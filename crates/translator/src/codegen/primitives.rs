@@ -56,14 +56,14 @@ pub(super) fn literal_text(literal: Literal) -> String {
         Literal::Double(v) => java_runtime::double_to_string(v),
         Literal::Float(v) => java_runtime::float_to_string(v),
         Literal::Char(_) | Literal::Small(_, Type::Char) => {
-            java_runtime::char_to_string(literal_value(literal).0 as u16)
+            java_runtime::char_to_string(literal_value(literal).0 as u16).to_string_lossy().into_owned()
         }
         Literal::Small(v, _) => v.to_string(),
     }
 }
 
 /// A literal's value: as an integer if it is one, else as a double.
-fn literal_value(literal: Literal) -> (i64, Option<f64>) {
+pub(super) fn literal_value(literal: Literal) -> (i64, Option<f64>) {
     match literal {
         Literal::Int(v) | Literal::Small(v, _) => (v as i64, None),
         Literal::Long(v) => (v, None),

@@ -170,8 +170,8 @@ shared_as_is!(
     f32,
     f64,
     bool,
-    String,
-    Option<String>,
+    crate::JString,
+    Option<crate::JString>,
     crate::JStr,
     Option<crate::JStr>
 );
@@ -216,8 +216,8 @@ shared_across_as_is!(
     f32,
     f64,
     bool,
-    String,
-    Option<String>,
+    crate::JString,
+    Option<crate::JString>,
     crate::JStr,
     Option<crate::JStr>
 );

@@ -8,8 +8,12 @@
 //! possessive quantifiers, Unicode properties, boundaries, set unions and intersections) is
 //! rejected: the translator checks a constant pattern when it translates the call, and any other
 //! pattern fails when it is compiled at run time.
+//!
+//! The input is matched as code points, as Java's `Pattern` matches: a lone surrogate is a code
+//! point of its own, which `.` and a negated set match. A pattern or a replacement string with a
+//! lone surrogate is not supported.
 
-use crate::throw;
+use crate::{JString, Wtf8, throw};
 use std::cell::RefCell;
 
 /// A compiled pattern.
@@ -54,7 +58,9 @@ enum Class {
 }
 
 impl Class {
-    fn contains(self, c: char) -> bool {
+    /// Whether code point `c` is in the class: never a lone surrogate.
+    fn contains(self, c: u32) -> bool {
+        let Some(c) = char::from_u32(c) else { return false };
         match self {
             Class::Digit => c.is_ascii_digit(),
             Class::Space => matches!(c, ' ' | '\t' | '\n' | '\u{B}' | '\u{C}' | '\r'),
@@ -72,15 +78,16 @@ struct Set {
 }
 
 impl Set {
-    fn contains(&self, c: char) -> bool {
-        let inside = self.ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi)
+    /// Whether code point `c` is in the set; a range such as `\u0000-\uFFFF` spans the surrogates.
+    fn contains(&self, c: u32) -> bool {
+        let inside = self.ranges.iter().any(|&(lo, hi)| lo as u32 <= c && c <= hi as u32)
             || self.classes.iter().any(|&(class, negated)| class.contains(c) != negated);
         inside != self.negated
     }
 }
 
-fn is_line_terminator(c: char) -> bool {
-    matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}')
+fn is_line_terminator(c: u32) -> bool {
+    matches!(c, 0x0A | 0x0D | 0x85 | 0x2028 | 0x2029)
 }
 
 struct Parser<'p> {
@@ -378,12 +385,13 @@ fn compiled(pattern: &str) -> Regex {
     })
 }
 
-/// A match: its start and end, in characters, and those of each group.
+/// A match: its start and end, in code points, and those of each group.
 type Captures = Vec<Option<(usize, usize)>>;
 
 struct Matcher<'r> {
     regex: &'r Regex,
-    input: Vec<char>,
+    /// The input's code points.
+    input: Vec<u32>,
     caps: RefCell<Captures>,
 }
 
@@ -417,23 +425,21 @@ impl Matcher<'_> {
     fn atom(&self, node: &Node, pos: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
         let input = &self.input;
         match node {
-            Node::Char(c) => input.get(pos) == Some(c) && k(pos + 1),
+            Node::Char(c) => input.get(pos) == Some(&(*c as u32)) && k(pos + 1),
             Node::Any => input.get(pos).is_some_and(|&c| !is_line_terminator(c)) && k(pos + 1),
             Node::Set(set) => input.get(pos).is_some_and(|&c| set.contains(c)) && k(pos + 1),
             Node::Start => pos == 0 && k(pos),
             Node::End => {
                 let rest = &input[pos..];
                 let at_end = rest.is_empty()
-                    || rest == ['\r', '\n']
+                    || rest == [0x0D, 0x0A]
                     || (rest.len() == 1 && is_line_terminator(rest[0]));
                 at_end && k(pos)
             }
             Node::LineBreak => match input.get(pos) {
                 // `\r\n` is tried first, then `\r` alone.
-                Some('\r') => (input.get(pos + 1) == Some(&'\n') && k(pos + 2)) || k(pos + 1),
-                Some(&c) => {
-                    matches!(c, '\n' | '\u{B}' | '\u{C}' | '\u{85}' | '\u{2028}' | '\u{2029}') && k(pos + 1)
-                }
+                Some(0x0D) => (input.get(pos + 1) == Some(&0x0A) && k(pos + 2)) || k(pos + 1),
+                Some(&c) => matches!(c, 0x0A | 0x0B | 0x0C | 0x85 | 0x2028 | 0x2029) && k(pos + 1),
                 None => false,
             },
             // A group that has not matched (or does not exist) matches nothing.
@@ -473,20 +479,24 @@ impl Matcher<'_> {
 }
 
 /// Every match of `regex` in `s`, in order, as Java's repeated `find` gives them: after an empty
-/// match, the next search starts one character later. Positions are byte offsets.
-fn matches(regex: &Regex, s: &str, mut each: impl FnMut(&[Option<(usize, usize)>]) -> bool) {
+/// match, the next search starts one code point later. Positions are byte offsets.
+fn matches(regex: &Regex, s: &Wtf8, mut each: impl FnMut(&[Option<(usize, usize)>]) -> bool) {
     if let Some(literal) = &regex.literal
         && !literal.is_empty()
     {
-        for (start, m) in s.match_indices(literal.as_str()) {
-            if !each(&[Some((start, start + m.len()))]) {
+        // The literal has no lone surrogate, so its bytes match whole code points only.
+        let literal = Wtf8::new(literal);
+        let mut from = 0;
+        while let Some(start) = s.find_from(literal, from) {
+            from = start + literal.len();
+            if !each(&[Some((start, from))]) {
                 return;
             }
         }
         return;
     }
-    let matcher = Matcher { regex, input: s.chars().collect(), caps: RefCell::new(Vec::new()) };
-    let mut offsets: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    let (mut offsets, input): (Vec<usize>, Vec<u32>) = s.code_point_indices().unzip();
+    let matcher = Matcher { regex, input, caps: RefCell::new(Vec::new()) };
     offsets.push(s.len());
     let mut from = 0;
     while from <= matcher.input.len() {
@@ -501,9 +511,9 @@ fn matches(regex: &Regex, s: &str, mut each: impl FnMut(&[Option<(usize, usize)>
     }
 }
 
-/// `s.split(regex, limit)`.
-pub fn split(s: &str, regex: &str, limit: i32) -> Vec<String> {
-    let regex = compiled(regex);
+/// `s.split(regex, limit)`. A pattern with a lone surrogate is not supported.
+pub fn split(s: &Wtf8, regex: &Wtf8, limit: i32) -> Vec<JString> {
+    let regex = compiled(regex.expect_str("split"));
     let mut parts = Vec::new();
     let mut index = 0;
     let limited = limit > 0;
@@ -512,7 +522,7 @@ pub fn split(s: &str, regex: &str, limit: i32) -> Vec<String> {
         if !limited || parts.len() < limit as usize - 1 {
             // A match of nothing at the start never makes an empty first part.
             if !(index == 0 && start == 0 && start == end) {
-                parts.push(s[index..start].to_string());
+                parts.push(JString::from(s.slice(index, start)));
                 index = end;
             }
             true
@@ -521,13 +531,13 @@ pub fn split(s: &str, regex: &str, limit: i32) -> Vec<String> {
         }
     });
     if index == 0 {
-        return vec![s.to_string()];
+        return vec![JString::from(s)];
     }
     if !limited || parts.len() < limit as usize {
-        parts.push(s[index..].to_string());
+        parts.push(JString::from(s.slice(index, s.len())));
     }
     if limit == 0 {
-        while parts.last().is_some_and(String::is_empty) {
+        while parts.last().is_some_and(|p| p.is_empty()) {
             parts.pop();
         }
     }
@@ -606,20 +616,22 @@ pub fn never_fails(pattern: &str, replacement: Option<&str>) -> bool {
     replacement.is_none_or(|r| parse_replacement(r, regex.groups).is_ok())
 }
 
-fn replace(s: &str, regex: &str, replacement: &str, all: bool) -> String {
+/// The text of `s` with the first match of `regex`, or every one when `all`, replaced. Pieces
+/// are pushed one after another, so halves of a pair that the replacing brings together join.
+fn replace(s: &Wtf8, regex: &str, replacement: &str, all: bool) -> JString {
     let regex = compiled(regex);
     let pieces = parse_replacement(replacement, regex.groups).unwrap_or_else(|(class, m)| throw(class, &m));
-    let mut out = String::new();
+    let mut out = JString::new();
     let mut index = 0;
     matches(&regex, s, |caps| {
         let (start, end) = caps[0].expect("the whole match");
-        out.push_str(&s[index..start]);
+        out.push_wtf8(s.slice(index, start));
         for piece in &pieces {
             match piece {
                 Replacement::Text(text) => out.push_str(text),
                 Replacement::Group(g) => {
                     if let Some((a, b)) = caps.get(*g).copied().flatten() {
-                        out.push_str(&s[a..b]);
+                        out.push_wtf8(s.slice(a, b));
                     }
                 }
             }
@@ -627,23 +639,25 @@ fn replace(s: &str, regex: &str, replacement: &str, all: bool) -> String {
         index = end;
         all
     });
-    out.push_str(&s[index..]);
+    out.push_wtf8(s.slice(index, s.len()));
     out
 }
 
 /// `s.replaceAll(regex, replacement)`.
-pub fn replace_all(s: &str, regex: &str, replacement: &str) -> String {
-    replace(s, regex, replacement, true)
+pub fn replace_all(s: &Wtf8, regex: &Wtf8, replacement: &Wtf8) -> JString {
+    let what = "replaceAll";
+    replace(s, regex.expect_str(what), replacement.expect_str(what), true)
 }
 
 /// `s.replaceFirst(regex, replacement)`.
-pub fn replace_first(s: &str, regex: &str, replacement: &str) -> String {
-    replace(s, regex, replacement, false)
+pub fn replace_first(s: &Wtf8, regex: &Wtf8, replacement: &Wtf8) -> JString {
+    let what = "replaceFirst";
+    replace(s, regex.expect_str(what), replacement.expect_str(what), false)
 }
 
 /// Whether `regex` matches somewhere in `s`, as `Matcher.find` from the start.
-pub fn finds(s: &str, regex: &str) -> bool {
-    let regex = compiled(regex);
+pub fn finds(s: &Wtf8, regex: &Wtf8) -> bool {
+    let regex = compiled(regex.expect_str("a regular expression"));
     let mut found = false;
     matches(&regex, s, |_| {
         found = true;
@@ -653,11 +667,11 @@ pub fn finds(s: &str, regex: &str) -> bool {
 }
 
 /// `s.matches(regex)`: whether the whole string matches.
-pub fn matches_all(s: &str, regex: &str) -> bool {
-    let regex = compiled(regex);
+pub fn matches_all(s: &Wtf8, regex: &Wtf8) -> bool {
+    let regex = compiled(regex.expect_str("matches"));
     let matcher = Matcher {
         regex: &regex,
-        input: s.chars().collect(),
+        input: s.code_points().collect(),
         caps: RefCell::new(vec![None; regex.groups + 1]),
     };
     let len = matcher.input.len();
@@ -669,7 +683,11 @@ mod tests {
     use super::*;
 
     fn parts(s: &str, regex: &str, limit: i32) -> Vec<String> {
-        split(s, regex, limit)
+        split(Wtf8::new(s), Wtf8::new(regex), limit).iter().map(JString::to_string).collect()
+    }
+
+    fn w(s: &str) -> &Wtf8 {
+        Wtf8::new(s)
     }
 
     #[test]
@@ -690,24 +708,42 @@ mod tests {
     }
 
     #[test]
+    fn lone_surrogates_are_code_points_of_the_input() {
+        let s = crate::JString::from_units(&[0x61, 0xD83D, 0x2C, 0xDE00, 0x2C, 0x62]);
+        let units = |p: &JString| p.units().collect::<Vec<u16>>();
+        let pieces = split(&s, w(","), 0);
+        assert_eq!(
+            pieces.iter().map(units).collect::<Vec<_>>(),
+            [vec![0x61, 0xD83D], vec![0xDE00], vec![0x62]]
+        );
+        // Each surrogate is a code point that a negated set matches.
+        let pieces = split(&s, w("[^,]"), 0);
+        assert_eq!(pieces.iter().map(units).collect::<Vec<_>>(), [vec![], vec![], vec![0x2C], vec![0x2C]]);
+        assert!(matches_all(&s, w(".+")));
+        assert!(!matches_all(&s, w("[\\w,]+")));
+        // Removing what lies between the halves joins them into their pair.
+        assert_eq!(replace_all(&s, w(","), w("")).to_string(), "a\u{1F600}b");
+    }
+
+    #[test]
     fn replacement_follows_java() {
-        assert_eq!(replace_all("a1b22", "\\d", "#"), "a#b##");
-        assert_eq!(replace_all("abc", "", "-"), "-a-b-c-");
-        assert_eq!(replace_all("john smith", "(\\w+) (\\w+)", "$2 $1"), "smith john");
-        assert_eq!(replace_first("aaa", "a", "b"), "baa");
-        assert_eq!(replace_all("a.b", ".", "x"), "xxx");
-        assert_eq!(replace_all("aaa", "a*?", "-"), "-a-a-a-");
-        assert!(matches_all("abc123", "[a-z]+\\d{3}"));
-        assert!(!matches_all("abc", "ab"));
-        assert!(matches_all("ab", "(a|ab)b?"));
-        assert_eq!(replace_all("a..b...c", "(\\.)(\\1)+", "/"), "a/b/c");
-        assert_eq!(replace_all("abab cdc", "(\\w)(\\w)\\1\\2", "<$0>"), "<abab> cdc");
+        assert_eq!(replace_all(w("a1b22"), w("\\d"), w("#")), "a#b##");
+        assert_eq!(replace_all(w("abc"), w(""), w("-")), "-a-b-c-");
+        assert_eq!(replace_all(w("john smith"), w("(\\w+) (\\w+)"), w("$2 $1")), "smith john");
+        assert_eq!(replace_first(w("aaa"), w("a"), w("b")), "baa");
+        assert_eq!(replace_all(w("a.b"), w("."), w("x")), "xxx");
+        assert_eq!(replace_all(w("aaa"), w("a*?"), w("-")), "-a-a-a-");
+        assert!(matches_all(w("abc123"), w("[a-z]+\\d{3}")));
+        assert!(!matches_all(w("abc"), w("ab")));
+        assert!(matches_all(w("ab"), w("(a|ab)b?")));
+        assert_eq!(replace_all(w("a..b...c"), w("(\\.)(\\1)+"), w("/")), "a/b/c");
+        assert_eq!(replace_all(w("abab cdc"), w("(\\w)(\\w)\\1\\2"), w("<$0>")), "<abab> cdc");
         // `\11` is group 1 then `1` when there is no group 11.
-        assert!(matches_all("aa1", "(a)\\11"));
-        assert!(!matches_all("a", "\\2(a)"));
+        assert!(matches_all(w("aa1"), w("(a)\\11")));
+        assert!(!matches_all(w("a"), w("\\2(a)")));
         assert_eq!(parts("a\r\nb\nc\rd\u{2028}e", "\\R", 0), ["a", "b", "c", "d", "e"]);
-        assert!(matches_all("\r\n", "\\R"));
-        assert!(matches_all("\r\n", "\\R\\n"));
+        assert!(matches_all(w("\r\n"), w("\\R")));
+        assert!(matches_all(w("\r\n"), w("\\R\\n")));
     }
 
     #[test]

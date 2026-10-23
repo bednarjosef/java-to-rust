@@ -162,7 +162,7 @@ pub(super) fn rust_type(ty: Type) -> &'static str {
         Type::Float => "f32",
         Type::Boolean => "bool",
         Type::String if super::shared_strings() => "java::JStr",
-        Type::String => "String",
+        Type::String => "java::JString",
         Type::Charset => "java::Charset",
         Type::JavaClass => "java::Class",
         Type::Void => "()",

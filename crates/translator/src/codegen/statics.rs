@@ -61,7 +61,7 @@ impl<'a> Gen<'a> {
             }
             let (ty, value) = match (&f.ty, &f.init) {
                 (Type::String, Some(Expr { kind: ExprKind::Str(s), .. })) => {
-                    ("&str".to_string(), rust_string(s))
+                    ("&java::Wtf8".to_string(), format!("java::wtf8({})", rust_string(s)))
                 }
                 (_, Some(init)) => (self.ty_name(f.ty), self.value(init, f.ty).text),
                 (_, None) => unreachable!("a constant has a value"),
@@ -127,7 +127,7 @@ impl<'a> Gen<'a> {
         let cell = cell_name(&self.class.types[t], &f.name);
         let ty = self.field_ty_name(f.ty, stored);
         let constant = init == "None"
-            || init == "String::new()"
+            || init == "java::JString::new()"
             || init.parse::<f64>().is_ok()
             || init.trim_start_matches('-').chars().next().is_some_and(|c| c.is_ascii_digit())
                 && init.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))

@@ -13,6 +13,62 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
+/// The text of a string literal.
+pub const fn wtf8(s: &str) -> &Wtf8 {
+    Wtf8::new(s)
+}
+
+/// The text of a string literal that holds a lone surrogate, given as its WTF-8 bytes. Written in
+/// a `const` block, it checks the bytes when the program is compiled.
+///
+/// # Panics
+/// If the bytes are not WTF-8, or hold a high surrogate's 3-byte form directly before a low one's.
+pub const fn wtf8_bytes(bytes: &[u8]) -> &Wtf8 {
+    assert!(well_formed(bytes), "a string literal that is not WTF-8");
+    // SAFETY: the bytes were just checked.
+    unsafe { Wtf8::from_bytes_unchecked(bytes) }
+}
+
+/// Whether `bytes` are WTF-8 in which no high surrogate's 3-byte form comes directly before a low
+/// one's.
+const fn well_formed(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    let mut after_high = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let (len, low, high) = match b {
+            0x00..=0x7F => (1, 0x80, 0xBF),
+            0xC2..=0xDF => (2, 0x80, 0xBF),
+            0xE0 => (3, 0xA0, 0xBF),
+            0xE1..=0xEF => (3, 0x80, 0xBF),
+            0xF0 => (4, 0x90, 0xBF),
+            0xF1..=0xF3 => (4, 0x80, 0xBF),
+            0xF4 => (4, 0x80, 0x8F),
+            _ => return false,
+        };
+        if i + len > bytes.len() {
+            return false;
+        }
+        if len > 1 && (bytes[i + 1] < low || bytes[i + 1] > high) {
+            return false;
+        }
+        let mut j = 2;
+        while j < len {
+            if bytes[i + j] & 0xC0 != 0x80 {
+                return false;
+            }
+            j += 1;
+        }
+        let surrogate = b == 0xED && bytes[i + 1] >= 0xA0;
+        if after_high && surrogate && bytes[i + 1] >= 0xB0 {
+            return false;
+        }
+        after_high = surrogate && bytes[i + 1] < 0xB0;
+        i += len;
+    }
+    true
+}
+
 /// A string slice of WTF-8 bytes.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
@@ -54,11 +110,18 @@ impl Wtf8 {
 
     /// The text as a Rust string, or `None` where it holds a lone surrogate.
     pub fn to_str(&self) -> Option<&str> {
-        if has_surrogate(&self.0) {
-            return None;
-        }
-        // SAFETY: WTF-8 without surrogates is UTF-8.
-        Some(unsafe { std::str::from_utf8_unchecked(&self.0) })
+        // The 3-byte form of a surrogate is the only WTF-8 that is not UTF-8.
+        std::str::from_utf8(&self.0).ok()
+    }
+
+    /// The text as a Rust string, ending the program where it holds a lone surrogate, which
+    /// `what` does not take.
+    pub fn expect_str(&self, what: &str) -> &str {
+        self.to_str().unwrap_or_else(|| {
+            crate::throw_uncaught(format!(
+                "{what} of a string with a lone surrogate is not supported by the translation"
+            ))
+        })
     }
 
     /// The text as Java prints it in UTF-8: a lone surrogate as `?`.
@@ -106,6 +169,11 @@ impl Wtf8 {
         index == self.0.len() || self.0.get(index).is_some_and(|&b| b & 0xC0 != 0x80)
     }
 
+    /// `s.contains(t)`: whether `t` occurs in it, as code units.
+    pub fn contains(&self, t: &Wtf8) -> bool {
+        crate::index_of(self, t, 0) >= 0
+    }
+
     /// Whether `prefix` is at the start: a byte comparison, which is the comparison of units
     /// except where `prefix` ends with a high surrogate that this text has as half of a pair.
     pub fn starts_with(&self, prefix: &Wtf8) -> bool {
@@ -125,6 +193,66 @@ impl Wtf8 {
         n >= m && self.units().skip(n - m).eq(suffix.units())
     }
 
+    /// The byte offset of the first occurrence of `t` from byte `from`, which must be a boundary.
+    /// Bytes compare as units unless `t` starts with a low surrogate or ends with a high one
+    /// (`has_half_edges`), which can match half of a pair.
+    pub fn find_from(&self, t: &Wtf8, from: usize) -> Option<usize> {
+        let (h, n) = (&self.0[from..], &t.0);
+        let found = match (n.len(), std::str::from_utf8(h), std::str::from_utf8(n)) {
+            (0, ..) => Some(0),
+            (1, ..) => h.iter().position(|&b| b == n[0]),
+            (_, Ok(h), Ok(n)) => h.find(n),
+            _ => h.windows(n.len()).position(|w| w == n),
+        };
+        found.map(|i| i + from)
+    }
+
+    /// The byte offset of the last occurrence of `t` that ends by byte `end`.
+    pub fn rfind_before(&self, t: &Wtf8, end: usize) -> Option<usize> {
+        let (h, n) = (&self.0[..end], &t.0);
+        match (n.len(), std::str::from_utf8(h), std::str::from_utf8(n)) {
+            (0, ..) => Some(end),
+            (1, ..) => h.iter().rposition(|&b| b == n[0]),
+            (_, Ok(h), Ok(n)) => h.rfind(n),
+            _ => h.windows(n.len()).rposition(|w| w == n),
+        }
+    }
+
+    /// Whether it starts with a low surrogate or ends with a high one: then, as a pattern, it can
+    /// match half of a pair, which a comparison of bytes does not see.
+    pub fn has_half_edges(&self) -> bool {
+        starts_low(&self.0) || ends_high(&self.0)
+    }
+
+    /// The code points with the byte offset each starts at.
+    pub fn code_point_indices(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
+        let mut offset = 0;
+        self.code_points().map(move |c| {
+            let at = offset;
+            offset += code_point_len(c);
+            (at, c)
+        })
+    }
+
+    /// Without the code points at its start (when `start`) and at its end (when `end`) for which
+    /// `trimmed` holds.
+    pub fn trim_by(&self, start: bool, end: bool, trimmed: impl Fn(u32) -> bool) -> &Wtf8 {
+        let mut from = 0;
+        if start {
+            from = self.code_point_indices().find(|&(_, c)| !trimmed(c)).map_or(self.0.len(), |(i, _)| i);
+        }
+        let mut to = self.0.len();
+        if end {
+            to = from;
+            for (i, c) in self.code_point_indices().skip_while(|&(i, _)| i < from) {
+                if !trimmed(c) {
+                    to = i + code_point_len(c);
+                }
+            }
+        }
+        self.slice(from, to)
+    }
+
     /// The high surrogate at the end, if it ends with one.
     fn last_high(&self) -> Option<u16> {
         ends_high(&self.0).then(|| surrogate_at(&self.0[self.0.len() - 3..]))
@@ -134,11 +262,6 @@ impl Wtf8 {
     fn first_low(&self) -> Option<u16> {
         starts_low(&self.0).then(|| surrogate_at(&self.0[..3]))
     }
-}
-
-/// Whether WTF-8 `bytes` hold a surrogate's 3-byte form.
-fn has_surrogate(bytes: &[u8]) -> bool {
-    bytes.windows(2).any(|w| w[0] == 0xED && w[1] >= 0xA0)
 }
 
 /// Whether WTF-8 `bytes` end with a high surrogate.
@@ -154,6 +277,16 @@ fn starts_low(bytes: &[u8]) -> bool {
 /// The surrogate of the 3 bytes `b`.
 fn surrogate_at(b: &[u8]) -> u16 {
     0xD000 | (u16::from(b[1] & 0x3F) << 6) | u16::from(b[2] & 0x3F)
+}
+
+/// The length in bytes of code point `c` in WTF-8.
+fn code_point_len(c: u32) -> usize {
+    match c {
+        0..0x80 => 1,
+        0x80..0x800 => 2,
+        0x800..0x10000 => 3,
+        _ => 4,
+    }
 }
 
 /// The WTF-8 bytes of code point `c`, which may be a surrogate, appended to `out`.
@@ -353,10 +486,15 @@ impl JString {
 
     /// Appends one UTF-16 code unit, which may be half of a pair.
     pub fn push_unit(&mut self, unit: u16) {
-        let mut bytes = Vec::with_capacity(3);
-        encode(u32::from(unit), &mut bytes);
-        // SAFETY: one encoded code point is well-formed WTF-8.
-        self.push_wtf8(unsafe { Wtf8::from_bytes_unchecked(&bytes) });
+        if (0xDC00..0xE000).contains(&unit)
+            && let Some(high) = self.last_high()
+        {
+            self.0.truncate(self.0.len() - 3);
+            let c = 0x10000 + ((u32::from(high) - 0xD800) << 10) + (u32::from(unit) - 0xDC00);
+            encode(c, &mut self.0);
+        } else {
+            encode(u32::from(unit), &mut self.0);
+        }
     }
 
     /// Appends code point `c`, which may be a lone surrogate.
@@ -443,12 +581,143 @@ impl fmt::Write for JString {
     }
 }
 
+impl PartialEq<&str> for Wtf8 {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other.as_bytes()
+    }
+}
+
+impl PartialEq<JString> for Wtf8 {
+    fn eq(&self, other: &JString) -> bool {
+        self.0 == *other.0
+    }
+}
+
+impl PartialEq<Wtf8> for JString {
+    fn eq(&self, other: &Wtf8) -> bool {
+        *self.0 == other.0
+    }
+}
+
+impl PartialEq<&Wtf8> for JString {
+    fn eq(&self, other: &&Wtf8) -> bool {
+        *self.0 == other.0
+    }
+}
+
+impl PartialEq<JString> for &Wtf8 {
+    fn eq(&self, other: &JString) -> bool {
+        self.0 == *other.0
+    }
+}
+
+impl PartialEq<JString> for str {
+    fn eq(&self, other: &JString) -> bool {
+        *self.as_bytes() == *other.0
+    }
+}
+
+impl PartialEq<JString> for &str {
+    fn eq(&self, other: &JString) -> bool {
+        *self.as_bytes() == *other.0
+    }
+}
+
+/// A piece of a string concatenation (`java::concat!`), appended to the text being made: a
+/// string as it is, so that the halves of a pair that meet join, and anything else as Java shows
+/// it.
+pub trait Piece {
+    fn push_to(&self, out: &mut JString);
+}
+
+impl Piece for str {
+    fn push_to(&self, out: &mut JString) {
+        out.push_str(self);
+    }
+}
+
+impl Piece for String {
+    fn push_to(&self, out: &mut JString) {
+        out.push_str(self);
+    }
+}
+
+impl Piece for Wtf8 {
+    fn push_to(&self, out: &mut JString) {
+        out.push_wtf8(self);
+    }
+}
+
+impl Piece for JString {
+    fn push_to(&self, out: &mut JString) {
+        out.push_wtf8(self);
+    }
+}
+
+impl Piece for crate::JStr {
+    fn push_to(&self, out: &mut JString) {
+        out.push_wtf8(self);
+    }
+}
+
+/// A `char`, which may be half of a pair.
+impl Piece for crate::Char {
+    fn push_to(&self, out: &mut JString) {
+        out.push_unit(self.0);
+    }
+}
+
+/// Formatted text, such as numbers and objects shown through `Display`.
+impl Piece for fmt::Arguments<'_> {
+    fn push_to(&self, out: &mut JString) {
+        let _ = fmt::Write::write_fmt(out, *self);
+    }
+}
+
+impl<T: Piece + ?Sized> Piece for &T {
+    fn push_to(&self, out: &mut JString) {
+        (**self).push_to(out);
+    }
+}
+
+/// A string concatenation: the text of its pieces (`Piece`) one after another.
+#[macro_export]
+macro_rules! concat {
+    ($($piece:expr),* $(,)?) => {{
+        let mut text = $crate::JString::new();
+        $( $crate::Piece::push_to(&$piece, &mut text); )*
+        text
+    }};
+}
+
+/// `s += a + b`: the pieces appended to the string `s` (a `JString`), one after another.
+#[macro_export]
+macro_rules! append {
+    ($target:expr, $($piece:expr),* $(,)?) => {{
+        let target: &mut $crate::JString = &mut $target;
+        $( $crate::Piece::push_to(&$piece, target); )*
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn units(s: &Wtf8) -> Vec<u16> {
         s.units().collect()
+    }
+
+    #[test]
+    fn literal_bytes_are_checked() {
+        const LONE: &Wtf8 = wtf8_bytes(b"a\xed\xa0\x80b");
+        assert_eq!(units(LONE), [0x61, 0xD800, 0x62]);
+        assert!(well_formed("aé😀".as_bytes()));
+        assert!(well_formed(b"\xed\xb0\x80\xed\xa0\x80"));
+        // The halves of a pair, a truncated character, an overlong form and a stray byte.
+        assert!(!well_formed(b"\xed\xa0\xbd\xed\xb8\x80"));
+        assert!(!well_formed(b"\xe2\x82"));
+        assert!(!well_formed(b"\xc0\xaf"));
+        assert!(!well_formed(b"\x80"));
     }
 
     #[test]
@@ -503,6 +772,14 @@ mod tests {
         let t = JString::from("x😀");
         assert!(t.ends_with(&JString::from_units(&smiley[1..])));
         assert!(!t.ends_with(&JString::from_units(&smiley[..1])));
+    }
+
+    #[test]
+    fn concatenation_joins_halves_and_formats_the_rest() {
+        let smiley: Vec<u16> = "😀".encode_utf16().collect();
+        let high = JString::from_units(&smiley[..1]);
+        let text = crate::concat!("n=", format_args!("{}", 5), high, crate::Char(smiley[1]), Wtf8::new("!"));
+        assert_eq!(text, *"n=5😀!");
     }
 
     #[test]

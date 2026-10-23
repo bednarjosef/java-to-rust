@@ -107,9 +107,9 @@ static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty");
 ```
 
 ```rust
-fn parse(s: &str) -> Result<i32, Throwable> {
+fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
     if s.is_empty() {
-        return Err(Throwable::Bad(Rc::new(Bad::new("empty"))));
+        return Err(Throwable::Bad(Rc::new(Bad::new(java::wtf8("empty")))));
     }
     Ok(java::try_parse_radix::<i32>(Some(s), 10)?)   // checked only if a caller observes it
 }
@@ -322,12 +322,11 @@ A static block or static field initializer that throws is wrapped in
 
 Making an object's text runs its `toString`. Where the generator makes the text (`"" + o`,
 `println(o)`, `String.valueOf(o)` and so `append(o)`, `String.format` with its arguments one by
-one), that call is like any other: what the program's `toString` throws goes on. A class whose
-`toString` throws is not `Display` then; the dispatching enum of its type gets `try_text`, which
-returns the exception. The `hashCode` that `Object.toString` shows, for a class without a
+one), that call is like any other: what the program's `toString` throws goes on. Where a class's
+`toString` throws, the dispatching enum of its type gets `try_text`, which returns the exception. The `hashCode` that `Object.toString` shows, for a class without a
 `toString` of its own, is treated the same way.
 
-Elsewhere the text goes through `Display`, which cannot return an exception, so what the
+Elsewhere the text goes through the enum's `Display`, which cannot return an exception, so what the
 `toString` throws ends the program: the text of an enum constant, the message of an exception,
 `printf` (which makes all its text before printing), and the objects other library calls show.
 Where a `toString` the program wrote may throw what a `catch` around such a text, or around a
@@ -517,8 +516,8 @@ Rejected, each with a message naming the construct:
 - catching a class that is neither a standard class nor translated (in a single file, for
   example `StackOverflowError` or `PatternSyntaxException`); the translation never raises
   `StackOverflowError` or `OutOfMemoryError`;
-- a `toString` of the program that throws what a `catch` around an object's `Display` text would
-  catch;
+- a `toString` of the program that throws what a `catch` around the text that an enum's `Display`
+  makes would catch;
 - a constructor of an enum that throws something a caller catches, and a caught call of `main`;
 - a `finally` that would see an uncaught static initializer's failure;
 - try-with-resources over a resource without a translated `close()`;

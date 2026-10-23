@@ -7,7 +7,7 @@
 //! before anything is written, and a bad format or argument throws the exception Java throws.
 //! Hexadecimal floating point (`%a`) and dates (`%t`) are not supported.
 
-use crate::{double_to_string, float_to_string, shortest_digits, string, throw};
+use crate::{JString, Wtf8, double_to_string, float_to_string, shortest_digits, string, throw};
 
 /// An argument of a format, as its Java value.
 #[derive(Clone, Copy, Debug)]
@@ -22,9 +22,9 @@ pub enum Arg<'a> {
     Float(f32),
     Double(f64),
     /// A `String`.
-    Str(&'a str),
+    Str(&'a Wtf8),
     /// Any other object, by the text its `toString` gives.
-    Text(&'a str),
+    Text(&'a Wtf8),
 }
 
 impl Arg<'_> {
@@ -401,12 +401,12 @@ pub fn never_fails(format: &str, args: &[Arg]) -> bool {
 /// `toString` (`None` for null). The text does not tell a number from a string, so a conversion
 /// other than `%s` and `%S` (and `%n` and `%%`, which take none) is not supported, and fails
 /// loudly when it runs.
-pub fn format_objects(format: &str, texts: &[Option<String>]) -> String {
-    self::format(format, &object_args(format, texts))
+pub fn format_objects(format: &Wtf8, texts: &[Option<JString>]) -> JString {
+    self::format(format, &object_args(format.expect_str("String.format"), texts))
 }
 
 /// The arguments of `format_objects`, once its format is known to take only text.
-fn object_args<'a>(format: &str, texts: &'a [Option<String>]) -> Vec<Arg<'a>> {
+fn object_args<'a>(format: &str, texts: &'a [Option<JString>]) -> Vec<Arg<'a>> {
     if let Ok(items) = parse(format)
         && let Some(spec) = items.iter().find_map(|item| match item {
             Item::Spec(spec) if !matches!(spec.conversion, 's' | 'S' | 'n' | '%') => Some(spec),
@@ -420,26 +420,26 @@ fn object_args<'a>(format: &str, texts: &'a [Option<String>]) -> Vec<Arg<'a>> {
 }
 
 /// `String.format(format, args)`.
-pub fn format(format: &str, args: &[Arg]) -> String {
-    try_format(format, args).unwrap_or_else(|e| fail_format(e))
+pub fn format(format: &Wtf8, args: &[Arg]) -> JString {
+    try_format(format.expect_str("String.format"), args).unwrap_or_else(|e| fail_format(e))
 }
 
 /// `System.out.printf(format, args)`: the text that Java's `Formatter` writes piece by piece, so
 /// that a specifier that fails as it prints (an argument that is missing or does not fit) leaves
 /// the text before it printed, as Java's does. A format that does not parse prints nothing.
-pub fn print_format(format: &str, args: &[Arg]) {
+pub fn print_format(format: &Wtf8, args: &[Arg]) {
     use std::io::Write as _;
-    let mut out = String::new();
-    let result = format_into(format, args, &mut out);
-    let _ = crate::out().write_all(out.as_bytes());
+    let mut out = JString::new();
+    let result = format_into(format.expect_str("printf"), args, &mut out);
+    let _ = crate::out().write_all(out.to_string_lossy().as_bytes());
     if let Err(e) = result {
         fail_format(e)
     }
 }
 
 /// `print_format` with the arguments in an `Object[]` (see `format_objects`).
-pub fn print_format_objects(format: &str, texts: &[Option<String>]) {
-    print_format(format, &object_args(format, texts))
+pub fn print_format_objects(format: &Wtf8, texts: &[Option<JString>]) {
+    print_format(format, &object_args(format.expect_str("printf"), texts))
 }
 
 fn fail_format(e: FormatError) -> ! {
@@ -447,14 +447,14 @@ fn fail_format(e: FormatError) -> ! {
     throw(e.class, &message)
 }
 
-fn try_format(format: &str, args: &[Arg]) -> Result<String, FormatError> {
-    let mut out = String::new();
+fn try_format(format: &str, args: &[Arg]) -> Result<JString, FormatError> {
+    let mut out = JString::new();
     format_into(format, args, &mut out)?;
     Ok(out)
 }
 
 /// Formats into `out`, which holds the text before the failing specifier when it fails.
-fn format_into(format: &str, args: &[Arg], out: &mut String) -> Result<(), FormatError> {
+fn format_into(format: &str, args: &[Arg], out: &mut JString) -> Result<(), FormatError> {
     let items = parse(format)?;
     let mut last: i32 = -1;
     let mut last_ordinary: i32 = -1;
@@ -508,11 +508,11 @@ fn conversion_error<T>(spec: &Spec, arg: Arg) -> Result<T, FormatError> {
     fail("java.util.IllegalFormatConversionException", format!("{} != {}", spec.conversion, arg.class()))
 }
 
-fn print(out: &mut String, spec: &Spec, arg: Arg) -> Result<(), FormatError> {
+fn print(out: &mut JString, spec: &Spec, arg: Arg) -> Result<(), FormatError> {
     match spec.conversion {
         'd' | 'o' | 'x' => {
             let (value, bits) = match arg {
-                Arg::Null => return print_text(out, spec, "null"),
+                Arg::Null => return print_str(out, spec, "null"),
                 Arg::Byte(v) => (v as i64, 8),
                 Arg::Short(v) => (v as i64, 16),
                 Arg::Int(v) => (v as i64, 32),
@@ -523,7 +523,7 @@ fn print(out: &mut String, spec: &Spec, arg: Arg) -> Result<(), FormatError> {
         }
         'e' | 'f' | 'g' => {
             let value = match arg {
-                Arg::Null => return print_text(out, spec, "null"),
+                Arg::Null => return print_str(out, spec, "null"),
                 Arg::Float(v) => v as f64,
                 Arg::Double(v) => v,
                 _ => return conversion_error(spec, arg),
@@ -533,7 +533,7 @@ fn print(out: &mut String, spec: &Spec, arg: Arg) -> Result<(), FormatError> {
         }
         'c' => {
             let text = match arg {
-                Arg::Null => "null".to_string(),
+                Arg::Null => JString::from("null"),
                 Arg::Char(c) => string::from_units(&[c]),
                 Arg::Byte(_) | Arg::Short(_) | Arg::Int(_) => {
                     let cp = match arg {
@@ -543,10 +543,11 @@ fn print(out: &mut String, spec: &Spec, arg: Arg) -> Result<(), FormatError> {
                         _ => unreachable!(),
                     };
                     match u32::try_from(cp).ok().filter(|&cp| cp <= 0x10FFFF) {
-                        Some(cp) => match char::from_u32(cp) {
-                            Some(c) => c.to_string(),
-                            None => "?".to_string(),
-                        },
+                        Some(cp) => {
+                            let mut text = JString::new();
+                            text.push_code_point(cp);
+                            text
+                        }
                         None => {
                             return fail(
                                 "java.util.IllegalFormatCodePointException",
@@ -565,29 +566,29 @@ fn print(out: &mut String, spec: &Spec, arg: Arg) -> Result<(), FormatError> {
                 Arg::Bool(false) => "false",
                 _ => "true",
             };
-            print_text(out, spec, text)
+            print_str(out, spec, text)
         }
         's' => {
             if spec.has(ALTERNATE) {
                 return mismatch(ALTERNATE, 's');
             }
             let text = match arg {
-                Arg::Null => "null".to_string(),
-                Arg::Bool(b) => b.to_string(),
+                Arg::Null => JString::from("null"),
+                Arg::Bool(b) => b.to_string().into(),
                 Arg::Char(c) => string::from_units(&[c]),
-                Arg::Byte(v) => v.to_string(),
-                Arg::Short(v) => v.to_string(),
-                Arg::Int(v) => v.to_string(),
-                Arg::Long(v) => v.to_string(),
-                Arg::Float(v) => float_to_string(v),
-                Arg::Double(v) => double_to_string(v),
-                Arg::Str(s) | Arg::Text(s) => s.to_string(),
+                Arg::Byte(v) => v.to_string().into(),
+                Arg::Short(v) => v.to_string().into(),
+                Arg::Int(v) => v.to_string().into(),
+                Arg::Long(v) => v.to_string().into(),
+                Arg::Float(v) => float_to_string(v).into(),
+                Arg::Double(v) => double_to_string(v).into(),
+                Arg::Str(s) | Arg::Text(s) => s.to_owned(),
             };
             print_text(out, spec, &text)
         }
         'h' => {
             let hash = match arg {
-                Arg::Null => return print_text(out, spec, "null"),
+                Arg::Null => return print_str(out, spec, "null"),
                 Arg::Bool(b) => crate::bool_hash(b),
                 Arg::Char(c) => c as i32,
                 Arg::Byte(v) => v as i32,
@@ -599,20 +600,20 @@ fn print(out: &mut String, spec: &Spec, arg: Arg) -> Result<(), FormatError> {
                 Arg::Str(s) => string::string_hash(s),
                 Arg::Text(_) => return fail(UNSUPPORTED, "%h of an object"),
             };
-            print_text(out, spec, &format!("{:x}", hash as u32))
+            print_str(out, spec, &format!("{:x}", hash as u32))
         }
         'n' => {
             out.push('\n');
             Ok(())
         }
-        _ => print_text(out, spec, "%"),
+        _ => print_str(out, spec, "%"),
     }
 }
 
 /// Java's `print(String)`: cut to the precision, upper-cased for an upper-case conversion, and
 /// justified in the width.
-fn print_text(out: &mut String, spec: &Spec, text: &str) -> Result<(), FormatError> {
-    let mut text = text.to_string();
+fn print_text(out: &mut JString, spec: &Spec, text: &Wtf8) -> Result<(), FormatError> {
+    let mut text = text.to_owned();
     if spec.precision != -1 {
         let units = string::units(&text);
         if (spec.precision as usize) < units.len() {
@@ -627,16 +628,21 @@ fn print_text(out: &mut String, spec: &Spec, text: &str) -> Result<(), FormatErr
 }
 
 /// Pads `text` with spaces to the width, on the left unless the `-` flag is set.
-fn justify(out: &mut String, spec: &Spec, text: &str) {
-    let len = text.encode_utf16().count() as i32;
-    let pad = (spec.width - len).max(0) as usize;
+fn justify(out: &mut JString, spec: &Spec, text: &Wtf8) {
+    let len = text.unit_len() as i32;
+    let pad = " ".repeat((spec.width - len).max(0) as usize);
     if spec.has(LEFT_JUSTIFY) {
-        out.push_str(text);
-        out.extend(std::iter::repeat_n(' ', pad));
+        out.push_wtf8(text);
+        out.push_str(&pad);
     } else {
-        out.extend(std::iter::repeat_n(' ', pad));
-        out.push_str(text);
+        out.push_str(&pad);
+        out.push_wtf8(text);
     }
+}
+
+/// `print_text` of Rust text.
+fn print_str(out: &mut JString, spec: &Spec, text: &str) -> Result<(), FormatError> {
+    print_text(out, spec, Wtf8::new(text))
 }
 
 fn leading_sign(sb: &mut String, spec: &Spec, neg: bool) {
@@ -688,7 +694,7 @@ fn magnitude(sb: &mut String, value: &str, offset: usize, spec: &Spec, width: i3
     }
 }
 
-fn print_integer(out: &mut String, spec: &Spec, value: i64, bits: u32) -> Result<(), FormatError> {
+fn print_integer(out: &mut JString, spec: &Spec, value: i64, bits: u32) -> Result<(), FormatError> {
     let mut sb = String::new();
     match spec.conversion {
         'd' => {
@@ -720,7 +726,7 @@ fn print_integer(out: &mut String, spec: &Spec, value: i64, bits: u32) -> Result
             sb.push_str(&if spec.has(UPPERCASE) { digits.to_uppercase() } else { digits });
         }
     }
-    justify(out, spec, &sb);
+    justify(out, spec, Wtf8::new(&sb));
     Ok(())
 }
 
@@ -819,7 +825,7 @@ fn add_zeros(mant: &mut String, prec: i32) {
     mant.push_str(&"0".repeat((prec - out_prec) as usize));
 }
 
-fn print_float(out: &mut String, spec: &Spec, value: f64) {
+fn print_float(out: &mut JString, spec: &Spec, value: f64) {
     let mut sb = String::new();
     let neg = value < 0.0 || (value == 0.0 && value.is_sign_negative());
     if value.is_nan() {
@@ -834,7 +840,7 @@ fn print_float(out: &mut String, spec: &Spec, value: f64) {
         }
         trailing_sign(&mut sb, spec, neg);
     }
-    justify(out, spec, &sb);
+    justify(out, spec, Wtf8::new(&sb));
 }
 
 fn print_finite(sb: &mut String, spec: &Spec, v: f64, neg: bool) {
@@ -913,9 +919,13 @@ fn print_finite(sb: &mut String, spec: &Spec, v: f64, neg: bool) {
 mod tests {
     use super::*;
 
+    fn w(s: &str) -> &Wtf8 {
+        Wtf8::new(s)
+    }
+
     fn f(format: &str, args: &[Arg]) -> String {
         match try_format(format, args) {
-            Ok(s) => s,
+            Ok(s) => s.to_string(),
             Err(e) => format!("{}: {}", e.class, e.message),
         }
     }
@@ -936,7 +946,7 @@ mod tests {
         );
         assert_eq!(f("%x", &[Arg::Byte(-1)]), "ff");
         assert_eq!(
-            f("%d", &[Arg::Str("x")]),
+            f("%d", &[Arg::Str(w("x"))]),
             "java.util.IllegalFormatConversionException: d != java.lang.String"
         );
     }
@@ -975,22 +985,28 @@ mod tests {
         assert_eq!(
             f(
                 "%s|%10s|%-6s|%.2s|%S",
-                &[Arg::Str("hi"), Arg::Str("right"), Arg::Str("left"), Arg::Str("cut"), Arg::Str("up")]
+                &[
+                    Arg::Str(w("hi")),
+                    Arg::Str(w("right")),
+                    Arg::Str(w("left")),
+                    Arg::Str(w("cut")),
+                    Arg::Str(w("up"))
+                ]
             ),
             "hi|     right|left  |cu|UP"
         );
         assert_eq!(
             f(
                 "%b %b %B %c %c%n%%",
-                &[Arg::Null, Arg::Str("x"), Arg::Bool(true), Arg::Char(65), Arg::Int(0x1F600)]
+                &[Arg::Null, Arg::Str(w("x")), Arg::Bool(true), Arg::Char(65), Arg::Int(0x1F600)]
             ),
             "false true TRUE A 😀\n%"
         );
-        assert_eq!(f("%2$s %1$s %<s", &[Arg::Str("a"), Arg::Str("b")]), "b a a");
+        assert_eq!(f("%2$s %1$s %<s", &[Arg::Str(w("a")), Arg::Str(w("b"))]), "b a a");
         assert_eq!(f("%s %s", &[Arg::Double(1.0), Arg::Float(0.1)]), "1.0 0.1");
         assert_eq!(f("%s", &[]), "java.util.MissingFormatArgumentException: Format specifier '%s'");
         assert_eq!(f("%q", &[]), "java.util.UnknownFormatConversionException: Conversion = 'q'");
-        assert_eq!(f("%h", &[Arg::Str("hello")]), "5e918d2");
+        assert_eq!(f("%h", &[Arg::Str(w("hello"))]), "5e918d2");
         assert!(check_supported("%a").is_err());
         assert!(check_supported("%tY").is_err());
         assert!(check_supported("%d %s").is_ok());

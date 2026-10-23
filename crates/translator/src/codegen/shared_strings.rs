@@ -6,12 +6,17 @@ use super::*;
 use crate::analysis::{Made, made};
 
 impl<'a> Gen<'a> {
-    /// The string of a literal, `text` a `&'static str`: a `String`, or the interned
-    /// `java::JStr`, looked up once where the code has it, where the program's strings are
-    /// shared.
+    /// The string of a literal, `text` a Rust string literal or the name of a string constant (a
+    /// `&'static java::Wtf8`): a `java::JString`, or the interned `java::JStr`, looked up once
+    /// where the code has it, where the program's strings are shared.
     pub(super) fn string_literal(&mut self, text: &str) -> String {
+        let text = if text.starts_with('"') {
+            format!("{}({text})", self.runtime("wtf8"))
+        } else {
+            text.to_string()
+        };
         if !super::shared_strings() {
-            return format!("String::from({text})");
+            return format!("{}::from({text})", self.runtime("JString"));
         }
         let jstr = self.runtime("JStr");
         let interned = self.runtime("interned_literal");
@@ -149,8 +154,8 @@ impl<'a> Gen<'a> {
             if self.enum_text_throws(t) {
                 return (format!("{handle}.try_text()"), true);
             }
-            self.need(Need::SharedText(t));
-            return (format!("{handle}.shared_text()"), false);
+            self.need(Need::JavaString(t));
+            return (format!("{handle}.java_string()"), false);
         }
         let shared = self.runtime("shared");
         match self.handle_text(handle, e) {

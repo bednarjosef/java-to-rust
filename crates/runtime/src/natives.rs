@@ -240,8 +240,8 @@ pub fn address_hash<T: ?Sized>(address: *const T) -> i32 {
 
 /// What `Object.toString()` makes for an object of a class that does not override it: the
 /// class's binary name, `@` and the object's hash code in hexadecimal.
-pub fn default_text(class: &str, hash: i32) -> String {
-    format!("{class}@{hash:x}")
+pub fn default_text(class: &str, hash: i32) -> crate::JString {
+    format!("{class}@{hash:x}").into()
 }
 
 /// `System.currentTimeMillis()`: milliseconds since the Unix epoch.
@@ -268,8 +268,8 @@ pub fn available_processors() -> i32 {
 
 /// `System.lineSeparator()` and `System.getProperty("line.separator")`; the translator targets
 /// Unix-like systems, where it is `"\n"`.
-pub fn line_separator() -> String {
-    "\n".to_string()
+pub fn line_separator() -> crate::JString {
+    "\n".into()
 }
 
 /// A primitive element of an array as the bytes the JVM keeps it in: little-endian, as on the

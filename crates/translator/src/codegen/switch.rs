@@ -184,7 +184,8 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::Int(i) => i.to_string(),
             ExprKind::Char(c) => c.to_string(),
-            ExprKind::Str(s) => rust_string(s),
+            ExprKind::Str(s) => byte_string(s.as_bytes()),
+            ExprKind::Units(units) => byte_string(&super::strings::wtf8_of(units)),
             ExprKind::EnumConstant { class, ordinal } => self.constant_path(*class, *ordinal),
             ExprKind::Static { class, name } => cell_name(&self.class.types[*class], name),
             _ => unreachable!("lowering keeps only constant case labels"),
@@ -394,21 +395,17 @@ impl<'a> Gen<'a> {
         } else if selector.ty != Type::String {
             self.value(selector, selector.ty).typed()
         } else if self.nullable(selector) && super::shared_strings() {
-            // The text of the `&JStr` that throws on null.
+            // The bytes of the `&JStr` that throws on null.
             let option = format!("{}.as_ref()", self.expr(selector).at(ATOM));
-            format!("{}.as_str()", self.dereference(&[selector.id], &option))
+            format!("{}.as_bytes()", self.dereference(&[selector.id], &option))
         } else if self.nullable(selector) {
-            // `deref` is a `&str` that throws on null.
-            self.deref(selector)
-        } else if let ExprKind::Var(name) = &selector.kind
-            && self.borrowed.contains(name)
-        {
-            // A borrowed shared string is a `&JStr`.
-            if super::shared_strings() { format!("{}.as_str()", self.local(name)) } else { self.local(name) }
+            // `deref` is a `&Wtf8` that throws on null.
+            format!("{}.as_bytes()", self.deref(selector))
         } else if let ExprKind::Var(name) = &selector.kind {
-            format!("{}.as_str()", self.local(name))
+            // A string's text is matched as bytes, which a byte string literal is.
+            format!("{}.as_bytes()", self.local(name))
         } else {
-            format!("&*{}", self.expr(selector).at(UNARY))
+            format!("{}.as_bytes()", self.expr(selector).at(ATOM))
         };
         self.guarded = outer;
         let yields_last = cases.iter().all(|c| matches!(c.body.last(), Some(Stmt::Yield(_))));
@@ -625,4 +622,20 @@ impl<'a> Gen<'a> {
         self.indent -= 1;
         self.line("}");
     }
+}
+
+/// A string's WTF-8 bytes as a Rust byte string literal, for matching a string's bytes.
+pub(super) fn byte_string(bytes: &[u8]) -> String {
+    let mut out = String::from("b\"");
+    for &b in bytes {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b' '..=b'~' => out.push(b as char),
+            b'\n' => out.push_str("\\n"),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    out.push('"');
+    out
 }

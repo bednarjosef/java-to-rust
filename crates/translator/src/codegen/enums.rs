@@ -126,7 +126,7 @@ impl<'a> Gen<'a> {
         self.gap();
         // Where strings are shared, a constant's name is the interned literal of its declaration.
         let shared = super::shared_strings();
-        let text = if shared { self.runtime("JStr") } else { "String".to_string() };
+        let text = if shared { self.runtime("JStr") } else { "java::JString".to_string() };
         self.line(&format!("{}fn enum_name(self) -> {text} {{", self.vis()));
         self.indent += 1;
         self.line(&format!("let name: {} = match self {{", if shared { &text } else { "&str" }));
@@ -138,16 +138,16 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("};");
-        self.line(if shared { "name" } else { "name.to_string()" });
+        self.line(if shared { "name" } else { "name.into()" });
         self.indent -= 1;
         self.line("}");
         self.gap();
-        self.line(&format!("{}fn enum_value_of(name: &str) -> {name} {{", self.vis()));
+        self.line(&format!("{}fn enum_value_of(name: &java::Wtf8) -> {name} {{", self.vis()));
         self.indent += 1;
-        self.line("match name {");
+        self.line("match name.as_bytes() {");
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{} => {name}::{},", rust_string(&c.name), variant_name(&c.name)));
+            self.line(&format!("{} => {name}::{},", byte_string(c.name.as_bytes()), variant_name(&c.name)));
         }
         let throw = self.runtime("throw");
         self.line(&format!(
@@ -181,11 +181,30 @@ impl<'a> Gen<'a> {
             // found first, which is this `Display`.
             // A `toString` that may return null shows "null", as Java's string conversion does.
             Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
-                "f.write_str(Self::{}(*self).as_deref().unwrap_or(\"null\"))",
+                "fmt::Display::fmt(Self::{}(*self).as_deref().unwrap_or(java::wtf8(\"null\")), f)",
                 self.fn_names[m]
             )),
-            Some(m) => self.line(&format!("f.write_str(&Self::{}(*self))", self.fn_names[m])),
+            Some(m) => self.line(&format!("fmt::Display::fmt(&Self::{}(*self), f)", self.fn_names[m])),
             None => self.line("write!(f, \"{}\", self.enum_name())"),
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        // In a concatenation, the string that `toString` returns as it is.
+        let (piece, jstring) = (self.runtime("Piece"), self.runtime("JString"));
+        self.gap();
+        self.line(&format!("impl {piece} for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn push_to(&self, out: &mut {jstring}) {{"));
+        self.indent += 1;
+        match self.enum_to_string(index) {
+            Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
+                "out.push_wtf8(Self::{}(*self).as_deref().unwrap_or(java::wtf8(\"null\")));",
+                self.fn_names[m]
+            )),
+            Some(m) => self.line(&format!("out.push_wtf8(&Self::{}(*self));", self.fn_names[m])),
+            None => self.line("let _ = fmt::Write::write_fmt(out, format_args!(\"{self}\"));"),
         }
         self.indent -= 1;
         self.line("}");
@@ -229,14 +248,14 @@ impl<'a> Gen<'a> {
         let exception = self.runtime("Exception");
         self.gap();
         self.line(&format!(
-            "{}fn try_enum_value_of(name: &str) -> Result<{name}, {exception}> {{",
+            "{}fn try_enum_value_of(name: &java::Wtf8) -> Result<{name}, {exception}> {{",
             self.vis()
         ));
         self.indent += 1;
-        self.line("Ok(match name {");
+        self.line("Ok(match name.as_bytes() {");
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{} => {name}::{},", rust_string(&c.name), variant_name(&c.name)));
+            self.line(&format!("{} => {name}::{},", byte_string(c.name.as_bytes()), variant_name(&c.name)));
         }
         self.line(&format!(
             "_ => return Err({exception}::new(\"java.lang.IllegalArgumentException\", format!(\"No enum constant {}.{{name}}\"))),",

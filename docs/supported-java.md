@@ -39,7 +39,7 @@ plainer form only where it proves the meaning is the same:
 | reference that may be null | `Option<..>` | the plain value where nullness analysis proves it is never null (`analysis/nullness.rs`) |
 | `int` arithmetic | `wrapping_add`, `java::rem`, ... | `+ - * / %` where range analysis proves no overflow and a nonzero divisor (`analysis/ranges.rs`) |
 | array | `java::Array<T>`, a shared cell | `Vec<T>` (or `Vec<Vec<T>>`) when no other name can see it (`analysis/arrays.rs`) |
-| string | Rust `String` | `&str` for a parameter never assigned; byte indexing for strings proven ASCII |
+| string | `java::JString`, WTF-8 bytes | `&java::Wtf8` for a parameter never assigned; byte indexing for strings proven ASCII |
 | object in a threaded program | `Arc<java::Locked<C>>` | `Arc<C>` when immutable; `Rc<RefCell<C>>` when no other thread can reach it |
 
 Nullness analysis treats a field as not null when every constructor sets it to a non-null value
@@ -69,10 +69,11 @@ never freed.
 
 ## Strings, builders, characters and formatting
 
-- **Strings** are Rust strings. The `String` methods count in UTF-16 units as Java does
-  (`indexOf`, `substring`, `charAt`, the code point methods) and throw what Java throws, with
-  Java's messages. A lone surrogate becomes `?` when it is stored in a string, so code that
-  splits and later rejoins a surrogate pair can differ from Java (`known-failures/`).
+- **Strings** are WTF-8 (`java::JString`, see object-model.md, 4): a string holds Java's code
+  units exactly, lone surrogates included, and halves of a pair that a concatenation or an append
+  brings together join. The `String` methods count in UTF-16 units as Java does (`indexOf`,
+  `substring`, `charAt`, the code point methods) and throw what Java throws, with Java's
+  messages.
 - **`StringBuilder` and `StringBuffer`** are `java::StringBuilder`, a shared handle to UTF-16
   units: every holder sees changes, and `append` chains stay chains. Where two threads may reach
   builders they are `java::SharedStringBuilder`.
@@ -122,7 +123,7 @@ never freed.
 
 - Static and instance methods, overloading, varargs, fields with initializers, initializer
   blocks, static fields, constructors (with `this(...)` and `super(...)`), and a user `toString`
-  in printing and concatenation. A `toString` becomes `impl fmt::Display`.
+  in printing and concatenation. A `toString` is a method returning the string.
 - Constructors build a plain value, starting from a struct literal of the leading field
   assignments (`P { x, y }`), and `new` shares it (`Rc::new(RefCell::new(P::new(1, 2)))`).
 - An object parameter that a method only uses (fields, calls, comparison, printing) is a

@@ -62,7 +62,8 @@ enum, `Rep::Enum`) and `Home` (where a method's body is emitted: a class's `impl
 struct, an enum, a free function, or nowhere for an abstract method).
 
 `codegen/dispatch.rs` writes the enums. Each item of an enum (`base()`, `base_mut()`, a
-dispatcher, a body on the enum, a `to_x()` or `as_x()` conversion, `Display`, and the methods
+dispatcher, a body on the enum, a `to_x()` or `as_x()` conversion, `Display`, `java_string()`,
+`try_text()` and `nullable_text()` (the string its `toString` returns), and the methods
 that answer for the object's class: `runtime_class()`, `runtime_class_name()`,
 `runtime_type_names()` and `object_identity_hash()`) is a `Need`, and is written only when some
 code uses it: the generator writes the program again with the items asked for until no new one
@@ -145,15 +146,15 @@ class Rect extends Base {
 The shape of the Rust (simplified):
 
 ```rust
-struct BaseFields { name: String, uses: i32 }
+struct BaseFields { name: java::JString, uses: i32 }
 impl BaseFields {
-    fn new(name: &str) -> BaseFields { BaseFields { name: name.to_string(), uses: 0 } }
-    fn get_name(&mut self) -> String { self.uses = self.uses.wrapping_add(1); self.name.clone() }
+    fn new(name: &java::Wtf8) -> BaseFields { BaseFields { name: name.to_owned(), uses: 0 } }
+    fn get_name(&mut self) -> java::JString { self.uses = self.uses.wrapping_add(1); self.name.clone() }
 }
 
 struct Circle { base: BaseFields, r: f64 }
 impl Circle {
-    fn new(r: f64) -> Circle { Circle { base: BaseFields::new("circle"), r } }
+    fn new(r: f64) -> Circle { Circle { base: BaseFields::new(java::wtf8("circle")), r } }
     fn area(&self) -> f64 { 3.0 * self.r * self.r }
 }
 
@@ -169,7 +170,9 @@ impl Base {
     fn area(&self) -> f64 {
         match self { Base::Circle(o) => o.borrow().area(), Base::Rect(o) => o.borrow().area() }
     }
-    fn to_string_in_base(&self) -> String { format!("{}:{}", self.base().name, java::Double(self.area())) }
+    fn to_string_in_base(&self) -> java::JString {
+        java::concat!(self.base().name.clone(), format_args!(":{}", java::Double(self.area())))
+    }
 }
 impl PartialEq for Base { /* Rc::ptr_eq per variant, false across variants */ }
 impl fmt::Display for Base { /* each variant as its class shows it */ }
@@ -192,8 +195,8 @@ Rules:
   calls the body declared above non-virtually. `X.super.m()` is a `super` call of interface
   `X`'s default method.
 - An abstract method is not emitted; its dispatcher is.
-- An inherited field-level `toString` is the `Display` of the fields struct, and the concrete
-  class's `Display` delegates to it.
+- A `toString` is a method that returns the string, as any other method is; the enum's
+  `Display` (for printing) calls it per variant.
 - A static method of a class or interface is a free function.
 
 ### 1.3 Places typed by the base, the interface and Object
@@ -358,7 +361,7 @@ is then:
 - `a == null && b == null` where no string can be on both sides: one side only interned and the
   other only new, or a side that is only ever null;
 - otherwise by the objects at run time. Every string of the program is then a `java::JStr`, an
-  `Arc<str>` compared by address (`java::same_str`), and the program-wide switch
+  `Arc` of its WTF-8 bytes (see 4) compared by address (`java::same_str`), and the program-wide switch
   (`Class::shared_strings`) makes each place that makes a string make the object Java makes: a
   literal is interned once (`java::interned_literal`), a new string is new, a method that may
   return its receiver returns it when Java's would (`java::kept` and its siblings, with the
@@ -403,7 +406,8 @@ hash, which no program can depend on). The same call on a single class without a
 identity directly (`identity_call`). `String.equals(Object)` and `Integer.equals(Object)` with
 an `Object` argument are `Object`'s `equals` on the receiver converted to `Object`. An interface
 that declares `equals` or `hashCode` again (`Comparator`) dispatches a class without its own to
-`Object`'s. `Object.toString()` is the enum's `Display`.
+`Object`'s. `Object.toString()` is the enum's `java_string()`, which calls each class's
+`toString` and makes the text of the classes without one.
 
 The identity hash is the address of the class's struct (`java::address_hash` of
 `RefCell::as_ptr`, `Rc::as_ptr` or `ptr::from_ref`), not of the `Rc`, so a method that borrows the
@@ -470,12 +474,15 @@ Other rules:
 
 ### 1.10 Printing
 
-An enum's `fmt::Display` dispatches per variant to the class's `Display`, to its `to_string`
-method when its `toString` is not a `Display`, or to the inherited body. `b.toString()` on an
-enum is `b.to_string()` through `ToString`; an inherited `toString` emitted on an enum is always
-`to_string_in_<type>`, since clippy forbids an inherent `to_string` beside `Display`. Printing
-formats an enum in place only when it is safe for every variant; otherwise the text is computed
-first. `java::or_null` works for `Option<Enum>`.
+A class's `toString` is a method returning the string (a `java::JString`), never a `Display`:
+`Display` writes text, which would show a lone surrogate as `?` where the string is used as a
+value, and would not keep the object that a shared string is. Printing and concatenation call
+it. An enum's `java_string()` dispatches per variant to the class's `toString`, or to the
+inherited body, and its `fmt::Display` (for `printf` and the other text the runtime makes) shows
+that string; in a concatenation the enum value is a `java::Piece` that pushes its
+`java_string()`. An inherited `toString` emitted on an enum is always `to_string_in_<type>`, since
+clippy forbids an inherent `to_string` beside `Display`. `java::or_null` works for
+`Option<Enum>`.
 
 ### 1.11 Generics
 
@@ -687,40 +694,52 @@ A call may run any member of an override group, so the analyses treat the group 
 - A class with subclasses that needs the whole-object constructor form, whose enclosing
   instance or captured locals a `super(..)` computes, is rejected (1.4).
 
-## 4. Plan: strings as WTF-8
+## 4. Strings as WTF-8
 
-Not built yet. Today a translated string is a Rust `String` (or a shared `java::JStr`, an
-`Arc<str>`, see 1.6), which cannot hold a lone UTF-16 surrogate: one becomes `?` when it is
-stored (`runtime/src/string.rs`), which `known-failures/LoneSurrogateCompareTo.java`, the
-strings fuzzer's seeds 18, 51 and 396 and four javac cases (`scripts/javac-check/known-differences`)
-show. The plan stores every string as WTF-8, so that a string holds exactly Java's code units
-while normal text stays plain UTF-8 at no cost:
+A translated string holds exactly Java's UTF-16 code units, lone surrogates included, while
+normal text stays plain UTF-8 at no cost:
 
-- **The bytes.** WTF-8 is UTF-8 that also encodes a lone surrogate in UTF-8's 3-byte form
-  (`ED A0..BF ..`). A surrogate pair is always its 4-byte character, never two 3-byte halves, so
-  each Java string has exactly one encoding and equality and hashing stay byte comparisons. Text
-  without lone surrogates is byte for byte its UTF-8.
-- **The types** (`runtime/src/wtf8.rs`). `java::Wtf8` is the unsized string slice, a
-  `[u8]` that holds WTF-8, with the `str`-like methods the generator and the runtime use;
-  `java::JString` is the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one
-  (an `Arc` of the same bytes); both deref to `Wtf8`. A `&str` converts to a `&Wtf8` for free;
-  a `&Wtf8` converts back to a `&str` after a check for lone surrogates, which the runtime folds
-  into the ASCII checks it already makes.
-- **Joining.** Appending text that starts with a low surrogate to text that ends with a high one
-  joins the two into their 4-byte character, as Java's UTF-16 shows them as one pair: a check of
-  the six bytes at the seam, in `JString`'s append and in concatenation (`java::concat!`, whose
-  parts are written as they are rather than through `format!`, which would show a lone surrogate
-  as `?`).
+- **The bytes.** A string is WTF-8: UTF-8 that also encodes a lone surrogate in UTF-8's 3-byte
+  form (`ED A0..BF ..`). A surrogate pair is always its 4-byte character, never two 3-byte
+  halves, so each Java string has exactly one encoding, and equality, ordering and hashing are
+  byte comparisons. Text without lone surrogates is byte for byte its UTF-8.
+- **The types** (`runtime/src/wtf8.rs`). `java::Wtf8` is the unsized string slice, a `[u8]` that
+  holds WTF-8, with the `str`-like methods the generator and the runtime use; `java::JString` is
+  the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one (an `Arc` of the same
+  bytes, see 1.6); both deref to `Wtf8`. `Type::String` is `java::JString` (or `java::JStr`
+  where strings are shared), a borrowed string parameter is a `&java::Wtf8`, and a literal is
+  `java::wtf8("..")`, a `&'static Wtf8` view of its UTF-8 made at compile time. A literal with
+  a lone surrogate, which javac's tree gives as its code units, is
+  `const { java::wtf8_bytes(b"..") }`: its WTF-8 bytes, checked when Rust compiles the program;
+  a `case` label folded from such literals matches the same bytes. The runtime's
+  string functions take `&Wtf8` and return `JString`; a function that needs a `&str` (a
+  pattern, a format string, a path) checks for lone surrogates first: a path or a number to
+  parse turns one into `?` as Java does, a pattern ends the program loudly. A regular
+  expression matches the code points of its input, a lone surrogate being one of its own, as
+  Java's `Pattern` does.
+- **Joining.** Appending text that starts with a low surrogate to text that ends with a high
+  one joins the two into their 4-byte character, as Java's UTF-16 shows them as one pair: a
+  check of the bytes at the seam, in `JString`'s pushes. A concatenation is `java::concat!` (and
+  `s += ...` is `java::append!`), whose pieces (`java::Piece`) are pushed one after another:
+  each string, `char`, builder or object's string as it is, and the text between them as a
+  literal or a `format_args!` of numbers and the like, so that halves that meet join.
 - **Code units.** `charAt`, `substring` and the other unit-indexed methods keep their ASCII fast
   paths; their other path decodes WTF-8 to units exactly and encodes a lone surrogate back
-  rather than `?` (`from_units`). A builder already holds UTF-16 units, so its `toString` becomes
-  exact.
-- **Output.** Printing encodes as Java's UTF-8 `PrintStream` does: a lone surrogate prints `?`.
-- **The generator.** `rust_type(String)` is `java::JString`, or `java::JStr` where strings are
-  shared; the runtime's string functions take `&Wtf8`; a literal is a `&'static Wtf8` view of
-  its UTF-8; a Java `char` that is a surrogate becomes its 3-byte form in a string.
+  (`from_units`). A builder holds UTF-16 units, so its `toString` (`text()`) is exact.
+- **Objects.** A `toString` is a method returning the string, never a `Display` (see 1.10), so
+  the string it returns is kept exactly; an enum's string is `java_string()`, and in a
+  concatenation an enum value is a piece that pushes it.
+- **Output.** Printing encodes as Java's UTF-8 `PrintStream` does: `Display` of a string shows a
+  lone surrogate as `?`. A printed line with two or more strings or `char`s, which could be the
+  halves of a pair, is made first and then printed.
+- **`switch` and `valueOf`.** A string `switch` and an enum's `valueOf` match the string's bytes
+  against byte string literals (`b"..."`), a string constant in a `case` by its text.
 
-Steps, each keeping `scripts/check.sh` green: (1) the runtime types and their operations, with
-unit tests, unused; (2) the generator and the runtime's string functions switched over, with
-the corpus also run with `JAVA_TO_RUST_SHARED_STRINGS`; (3) the lone-surrogate cases above moved
-into the corpus, off `known-differences`, and javac timed before and after.
+What does not hold a lone surrogate exactly: the message of an exception the runtime raises
+(a Rust `String`), a thread's name (Rust's), and the text of a charset or a `Class`.
+
+The translated javac keeps a lone surrogate exactly too: a `char` literal such as `'\uD800'` is
+compiled into the same class file as the real javac compiles it (`features-CodePoints` and the
+other corpus cases of `scripts/javac-check.sh --corpus`). WTF-8 costs javac no measurable time:
+a debug build of it compiles `corpus/programs` in the same time as with Rust strings, within the
+noise of a loaded machine, and builds with a rustc peak of 8.0 GB against 7.9 GB.

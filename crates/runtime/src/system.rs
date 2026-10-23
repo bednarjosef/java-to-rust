@@ -10,16 +10,21 @@ use crate::exit;
 /// `System.getenv(name)`: the variable of the environment the program runs in, as the JVM reads
 /// it, or `None` where it is unset. A name that no variable can have (empty, or with `=` or a
 /// zero byte) is unset, and a value that is not UTF-8 is read with replacement characters.
-pub fn getenv(name: &str) -> Option<String> {
+pub fn getenv(name: &crate::Wtf8) -> Option<crate::JString> {
+    let name = &*name.to_string_lossy();
     if name.is_empty() || name.contains(['=', '\0']) {
         return None;
     }
-    std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+    std::env::var_os(name).map(|value| value.to_string_lossy().into_owned().into())
 }
 
 /// The value of a system property that depends on the machine or the run (the translation fixes
 /// the others, see `lower::system`).
-pub fn system_property(key: &str) -> String {
+pub fn system_property(key: &str) -> crate::JString {
+    property(key).into()
+}
+
+fn property(key: &str) -> String {
     let env = |name: &str| std::env::var(name).unwrap_or_default();
     match key {
         "line.separator" => "\n".to_string(),
@@ -48,8 +53,11 @@ pub fn system_property(key: &str) -> String {
 
 /// `System.getProperty("java.home")`: the `JAVA_HOME` of the run, or else `fallback`, the home of
 /// the JDK the translator ran with.
-pub fn java_home(fallback: &str) -> String {
-    std::env::var("JAVA_HOME").ok().filter(|home| !home.is_empty()).unwrap_or_else(|| fallback.to_string())
+pub fn java_home(fallback: &crate::Wtf8) -> crate::JString {
+    match std::env::var("JAVA_HOME").ok().filter(|home| !home.is_empty()) {
+        Some(home) => home.into(),
+        None => fallback.to_owned(),
+    }
 }
 
 /// `Runtime.totalMemory()`: the heap the runtime has, in bytes. Not the JVM's figure.
@@ -117,7 +125,7 @@ mod tests {
     #[test]
     fn user_dir_is_the_working_directory() {
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(system_property("user.dir"), cwd.to_string_lossy());
+        assert_eq!(system_property("user.dir"), *cwd.to_string_lossy());
     }
 
     #[test]

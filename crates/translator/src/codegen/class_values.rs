@@ -190,7 +190,9 @@ impl<'a> Gen<'a> {
             ClassOp::IsInterface => "is_interface",
             ClassOp::IsPrimitive => "is_primitive",
             ClassOp::IsEnum => "is_enum",
-            ClassOp::ToString => "to_string",
+            ClassOp::ToString => {
+                return Code::atom(format!("{}::from({class}.to_string())", self.runtime("JString")));
+            }
             ClassOp::HashCode => "hash_code",
             ClassOp::GetCanonicalName => "get_canonical_name",
             ClassOp::GetPackageName => "get_package_name",

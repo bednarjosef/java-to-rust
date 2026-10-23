@@ -80,7 +80,8 @@ fn pure(e: &Expr, index: usize, assigned: &HashSet<&str>, decl: &TypeDecl) -> bo
         | ExprKind::Char(_)
         | ExprKind::Float(_)
         | ExprKind::Bool(_)
-        | ExprKind::Str(_) => true,
+        | ExprKind::Str(_)
+        | ExprKind::Units(_) => true,
         ExprKind::Static { class, name } => {
             *class == index
                 && (assigned.contains(name.as_str())

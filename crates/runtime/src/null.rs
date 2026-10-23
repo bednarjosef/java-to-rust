@@ -36,6 +36,16 @@ impl<T: std::fmt::Display> std::fmt::Display for OrNull<T> {
     }
 }
 
+/// A string concatenation's piece that may be null, as Java shows it.
+impl<T: std::fmt::Display + crate::Piece> crate::Piece for OrNull<T> {
+    fn push_to(&self, out: &mut crate::JString) {
+        match &self.0 {
+            Some(value) => value.push_to(out),
+            None => out.push_str("null"),
+        }
+    }
+}
+
 /// `a == b` on references that may be null: both null, or the same object.
 pub fn same<H: Handle>(a: Option<&H>, b: Option<&H>) -> bool {
     match (a, b) {

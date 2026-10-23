@@ -52,7 +52,8 @@ impl<'a> Gen<'a> {
                     Some(radix) => self.value(radix, Type::Int).text,
                     None => "10".to_string(),
                 };
-                Code::atom(format!("{}({value}, {radix})", self.runtime("to_unsigned_string")))
+                let f = self.runtime("to_unsigned_string");
+                Code::atom(format!("{}::from({f}({value}, {radix}))", self.runtime("JString")))
             }
             UnsignedOp::Parse | UnsignedOp::ParseRange => self.parse_unsigned_builtin(kind, args, id),
             UnsignedOp::Widen => {

@@ -38,8 +38,8 @@ fn a_local_class_holds_its_captures_as_fields() {
     assert_contains(
         &rust,
         &[
-            "struct ALabeler {\n    scale: i32,\n    unit: String,\n    calls: i32,\n}",
-            "fn new(scale: i32, unit: &str) -> ALabeler {",
+            "struct ALabeler {\n    scale: i32,\n    unit: java::JString,\n    calls: i32,\n}",
+            "fn new(scale: i32, unit: &java::Wtf8) -> ALabeler {",
             "ALabeler::new(scale, &unit)",
             "self.scale",
         ],
@@ -85,7 +85,7 @@ fn a_method_whose_this_is_captured_keeps_the_handle() {
         &rust,
         &[
             "outer: Rc<RefCell<A>>,",
-            "fn scaled(this: &Rc<RefCell<A>>, v: i32) -> String {",
+            "fn scaled(this: &Rc<RefCell<A>>, v: i32) -> java::JString {",
             "AScaler::new(this.clone(), v)",
             "self.outer.borrow().factor",
         ],
@@ -231,10 +231,10 @@ fn an_anonymous_subclass_passes_constructor_arguments_to_super() {
     assert_contains(
         &rust,
         &[
-            "struct ReportInMain {\n    base: AReportFields,\n    sep: String,\n}",
-            "fn new(title: &str, sep: &str) -> ReportInMain {",
-            "ReportInMain { base: AReportFields::new(title), sep: sep.to_string() }",
-            "ReportInMain::new(\"squares\", &sep)",
+            "struct ReportInMain {\n    base: AReportFields,\n    sep: java::JString,\n}",
+            "fn new(title: &java::Wtf8, sep: &java::Wtf8) -> ReportInMain {",
+            "ReportInMain { base: AReportFields::new(title), sep: sep.to_owned() }",
+            "ReportInMain::new(java::wtf8(\"squares\"), &sep)",
         ],
     );
 }
@@ -411,7 +411,7 @@ fn an_inner_superclass_whose_constructor_calls_an_override_gets_its_enclosing_in
         &[
             "fn new(outer: Rc<A>) -> ABaseFields {",
             "ADerived { base: ABaseFields::new(outer.clone()) }",
-            "format!(\"derived {}\", self.base.outer.total)",
+            "java::concat!(format_args!(\"derived {}\", self.base.outer.total))",
         ],
     );
 }

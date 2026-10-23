@@ -108,8 +108,8 @@ fn format_samples(args: &[Expr]) -> Vec<java_runtime::format::Arg<'static>> {
             Type::Long => Arg::Long(0),
             Type::Float => Arg::Float(0.0),
             Type::Double => Arg::Double(0.0),
-            Type::String => Arg::Str(""),
-            _ => Arg::Text(""),
+            Type::String => Arg::Str(java_runtime::wtf8("")),
+            _ => Arg::Text(java_runtime::wtf8("")),
         })
         .collect()
 }

@@ -70,10 +70,10 @@ fn a_method_reference_is_a_closure_of_the_call_it_makes() {
     assert_contains(
         &rust,
         &[
-            "let length = |a: &str| -> i32 { a.len() as i32 };",
-            "let doubled = |a: &str| -> i32 { twice(a) };",
+            "let length = |a: &java::Wtf8| -> i32 { a.len() as i32 };",
+            "let doubled = |a: &java::Wtf8| -> i32 { twice(a) };",
             "let make = |a: i32| -> Rc<APoint> { Rc::new(APoint::new(a)) };",
-            "length(\"abc\")",
+            "length(java::wtf8(\"abc\"))",
         ],
     );
     assert_lacks(&rust, &["struct MeasureLambdaInMain", "enum AMeasure", "type AMeasure"]);
@@ -98,7 +98,7 @@ fn a_generic_interfaces_closure_converts_its_arguments_and_its_result() {
         &[
             "let square = |t: Object| -> Object {\n        let x: i32 = java::cast(&t, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE));\n        Object::Integer(x.wrapping_mul(x))\n    };",
             "square(Object::Integer(7))",
-            "let show = |t: Object| {\n        let s: &str = &java::cast(&t, |o| o.as_string(), (\"java.lang.String\", java::BASE));\n        java::println!(\"{}\", java::string_length(s));\n    };",
+            "let show = |t: Object| {\n        let s: &java::Wtf8 = &java::cast(&t, |o| o.as_string(), (\"java.lang.String\", java::BASE));\n        java::println!(\"{}\", java::string_length(s));\n    };",
         ],
     );
     assert_lacks(&rust, &["fn apply_integer", "struct FunctionLambdaInMain"]);
@@ -250,7 +250,7 @@ fn a_method_reference_on_a_computed_receiver_evaluates_it_once() {
         }",
     );
     // The receiver is made once, before the closure, which captures it.
-    assert!(rust.contains("let receiver = java::StringBuilder::from_text(\"ab\");"), "{rust}");
+    assert!(rust.contains("let receiver = java::StringBuilder::from_text(java::wtf8(\"ab\"));"), "{rust}");
     assert!(rust.contains("let receiver = receiver.clone(); Rc::new(move ||"), "{rust}");
 }
 
@@ -348,7 +348,7 @@ fn the_default_methods_of_a_closure_type_are_its_extension_trait() {
         &rust,
         &[
             "type ACheck = Rc<dyn Fn(i32) -> bool>;",
-            "trait ACheckMethods {\n    fn negate(&self) -> ACheck;\n    fn describe(&self, x: i32) -> String;\n}",
+            "trait ACheckMethods {\n    fn negate(&self) -> ACheck;\n    fn describe(&self, x: i32) -> java::JString;\n}",
             "impl ACheckMethods for ACheck {\n    fn negate(&self) -> ACheck {",
             "let outer = self.clone();\n        Rc::new(move |x: i32| -> bool { !outer(x) })\n",
             "if self(x) {",

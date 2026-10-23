@@ -190,7 +190,7 @@ impl<'c> Graph<'c> {
             return Vec::new();
         }
         match &e.kind {
-            ExprKind::Str(_) => vec![self.node(Key::Interned)],
+            ExprKind::Str(_) | ExprKind::Units(_) => vec![self.node(Key::Interned)],
             ExprKind::Null | ExprKind::This | ExprKind::New { .. } => Vec::new(),
             ExprKind::Var(name) => vec![self.node(Key::Var(m, name.clone()))],
             ExprKind::Field { object, name } => self.field_nodes(object, name),
@@ -610,6 +610,7 @@ const UNKNOWN: u8 = 4;
 fn constant(class: &Class, e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Str(_)
+        | ExprKind::Units(_)
         | ExprKind::Int(_)
         | ExprKind::Long(_)
         | ExprKind::Double(_)
