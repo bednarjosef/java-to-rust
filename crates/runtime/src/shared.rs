@@ -7,54 +7,62 @@
 //! runs. javac starts its one thread only when a file manager closes in the background, which a
 //! normal compilation never does; plain counts make it about an eighth faster.
 //!
-//! The count is an `AtomicUsize`. While only one thread runs (`locked::alone`), a copy loads it and
+//! The count is an `AtomicU32`, in a header before the value that also names the function that
+//! frees the allocation (`Inner`). While only one thread runs (`locked::alone`), a copy loads it and
 //! stores it plus one, with relaxed orderings, which compile to a plain increment. That is sound
 //! for the same reason as the locks' plain path (`locked.rs`, `THREADS`): the flag turns on only in
 //! the thread that is about to spawn the second thread, before it does, so a thread that reads it
 //! off is the only thread there is, and the spawn orders every plain store before anything the new
 //! thread does. From then on every change is atomic, as `std::sync::Arc`'s.
 //!
-//! There are no weak references, and a handle of a `dyn` type cannot be made from one of a sized
-//! type (that needs the unstable `CoerceUnsized`): closures of functional interfaces that threads
-//! share stay `std::sync::Arc<dyn Fn ..>`.
+//! There are no weak references, and the value is sized: a handle of a `dyn` type could not be
+//! made from one of a sized type anyway (that needs the unstable `CoerceUnsized`), so closures of
+//! functional interfaces that threads share stay `std::sync::Arc<dyn Fn ..>`.
 
 use crate::locked::alone;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering, fence};
+use std::sync::atomic::{AtomicU32, Ordering, fence};
 
 /// More references than this abort the process, as `std::sync::Arc` does: counting on would wrap.
-const MAX_REFS: usize = isize::MAX as usize;
+const MAX_REFS: u32 = i32::MAX as u32;
 
-// The count comes first in every handle's allocation, whatever `T` is, so that `clone_counted`
-// finds it without knowing `T`.
+// The header comes first in every handle's allocation, whatever `T` is, so that `clone_counted`
+// finds the count and the last handle's drop finds the function that frees the allocation
+// without knowing `T`: the drop of a handle is then the same code for every class, and the
+// arms of an enum's drop over the classes that threads share are all alike.
 #[repr(C)]
-struct Inner<T: ?Sized> {
-    count: AtomicUsize,
+struct Inner<T> {
+    count: AtomicU32,
+    /// The address of `free::<T>`, less that of `anchor`: the code is far smaller than 2 GB, so
+    /// it fits in the half of the header's word that the count leaves.
+    free: i32,
     value: T,
 }
 
 /// A counted reference to a `T` that threads can share. See the module comment.
-pub struct Arc<T: ?Sized> {
+pub struct Arc<T> {
     ptr: NonNull<Inner<T>>,
     owns: PhantomData<Inner<T>>,
 }
 
 // As `std::sync::Arc`: a handle moves to or is shared with another thread only if the value may be
 // shared and dropped there.
-unsafe impl<T: ?Sized + Sync + Send> Send for Arc<T> {}
-unsafe impl<T: ?Sized + Sync + Send> Sync for Arc<T> {}
+unsafe impl<T: Sync + Send> Send for Arc<T> {}
+unsafe impl<T: Sync + Send> Sync for Arc<T> {}
 
 impl<T> Arc<T> {
     #[inline]
     pub fn new(value: T) -> Arc<T> {
-        let inner = Box::new(Inner { count: AtomicUsize::new(1), value });
+        let free = (free::<T> as unsafe fn(NonNull<()>) as usize).wrapping_sub(anchor as fn() as usize);
+        let free = i32::try_from(free as isize).expect("the code is smaller than 2 GB");
+        let inner = Box::new(Inner { count: AtomicU32::new(1), free, value });
         Arc { ptr: NonNull::from(Box::leak(inner)), owns: PhantomData }
     }
 }
 
-impl<T: ?Sized> Arc<T> {
+impl<T> Arc<T> {
     #[inline]
     fn inner(&self) -> &Inner<T> {
         // The handle keeps the allocation alive.
@@ -76,7 +84,7 @@ impl<T: ?Sized> Arc<T> {
     /// How many handles there are of the object.
     #[inline]
     pub fn strong_count(this: &Arc<T>) -> usize {
-        this.inner().count.load(Ordering::Acquire)
+        this.inner().count.load(Ordering::Acquire) as usize
     }
 
     /// Always 0: there are no weak references (kept for the shape of `std::sync::Arc`'s).
@@ -95,16 +103,9 @@ impl<T: ?Sized> Arc<T> {
             None
         }
     }
-
-    #[cold]
-    #[inline(never)]
-    fn drop_slow(&mut self) {
-        // The last handle: nothing else can reach the allocation.
-        drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
-    }
 }
 
-impl<T: ?Sized> Clone for Arc<T> {
+impl<T> Clone for Arc<T> {
     #[inline]
     fn clone(&self) -> Arc<T> {
         count_up(&self.inner().count);
@@ -112,12 +113,37 @@ impl<T: ?Sized> Clone for Arc<T> {
     }
 }
 
-impl<T: ?Sized> Drop for Arc<T> {
+impl<T> Drop for Arc<T> {
     #[inline]
     fn drop(&mut self) {
         if count_down(&self.inner().count) {
-            self.drop_slow();
+            free_last(self.ptr.cast());
         }
+    }
+}
+
+/// The address that `Inner::free` is relative to.
+#[inline(never)]
+fn anchor() {}
+
+/// Frees the allocation of `Inner<T>` at `inner`, whose last handle was dropped.
+unsafe fn free<T>(inner: NonNull<()>) {
+    // The last handle: nothing else can reach the allocation.
+    drop(unsafe { Box::from_raw(inner.cast::<Inner<T>>().as_ptr()) });
+}
+
+/// Frees the allocation whose last handle was dropped by the function its header names, so that
+/// the drop of a handle is not generic.
+#[cold]
+#[inline(never)]
+fn free_last(inner: NonNull<Inner<()>>) {
+    // The header is the same for every `T` (`Inner` is `repr(C)`), and its offset was made from
+    // `free::<T>` of the allocation's own `T`.
+    unsafe {
+        let offset = (*inner.as_ptr()).free as isize;
+        let address = (anchor as fn() as usize).wrapping_add(offset as usize);
+        let free: unsafe fn(NonNull<()>) = std::mem::transmute(address);
+        free(inner.cast());
     }
 }
 
@@ -128,7 +154,7 @@ impl<T: ?Sized> Drop for Arc<T> {
 /// One more handle. Inlined even into the largest functions, the copies of `Object` that match
 /// on every class, where a call would cost more than the change it makes.
 #[inline(always)]
-fn count_up(count: &AtomicUsize) {
+fn count_up(count: &AtomicU32) {
     if alone() {
         let old = count.load(Ordering::Relaxed);
         if old > MAX_REFS {
@@ -142,7 +168,7 @@ fn count_up(count: &AtomicUsize) {
 
 #[cold]
 #[inline(never)]
-fn count_up_atomic(count: &AtomicUsize) {
+fn count_up_atomic(count: &AtomicU32) {
     if count.fetch_add(1, Ordering::Relaxed) > MAX_REFS {
         std::process::abort();
     }
@@ -150,7 +176,7 @@ fn count_up_atomic(count: &AtomicUsize) {
 
 /// One handle fewer: whether it was the last one, whose value is to be freed.
 #[inline(always)]
-fn count_down(count: &AtomicUsize) -> bool {
+fn count_down(count: &AtomicU32) -> bool {
     if alone() {
         let old = count.load(Ordering::Relaxed);
         count.store(old - 1, Ordering::Relaxed);
@@ -162,7 +188,7 @@ fn count_down(count: &AtomicUsize) -> bool {
 
 #[cold]
 #[inline(never)]
-fn count_down_atomic(count: &AtomicUsize) -> bool {
+fn count_down_atomic(count: &AtomicU32) -> bool {
     if count.fetch_sub(1, Ordering::Release) != 1 {
         return false;
     }
@@ -211,13 +237,13 @@ pub fn clone_counted<E: CountedHandles>(e: &E) -> Option<E> {
     }
     // The variant's one field, a handle, follows the discriminant at the handle's alignment,
     // and the count is the first field of the allocation it points to (`Inner` is `repr(C)`).
-    let count = unsafe { *(at.add(std::mem::align_of::<NonNull<()>>()) as *const *const AtomicUsize) };
+    let count = unsafe { *(at.add(std::mem::align_of::<NonNull<()>>()) as *const *const AtomicU32) };
     count_up(unsafe { &*count });
     // The handle now counts one more owner: the copy.
     Some(unsafe { std::ptr::read(e) })
 }
 
-impl<T: ?Sized> Deref for Arc<T> {
+impl<T> Deref for Arc<T> {
     type Target = T;
 
     #[inline]
@@ -226,7 +252,7 @@ impl<T: ?Sized> Deref for Arc<T> {
     }
 }
 
-impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for Arc<T> {
+impl<T: std::fmt::Debug> std::fmt::Debug for Arc<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         (**self).fmt(f)
     }

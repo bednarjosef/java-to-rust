@@ -68,7 +68,7 @@ pub trait FixedHandle {
     fn cell(&self) -> &Self::Cell;
 }
 
-impl<C: FixedFields + ?Sized> FixedHandle for crate::Arc<C> {
+impl<C: FixedFields> FixedHandle for crate::Arc<C> {
     type Cell = C;
 
     #[inline(always)]

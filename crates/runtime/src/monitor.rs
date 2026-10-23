@@ -46,7 +46,7 @@ impl<T: ?Sized> HasMonitor for Locked<T> {
     }
 }
 
-impl<H: HasMonitor + ?Sized> HasMonitor for Arc<H> {
+impl<H: HasMonitor> HasMonitor for Arc<H> {
     #[inline]
     fn monitor(&self) -> MonitorOf<'_> {
         (**self).monitor()
