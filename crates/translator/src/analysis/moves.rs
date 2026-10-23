@@ -61,6 +61,8 @@ struct Walk {
     uses: Vec<Use>,
     /// How many string concatenations enclose the expression being walked.
     concatenating: usize,
+    /// How many argument lists enclose the expression being walked.
+    arguments: usize,
 }
 
 impl Walk {
@@ -226,9 +228,11 @@ impl Walk {
             ExprKind::Conditional(c, a, b) => {
                 // An `if` drops the temporaries of its condition before a branch runs, so a
                 // branch may move what the condition reads; a null test narrows the variable
-                // instead, which keeps it borrowed.
+                // instead, which keeps it borrowed. As an argument, it runs while the call's other
+                // arguments may still borrow what the condition reads (a borrowed parameter's
+                // `&x`), so there it counts as part of the statement.
                 let outer = self.statement;
-                if !mentions_null(c) && self.concatenating == 0 {
+                if !mentions_null(c) && self.concatenating == 0 && self.arguments == 0 {
                     self.statement = usize::MAX - self.uses.len();
                 }
                 self.expr(c);
@@ -238,7 +242,7 @@ impl Walk {
             }
             ExprKind::MethodCall { receiver, args, .. } => {
                 self.expr(receiver);
-                args.iter().for_each(|a| self.expr(a));
+                self.arguments(args);
             }
             ExprKind::Call { args, .. }
             | ExprKind::Builtin(_, args)
@@ -246,7 +250,7 @@ impl Walk {
             | ExprKind::ThisCall { args, .. }
             | ExprKind::SuperInit { args, .. }
             | ExprKind::NewArray(args)
-            | ExprKind::ArrayLit(args) => args.iter().for_each(|a| self.expr(a)),
+            | ExprKind::ArrayLit(args) => self.arguments(args),
             // Anything else: its variables count as mentioned, none of them as a last use.
             _ => visit_expr(e, &mut |x| {
                 if let ExprKind::Var(name) = &x.kind {
@@ -254,6 +258,12 @@ impl Walk {
                 }
             }),
         }
+    }
+
+    fn arguments(&mut self, args: &[Expr]) {
+        self.arguments += 1;
+        args.iter().for_each(|a| self.expr(a));
+        self.arguments -= 1;
     }
 
     fn place(&mut self, place: &Place) {
