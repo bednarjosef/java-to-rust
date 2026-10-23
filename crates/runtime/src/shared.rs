@@ -122,8 +122,9 @@ impl<T: ?Sized> Drop for Arc<T> {
 // the plain path is inlined where a handle is copied or dropped: there are hundreds of thousands of
 // such places in a large program.
 
-/// One more handle.
-#[inline]
+/// One more handle. Inlined even into the largest functions, the copies of `Object` that match
+/// on every class, where a call would cost more than the change it makes.
+#[inline(always)]
 fn count_up(count: &AtomicUsize) {
     if alone() {
         let old = count.load(Ordering::Relaxed);
@@ -145,7 +146,7 @@ fn count_up_atomic(count: &AtomicUsize) {
 }
 
 /// One handle fewer: whether it was the last one, whose value is to be freed.
-#[inline]
+#[inline(always)]
 fn count_down(count: &AtomicUsize) -> bool {
     if alone() {
         let old = count.load(Ordering::Relaxed);
