@@ -31,6 +31,7 @@ struct Saved {
     this_form: ThisForm,
     borrowed: HashSet<String>,
     borrowed_optional: HashSet<String>,
+    borrowed_optional_objects: HashSet<String>,
     int_receiver: bool,
     double_receiver: bool,
     locals: HashMap<String, String>,
@@ -251,6 +252,7 @@ impl<'a> Gen<'a> {
             let f = self.facts;
             if f.borrowed_params.contains(&key)
                 || f.borrowed_objects.contains(&key)
+                || f.borrowed_optional_objects.contains(&key)
                 || f.borrowed_optional_params.contains(&key)
                 || f.borrowed_arrays.contains_key(&key)
             {
@@ -466,6 +468,7 @@ impl<'a> Gen<'a> {
             this_form: self.this_form,
             borrowed: std::mem::take(&mut self.borrowed),
             borrowed_optional: std::mem::take(&mut self.borrowed_optional),
+            borrowed_optional_objects: std::mem::take(&mut self.borrowed_optional_objects),
             int_receiver: self.int_receiver,
             double_receiver: self.double_receiver,
             locals: std::mem::take(&mut self.locals),
@@ -503,6 +506,7 @@ impl<'a> Gen<'a> {
         self.this_form = s.this_form;
         self.borrowed = s.borrowed;
         self.borrowed_optional = s.borrowed_optional;
+        self.borrowed_optional_objects = s.borrowed_optional_objects;
         self.int_receiver = s.int_receiver;
         self.double_receiver = s.double_receiver;
         self.locals = s.locals;

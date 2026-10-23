@@ -837,6 +837,28 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A possibly-null object as the `&Option<Rc<..>>` that a parameter of type `ty` borrows: the
+    /// place that holds it when it is one of that type, or else a reference to its value.
+    fn optional_object_ref(&mut self, e: &'a Expr, ty: Type) -> String {
+        let inner = self.peel(e);
+        if matches!(inner.kind, ExprKind::Null) {
+            return "&None".to_string();
+        }
+        let same = matches!(inner.ty, Type::Class(..)) && self.ty_name(inner.ty) == self.ty_name(ty);
+        match &inner.kind {
+            // Not where a null check narrowed it to the object (`if let Some(x) = x.as_ref()`).
+            ExprKind::Var(name)
+                if same && self.borrowed_optional_objects.contains(name) && !self.borrowed.contains(name) =>
+            {
+                self.local(name)
+            }
+            ExprKind::Var(_) | ExprKind::Field { .. } if same && self.nullable(inner) => {
+                format!("&{}", self.object_place(inner))
+            }
+            _ => format!("&{}", self.optional_to(e, ty).at(UNARY)),
+        }
+    }
+
     /// `a == b` and `a != b` (expression `id`) on objects: whether they are the same object, as
     /// `Rc::ptr_eq`, or `java::same` where either may be null; `java::same_object` on `Object`s
     /// that may both be strings or boxes (`Facts::identity_checks`).
@@ -984,6 +1006,8 @@ impl<'a> Gen<'a> {
                     self.str_ref(a)
                 } else if self.facts.borrowed_objects.contains(&(index, i)) {
                     self.object_ref(a)
+                } else if self.facts.borrowed_optional_objects.contains(&(index, i)) {
+                    self.optional_object_ref(a, p.ty)
                 } else if self.facts.borrowed_optional_params.contains(&(index, i)) {
                     self.option_arg(a)
                 } else if self.optional_var(index, p.ty, &p.name) {

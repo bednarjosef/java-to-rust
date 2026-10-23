@@ -186,6 +186,7 @@ fn generate_with(
         method: 0,
         borrowed: HashSet::new(),
         borrowed_optional: HashSet::new(),
+        borrowed_optional_objects: HashSet::new(),
         int_receiver: false,
         double_receiver: false,
         this_form: ThisForm::Shared,
@@ -337,6 +338,9 @@ struct Gen<'a> {
     borrowed: HashSet<String>,
     /// The current method's possibly-null string parameters that are borrowed as `Option<&str>`.
     borrowed_optional: HashSet<String>,
+    /// The current method's possibly-null object parameters that are borrowed as
+    /// `&Option<Rc<..>>`: a read of one as a value clones it.
+    borrowed_optional_objects: HashSet<String>,
     /// Whether the current method calls a method on an `i32` or `f64` value that is not a
     /// literal. Rust needs the type of such a value to be known, so variables initialized with a
     /// bare literal then get their type written (see `annotation`).
@@ -544,6 +548,10 @@ impl<'a> Gen<'a> {
             .filter(|&i| self.facts.borrowed_optional_params.contains(&(index, i)))
             .map(|i| m.params[i].name.clone())
             .collect();
+        self.borrowed_optional_objects = (0..m.params.len())
+            .filter(|&i| self.facts.borrowed_optional_objects.contains(&(index, i)))
+            .map(|i| m.params[i].name.clone())
+            .collect();
     }
 
     /// The parameters of method `index` with their Rust types. For the method's own body
@@ -557,6 +565,8 @@ impl<'a> Gen<'a> {
                 let mutable = if body && assigns_any(&m.body, &p.name) { "mut " } else { "" };
                 let ty = if self.borrowed_optional.contains(&p.name) {
                     "Option<&java::Wtf8>".to_string()
+                } else if self.facts.borrowed_optional_objects.contains(&(index, i)) {
+                    format!("&Option<{}>", self.ty_name(p.ty))
                 } else if self.optional_var(index, p.ty, &p.name) {
                     format!("Option<{}>", self.ty_name(p.ty))
                 } else if self.facts.borrowed_objects.contains(&(index, i)) {

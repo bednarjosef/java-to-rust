@@ -300,6 +300,10 @@ impl<'a> Gen<'a> {
                     {
                         Code::atom(format!("{rust}.clone()"))
                     }
+                    // So is a possibly-null object parameter that the method borrows.
+                    Type::Class(..) if self.borrowed_optional_objects.contains(name) => {
+                        Code::atom(format!("{rust}.clone()"))
+                    }
                     ty if self.clones(ty) && !self.facts.moves.contains(&e.id) => {
                         Code::atom(format!("{rust}.clone()"))
                     }

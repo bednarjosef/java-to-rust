@@ -126,8 +126,8 @@ never freed.
   in printing and concatenation. A `toString` is a method returning the string.
 - Constructors build a plain value, starting from a struct literal of the leading field
   assignments (`P { x, y }`), and `new` shares it (`Rc::new(RefCell::new(P::new(1, 2)))`).
-- An object parameter that a method only uses (fields, calls, comparison, printing) is a
-  borrowed `&Rc<..>`. Methods of shared classes borrow their object
+- An object parameter that a method only uses (fields, calls, comparison, printing, a copy into a
+  local) is a borrowed `&Rc<..>`, or `&Option<Rc<..>>` where it may be null. Methods of shared classes borrow their object
   (`p.borrow_mut().set(2)`) when nothing they run can reach the object another way.
 - `==` on objects is identity: `Rc::ptr_eq`, or `java::same` where either side may be null. Two
   `Object`s that may both be strings or boxes are compared at run time, and equal ones end the

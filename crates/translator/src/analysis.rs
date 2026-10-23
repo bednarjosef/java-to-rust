@@ -117,10 +117,14 @@ pub struct Facts {
     pub borrowed_params: HashSet<(usize, usize)>,
     /// String parameters that are never assigned but can be null: `Option<&str>`.
     pub borrowed_optional_params: HashSet<(usize, usize)>,
-    /// Object parameters, as (method, parameter) indexes, that the method only uses through: it
-    /// reads and writes their fields, calls their methods, compares or prints them, and passes
-    /// them on to such parameters. They are `&Rc<..>`, which the caller lends.
+    /// Object parameters, as (method, parameter) indexes, that the method never assigns and only
+    /// uses through: it reads and writes their fields, calls their methods, compares or prints
+    /// them, passes them on to such parameters, and copies them into locals. They are `&Rc<..>`,
+    /// which the caller lends.
     pub borrowed_objects: HashSet<(usize, usize)>,
+    /// Object parameters that can be null and that the method uses the same way: they are
+    /// `&Option<Rc<..>>`, which the caller lends.
+    pub borrowed_optional_objects: HashSet<(usize, usize)>,
     /// String variables and parameters, as (method, name), that can hold null.
     pub nullable_vars: HashSet<(usize, String)>,
     /// Methods whose string or object return value can be null.
@@ -324,7 +328,7 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
     facts.class_monitors = monitors::class_monitors(class, &facts);
     phase("analysis: borrowing", || {
         borrowed_params(class, &mut facts);
-        facts.borrowed_objects = borrowed_objects(class, &facts);
+        (facts.borrowed_objects, facts.borrowed_optional_objects) = borrowed_objects(class, &facts);
     });
     ascii_strings(class, &mut facts);
     phase("analysis: arrays", || arrays::analyze(class, &mut facts));
@@ -599,14 +603,16 @@ fn align_groups(class: &Class, set: &mut HashSet<(usize, usize)>) -> bool {
     !unaligned.is_empty()
 }
 
-fn borrowed_objects(class: &Class, facts: &Facts) -> HashSet<(usize, usize)> {
-    let mut borrowed: HashSet<(usize, usize)> = HashSet::new();
+/// Parameters, as (method, parameter) indexes.
+type Params = HashSet<(usize, usize)>;
+
+/// The object parameters that methods borrow: those that can never be null (`&Rc<..>`) and
+/// those that can (`&Option<Rc<..>>`).
+fn borrowed_objects(class: &Class, facts: &Facts) -> (Params, Params) {
+    let mut borrowed = Params::new();
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
-            if matches!(p.ty, Type::Class(..))
-                && !nullable_var(facts, m, &p.name)
-                && !assigns_any(&method.body, &p.name)
-            {
+            if matches!(p.ty, Type::Class(..)) && !assigns_any(&method.body, &p.name) {
                 borrowed.insert((m, i));
             }
         }
@@ -618,67 +624,88 @@ fn borrowed_objects(class: &Class, facts: &Facts) -> HashSet<(usize, usize)> {
             .copied()
             .filter(|&(m, i)| {
                 let method = &class.methods[m];
-                let name = &method.params[i].name;
-                let mut value = false;
-                for stmt in &method.body {
-                    visit_stmt(stmt, &mut |e| value |= used_as_value(e, name, &borrowed), &mut |_| {});
-                }
-                value
+                used_as_value(&method.body, &method.params[i].name, &borrowed)
             })
             .collect();
         for p in &losing {
             borrowed.remove(p);
         }
         if !align_groups(class, &mut borrowed) && losing.is_empty() {
-            return borrowed;
+            break;
         }
+    }
+    let (mut nullable, mut plain): (Params, Params) =
+        borrowed.into_iter().partition(|&(m, i)| nullable_var(facts, m, &class.methods[m].params[i].name));
+    // The methods of a group take a parameter alike, so it is null in all of them or in none.
+    align_groups(class, &mut plain);
+    align_groups(class, &mut nullable);
+    (plain, nullable)
+}
+
+/// The `Var` node inside `e` when `e` reads the variable `name`, through any casts.
+fn var_read(e: &Expr, name: &str) -> Option<ExprId> {
+    match &e.kind {
+        ExprKind::Var(v) if v == name => Some(e.id),
+        ExprKind::Cast(_, inner) => var_read(inner, name),
+        _ => None,
     }
 }
 
-/// Whether `e` uses the object variable `name` other than through it: as the value of an
-/// assignment, an argument of a parameter that is not borrowed, or an operand of anything but a
-/// field access, a call on it, `==`, `!=` or a concatenation.
-fn used_as_value(e: &Expr, name: &str, borrowed: &HashSet<(usize, usize)>) -> bool {
-    let is_name = |x: &Expr| matches!(&x.kind, ExprKind::Var(v) if v == name);
+/// Whether `stmts` use the object variable `name` other than through it, or by a copy that a local
+/// variable takes: as the value of an assignment to a field, an element or a static, an argument
+/// of a parameter that is not borrowed, a returned or thrown value, or an operand of anything but
+/// a field access, a call on it, `instanceof`, `==`, `!=` or a concatenation. A read that the
+/// method needs as a value (a local's, a cast's) clones the borrowed handle there.
+fn used_as_value(stmts: &[Stmt], name: &str, borrowed: &HashSet<(usize, usize)>) -> bool {
     let mut allowed = HashSet::new();
     let mut uses = Vec::new();
-    visit_expr(e, &mut |x| match &x.kind {
-        ExprKind::Var(v) if v == name => uses.push(x.id),
-        ExprKind::Field { object, .. }
-        | ExprKind::Assign { target: Place::Field { object, .. }, .. }
-        | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
-            if is_name(object) =>
-        {
-            allowed.insert(object.id);
-        }
-        ExprKind::MethodCall { receiver, .. } if is_name(receiver) => {
-            allowed.insert(receiver.id);
-        }
-        ExprKind::InstanceOf { value, .. } if is_name(value) => {
-            allowed.insert(value.id);
-        }
-        ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::Add, l, r) => {
-            allowed.extend([l, r].into_iter().filter(|o| is_name(o)).map(|o| o.id));
-        }
-        ExprKind::Builtin(Builtin::Print | Builtin::Println, args) => {
-            allowed.extend(args.iter().filter(|a| is_name(a)).map(|a| a.id));
-        }
-        _ => {}
-    });
-    visit_expr(e, &mut |x| match &x.kind {
-        ExprKind::Call { args, resolved: Some(callee), .. }
-        | ExprKind::MethodCall { args, resolved: Some(callee), .. }
-        | ExprKind::New { args, ctor: Some(callee), .. }
-        | ExprKind::ThisCall { args, resolved: Some(callee) }
-        | ExprKind::SuperInit { args, resolved: Some(callee) } => {
-            for (j, a) in args.iter().enumerate() {
-                if is_name(a) && borrowed.contains(&(*callee, j)) {
-                    allowed.insert(a.id);
+    let mut on_expr = |e: &Expr| {
+        visit_expr(e, &mut |x| match &x.kind {
+            ExprKind::Var(v) if v == name => uses.push(x.id),
+            ExprKind::Field { object, .. }
+            | ExprKind::Assign { target: Place::Field { object, .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => {
+                allowed.extend(var_read(object, name));
+            }
+            ExprKind::Assign { target: Place::Var(_), value, .. } => allowed.extend(var_read(value, name)),
+            ExprKind::MethodCall { receiver, .. } => allowed.extend(var_read(receiver, name)),
+            ExprKind::InstanceOf { value, .. } => allowed.extend(var_read(value, name)),
+            ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::Add, l, r) => {
+                allowed.extend(var_read(l, name));
+                allowed.extend(var_read(r, name));
+            }
+            ExprKind::Builtin(Builtin::Print | Builtin::Println, args) => {
+                allowed.extend(args.iter().filter_map(|a| var_read(a, name)));
+            }
+            _ => {}
+        });
+        visit_expr(e, &mut |x| match &x.kind {
+            ExprKind::Call { args, resolved: Some(callee), .. }
+            | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+            | ExprKind::New { args, ctor: Some(callee), .. }
+            | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::SuperInit { args, resolved: Some(callee) } => {
+                for (j, a) in args.iter().enumerate() {
+                    if let ExprKind::Var(v) = &a.kind
+                        && v == name
+                        && borrowed.contains(&(*callee, j))
+                    {
+                        allowed.insert(a.id);
+                    }
                 }
             }
-        }
-        _ => {}
-    });
+            _ => {}
+        });
+    };
+    let mut locals = Vec::new();
+    for stmt in stmts {
+        visit_stmt(stmt, &mut on_expr, &mut |s| {
+            if let Stmt::Local { init: Some(init), .. } = s {
+                locals.extend(var_read(init, name));
+            }
+        });
+    }
+    allowed.extend(locals);
     uses.iter().any(|id| !allowed.contains(id))
 }
 

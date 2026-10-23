@@ -2653,9 +2653,9 @@ fn object_fields_that_may_be_null_are_options() {
             "while n.is_some() {",
             "s = s.wrapping_add(java::non_null(n.as_ref()).value);",
             "n = java::non_null(n.as_ref()).next.clone();",
-            "fn sum(head: Rc<Node>) -> i32 {",
-            "let mut n: Option<Rc<Node>> = Some(head);",
-            "sum(Rc::new(Node::new(1, Some(Rc::new(Node::new(2, None))))))",
+            "fn sum(head: &Rc<Node>) -> i32 {",
+            "let mut n: Option<Rc<Node>> = Some(head.clone());",
+            "sum(&Rc::new(Node::new(1, Some(Rc::new(Node::new(2, None))))))",
         ],
     );
 }
