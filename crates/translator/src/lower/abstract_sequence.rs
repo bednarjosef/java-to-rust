@@ -35,7 +35,7 @@ impl<'t> Lowering<'t> {
     /// the chain loop in `lower/object.rs` links are the top class's, so these are the rest.
     pub(super) fn link_sequence_subclasses(
         &self,
-        methods: &mut Vec<Method>,
+        methods: &mut [Method],
         first: usize,
         equals: usize,
     ) -> Result<(), Error> {
