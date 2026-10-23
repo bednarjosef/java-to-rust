@@ -71,6 +71,7 @@ something a translated program does not have.
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; not `getSpace0` |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing; the path it gives them, `UnixPath.getByteArrayForSysCalls()`, is never null, as the JDK's code shows (`analysis/nullness.rs`: `never_null_result`), so a call has no message of a null path to know |
 | `UnixNativeDispatcher.statvfs0` (the translator's patch, `long[]` fields) | `unix.rs`: `unix_statvfs` | the four fields `UnixFileStoreAttributes.fill` copies (block size, blocks, free and available blocks) |
+| `UnixNativeDispatcher.fgetxattr0`, `fsetxattr0`, `fremovexattr0`, `flistxattr0` and `mknod0` (the translator's patch) | `unix.rs` | the extended attributes of an open file, read from and written to the native memory of the JDK's `NativeBuffer`s, as the DOS and user-defined attribute views and `Files.copy` use them, and `mknod` for the copy of a special file |
 | `LinuxNativeDispatcher.init`, `posix_fadvise`; `UnixFileSystem.directCopy0`, `bufferedCopy0` | `file_copy.rs`, `codegen/file_copy.rs` | `init` does nothing; `posix_fadvise` checks the descriptor is open and gives 0, as its advice has no effect a program can see. `directCopy0` gives `UNSUPPORTED` (-4), so the JDK copies through `bufferedCopy0`, which moves the same bytes between the two descriptors (`copy_file_range` is not used). The JDK's native is `bufferedCopy0Errno` in the translator's patch of `UnixFileSystem`: it answers the `errno` of a failed read or write, and `bufferedCopy` throws `UnixException(errno)` as HotSpot does, so `copyFile` raises the same `IOException` subclass and message (`NoSuchFileException`, `AccessDeniedException`, ...). `posix_fadvise` still raises `java.io.IOException` for a descriptor that is not open; `Files.copy` opens both descriptors first, so it is not reached from there |
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers |
@@ -150,9 +151,7 @@ a few percent of zlib's size at each level.
   program reaches them yet. `FileChannel.open` and `Files.newByteChannel` do not use
   `FileChannelImpl` at all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
-  definition and module natives, sockets, extended attributes (`UnixNativeDispatcher.fsetxattr0` and
-  the other `sun.nio.fs` xattr natives, which `Files.copy` reaches through `copyNonPosixAttributes`),
-  `MappedMemoryUtils.isLoaded0`, `load0` and
+  definition and module natives, sockets, `MappedMemoryUtils.isLoaded0`, `load0` and
   `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
 
 ## The reachability boundary
@@ -391,10 +390,6 @@ Not done:
 
 - Hand-writing the remaining natives as programs need them, keeping to the policy above (for
   example `UnixFileSystem.getSpace0`, which needs `statvfs`).
-- The extended attributes of `Files.copy` (`fsetxattr0` and its siblings), so
-  `FileChannelTransfers` does not translate yet: it stops there. Every program that calls
-  `Files.copy` stops there too, so the `NoSuchFileException` message of a copy is not checked in
-  the corpus yet.
 - The `CharSequence` enum of the object model has no variants when a program's only conversion of a
   `CharBuffer` to `CharSequence` is the translator's own call (`char_sequence_call`). The flow
   analysis (`analysis/hierarchy.rs` `flows`) records no edge for it, so the interface's methods have

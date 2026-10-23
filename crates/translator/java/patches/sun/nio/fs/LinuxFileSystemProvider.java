@@ -7,24 +7,12 @@ import java.util.Set;
 
 /**
  * The translator's patch of the JDK's {@code LinuxFileSystemProvider} (see docs/jdk-overlays.md).
- * The JDK's adds the DOS and the user-defined attribute views, which keep their attributes in
- * extended attributes, through memory of its own; patched, it has neither, as on a file system
- * without extended attributes: {@code getFileAttributeView} gives null for them, and reading them
- * throws {@code UnsupportedOperationException}. Its streams of a file read and write the
- * runtime's descriptor themselves ({@code UnixFileInputStream}, {@code UnixFileOutputStream}),
- * where the JDK's go through a channel and {@code ByteBuffer}s; they take the options as the
- * JDK's do.
+ * Its streams of a file read and write the runtime's descriptor themselves
+ * ({@code UnixFileInputStream}, {@code UnixFileOutputStream}), where the JDK's go through a
+ * channel and {@code ByteBuffer}s; they take the options as the JDK's do. The DOS and the
+ * user-defined attribute views are the JDK's, over the runtime's extended attributes.
  */
 class LinuxFileSystemProvider {
-    @Remove
-    public <V extends FileAttributeView> V getFileAttributeView(Path obj, Class<V> type, LinkOption... options);
-
-    @Remove
-    public DynamicFileAttributeView getFileAttributeView(Path obj, String name, LinkOption... options);
-
-    @Remove
-    public <A extends BasicFileAttributes> A readAttributes(Path file, Class<A> type, LinkOption... options);
-
     /** A stream that reads the file: any option is taken but {@code APPEND} and {@code WRITE}. */
     @Add
     @Override

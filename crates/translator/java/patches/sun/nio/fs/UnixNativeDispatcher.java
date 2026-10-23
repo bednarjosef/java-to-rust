@@ -13,9 +13,10 @@ package sun.nio.fs;
  * <p>Descriptors are those of the runtime's table, which {@code FileInputStream} and the others
  * use too. The calls relative to an open directory ({@code openat}, {@code fdopendir} and the
  * others), which the JDK makes only where {@link #openatSupported} says so, fail with
- * {@code ENOSYS}. The calls on memory addresses (extended attributes, the mount table) and those
- * that look users and groups up by name are natives that the translator does not implement, so
- * that a program that runs them is rejected.
+ * {@code ENOSYS}. The extended attributes are read from and written to memory outside the heap
+ * by address, which the runtime's natives copy. The mount table and the calls that look users
+ * and groups up by name are natives that the translator does not implement, so that a program
+ * that runs them is rejected.
  */
 class UnixNativeDispatcher {
     /** The number of fields {@code stat0} and {@code fstat0} fill (see {@link UnixFileAttributes}). */
@@ -115,10 +116,11 @@ class UnixNativeDispatcher {
     @Replace
     static void mknod(UnixPath path, int mode, long dev) throws UnixException {
         mknod0(path.getByteArrayForSysCalls(), mode, dev);
+        check();
     }
 
     @Add
-    private static native void mknod0(byte[] path, int mode, long dev) throws UnixException;
+    private static native void mknod0(byte[] path, int mode, long dev);
 
     @Replace
     static void rename(UnixPath from, UnixPath to) throws UnixException {
@@ -430,31 +432,44 @@ class UnixNativeDispatcher {
     static int fgetxattr(int filedes, byte[] name, long valueAddress, int valueLen)
         throws UnixException
     {
-        return fgetxattr0(filedes, name, valueAddress, valueLen);
+        int size = fgetxattr0(filedes, name, valueAddress, valueLen);
+        check();
+        return size;
     }
 
+    /** {@code fgetxattr}, into the memory at {@code valueAddress} (outside the heap). */
     @Add
-    private static native int fgetxattr0(int filedes, byte[] name, long valueAddress, int valueLen)
-        throws UnixException;
+    private static native int fgetxattr0(int filedes, byte[] name, long valueAddress, int valueLen);
 
     @Replace
     static void fsetxattr(int filedes, byte[] name, long valueAddress, int valueLen)
         throws UnixException
     {
         fsetxattr0(filedes, name, valueAddress, valueLen);
+        check();
     }
 
     @Add
-    private static native void fsetxattr0(int filedes, byte[] name, long valueAddress, int valueLen)
-        throws UnixException;
+    private static native void fsetxattr0(int filedes, byte[] name, long valueAddress, int valueLen);
 
     @Replace
     static void fremovexattr(int filedes, byte[] name) throws UnixException {
         fremovexattr0(filedes, name);
+        check();
     }
 
     @Add
-    private static native void fremovexattr0(int filedes, byte[] name) throws UnixException;
+    private static native void fremovexattr0(int filedes, byte[] name);
+
+    @Replace
+    static int flistxattr(int filedes, long listAddress, int size) throws UnixException {
+        int length = flistxattr0(filedes, listAddress, size);
+        check();
+        return length;
+    }
+
+    @Add
+    private static native int flistxattr0(int filedes, long listAddress, int size);
 
     /**
      * The natives of the translator's {@code FileChannel} ({@code UnixFileChannel}), on a
