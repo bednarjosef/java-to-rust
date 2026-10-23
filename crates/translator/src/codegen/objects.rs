@@ -734,12 +734,17 @@ impl<'a> Gen<'a> {
                 &mut |_| {},
             );
         }
-        let missed = self
+        // Each one, first to last, as the generator reports what it rejects (`generate_all`).
+        let mut missed: Vec<Pos> = self
             .facts
             .null_checked
             .iter()
-            .filter(|(id, _)| !self.dereferenced.contains(id) && !unwritten.contains(id));
-        if let Some(pos) = missed.map(|(_, &pos)| pos).min_by_key(|p| (p.line, p.column)) {
+            .filter(|(id, _)| !self.dereferenced.contains(id) && !unwritten.contains(id))
+            .map(|(_, &pos)| pos)
+            .collect();
+        missed.sort_by_key(|p| (p.line, p.column, p.unit));
+        missed.dedup();
+        for pos in missed {
             let message = "catching the `NullPointerException` of this dereference not supported yet";
             self.rejected.push(Error { pos, message: message.to_string() });
         }

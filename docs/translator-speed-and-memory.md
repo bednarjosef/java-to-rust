@@ -113,7 +113,11 @@ which it is reached. They only change how the work is ordered:
   whole program once for each class or field; they now scan it once and keep an index.
 - **Lookups that were searches.** Class hierarchy questions (the members of a class, its
   subclasses, who overrides a method) went through every class each time; they are now tables
-  built once. The generator did the same for names and enum variants.
+  built once. The generator did the same for names and enum variants, and lowering for the class
+  or method that a name or symbol names (`type_index`, `method_index`, which searched javac's
+  3,141 classes and 27,000 methods on every lookup and were most of lowering's time). The
+  implementation that a call runs on a class is kept once found (`Hierarchy::implementation`),
+  as the analyses and the generator ask for it once for every concrete class under a type.
 
 `whole_objects`, the analysis the old census never got past on javac, was slow for the first
 three of these reasons: the borrowing rounds over name sets, a scan of the program per class for
@@ -369,8 +373,11 @@ running `--census`:
 - **Getting the code**: javac attributes 1599 units in 14 to 17 s; reachability takes 14 to 19 s
   over 15 rounds and reaches 3405 classes and 21,539 methods (the quicker `--survey` counts
   26,102 pieces of code: 11,358 of javac's own and 14,744 of the libraries').
-- **Lowering**: five attempts (the Rust generics are narrowed down between them) of 16 s each, 81 s
-  in all on a quiet machine (148 s while other builds ran).
+- **Lowering** (2026-10-23, 3,141 classes reached): five attempts (the Rust generics are narrowed
+  down between them) of 8 to 31 s, 108 s in all on a quiet machine; then 22 s to find the methods
+  that can run. The whole census takes about 6 minutes: 4 rounds of the analyses of about 20 s
+  each (one more for each round in which the analyses or the generator rejected something that
+  only they find), and the generator's last, complete run of about 80 s.
 - **The census, complete** (2026-10-22, see "Scaling to javac"): of javac's own 11,358 pieces of
   code, 10,755 (94.7%) translate; of the libraries' 15,249, 14,742 (96.7%); together 25,497 of
   26,607 (95.8%). It reaches 143 native methods, 43 of them in the runtime. What holds javac's own

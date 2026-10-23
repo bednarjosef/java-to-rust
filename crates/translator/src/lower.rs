@@ -314,6 +314,8 @@ struct Lowering<'t> {
     types: Vec<TypeInfo<'t>>,
     /// Every method and constructor of every class, in the order of `Class::methods`.
     methods: Vec<MethodInfo<'t>>,
+    /// `types` and `methods` by name (`type_index`, `method_index`).
+    indices: RefCell<objects::Indices<'t>>,
     /// In a whole program, what is reachable from `main`: only that is lowered.
     reach: Option<&'t crate::program::Reach>,
     /// In a whole program, the class whose `main` is the entry point; in a file, every `main` is.
