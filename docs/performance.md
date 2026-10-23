@@ -458,6 +458,7 @@ standard error as the real javac, and the PGO build passes the whole `--corpus` 
 | the same with `lto = "thin"` | 13.8 GB | 5.3 min | 0.053 s | 0.98 s | 6.96 s |
 | `lto = "fat"`, 16 codegen units | 13.6 GB | 9.4 min | 0.050 s | 0.91 s | 6.47 s |
 | `lto = "fat"` and PGO | 16.3 GB | 25 min | 0.040 s | 0.65 s | 4.31 s |
+| the same, at 7ebdc33c (below) | about 21 GB | 30 min | 0.023 s | 0.38 s | 2.68 s |
 
 The crate is one of about 537,000 lines, built with all 16 cores; the peak is the memory of the
 whole build (cargo and rustc). Fat LTO also makes the binary 22% smaller (72 MB against 92 MB),
@@ -467,18 +468,28 @@ over inputs that are not the timed ones (`corpus/threads` and `corpus/whole-prog
 each project of `corpus/projects`, and the javac-check cases other than hello; 5 s), and a build
 with `-Cprofile-use` of the merged profile (`llvm-profdata` from rustup's `llvm-tools`). Its
 build time is the two builds together, and its peak is the instrumented build's. PGO takes a
-third off the time of fat LTO alone, and the 47 programs then compile as fast as the real javac.
-Hello is faster than the real javac, which pays the JVM's start-up. On the 540 features, the PGO
-build is still 2.3 times slower than the real javac, whose JIT has warmed up by then.
+third off the time of fat LTO alone.
 
-Most of the rest is locking. javac starts one thread, the file manager's deferred close, which a
-normal run never starts, but its reachable `Thread.start()` makes the program threaded and most of
-its classes `Arc<java::Locked<..>>` (docs/multi-threading.md, section 4). Every field access then
-takes the object's data lock. Until a second thread starts, a lock is taken and given back with
-plain stores (`locked.rs`, `THREADS`); with that, at `opt-level = 1`, the 47 programs take 25%
-less time (3.68 s to 2.75 s, measured on a loaded machine where the real javac took 1.42 s), and
-so do the first 1,259 files of the decompiled Minecraft server (191 s to 144 s, real javac about
-6 s).
+The last row is the same build of javac as translated at 7ebdc33c, after the changes below; the
+real javac took 0.19 s, 0.60 s and 1.89 s in the same rounds. Hello is 8 times faster than the
+real javac, which pays the JVM's start-up, and the 47 programs 1.6 times faster. On the 540
+features the translation is still 1.4 times slower than the real javac, whose JIT has warmed up
+by then.
+
+javac starts one thread, the file manager's deferred close, which a normal run never starts, but
+its reachable `Thread.start()` makes the program threaded and most of its classes
+`Arc<java::Locked<..>>` (docs/multi-threading.md, section 4). A build that took no locks at all
+showed that locking was about a third of the time. Until a second thread starts, the translation
+now pays for being threaded with plain loads and stores only: the reference counts of
+`java::Arc` (`shared.rs`), taking and giving back a lock, and the borrow flag, which is kept in
+the lock's own word (`locked.rs`). Measured at `opt-level = 3` with 256 codegen units (which
+ranks changes in a third of the time of a fat-LTO build but runs about half as slow again), the
+540 features went from 7.00 s with plain locks to 5.16 to 5.51 s with the borrow flag in the
+lock's word, and to 5.29 to 5.32 s once object parameters that may be null are borrowed
+(`&Option<Rc<..>>`, docs/supported-java.md) rather than copied. `charAt` and `String.hashCode`
+read a string's leading ASCII bytes as they are; decoding every character had been 3% of the
+time. The build's peak grew from 13.6 GB to about 21 GB with the plain reference counts, which
+are inlined wherever a handle is copied or dropped.
 
 ## NodeList: stack overflow when the list is freed (fixed)
 
