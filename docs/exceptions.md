@@ -447,7 +447,8 @@ how the class file names each method (`Gen.binaryQualifier` and the erased descr
 static field and each local: the slot `Gen` gives it, read after code generation, so the slots
 are javac's own rather than a copy of its rules. A program whose sources are a module that the
 JDK has too (javac's `jdk.compiler`) compiles as part of that module (`--patch-module`), as the
-unnamed module may not hold its packages. A lambda's body is a method whose first
+unnamed module may not hold its packages, and its locals are named by their names, as the JDK
+compiles its modules with `-g`. A lambda's body is a method whose first
 parameters are its captures, of the class around it, also for a lambda in a lambda, which so
 reads the enclosing instance as `this` too; a local or anonymous class reads a captured local as
 `this.val$x`; an inner class's constructor reads its enclosing instance from its first
@@ -455,7 +456,15 @@ parameter (`<parameter1>.chk`), as does a lambda in it, which takes that as a pa
 the initializers the constructor runs read the field (`this.this$0.chk`), also where the
 constructor is a method of a class that builds whole objects (`analysis/whole_objects.rs`);
 javac's own locals are named too (the `s$` of a string `switch`, the iterator
-`i$` of a for-each loop, whose calls start at the collection as javac's do). A parameter that
+`i$` of a for-each loop, whose calls start at the collection as javac's do). A variable of a
+`finally` block has a slot in each copy of the block that javac writes for a way out of the
+`try`: the copy for an exception keeps the exception in a slot first, so its variables are
+further along, by as much as the local variable table of the class file (compiled with `-g`,
+which does not change the slots) shows for a named variable of the block. Such a message has
+both texts, and the `finally` that the translation writes once picks the one of the copy that
+runs, by whether an exception ended the `try` (`Gen::npe_message`). Where the copies for a
+completed `try` differ (a `return` or a jump out of a block with locals of its own), and in a
+`finally` inside another, the message is not known. A parameter that
 its method assigns is `<parameterN>` until the JVM sees it written: HotSpot walks the bytecode
 once, in order, carrying what it has seen forward along each jump, and stops at the failing
 instruction. So a write counts only where a forward path from the method's start reaches the
@@ -470,7 +479,13 @@ no `because` for the value of `c ? a : b`, no message for a pattern switch's
 `Objects.requireNonNull`, and an assigned value followed back to its source
 (`(s = a).next` fails `because "a" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
-(`program::MODULE_CALLS`), and an enum's `toString()` as the enum's.
+(`program::MODULE_CALLS`), an enum's `toString()` as the enum's, `c.cast(x)` (a block that
+checks `x`) as `java.lang.Class.cast(Object)`, and `subSequence` (lowered as `substring`) as
+itself; the elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no
+message, as `Objects.requireNonNull` gives none. Calls of one name that start at the same place,
+as calls of a chain do (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told
+apart by where their first argument starts, which `BytecodeNames` adds to the name
+(`stream@3:30`, `stream@`).
 
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
 its locals (`because "original" is null`), by their Java names where lowering renamed them
@@ -482,7 +497,9 @@ binary name the tree gives. Calls of one method that start at the same place, as
 chain do (`b.append('0').append(1)`), are told apart by their first argument
 (`ClassFileNames::chained_calls`). Also covered: `String` methods by the overload javac chose,
 unboxing as the call it is (`java.lang.Integer.intValue()`), the JDK's constructors that fail
-inside (`new String(s)`, `new StringBuilder(s)`), a static by the class that declares it, an
+inside (`new String(s)`, `new StringBuilder(s)`) and its methods that do (a null format of
+`String.format`, which `Formatter.parse` asks for its length, a null `CharSequence` of
+`contentEquals`), a static by the class that declares it, an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
 the field it is, a string `switch`'s temporary and a for-each loop's iterator as `<localN>` from
 the slots javac would give (`javac::jdk_temps`), in an argument too, and a null locale of

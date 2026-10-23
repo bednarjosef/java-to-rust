@@ -6,7 +6,9 @@ import java.util.List;
 // builds whole objects) reading its enclosing instance's field, a class whose superclass has an
 // enclosing instance of another class, an element at a constant index, a static of the
 // enclosing class, an element at an enum's ordinal, an enum's `toString()`, a for-each variable
-// in a lambda, and code under a constant `false`, which javac writes no code for.
+// in a lambda, code under a constant `false`, which javac writes no code for, and the
+// `subSequence` of a `CharSequence`'s text, which is lowered as a `substring`, and a null
+// `CharSequence` that `contentEquals` compares.
 public class NullMessagesOfNestedCode {
     Object types = null;
     Handler handler;
@@ -93,6 +95,29 @@ public class NullMessagesOfNestedCode {
         return phase.toString() + phase.name();
     }
 
+    static class Name implements CharSequence {
+        public int length() {
+            return 0;
+        }
+
+        public char charAt(int index) {
+            return 'n';
+        }
+
+        public CharSequence subSequence(int start, int end) {
+            return toString().subSequence(start, end);
+        }
+
+        @Override
+        public String toString() {
+            return null;
+        }
+    }
+
+    static Name flatName() {
+        return null;
+    }
+
     static void run(Runnable r) {
         try {
             r.run();
@@ -114,5 +139,7 @@ public class NullMessagesOfNestedCode {
         run(() -> owners(List.of(list), "s"));
         run(() -> o.traced(new Sym()));
         run(() -> System.out.println(o.phaseName()));
+        run(() -> System.out.println(new Name().subSequence(0, 1)));
+        run(() -> System.out.println("n".contentEquals(flatName())));
     }
 }

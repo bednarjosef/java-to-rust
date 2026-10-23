@@ -212,10 +212,16 @@ impl Messages<'_> {
             }
         };
         match &x.kind {
+            // `String.join(delimiter, elements)`, which lowering writes as a loop over
+            // `elements.iterator()` (`lower::foreach`): `String.join` checks the elements with
+            // `Objects.requireNonNull`, whose exception has no message.
+            ExprKind::MethodCall { receiver, name, .. } if name == "iterator" && self.joins(x) => {
+                out.insert(receiver.id, None);
+            }
             ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. }
                 if !self.class.methods[*r].is_static =>
             {
-                let call = self.call(x.pos, name).or_else(|| self.jdk_call(x));
+                let call = self.call_of(x, name).or_else(|| self.jdk_call(x));
                 add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
             }
             // Unboxing in the JDK's code, which javac writes as a call of the boxed class's
@@ -296,9 +302,18 @@ impl Messages<'_> {
                 // A method of `String`, which javac names by `String` with the parameters of the
                 // overload it chose.
                 if let Some((method, params)) = string_method(builtin, args) {
+                    // `subSequence(int, int)` is lowered as the `substring` that it returns.
                     let call = match self.jdk {
+                        true if method == "substring" && params == "int, int" => {
+                            self.named_call(x, "subSequence").flatten().or_else(|| {
+                                (args[0].ty == Type::String).then(|| format!("String.{method}({params})"))
+                            })
+                        }
                         true => (args[0].ty == Type::String).then(|| format!("String.{method}({params})")),
-                        false => self.call(x.pos, method),
+                        false => self.call(x.pos, method).or_else(|| match method {
+                            "substring" => self.call(x.pos, "subSequence"),
+                            _ => None,
+                        }),
                     };
                     add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                     // A null locale of `toLowerCase(Locale)` or `toUpperCase(Locale)`, whose
@@ -311,6 +326,16 @@ impl Messages<'_> {
                         && name == crate::program::LOCALE_LANGUAGE.1
                     {
                         out.insert(locale.id, None);
+                    }
+                    // A null `CharSequence` of `contentEquals`, whose text lowering asks for
+                    // (`ObjectText`): `String`'s code asks for its length (`-g`, so the parameter
+                    // has its name).
+                    if let (Builtin::String(StringOp::ContentEquals), [_, other]) = (builtin, &args[..])
+                        && let ExprKind::Builtin(Builtin::ObjectText, text) = &self.argument(other).kind
+                    {
+                        let message =
+                            "Cannot invoke \"java.lang.CharSequence.length()\" because \"cs\" is null";
+                        out.entry(text[0].id).or_insert(Some(message.to_string()));
                     }
                     return;
                 }
@@ -336,7 +361,29 @@ impl Messages<'_> {
                     _ => None,
                 };
                 if let Some(method) = charset {
-                    return add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")));
+                    let call = match self.jdk {
+                        true => self.named_call(x, method).flatten(),
+                        false => self.call(x.pos, method),
+                    };
+                    return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                }
+                // The null format of `String.format`, whose length the JDK's `Formatter.parse`
+                // asks for (`-g`, so its parameter has its name), or the null receiver of
+                // `formatted`, which lowering passes as the format.
+                if let Builtin::Format = builtin
+                    && args[0].ty == Type::String
+                {
+                    let formatted = match self.jdk {
+                        true => self.named_call(x, "formatted").flatten(),
+                        false => self.call(x.pos, "formatted"),
+                    };
+                    return match formatted {
+                        Some(m) => add(&args[0], Some(format!("Cannot invoke \"{m}\""))),
+                        None => {
+                            let message = "Cannot invoke \"String.length()\" because \"s\" is null";
+                            out.entry(args[0].id).or_insert(Some(message.to_string()));
+                        }
+                    };
                 }
                 // `o.getClass()` of a null, alone or compared or named, which javac calls as
                 // `Object`'s whatever the object's type, in the JDK's code too.
@@ -799,8 +846,8 @@ impl Messages<'_> {
     /// The method that `e` calls, as the class file names it, if it is a call.
     fn called(&self, e: &Expr) -> Option<String> {
         match &e.kind {
-            ExprKind::MethodCall { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_call(e)),
-            ExprKind::Call { name, resolved, .. } => self.call(e.pos, name).or_else(|| {
+            ExprKind::MethodCall { name, .. } => self.call_of(e, name).or_else(|| self.jdk_call(e)),
+            ExprKind::Call { name, resolved, .. } => self.call_of(e, name).or_else(|| {
                 // A call of `Class` or `ClassLoader` that the translator's module code answers
                 // (`program::MODULE_CALLS`), named as the JDK's method it stands for.
                 let modules = resolved.is_some_and(|r| {
@@ -819,6 +866,11 @@ impl Messages<'_> {
                 let named = self.jdk.then(|| self.named_call(e, name).flatten()).flatten();
                 named.or_else(|| self.jdk_static_call(e))
             }),
+            // `c.cast(x)`, which lowering writes as a block that checks `x` (`lower::classes`).
+            ExprKind::Switch { .. } if class_cast(e) => match self.jdk {
+                false => self.call(e.pos, "cast"),
+                true => self.named_call(e, "cast").flatten(),
+            },
             // `e.ordinal()`, which javac calls on the enum's class.
             ExprKind::Builtin(Builtin::EnumOrdinal, args) => match self.jdk {
                 false => self.call(e.pos, "ordinal"),
@@ -1111,6 +1163,29 @@ impl Messages<'_> {
             }
             Type::Class(..) => self.java_class(ty)?,
             _ => return None,
+        })
+    }
+
+    /// Whether the call `x` is where the source calls `String.join`.
+    fn joins(&self, x: &Expr) -> bool {
+        let call = match self.jdk {
+            true => self.named_call(x, "join").flatten(),
+            false => self.call(x.pos, "join"),
+        };
+        call.is_some_and(|c| c.starts_with("String.join(") || c.starts_with("java.lang.String.join("))
+    }
+
+    /// The method `name` of the call `x`, as the class file names it. Of calls of one name that
+    /// start alike, as in a chain, it is the one whose first argument starts where `x`'s does
+    /// (`java/BytecodeNames.java`).
+    fn call_of(&self, x: &Expr, name: &str) -> Option<String> {
+        self.call(x.pos, name).or_else(|| {
+            let (ExprKind::MethodCall { args, .. } | ExprKind::Call { args, .. }) = &x.kind else {
+                return None;
+            };
+            let first = args.first().map(|a| self.argument(a).pos);
+            let at = first.map_or(String::new(), |p| format!("{}:{}", p.line, p.column));
+            self.call(x.pos, &format!("{name}@{at}"))
         })
     }
 
@@ -1520,6 +1595,22 @@ fn builder_method(op: BuilderOp) -> Option<&'static str> {
 
 /// `e` without the casts that the class file has no instruction for, or that pass the value
 /// on as it is (`checkcast`); `None` for a conversion that is an instruction of its own.
+/// Whether `e` is the block of `c.cast(x)` (`lower::classes`): `switch (0) { default -> { ..;
+/// check(c, x); yield (T) x; } }`, the check alone or under an `if`.
+fn class_cast(e: &Expr) -> bool {
+    let ExprKind::Switch { selector, cases } = &e.kind else { return false };
+    let ([case], ExprKind::Int(0)) = (&cases[..], &selector.kind) else { return false };
+    let check =
+        |s: &Stmt| matches!(s, Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::ClassCheck, _), .. }));
+    match case.body.split_last() {
+        Some((Stmt::Yield(_), rest)) => rest.last().is_some_and(|s| match s {
+            Stmt::If { then, otherwise: None, .. } => check(then),
+            s => check(s),
+        }),
+        _ => false,
+    }
+}
+
 fn transparent(e: &Expr) -> Option<&Expr> {
     let object = |t: Type| t.is_reference() || matches!(t, Type::Enum(_));
     match &e.kind {

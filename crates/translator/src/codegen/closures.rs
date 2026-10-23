@@ -39,6 +39,7 @@ struct Saved {
     ctor_result: Option<&'static str>,
     attempts: Vec<exceptions::Attempt>,
     finallies: Vec<exceptions::Finally>,
+    finally_ends: Vec<Option<String>>,
     attempt_count: usize,
     try_assigned: HashSet<String>,
     annotations: Vec<(String, Type, String)>,
@@ -467,6 +468,7 @@ impl<'a> Gen<'a> {
             ctor_result: self.ctor_result.take(),
             attempts: std::mem::take(&mut self.attempts),
             finallies: std::mem::take(&mut self.finallies),
+            finally_ends: std::mem::take(&mut self.finally_ends),
             attempt_count: self.attempt_count,
             try_assigned: std::mem::take(&mut self.try_assigned),
             annotations: std::mem::take(&mut self.annotations),
@@ -504,6 +506,7 @@ impl<'a> Gen<'a> {
         self.ctor_result = s.ctor_result;
         self.attempts = s.attempts;
         self.finallies = s.finallies;
+        self.finally_ends = s.finally_ends;
         self.attempt_count = s.attempt_count;
         self.try_assigned = s.try_assigned;
         self.annotations = s.annotations;

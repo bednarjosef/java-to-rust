@@ -204,6 +204,7 @@ fn generate_with(
         throwing: false,
         attempts: Vec::new(),
         finallies: Vec::new(),
+        finally_ends: Vec::new(),
         yield_slots: Vec::new(),
         optional_yield: false,
         attempt_count: 0,
@@ -391,6 +392,9 @@ struct Gen<'a> {
     /// The `try` statements with a `finally` whose body or `catch` clauses are being written,
     /// innermost last.
     finallies: Vec<exceptions::Finally>,
+    /// The `finally` blocks being written, innermost last: the condition, on what ended their
+    /// `try`, that holds when an exception did; `None` where only a completed `try` gets there.
+    finally_ends: Vec<Option<String>>,
     /// The switch expressions (by frame index) that a `yield` leaves through a `finally`: their
     /// value waits in a `yielded{index}` local (see `switch.rs`).
     yield_slots: Vec<usize>,
@@ -495,6 +499,7 @@ impl<'a> Gen<'a> {
         self.throwing = self.facts.throwing.contains(&index);
         self.attempts.clear();
         self.finallies.clear();
+        self.finally_ends.clear();
         self.attempt_count = 0;
         self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
         self.unset_locals.clear();

@@ -24,8 +24,10 @@ impl<'a> Gen<'a> {
                 _ => "None".to_string(),
             };
             let key = self.element_value(&args[args.len() - 1], elem);
-            let message = |g: &Self, id: ExprId, default: &str| match g.facts.npe_messages.get(&id) {
-                Some(Some(message)) => format!("{message:?}"),
+            let message = |g: &mut Self, id: ExprId, default: &str| match g.facts.npe_messages.get(&id) {
+                Some(Some(message)) => {
+                    g.npe_message(message, g.facts.null_checked.get(&id).copied().unwrap_or_default())
+                }
                 _ => format!("{default:?}"),
             };
             let null_element = message(self, id, crate::analysis::SEARCH_NULL_ELEMENT);
@@ -69,7 +71,10 @@ impl<'a> Gen<'a> {
                 let (from, to) = (self.value(&args[1], Type::Int).text, self.value(&args[2], Type::Int).text);
                 let zero = self.element_zero(elem);
                 let message = match self.facts.npe_messages.get(&args[0].id) {
-                    Some(Some(message)) => format!("Some({message:?})"),
+                    Some(Some(message)) => {
+                        let pos = self.facts.null_checked.get(&args[0].id).copied().unwrap_or_default();
+                        format!("Some({})", self.npe_message(message, pos))
+                    }
                     _ => "None".to_string(),
                 };
                 let objects = elem.is_reference();
