@@ -327,8 +327,8 @@ Design: [natives-and-input.md](natives-and-input.md).
   asks for one of its classes.
 - Reachability stops at the classes the runtime provides (`RUNTIME_CLASSES`: `String`,
   `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`) and at what is not
-  translated (`UNTRANSLATED`: most reflection, method handles, serialization, security, class
-  loading). An untranslated class used as a type has no objects, so its variables are only ever
+  translated (`UNTRANSLATED`: most reflection, method handles, serialization, security but
+  message digests, class loading). An untranslated class used as a type has no objects, so its variables are only ever
   null (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
   `Tripwire.ENABLED`, virtual threads) is not reached, and neither are parallel streams when no
   stream can become parallel (`program/reach/sequential.rs`).

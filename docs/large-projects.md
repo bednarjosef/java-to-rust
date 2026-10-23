@@ -151,10 +151,8 @@ then a one-line reason. They are reported as `KNOWN` and do not fail the run; a 
 identical is reported as `NOTE`, to be removed from the list. The list is empty: every case
 matches.
 
-javac itself is never patched, as it is the program under test. Its census keeps the rejection
-of `new DigestInputStream` in `Main.showClass` (Main.java:485), which is only reached with the
-hidden `-XDshowClass` option and ends the program loudly there; translating `MessageDigest`
-through the JDK's own SHA code would lift it.
+javac itself is never patched, as it is the program under test. All of its own code translates:
+its census reports rejections only in the JDK's code it reaches, none in javac's.
 
 ## Limits
 
