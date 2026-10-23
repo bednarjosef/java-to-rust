@@ -37,6 +37,15 @@ pub fn ascii_char_at(s: &Wtf8, index: i32) -> u16 {
 
 /// `char_at` where the program observes the `StringIndexOutOfBoundsException`.
 pub fn try_char_at(s: &Wtf8, index: i32) -> Result<u16, Exception> {
+    let bytes = s.as_bytes();
+    // Up to an ASCII unit, units are bytes: a word-at-a-time check of the bytes before it, rather
+    // than decoding every unit from the start.
+    if let Ok(i) = usize::try_from(index)
+        && i < bytes.len()
+        && bytes[..=i].is_ascii()
+    {
+        return Ok(bytes[i] as u16);
+    }
     let unit = usize::try_from(index).ok().and_then(|i| s.units().nth(i));
     unit.ok_or_else(|| out_of_bounds(index, string_length(s)))
 }
@@ -156,6 +165,9 @@ mod tests {
         assert_eq!(char_at(crate::Wtf8::new("a😀b"), 1), 0xD83D);
         assert_eq!(char_at(crate::Wtf8::new("a😀b"), 3), unit('b'));
         assert_eq!(ascii_char_at(crate::Wtf8::new("abc"), 2), unit('c'));
+        assert_eq!(char_at(crate::Wtf8::new("héllo"), 0), unit('h'));
+        assert!(try_char_at(crate::Wtf8::new("ab"), 2).is_err());
+        assert!(try_char_at(crate::Wtf8::new("ab"), -1).is_err());
     }
 
     #[test]
