@@ -182,7 +182,8 @@ fn write_dependencies(path: &str, tree: &java_to_rust::output::ModuleTree) -> Re
 /// A Cargo project around the translation's files, depending on the runtime crate of this
 /// checkout. Its debug builds keep line tables only, which backtraces need: full debug
 /// information makes a large program's binary several times larger and adds to its build's
-/// memory.
+/// memory. Its release builds use fat LTO, which makes the translated javac about 10% faster
+/// (docs/performance.md, "The translated javac").
 fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result<()> {
     let name = Path::new(input)
         .file_stem()
@@ -197,7 +198,8 @@ fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result
         format!(
             "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
              [dependencies]\njava-runtime = {{ path = {:?} }}\n\n\
-             [profile.dev]\ndebug = \"line-tables-only\"\n\n[workspace]\n",
+             [profile.dev]\ndebug = \"line-tables-only\"\n\n\
+             [profile.release]\nlto = \"fat\"\n\n[workspace]\n",
             runtime.display().to_string()
         ),
     )?;
