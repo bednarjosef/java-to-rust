@@ -36,9 +36,8 @@ public class ExtendedAttributes {
     }
 
     public static void main(String[] args) throws IOException {
-        Path dir = Path.of(System.getProperty("java.io.tmpdir"), "java-to-rust-xattr-" + System.nanoTime());
+        Path dir = Files.createTempDirectory("java-to-rust-xattr-");
         dirPath = dir.toString();
-        Files.createDirectory(dir);
         Path file = Files.writeString(dir.resolve("notes.txt"), "some text\n");
         UserDefinedFileAttributeView view = Files.getFileAttributeView(file, UserDefinedFileAttributeView.class);
         System.out.println("view " + view.name());
