@@ -214,7 +214,10 @@ A translated program is closed: it knows all its classes. So:
 
 - `jdk.internal.loader.` is untranslated ("class loading"), as are reflection
   (`java.lang.reflect.`, `java.lang.invoke.`, with the exceptions in `TRANSLATED_ANYWAY`),
-  serialization streams and security (`UNTRANSLATED`). `ResourceBundle`, `ServiceLoader` and
+  serialization streams and security (`UNTRANSLATED`). Of security, message digests are
+  translated: `MessageDigest`, `DigestInputStream` and the `SUN` provider's digests, which
+  `MessageDigest.getInstance(String)` makes by name (`java/patches/java/security/MessageDigest.java`,
+  `TranslatedDigests`); a `Provider` and the methods that name one are not. `ResourceBundle`, `ServiceLoader` and
   `Module` are translated, the last two (and `ModuleLayer`) patched (see [reflection-and-plugins.md](reflection-and-plugins.md)).
 - `Class.forName` of a name spelled out as a literal is that class's literal, after its static
   initialization when the call initializes (`program::class_for_name`, `Builtin::InitializeClass`).
@@ -231,7 +234,9 @@ A translated program is closed: it knows all its classes. So:
 - `Class.getResourceAsStream` and `getResource` end the program with an `InternalError` naming
   the resource (`Builtin::MissingResource`): data files such as `uniName.dat` (`Character.getName`),
   `currency.data` and the ICU normalizer data are generated when the JDK is built and are not in
-  its sources.
+  its sources. A class file, a name that certainly ends in `.class` (a literal, or a
+  concatenation whose last operand is one), is `null` instead, a resource that is not there: the
+  translation has no class files, since its classes were translated from their source.
 
 ### Strings and characters in the JDK's code
 

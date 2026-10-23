@@ -73,7 +73,8 @@
 //! operand is the access of the first byte (`a[i]`, or `a[i] = (byte) v`), so the analyses see
 //! it, and which throws Java's `ArrayIndexOutOfBoundsException` when the value's bytes do not fit.
 //! A static method that returns such a handle of its parameters (`ByteArray.create`) makes one
-//! too. Any other use of a `VarHandle` is rejected.
+//! too, and so does `withInvokeExactBehavior()` of one (`SHA3.asLittleEndian`). Any other use of
+//! a `VarHandle` is rejected.
 //!
 //! A `MethodHandle` constant of a constructor is a handle too, resolved when translating:
 //! `lookup.findConstructor(C.class, MethodType.methodType(void.class, P.class, ..))`, where the
@@ -852,8 +853,8 @@ impl<'t> Lowering<'t> {
     /// `byteArrayViewVarHandle` of an array class literal, of `findVarHandle` of a class literal
     /// and a field's name, or of `MhUtil.findVarHandle` of a field of `owner` (the class of the
     /// lookup); a call of a static method that returns one of those of its parameters (`bound`
-    /// gives their arguments), as `ByteArray.create(int[].class)` does; or a constant whose value
-    /// is one. `block` is the static block `value` is in, if any.
+    /// gives their arguments), as `ByteArray.create(int[].class)` does; `withInvokeExactBehavior()`
+    /// of one; or a constant whose value is one. `block` is the static block `value` is in, if any.
     fn var_handle_value(
         &self,
         value: Node<'t>,
@@ -862,6 +863,15 @@ impl<'t> Lowering<'t> {
         owner: usize,
     ) -> Option<VarHandleOf<'t>> {
         let value = plain(value);
+        // `withInvokeExactBehavior()` and `withInvokeBehavior()` make the same handle with
+        // another check of the types of its accesses, which javac has made.
+        if let Some(symbol) =
+            value.symbol().filter(|s| s.owner == VAR_HANDLE && value.kind() == "METHOD_INVOCATION")
+            && matches!(symbol.name, "withInvokeExactBehavior" | "withInvokeBehavior")
+        {
+            let receiver = value.get("methodSelect")?.get("expression")?;
+            return self.var_handle_value(receiver, block, bound, owner);
+        }
         // A parameter of the method whose body this is, or the node itself.
         let arg = |n: Node<'t>| {
             let n = plain(n);

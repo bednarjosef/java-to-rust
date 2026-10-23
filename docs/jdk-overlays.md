@@ -150,6 +150,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/io/InputStreamReader.java`, `OutputStreamWriter.java` | decode and encode the common charsets themselves instead of through `StreamDecoder` and `StreamEncoder` |
 | `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; no layers but the boot layer |
 | `java/net/InetAddress.java`, `Inet4AddressImpl.java`, `Inet6AddressImpl.java` | names looked up by the system through `TranslatedNet`; no hosts file and no resolver of the program's own |
+| `java/security/MessageDigest.java` | `getInstance(String)` makes the `SUN` provider's digests (MD2, MD5, SHA-1, SHA-2, SHA-3) by name through `TranslatedDigests`, without `Provider`, `Security` or `GetInstance`; `toString` names `SUN`, `getProvider()` is null |
 | `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |
 | `java/net/URLClassLoader.java` | finds only what its parent finds; code from its URLs fails loudly |
 | `java/nio/file/DirectoryIteratorException.java`, `InvalidPathException.java` | constructors that do not throw |

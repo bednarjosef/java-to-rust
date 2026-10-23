@@ -73,7 +73,7 @@ None of this exists yet.
   and translating what it produces covers them, because the translator reads javac's own
   attributed trees. Processors that are loaded at run time are a different matter (see limits).
 - **Resources.** Files on the class path (configuration, templates, data, images) read with
-  `getResourceAsStream` end the program today. A project needs them embedded into the binary
+  `getResourceAsStream` end the program today (a class file is `null`: the translation has none). A project needs them embedded into the binary
   (`include_bytes!`) or installed next to it, chosen per project.
 - **Several entry points.** A project with several `main` classes becomes one binary each,
   sharing the crates. A library without a `main` needs its public API as the starting points
@@ -151,10 +151,15 @@ then a one-line reason. They are reported as `KNOWN` and do not fail the run; a 
 identical is reported as `NOTE`, to be removed from the list. The list is empty: every case
 matches.
 
-javac itself is never patched, as it is the program under test. Its census keeps the rejection
-of `new DigestInputStream` in `Main.showClass` (Main.java:485), which is only reached with the
-hidden `-XDshowClass` option and ends the program loudly there; translating `MessageDigest`
-through the JDK's own SHA code would lift it.
+javac itself is never patched, as it is the program under test. All of its own code translates:
+its census reports rejections only in the JDK's code it reaches, none in javac's. One behaviour
+differs by design: the hidden option `-XDshowClass=NAME` prints the URL and SHA-256 checksum of
+the class file of `NAME` that javac runs from, which a translation does not have. Its
+`getResource` and `getResourceAsStream` of the class file are `null`, so the translated javac
+does for every class what the real one does for a class outside `jdk.compiler`, such as
+`java.lang.Object`: it prints `javac: show class: NAME` and ends with the
+`NullPointerException` of javac's `DigestInputStream` over a null stream (exit code 1), without
+the stack trace's frames.
 
 ## Limits
 
