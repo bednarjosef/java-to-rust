@@ -4,7 +4,32 @@
 //! here, from the declarations alone.
 
 use super::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A hash of type and method indices, which need no protection from chosen keys: the default
+/// hash took a tenth of a translation of javac, in `declared` and `implementations`.
+#[derive(Default)]
+struct IndexHasher(u64);
+
+impl Hasher for IndexHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_usize(b as usize);
+        }
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (self.0.rotate_left(5) ^ n as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type IndexMap<K, V> = HashMap<K, V, BuildHasherDefault<IndexHasher>>;
 
 /// The supertypes, subtypes and overrides of the program's types and methods.
 #[derive(Default)]
@@ -34,7 +59,10 @@ pub struct Hierarchy {
     /// The methods each type declares, in index order.
     by_class: Vec<Vec<usize>>,
     /// The methods of each group that each type declares, in index order, by group id and type.
-    declared: HashMap<(usize, usize), Vec<usize>>,
+    declared: IndexMap<(usize, usize), Vec<usize>>,
+    /// The answers of `implementation` so far, by group id and class: the analyses and the
+    /// generator ask the same ones many times, once for every concrete class under a type.
+    implementations: RefCell<IndexMap<(usize, usize), Option<usize>>>,
     /// For each type, one bit per type that it is a subtype of (itself included), `words` words
     /// a type.
     supertype_bits: Vec<u64>,
@@ -79,7 +107,7 @@ impl Hierarchy {
             group_ids[m] = root;
         }
         let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut declared: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        let mut declared: IndexMap<(usize, usize), Vec<usize>> = IndexMap::default();
         let mut by_class = vec![Vec::new(); types.len()];
         for (m, method) in methods.iter().enumerate() {
             by_class[method.class].push(m);
@@ -124,6 +152,7 @@ impl Hierarchy {
             groups,
             by_class,
             declared,
+            implementations: RefCell::default(),
             supertype_bits,
             words,
             names,
@@ -237,6 +266,7 @@ impl Hierarchy {
     /// (`program/census.rs`).
     pub fn make_concrete(&mut self, m: usize) {
         self.method_abstract[m] = false;
+        self.implementations.get_mut().clear();
     }
 
     /// The implementation an object of concrete class `c` runs for a call resolved to `m`: the
@@ -244,6 +274,16 @@ impl Hierarchy {
     /// method of one of its interfaces. `None` when there is none in the program.
     pub fn implementation(&self, m: usize, c: usize) -> Option<usize> {
         let id = self.group_ids[m];
+        if let Some(&found) = self.implementations.borrow().get(&(id, c)) {
+            return found;
+        }
+        let found = self.find_implementation(id, c);
+        self.implementations.borrow_mut().insert((id, c), found);
+        found
+    }
+
+    /// `implementation`, for the group with id `id`, found again.
+    fn find_implementation(&self, id: usize, c: usize) -> Option<usize> {
         let declared_in = |t: usize| {
             let declared = self.declared.get(&(id, t))?;
             declared.iter().copied().find(|&g| !self.method_abstract[g])
