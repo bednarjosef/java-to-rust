@@ -442,23 +442,33 @@ Further speed-ups, not done:
 
 ## The translated javac
 
-javac translated as a whole program (`scripts/javac-check.sh` checks its output against the real
-javac's), timed against the real javac on two inputs: `scripts/javac-check/hello` (one class) and
-`corpus/programs` compiled together (47 files, 121 class files, `-d classes *.java`). Wall clock,
-the best of three runs on an otherwise quiet machine. Every run gives the same class files and
-the same standard error as the real javac.
+javac translated as a whole program with `--census` (`scripts/javac-check.sh` checks its output
+against the real javac's), timed against the real javac on three inputs:
+`scripts/javac-check/hello` (one class), `corpus/programs` compiled together (47 files, 121 class
+files) and the files of `corpus/features` at 21d7678e that javac compiles together (540 files,
+1,509 class files; the 13 left out declare a public class under another file's name or one that another file
+declares too). Wall clock, the best of three rounds, each round running every build once on each
+input, so that a passing load hits them alike. Every run gives the same class files and the same
+standard error as the real javac, and the PGO build passes the whole `--corpus` check.
 
-| build | rustc peak | build time | hello | 47 programs |
-|---|---:|---:|---:|---:|
-| real javac (JDK 25) | | | 0.20 s | 0.61 s |
-| debug (`debug = "line-tables-only"`) | 7.3 GB | 3.5 min | 0.35 s | 8.2 s |
-| `opt-level = 1`, 256 codegen units | 8.5 GB | 15 min | 0.077 s | 1.46 s |
-| `opt-level = 3`, 256 codegen units | 9.6 GB | 19 min | 0.073 s | 1.36 s |
+| build | build peak | build time | hello | 47 programs | 540 features |
+|---|---:|---:|---:|---:|---:|
+| real javac (JDK 26) | | | 0.19 s | 0.61 s | 1.90 s |
+| `opt-level = 3`, 256 codegen units | 13.9 GB | 5.4 min | 0.056 s | 1.02 s | 7.24 s |
+| the same with `lto = "thin"` | 13.8 GB | 5.3 min | 0.053 s | 0.98 s | 6.96 s |
+| `lto = "fat"`, 16 codegen units | 13.6 GB | 9.4 min | 0.050 s | 0.91 s | 6.47 s |
+| `lto = "fat"` and PGO | 16.3 GB | 25 min | 0.040 s | 0.65 s | 4.31 s |
 
-The builds are of one crate of about 516,000 lines, with one job (`CARGO_BUILD_JOBS=1`) in a
-12 GB memory scope. These times are from before the single-thread fast path below. Hello is
-faster than the real javac, which pays the JVM's start-up; on the 47 programs the optimized
-builds are about 2.3 times slower than the real javac, whose JIT has warmed up by then.
+The crate is one of about 537,000 lines, built with all 16 cores; the peak is the memory of the
+whole build (cargo and rustc). Fat LTO also makes the binary 22% smaller (72 MB against 92 MB).
+PGO (profile-guided optimization) is three steps: a build with `-Cprofile-generate`, a run of it
+over inputs that are not the timed ones (`corpus/threads` and `corpus/whole-program` together,
+each project of `corpus/projects`, and the javac-check cases other than hello; 5 s), and a build
+with `-Cprofile-use` of the merged profile (`llvm-profdata` from rustup's `llvm-tools`). Its
+build time is the two builds together, and its peak is the instrumented build's. PGO takes a
+third off the time of fat LTO alone, and the 47 programs then compile as fast as the real javac.
+Hello is faster than the real javac, which pays the JVM's start-up. On the 540 features, the PGO
+build is still 2.3 times slower than the real javac, whose JIT has warmed up by then.
 
 Most of the rest is locking. javac starts one thread, the file manager's deferred close, which a
 normal run never starts, but its reachable `Thread.start()` makes the program threaded and most of
