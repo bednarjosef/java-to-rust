@@ -738,6 +738,8 @@ normal text stays plain UTF-8 at no cost:
 What does not hold a lone surrogate exactly: the message of an exception the runtime raises
 (a Rust `String`), a thread's name (Rust's), and the text of a charset or a `Class`.
 
-Plan, not built yet: the four javac cases of `scripts/javac-check/known-differences` (char
-literals with a lone surrogate) are checked with a javac translated from these strings and leave
-the list, and javac is timed before and after.
+The translated javac keeps a lone surrogate exactly too: a `char` literal such as `'\uD800'` is
+compiled into the same class file as the real javac compiles it (`features-CodePoints` and the
+other corpus cases of `scripts/javac-check.sh --corpus`). WTF-8 costs javac no measurable time:
+a debug build of it compiles `corpus/programs` in the same time as with Rust strings, within the
+noise of a loaded machine, and builds with a rustc peak of 8.0 GB against 7.9 GB.
