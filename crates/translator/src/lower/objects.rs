@@ -4,6 +4,7 @@
 
 use super::inner::NestKind;
 use super::*;
+use std::collections::HashMap;
 
 /// A class declared in the file, in `Class::types` order.
 pub(super) struct TypeInfo<'t> {
@@ -19,6 +20,44 @@ pub(super) struct TypeInfo<'t> {
 }
 
 /// A method or constructor of a class, in `Class::methods` order.
+/// The classes and methods by the names that `type_index` and `method_index` find them by, as far
+/// as `Lowering::types` and `Lowering::methods` are indexed. Both lists only grow, so each lookup
+/// first indexes what was added; renaming a class forgets the classes (`forget_types`). Searching
+/// the lists instead took most of the time of lowering javac.
+#[derive(Default)]
+pub(super) struct Indices<'t> {
+    types: usize,
+    /// The first class with each name, as its declaration's or as javac's.
+    types_by_name: HashMap<String, usize>,
+    methods: usize,
+    /// The first method with each name and signature, by javac's name of its class.
+    methods_by_owner: HashMap<String, HashMap<(&'t str, &'t str), usize>>,
+}
+
+impl<'t> Indices<'t> {
+    fn add_types(&mut self, types: &[TypeInfo<'t>]) {
+        for (t, info) in types.iter().enumerate().skip(self.types) {
+            self.types_by_name.entry(info.name.clone()).or_insert(t);
+            self.types_by_name.entry(info.javac.clone()).or_insert(t);
+        }
+        self.types = types.len();
+    }
+
+    fn add_methods(&mut self, types: &[TypeInfo<'t>], methods: &[MethodInfo<'t>]) {
+        for (m, info) in methods.iter().enumerate().skip(self.methods) {
+            let owner = self.methods_by_owner.entry(types[info.owner].javac.clone()).or_default();
+            owner.entry((info.name, info.sig)).or_insert(m);
+        }
+        self.methods = methods.len();
+    }
+
+    /// Forgets the classes' names, after one changed.
+    pub(super) fn forget_types(&mut self) {
+        self.types = 0;
+        self.types_by_name.clear();
+    }
+}
+
 pub(super) struct MethodInfo<'t> {
     /// Index into the types of the class that declares it.
     pub owner: usize,
@@ -51,6 +90,7 @@ impl<'t> Lowering<'t> {
             ret: Cell::new(Type::Void),
             types: Vec::new(),
             methods: Vec::new(),
+            indices: Default::default(),
             reach: None,
             entry: None,
             standard: exceptions::Standard::default(),
@@ -175,14 +215,16 @@ impl<'t> Lowering<'t> {
     /// The index of the class with this name, if the file declares it: the name of its
     /// declaration, or the name javac gives it.
     pub(super) fn type_index(&self, qualified: &str) -> Option<usize> {
-        self.types.iter().position(|t| t.name == qualified || t.javac == qualified)
+        let mut indices = self.indices.borrow_mut();
+        indices.add_types(&self.types);
+        indices.types_by_name.get(qualified).copied()
     }
 
     /// The index of the method or constructor that a symbol names, in `Class::methods`.
     pub(super) fn method_index(&self, symbol: &Symbol) -> Option<usize> {
-        self.methods.iter().position(|m| {
-            self.types[m.owner].javac == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
-        })
+        let mut indices = self.indices.borrow_mut();
+        indices.add_methods(&self.types, &self.methods);
+        indices.methods_by_owner.get(symbol.owner)?.get(&(symbol.name, symbol.ty)).copied()
     }
 
     /// The declaration of a class: its instance fields and static fields, in source order.

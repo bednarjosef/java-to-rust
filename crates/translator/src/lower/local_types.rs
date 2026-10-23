@@ -34,6 +34,7 @@ impl<'t> Lowering<'t> {
                 n += 1;
             }
             self.types[t].name = name;
+            self.indices.get_mut().forget_types();
         }
     }
 
