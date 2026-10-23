@@ -26,7 +26,8 @@ hand-written itself.
    allows (section 1). A lock the translation adds is never held while the thread waits for
    anything else, so it cannot add a deadlock (1.3).
 3. **Thread-shared objects swap `Rc` for `Arc` and `RefCell` for `java::Locked<C>`**, a `RefCell`
-   behind a reentrant lock with `RefCell`'s API. The generated text is the same as for a
+   behind a reentrant lock with `RefCell`'s API. `Arc` is `java::Arc` (`shared.rs`), whose count
+   changes are plain until the first thread starts. The generated text is the same as for a
    thread-local object; only the type names differ. An immutable shared class is `Arc<C>`, read
    without a lock. Which classes are shared is decided per class, by type (section 4).
 4. **An object's monitor is its data lock.** `synchronized` holds the reentrant lock of the
@@ -138,7 +139,13 @@ Besides shared (`Rc<RefCell<C>>`), immutable (`Rc<C>`) and owned (a plain value)
 | mutable | `Rc<RefCell<C>>` | `Arc<java::Locked<C>>` |
 | immutable (no field written after construction) | `Rc<C>` | `Arc<C>` |
 | owned | plain value | plain value, moved into the thread |
-| closure type (`docs/closures-and-nested-classes.md` 4.2) | `Rc<dyn Fn(..) -> R>` | `Arc<dyn Fn(..) -> R + Send + Sync>` |
+| closure type (`docs/closures-and-nested-classes.md` 4.2) | `Rc<dyn Fn(..) -> R>` | `std::sync::Arc<dyn Fn(..) -> R + Send + Sync>` |
+
+The `Arc` of objects is the runtime's `java::Arc`: `std::sync::Arc`'s shape without weak
+references, whose count changes are plain loads and stores until the program starts its first
+thread and atomic from then on, by the same argument as the locks' plain path (`locked.rs`,
+`THREADS`). Closures keep `std::sync::Arc`, because making a `dyn` handle from a sized one needs
+the unstable `CoerceUnsized`.
 
 `java::Locked<C>` keeps `RefCell`'s API (`borrow`, `borrow_mut`, `with_borrow`,
 `with_borrow_mut`, mapped guards), so the generator writes the same text for both forms. Because
@@ -557,9 +564,9 @@ unchanged and that a class no thread reaches keeps `Rc`.
   short method call: a compare-and-swap to take the data lock and a sequentially consistent
   store to give it back, with a look at the parking bucket's waiters, against a flag check for a
   `RefCell` borrow; and an atomic increment per handle clone. Until the program starts its first
-  thread, the lock is taken and given back with plain stores instead (`locked.rs`, `THREADS`): a
-  program whose threads start late, or never (javac's), pays no atomic operation for its locks
-  until then. An immutable shared object costs nothing on reads beyond the `Arc` count.
+  thread, the lock is taken and given back and handles are counted with plain stores instead
+  (`locked.rs`, `THREADS`; `shared.rs`): a program whose threads start late, or never (javac's),
+  pays no atomic operation until then. An immutable shared object costs nothing on reads beyond the `Arc` count.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock.
 - **Primitive statics** are plain loads and stores on x86-64 (acquire/release); object statics
   cost a lock per access.

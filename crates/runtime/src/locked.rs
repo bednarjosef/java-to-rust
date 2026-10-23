@@ -51,7 +51,7 @@ pub(crate) fn begin_threads() {
 
 /// Whether only one thread runs: no thread has been started (`THREADS`).
 #[inline]
-fn alone() -> bool {
+pub(crate) fn alone() -> bool {
     !THREADS.load(Ordering::Relaxed)
 }
 

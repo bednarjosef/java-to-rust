@@ -11,11 +11,11 @@
 //! monitor is only the record that the thread holds it, a list of the addresses of the objects
 //! that the thread has entered, so that `wait`, `notify` and `holdsLock` answer as Java's do.
 
+use crate::Arc;
 use crate::Locked;
 use crate::locked::{RawLock, Waited};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// The monitor of an object: the lock of one that threads share, or the address of one that a

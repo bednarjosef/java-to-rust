@@ -14,10 +14,10 @@
 //! the drops above it use less than `RECURSION_BYTES` of stack, measured from the shallowest
 //! `drop_links` this thread has run; only deeper than that does it start a chain.
 
+use crate::Arc;
 use crate::Locked;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 
 /// How much stack the nested drops of a structure may use, recursively, before a `Drop` moves
 /// its links onto a chain. A level of a list or a tree takes a few hundred bytes.
@@ -52,7 +52,22 @@ pub trait Link<'a> {
 /// and those that threads share.
 pub struct Chain<'a> {
     objects: Vec<Rc<dyn Unlink<'a> + 'a>>,
-    shared: Vec<Arc<dyn Unlink<'a> + 'a>>,
+    shared: Vec<Box<dyn LastShared<'a> + 'a>>,
+}
+
+/// The last handle of an object that threads share, on a chain: a `java::Arc` cannot become one
+/// of a `dyn` type, so the chain holds it boxed behind this.
+trait LastShared<'a> {
+    /// Unlinks the object, which this handle is the last one of.
+    fn unlink_last(&mut self, chain: &mut Chain<'a>);
+}
+
+impl<'a, T: Unlink<'a>> LastShared<'a> for Arc<T> {
+    fn unlink_last(&mut self, chain: &mut Chain<'a>) {
+        if let Some(o) = Arc::get_mut(self) {
+            o.unlink(chain);
+        }
+    }
 }
 
 impl<'a> Chain<'a> {
@@ -69,7 +84,7 @@ impl<'a> Chain<'a> {
     #[inline]
     pub fn push_shared<T: Unlink<'a> + 'a>(&mut self, object: Arc<T>) {
         if Arc::strong_count(&object) == 1 && Arc::weak_count(&object) == 0 {
-            self.shared.push(object);
+            self.shared.push(Box::new(object));
         }
     }
 
@@ -82,9 +97,7 @@ impl<'a> Chain<'a> {
                     o.unlink(self);
                 }
             } else if let Some(mut object) = self.shared.pop() {
-                if let Some(o) = Arc::get_mut(&mut object) {
-                    o.unlink(self);
-                }
+                object.unlink_last(self);
             } else {
                 return;
             }

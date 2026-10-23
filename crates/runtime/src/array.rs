@@ -10,11 +10,11 @@
 //! class (`ElementClass`): a store of an object of another class throws `ArrayStoreException`,
 //! and `getClass()` is the array's own class, as in Java. Every other array carries none.
 
+use crate::Arc;
 use crate::{Class, Exception, Locked, throw};
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use std::sync::Arc;
 
 pub type Array<T> = Rc<ArrayData<RefCell<Vec<T>>, T>>;
 

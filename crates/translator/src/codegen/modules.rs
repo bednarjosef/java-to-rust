@@ -301,9 +301,6 @@ pub(super) fn use_lines(code: &str) -> Vec<String> {
     if code.contains("Rc<") || code.contains("Rc::") {
         std.push_str("use std::rc::Rc;\n");
     }
-    if bare(code, "Arc<") || bare(code, "Arc::") {
-        std.push_str("use std::sync::Arc;\n");
-    }
     if bare(code, "LazyLock<") {
         std.push_str("use std::sync::LazyLock;\n");
     }
@@ -311,8 +308,16 @@ pub(super) fn use_lines(code: &str) -> Vec<String> {
     if !std.is_empty() {
         uses.push(std);
     }
+    let mut runtime = String::new();
     if code.contains("java::") {
-        uses.push("use java_runtime as java;\n".to_string());
+        runtime.push_str("use java_runtime as java;\n");
+    }
+    // The handle of objects that threads share (`java::Arc`, see the runtime's `shared.rs`).
+    if bare(code, "Arc<") || bare(code, "Arc::") {
+        runtime.push_str("use java_runtime::Arc;\n");
+    }
+    if !runtime.is_empty() {
+        uses.push(runtime);
     }
     uses
 }
