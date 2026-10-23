@@ -409,6 +409,27 @@ fn arrays_seen_through_two_names_are_shared() {
 }
 
 #[test]
+fn an_array_borrowed_for_a_call_is_read_after_the_arguments_that_write_it() {
+    let rust = translate(
+        "class A {
+            static int squeeze(char[] path) { path[0] = 'x'; return 1; }
+            public static void main(String[] args) {
+                char[] path = \"ab/./cd\".toCharArray();
+                char[] alias = path;
+                System.out.println(new String(path, 0, squeeze(path)));
+                System.out.println(alias.length);
+            } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "{ let array = path.clone(); let arg = { let value = squeeze(&mut path.borrow_mut()); value }; java::from_chars_range(&array.borrow(), 0, arg) }",
+        ],
+    );
+    assert_lacks(&rust, &["from_chars_range(&path.borrow(), 0, "]);
+}
+
+#[test]
 fn arrays_passed_to_methods_are_borrowed() {
     let rust = translate(
         "class A {

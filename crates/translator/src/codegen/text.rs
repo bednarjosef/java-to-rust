@@ -257,11 +257,12 @@ impl<'a> Gen<'a> {
                 ))
             }
             StringOp::JoinRange => {
-                let texts: Vec<String> = args[..3].iter().map(|a| self.text_ref(a)).collect();
-                let elements = self.slice_of(&args[3]);
-                let size = self.int_arg(&args[4]);
-                let f = self.runtime("join_range");
-                Code::atom(format!("{f}({}, {elements}, {size})", texts.join(", ")))
+                let mut texts: Vec<String> = args[..3].iter().map(|a| self.text_ref(a)).collect();
+                texts.extend([String::new(), self.int_arg(&args[4])]);
+                self.array_call(args, 3, texts, |g, t| {
+                    let f = g.runtime("join_range");
+                    Code::atom(format!("{f}({})", t.join(", ")))
+                })
             }
             StringOp::Lines => {
                 let s = self.text_ref(&args[0]);
@@ -284,20 +285,20 @@ impl<'a> Gen<'a> {
                 ))
             }
             StringOp::FromChars => {
-                let chars = self.slice_of(&args[0]);
-                match args.get(1..) {
-                    Some([offset, count]) => {
-                        let (offset, count) = (self.int_arg(offset), self.int_arg(count));
-                        self.may_fail(id, "from_chars_range", "", &format!("{chars}, {offset}, {count}"))
+                let mut texts = vec![String::new()];
+                texts.extend(args[1..].iter().map(|x| self.int_arg(x)));
+                self.array_call(args, 0, texts, |g, t| match t {
+                    [chars, offset, count] => {
+                        g.may_fail(id, "from_chars_range", "", &format!("{chars}, {offset}, {count}"))
                     }
-                    _ => call(self, "from_units", vec![chars]),
-                }
+                    _ => call(g, "from_units", t[..1].to_vec()),
+                })
             }
             StringOp::FromCodePoints | StringOp::FromHighByte => {
-                let mut values = vec![self.slice_of(&args[0])];
-                values.extend(args[1..].iter().map(|x| self.int_arg(x)));
+                let mut texts = vec![String::new()];
+                texts.extend(args[1..].iter().map(|x| self.int_arg(x)));
                 let name = if op == StringOp::FromCodePoints { "from_code_points" } else { "from_high_byte" };
-                call(self, name, values)
+                self.array_call(args, 0, texts, |g, t| call(g, name, t.to_vec()))
             }
             StringOp::GetBytes => {
                 let s = self.text_ref(&args[0]);
@@ -309,29 +310,29 @@ impl<'a> Gen<'a> {
                 Code::atom(self.made_array(bytes, Type::array(Type::Byte)))
             }
             StringOp::FromBytes => {
-                let bytes = self.slice_of(&args[0]);
                 match args.get(1..) {
                     Some([offset, length, rest @ ..]) if rest.len() <= 1 => {
-                        let (offset, length) = (self.int_arg(offset), self.int_arg(length));
+                        let mut texts = vec![String::new(), self.int_arg(offset), self.int_arg(length)];
                         // Without a charset, the default one, which is UTF-8.
-                        let charset = match rest {
+                        texts.push(match rest {
                             [charset] => self.charset_arg(charset),
                             _ => format!("{}::Utf8", self.runtime("Charset")),
-                        };
-                        self.may_fail(
-                            id,
-                            "new_string_range",
-                            "",
-                            &format!("{bytes}, {offset}, {length}, {charset}"),
-                        )
+                        });
+                        self.array_call(args, 0, texts, |g, t| {
+                            g.may_fail(id, "new_string_range", "", &t.join(", "))
+                        })
                     }
                     Some([charset]) => {
                         let charset = self.charset_arg(charset);
-                        call(self, "new_string", vec![bytes, charset])
+                        self.array_call(args, 0, vec![String::new(), charset], |g, t| {
+                            call(g, "new_string", t.to_vec())
+                        })
                     }
                     _ => {
                         let charset = format!("{}::Utf8", self.runtime("Charset"));
-                        call(self, "new_string", vec![bytes, charset])
+                        self.array_call(args, 0, vec![String::new(), charset], |g, t| {
+                            call(g, "new_string", t.to_vec())
+                        })
                     }
                 }
             }
@@ -481,11 +482,12 @@ impl<'a> Gen<'a> {
                 method(&name, vec![value])
             }
             BuilderOp::Append => {
-                let (start, end) = (self.int_arg(&rest[1]), self.int_arg(&rest[2]));
                 if matches!(rest[0].ty, Type::Array(_)) {
-                    let chars = self.slice_of(&rest[0]);
-                    method("append_chars_range", vec![chars, start, end])
-                } else if matches!(rest[0].ty, Type::Class(..)) && !self.plain_sequence(&rest[0]) {
+                    let texts = vec![String::new(), self.int_arg(&rest[1]), self.int_arg(&rest[2])];
+                    return self.array_call(rest, 0, texts, |_, t| method("append_chars_range", t.to_vec()));
+                }
+                let (start, end) = (self.int_arg(&rest[1]), self.int_arg(&rest[2]));
+                if matches!(rest[0].ty, Type::Class(..)) && !self.plain_sequence(&rest[0]) {
                     self.program_range_call(id, &args[0], &sb, &rest[0], &format!("{start}, {end}"))
                 } else {
                     let text = self.range_text(&rest[0]);
