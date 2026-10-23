@@ -870,12 +870,16 @@ impl Messages<'_> {
         Some(Source::Shown(shown))
     }
 
-    /// The argument that `e` reads, where it is a local that holds one; else `e`.
+    /// The argument that `e` reads, where it is a local that holds one (or holds another such
+    /// local, as the locals of a `Builtin::Kept` hold those of `lower::argument_order`); else `e`.
     fn argument<'e>(&'e self, e: &'e Expr) -> &'e Expr {
-        match &e.kind {
-            ExprKind::Var(name) => self.arguments.get(name.as_str()).copied().unwrap_or(e),
-            _ => e,
+        let mut e = e;
+        while let ExprKind::Var(name) = &e.kind
+            && let Some(init) = self.arguments.get(name.as_str())
+        {
+            e = init;
         }
+        e
     }
 
     /// The receiver that `e` reads, where it is a local that holds one, or the call of a block that
