@@ -29,33 +29,7 @@ impl<'a> Gen<'a> {
         if subtype && src_ty == dst_ty {
             return None;
         }
-        // The element mismatch is named when the destination's class is a subtype of the source's
-        // (a `Named` array copied into a `Box` array); an unrelated pair is a type mismatch.
-        // `Object` is named as the runtime names it, which is not its binary name.
-        let binary = |t: usize| match self.class.types[t].name.as_str() {
-            OBJECT => "java.lang.Object".to_string(),
-            _ => self.binary_name(t),
-        };
-        let (from, to) = (binary(s), binary(d));
-        let message = if self.class.hierarchy.is_subtype(d, s) {
-            format!(
-                "arraycopy: element type mismatch: can not cast one of the elements of {from}[] to the type of the destination array, {to}"
-            )
-        } else {
-            format!("arraycopy: type mismatch: can not copy {from}[] into {to}[]")
-        };
-        // An element is stored when it passes, and a null always does: each arm converts an
-        // element of a class that passes from the source's representation to the destination's.
-        let (src_nullable, dst_nullable) = (src_ty.starts_with("Option<"), dst_ty.starts_with("Option<"));
-        let mut arms = self.element_arms(s, d, (src_nullable, dst_nullable));
-        if src_nullable && dst_nullable {
-            arms.insert(0, "None => Ok(None), ".to_string());
-        }
-        let fallthrough = if subtype { String::new() } else { format!("_ => Err(\"{message}\"), ") };
-        let convert = format!(
-            "|e: &{src_ty}| -> Result<{dst_ty}, &'static str> {{ match e {{ {}{fallthrough}}} }}",
-            arms.concat()
-        );
+        let convert = self.class_element_convert((s, d), (*es, *ed));
         let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
         let ints: Vec<String> =
             [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
@@ -77,25 +51,78 @@ impl<'a> Gen<'a> {
         Some(Code::atom(self.passed_on(code)))
     }
 
+    /// The conversion of each element of an array of class `s` (element type `es`) into one of
+    /// an array of class `d` (`ed`), for `try_arraycopy_with`: a closure that yields the element
+    /// in the destination's representation when it passes, and else HotSpot's message. The
+    /// element mismatch is named when the destination's class is a subtype of the source's (a
+    /// `Named` array copied into a `Box` array); an unrelated pair is a type mismatch.
+    pub(super) fn class_element_convert(&mut self, (s, d): (usize, usize), (es, ed): (Type, Type)) -> String {
+        let (src_ty, dst_ty) = (self.element_ty_name(es), self.element_ty_name(ed));
+        let subtype = self.class.hierarchy.is_subtype(s, d);
+        // `Object` is named as the runtime names it, which is not its binary name.
+        let binary = |t: usize| match self.class.types[t].name.as_str() {
+            OBJECT => "java.lang.Object".to_string(),
+            _ => self.binary_name(t),
+        };
+        let (from, to) = (binary(s), binary(d));
+        let message = if self.class.hierarchy.is_subtype(d, s) {
+            format!(
+                "arraycopy: element type mismatch: can not cast one of the elements of {from}[] to the type of the destination array, {to}"
+            )
+        } else {
+            format!("arraycopy: type mismatch: can not copy {from}[] into {to}[]")
+        };
+        // An element is stored when it passes, and a null always does: each arm converts an
+        // element of a class that passes from the source's representation to the destination's.
+        let (src_nullable, dst_nullable) = (src_ty.starts_with("Option<"), dst_ty.starts_with("Option<"));
+        let mut arms = self.element_arms(s, d, (src_nullable, dst_nullable));
+        if src_nullable && dst_nullable {
+            arms.insert(0, "None => Ok(None), ".to_string());
+        }
+        let fallthrough = if subtype { String::new() } else { format!("_ => Err(\"{message}\"), ") };
+        format!(
+            "|e: &{src_ty}| -> Result<{dst_ty}, &'static str> {{ match e {{ {}{fallthrough}}} }}",
+            arms.concat()
+        )
+    }
+
     /// The arms converting each element of class `s` that is an instance of `d`. A pattern takes
     /// the object out of the source's representation, which is one class's object or an enum over
     /// several, and the arm yields it in the destination's: an enum variant when `d` has subclasses.
-    fn element_arms(&self, s: usize, d: usize, (src_nullable, dst_nullable): (bool, bool)) -> Vec<String> {
+    /// A class that no value of `d` is anywhere else has no variant there, and its element ends
+    /// the program: an array held as an `Object` may be copied to any other, which is beyond what
+    /// the analysis follows (the arrays that `SpinedBuffer` copies are always of one type).
+    fn element_arms(
+        &mut self,
+        s: usize,
+        d: usize,
+        (src_nullable, dst_nullable): (bool, bool),
+    ) -> Vec<String> {
         let cases: Vec<(String, usize)> = match self.rep(s) {
             hierarchy::Rep::Object(c) => vec![("x".to_string(), c)],
             hierarchy::Rep::Enum(t) => {
                 self.enum_variants(t).into_iter().map(|c| (format!("{}(x)", self.variant(t, c)), c)).collect()
             }
         };
+        let missing = self.runtime("not_translated");
         cases
             .into_iter()
             .filter(|&(_, c)| self.class.hierarchy.is_subtype(c, d))
             .map(|(pattern, c)| {
+                let pattern = if src_nullable { format!("Some({pattern})") } else { pattern };
                 let object = match self.rep(d) {
                     hierarchy::Rep::Object(_) => "x.clone()".to_string(),
-                    hierarchy::Rep::Enum(t) => format!("{}(x.clone())", self.variant(t, c)),
+                    hierarchy::Rep::Enum(t) if self.enum_variants(t).contains(&c) => {
+                        format!("{}(x.clone())", self.variant(t, c))
+                    }
+                    hierarchy::Rep::Enum(_) => {
+                        let (from, to) = (self.binary_name(c), self.binary_name(d));
+                        let pattern = pattern.replace("(x)", "(_)");
+                        return format!(
+                            "{pattern} => {missing}(\"`System.arraycopy` of a {from} into an array of {to}, which no {to} is elsewhere\"), "
+                        );
+                    }
                 };
-                let pattern = if src_nullable { format!("Some({pattern})") } else { pattern };
                 let value = if dst_nullable { format!("Some({object})") } else { object };
                 format!("{pattern} => Ok({value}), ")
             })
