@@ -909,6 +909,45 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether the variant of class `c` holds a `java::Arc` of the class's object.
+    fn counted_variant(&self, c: usize) -> bool {
+        self.runtime_of(c).is_none() && !self.holds_value(c) && self.pointer(c) == "Arc"
+    }
+
+    /// The `Clone` of an enum whose first `counted` variants hold a `java::Arc` each: those are
+    /// copied by `java::clone_counted`, the others by a `match`.
+    fn counted_clone(&mut self, name: &str, shorts: &[String], counted: usize) {
+        self.line(&format!("java::counted_handles!({name}, {counted});"));
+        self.gap();
+        self.line(&format!("impl Clone for {name} {{"));
+        self.indent += 1;
+        self.line("#[inline]");
+        self.line(&format!("fn clone(&self) -> {name} {{"));
+        self.indent += 1;
+        if counted == shorts.len() {
+            self.line("match java::clone_counted(self) {");
+            self.indent += 1;
+            self.line("Some(copy) => copy,");
+            self.line("None => unreachable!(\"every variant holds a handle\"),");
+        } else {
+            self.line("if let Some(copy) = java::clone_counted(self) {");
+            self.line("    return copy;");
+            self.line("}");
+            self.line("match self {");
+            self.indent += 1;
+            for short in &shorts[counted..] {
+                self.line(&format!("{name}::{short}(o) => {name}::{short}(o.clone()),"));
+            }
+            self.line("_ => unreachable!(\"a handle's variant is copied above\"),");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// Whether the objects of the enum of `t` are immutable: a family is immutable together.
     pub(super) fn immutable_enum(&self, t: usize) -> bool {
         let concretes = self.class.hierarchy.concretes(t);
@@ -1292,19 +1331,28 @@ impl<'a> Gen<'a> {
             return self.closure_alias(t);
         }
         let name = struct_name(&self.class.types[t].name);
-        let variants = self.enum_variants(t);
+        let mut variants = self.enum_variants(t);
+        // The variants that hold a `java::Arc` come first, so that a copy of one is a count
+        // change without a `match` over the classes (`java::clone_counted`).
+        variants.sort_by_key(|&c| !self.counted_variant(c));
+        let counted = variants.iter().filter(|&&c| self.counted_variant(c)).count();
+        let shorts: Vec<String> = variants
+            .iter()
+            .map(|&c| self.variant(t, c).rsplit("::").next().unwrap_or_default().to_string())
+            .collect();
         self.gap();
-        self.line("#[derive(Clone)]");
+        self.line(if counted == 0 { "#[derive(Clone)]" } else { "#[repr(u16)]" });
         self.line(&format!("{}enum {name} {{", self.vis()));
         self.indent += 1;
-        for &c in &variants {
-            let variant = self.variant(t, c);
-            let short = variant.rsplit("::").next().unwrap_or_default().to_string();
+        for (&c, short) in variants.iter().zip(&shorts) {
             let payload = self.payload(c);
             self.line(&format!("{short}({payload}),"));
         }
         self.indent -= 1;
         self.line("}");
+        if counted > 0 {
+            self.counted_clone(&name, &shorts, counted);
+        }
         let wanted: Vec<Need> = self.wanted.iter().copied().collect();
         let mark = self.out.len();
         self.gap();

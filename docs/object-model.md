@@ -187,6 +187,12 @@ Rules:
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
   wraps the object in that type's enum (`Binary::Add(o.clone()).eval()`) rather than
   converting the whole value.
+- An enum with variants that hold a `java::Arc` (the classes that threads share,
+  docs/multi-threading.md) lists them first and is `#[repr(u16)]`, and its `Clone` copies any of
+  them with `java::clone_counted`: one more count on the handle and a copy of the enum's bits,
+  whichever class the variant is, rather than a `match` over every class
+  (`java::counted_handles!` states the layout that this relies on). The other variants are
+  copied by a `match`. An enum of `Rc` handles keeps `#[derive(Clone)]`.
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.
