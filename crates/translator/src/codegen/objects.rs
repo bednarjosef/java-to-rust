@@ -841,7 +841,12 @@ impl<'a> Gen<'a> {
         }
         let same = matches!(inner.ty, Type::Class(..)) && self.ty_name(inner.ty) == self.ty_name(ty);
         match &inner.kind {
-            ExprKind::Var(name) if same && self.borrowed_optional_objects.contains(name) => self.local(name),
+            // Not where a null check narrowed it to the object (`if let Some(x) = x.as_ref()`).
+            ExprKind::Var(name)
+                if same && self.borrowed_optional_objects.contains(name) && !self.borrowed.contains(name) =>
+            {
+                self.local(name)
+            }
             ExprKind::Var(_) | ExprKind::Field { .. } if same && self.nullable(inner) => {
                 format!("&{}", self.object_place(inner))
             }
