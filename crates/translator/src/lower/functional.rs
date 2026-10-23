@@ -8,8 +8,9 @@
 //! extend, as interfaces of the program, the way it gets the standard exception classes (see
 //! `exceptions`). Their items are named by their simple names at the crate's root.
 //!
-//! Marker interfaces (`Serializable`, `Cloneable`, `RandomAccess`) declare nothing, so they are
-//! dropped where a class implements them; `JavaTree` drops them from intersection casts such as
+//! Marker interfaces (`Serializable`, `Cloneable`, `RandomAccess`) declare nothing, so without
+//! the JDK's sources they are dropped where a class implements them (with them, they are the
+//! program's interfaces); `JavaTree` drops them from intersection casts such as
 //! `(Comparator<T> & Serializable)`.
 
 use super::*;

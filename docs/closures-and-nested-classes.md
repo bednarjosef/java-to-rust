@@ -386,8 +386,10 @@ class for that local, so `System.out` and `System.err` are read where the refere
 lambda, as javac's synthetic method does. Any other use of `super` in a lambda (including
 `super.clone()`) is rejected.
 
-Marker interfaces (`Serializable`, `Cloneable`, `RandomAccess`) declare nothing: lowering drops
-them where a class implements them (`lower/functional.rs`), and `JavaTree` drops them and
+Marker interfaces (`Serializable`, `Cloneable`, `RandomAccess`) declare nothing: without the
+JDK's sources, which declare them, lowering drops them where a class implements them
+(`lower/functional.rs`); with those sources they are interfaces like any other, so that a
+`ZoneRules` returned as a `Serializable` is one. `JavaTree` drops them and
 `Object` from intersection casts, so `(Comparator<T> & Serializable)` is `Comparator<T>`. A cast
 to two interfaces that are not markers is rejected.
 
