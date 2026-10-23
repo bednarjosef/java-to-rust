@@ -5,12 +5,14 @@ import java.nio.charset.Charset;
 import java.nio.charset.MalformedInputException;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.UnmappableCharacterException;
+import sun.nio.ch.Interruptible;
 
 /**
- * The methods of {@code JavaLangAccess} that the JDK's {@code java.io}, {@code java.nio.file} and
- * charsets' coders call on {@code SharedSecrets.getJavaLangAccess()}, which the JVM sets as it
- * starts and a translated program never has: each call of one of them is a call of the method of the same name here (see
- * {@code lower.rs}), which does what {@code String}'s own code does for it.
+ * The methods of {@code JavaLangAccess} that the JDK's {@code java.io}, {@code java.nio.file},
+ * channels and charsets' coders call on {@code SharedSecrets.getJavaLangAccess()}, which the JVM
+ * sets as it starts and a translated program never has: each call of one of them is a call of the
+ * method of the same name here (see {@code lower.rs}), which does what {@code String}'s own code
+ * does for it, or, for {@code blockedOn}, what a thread's record of its channel comes to here.
  */
 final class TranslatedLangAccess {
     private TranslatedLangAccess() {}
@@ -152,4 +154,13 @@ final class TranslatedLangAccess {
     static String concat(String prefix, Object value, String suffix) {
         return prefix + value + suffix;
     }
+
+    /**
+     * Nothing: the JDK records the channel operation that the thread is in, so that an interrupt
+     * from another thread closes the channel and wakes the thread. Every channel of a translated
+     * program is a file's, whose operations do not wait indefinitely, so an interrupt that arrives
+     * during one is seen as one that arrives just after it: the next {@code begin} of the thread
+     * closes the channel and its {@code end} throws {@code ClosedByInterruptException}.
+     */
+    static void blockedOn(Interruptible intr) {}
 }

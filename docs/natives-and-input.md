@@ -145,11 +145,14 @@ a few percent of zlib's size at each level.
   reached: the translator gives the program its own `Throwable` and standard exceptions
   (`java/Standard.java`). Stack traces and helpful null-pointer messages are in
   [exceptions.md](exceptions.md).
-- `FileChannelImpl` (the channel of `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`)
-  reaches the channel natives above, but its path stops before them: `AbstractInterruptibleChannel`
-  calls `JavaLangAccess.blockedOn`, and `InnocuousThread` uses a field offset as a value. So no
-  program reaches them yet. `FileChannel.open` and `Files.newByteChannel` do not use
-  `FileChannelImpl` at all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
+- `UnixFileDispatcherImpl.force0`, which `FileChannel.force` of `FileChannelImpl` (the channel of
+  `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`) reaches. Its reads, writes,
+  positions and sizes go through the channel natives above. `AbstractInterruptibleChannel` calls
+  `JavaLangAccess.blockedOn` to record the operation a thread is in, which does nothing in a
+  translation (`TranslatedLangAccess`): a file's operations do not wait indefinitely, so an
+  interrupt during one is seen just after it, when the next operation's `begin` closes the
+  channel. `FileChannel.open` and `Files.newByteChannel` do not use `FileChannelImpl` at all: they
+  use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
   definition and module natives, sockets, `MappedMemoryUtils.isLoaded0`, `load0` and
   `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
