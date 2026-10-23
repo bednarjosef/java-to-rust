@@ -2,6 +2,7 @@
 //! `getSystemTimeZoneID` names the zone from the environment and the system's files, and
 //! `getSystemGMTOffsetID` gives the offset from UTC when that name is not a zone the JDK knows.
 
+use crate::JString;
 use std::ffi::c_char;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,7 +45,11 @@ unsafe extern "C" {
 /// a leading `:`; else the first line of `/etc/timezone`; else the zone of `/etc/localtime` (see
 /// `zone_of_localtime`); else `None`. The JDK's `javaHome` argument names only its `tzmappings`
 /// file, which this JDK does not have, so it is not read.
-pub fn system_time_zone_id() -> Option<String> {
+pub fn system_time_zone_id() -> Option<JString> {
+    zone_id().map(JString::from)
+}
+
+fn zone_id() -> Option<String> {
     if let Some(tz) = std::env::var_os("TZ").filter(|tz| !tz.is_empty()) {
         let tz = tz.to_string_lossy();
         return Some(tz.strip_prefix(':').unwrap_or(&tz).to_string());
@@ -57,8 +62,8 @@ pub fn system_time_zone_id() -> Option<String> {
 
 /// `TimeZone.getSystemGMTOffsetID()`: `GMT` for no offset, else `GMT+hh:mm` or `GMT-hh:mm`, for
 /// the offset of the local time from UTC now.
-pub fn system_gmt_offset_id() -> String {
-    gmt_offset_id(local_offset_seconds())
+pub fn system_gmt_offset_id() -> JString {
+    JString::from(gmt_offset_id(local_offset_seconds()))
 }
 
 /// The first line of a file's bytes, without its newline; `None` if it is empty.
@@ -266,7 +271,7 @@ mod tests {
 
     #[test]
     fn the_gmt_offset_id_has_the_jdk_shape() {
-        let id = system_gmt_offset_id();
+        let id = system_gmt_offset_id().to_string_lossy().into_owned();
         assert!(id == "GMT" || (id.len() == 9 && (id.starts_with("GMT+") || id.starts_with("GMT-"))), "{id}");
     }
 }
