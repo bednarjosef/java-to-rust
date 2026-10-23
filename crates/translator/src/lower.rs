@@ -162,6 +162,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             shared_strings: false,
             module_labels,
             thread_statics: None,
+            element_classes: lowering.element_classes.take(),
         };
         Ok((class, lowering.real.clone(), failed))
     })
@@ -394,6 +395,8 @@ struct Lowering<'t> {
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
     /// What lowering assumed (see `ast::Note`).
     notes: RefCell<Vec<crate::ast::Note>>,
+    /// The classes of the covariant arrays the code makes (`Class::element_classes`).
+    element_classes: RefCell<std::collections::HashMap<ExprId, Type>>,
     /// The annotation types whose class literals the code has (`Class::annotation_classes`).
     annotation_classes: RefCell<std::collections::BTreeSet<String>>,
     /// The annotation types declared in other classes, whose binary names lowering does not
@@ -1045,7 +1048,9 @@ impl<'t> Lowering<'t> {
         };
         let id = self.next_id.get();
         self.next_id.set(id + 1);
-        Ok(Expr { kind, pos: node.pos(), ty, id })
+        let expr = Expr { kind, pos: node.pos(), ty, id };
+        self.note_element_class(node, &expr)?;
+        Ok(expr)
     }
 
     /// `left op right`, where `right` may assign the variable that `left` reads, as in

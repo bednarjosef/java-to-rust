@@ -4,17 +4,86 @@
 //! A program that starts threads has its arrays behind an `Arc` and a `java::Locked`
 //! (`SharedArray`), which one thread at a time may borrow; the functions here take either handle
 //! (`Elements`), and those that make an array have a `shared_` twin.
+//!
+//! An array that the translation holds as an `Object[]` though the program made it as an array of
+//! a narrower class (a covariant array, see the translator's `lower::covariant`) carries that
+//! class (`ElementClass`): a store of an object of another class throws `ArrayStoreException`,
+//! and `getClass()` is the array's own class, as in Java. Every other array carries none.
 
-use crate::{Exception, Locked, throw};
+use crate::{Class, Exception, Locked, throw};
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub type Array<T> = Rc<RefCell<Vec<T>>>;
+pub type Array<T> = Rc<ArrayData<RefCell<Vec<T>>, T>>;
 
 /// An array of a program with threads.
-pub type SharedArray<T> = Arc<Locked<Vec<T>>>;
+pub type SharedArray<T> = Arc<ArrayData<Locked<Vec<T>>, T>>;
+
+/// What an array handle points to: the elements, in a `RefCell` or a `Locked` (`C`), which the
+/// handle borrows through `Deref` as it would the cell itself, and the class of a covariant array.
+pub struct ArrayData<C, T> {
+    items: C,
+    class: Option<Box<ElementClass<T>>>,
+}
+
+impl<C, T> Deref for ArrayData<C, T> {
+    type Target = C;
+
+    #[inline]
+    fn deref(&self) -> &C {
+        &self.items
+    }
+}
+
+impl<C, T> ArrayData<C, T> {
+    /// The cell of an array that nothing else holds (a dying one).
+    pub(crate) fn items_mut_unique(&mut self) -> &mut C {
+        &mut self.items
+    }
+}
+
+impl<C: std::fmt::Debug, T> std::fmt::Debug for ArrayData<C, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.items.fmt(f)
+    }
+}
+
+/// The class of a covariant array (`String[]` for one the translation holds as an `Object[]`),
+/// as the translator writes it where the array is made.
+pub struct ElementClass<T> {
+    /// The array's class, which its `getClass()` gives.
+    class: fn() -> Class,
+    /// The binary name of the class of the elements: `java.lang.String`.
+    pub(crate) element: &'static str,
+    /// The binary names of the class of an element and of every class and interface above it,
+    /// its own first (`None` for null), which the store of the element tests.
+    names: fn(&T) -> Option<&'static [&'static str]>,
+}
+
+impl<T> ElementClass<T> {
+    pub fn new(
+        class: fn() -> Class,
+        element: &'static str,
+        names: fn(&T) -> Option<&'static [&'static str]>,
+    ) -> ElementClass<T> {
+        ElementClass { class, element, names }
+    }
+
+    /// The binary name of the class of `v` where the array cannot hold it (`java.lang.Integer` in
+    /// a `String[]`), which the `ArrayStoreException` gives. A null fits any array.
+    pub(crate) fn refuses(&self, v: &T) -> Option<&'static str> {
+        let names = (self.names)(v)?;
+        (!names.contains(&self.element)).then(|| names.first().copied().unwrap_or("java.lang.Object"))
+    }
+}
+
+impl<T> Clone for ElementClass<T> {
+    fn clone(&self) -> ElementClass<T> {
+        ElementClass { class: self.class, element: self.element, names: self.names }
+    }
+}
 
 /// A handle of an array: an `Array`, or a `SharedArray`, whose elements are borrowed the same way,
 /// or a reference to one.
@@ -23,12 +92,30 @@ pub trait Elements<T> {
     fn items_mut(&self) -> impl DerefMut<Target = Vec<T>> + '_;
     /// The array's address, which is its identity.
     fn address(&self) -> *const u8;
+    /// The class of a covariant array.
+    fn element_class(&self) -> Option<&ElementClass<T>>;
 }
 
 /// A handle that a new array can be made as: an `Array` or a `SharedArray`.
 pub trait MadeElements<T>: Elements<T> {
+    /// A new array of the same kind, of class `class` where it is a covariant array.
+    fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> Self;
+
     /// A new array of the same kind, such as a copy.
-    fn made(items: Vec<T>) -> Self;
+    fn made(items: Vec<T>) -> Self
+    where
+        Self: Sized,
+    {
+        Self::made_as(items, None)
+    }
+
+    /// A new array of the same kind and class as this one: a copy keeps the class.
+    fn made_like(&self, items: Vec<T>) -> Self
+    where
+        Self: Sized,
+    {
+        Self::made_as(items, self.element_class().cloned())
+    }
 }
 
 impl<T, A: Elements<T>> Elements<T> for &A {
@@ -44,6 +131,10 @@ impl<T, A: Elements<T>> Elements<T> for &A {
 
     fn address(&self) -> *const u8 {
         (**self).address()
+    }
+
+    fn element_class(&self) -> Option<&ElementClass<T>> {
+        (**self).element_class()
     }
 }
 
@@ -61,11 +152,16 @@ impl<T> Elements<T> for Array<T> {
     fn address(&self) -> *const u8 {
         Rc::as_ptr(self) as *const u8
     }
+
+    #[inline]
+    fn element_class(&self) -> Option<&ElementClass<T>> {
+        self.class.as_deref()
+    }
 }
 
 impl<T> MadeElements<T> for Array<T> {
-    fn made(items: Vec<T>) -> Array<T> {
-        from_vec(items)
+    fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> Array<T> {
+        Rc::new(ArrayData { items: RefCell::new(items), class: class.map(Box::new) })
     }
 }
 
@@ -83,28 +179,105 @@ impl<T> Elements<T> for SharedArray<T> {
     fn address(&self) -> *const u8 {
         Arc::as_ptr(self) as *const u8
     }
+
+    #[inline]
+    fn element_class(&self) -> Option<&ElementClass<T>> {
+        self.class.as_deref()
+    }
 }
 
 impl<T> MadeElements<T> for SharedArray<T> {
-    fn made(items: Vec<T>) -> SharedArray<T> {
-        shared_from_vec(items)
+    fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> SharedArray<T> {
+        Arc::new(ArrayData { items: Locked::new(items), class: class.map(Box::new) })
     }
 }
 
 /// An array with the given elements, as in `{a, b, c}`.
 pub fn from_vec<T>(items: Vec<T>) -> Array<T> {
-    Rc::new(RefCell::new(items))
+    Array::made_as(items, None)
 }
 
 /// `from_vec` in a program with threads.
 pub fn shared_from_vec<T>(items: Vec<T>) -> SharedArray<T> {
-    Arc::new(Locked::new(items))
+    SharedArray::made_as(items, None)
 }
 
 /// An array of a program with threads that has the elements of `a`, which the runtime's own
 /// functions made (`String.getBytes`, `Character.toChars`).
 pub fn to_shared<T: Clone>(a: Array<T>) -> SharedArray<T> {
-    shared_from_vec(Rc::try_unwrap(a).map_or_else(|a| a.borrow().clone(), RefCell::into_inner))
+    let class = a.element_class().cloned();
+    let items = Rc::try_unwrap(a).map_or_else(|a| a.borrow().clone(), |a| a.items.into_inner());
+    SharedArray::made_as(items, class)
+}
+
+/// The array `a` just made, as an array of class `class`: a covariant array (`new String[n]`
+/// that the translation holds as an `Object[]`), or with `None` one that carries no class (a copy
+/// into `Object[].class`).
+pub fn tagged<T, A: MadeElements<T>>(a: A, class: Option<ElementClass<T>>) -> A {
+    if class.is_none() && a.element_class().is_none() {
+        return a;
+    }
+    let items = std::mem::take(&mut *a.items_mut());
+    A::made_as(items, class)
+}
+
+/// `a.getClass()` of an `Object[]`: the class of a covariant array, or `exact`, `Object[]`'s.
+pub fn array_class<T>(a: &impl Elements<T>, exact: fn() -> Class) -> Class {
+    a.element_class().map_or_else(exact, |c| (c.class)())
+}
+
+/// Java's check of `a[i] = v` in an `Object[]` that may be a covariant array: the index is
+/// checked first, then whether the array can hold `v`.
+#[cold]
+#[inline(never)]
+fn check_store<T>(class: &ElementClass<T>, len: usize, i: i32, v: &T) -> Result<(), Exception> {
+    try_position(len, i)?;
+    match class.refuses(v) {
+        Some(name) => Err(Exception::new("java.lang.ArrayStoreException", name)),
+        None => Ok(()),
+    }
+}
+
+/// `a[i] = v` in an `Object[]` that may be a covariant array, which throws
+/// `ArrayStoreException` for an element of another class.
+#[inline]
+pub fn checked_set<T>(a: &impl Elements<T>, i: i32, v: T) {
+    if let Some(class) = a.element_class() {
+        check_store(class, a.items().len(), i, &v).unwrap_or_else(|e| crate::throw_exception(e));
+    }
+    set(a, i, v)
+}
+
+/// `checked_set` where the program observes the exception.
+pub fn try_checked_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
+    if let Some(class) = a.element_class() {
+        check_store(class, a.items().len(), i, &v)?;
+    }
+    try_set(a, i, v)
+}
+
+/// `checked_set` as an expression: stores `v` and gives it back.
+pub fn checked_store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> T {
+    checked_set(a, i, v.clone());
+    v
+}
+
+/// `checked_store` where the program observes the exception.
+pub fn try_checked_store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> Result<T, Exception> {
+    try_checked_set(a, i, v.clone())?;
+    Ok(v)
+}
+
+/// `checked_store` where the elements may be null and `v` is not, as `store_some`.
+pub fn checked_store_some<T: Clone>(a: &impl Elements<Option<T>>, i: i32, v: T) -> T {
+    checked_set(a, i, Some(v.clone()));
+    v
+}
+
+/// `checked_store_some` where the program observes the exception.
+pub fn try_checked_store_some<T: Clone>(a: &impl Elements<Option<T>>, i: i32, v: T) -> Result<T, Exception> {
+    try_checked_set(a, i, Some(v.clone()))?;
+    Ok(v)
 }
 
 /// `new T[len]` with every element `zero`, the default value of `T`.
@@ -490,12 +663,12 @@ pub fn sort_floats(a: &impl Elements<f32>) {
         .sort_by(|x, y| x.partial_cmp(y).filter(|o| o.is_ne()).unwrap_or_else(|| key(*x).cmp(&key(*y))));
 }
 
-/// `Arrays.copyOf(a, len)`: the first `len` elements, padded with `zero`.
+/// `Arrays.copyOf(a, len)`: the first `len` elements, padded with `zero`, of `a`'s class.
 pub fn copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> A {
     let len = size(len);
     let mut items = a.items().clone();
     items.resize(len, zero);
-    A::made(items)
+    a.made_like(items)
 }
 
 /// `copy_of` where the program observes the `NegativeArraySizeException`.
@@ -503,7 +676,7 @@ pub fn try_copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> Re
     let len = try_size(len)?;
     let mut items = a.items().clone();
     items.resize(len, zero);
-    Ok(A::made(items))
+    Ok(a.made_like(items))
 }
 
 /// `a[i] = v` as an expression: stores `v` and gives it back.

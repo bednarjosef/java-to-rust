@@ -472,7 +472,10 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         // operand, the access of the element, does (`lower::handles`).
         Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => &[],
         Builtin::ArraysCopyOf => &["java.lang.NegativeArraySizeException"],
-        Builtin::Native(Native::ArrayCopy) if object_copy(args) => {
+        // Into an `Object[]` that may be a covariant array, which checks what it holds.
+        Builtin::Native(Native::ArrayCopy)
+            if object_copy(args) || args.get(2).is_some_and(|d| class.checks_store(d.ty, &args[0])) =>
+        {
             &["java.lang.ArrayIndexOutOfBoundsException", "java.lang.ArrayStoreException"]
         }
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
@@ -810,9 +813,10 @@ pub(super) fn runtime_failures(
                     }
                 }
                 out.push(("java.lang.ArrayIndexOutOfBoundsException", "this call of the library", true, x.id));
-                // An array of objects may be of another type than the destination's: the copy's
-                // checked form returns the mismatch (`codegen/dispatch.rs`).
-                if object_copy(args) {
+                // An array of objects may be of another type than the destination's, or the
+                // destination a covariant array of a narrower class: the copy's checked form
+                // returns the mismatch (`codegen/dispatch.rs`, `java::arraycopy`).
+                if object_copy(args) || class.checks_store(args[2].ty, &args[0]) {
                     out.push(("java.lang.ArrayStoreException", "this call of the library", true, x.id));
                 }
             }
@@ -988,6 +992,12 @@ pub(super) fn runtime_failures(
         if !facts.in_bounds.contains(&x.id) && !row {
             out.push((INDEX, "this array access", true, x.id));
         }
+    }
+    // A store into an `Object[]` that may be a covariant array, which cannot hold every object.
+    if let ExprKind::Assign { op: None, target: Place::Index(array, _), value } = &x.kind
+        && class.checks_store(array.ty, value)
+    {
+        out.push(("java.lang.ArrayStoreException", "this array store", true, x.id));
     }
     if let ExprKind::Assign { target: Place::Field { object, .. }, .. }
     | ExprKind::IncDec { target: Place::Field { object, .. }, .. } = &x.kind

@@ -8,13 +8,54 @@ use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// `System.arraycopy(src, src_pos, dest, dest_pos, length)` between shared arrays. When `src`
-/// and `dest` are the same array the copy behaves as if it went through a temporary array.
+/// and `dest` are the same array the copy behaves as if it went through a temporary array. Into a
+/// covariant array (`crate::ElementClass`) of another class than `src`'s, each element is checked
+/// as it is stored.
 pub fn arraycopy<T: Clone, A: Elements<T>>(src: &A, src_pos: i32, dest: &A, dest_pos: i32, length: i32) {
+    if let Some(class) = checked_destination(src, dest) {
+        return checked_copy(src, src_pos, dest, dest_pos, length, class)
+            .unwrap_or_else(|e| crate::throw_exception(e));
+    }
     if src.address() == dest.address() {
         copy_within(&mut dest.items_mut(), src_pos, dest_pos, length);
     } else {
         copy_slice(&src.items(), src_pos, &mut dest.items_mut(), dest_pos, length);
     }
+}
+
+/// The class of `dest` where it is a covariant array that a copy from `src` must check: `src` is
+/// not of the same class.
+fn checked_destination<'a, T, A: Elements<T>>(src: &A, dest: &'a A) -> Option<&'a crate::ElementClass<T>> {
+    let class = dest.element_class()?;
+    let same = src.element_class().is_some_and(|s| s.element == class.element);
+    (!same).then_some(class)
+}
+
+/// `arraycopy` into a covariant array of another class than `src`'s: the elements up to the
+/// first that `dest` cannot hold are stored, and that one throws HotSpot's
+/// `ArrayStoreException`.
+fn checked_copy<T: Clone, A: Elements<T>>(
+    src: &A,
+    src_pos: i32,
+    dest: &A,
+    dest_pos: i32,
+    length: i32,
+    class: &crate::ElementClass<T>,
+) -> Result<(), Exception> {
+    let (from, to, n) = copy_bounds::<T>(src.items().len(), src_pos, dest.items().len(), dest_pos, length)
+        .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
+    let items: Vec<T> = src.items()[from..from + n].to_vec();
+    let fits = items.iter().take_while(|v| class.refuses(v).is_none()).count();
+    dest.items_mut()[to..to + fits].clone_from_slice(&items[..fits]);
+    if fits < n {
+        let source = src.element_class().map_or("java.lang.Object", |c| c.element);
+        let message = format!(
+            "arraycopy: element type mismatch: can not cast one of the elements of {source}[] to the type of the destination array, {}",
+            class.element
+        );
+        return Err(Exception::new("java.lang.ArrayStoreException", message));
+    }
+    Ok(())
 }
 
 /// `System.arraycopy` from one array to a different one, either of which may be a plain array.
@@ -107,6 +148,9 @@ pub fn try_arraycopy<T: Clone, A: Elements<T>>(
     dest_pos: i32,
     length: i32,
 ) -> Result<(), Exception> {
+    if let Some(class) = checked_destination(src, dest) {
+        return checked_copy(src, src_pos, dest, dest_pos, length, class);
+    }
     let (src_len, dest_len) = (src.items().len(), dest.items().len());
     try_bounds::<T>(src_len, src_pos, dest_len, dest_pos, length)?;
     arraycopy(src, src_pos, dest, dest_pos, length);

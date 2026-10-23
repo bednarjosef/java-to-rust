@@ -140,6 +140,14 @@ impl<'a, T: Unlink<'a> + ?Sized> Unlink<'a> for Locked<T> {
     }
 }
 
+/// An array, through its cell.
+impl<'a, C: Unlink<'a>, T> Unlink<'a> for crate::ArrayData<C, T> {
+    #[inline]
+    fn unlink(&mut self, chain: &mut Chain<'a>) {
+        self.items_mut_unique().unlink(chain);
+    }
+}
+
 /// The elements of an array.
 impl<'a, T: Link<'a>> Unlink<'a> for Vec<T> {
     fn unlink(&mut self, chain: &mut Chain<'a>) {

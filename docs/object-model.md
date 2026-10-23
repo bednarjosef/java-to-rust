@@ -528,11 +528,34 @@ array types of references that meet (an argument, an assignment, a return, a cas
 for an array of a type variable, an array passed for `Object...`) are each an `Object[]`
 everywhere in the program: lowering notes each such type and the program is lowered again
 (`real_generics::retry`). Element reads get the checked cast back, a for-each casts each element,
-and a store converts to `Object`. Every other array keeps its exact type. Such an array does not
-remember its element class, so:
+and a store converts to `Object`. Every other array keeps its exact type.
 
-- storing an object of another class in it does not throw `ArrayStoreException`, and its
-  `getClass()` is `Object[]`'s;
+Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle
+next to its elements; every other array carries `None`, one word). Lowering notes the class of
+each array the code makes where it is an `Object[]` (`Class::element_classes`): a `new String[n]`
+or `{a, b}`, and an `Arrays.copyOf` or `copyOfRange` into a class literal, or into a class held in
+a variable, which is taken as `Object[]`. The `String[]`s that the runtime makes as `Object[]`s
+(`split`, `main`'s arguments) carry `String[]`. A clone or a copy without a class keeps its
+source's class. So:
+
+- a store into an `Object[]` (`java::checked_set`, `Class::checks_store`) checks the index, then
+  whether the array can hold the object, by the names of the object's class and of every class
+  and interface above it: an object of another class throws `ArrayStoreException` with its class
+  name, as HotSpot's does. A store into an array that carries no class costs one test of the
+  handle more than another store;
+- `System.arraycopy` into an array that carries another class than the source's checks each
+  element, and stores those before the first that fails, which throws HotSpot's
+  `ArrayStoreException` ("arraycopy: element type mismatch: ...");
+- `getClass()` of an `Object[]` (`java::array_class`), as a value or as an `Object`, is the class
+  it carries.
+
+An array of arrays (`String[][]` as an `Object[][]`) carries no class, nor does an array that a
+method keeps to itself as a plain `Vec` (`analysis::arrays`), an array that
+`Array.newInstance(a.getClass().getComponentType(), n)` makes, or an enum's `values()` as an
+`Object[]`: storing an object of another class in one of them does not throw, and its `getClass()`
+is `Object[]`'s. `instanceof String[]` and a cast to `String[]` of an `Object` do not look at the
+class an array carries. Also:
+
 - a `String[]` that is an `Object[]` is copied where the runtime's string builtins take or make
   one (`Builtin::StringArrayOf`, `Builtin::ObjectArrayOf`; the copy of a null is null, so
   `Arrays.equals` of two null fields is `true`), which only matters where the builtin
@@ -687,8 +710,9 @@ A call may run any member of an override group, so the analyses treat the group 
 - Real generics need no trait: a generic whose type variables are used for text, `equals`,
   `hashCode`, a bound, a cast or an array stays erased. Traits for interfaces used as bounds and
   per-instantiation enum variants (`Shape::BoxOfInteger`) are not built.
-- Covariant arrays do not keep their element class (no `ArrayStoreException`, `getClass()` is
-  `Object[]`'s).
+- Arrays of arrays, plain arrays and the arrays that `Array.newInstance` and `values()` make as
+  `Object[]`s do not carry their class (1.11, covariant arrays), and `instanceof` and casts
+  of an array as an `Object` do not look at the class an array carries.
 - `Number.byteValue()` or `shortValue()` overridden by a program class, `CharSequence`'s methods
   beyond those listed in 1.9, and other `java.lang.Enum` methods implementing an interface method
   are rejected.

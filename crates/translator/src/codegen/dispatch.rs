@@ -2455,6 +2455,10 @@ impl<'a> Gen<'a> {
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
             self.match_arms(t, variants, &|g: &mut Self, c| match need {
+                // An `Object[]` that may be a covariant array, which carries its class.
+                Need::RuntimeClass(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
+                    (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
+                }
                 Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
                 Need::RuntimeTypeNames(_) => (g.names_list(c), false),

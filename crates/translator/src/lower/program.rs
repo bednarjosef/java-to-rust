@@ -273,6 +273,7 @@ fn lower_into<'t>(
         shared_strings: false,
         module_labels: module_labels(reach),
         thread_statics: None,
+        element_classes: lowering.element_classes.take(),
     };
     Ok((class, lowering.real.clone(), failed))
 }

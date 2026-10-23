@@ -24,8 +24,11 @@
 //! to the enum, an `Option` of it where the element may be null, as any enum that may be null is
 //! (`analysis::nullness`).
 //!
-//! Such an array does not remember its element class: storing an object of another class in it
-//! does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s.
+//! Where the code makes such an array (`new String[n]`, `{a, b}`, `Arrays.copyOf` into a class
+//! literal), the array carries the class Java makes it of (`Class::element_classes`,
+//! `java::ElementClass`): a store into an `Object[]` of an object the array cannot hold throws
+//! `ArrayStoreException` (`Class::checks_store`), and its `getClass()` is its own class. An
+//! array of arrays (`String[][]` as an `Object[][]`) carries no class.
 
 use super::*;
 use std::rc::Rc;
@@ -137,6 +140,59 @@ impl<'t> Lowering<'t> {
         }
         let made = self.synth(kind, node.pos(), Type::array(Type::String));
         ExprKind::Builtin(Builtin::ObjectArrayOf, vec![made])
+    }
+
+    /// Notes the class of the array that `x`, lowered from `node`, makes where the translation
+    /// holds it as an `Object[]` though Java makes it of a narrower class of objects
+    /// (`Class::element_classes`): a `new` of an array, or an `Arrays.copyOf` or `copyOfRange`
+    /// into a class, which is the literal's or, for a class held in a variable, `Object[]`, as
+    /// the translation cannot tell it (it is not the source's: `Arrays.copyOf(a, n, Object[].class)`
+    /// of a `String[]` is an `Object[]`).
+    pub(super) fn note_element_class(&self, node: Node<'t>, x: &Expr) -> Result<(), Error> {
+        if self.covariant.known.is_empty() {
+            return Ok(());
+        }
+        let (java, made) = match node.kind() {
+            "NEW_ARRAY" => (node.java_type().to_string(), x),
+            "METHOD_INVOCATION" => {
+                let mut made = x;
+                while let ExprKind::Cast(_, inner) = &made.kind {
+                    made = inner;
+                }
+                let copy = matches!(
+                    made.kind,
+                    ExprKind::Builtin(Builtin::ArraysCopyOf | Builtin::Arrays(ArraysOp::CopyOfRange), _)
+                );
+                let nodes: Vec<Node> = node.list("arguments").collect();
+                if !copy
+                    || !matches!(nodes.len(), 3 | 4)
+                    || nodes.len() == 3 && !node.symbol().is_some_and(|s| s.name == "copyOf")
+                {
+                    return Ok(());
+                }
+                let mut class = nodes[nodes.len() - 1];
+                while matches!(class.kind(), "TYPE_CAST" | "PARENTHESIZED") {
+                    class = class.child("expression")?;
+                }
+                let literal = class.kind() == "MEMBER_SELECT" && class.str("identifier") == "class";
+                let java = match literal {
+                    true => class.child("expression")?.java_type().to_string(),
+                    false => "java.lang.Object[]".to_string(),
+                };
+                (java, made)
+            }
+            _ => return Ok(()),
+        };
+        let Some(element) = java.strip_suffix("[]") else { return Ok(()) };
+        if element.ends_with("[]") || !Self::is_object_array(made.ty) {
+            return Ok(());
+        }
+        let exact = Type::array(self.ty(node, element)?);
+        if !Self::of_objects(exact.element()) || exact == made.ty && node.kind() == "NEW_ARRAY" {
+            return Ok(());
+        }
+        self.element_classes.borrow_mut().insert(made.id, exact);
+        Ok(())
     }
 
     /// Whether `ty` is `Object[]`.

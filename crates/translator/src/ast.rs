@@ -310,6 +310,22 @@ pub struct Class {
     /// initialization it may run (`analysis::live_methods`); `None` when that is not known, and
     /// then every static may be. Only in a program that starts a thread.
     pub thread_statics: Option<std::collections::HashSet<usize>>,
+    /// The Java class of each array that the code makes where the translation holds it as an
+    /// `Object[]` though Java makes it as an array of a narrower class (`lower::covariant`), by
+    /// the expression that makes it: `String[]` for a `new String[n]`, and `Object[]` for a copy
+    /// into a class that is not the source's (`Arrays.copyOf(a, n, Object[].class)`).
+    pub element_classes: HashMap<ExprId, Type>,
+}
+
+impl Class {
+    /// Whether `a[i] = v` into an array of type `array` checks that the array can hold `v`: the
+    /// program makes covariant arrays (`element_classes`), `array` is an `Object[]`, which may be
+    /// one, and `v` is not null.
+    pub fn checks_store(&self, array: Type, value: &Expr) -> bool {
+        !self.element_classes.is_empty()
+            && matches!(array, Type::Array(element) if *element == Type::class(OBJECT))
+            && !matches!(value.kind, ExprKind::Null)
+    }
 }
 
 /// An assumption of the translation at a place of the program: the method (index into

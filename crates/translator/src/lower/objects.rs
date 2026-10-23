@@ -82,6 +82,7 @@ impl<'t> Lowering<'t> {
             ends_rejected: false,
             stubbed: Default::default(),
             notes: Default::default(),
+            element_classes: Default::default(),
             annotation_classes: Default::default(),
             nested_annotation_types: Default::default(),
             body_methods: Default::default(),

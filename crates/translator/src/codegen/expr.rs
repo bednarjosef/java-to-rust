@@ -250,6 +250,10 @@ impl<'a> Gen<'a> {
         if super::shared_strings() && e.ty == Type::String && !outside_catch && self.discarded != Some(e.id) {
             return self.shared_made(e, code);
         }
+        // A covariant array carries its class (`lower::covariant`).
+        if !outside_catch && let Some(class) = self.made_class(e) {
+            return self.with_element_class(class, code);
+        }
         code
     }
 
