@@ -250,6 +250,10 @@ impl<'a> Gen<'a> {
         if super::shared_strings() && e.ty == Type::String && !outside_catch && self.discarded != Some(e.id) {
             return self.shared_made(e, code);
         }
+        // A covariant array carries its class (`lower::covariant`).
+        if !outside_catch && let Some(class) = self.made_class(e) {
+            return self.with_element_class(class, code);
+        }
         code
     }
 
@@ -860,7 +864,7 @@ impl<'a> Gen<'a> {
             Builtin::StringSame => self.string_same(args),
             Builtin::Kept(op) => self.kept(op, args),
             Builtin::ValueOf => self.value_of(args),
-            Builtin::NullChecked => self.null_checked(args),
+            Builtin::NullChecked => self.null_checked(args, ty),
             Builtin::Unmatched => self.unmatched(args),
             Builtin::ObjectsHashCode => self.objects_hash_code(args),
             Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),

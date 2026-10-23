@@ -168,8 +168,9 @@ Design: [object-model.md](object-model.md).
 - **Generics** translate erased, as javac compiles them, with javac's casts and bridge methods.
   A generic class or method that only stores, returns and passes its type variables is a Rust
   generic instead (`struct Stack<T>`, `fn choose<T: Clone>`), with no casts.
-- An array of references used as an `Object[]` is an `Object[]` throughout, without its element
-  class, so storing a wrong class does not throw `ArrayStoreException`.
+- An array of references used as an `Object[]` is an `Object[]` throughout. Where the code makes
+  one, it carries the class it was made of, so storing an object of another class throws
+  `ArrayStoreException` and `getClass()` is its own; an array of arrays carries none.
 
 ## Enums and records
 

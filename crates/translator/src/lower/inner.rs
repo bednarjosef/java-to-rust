@@ -68,7 +68,7 @@ pub(super) struct Captured<'t> {
 }
 
 /// The constructors' parameter that passes the enclosing instance.
-pub(super) const OUTER: &str = "outer";
+pub(crate) const OUTER: &str = "outer";
 
 impl<'t> Lowering<'t> {
     /// Declares the inner (non-static member) class `member` of class `outer`.
@@ -223,11 +223,17 @@ impl<'t> Lowering<'t> {
     /// The captures of class `t`, as the declaration lists them.
     pub(super) fn captures_of(&self, t: usize) -> Result<Vec<Capture>, Error> {
         let Some(nested) = self.nesting(t) else { return Ok(Vec::new()) };
+        let receiver = self.lambda_of_type(t).and_then(|l| l.receiver).map(|(name, _)| name);
         nested
             .captures
             .iter()
             .map(|c| {
-                Ok(Capture { name: c.name.to_string(), field: c.field.clone(), ty: self.capture_type(c)? })
+                Ok(Capture {
+                    name: c.name.to_string(),
+                    field: c.field.clone(),
+                    ty: self.capture_type(c)?,
+                    checked: receiver == Some(c.name),
+                })
             })
             .collect()
     }
@@ -242,7 +248,10 @@ impl<'t> Lowering<'t> {
             Some(n) if n.kind == NestKind::Local => Origin::Local { method: n.method, binary },
             Some(n) if n.kind == NestKind::Anonymous => Origin::Anonymous { method: n.method, binary },
             Some(n) if n.kind == NestKind::Lambda => {
-                let binary = format!("{}$$Lambda", self.types[self.lambda_holder(t)].javac);
+                // Named after the binary name of the class that holds it: `p.Outer$Inner$$Lambda`.
+                let holder = self.lambda_holder(t);
+                let holder = self.binary_name(holder).unwrap_or_else(|| self.types[holder].javac.clone());
+                let binary = format!("{holder}$$Lambda");
                 Origin::Lambda { method: n.method, binary }
             }
             // A hoisted type's method is not kept: nothing reads it.
@@ -299,7 +308,7 @@ impl<'t> Lowering<'t> {
 
     /// The statements that start the body of a constructor of class `t` that does not call
     /// another one: the synthetic fields set from the parameters, then the field initializers when
-    /// they move here (`moves_initializers`), in order.
+    /// they move here (`moves_initializers`), in order, which read those fields.
     pub(super) fn synthetic_statements(&self, t: usize) -> Result<Vec<Stmt>, Error> {
         let Some(nested) = self.nesting(t) else { return Ok(Vec::new()) };
         let pos = self.types[t].node.pos();
@@ -329,8 +338,10 @@ impl<'t> Lowering<'t> {
                     && self.keeps(*m, javac)
             }) {
                 let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
-                let value = self.convert(self.expr(member.child("initializer")?)?, ty);
-                out.push(assign(member.str("name"), value));
+                let initializing = self.initializing.replace(true);
+                let value = member.child("initializer").and_then(|i| self.expr(i));
+                self.initializing.set(initializing);
+                out.push(assign(member.str("name"), self.convert(value?, ty)));
             }
         }
         Ok(out)

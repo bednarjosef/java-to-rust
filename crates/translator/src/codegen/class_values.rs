@@ -53,9 +53,71 @@ impl<'a> Gen<'a> {
                 let c = self.struct_class(object).expect("an object has a class");
                 self.decl_class(c)
             }
+            // An `Object[]` that may be a covariant array, which carries its class.
+            ty if self.carries_class(ty) => {
+                let exact = self.type_class(ty);
+                let handle = self.handle(object);
+                return Code::atom(format!("{}({handle}, || {exact})", self.runtime("array_class")));
+            }
             ty => self.type_class(ty),
         };
         self.after_object(object, &class)
+    }
+
+    /// Whether an array of type `ty` may carry its class: an `Object[]` in a program that makes
+    /// covariant arrays (`Class::element_classes`).
+    pub(super) fn carries_class(&self, ty: Type) -> bool {
+        !self.class.element_classes.is_empty() && ty == Type::array(Type::class(OBJECT))
+    }
+
+    /// The Java class of the array that `e` makes, where the translation holds it as an
+    /// `Object[]` and the array carries the class (`Class::element_classes`): a new array or a
+    /// copy that lowering noted, and the `String[]`s that the runtime makes as `Object[]`s
+    /// (`split`, `main`'s arguments).
+    pub(super) fn made_class(&self, e: &Expr) -> Option<Type> {
+        if self.class.element_classes.is_empty() || e.ty != Type::array(Type::class(OBJECT)) {
+            return None;
+        }
+        match &e.kind {
+            ExprKind::NewArray(_)
+            | ExprKind::ArrayLit(_)
+            | ExprKind::Builtin(Builtin::ArraysCopyOf | Builtin::Arrays(ArraysOp::CopyOfRange), _) => {
+                self.class.element_classes.get(&e.id).copied()
+            }
+            ExprKind::Builtin(Builtin::ObjectArrayOf | Builtin::MainArgs, _) => {
+                Some(Type::array(Type::String))
+            }
+            _ => None,
+        }
+    }
+
+    /// `code`, a new `Object[]`, as an array of class `class` (`java::tagged`): one that carries
+    /// `String[]`, or none for `Object[]`.
+    pub(super) fn with_element_class(&mut self, class: Type, code: Code) -> Code {
+        let tagged = self.runtime("tagged");
+        let object = Type::class(OBJECT);
+        if class == Type::array(object) {
+            return Code::atom(format!("{tagged}({}, None)", code.text));
+        }
+        let Some(t) = self.enum_type(object) else { return code };
+        self.need(Need::RuntimeTypeNames(t));
+        let names = match self.nullable_element(object) {
+            true => "|v| v.as_ref().map(|o| o.runtime_type_names())",
+            false => "|v| Some(v.runtime_type_names())",
+        };
+        let element = class.element();
+        let name = match self.class.type_of(element) {
+            Some(c) => self.decl_names(c).swap_remove(0),
+            None => self.type_names(element).swap_remove(0),
+        };
+        let item = self.element_ty_name(object);
+        let made = self.type_class(class);
+        let element_class = self.runtime("ElementClass");
+        Code::atom(format!(
+            "{tagged}({}, Some({element_class}::<{item}>::new(|| {made}, {}, {names})))",
+            code.text,
+            rust_string(&name)
+        ))
     }
 
     /// `ComparableClassFor(x)`: `Some` of the class of `x` where that class says it implements

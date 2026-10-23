@@ -25,7 +25,12 @@ impl<'t> Lowering<'t> {
         let pos = node.pos();
         let rejected = || unsupported(node, "for-each over collections");
         let Some(iterator) = self.no_arg_method(collection.ty, "iterator") else { return rejected() };
-        let start = self.call_of(collection, iterator, pos)?;
+        // The calls start where the collection does, as javac's do, which the messages of their
+        // `NullPointerException`s name them by; so does javac's own local for the iterator. That
+        // is where its parentheses start, if it has any.
+        let at = node.child("expression")?.pos();
+        self.iterators.borrow_mut().insert((self.types[self.current.get()].name.clone(), pos), at);
+        let start = self.call_of(collection, iterator, at)?;
         let it_ty = start.ty;
         let (Some(has_next), Some(next)) =
             (self.no_arg_method(it_ty, "hasNext"), self.no_arg_method(it_ty, "next"))
@@ -34,8 +39,8 @@ impl<'t> Lowering<'t> {
         };
         let it = self.fresh_name("it");
         let var = || self.synth(ExprKind::Var(it.clone()), pos, it_ty);
-        let cond = self.call_of(var(), has_next, pos)?;
-        let element = self.call_of(var(), next, pos)?;
+        let cond = self.call_of(var(), has_next, at)?;
+        let element = self.call_of(var(), next, at)?;
         let variable = node.child("variable")?;
         let ty = self.ty(variable, variable.symbol().map_or("", |s| s.ty))?;
         // An element of a primitive type is unboxed from its box, as javac casts to it.

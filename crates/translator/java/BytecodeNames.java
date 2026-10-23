@@ -27,34 +27,44 @@ import javax.tools.*;
  * compiled without {@code -g} decides: compiles the program as {@code javac} does, code
  * generation included, and prints what javac's code generator gave its code.
  *
- * <p>Usage: {@code java BytecodeNames FILE...}, or the source on standard input for one file.
+ * <p>Usage: {@code java BytecodeNames [--patch-module MODULE=ROOT]... FILE...}, or the source on
+ * standard input for one file. The files under the root of a module that the JDK has too, such
+ * as javac's {@code jdk.compiler}, compile as part of that module, as the JDK compiles them.
  * Prints one line, {@code {"java":"26","entries":[[CLASS,LINE,COLUMN,KIND,NAME,TEXT],...]}}:
  * the Java version, then for each use in the source (by the outermost class it is in, and the
  * line and column where it starts) of
  * <ul>
  * <li>{@code local}: a local variable or parameter named {@code NAME}, {@code TEXT} being how the
  * JVM names it, {@code <parameterN>} (the Nth parameter of the method of the class file, which
- * for a lambda's body starts with the locals it captures) or {@code <localN>} (its slot); not
- * javac's own variables, whose names have a {@code $};
+ * for a lambda's body starts with the locals it captures) or {@code <localN>} (its slot), or in a
+ * module of the JDK, which the JDK compiles with {@code -g}, its name; not javac's own variables,
+ * whose names have a {@code $};
  * <li>{@code temp}: a variable that javac adds for a statement, holding the value of the
- * expression that starts there ({@code arr$}, the array of a for-each loop; {@code s$}, the
- * string of a switch), named as a local;
+ * expression that starts there ({@code arr$}, the array of a for-each loop; {@code i$}, its
+ * iterator, at the start of the collection; {@code s$}, the string of a switch), named as a
+ * local;
  * <li>{@code call}: a call of the method {@code NAME}, {@code TEXT} being the method as the class
  * file refers to it, {@code Main$Box.size()};
  * <li>{@code static}: a static field, {@code Main$Box.shared}.
  * </ul>
- * {@code TEXT} is {@code null} where the JVM's name is not certain: a variable that javac's code
- * generator writes more than once (in a {@code finally} block, which it copies to every exit,
- * or an instance initializer, copied into every constructor) or that it gives no slot, and a
- * parameter that the method assigns, which the JVM names as a local where an assignment may
- * have run.
+ * A variable of a {@code finally} block, which the code generator copies to every exit of its
+ * {@code try}, has two slots where the copies differ: U+0001 {@code <localN>} U+0002
+ * {@code <localM>} U+0003, its slot in the copies that run once the {@code try} completed, then
+ * its slot in the copy for an exception, which keeps the exception in a slot of its own first
+ * ({@code handlerShift}). {@code TEXT} is {@code null} where the JVM's name is not certain: a
+ * variable of a {@code finally} block whose copies for a completed {@code try} differ (a
+ * {@code return} or a jump out of a block with locals of its own) or of a {@code finally} block in
+ * another, a variable of an instance initializer, copied into every constructor, one that the
+ * code generator gives no slot, and a parameter that the method assigns, read in a
+ * {@code finally} block whose copies name it differently. Such a parameter is a local where the
+ * JVM's walk of the bytecode saw it written ({@link ParameterWrites}).
  */
 public class BytecodeNames {
     public static void main(String[] args) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         StandardJavaFileManager standard = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
-        // The class files are not needed: only what the code generator decided on the way.
+        // The class files stay in memory, for the local variable tables of `finally` blocks.
         JavaFileManager discarding = new ForwardingJavaFileManager<>(standard) {
             @Override
             public JavaFileObject getJavaFileForOutput(Location location, String className, JavaFileObject.Kind kind,
@@ -62,17 +72,33 @@ public class BytecodeNames {
                 return new SimpleJavaFileObject(URI.create("discarded:///" + className.replace('.', '/') + kind.extension), kind) {
                     @Override
                     public OutputStream openOutputStream() {
-                        return OutputStream.nullOutputStream();
+                        return new ByteArrayOutputStream() {
+                            @Override
+                            public void close() {
+                                CLASS_FILES.put(className, toByteArray());
+                            }
+                        };
                     }
                 };
             }
         };
-        Iterable<? extends JavaFileObject> sources;
-        if (args.length > 0) {
-            List<File> files = new ArrayList<>();
-            for (String a : args) {
-                files.add(new File(a));
+        // `-g` adds the tables of the locals, which do not change their slots.
+        List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-nowarn", "-g"));
+        List<File> files = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("--patch-module") && i + 1 < args.length) {
+                // A root of the JDK's own module, such as javac's `jdk.compiler`: its packages
+                // compile only as part of that module.
+                String patch = args[++i];
+                if (java.lang.module.ModuleFinder.ofSystem().find(patch.split("=", 2)[0]).isPresent()) {
+                    options.addAll(List.of("--patch-module", patch));
+                }
+            } else {
+                files.add(new File(args[i]));
             }
+        }
+        Iterable<? extends JavaFileObject> sources;
+        if (!files.isEmpty()) {
             sources = standard.getJavaFileObjectsFromFiles(files);
         } else {
             String source = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
@@ -88,8 +114,7 @@ public class BytecodeNames {
                 }
             });
         }
-        JavacTaskImpl task = (JavacTaskImpl) compiler.getTask(null, discarding, diagnostics,
-                List.of("-proc:none", "-Xlint:none", "-nowarn"), null, sources);
+        JavacTaskImpl task = (JavacTaskImpl) compiler.getTask(null, discarding, diagnostics, options, null, sources);
         BytecodeNames names = new BytecodeNames(task);
         task.addTaskListener(names.listener());
         task.generate();
@@ -137,6 +162,9 @@ public class BytecodeNames {
         }
         out.append('"');
     }
+
+    /** The class files that the code generator wrote, by binary name. */
+    private static final Map<String, byte[]> CLASS_FILES = new HashMap<>();
 
     private final Types types;
     private final Gen gen;
@@ -223,13 +251,89 @@ public class BytecodeNames {
         return new long[] {unit.getLineMap().getLineNumber(at), unit.getLineMap().getColumnNumber(at)};
     }
 
+    /**
+     * How many slots further the variables of {@code finalizer}, a {@code finally} block of member
+     * {@code def} of class {@code c} declaring {@code declared}, are in the copy that the code
+     * generator writes for an exception than in the copies it writes where the {@code try}
+     * completes; {@code null} where the latter do not agree (a {@code return} or a jump out of a
+     * block of the {@code try}, with more locals in use). The copy for an exception is the last
+     * the code generator writes, and the one whose slots the variables keep. The local variable
+     * table of the class file (compiled with {@code -g}) has each copy of a named variable of the
+     * block, apart by where it starts.
+     */
+    private static Integer handlerShift(JCClassDecl c, JCTree def, JCBlock finalizer, List<VarSymbol> declared,
+            JCCompilationUnit unit) {
+        byte[] bytes = CLASS_FILES.get(c.sym.flatname.toString());
+        VarSymbol named = declared.stream()
+            .filter(v -> v.adr >= 0 && !v.name.toString().contains("$"))
+            .findFirst()
+            .orElse(null);
+        if (bytes == null || named == null || !(def instanceof JCMethodDecl method)) {
+            return null;
+        }
+        long from = position(unit, TreeInfo.getStartPos(finalizer))[0];
+        long to = position(unit, TreeInfo.endPos(finalizer))[0];
+        java.lang.classfile.ClassModel model = java.lang.classfile.ClassFile.of().parse(bytes);
+        for (java.lang.classfile.MethodModel m : model.methods()) {
+            if (!m.methodName().equalsString(method.sym.name.toString())) {
+                continue;
+            }
+            java.lang.classfile.attribute.CodeAttribute code =
+                m.findAttribute(java.lang.classfile.Attributes.code()).orElse(null);
+            if (code == null) {
+                continue;
+            }
+            List<java.lang.classfile.attribute.LineNumberInfo> lines = code
+                .findAttribute(java.lang.classfile.Attributes.lineNumberTable())
+                .map(java.lang.classfile.attribute.LineNumberTableAttribute::lineNumbers)
+                .orElse(List.of());
+            List<java.lang.classfile.attribute.LocalVariableInfo> slots = new ArrayList<>();
+            for (java.lang.classfile.attribute.LocalVariableInfo v : code
+                    .findAttribute(java.lang.classfile.Attributes.localVariableTable())
+                    .map(java.lang.classfile.attribute.LocalVariableTableAttribute::localVariables)
+                    .orElse(List.of())) {
+                // The line of the last entry of the line table that starts before the variable.
+                int line = -1;
+                int at = -1;
+                for (java.lang.classfile.attribute.LineNumberInfo l : lines) {
+                    if (l.startPc() <= v.startPc() && l.startPc() >= at) {
+                        at = l.startPc();
+                        line = l.lineNumber();
+                    }
+                }
+                if (v.name().equalsString(named.name.toString()) && line >= from && line <= to) {
+                    slots.add(v);
+                }
+            }
+            slots.sort(Comparator.comparingInt(java.lang.classfile.attribute.LocalVariableInfo::startPc));
+            if (slots.size() < 2 || slots.get(slots.size() - 1).slot() != named.adr) {
+                continue;
+            }
+            int normal = slots.get(0).slot();
+            for (int i = 1; i < slots.size() - 1; i++) {
+                if (slots.get(i).slot() != normal) {
+                    return null;
+                }
+            }
+            int shift = named.adr - normal;
+            return shift >= 0 ? shift : null;
+        }
+        return null;
+    }
+
     /** The entries of the members of class {@code c}, lowered to {@code defs} and generated. */
     private void report(JCClassDecl c, com.sun.tools.javac.util.List<JCTree> defs, JCCompilationUnit unit) {
         String outermost = c.sym.outermostClass().flatname.toString();
+        // A class of one of the JDK's modules (`--patch-module`), such as javac's.
+        boolean jdkModule = !c.sym.packge().modle.isUnnamed();
         for (JCTree def : defs) {
             List<VarSymbol> params = new ArrayList<>();
-            // The variables whose slots are not certain.
+            // The variables whose slots are not certain, and the parameters that the method assigns.
             Set<Symbol> uncertain = new HashSet<>();
+            // The slots of the variables of a `finally` block in the copies that run after the
+            // `try` completes and in the one that runs for an exception (see `handlerShift`).
+            Map<Symbol, int[]> copies = new HashMap<>();
+            Set<Symbol> assigned = new HashSet<>();
             JCTree body;
             if (def instanceof JCMethodDecl m && m.body != null) {
                 body = m.body;
@@ -254,7 +358,7 @@ public class BytecodeNames {
             new TreeScanner() {
                 private void assigned(JCTree target) {
                     if (TreeInfo.skipParens((JCExpression) target) instanceof JCIdent id && params.contains(id.sym)) {
-                        uncertain.add(id.sym);
+                        assigned.add(id.sym);
                     }
                 }
 
@@ -278,27 +382,73 @@ public class BytecodeNames {
                     super.visitUnary(t);
                 }
 
+                /** How many `finally` blocks the scan is in. */
+                private int finallies;
+
                 @Override
                 public void visitTry(JCTry t) {
-                    super.visitTry(t);
+                    scan(t.resources);
+                    scan(t.body);
+                    scan(t.catchers);
                     if (t.finalizer != null) {
+                        // Its variables, but those of a `finally` in it, which is copied more.
+                        List<VarSymbol> declared = new ArrayList<>();
                         new TreeScanner() {
+                            private boolean nested;
+
                             @Override
                             public void visitVarDef(JCVariableDecl v) {
                                 uncertain.add(v.sym);
+                                if (!nested) {
+                                    declared.add(v.sym);
+                                }
                                 super.visitVarDef(v);
                             }
+
+                            @Override
+                            public void visitTry(JCTry inner) {
+                                scan(inner.resources);
+                                scan(inner.body);
+                                scan(inner.catchers);
+                                boolean outer = nested;
+                                nested = true;
+                                scan(inner.finalizer);
+                                nested = outer;
+                            }
                         }.scan(t.finalizer);
+                        // The copies of a `finally` in another one are not told apart.
+                        if (finallies == 0) {
+                            Integer shift = handlerShift(c, def, t.finalizer, declared, unit);
+                            for (VarSymbol v : declared) {
+                                if (shift != null && v.adr >= shift) {
+                                    copies.put(v, new int[] {v.adr - shift, v.adr});
+                                }
+                            }
+                        }
+                        finallies++;
+                        scan(t.finalizer);
+                        finallies--;
                     }
                 }
             }.scan(body);
+            ParameterWrites writes = new ParameterWrites(assigned);
+            if (!assigned.isEmpty()) {
+                writes.scan(body);
+            }
             new TreeScanner() {
+                /** Where the source has the variables that lowering added: where their values start. */
+                private final Map<Symbol, JCTree> temps = new HashMap<>();
+
                 private void entry(JCTree at, String kind, String name, String text) {
+                    if (!starts.containsKey(at) && at instanceof JCIdent id && temps.containsKey(id.sym)) {
+                        at = temps.get(id.sym);
+                    }
                     long[] start = starts.get(at);
                     if (start == null) {
                         // A name that lowering wrote anew, such as a lambda's captured local in
-                        // its body, is where the name it stands for was.
-                        if (!(at instanceof JCIdent)) {
+                        // its body, or a static that it qualifies with its class (an enclosing
+                        // class's, or one imported), is where the name it stands for was.
+                        if (!(at instanceof JCIdent || at instanceof JCFieldAccess && kind.equals("static"))) {
                             return;
                         }
                         start = position(unit, at.pos);
@@ -310,11 +460,39 @@ public class BytecodeNames {
                     entries.put(key, text);
                 }
 
-                private String local(VarSymbol v) {
+                /** {@code e} as the source has it: without the casts that erasure added. */
+                private JCTree written(JCTree e) {
+                    while (!starts.containsKey(e) && (e instanceof JCTypeCast || e instanceof JCParens)) {
+                        e = e instanceof JCTypeCast cast ? cast.expr : ((JCParens) e).expr;
+                    }
+                    return e;
+                }
+
+                /** How the JVM names variable {@code v} where {@code use} reads it. */
+                private String local(VarSymbol v, JCIdent use) {
+                    // A variable of a `finally` block: the slot of its copies that run once the
+                    // `try` completed and that of the copy for an exception, as
+                    // U+0001 `<localN>` U+0002 `<localM>` U+0003.
+                    int[] slots = copies.get(v);
+                    if (slots != null) {
+                        return slots[0] == slots[1]
+                            ? "<local" + slots[0] + ">"
+                            : "\u0001<local" + slots[0] + ">\u0002<local" + slots[1] + ">\u0003";
+                    }
                     if (v.adr < 0 || uncertain.contains(v)) {
                         return null;
                     }
                     int index = params.indexOf(v);
+                    if (index >= 0 && assigned.contains(v)) {
+                        // Each copy of the code that reads it (a `finally` block's) must agree.
+                        Set<Boolean> written = writes.uses.get(use);
+                        if (written == null || written.size() != 1) {
+                            return null;
+                        }
+                        if (written.contains(true) || v.adr >= ParameterWrites.SLOTS) {
+                            return "<local" + v.adr + ">";
+                        }
+                    }
                     return index >= 0 ? "<parameter" + (index + 1) + ">" : "<local" + v.adr + ">";
                 }
 
@@ -322,8 +500,9 @@ public class BytecodeNames {
                 public void visitIdent(JCIdent t) {
                     // The names with a `$` are javac's own (`arr$`), the temps.
                     if (t.sym instanceof VarSymbol v && v.owner.kind == Kinds.Kind.MTH) {
+                        // The JDK compiles its modules with the names of their locals (`-g`).
                         if (!t.name.toString().contains("$")) {
-                            entry(t, "local", t.name.toString(), local(v));
+                            entry(t, "local", t.name.toString(), jdkModule ? t.name.toString() : local(v, t));
                         }
                     } else if (t.sym instanceof VarSymbol v && v.isStatic() && v.getConstValue() == null) {
                         entry(t, "static", t.name.toString(), member(v, c.sym.type));
@@ -341,9 +520,19 @@ public class BytecodeNames {
 
                 @Override
                 public void visitVarDef(JCVariableDecl t) {
-                    // A variable that lowering added, which the attributed tree does not have.
-                    if (t.sym != null && !starts.containsKey(t) && t.init != null) {
-                        entry(TreeInfo.skipParens(t.init), "temp", t.name.toString().replaceAll("[0-9]", ""), local(t.sym));
+                    // A variable that lowering added, which the attributed tree does not have
+                    // (javac names its own with a `$`; a for-each loop's variable is declared
+                    // anew too, but it is the source's).
+                    if (t.sym != null && !starts.containsKey(t) && t.init != null && t.name.toString().contains("$")) {
+                        // A call that lowering wrote, such as the `iterator()` of a for-each loop
+                        // (`i$`), starts where its receiver does.
+                        JCTree init = TreeInfo.skipParens(t.init);
+                        if (!starts.containsKey(init) && init instanceof JCMethodInvocation call
+                                && call.meth instanceof JCFieldAccess f) {
+                            init = written(f.selected);
+                        }
+                        temps.put(t.sym, init);
+                        entry(init, "temp", t.name.toString().replaceAll("[0-9]", ""), local(t.sym, null));
                     }
                     super.visitVarDef(t);
                 }
@@ -354,12 +543,336 @@ public class BytecodeNames {
                         Type site = t.meth instanceof JCFieldAccess f ? f.selected.type : c.sym.type;
                         // A call that lowering wrote, such as the `iterator()` of a for-each
                         // loop, starts where its receiver does.
-                        JCTree at = starts.containsKey(t) || !(t.meth instanceof JCFieldAccess f) ? t : f.selected;
+                        JCTree at = starts.containsKey(t) || !(t.meth instanceof JCFieldAccess f) ? t : written(f.selected);
                         entry(at, "call", m.name.toString(), member(m, site));
+                        // Calls of one name that start alike, as in a chain
+                        // (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), apart
+                        // by where their first argument starts: `stream@3:30`, `stream@`. Calls
+                        // without one are apart by the class of the receiver too:
+                        // `stream@#java.util.List`.
+                        long[] first = t.args.isEmpty() ? null : starts.get(written(t.args.head));
+                        if (t.args.isEmpty() || first != null) {
+                            String where = first == null ? "" : first[0] + ":" + first[1];
+                            entry(at, "call", m.name + "@" + where, member(m, site));
+                        }
+                        if (t.args.isEmpty() && types.erasure(site).tsym instanceof ClassSymbol receiver) {
+                            entry(at, "call", m.name + "@#" + receiver.flatname, member(m, site));
+                        }
                     }
                     super.visitApply(t);
                 }
             }.scan(body);
+        }
+    }
+
+    /**
+     * Whether the JVM names a parameter that its method assigns as the parameter
+     * ({@code <parameterN>}) or as a local ({@code <localN>}) where the code reads it. HotSpot's
+     * message ({@code ExceptionMessageBuilder}) names it as a local where its slot was written on
+     * a path that runs forward through the bytecode, from the method's start or from the start
+     * of an exception handler (where no slot is written), to the load: it walks the bytecode once
+     * in order, merging what it has seen into each jump's target, and stops at the failing
+     * instruction, so a write that only a jump back brings (a loop's next round) does not count.
+     * This walks the lowered code in the order of javac's code generator ({@code Gen}), with its
+     * jumps: a loop's condition before its body and its step, so the loop is left from the
+     * condition as it was first reached; a {@code finally} block copied to each way out of its
+     * {@code try} and to the handler of any exception.
+     */
+    private static final class ParameterWrites extends TreeScanner {
+        /** HotSpot keeps the writes of the first 64 slots; a later slot counts as written. */
+        static final int SLOTS = 64;
+
+        private final Set<Symbol> params;
+        /** For each read of a parameter, whether its slot was written: both, where copies differ. */
+        final Map<JCIdent, Set<Boolean>> uses = new IdentityHashMap<>();
+        /** The parameters written on the paths that reach here; {@code null} where none does. */
+        private Set<Symbol> state = Set.of();
+        /** What the jumps to each statement's end ({@code break}, {@code yield}) bring. */
+        private final Map<JCTree, Set<Symbol>> exits = new IdentityHashMap<>();
+        /** What the {@code continue}s of each loop bring. */
+        private final Map<JCTree, Set<Symbol>> continues = new IdentityHashMap<>();
+        /** The {@code try}s with a {@code finally} around the code, innermost last. */
+        private final List<JCTry> finalizers = new ArrayList<>();
+        /** How many of {@code finalizers} are around each statement that a jump may leave. */
+        private final Map<JCTree, Integer> depth = new IdentityHashMap<>();
+
+        ParameterWrites(Set<Symbol> params) {
+            this.params = params;
+        }
+
+        private static Set<Symbol> union(Set<Symbol> a, Set<Symbol> b) {
+            if (a == null) {
+                return b;
+            }
+            if (b == null || a.containsAll(b)) {
+                return a;
+            }
+            Set<Symbol> both = new HashSet<>(a);
+            both.addAll(b);
+            return both;
+        }
+
+        private void write(Symbol param) {
+            if (state != null && !state.contains(param)) {
+                Set<Symbol> next = new HashSet<>(state);
+                next.add(param);
+                state = next;
+            }
+        }
+
+        /** Whether {@code cond} is a constant, which javac's code generator jumps on or not at all. */
+        private static boolean isTrue(JCExpression cond) {
+            return cond == null || cond.type != null && cond.type.isTrue();
+        }
+
+        private static boolean isFalse(JCExpression cond) {
+            return cond != null && cond.type != null && cond.type.isFalse();
+        }
+
+        @Override
+        public void scan(JCTree tree) {
+            // Code that no path reaches is not generated.
+            if (tree != null && state != null) {
+                super.scan(tree);
+            }
+        }
+
+        @Override
+        public void visitClassDef(JCClassDecl t) {
+            // Another class's code.
+        }
+
+        @Override
+        public void visitLambda(JCLambda t) {
+            // Another method's code.
+        }
+
+        @Override
+        public void visitIdent(JCIdent t) {
+            if (state != null && params.contains(t.sym)) {
+                uses.computeIfAbsent(t, k -> new HashSet<>()).add(state.contains(t.sym));
+            }
+        }
+
+        private JCIdent param(JCExpression target) {
+            return TreeInfo.skipParens(target) instanceof JCIdent id && params.contains(id.sym) ? id : null;
+        }
+
+        @Override
+        public void visitAssign(JCAssign t) {
+            JCIdent target = param(t.lhs);
+            if (target == null) {
+                super.visitAssign(t);
+            } else {
+                // The value is computed before it is stored.
+                scan(t.rhs);
+                write(target.sym);
+            }
+        }
+
+        @Override
+        public void visitAssignop(JCAssignOp t) {
+            JCIdent target = param(t.lhs);
+            super.visitAssignop(t);
+            if (target != null) {
+                write(target.sym);
+            }
+        }
+
+        @Override
+        public void visitUnary(JCUnary t) {
+            JCIdent target = t.getTag().isIncOrDecUnaryOp() ? param(t.arg) : null;
+            super.visitUnary(t);
+            if (target != null) {
+                write(target.sym);
+            }
+        }
+
+        @Override
+        public void visitIf(JCIf t) {
+            scan(t.cond);
+            Set<Symbol> start = state, then = null, otherwise = null;
+            if (!isFalse(t.cond)) {
+                scan(t.thenpart);
+                then = state;
+            }
+            if (!isTrue(t.cond)) {
+                state = start;
+                scan(t.elsepart);
+                otherwise = state;
+            }
+            state = union(then, otherwise);
+        }
+
+        @Override
+        public void visitConditional(JCConditional t) {
+            scan(t.cond);
+            Set<Symbol> start = state, then = null, otherwise = null;
+            if (!isFalse(t.cond)) {
+                scan(t.truepart);
+                then = state;
+            }
+            if (!isTrue(t.cond)) {
+                state = start;
+                scan(t.falsepart);
+                otherwise = state;
+            }
+            state = union(then, otherwise);
+        }
+
+        @Override
+        public void visitWhileLoop(JCWhileLoop t) {
+            loop(t, t.cond, t.body, com.sun.tools.javac.util.List.nil());
+        }
+
+        @Override
+        public void visitForLoop(JCForLoop t) {
+            scan(t.init);
+            loop(t, t.cond, t.body, t.step);
+        }
+
+        /** A loop whose condition comes first. */
+        private void loop(JCStatement loop, JCExpression cond, JCStatement body, com.sun.tools.javac.util.List<? extends JCTree> step) {
+            depth.put(loop, finalizers.size());
+            scan(cond);
+            Set<Symbol> exit = isTrue(cond) ? null : state;
+            if (!isFalse(cond)) {
+                scan(body);
+                // `continue` goes to the step, which goes back to the condition.
+                state = union(state, continues.remove(loop));
+                scan(step);
+            }
+            state = union(exit, exits.remove(loop));
+        }
+
+        @Override
+        public void visitDoLoop(JCDoWhileLoop t) {
+            depth.put(t, finalizers.size());
+            scan(t.body);
+            state = union(state, continues.remove(t));
+            Set<Symbol> exit = null;
+            if (state != null) {
+                scan(t.cond);
+                exit = isTrue(t.cond) ? null : state;
+            }
+            state = union(exit, exits.remove(t));
+        }
+
+        @Override
+        public void visitLabelled(JCLabeledStatement t) {
+            depth.put(t, finalizers.size());
+            scan(t.body);
+            state = union(state, exits.remove(t));
+        }
+
+        @Override
+        public void visitSwitch(JCSwitch t) {
+            switchCases(t, t.selector, t.cases);
+        }
+
+        @Override
+        public void visitSwitchExpression(JCSwitchExpression t) {
+            switchCases(t, t.selector, t.cases);
+        }
+
+        /** The cases follow the switch's jump to each, or the case before them. */
+        private void switchCases(JCTree t, JCExpression selector, com.sun.tools.javac.util.List<JCCase> cases) {
+            scan(selector);
+            depth.put(t, finalizers.size());
+            Set<Symbol> start = state, previous = null;
+            boolean otherwise = false;
+            for (JCCase c : cases) {
+                otherwise |= c.labels.stream().anyMatch(l -> l instanceof JCDefaultCaseLabel);
+                state = union(start, previous);
+                scan(c.stats);
+                previous = state;
+            }
+            state = union(previous, exits.remove(t));
+            if (!otherwise) {
+                state = union(state, start);
+            }
+        }
+
+        @Override
+        public void visitBreak(JCBreak t) {
+            jump(t.target, exits);
+        }
+
+        @Override
+        public void visitYield(JCYield t) {
+            scan(t.value);
+            jump(t.target, exits);
+        }
+
+        @Override
+        public void visitContinue(JCContinue t) {
+            jump(t.target, continues);
+        }
+
+        @Override
+        public void visitReturn(JCReturn t) {
+            scan(t.expr);
+            finalizers(0);
+            state = null;
+        }
+
+        @Override
+        public void visitThrow(JCThrow t) {
+            scan(t.expr);
+            state = null;
+        }
+
+        private void jump(JCTree target, Map<JCTree, Set<Symbol>> to) {
+            finalizers(depth.getOrDefault(target, 0));
+            if (state != null) {
+                to.merge(target, state, ParameterWrites::union);
+            }
+            state = null;
+        }
+
+        /** The copies of the {@code finally} blocks that a jump out of them runs, innermost first. */
+        private void finalizers(int outermost) {
+            List<JCTry> around = new ArrayList<>(finalizers);
+            for (int i = around.size() - 1; i >= outermost; i--) {
+                // A block runs outside its own `try`.
+                finalizers.subList(i, finalizers.size()).clear();
+                scan(around.get(i).finalizer);
+            }
+            finalizers.clear();
+            finalizers.addAll(around);
+        }
+
+        @Override
+        public void visitTry(JCTry t) {
+            scan(t.resources);
+            boolean fin = t.finalizer != null;
+            Set<Symbol> exit = null;
+            List<JCTree> blocks = new ArrayList<>();
+            blocks.add(t.body);
+            for (JCCatch c : t.catchers) {
+                blocks.add(c.body);
+            }
+            for (int i = 0; i < blocks.size(); i++) {
+                if (i > 0) {
+                    // An exception handler starts with no slot written.
+                    state = Set.of();
+                }
+                if (fin) {
+                    finalizers.add(t);
+                }
+                scan(blocks.get(i));
+                if (fin) {
+                    finalizers.remove(finalizers.size() - 1);
+                    scan(t.finalizer);
+                }
+                exit = union(exit, state);
+            }
+            if (fin) {
+                // The handler of any other exception, which runs the block and throws it again.
+                state = Set.of();
+                scan(t.finalizer);
+            }
+            state = exit;
         }
     }
 

@@ -77,9 +77,10 @@ Lowering (`lower/inner.rs`) then desugars each class as javac does, so there are
 expression kinds: a field `outer` (first in the struct) and a field per captured local; every
 constructor takes the enclosing instance first and the captured locals last, and stores them
 before anything else runs; every `new`, `this(..)` and `super(..)` passes them. A captured local
-is read as its field (its constructor parameter, inside a constructor), and a member of an
-enclosing class as a chain of `outer` fields (`this.outer.outer`). The analyses and the
-generator see only fields, parameters and arguments they already handle.
+is read as its field, and a member of an enclosing class as a chain of `outer` fields
+(`this.outer.outer`), except that a constructor's own code reads the parameters (`outer.outer`),
+as javac's does; the initializers that a constructor runs read the fields, as javac's do too.
+The analyses and the generator see only fields, parameters and arguments they already handle.
 
 In the AST (`ast.rs`), a `TypeDecl` has `outer: Option<usize>` (the enclosing class whose
 instance its objects hold) and `captures: Vec<Capture>`, where a `Capture` names the local, the
@@ -264,8 +265,8 @@ in the module of their package:
   (`Main$1Counter.Tally`), capturing what they read like local classes (`member_outers`).
 
 `getName` gives javac's binary name (`Main$1Labeler`, `Main$1`); `getSimpleName` of an anonymous
-class is `""`. A lambda's class name is `Main$$Lambda`, the JVM's name without its varying
-suffix.
+class is `""`. A lambda's class name is `Main$$Lambda` (`p.Outer$Inner$$Lambda` in a member
+class), the JVM's name without its varying suffix.
 
 ### 2.6 Generic outers
 
@@ -374,17 +375,21 @@ gets the same conversions and library mappings and javac's referent symbol picks
 | constructor `ArrayList::new` | `new ArrayList<>(a)`, the overload javac resolved |
 | array constructor `int[]::new` | `new int[a]` |
 
-A bound receiver that is a local, `this`, or a final field is captured as it is. Any other
-receiver (`a.b()::c`, a field that is not final) is evaluated once where the reference is
-created, into a synthetic local of the creating code that is checked for null there, as Java
-does, and that the class captures (`plan_receivers`).
+A bound receiver other than `this` (a local, a field, `a.b()`) is evaluated once where the
+reference is created, into a synthetic local of the creating code that is checked for null
+there, as javac's `Objects.requireNonNull` does (its exception has no message), and that the
+class captures (`plan_receivers`). Without the JDK's sources the program has no `PrintStream`
+class for that local, so `System.out` and `System.err` are read where the reference is called
+(a `System.setOut` between creating and calling it is not translated then anyway).
 
 `super.m()` and `super::m` in a lambda run on the object of the class whose code holds the
 lambda, as javac's synthetic method does. Any other use of `super` in a lambda (including
 `super.clone()`) is rejected.
 
-Marker interfaces (`Serializable`, `Cloneable`, `RandomAccess`) declare nothing: lowering drops
-them where a class implements them (`lower/functional.rs`), and `JavaTree` drops them and
+Marker interfaces (`Serializable`, `Cloneable`, `RandomAccess`) declare nothing: without the
+JDK's sources, which declare them, lowering drops them where a class implements them
+(`lower/functional.rs`); with those sources they are interfaces like any other, so that a
+`ZoneRules` returned as a `Serializable` is one. `JavaTree` drops them and
 `Object` from intersection casts, so `(Comparator<T> & Serializable)` is `Comparator<T>`. A cast
 to two interfaces that are not markers is rejected.
 

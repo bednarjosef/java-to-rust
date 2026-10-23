@@ -117,10 +117,18 @@ the order that unblocks the most.
 
 ### javac end to end
 
-javac is the first large target, and `scripts/javac-check.sh TRANSLATED_JAVAC [CASE...]` checks
-a translated javac against the real one. Each case in `scripts/javac-check/` is a directory of
-small Java files (hello world, generics, an enum with a switch, lambdas, a compile error), with
-an optional `args` file of more javac arguments. Both compilers compile it with the same
+javac is the first large target. It is translated with `jdk.compiler` as the program and
+`java.compiler`, `jdk.internal.opt`, `jdk.zipfs` and `java.base` as libraries, all from the JDK's
+`lib/src.zip`. `jdk.zipfs` holds the zip file system that javac opens the jars of the class path
+with: `FileSystemProvider.installedProviders` finds its `ZipFileSystemProvider` through
+`ServiceLoader`, from the module's `provides` (see docs/reflection-and-plugins.md).
+
+`scripts/javac-check.sh TRANSLATED_JAVAC [CASE...]` checks a translated javac against the real
+one. Each case in `scripts/javac-check/` is a directory of small Java files (hello world,
+generics, an enum with a switch, lambdas, a compile error, code that uses classes from a jar on
+the class path), with an optional `args` file of more javac arguments and an optional `jar/`
+directory, whose sources the real javac compiles and the JDK's `jar` tool packs into `lib.jar`
+next to the case's files. Both compilers compile it with the same
 arguments in their own copy of the directory, and the case passes when the class files are the
 same byte for byte and so are standard output, standard error and the exit code. The real javac
 is `javac` on `PATH` (or `JAVAC`), and must be the JDK whose `lib/src.zip` the translation was

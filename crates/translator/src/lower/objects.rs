@@ -45,6 +45,7 @@ impl<'t> Lowering<'t> {
             next_id: Cell::new(0),
             current: Cell::new(0),
             method_ctx: Cell::new(None),
+            initializing: Cell::new(false),
             scope: Cell::new(None),
             in_ctor: Cell::new(false),
             ret: Cell::new(Type::Void),
@@ -58,7 +59,10 @@ impl<'t> Lowering<'t> {
             field_updates: Default::default(),
             static_qualifiers: Default::default(),
             calls: Default::default(),
+            chained_calls: Default::default(),
+            iterators: Default::default(),
             body_class: Default::default(),
+            renamed_locals: Default::default(),
             covariant: Default::default(),
             object: None,
             plain_object: None,
@@ -78,6 +82,7 @@ impl<'t> Lowering<'t> {
             ends_rejected: false,
             stubbed: Default::default(),
             notes: Default::default(),
+            element_classes: Default::default(),
             annotation_classes: Default::default(),
             nested_annotation_types: Default::default(),
             body_methods: Default::default(),
@@ -338,7 +343,10 @@ impl<'t> Lowering<'t> {
         ClassFileNames {
             static_qualifiers: self.static_qualifiers.take(),
             outer_fields,
-            calls: self.calls.take(),
+            calls: self.calls.take().into_iter().map(|(key, (_, named))| (key, named)).collect(),
+            chained_calls: self.chained_calls.take(),
+            iterators: self.iterators.take(),
+            renamed_locals: self.renamed_locals.take(),
         }
     }
 
@@ -364,7 +372,17 @@ impl<'t> Lowering<'t> {
                         && !receiver.contains([' ', '&', '?'])
                         && !receiver.starts_with("capture")
                         && !receiver.ends_with(']');
-                    (named && class).then(|| receiver.to_string())
+                    // A type variable, by its erasure where that is the method's class (elsewhere
+                    // javac may cast the receiver to another class first).
+                    let var = !receiver.is_empty()
+                        && receiver.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+                    match (named, class, var) {
+                        (true, true, _) => Some(receiver.to_string()),
+                        (true, false, true) => self
+                            .var_erasure_name(receiver, self.current.get(), self.method_ctx.get())
+                            .filter(|erasure| erasure == symbol.owner),
+                        _ => None,
+                    }
                 }),
                 // A method of an enum constant's body, which javac gives no owner
                 // (`constant_body_call`), by the body's anonymous class.
@@ -378,13 +396,19 @@ impl<'t> Lowering<'t> {
             self.types[m.owner].javac == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
         });
         let param = |ty: &str| {
-            erased(ty).or_else(|| {
-                let m = callee?;
-                let var = ty.trim_end_matches("...").trim_end_matches("[]");
-                let dims = ty[var.len()..].matches("[]").count() + usize::from(ty.ends_with("..."));
-                let erasure = self.var_erasure_name(var, self.methods[m].owner, Some(m))?;
-                Some(erasure + &"[]".repeat(dims))
-            })
+            erased(ty)
+                .or_else(|| {
+                    let m = callee?;
+                    let var = ty.trim_end_matches("...").trim_end_matches("[]");
+                    let dims = ty[var.len()..].matches("[]").count() + usize::from(ty.ends_with("..."));
+                    let erasure = self.var_erasure_name(var, self.methods[m].owner, Some(m))?;
+                    Some(erasure + &"[]".repeat(dims))
+                })
+                // `Enum<E extends Enum<E>>` is the translator's own class, whose methods lowering
+                // does not have: its `compareTo(E)` is `compareTo(java.lang.Enum)`.
+                .or_else(|| {
+                    (symbol.owner == "java.lang.Enum" && ty == "E").then(|| "java.lang.Enum".to_string())
+                })
         };
         let params =
             method_params(symbol.ty).and_then(|p| p.iter().map(|t| param(t)).collect::<Option<Vec<_>>>());
@@ -394,14 +418,33 @@ impl<'t> Lowering<'t> {
             params,
         });
         let mut calls = self.calls.borrow_mut();
+        let mut chained = self.chained_calls.borrow_mut();
+        let first = node.list("arguments").next().map(|a| a.pos());
         let key = (self.types[self.current.get()].name.clone(), node.pos(), symbol.name.to_string());
-        match calls.get(&key) {
-            Some(known) if *known != named => {
-                calls.insert(key, None);
+        let mut chain = |at: Option<Pos>, named: &Option<CallName>| {
+            let Some(at) = at else { return };
+            let key = (key.0.clone(), key.1, key.2.clone(), at);
+            match chained.get(&key) {
+                Some(known) if known != named => {
+                    chained.insert(key, None);
+                }
+                Some(_) => {}
+                None => {
+                    chained.insert(key, named.clone());
+                }
+            }
+        };
+        match calls.get_mut(&key) {
+            // A second call there, of another method or another class: each by its first
+            // argument, the first one's once.
+            Some((at, known)) if *known != named => {
+                chain(at.take(), known);
+                chain(first, &named);
+                *known = None;
             }
             Some(_) => {}
             None => {
-                calls.insert(key, named);
+                calls.insert(key, (first, named));
             }
         }
     }

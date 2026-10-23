@@ -1062,7 +1062,9 @@ impl<'a> Gen<'a> {
             self.stmts(body, false);
             self.indent -= 1;
             self.line("}");
+            self.finally_ends.push(None);
             self.finally_block(finally);
+            self.finally_ends.pop();
             return;
         }
         // Whether the body or a `catch` clause completes normally, as Java tells: when none does,
@@ -1085,8 +1087,8 @@ impl<'a> Gen<'a> {
         };
         let (arms, all) = self.catch_arms(catches);
         let finally_completes = completes_all(finally);
-        // When the `finally` does not complete, what ended the `try` is dropped.
-        let last = if finally_completes { result.clone() } else { "_".to_string() };
+        // When the `finally` does not complete, what ended the `try` is not used after it.
+        let last = if finally_completes { result.clone() } else { format!("_{result}") };
         let first = if arms.is_empty() { &last } else { &result };
         self.line(&format!("let {first}: {ty} = {{"));
         self.finallies.push(Finally { frame: self.frames.len(), jumps: Vec::new() });
@@ -1109,7 +1111,13 @@ impl<'a> Gen<'a> {
             self.line("};");
         }
         let Finally { jumps, .. } = self.finallies.pop().expect("the `try` is open");
+        let thrown = match completion {
+            true => format!("matches!({last}, {}(_))", self.runtime("Completion::Throw")),
+            false => format!("{last}.is_err()"),
+        };
+        self.finally_ends.push(Some(thrown));
         self.finally_block(finally);
+        self.finally_ends.pop();
         if !finally_completes {
             return;
         }

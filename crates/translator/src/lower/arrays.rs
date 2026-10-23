@@ -170,8 +170,9 @@ impl<'t> Lowering<'t> {
     /// `Arrays.copyOf(a, n, type)` and `copyOfRange(a, from, to, type)` as the runtime's
     /// `copyOf(a, n)` and `copyOfRange(a, from, to)`: an array's elements do not depend on the
     /// class it is made of, which is a class literal (`Object[].class`), the `getClass()` of a
-    /// variable, or a variable that holds a class (cast or not), dropped unlowered. The copy must
-    /// be of the array's own type.
+    /// variable, or a variable that holds a class (cast or not), dropped unlowered; where the
+    /// copy is a covariant array, the class it carries is noted from it
+    /// (`covariant::note_element_class`). The copy must be of the array's own type.
     pub(super) fn copy_of_with_class(
         &self,
         node: Node<'t>,

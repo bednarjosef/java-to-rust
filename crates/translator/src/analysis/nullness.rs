@@ -130,7 +130,11 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                         // may be under way, with the static still null.
                         declared.push((m, name.clone()));
                     }
-                    Stmt::Return(Some(value), _) if maybe_null(facts, m, value) => returns.push(m),
+                    Stmt::Return(Some(value), _)
+                        if maybe_null(facts, m, value) && !never_null_result(class, m) =>
+                    {
+                        returns.push(m)
+                    }
                     Stmt::ForEach { name, array, .. }
                         if facts.nullable_elements.contains(&array.ty.element()) =>
                     {
@@ -210,6 +214,24 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
 
 /// The element types of references of the array classes that are `Object`s, which
 /// `java.lang.reflect.Array`'s natives make and store into.
+/// Whether method `m` is one of the JDK's whose result is never null, though this analysis
+/// cannot tell, as it does not see that a value is not null once the code has read through it.
+///
+/// `sun.nio.fs.UnixPath.getByteArrayForSysCalls()`, whose result the patched
+/// `UnixNativeDispatcher` gives the natives (lines of `UnixPath.java` of Java 26): it returns
+/// `resolve(defaultDirectory, path)` (line 146), which returns one of its two arguments only
+/// after reading the lengths of both (lines 367-372) and otherwise a new array; `path` (line
+/// 149) only after `isEmpty()` has read `path.length` (lines 148, 226); or a new array (lines
+/// 152-153). A null would throw before any of them returns.
+fn never_null_result(class: &Class, m: usize) -> bool {
+    let method = &class.methods[m];
+    let decl = &class.types[method.class];
+    decl.package == "sun.nio.fs"
+        && decl.name == "sun.nio.fs.UnixPath"
+        && method.name == "getByteArrayForSysCalls"
+        && method.params.is_empty()
+}
+
 fn reflect_elements(class: &Class) -> Vec<Type> {
     (0..class.types.len())
         .filter_map(|c| class.array_of(c))
@@ -315,6 +337,10 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
                 || (!narrowed(b, false) && maybe_null(facts, m, b))
         }
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
+        // A copy of a `String[]` as an `Object[]` or back is null where the array is.
+        ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) => {
+            maybe_null(facts, m, &args[0])
+        }
         // A switch expression is null when a value it yields may be.
         ExprKind::Switch { cases, .. } => {
             let mut null = false;

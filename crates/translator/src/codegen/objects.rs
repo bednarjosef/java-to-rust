@@ -60,6 +60,23 @@ impl Slot {
 
 /// Whether values of this type are owned heap data or shared arrays or objects, which are cloned
 /// when read.
+/// `message` as the copy of its `finally` block that runs once the `try` completed, or with
+/// `thrown` the one for an exception, names it: each U+0001 `<localN>` U+0002 `<localM>` U+0003
+/// of the message (`java/BytecodeNames.java`) is the first slot, or the second.
+pub(super) fn finally_copy(message: &str, thrown: bool) -> String {
+    let mut out = String::new();
+    let mut rest = message;
+    while let Some((before, pair)) = rest.split_once('\u{1}') {
+        let Some((completed, after)) = pair.split_once('\u{2}') else { break };
+        let Some((exception, after)) = after.split_once('\u{3}') else { break };
+        out.push_str(before);
+        out.push_str(if thrown { exception } else { completed });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(super) fn needs_clone(ty: Type) -> bool {
     matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..))
 }
@@ -669,10 +686,34 @@ impl<'a> Gen<'a> {
         self.dereferenced.insert(id);
         // Java's message, where a `catch` may read it.
         let call = match ids.iter().find_map(|id| self.facts.npe_messages.get(id)) {
-            Some(Some(message)) => format!("{}({option}, {message:?})", self.runtime("try_non_null_message")),
+            Some(Some(message)) => {
+                let message = self.npe_message(message, self.facts.null_checked[&id]);
+                format!("{}({option}, {message})", self.runtime("try_non_null_message"))
+            }
             _ => format!("{}({option})", self.runtime("try_non_null")),
         };
         self.passed_on(Code::atom(call))
+    }
+
+    /// A message of `Facts::npe_messages`, at `pos`, as a Rust `&str`. One that names a variable
+    /// of a `finally` block by its slots in two copies of the block (`java/BytecodeNames.java`)
+    /// is that of the copy that runs: the one for an exception where an exception ended the
+    /// `try`.
+    pub(super) fn npe_message(&mut self, message: &str, pos: Pos) -> String {
+        let (completed, thrown) = (finally_copy(message, false), finally_copy(message, true));
+        if completed == thrown {
+            return format!("{message:?}");
+        }
+        match self.finally_ends.last() {
+            Some(Some(cond)) => format!("if {cond} {{ {thrown:?} }} else {{ {completed:?} }}"),
+            Some(None) => format!("{completed:?}"),
+            None => {
+                let message = "the message of the `NullPointerException` of this dereference outside its `finally` \
+                               block not supported yet";
+                self.rejected.push(Error { pos, message: message.to_string() });
+                format!("{completed:?}")
+            }
+        }
     }
 
     /// Rejects the program when an object of `Facts::null_checked` is dereferenced by code that

@@ -71,7 +71,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
-pub(crate) use argument_order::{RECEIVER, held_local, ordered_call};
+pub(crate) use argument_order::{ARGUMENT, RECEIVER, held_local, ordered_call};
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
@@ -82,6 +82,7 @@ pub use exceptions::{
     is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
 };
 pub use functional::is_functional;
+pub(crate) use inner::OUTER;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
@@ -161,6 +162,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             shared_strings: false,
             module_labels,
             thread_statics: None,
+            element_classes: lowering.element_classes.take(),
         };
         Ok((class, lowering.real.clone(), failed))
     })
@@ -286,12 +288,20 @@ fn kind_words(kind: &str) -> String {
     kind.to_lowercase().replace('_', " ")
 }
 
+/// The calls noted while lowering (`Lowering::calls`): by the class whose code calls, the
+/// call's position and the method's name, the position of the first argument and the method.
+type NotedCalls = std::collections::HashMap<(String, Pos, String), (Option<Pos>, Option<CallName>)>;
+
 struct Lowering<'t> {
     next_id: Cell<ExprId>,
     /// Index of the class whose members are being lowered: `this` and unqualified names refer to it.
     current: Cell<usize>,
     /// The method being lowered, whose type variables are in scope.
     method_ctx: Cell<Option<usize>>,
+    /// Whether the code being lowered is a field initializer or an initializer block that runs in
+    /// a constructor, which reads the enclosing instance and the captured locals from the fields,
+    /// as javac's code for it does, not from the constructor's parameters.
+    initializing: Cell<bool>,
     /// The class and method whose type variables a declared type is read in, when that is not
     /// the code being lowered (see `generics::declared_type`).
     scope: Cell<Option<(usize, Option<usize>)>>,
@@ -318,10 +328,18 @@ struct Lowering<'t> {
     /// The class that names each static field read, and the methods of `String` that calls name
     /// (see `Class::class_file`).
     static_qualifiers: RefCell<std::collections::HashMap<(String, Pos, String), Option<String>>>,
-    calls: RefCell<std::collections::HashMap<(String, Pos, String), Option<CallName>>>,
+    /// With the position of the first argument of the call first noted at each key, until a
+    /// second differs (`chained_calls`).
+    calls: RefCell<NotedCalls>,
+    chained_calls: RefCell<crate::ast::ChainedCalls>,
+    /// See `ClassFileNames::iterators`.
+    iterators: RefCell<std::collections::HashMap<(String, Pos), Pos>>,
     /// The binary name of the anonymous class of the enum constant's body whose method is being
     /// lowered (`constant_bodies`), which javac names that body's own methods by (`note_call`).
     body_class: RefCell<Option<String>>,
+    /// The Java name of each local that `local_names` renamed (see `Class::class_file`).
+    renamed_locals:
+        RefCell<std::collections::HashMap<(String, Pos), std::collections::HashMap<String, String>>>,
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
@@ -377,6 +395,8 @@ struct Lowering<'t> {
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
     /// What lowering assumed (see `ast::Note`).
     notes: RefCell<Vec<crate::ast::Note>>,
+    /// The classes of the covariant arrays the code makes (`Class::element_classes`).
+    element_classes: RefCell<std::collections::HashMap<ExprId, Type>>,
     /// The annotation types whose class literals the code has (`Class::annotation_classes`).
     annotation_classes: RefCell<std::collections::BTreeSet<String>>,
     /// The annotation types declared in other classes, whose binary names lowering does not
@@ -480,7 +500,8 @@ impl<'t> Lowering<'t> {
         let method = self.method_in_scope(index);
         self.method_ctx.set(outer);
         let mut method = method?;
-        local_names::distinct_locals(&mut method);
+        let renamed = local_names::distinct_locals(&mut method).into_iter().collect();
+        self.renamed_locals.borrow_mut().insert((self.types[method.class].name.clone(), method.pos), renamed);
         self.share_element_reads(&mut method);
         self.arguments_before_receivers(&mut method);
         Ok(method)
@@ -825,7 +846,8 @@ impl<'t> Lowering<'t> {
             "CHAR_LITERAL" => self.char_literal(node)?,
             "FLOAT_LITERAL" => self.float_literal(node)?,
             "NULL_LITERAL" => ExprKind::Null,
-            "IDENTIFIER" => match self.alias(node) {
+            // `TRUE` and `FALSE` that a static import of `Boolean`'s names are its constants too.
+            "IDENTIFIER" => match self.alias(node).or_else(|| self.boolean_constant(node)) {
                 Some(value) => value,
                 None => self.name(node)?,
             },
@@ -1026,7 +1048,9 @@ impl<'t> Lowering<'t> {
         };
         let id = self.next_id.get();
         self.next_id.set(id + 1);
-        Ok(Expr { kind, pos: node.pos(), ty, id })
+        let expr = Expr { kind, pos: node.pos(), ty, id };
+        self.note_element_class(node, &expr)?;
+        Ok(expr)
     }
 
     /// `left op right`, where `right` may assign the variable that `left` reads, as in

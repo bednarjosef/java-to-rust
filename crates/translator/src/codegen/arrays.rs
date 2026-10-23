@@ -225,6 +225,14 @@ impl<'a> Gen<'a> {
         } else {
             (if used { "store" } else { "set" }, self.element_value(rhs, ty))
         };
+        // Into an `Object[]` that may be a covariant array, which checks what it holds.
+        let checked;
+        let helper = if self.class.checks_store(array.ty, rhs) {
+            checked = format!("checked_{helper}");
+            checked.as_str()
+        } else {
+            helper
+        };
         if lends_array(index) || lends_array(rhs) {
             i = self.bind_first(&mut binding, i, &["index", "slot", "at"]);
             v = self.bind_first(&mut binding, v, &["value", "item", "new"]);

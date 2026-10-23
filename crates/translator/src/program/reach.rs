@@ -793,7 +793,8 @@ fn stub_null_test(condition: &Value, equal: bool) -> bool {
 }
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
-/// branch can run: it reads one of the `FALSE_FLAGS` or calls one of the `FALSE_CALLS` or
+/// branch can run: it reads one of the `FALSE_FLAGS` or a constant variable that is `false` by its
+/// simple name (whose branch javac writes no code for), or calls one of the `FALSE_CALLS` or
 /// `FALSE_INSTANCE_CALLS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
 /// of its nodes has children (`getChildCount() > 0`); alone, or as the first
@@ -808,8 +809,12 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
         }
         "IDENTIFIER" | "MEMBER_SELECT" => {
             let symbol = &condition["symbol"];
+            // A constant variable that is `false`, named by its simple name: javac writes no
+            // code for the branch (`private final boolean debug = false;`).
+            let false_constant =
+                text(condition, "kind") == "IDENTIFIER" && text(symbol, "constant") == "false";
             text(symbol, "kind") == "FIELD"
-                && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+                && (false_constant || FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name"))))
         }
         "METHOD_INVOCATION" => {
             let symbol = &condition["symbol"];
@@ -1123,16 +1128,6 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
             "(java.lang.Module,java.lang.Class<?>)boolean",
         ),
         (TRANSLATED_MODULES, "verifyModuleAccess"),
-    ),
-    // The installed file-system providers, which the JDK loads with `ServiceLoader`; the
-    // translator's are those of `java.base`.
-    (
-        (
-            "java.nio.file.spi.FileSystemProvider",
-            "loadInstalledProviders",
-            "()java.util.List<java.nio.file.spi.FileSystemProvider>",
-        ),
-        ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
     ),
     // Whether a network interface has an address, and the interface of a name, which the JVM
     // asks the system for (`java/net/TranslatedNet.java`).
@@ -1457,9 +1452,14 @@ impl<'t> Rounds<'t> {
                 walk
             }
             None => {
-                let walk =
-                    Walk::start(&self.units, &self.main, true, self.string_array_writes, &self.locale_data)?
-                        .with_providers(&self.providers);
+                let walk = Walk::start(
+                    &self.units,
+                    &self.main,
+                    true,
+                    self.string_array_writes,
+                    &self.locale_data,
+                    &self.providers,
+                )?;
                 self.sequential.insert(walk)
             }
         };
@@ -1473,9 +1473,14 @@ impl<'t> Rounds<'t> {
                 }
             }
             None if !self.stays_sequential => {
-                let walk =
-                    Walk::start(&self.units, &self.main, false, self.string_array_writes, &self.locale_data)?
-                        .with_providers(&self.providers);
+                let walk = Walk::start(
+                    &self.units,
+                    &self.main,
+                    false,
+                    self.string_array_writes,
+                    &self.locale_data,
+                    &self.providers,
+                )?;
                 self.parallel = Some(walk);
             }
             None => {}
@@ -1595,19 +1600,29 @@ struct Walk<'t> {
     /// (`reflection.rs`).
     providers: Vec<super::modules::ServiceProvider>,
     service_loads: BTreeSet<Option<String>>,
+    /// The providers found whose classes no unit declares yet, so that what makes them
+    /// (`load_services`) is reached once a later round declares them.
+    unmade: BTreeSet<String>,
 }
 
 impl<'t> Walk<'t> {
-    /// Walks from `main` over these units, with streams assumed to stay sequential or not, and
-    /// with `Reach::string_array_writes`.
+    /// Walks from `main` over these units, with streams assumed to stay sequential or not, with
+    /// `Reach::string_array_writes`, and with the service providers of the sources
+    /// (`Walk::providers`), which the first walk already loads.
     fn start(
         units: &[&'t Value],
         main: &str,
         sequential: bool,
         string_array_writes: bool,
         locale_data: &[String],
+        providers: &[super::modules::ServiceProvider],
     ) -> Result<Walk<'t>, String> {
-        let mut walk = Walk { sequential, locale_data: locale_data.to_vec(), ..Walk::default() };
+        let mut walk = Walk {
+            sequential,
+            locale_data: locale_data.to_vec(),
+            providers: providers.to_vec(),
+            ..Walk::default()
+        };
         walk.reach.sequential = sequential;
         walk.reach.string_array_writes = string_array_writes;
         walk.declare_units(units);
@@ -1876,6 +1891,11 @@ impl<'t> Walk<'t> {
                     for class in ["java.lang.Thread", "java.lang.Runnable"] {
                         self.work.push(Item::Method((class.into(), "run".into(), "()void".into())));
                     }
+                }
+                // `CharSequence.isEmpty()` runs the sequence's `length()`, as the translation
+                // writes it (`lower::object`).
+                if key.0 == "java.lang.CharSequence" && key.1 == "isEmpty" {
+                    self.work.push(Item::Method((key.0.clone(), "length".into(), "()int".into())));
                 }
             }
             return;

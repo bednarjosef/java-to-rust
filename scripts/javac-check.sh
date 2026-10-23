@@ -9,6 +9,8 @@
 #
 # A case of scripts/javac-check/ is a directory of .java files, compiled together with `-d classes`,
 # and an optional file `args` with more of javac's arguments, split at white space, which go first.
+# A case may also have a directory jar/ of .java files, which the real javac compiles and the JDK's
+# jar tool packs into lib.jar next to the case's sources, for its args to put on the class path.
 # The corpus cases are the programs of corpus/: each file of features, threads and whole-program on
 # its own, each file of programs on its own and all of them together, and each project (a directory
 # with a src/) with all its files. PATTERN is a shell pattern that case names must match, such as
@@ -41,6 +43,7 @@ if [ "${1:-}" = --corpus ]; then
   filter=${1:-*}
 fi
 real=$(realpath "$(command -v "${JAVAC:-javac}")")
+jar_tool=$(dirname "$real")/jar
 # The translated javac reads the platform's classes from the JDK it is told is home.
 java_home=$(dirname "$(dirname "$real")")
 out=${JAVAC_CHECK_OUT:-${TMPDIR:-/tmp}/javac-check}
@@ -87,6 +90,15 @@ known_reason() {
   return 1
 }
 
+# Makes $1/lib.jar from the sources of the case's jar/ directory, with the real javac.
+make_jar() {
+  local dir=$1 sources
+  rm -rf "$dir" && mkdir -p "$dir/classes"
+  mapfile -t sources < <(cd "$src_root/jar" && find . -name '*.java' | sort)
+  (cd "$src_root/jar" && "$real" -d "$dir/classes" "${sources[@]}") || { echo "cannot compile $src_root/jar" >&2; exit 2; }
+  "$jar_tool" --create --file "$dir/lib.jar" -C "$dir/classes" .
+}
+
 # Compiles the files src_files of the case in src_root with javac $2 in directory $1, with the
 # arguments src_args first, keeping output, errors and exit code there. Words after the second
 # argument run first, such as the build-slot limiter.
@@ -95,6 +107,7 @@ compile() {
   shift 2
   rm -rf "$dir" && mkdir -p "$dir/classes"
   (cd "$src_root" && cp --parents -- "${src_files[@]}" "$dir/")
+  [ ! -d "$src_root/jar" ] || cp "$work/jar/lib.jar" "$dir/"
   (cd "$dir" && set +e && JAVA_HOME=$java_home timeout "$timeout" "$@" "$javac" "${src_args[@]}" \
     -d classes "${src_files[@]}" > stdout 2> stderr < /dev/null; echo $? > exit)
 }
@@ -119,6 +132,7 @@ for line in "${all[@]}"; do
   read -r -a src_files <<< "$files"
   read -r -a src_args <<< "$args"
   work=$out/$name
+  [ ! -d "$src_root/jar" ] || make_jar "$work/jar"
   compile "$work/real" "$real"
   compile "$work/translated" "$translated" "${slot[@]}"
   problems=()

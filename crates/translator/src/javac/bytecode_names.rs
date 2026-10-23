@@ -53,9 +53,19 @@ pub fn source_names(source: &str) -> Result<BytecodeNames, Error> {
     names(Vec::new(), Some(source))
 }
 
-/// The names of the code of a program's files.
-pub fn program_names(files: &[PathBuf]) -> Result<BytecodeNames, Error> {
-    names(files.iter().map(|f| f.as_os_str().to_owned()).collect(), None)
+/// The names of the code of a program's files. `modules` are the program's roots that are
+/// modules, by name: the files of one that the JDK has too (javac's `jdk.compiler`) compile as
+/// part of it, since the unnamed module may not hold its packages.
+pub fn program_names(files: &[PathBuf], modules: &[(String, PathBuf)]) -> Result<BytecodeNames, Error> {
+    let mut args = Vec::new();
+    for (name, root) in modules {
+        args.push("--patch-module".into());
+        let mut patch = std::ffi::OsString::from(format!("{name}="));
+        patch.push(root);
+        args.push(patch);
+    }
+    args.extend(files.iter().map(|f| f.as_os_str().to_owned()));
+    names(args, None)
 }
 
 fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<BytecodeNames, Error> {
@@ -107,51 +117,62 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
 }
 
 impl BytecodeNames {
-    /// Adds the temps of the string `switch`es of the JDK's code (`jdk_switch_temps`), which
-    /// `java/BytecodeNames.java` does not compile.
-    pub fn add_jdk_switch_temps(&mut self, temps: SwitchTemps) {
-        for (class, pos, text) in temps {
-            self.entries.insert((class, pos, NameKind::Temp, "s$".to_string()), Some(text));
+    /// Adds the temps of the JDK's code (`jdk_temps`), which `java/BytecodeNames.java` does not
+    /// compile.
+    pub fn add_jdk_temps(&mut self, temps: JdkTemps) {
+        for (class, pos, name, text) in temps {
+            self.entries.insert((class, pos, NameKind::Temp, name.to_string()), Some(text));
         }
     }
 }
 
-/// The temps of string `switch`es, by outermost class and position, with their text.
-pub type SwitchTemps = Vec<(String, Pos, String)>;
+/// The temps of javac's own in the JDK's code, by outermost class and position, with javac's name
+/// for the variable (`s$` or `i$`) and the JVM's text for it.
+pub type JdkTemps = Vec<(String, Pos, &'static str, String)>;
 
-/// The temps of the string `switch`es in `trees`, the JDK's units (see `unit_switch_temps`).
-pub fn jdk_switch_temps(trees: &[&Value]) -> SwitchTemps {
-    trees.iter().flat_map(|tree| unit_switch_temps(tree)).collect()
+/// The temps of `trees`, the JDK's units (see `unit_temps`).
+pub fn jdk_temps(trees: &[&Value]) -> JdkTemps {
+    trees.iter().flat_map(|tree| unit_temps(tree)).collect()
 }
 
-/// The JVM's names of the strings that the string `switch`es of a unit of the JDK's code switch
-/// on: javac keeps the string in a variable of its own (`s$`, then the case's index in `tmp$`)
-/// and calls its `hashCode()`, so a null string is `<localN>` in the message, a slot that the
-/// JDK's class files (compiled with `-g`) leave unnamed. The slot is the code generator's: the
+/// The JVM's names of the variables of javac's own in a unit of the JDK's code whose value a
+/// `NullPointerException`'s message can name, which the JDK's class files (compiled with `-g`)
+/// leave unnamed, so that a null one is `<localN>` in the message: the string that a string
+/// `switch` switches on, which javac keeps in a variable (`s$`, then the case's index in `tmp$`)
+/// and calls `hashCode()` on, and the iterator of a for-each loop over an `Iterable` (`i$`), at
+/// the position of the collection, which `iterator()` is called on and whose `hasNext()` and
+/// `next()` are called. The slot is the code generator's: the
 /// parameters' (`this` first), then the variables of the blocks around the `switch`, each in the
 /// next slot when it is declared (before its initializer runs) and freed at the end of its block,
 /// two for a `long` or `double`, and the variables that javac adds itself: a for-each loop's
 /// array, length and index, or its iterator; a `synchronized` block's lock; an enclosing string
-/// `switch`'s two. A `switch` in code whose slots this does not follow is left out: in a
-/// constructor, initializer or lambda, in a `finally` block or a try-with-resources, in a method
-/// with patterns, and a `switch` expression with values on the stack before it (an argument).
-fn unit_switch_temps(unit: &Value) -> SwitchTemps {
+/// `switch`'s two. Each of javac's own is declared before the expression that it holds runs, as
+/// a variable is. A `switch` expression's string is in the next slot whatever is on the stack
+/// (javac declares it in a `LetExpr` around the `switch`). A `switch` in code whose slots this
+/// does not follow is left out: in a constructor that javac gives parameters of its own (an
+/// enum's, or an inner, local or anonymous class's), an initializer or a lambda, in a `finally` block or
+/// a try-with-resources, in a method with patterns, in an expression whose own temps javac
+/// declares (a compound assignment, an increment), and in the cases of a `switch` expression
+/// with a `try`, whose stack javac keeps in variables.
+fn unit_temps(unit: &Value) -> JdkTemps {
     let mut out = Vec::new();
     for class in unit["typeDecls"].as_array().into_iter().flatten() {
         let Some(name) = class["symbol"]["type"].as_str() else { continue };
         let outermost = name.split('<').next().unwrap_or_default().to_string();
-        classes(class, &outermost, &mut out);
+        let plain = class["kind"].as_str() != Some("ENUM");
+        classes(class, &outermost, plain, &mut out);
     }
     out
 }
 
-/// The temps of the methods of `class` and of the classes in it.
-fn classes(class: &Value, outermost: &str, out: &mut Vec<(String, Pos, String)>) {
+/// The temps of the methods of `class` and of the classes in it; of its constructors too where
+/// they are `plain`, with no parameters of javac's own.
+fn classes(class: &Value, outermost: &str, plain: bool, out: &mut JdkTemps) {
     for member in class["members"].as_array().into_iter().flatten() {
         match member["kind"].as_str() {
             Some("METHOD") => {
                 let symbol = &member["symbol"];
-                if member["name"].as_str() == Some("<init>") || has_patterns(&member["body"]) {
+                if member["name"].as_str() == Some("<init>") && !plain || has_patterns(&member["body"]) {
                     continue;
                 }
                 let mut slots = SwitchSlots { outermost, out: &mut *out, next: 0 };
@@ -163,7 +184,10 @@ fn classes(class: &Value, outermost: &str, out: &mut Vec<(String, Pos, String)>)
                 }
                 slots.statement(&member["body"]);
             }
-            Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD") => classes(member, outermost, out),
+            Some(kind @ ("CLASS" | "INTERFACE" | "ENUM" | "RECORD")) => {
+                let plain = kind != "ENUM" && member["symbol"]["static"].as_bool() == Some(true);
+                classes(member, outermost, plain, out)
+            }
             _ => {}
         }
     }
@@ -172,11 +196,11 @@ fn classes(class: &Value, outermost: &str, out: &mut Vec<(String, Pos, String)>)
 }
 
 /// The classes declared in the code under `v` (not its members, which `classes` walks).
-fn nested_classes(v: &Value, outermost: &str, out: &mut Vec<(String, Pos, String)>, top: bool) {
+fn nested_classes(v: &Value, outermost: &str, out: &mut JdkTemps, top: bool) {
     match v {
         Value::Object(fields) => {
             if !top && matches!(v["kind"].as_str(), Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD")) {
-                return classes(v, outermost, out);
+                return classes(v, outermost, false, out);
             }
             for (key, value) in fields {
                 if top && key == "members" {
@@ -213,6 +237,30 @@ fn has_patterns(v: &Value) -> bool {
     }
 }
 
+/// Whether the code of the `switch` expression `s` has a `try` or a `synchronized` block,
+/// before which javac keeps the stack in variables of its own (`Gen.hasTry`).
+fn has_try(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => {
+            matches!(v["kind"].as_str(), Some("TRY" | "SYNCHRONIZED"))
+                || !matches!(
+                    v["kind"].as_str(),
+                    Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD" | "LAMBDA_EXPRESSION")
+                ) && fields.iter().any(|(key, value)| key != "symbol" && has_try(value))
+        }
+        Value::Array(items) => items.iter().any(has_try),
+        _ => false,
+    }
+}
+
+/// The position of the tree `v`.
+fn position(v: &Value) -> Pos {
+    Pos::new(
+        v["line"].as_u64().unwrap_or_default() as usize,
+        v["column"].as_u64().unwrap_or_default() as usize,
+    )
+}
+
 /// The slots a variable declaration takes: two for a `long` or a `double`.
 fn size(variable: &Value) -> usize {
     match variable["symbol"]["type"].as_str() {
@@ -224,7 +272,7 @@ fn size(variable: &Value) -> usize {
 /// The walk of a method's code, with the next free slot.
 struct SwitchSlots<'a> {
     outermost: &'a str,
-    out: &'a mut Vec<(String, Pos, String)>,
+    out: &'a mut JdkTemps,
     next: usize,
 }
 
@@ -241,46 +289,52 @@ impl SwitchSlots<'_> {
             "VARIABLE" => {
                 // The variable's slot is taken before its initializer runs.
                 self.next += size(s);
-                self.expression(&s["initializer"], true);
+                self.expression(&s["initializer"]);
                 return;
             }
-            "EXPRESSION_STATEMENT" => self.expression(&s["expression"], false),
-            "RETURN" => self.expression(&s["expression"], true),
-            "THROW" => self.expression(&s["expression"], false),
+            "EXPRESSION_STATEMENT" => self.expression(&s["expression"]),
+            "RETURN" => self.expression(&s["expression"]),
+            "THROW" => self.expression(&s["expression"]),
             "IF" => {
-                self.expression(&s["condition"], false);
+                self.expression(&s["condition"]);
                 self.statement(&s["thenStatement"]);
                 self.statement(&s["elseStatement"]);
             }
             "WHILE_LOOP" | "DO_WHILE_LOOP" => {
-                self.expression(&s["condition"], false);
+                self.expression(&s["condition"]);
                 self.statement(&s["statement"]);
             }
             "FOR_LOOP" => {
                 for init in list(&s["initializer"]) {
                     self.statement(&init);
                 }
-                self.expression(&s["condition"], false);
+                self.expression(&s["condition"]);
                 for update in list(&s["update"]) {
                     self.statement(&update);
                 }
                 self.statement(&s["statement"]);
             }
             "ENHANCED_FOR_LOOP" => {
-                self.expression(&s["expression"], false);
+                // The array, or the iterator, then its length and index.
                 let array = s["expression"]["javaType"].as_str().is_some_and(|t| t.ends_with("[]"));
-                self.next += if array { 3 } else { 1 };
+                if !array {
+                    let pos = position(&s["expression"]);
+                    self.out.push((self.outermost.to_string(), pos, "i$", format!("<local{}>", self.next)));
+                }
+                self.next += 1;
+                self.expression(&s["expression"]);
+                self.next += if array { 2 } else { 0 };
                 self.next += size(&s["variable"]);
                 self.statement(&s["statement"]);
             }
             "LABELED_STATEMENT" => self.statement(&s["statement"]),
             "SYNCHRONIZED" => {
-                self.expression(&s["expression"], false);
                 self.next += 1;
+                self.expression(&s["expression"]);
                 self.statement(&s["block"]);
             }
             "SWITCH" => self.switch(s),
-            "YIELD" => self.expression(&s["value"], false),
+            "YIELD" => self.expression(&s["value"]),
             "TRY" if list(&s["resources"]).is_empty() => {
                 self.statement(&s["block"]);
                 for catch in list(&s["catches"]) {
@@ -293,16 +347,45 @@ impl SwitchSlots<'_> {
         self.next = start;
     }
 
-    /// The `switch`es of an expression; `alone` when the value of a `switch` expression that is
-    /// all of it goes to an empty stack (an initializer, an assignment, a `return`).
-    fn expression(&mut self, e: &Value, alone: bool) {
-        match e["kind"].as_str().unwrap_or_default() {
-            "PARENTHESIZED" => self.expression(&e["expression"], alone),
-            "SWITCH_EXPRESSION" if alone => self.switch(e),
-            "ASSIGNMENT" if e["variable"]["kind"].as_str() == Some("IDENTIFIER") => {
-                self.expression(&e["expression"], true)
+    /// The `switch`es of an expression, through the expressions for which javac declares no
+    /// variables of its own: not into a lambda's body or a class's, which are other methods.
+    fn expression(&mut self, e: &Value) {
+        let parts: &[&str] = match e["kind"].as_str().unwrap_or_default() {
+            "SWITCH_EXPRESSION" => return self.switch(e),
+            "PARENTHESIZED" | "TYPE_CAST" | "MEMBER_SELECT" | "INSTANCE_OF" | "UNARY_PLUS"
+            | "UNARY_MINUS" | "BITWISE_COMPLEMENT" | "LOGICAL_COMPLEMENT" => &["expression"],
+            "ASSIGNMENT" => &["variable", "expression"],
+            "ARRAY_ACCESS" => &["expression", "index"],
+            "METHOD_INVOCATION" => &["methodSelect", "arguments"],
+            "NEW_CLASS" => &["enclosingExpression", "arguments"],
+            "NEW_ARRAY" => &["dimensions", "initializers"],
+            "CONDITIONAL_EXPRESSION" => &["condition", "trueExpression", "falseExpression"],
+            "PLUS"
+            | "MINUS"
+            | "MULTIPLY"
+            | "DIVIDE"
+            | "REMAINDER"
+            | "LEFT_SHIFT"
+            | "RIGHT_SHIFT"
+            | "UNSIGNED_RIGHT_SHIFT"
+            | "LESS_THAN"
+            | "GREATER_THAN"
+            | "LESS_THAN_EQUAL"
+            | "GREATER_THAN_EQUAL"
+            | "EQUAL_TO"
+            | "NOT_EQUAL_TO"
+            | "AND"
+            | "XOR"
+            | "OR"
+            | "CONDITIONAL_AND"
+            | "CONDITIONAL_OR" => &["leftOperand", "rightOperand"],
+            _ => &[],
+        };
+        for part in parts {
+            match &e[*part] {
+                Value::Array(items) => items.iter().for_each(|i| self.expression(i)),
+                one => self.expression(one),
             }
-            _ => {}
         }
     }
 
@@ -313,14 +396,19 @@ impl SwitchSlots<'_> {
         while selector["kind"].as_str() == Some("PARENTHESIZED") {
             selector = &selector["expression"];
         }
-        self.expression(selector, false);
         if selector["javaType"].as_str() == Some("java.lang.String") {
-            let pos = Pos::new(
-                selector["line"].as_u64().unwrap_or_default() as usize,
-                selector["column"].as_u64().unwrap_or_default() as usize,
-            );
-            self.out.push((self.outermost.to_string(), pos, format!("<local{}>", self.next)));
-            self.next += 2;
+            let pos = position(selector);
+            self.out.push((self.outermost.to_string(), pos, "s$", format!("<local{}>", self.next)));
+            // The string's, whose initializer the selector is, then the case's index.
+            self.next += 1;
+            self.expression(selector);
+            self.next += 1;
+        } else {
+            self.expression(selector);
+        }
+        if s["kind"].as_str() == Some("SWITCH_EXPRESSION") && has_try(s) {
+            self.next = start;
+            return;
         }
         let cases = s["cases"].as_array().cloned().unwrap_or_default();
         // The statements of the old form's cases share a block; a rule's body is its own.
@@ -339,7 +427,7 @@ impl SwitchSlots<'_> {
                 }
                 body => {
                     self.next = shared;
-                    self.expression(body, false);
+                    self.expression(body);
                 }
             }
         }

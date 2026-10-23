@@ -129,11 +129,21 @@ impl<'a> Gen<'a> {
             temp
         };
         let mut values = inits.clone();
+        // Whether an initializer reads a field, whose local the literal may move before it.
+        let reads_field = |e: &Expr| {
+            let mut found = false;
+            visit_expr(e, &mut |x| {
+                found |= matches!(&x.kind, ExprKind::Field { object, name }
+                    if matches!(object.kind, ExprKind::This) && fields.iter().any(|f| f.name == *name))
+            });
+            found
+        };
         if sequential {
-            // Every initializer that is read or has effects is computed in field order, first.
+            // Every initializer that is read, reads a field or has effects is computed in field
+            // order, first.
             for i in 0..fields.len() {
                 if let Some(init) = inits[i]
-                    && (read[i] || has_effects(init))
+                    && (read[i] || reads_field(init) || has_effects(init))
                 {
                     let local = bind(self, i, init, &mut taken);
                     if read[i] {

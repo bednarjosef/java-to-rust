@@ -536,8 +536,15 @@ impl<'a> Gen<'a> {
             (true, true) => optional,
             (true, false) => format!("{}({optional})", self.runtime("non_null")),
         };
-        let slice = self.slice_of(e);
         let maker = self.array_maker("from_vec", ty);
+        // A null array's copy is null.
+        if self.nullable(e) {
+            let option = self.object_place(e);
+            return Code::atom(format!(
+                "{option}.as_ref().map(|a| {maker}((&a.borrow()).iter().map(|s| {each}).collect::<Vec<_>>()))"
+            ));
+        }
+        let slice = self.slice_of(e);
         Code::atom(format!("{maker}(({slice}).iter().map(|s| {each}).collect::<Vec<_>>())"))
     }
 
@@ -2147,7 +2154,24 @@ impl<'a> Gen<'a> {
     /// (`java::unkept_monitor`): `synchronized (LOCK)` on an `Object` that is a plain object
     /// keeps its monitor although the type's other values have none.
     fn monitor_impl(&mut self, t: usize, variants: &[usize]) {
-        if variants.is_empty() || !self.facts.kept_monitor_of(t) {
+        if !self.facts.kept_monitor_of(t) {
+            return;
+        }
+        let (has, of) = (self.runtime("HasMonitor"), self.runtime("MonitorOf"));
+        let name = struct_name(&self.class.types[t].name);
+        // A type with no objects (`synchronized (lock)` on a `FileLock` of a channel that no
+        // code makes): there is no monitor to give.
+        if variants.is_empty() {
+            self.gap();
+            self.line(&format!("impl {has} for {name} {{"));
+            self.indent += 1;
+            self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
+            self.indent += 1;
+            self.line("match *self {}");
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
             return;
         }
         // A builder's handle has its cell's monitor (`java::Builder`'s `HasMonitor`).
@@ -2163,8 +2187,6 @@ impl<'a> Gen<'a> {
         if !handles.contains(&true) {
             return;
         }
-        let name = struct_name(&self.class.types[t].name);
-        let (has, of) = (self.runtime("HasMonitor"), self.runtime("MonitorOf"));
         self.gap();
         self.line(&format!("impl {has} for {name} {{"));
         self.indent += 1;
@@ -2433,6 +2455,10 @@ impl<'a> Gen<'a> {
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
             self.match_arms(t, variants, &|g: &mut Self, c| match need {
+                // An `Object[]` that may be a covariant array, which carries its class.
+                Need::RuntimeClass(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
+                    (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
+                }
                 Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
                 Need::RuntimeTypeNames(_) => (g.names_list(c), false),

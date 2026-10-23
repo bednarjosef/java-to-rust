@@ -12,7 +12,7 @@ mod survey;
 pub use census::{Census, census_program};
 pub use modules::{Contents as ModuleContents, loader_name};
 pub use reach::{
-    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind,
+    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS,
     PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS,
     TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES,
     TRANSLATED_SEGMENTS, UNSET_PROPERTIES, caller_query, charset_coder, charset_coding, class_bound,
@@ -102,12 +102,12 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     let (units, reach) = load(program, string_array_writes, false)?;
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
-    let (lowered, switch_temps) = {
+    let (lowered, jdk_temps) = {
         let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
         let lowered =
             phase("lower", || lower::tolerant_lower_program(&trees, program_units, &reach, &program.main));
         // What the JDK's messages of a `NullPointerException` need of its trees.
-        (lowered, javac::jdk_switch_temps(&trees[program_units..]))
+        (lowered, javac::jdk_temps(&trees[program_units..]))
     };
     // javac's trees are not needed once the program is lowered: only the file and the classes
     // of each unit, to say where an error is.
@@ -131,13 +131,23 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     let mut facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
     if facts.npe_message_read.is_some() {
-        let mut names = phase("class files", || {
-            javac::program_names(&source_files(program)?).map_err(|error| ProgramError { file: None, error })
-        })?;
-        names.add_jdk_switch_temps(switch_temps);
-        phase("messages", || analysis::npe_messages(&class, &mut facts, &names)).map_err(located)?;
+        let mut names = phase("class files", || class_file_names(program))?;
+        names.add_jdk_temps(jdk_temps);
+        phase("messages", || analysis::npe_messages(&class, &mut facts, &names))
+            .map_err(|mut errors| located(errors.remove(0)))?;
     }
     phase("codegen", || codegen::generate_modules(&class, &facts)).map_err(located)
+}
+
+/// How the class files of the program's code name what the messages of a `NullPointerException`
+/// show (`javac::program_names`).
+fn class_file_names(program: &Program) -> Result<javac::BytecodeNames, ProgramError> {
+    let modules = modules::modules(&program.sources)
+        .into_iter()
+        .filter_map(|m| Some((m.name, m.file.parent()?.to_path_buf())))
+        .collect::<Vec<_>>();
+    javac::program_names(&source_files(program)?, &modules)
+        .map_err(|error| ProgramError { file: None, error })
 }
 
 /// Keeps the methods of `class` that can run (`analysis::live_methods`) and gives the others a

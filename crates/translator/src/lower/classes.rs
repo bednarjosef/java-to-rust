@@ -341,7 +341,9 @@ impl<'t> Lowering<'t> {
                 }
             };
             let literal = ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new());
-            interfaces.push(self.synth(literal, pos, Type::JavaClass));
+            // An `Object` where `Class[]` is covariant.
+            let element = self.covariant_array(Type::array(Type::JavaClass)).element();
+            interfaces.push(self.convert(self.synth(literal, pos, Type::JavaClass), element));
         }
         if interfaces.is_empty() {
             return Ok(ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]));

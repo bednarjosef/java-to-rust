@@ -183,7 +183,7 @@ pub fn copy_of_range<T: Clone, A: MadeElements<T>>(a: &A, from: i32, to: i32, ze
     }
     let mut copy: Vec<T> = items[from as usize..].to_vec();
     copy.resize(to as usize - from as usize, zero);
-    A::made(copy)
+    a.made_like(copy)
 }
 
 /// `Arrays.copyOfRange(a, from, to)` of an array that may be null, where a catch sees the
@@ -301,8 +301,8 @@ pub fn deep_to_string<T: Clone, S: Into<crate::JString>>(
     }
 }
 
-/// `a.clone()`: a new array of the same elements. The elements are handles, so rows of an array
-/// of arrays are shared with the copy, as in Java.
+/// `a.clone()`: a new array of the same elements and class. The elements are handles, so rows of
+/// an array of arrays are shared with the copy, as in Java.
 pub fn clone_array<T: Clone, A: MadeElements<T>>(a: &A) -> A {
-    A::made(a.items().clone())
+    a.made_like(a.items().clone())
 }

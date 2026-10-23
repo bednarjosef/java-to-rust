@@ -34,7 +34,7 @@ impl<'t> Lowering<'t> {
         let mut out = Vec::new();
         for clause in node.list("implementsClause") {
             let raw = &super::captures::raw(clause.java_type());
-            if functional::is_marker(raw) {
+            if functional::is_marker(raw) && self.type_index(raw).is_none() {
                 continue;
             }
             match self.type_index(raw) {

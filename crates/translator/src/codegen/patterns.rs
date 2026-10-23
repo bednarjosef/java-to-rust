@@ -7,15 +7,16 @@ use super::*;
 const UNMATCHED: &str = "unreachable!(\"a case of the exhaustive switch matches\")";
 
 impl<'a> Gen<'a> {
-    /// `NullChecked(selector, value)`: the value, once a null selector has thrown; without a
-    /// value, the check alone (which a statement of a selector that is never null leaves out).
-    pub(super) fn null_checked(&mut self, args: &'a [Expr]) -> Code {
+    /// `NullChecked(selector, value)`: the value, once a null selector has thrown, as the
+    /// switch's type `ty` (an `int` constant in a `long` switch); without a value, the check
+    /// alone (which a statement of a selector that is never null leaves out).
+    pub(super) fn null_checked(&mut self, args: &'a [Expr], ty: Type) -> Code {
         let check = self.null_check(&args[0]);
         match args.get(1) {
             None => check,
-            Some(value) if !self.nullable(&args[0]) => self.expr(value),
+            Some(value) if !self.nullable(&args[0]) => self.value(value, ty),
             Some(value) => {
-                let value = self.expr(value);
+                let value = self.value(value, ty);
                 Code::atom(format!("{{ {}; {} }}", check.text, value.text))
             }
         }

@@ -17,7 +17,12 @@
 //! find, which are stubbed together; the other analyses report their first. A panic while the
 //! generator writes a method is an error of the method, found with the others. So every error
 //! recorded is one that a translation of the program would report once the code before it
-//! translated. An error that no stub can take away ends the census there, with its place: the pieces it did not get to are
+//! translated. Where a `catch` reads the message of a `NullPointerException`, the messages are
+//! found as a translation finds them (`analysis::npe_messages`), and each dereference whose
+//! message is not certain is an error of the analyses, which stubs its code. A rejected write of
+//! a `String` array as an `Object` array takes the census again with those writes reached, as it
+//! takes a translation again (`Reach::string_array_writes`). So the translation that a census
+//! writes is the one that a translation would write, but for the stubs. An error that no stub can take away ends the census there, with its place: the pieces it did not get to are
 //! counted as they stand. An error that lowering met outside any unit's code is placed in the
 //! unit that alone has code at its line and column.
 //!
@@ -28,11 +33,12 @@
 //! that a constructor runs; otherwise, to the piece at its position.
 
 use super::survey::{self, Part, Piece};
-use super::{Program, ProgramError, load, source_files};
+use super::{Program, ProgramError, class_file_names, load, source_files};
 use crate::ast::{Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt};
 use crate::output::ModuleTree;
 use crate::value::{Value, json};
-use crate::{analysis, codegen, lower};
+use crate::{analysis, codegen, javac, lower};
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write;
@@ -57,12 +63,22 @@ struct Rejection {
     error: Error,
 }
 
-/// The census of the code reachable from the program's `main`.
+/// The census of the code reachable from the program's `main`. As a translation does, it first
+/// reaches without the writes of `String` arrays as `Object` arrays, and again with them where
+/// that rejects one (`Reach::string_array_writes`).
 pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
+    match census_reached(program, false)? {
+        (_, true) => census_reached(program, true).map(|(census, _)| census),
+        (census, false) => Ok(census),
+    }
+}
+
+/// `census_program`, with `Reach::string_array_writes` or without; and whether, without, it
+/// rejected a write of a `String` array as an `Object` array.
+fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Census, bool), ProgramError> {
     use crate::timings::phase;
     let files = source_files(program)?;
-    // As a translation first does: without the writes of `String` arrays as `Object` arrays.
-    let (units, reach) = load(program, false, program.keep_going)?;
+    let (units, reach) = load(program, string_array_writes, program.keep_going)?;
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -101,6 +117,8 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     // from the stubs (`Stubs::stub`).
     locate(&trees, rejections.iter_mut().filter(|r| r.anchor.is_none()).chain(&mut fatal));
     let scan = survey::scan(&units.iter().collect::<Vec<_>>(), &reach, program, &files);
+    // What the JDK's messages of a `NullPointerException` need of its trees.
+    let jdk_temps = javac::jdk_temps(&trees[files.len()..]);
     let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
     if let Some(class) = &class {
         super::print_notes(class, &unit_files);
@@ -110,13 +128,44 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     let mut modules = None;
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
-            analyse(&mut class, &lowered.units, &mut rejections, &mut modules, program.ends_rejected)
+            let names = Names { program, jdk_temps: RefCell::new(jdk_temps), found: RefCell::new(None) };
+            analyse(&mut class, &lowered.units, &mut rejections, &mut modules, &names, program.ends_rejected)
         });
     }
     std::panic::set_hook(hook);
+    let string_array_write =
+        rejections.iter().chain(&fatal).any(|r| r.error.message.starts_with(lower::STRING_ARRAY_WRITE));
     let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
-    Ok(Census { report, json, modules })
+    Ok((Census { report, json, modules }, string_array_write && !string_array_writes))
+}
+
+/// How the class files name what the messages of a `NullPointerException` show, found the first
+/// time a `catch` of the program reads one, as a translation finds them.
+struct Names<'a> {
+    program: &'a Program,
+    /// The temps of the JDK's code (`javac::jdk_temps`), until they are added to `found`.
+    jdk_temps: RefCell<javac::JdkTemps>,
+    found: RefCell<Option<javac::BytecodeNames>>,
+}
+
+impl Names<'_> {
+    /// The messages of `facts`'s dereferences (`analysis::npe_messages`), where a `catch` reads
+    /// one; each that is not certain is an error.
+    fn messages(&self, class: &Class, facts: &mut analysis::Facts) -> Result<(), Vec<Error>> {
+        if facts.npe_message_read.is_none() {
+            return Ok(());
+        }
+        let mut found = self.found.borrow_mut();
+        if found.is_none() {
+            let names = crate::timings::phase("census: class files", || class_file_names(self.program));
+            let mut names = names.map_err(|e| vec![e.error])?;
+            names.add_jdk_temps(self.jdk_temps.take());
+            *found = Some(names);
+        }
+        let names = found.as_ref().expect("found above");
+        crate::timings::phase("census: messages", || analysis::npe_messages(class, facts, names))
+    }
 }
 
 /// An analysis or the generator, run for its errors.
@@ -129,6 +178,7 @@ fn analyse(
     units: &[Option<usize>],
     rejections: &mut Vec<Rejection>,
     modules: &mut Option<ModuleTree>,
+    names: &Names,
     ends_rejected: bool,
 ) -> Option<Rejection> {
     let generated: std::cell::RefCell<Option<ModuleTree>> = Default::default();
@@ -149,9 +199,11 @@ fn analyse(
         &unresolved_calls,
         &|class| {
             let tolerated = tolerated.borrow();
-            let facts = crate::timings::phase("census: analyses", || {
+            let mut facts = crate::timings::phase("census: analyses", || {
                 analysis::analyze_tolerating(class, &tolerated)
             })?;
+            // Each message that is not certain stubs its code, as a translation rejects it.
+            names.messages(class, &mut facts)?;
             codegen::catch_panics(true);
             let tree = crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
             codegen::catch_panics(false);

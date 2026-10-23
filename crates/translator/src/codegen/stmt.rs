@@ -109,9 +109,13 @@ impl<'a> Gen<'a> {
                 let kind = if has_continue(body) { Loop::DoWhile(cond) } else { Loop::Plain };
                 self.line("loop {");
                 self.loop_body(kind, body, &[]);
-                self.indent += 1;
-                self.exit_unless(cond);
-                self.indent -= 1;
+                // `while (true)` never leaves, so the loop is an expression of any type, as
+                // Rust's `loop` without a `break` is.
+                if !matches!(cond.kind, ExprKind::Bool(true)) {
+                    self.indent += 1;
+                    self.exit_unless(cond);
+                    self.indent -= 1;
+                }
                 self.line("}");
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
@@ -144,6 +148,12 @@ impl<'a> Gen<'a> {
     pub(super) fn returned(&mut self, value: &'a Expr) -> Code {
         if self.optional_return() {
             return self.optional_to(value, self.ret);
+        }
+        // A result that is never null, though the analysis cannot tell of the value
+        // (`analysis::nullness::never_null_result`): an `Option` that is always `Some`.
+        if crate::analysis::nullable_type(self.ret) && self.nullable(value) {
+            let code = self.expr(value);
+            return Code::atom(format!("{}.expect(\"a result that is never null\")", code.at(ATOM)));
         }
         if self.facts.owned_returns.contains(&self.method) {
             return Code::atom(self.owned(value));

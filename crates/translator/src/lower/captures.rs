@@ -261,11 +261,13 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether the code being lowered is a constructor of the current class, where the synthetic
-    /// parameters hold the captures and the enclosing instance.
+    /// parameters hold the captures and the enclosing instance; not one of the class's
+    /// initializers that the constructor runs (`initializing`).
     fn in_constructor(&self) -> bool {
-        self.method_ctx
-            .get()
-            .is_some_and(|m| self.methods[m].name == "<init>" && self.methods[m].owner == self.current.get())
+        !self.initializing.get()
+            && self.method_ctx.get().is_some_and(|m| {
+                self.methods[m].name == "<init>" && self.methods[m].owner == self.current.get()
+            })
     }
 
     /// The instance of class `target` (or of a subclass) that the code of the current class

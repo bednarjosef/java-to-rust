@@ -23,7 +23,7 @@ use std::collections::HashSet;
 
 /// The prefix of the locals that hold a receiver; `$` keeps them apart from the program's names.
 pub(crate) const RECEIVER: &str = "receiver$";
-pub(super) const ARGUMENT: &str = "argument$";
+pub(crate) const ARGUMENT: &str = "argument$";
 
 /// Whether `name` is a local that holds a call's receiver or argument.
 pub(crate) fn held_local(name: &str) -> bool {

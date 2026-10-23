@@ -310,6 +310,22 @@ pub struct Class {
     /// initialization it may run (`analysis::live_methods`); `None` when that is not known, and
     /// then every static may be. Only in a program that starts a thread.
     pub thread_statics: Option<std::collections::HashSet<usize>>,
+    /// The Java class of each array that the code makes where the translation holds it as an
+    /// `Object[]` though Java makes it as an array of a narrower class (`lower::covariant`), by
+    /// the expression that makes it: `String[]` for a `new String[n]`, and `Object[]` for a copy
+    /// into a class that is not the source's (`Arrays.copyOf(a, n, Object[].class)`).
+    pub element_classes: HashMap<ExprId, Type>,
+}
+
+impl Class {
+    /// Whether `a[i] = v` into an array of type `array` checks that the array can hold `v`: the
+    /// program makes covariant arrays (`element_classes`), `array` is an `Object[]`, which may be
+    /// one, and `v` is not null.
+    pub fn checks_store(&self, array: Type, value: &Expr) -> bool {
+        !self.element_classes.is_empty()
+            && matches!(array, Type::Array(element) if *element == Type::class(OBJECT))
+            && !matches!(value.kind, ExprKind::Null)
+    }
 }
 
 /// An assumption of the translation at a place of the program: the method (index into
@@ -319,6 +335,10 @@ pub struct Note {
     pub pos: Pos,
     pub message: String,
 }
+
+/// The calls of a method by the class whose code calls it, the call's position, the method's
+/// name and the position of the call's first argument (`ClassFileNames::chained_calls`).
+pub type ChainedCalls = HashMap<(String, Pos, String, Pos), Option<CallName>>;
 
 /// What the class files that javac writes name, where lowering knows it from javac's tree: the
 /// JDK's code, which `javac::BytecodeNames` does not compile, needs it for the messages of its
@@ -337,6 +357,18 @@ pub struct ClassFileNames {
     /// position and the method's name. `None` where two calls there differ, or where the class
     /// is not certain.
     pub calls: HashMap<(String, Pos, String), Option<CallName>>,
+    /// The calls that `calls` has as `None` because two calls of the method at the position
+    /// differ, as in a chain `b.append('0').append(1)`, whose calls all start where `b` does: by
+    /// the position of the call's first argument too.
+    pub chained_calls: ChainedCalls,
+    /// The iterator of each for-each loop over an `Iterable` that lowering writes out
+    /// (`lower::foreach`), by the class and the position of the loop, where its uses are: the
+    /// position of the collection, where javac's own local for it (`i$`) starts.
+    pub iterators: HashMap<(String, Pos), Pos>,
+    /// The locals that lowering renamed in each method it lowered, by the method's class and
+    /// position: the Java name of each by its new name (`s` for `s2`, a second `s` of another
+    /// type). A new name is never one that the method's source uses.
+    pub renamed_locals: HashMap<(String, Pos), HashMap<String, String>>,
 }
 
 /// A method as a call in a class file names it, in javac's names: the class that javac names it
@@ -473,6 +505,9 @@ pub struct Capture {
     /// The field that holds it, declared by the class or by a superclass that captures it too.
     pub field: String,
     pub ty: Type,
+    /// The receiver of a bound method reference, which the code that creates the reference
+    /// checks for null (`lower::lambdas`): never null in the class's code.
+    pub checked: bool,
 }
 
 /// Where a class is declared.
