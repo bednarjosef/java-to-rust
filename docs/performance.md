@@ -24,7 +24,7 @@ Rust/Java is the ratio of those two medians. Times in milliseconds.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
-- Rust: rustc 1.99.0 (b940084d7 2026-09-28), release profile
+- Rust: rustc 1.99.0 (b940084d7 2026-09-28), release profile without LTO (the crates the translator writes now build in release with fat LTO)
 - Load average at the start of each run: 20.8, 7.1 and 10.8 (on 16 cores); run 3 ended at 22.6.
   Run 1 started at 20.8, just above the threshold of 20 for starting a run.
 
@@ -460,8 +460,9 @@ standard error as the real javac, and the PGO build passes the whole `--corpus` 
 | `lto = "fat"` and PGO | 16.3 GB | 25 min | 0.040 s | 0.65 s | 4.31 s |
 
 The crate is one of about 537,000 lines, built with all 16 cores; the peak is the memory of the
-whole build (cargo and rustc). Fat LTO also makes the binary 22% smaller (72 MB against 92 MB).
-PGO (profile-guided optimization) is three steps: a build with `-Cprofile-generate`, a run of it
+whole build (cargo and rustc). Fat LTO also makes the binary 22% smaller (72 MB against 92 MB),
+and the crates the translator writes use it for their release builds (`lto = "fat"`). PGO (profile-guided optimization) is three steps, which `scripts/pgo-build.sh CRATE TRAIN_COMMAND`
+runs for any translated crate: a build with `-Cprofile-generate`, a run of it
 over inputs that are not the timed ones (`corpus/threads` and `corpus/whole-program` together,
 each project of `corpus/projects`, and the javac-check cases other than hello; 5 s), and a build
 with `-Cprofile-use` of the merged profile (`llvm-profdata` from rustup's `llvm-tools`). Its
