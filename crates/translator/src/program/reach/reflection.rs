@@ -102,15 +102,6 @@ fn service_load(node: &Value) -> Option<Option<String>> {
 }
 
 impl<'t> Walk<'t> {
-    /// The walk, with the service providers of the sources (`Walk::providers`).
-    pub(super) fn with_providers(
-        mut self,
-        providers: &[crate::program::modules::ServiceProvider],
-    ) -> Walk<'t> {
-        self.providers = providers.to_vec();
-        self
-    }
-
     /// A node of reachable code: a string literal, a class literal, a lookup or a load of a
     /// service, which the lookups' fixed point (`reflect`) takes up.
     pub(super) fn reflection_scan(&mut self, node: &Value) {

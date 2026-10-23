@@ -1129,16 +1129,6 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         (TRANSLATED_MODULES, "verifyModuleAccess"),
     ),
-    // The installed file-system providers, which the JDK loads with `ServiceLoader`; the
-    // translator's are those of `java.base`.
-    (
-        (
-            "java.nio.file.spi.FileSystemProvider",
-            "loadInstalledProviders",
-            "()java.util.List<java.nio.file.spi.FileSystemProvider>",
-        ),
-        ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
-    ),
     // Whether a network interface has an address, and the interface of a name, which the JVM
     // asks the system for (`java/net/TranslatedNet.java`).
     (
@@ -1462,9 +1452,14 @@ impl<'t> Rounds<'t> {
                 walk
             }
             None => {
-                let walk =
-                    Walk::start(&self.units, &self.main, true, self.string_array_writes, &self.locale_data)?
-                        .with_providers(&self.providers);
+                let walk = Walk::start(
+                    &self.units,
+                    &self.main,
+                    true,
+                    self.string_array_writes,
+                    &self.locale_data,
+                    &self.providers,
+                )?;
                 self.sequential.insert(walk)
             }
         };
@@ -1478,9 +1473,14 @@ impl<'t> Rounds<'t> {
                 }
             }
             None if !self.stays_sequential => {
-                let walk =
-                    Walk::start(&self.units, &self.main, false, self.string_array_writes, &self.locale_data)?
-                        .with_providers(&self.providers);
+                let walk = Walk::start(
+                    &self.units,
+                    &self.main,
+                    false,
+                    self.string_array_writes,
+                    &self.locale_data,
+                    &self.providers,
+                )?;
                 self.parallel = Some(walk);
             }
             None => {}
@@ -1603,16 +1603,23 @@ struct Walk<'t> {
 }
 
 impl<'t> Walk<'t> {
-    /// Walks from `main` over these units, with streams assumed to stay sequential or not, and
-    /// with `Reach::string_array_writes`.
+    /// Walks from `main` over these units, with streams assumed to stay sequential or not, with
+    /// `Reach::string_array_writes`, and with the service providers of the sources
+    /// (`Walk::providers`), which the first walk already loads.
     fn start(
         units: &[&'t Value],
         main: &str,
         sequential: bool,
         string_array_writes: bool,
         locale_data: &[String],
+        providers: &[super::modules::ServiceProvider],
     ) -> Result<Walk<'t>, String> {
-        let mut walk = Walk { sequential, locale_data: locale_data.to_vec(), ..Walk::default() };
+        let mut walk = Walk {
+            sequential,
+            locale_data: locale_data.to_vec(),
+            providers: providers.to_vec(),
+            ..Walk::default()
+        };
         walk.reach.sequential = sequential;
         walk.reach.string_array_writes = string_array_writes;
         walk.declare_units(units);
