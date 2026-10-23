@@ -1736,7 +1736,7 @@ impl<'a> Gen<'a> {
         let p = &self.class.methods[r].params[0];
         let other = self.local(&p.name);
         let optional = self.optional_var(r, p.ty, &p.name);
-        let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
+        let place = if self.lends(r) { other } else { format!("&{other}") };
         let comparable = self.class.methods[r].class;
         let compare = match self.runtime_of(c) {
             Some(ty) => {
@@ -1814,7 +1814,7 @@ impl<'a> Gen<'a> {
         let p = &m.params[0];
         let other = self.local(&p.name);
         let optional = self.optional_var(r, p.ty, &p.name);
-        let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
+        let place = if self.lends(r) { other } else { format!("&{other}") };
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
             // A `java::SharedArray` is an `Arc`, as `array_identity` compares them.
@@ -1887,6 +1887,12 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether the first parameter of method `r` is borrowed, so that it is a reference already.
+    fn lends(&self, r: usize) -> bool {
+        self.facts.borrowed_objects.contains(&(r, 0))
+            || self.facts.borrowed_optional_objects.contains(&(r, 0))
+    }
+
     /// A call of `Object`'s `equals` or `hashCode` (method `r`) on an object of a class that
     /// overrides neither and that no enum represents: its identity.
     pub(super) fn identity_call(&mut self, receiver: &'a Expr, r: usize, args: &'a [Expr]) -> Code {
@@ -1898,7 +1904,7 @@ impl<'a> Gen<'a> {
         let arg = self.call_args(r, args).remove(0);
         let p = &self.class.methods[r].params[0];
         let optional = self.optional_var(r, p.ty, &p.name);
-        let place = if self.facts.borrowed_objects.contains(&(r, 0)) { arg } else { format!("&{arg}") };
+        let place = if self.lends(r) { arg } else { format!("&{arg}") };
         // The object is found before the argument is evaluated, as Java does.
         let temp = self.temp("address");
         let same = format!("std::ptr::addr_eq({temp}, {})", self.address(c, "b"));
