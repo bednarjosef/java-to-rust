@@ -564,9 +564,12 @@ unchanged and that a class no thread reaches keeps `Rc`.
   short method call: a compare-and-swap to take the data lock and a sequentially consistent
   store to give it back, with a look at the parking bucket's waiters, against a flag check for a
   `RefCell` borrow; and an atomic increment per handle clone. Until the program starts its first
-  thread, the lock is taken and given back and handles are counted with plain stores instead
-  (`locked.rs`, `THREADS`; `shared.rs`): a program whose threads start late, or never (javac's),
-  pays no atomic operation until then. An immutable shared object costs nothing on reads beyond the `Arc` count.
+  thread, taking the lock and giving it back are a plain increment and decrement of the lock's
+  word, and handles are counted with plain stores (`locked.rs`, `RawLock` and `THREADS`;
+  `shared.rs`): a program whose threads start late, or never (javac's), pays no atomic operation
+  until then. The lock's word holds the holder's number and the count of its holds together, and
+  the thread that ran alone is holder 0, so the locks it holds when it starts a thread are its
+  own without being recorded. An immutable shared object costs nothing on reads beyond the `Arc` count.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock.
 - **Primitive statics** are plain loads and stores on x86-64 (acquire/release); object statics
   cost a lock per access.

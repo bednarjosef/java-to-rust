@@ -20,7 +20,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,8 @@ const WATCHDOG: Duration = Duration::from_secs(20);
 thread_local! {
     /// A byte whose address identifies the thread while it lives.
     static TOKEN: u8 = const { 0 };
+    /// The thread's number as the holder of locks (`RawLock`), once it has one.
+    static HOLDER: Cell<u32> = const { Cell::new(NO_HOLDER) };
 }
 
 /// Whether the process has started a second thread (`begin_threads`). Until it has, the one
@@ -42,17 +44,45 @@ thread_local! {
 static THREADS: AtomicBool = AtomicBool::new(false);
 
 /// The process is about to start a second thread: from now on every lock takes the atomic path.
-/// Called by the thread that spawns it, before it spawns it (`thread::start_thread`). The locks
-/// that this thread holds, taken with plain stores, are seen as held by the new thread, as the
-/// spawn orders those stores before everything the new thread does.
+/// Called by the thread that spawns it, before it spawns it (`thread::start_thread`). That thread
+/// is the one that ran alone, and it becomes holder 0, the holder of the locks it took alone
+/// (`RawLock`); the spawn orders their plain stores before everything the new thread does.
 pub(crate) fn begin_threads() {
-    THREADS.store(true, Ordering::SeqCst);
+    // A thread that has a number held locks on the atomic path already (only the unit tests'
+    // threads do, which take it from the start).
+    if !THREADS.swap(true, Ordering::SeqCst) {
+        HOLDER.with(|h| {
+            if h.get() == NO_HOLDER {
+                h.set(0);
+            }
+        });
+    }
 }
 
-/// Whether only one thread runs: no thread has been started (`THREADS`).
+/// Whether only one thread runs: no thread has been started (`THREADS`). The unit tests run on
+/// the test harness's threads, which no `begin_threads` announces, so they take the atomic path
+/// (`tests/locks_alone.rs` tests the plain one, in a process of its own).
 #[inline]
 pub(crate) fn alone() -> bool {
-    !THREADS.load(Ordering::Relaxed)
+    !cfg!(test) && !THREADS.load(Ordering::Relaxed)
+}
+
+/// The value of `HOLDER` before the thread has a number.
+const NO_HOLDER: u32 = u32::MAX;
+
+/// The next number of a thread that holds a lock, after the 0 of the thread that ran alone.
+static NEXT_HOLDER: AtomicU32 = AtomicU32::new(1);
+
+/// The calling thread's number as the holder of a lock: 0 for the thread that ran alone, and a
+/// number of its own for every other thread, which no other thread ever has.
+#[cold]
+fn holder() -> u64 {
+    HOLDER.with(|h| {
+        if h.get() == NO_HOLDER {
+            h.set(NEXT_HOLDER.fetch_add(1, Ordering::Relaxed));
+        }
+        h.get() as u64
+    })
 }
 
 /// The calling thread's token: never 0, and different from every other live thread's.
@@ -111,49 +141,81 @@ pub(crate) enum Waited {
     Interrupted,
 }
 
-/// A reentrant lock: the token of the thread that holds it (0 when free), and how many times that
-/// thread has taken it, of which how many as the object's monitor. (The monitor's wait set is in
-/// the lock's bucket.)
+/// A reentrant lock: one word, the number of the thread that holds it (`holder`) in the high half
+/// and how many times that thread has taken it in the low half, 0 when free; and how many of those
+/// holds are the object's monitor's. (The monitor's wait set is in the lock's bucket.)
+///
+/// While one thread runs alone, a hold only counts in the low half, with plain stores: that thread
+/// is holder 0. When it starts a second thread it keeps the number 0, so the locks it took alone
+/// are its own, held as any other: the word holds both halves, so another thread reads the holder
+/// and the count of one moment, and takes the lock only from 0, when it is free.
 pub struct RawLock {
-    owner: AtomicUsize,
-    depth: Cell<usize>,
+    state: AtomicU64,
     entered: AtomicUsize,
 }
 
-// `depth` is only read and written by the thread that holds the lock.
-unsafe impl Sync for RawLock {}
+/// The low half of `RawLock::state`: how many times the holder has taken the lock.
+const HOLDS: u64 = u32::MAX as u64;
+
+/// The holder of a lock whose state is `state`, which is not 0.
+fn holder_of(state: u64) -> u64 {
+    state >> 32
+}
 
 impl RawLock {
     pub(crate) const fn new() -> RawLock {
-        RawLock { owner: AtomicUsize::new(0), depth: Cell::new(0), entered: AtomicUsize::new(0) }
+        RawLock { state: AtomicU64::new(0), entered: AtomicUsize::new(0) }
+    }
+
+    /// The state of the lock held once by holder `me`.
+    fn held_once(me: u64) -> u64 {
+        (me << 32) | 1
+    }
+
+    /// Whether the calling thread, holder `me`, holds the lock. Only the holder changes a held
+    /// lock's state, and only from 0 does another take it, so the thread reads its own last write
+    /// or another's, never a stale one of its own.
+    fn held_by(&self, me: u64) -> bool {
+        let state = self.state.load(Ordering::Relaxed);
+        state != 0 && holder_of(state) == me
     }
 
     #[inline]
     pub(crate) fn acquire(&self) {
-        let me = thread_token();
-        // Only this thread ever stores its own token, so seeing it means this thread holds the lock.
-        if self.owner.load(Ordering::Relaxed) == me {
-            self.depth.set(self.depth.get() + 1);
-            return;
-        }
-        // The only thread: no other holds the lock, and none can race for it. The lock is left
-        // as the atomic path leaves it, so it may be released after another thread starts.
+        // The only thread, holder 0: no other holds the lock, and none can race for it.
         if alone() {
-            self.owner.store(me, Ordering::Relaxed);
-        } else if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            self.wait(me);
+            self.state.store(self.state.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        } else {
+            self.acquire_shared();
         }
-        self.depth.set(1);
     }
 
     #[cold]
-    fn wait(&self, me: usize) {
+    #[inline(never)]
+    fn acquire_shared(&self) {
+        let me = holder();
+        if self.held_by(me) {
+            self.state.store(self.state.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        } else if self
+            .state
+            .compare_exchange(0, Self::held_once(me), Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            self.wait(me);
+        }
+    }
+
+    #[cold]
+    fn wait(&self, me: u64) {
         let mut started = Instant::now();
         let bucket = bucket(self as *const RawLock as usize);
         let mut spins = 0u32;
         loop {
-            if self.owner.load(Ordering::Relaxed) == 0
-                && self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_ok()
+            if self.state.load(Ordering::Relaxed) == 0
+                && self
+                    .state
+                    .compare_exchange(0, Self::held_once(me), Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
             {
                 return;
             }
@@ -171,7 +233,7 @@ impl RawLock {
             // `release` stores 0 before it looks for waiters, and this thread counted itself before
             // it looks at the owner, so one of the two sees the other: no wakeup is lost. The
             // timeout is only a second line of defence.
-            if self.owner.load(Ordering::SeqCst) != 0 {
+            if self.state.load(Ordering::SeqCst) != 0 {
                 let _ = bucket.condvar.wait_timeout(guard, Duration::from_millis(50));
             } else {
                 drop(guard);
@@ -193,21 +255,28 @@ impl RawLock {
 
     #[inline]
     pub(crate) fn release(&self) {
-        let depth = self.depth.get() - 1;
-        self.depth.set(depth);
-        if depth == 0 {
-            // The only thread: no other waits for the lock (none can have started since it was
-            // taken without this thread starting it, and then `alone` is false).
-            if alone() {
-                self.owner.store(0, Ordering::Relaxed);
-                return;
-            }
-            self.owner.store(0, Ordering::SeqCst);
-            let bucket = bucket(self as *const RawLock as usize);
-            if bucket.waiters.load(Ordering::SeqCst) > 0 {
-                let _guard = bucket.mutex.lock().unwrap_or_else(|e| e.into_inner());
-                bucket.condvar.notify_all();
-            }
+        // The only thread: no other waits for the lock (none can have started since it was
+        // taken without this thread starting it, and then `alone` is false).
+        if alone() {
+            self.state.store(self.state.load(Ordering::Relaxed) - 1, Ordering::Relaxed);
+        } else {
+            self.release_shared();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn release_shared(&self) {
+        let state = self.state.load(Ordering::Relaxed);
+        if state & HOLDS > 1 {
+            self.state.store(state - 1, Ordering::Relaxed);
+            return;
+        }
+        self.state.store(0, Ordering::SeqCst);
+        let bucket = bucket(self as *const RawLock as usize);
+        if bucket.waiters.load(Ordering::SeqCst) > 0 {
+            let _guard = bucket.mutex.lock().unwrap_or_else(|e| e.into_inner());
+            bucket.condvar.notify_all();
         }
     }
 }
@@ -217,16 +286,19 @@ impl RawLock {
     /// to exit it is `BLOCKED` meanwhile, as `Thread.getState()` tells.
     #[inline]
     pub(crate) fn enter(&self) {
-        let me = thread_token();
-        if self.owner.load(Ordering::Relaxed) == me {
-            self.depth.set(self.depth.get() + 1);
+        if alone() {
+            self.state.store(self.state.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
         } else {
-            if alone() {
-                self.owner.store(me, Ordering::Relaxed);
-            } else if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            let me = holder();
+            if self.held_by(me) {
+                self.state.store(self.state.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            } else if self
+                .state
+                .compare_exchange(0, Self::held_once(me), Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 self.blocked(me);
             }
-            self.depth.set(1);
         }
         // Only the holder writes `entered`; another thread reads it only to tell a monitor from
         // a data lock while it waits.
@@ -235,7 +307,7 @@ impl RawLock {
 
     /// Waits for the monitor as a `BLOCKED` thread.
     #[cold]
-    fn blocked(&self, me: usize) {
+    fn blocked(&self, me: u64) {
         crate::thread::in_state(crate::thread::State::Blocked, || self.wait(me));
     }
 
@@ -248,7 +320,8 @@ impl RawLock {
 
     /// Whether the calling thread holds the monitor: `Thread.holdsLock`.
     pub(crate) fn held_by_current(&self) -> bool {
-        self.owner.load(Ordering::Relaxed) == thread_token() && self.entered.load(Ordering::Relaxed) > 0
+        let me = if alone() { 0 } else { holder() };
+        self.held_by(me) && self.entered.load(Ordering::Relaxed) > 0
     }
 
     /// `Object.wait`: gives up the monitor, every entry of it, until another thread notifies this
@@ -267,12 +340,13 @@ impl RawLock {
         let ticket = TICKETS.fetch_add(1, Ordering::Relaxed);
         // In the wait set while the monitor is still held, so a `notify` after this sees the waiter.
         lock().push(Waiter { lock: address, ticket, notified: false });
-        let (depth, entered) = (self.depth.get(), self.entered.load(Ordering::Relaxed));
+        let state = self.state.load(Ordering::Relaxed);
+        let (me, depth, entered) = (holder_of(state), state & HOLDS, self.entered.load(Ordering::Relaxed));
         // Every hold of the lock is a monitor's: a borrow of the object's fields across the wait
         // would let another thread in while it lasts.
-        assert!(depth == entered, "translation bug: `wait` while a borrow of the object is held");
+        assert!(depth == entered as u64, "translation bug: `wait` while a borrow of the object is held");
         self.entered.store(0, Ordering::Relaxed);
-        self.depth.set(1);
+        self.state.store(Self::held_once(me), Ordering::Relaxed);
         self.release();
         let deadline = timeout.map(|t| Instant::now() + t);
         crate::thread::waiting_in(Some(bucket_index(address)));
@@ -297,11 +371,11 @@ impl RawLock {
         });
         crate::thread::waiting_in(None);
         // Notified, the thread enters the monitor again, blocked while another holds it.
-        let me = thread_token();
-        if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        if self.state.compare_exchange(0, Self::held_once(me), Ordering::Acquire, Ordering::Relaxed).is_err()
+        {
             self.blocked(me);
         }
-        self.depth.set(depth);
+        self.state.store((me << 32) | depth, Ordering::Relaxed);
         self.entered.store(entered, Ordering::Relaxed);
         if interrupted { Waited::Interrupted } else { Waited::Done }
     }
