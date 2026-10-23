@@ -176,8 +176,19 @@ class UnixNativeDispatcher {
 
     @Replace
     static void symlink(byte[] name1, UnixPath name2) throws UnixException {
-        symlink0(name1, name2.getByteArrayForSysCalls());
+        symlink0(cString(name1), name2.getByteArrayForSysCalls());
         check();
+    }
+
+    /**
+     * A copy of the bytes of a path that the caller gives, as the JDK's
+     * {@code NativeBuffers.asNativeBuffer(cstr)} copies them to native memory: reading their
+     * length first, so that a null fails with its message.
+     */
+    @Add
+    private static byte[] cString(byte[] cstr) {
+        int length = cstr.length;
+        return java.util.Arrays.copyOf(cstr, length);
     }
 
     @Add

@@ -27,6 +27,10 @@ class InputStreamReader {
     @Add
     private final int unit;
 
+    /** Whether the charset is UTF-16BE, whose high surrogates come first in a character. */
+    @Add
+    private final boolean bigEndian;
+
     @Add
     private final byte[] bytes = new byte[BUFFER_SIZE];
 
@@ -60,6 +64,7 @@ class InputStreamReader {
         this.in = in;
         this.charset = cs;
         this.unit = unitOf(cs.name());
+        this.bigEndian = cs.name().equals("UTF-16BE");
     }
 
     @Replace
@@ -199,8 +204,7 @@ class InputStreamReader {
         if (unit == 2) {
             int whole = count - count % 2;
             if (whole >= 2) {
-                boolean big = charset.name().equals("UTF-16BE");
-                int high = big ? bytes[whole - 2] & 0xff : bytes[whole - 1] & 0xff;
+                int high = bigEndian ? bytes[whole - 2] & 0xff : bytes[whole - 1] & 0xff;
                 if (high >= 0xD8 && high <= 0xDB) {
                     whole -= 2;
                 }
