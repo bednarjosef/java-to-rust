@@ -420,7 +420,7 @@ fn programs_and_libraries_that_are_modules() {
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
     let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
     // The JDK's `ArrayList` and the library's class, translated from their sources.
-    for wanted in ["pub(crate) struct ArrayList", "pub(crate) fn shout(s: &str) -> String"] {
+    for wanted in ["pub(crate) struct ArrayList", "pub(crate) fn shout(s: &java::Wtf8) -> java::JString"] {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
     let translated = translate("p.Main", "logging", &[&java_base]);
