@@ -1600,6 +1600,9 @@ struct Walk<'t> {
     /// (`reflection.rs`).
     providers: Vec<super::modules::ServiceProvider>,
     service_loads: BTreeSet<Option<String>>,
+    /// The providers found whose classes no unit declares yet, so that what makes them
+    /// (`load_services`) is reached once a later round declares them.
+    unmade: BTreeSet<String>,
 }
 
 impl<'t> Walk<'t> {

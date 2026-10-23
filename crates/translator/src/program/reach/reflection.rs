@@ -251,7 +251,8 @@ impl<'t> Walk<'t> {
 
     /// Makes reachable the providers of the services that reachable code loads, each with what
     /// `ServiceLoader` makes it with: its public static `provider()`, or its constructor without
-    /// parameters; and whether there was a new one.
+    /// parameters; and whether there was a new one. A provider whose class no unit declares yet
+    /// is missing, and what makes it is reached once a later round declares it.
     fn load_services(&mut self) -> bool {
         if self.service_loads.is_empty() {
             return false;
@@ -265,12 +266,17 @@ impl<'t> Walk<'t> {
                 continue;
             }
             let providers = self.reach.services.entry(service.clone()).or_default();
-            if providers.iter().any(|(p, _)| *p == provider) {
+            if !providers.iter().any(|(p, _)| *p == provider) {
+                providers.push((provider.clone(), modular));
+                new = true;
+                self.work.push(Item::Class(provider.clone()));
+                self.unmade.insert(provider.clone());
+            }
+            if !self.unmade.contains(&provider) || !self.classes.contains_key(&provider) {
                 continue;
             }
-            providers.push((provider.clone(), modular));
+            self.unmade.remove(&provider);
             new = true;
-            self.work.push(Item::Class(provider.clone()));
             let made: Vec<_> = self
                 .methods
                 .iter()
