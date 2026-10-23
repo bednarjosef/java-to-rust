@@ -453,6 +453,7 @@ impl<'t> Lowering<'t> {
                     defaults.push((t, [implementations[0], implementations[1]]));
                 }
             }
+            self.link_sequence_subclasses(methods, s.methods, at.equals)?;
             let (_, params, _) = CHAR_SEQUENCE_METHODS[GET_CHARS];
             for method in methods.iter_mut().take(at.equals) {
                 let below_default =
@@ -514,8 +515,14 @@ impl<'t> Lowering<'t> {
                 let ret = ret.unwrap_or(Type::class(CHAR_SEQUENCE));
                 methods.push(Method { class: s.decl, ..method(name, params, ret) });
             }
-            for (t, [length, char_at]) in defaults {
-                methods.push(self.default_get_chars(t, length, char_at, s.methods));
+            for (t, mut found) in defaults {
+                for (i, slot) in found.iter_mut().enumerate() {
+                    if slot.is_none() && self.types[t].node.has_flag("ABSTRACT") {
+                        *slot = Some(methods.len());
+                        methods.push(self.abstract_sequence_method(t, i, s.methods));
+                    }
+                }
+                methods.push(self.default_get_chars(t, found[0], found[1], s.methods));
             }
         }
         self.bridges(methods)
@@ -792,7 +799,7 @@ impl<'t> Lowering<'t> {
 
     /// Whether type `t` of the program implements `java.lang.CharSequence`, directly, through an
     /// interface or through a superclass.
-    fn is_char_sequence(&self, t: usize) -> Result<bool, Error> {
+    pub(super) fn is_char_sequence(&self, t: usize) -> Result<bool, Error> {
         if self.implements_directly(t, "java.lang.CharSequence") {
             return Ok(true);
         }

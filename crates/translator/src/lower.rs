@@ -3,6 +3,7 @@
 //! resolved every name and call, so lowering only maps them onto the supported subset. Anything
 //! outside it is reported as an error naming the construct.
 
+mod abstract_sequence;
 mod code_point;
 mod covariant;
 mod element_reads;
