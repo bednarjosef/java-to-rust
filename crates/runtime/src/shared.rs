@@ -5,7 +5,7 @@
 //! a handle is most of what such a program does: `std::sync::Arc` makes each copy and drop an
 //! atomic read-modify-write, which costs a store-buffer drain every time even when only one thread
 //! runs. javac starts its one thread only when a file manager closes in the background, which a
-//! normal compilation never does, and its atomic count changes took about two thirds of its time.
+//! normal compilation never does; plain counts make it about an eighth faster.
 //!
 //! The count is an `AtomicUsize`. While only one thread runs (`locked::alone`), a copy loads it and
 //! stores it plus one, with relaxed orderings, which compile to a plain increment. That is sound
@@ -104,17 +104,7 @@ impl<T: ?Sized> Arc<T> {
 impl<T: ?Sized> Clone for Arc<T> {
     #[inline]
     fn clone(&self) -> Arc<T> {
-        let count = &self.inner().count;
-        let old = if alone() {
-            let old = count.load(Ordering::Relaxed);
-            count.store(old + 1, Ordering::Relaxed);
-            old
-        } else {
-            count.fetch_add(1, Ordering::Relaxed)
-        };
-        if old > MAX_REFS {
-            std::process::abort();
-        }
+        count_up(&self.inner().count);
         Arc { ptr: self.ptr, owns: PhantomData }
     }
 }
@@ -122,22 +112,59 @@ impl<T: ?Sized> Clone for Arc<T> {
 impl<T: ?Sized> Drop for Arc<T> {
     #[inline]
     fn drop(&mut self) {
-        let count = &self.inner().count;
-        if alone() {
-            let old = count.load(Ordering::Relaxed);
-            if old != 1 {
-                count.store(old - 1, Ordering::Relaxed);
-                return;
-            }
-        } else {
-            if count.fetch_sub(1, Ordering::Release) != 1 {
-                return;
-            }
-            // Every other handle's changes to the value happen before it is freed.
-            fence(Ordering::Acquire);
+        if count_down(&self.inner().count) {
+            self.drop_slow();
         }
-        self.drop_slow();
     }
+}
+
+// The count changes are not generic, so each is compiled once rather than once per class, and only
+// the plain path is inlined where a handle is copied or dropped: there are hundreds of thousands of
+// such places in a large program.
+
+/// One more handle.
+#[inline]
+fn count_up(count: &AtomicUsize) {
+    if alone() {
+        let old = count.load(Ordering::Relaxed);
+        if old > MAX_REFS {
+            std::process::abort();
+        }
+        count.store(old + 1, Ordering::Relaxed);
+    } else {
+        count_up_atomic(count);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn count_up_atomic(count: &AtomicUsize) {
+    if count.fetch_add(1, Ordering::Relaxed) > MAX_REFS {
+        std::process::abort();
+    }
+}
+
+/// One handle fewer: whether it was the last one, whose value is to be freed.
+#[inline]
+fn count_down(count: &AtomicUsize) -> bool {
+    if alone() {
+        let old = count.load(Ordering::Relaxed);
+        count.store(old - 1, Ordering::Relaxed);
+        old == 1
+    } else {
+        count_down_atomic(count)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn count_down_atomic(count: &AtomicUsize) -> bool {
+    if count.fetch_sub(1, Ordering::Release) != 1 {
+        return false;
+    }
+    // Every other handle's changes to the value happen before it is freed.
+    fence(Ordering::Acquire);
+    true
 }
 
 impl<T: ?Sized> Deref for Arc<T> {
