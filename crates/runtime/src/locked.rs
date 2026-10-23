@@ -1,12 +1,13 @@
 //! `java::Locked<T>`: the data lock of an object that several threads can reach, which takes the
 //! place of the `RefCell` of a thread-local object (`Arc<java::Locked<C>>` for `Rc<RefCell<C>>`).
 //!
-//! It is a `RefCell` behind a reentrant lock. `borrow()` and `borrow_mut()` take the lock (or
-//! count once more when the calling thread holds it already) and then borrow the cell, and their
-//! guards release both. So the translation keeps the shapes and the discipline of its `RefCell`
-//! code: one statement may borrow the same object several times (`o.borrow_mut().n =
-//! o.borrow().n + 1`), which a plain `Mutex` would deadlock on, and a borrow that conflicts with
-//! another of the same thread panics as `RefCell`'s does. A thread that finds the object locked by
+//! It is a reentrant lock whose word is a `RefCell`'s borrow flag too. `borrow()` and
+//! `borrow_mut()` take the lock (or count once more when the calling thread holds it already) and
+//! check the borrows alive as a `RefCell` would, and their guards give it back. So the translation
+//! keeps the shapes and the discipline of its `RefCell` code: one statement may borrow the same
+//! object several times (`o.borrow_mut().n = o.borrow().n + 1`), which a plain `Mutex` would
+//! deadlock on, and a borrow that conflicts with another of the same thread panics as
+//! `RefCell`'s does. A thread that finds the object locked by
 //! another waits until that thread's borrows end.
 //!
 //! The translation never holds a borrow while it waits for anything else, so a data lock cannot be
@@ -18,8 +19,11 @@
 //! region, which may be long and may wait for other monitors, as Java's does. A thread that waits
 //! for a lock held as a monitor is not watched.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, UnsafeCell};
+use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -154,8 +158,11 @@ pub struct RawLock {
     entered: AtomicUsize,
 }
 
-/// The low half of `RawLock::state`: how many times the holder has taken the lock.
-const HOLDS: u64 = u32::MAX as u64;
+/// The low half of `RawLock::state` but its top bit: how many times the holder has taken the lock.
+const HOLDS: u64 = (1 << 31) - 1;
+
+/// The top bit of the low half of `RawLock::state`: the holder borrows the data to change it.
+const WRITING: u64 = 1 << 31;
 
 /// The holder of a lock whose state is `state`, which is not 0.
 fn holder_of(state: u64) -> u64 {
@@ -178,16 +185,6 @@ impl RawLock {
     fn held_by(&self, me: u64) -> bool {
         let state = self.state.load(Ordering::Relaxed);
         state != 0 && holder_of(state) == me
-    }
-
-    #[inline]
-    pub(crate) fn acquire(&self) {
-        // The only thread, holder 0: no other holds the lock, and none can race for it.
-        if alone() {
-            self.state.store(self.state.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
-        } else {
-            self.acquire_shared();
-        }
     }
 
     #[cold]
@@ -279,6 +276,68 @@ impl RawLock {
             bucket.condvar.notify_all();
         }
     }
+
+    /// Takes the lock to borrow its data to read (`Locked::borrow`): a borrow to change it must not
+    /// be alive, as in a `RefCell`.
+    #[inline]
+    fn acquire_read(&self) {
+        // The only thread, holder 0: no other holds the lock, and none can race for it.
+        if alone() {
+            let state = self.state.load(Ordering::Relaxed);
+            if state & WRITING != 0 {
+                conflict("already mutably borrowed");
+            }
+            self.state.store(state + 1, Ordering::Relaxed);
+        } else {
+            self.acquire_shared();
+            if self.state.load(Ordering::Relaxed) & WRITING != 0 {
+                self.release();
+                conflict("already mutably borrowed");
+            }
+        }
+    }
+
+    /// Takes the lock to borrow its data to change (`Locked::borrow_mut`): no other borrow may be
+    /// alive, though the monitor may be held.
+    #[inline]
+    fn acquire_write(&self) {
+        let entered = || self.entered.load(Ordering::Relaxed) as u64;
+        if alone() {
+            let state = self.state.load(Ordering::Relaxed);
+            if state & HOLDS != entered() {
+                conflict("already borrowed");
+            }
+            self.state.store((state + 1) | WRITING, Ordering::Relaxed);
+        } else {
+            self.acquire_shared();
+            let state = self.state.load(Ordering::Relaxed);
+            if state & HOLDS != entered() + 1 {
+                self.release();
+                conflict("already borrowed");
+            }
+            self.state.store(state | WRITING, Ordering::Relaxed);
+        }
+    }
+
+    /// Gives back a hold that `acquire_write` took.
+    #[inline]
+    fn release_write(&self) {
+        let state = self.state.load(Ordering::Relaxed) & !WRITING;
+        if alone() {
+            self.state.store(state - 1, Ordering::Relaxed);
+        } else {
+            self.state.store(state, Ordering::Relaxed);
+            self.release_shared();
+        }
+    }
+}
+
+/// A borrow that conflicts with another of the same thread: a translation bug, which panics as a
+/// `RefCell` does.
+#[cold]
+#[inline(never)]
+fn conflict(what: &str) -> ! {
+    panic!("{what}")
 }
 
 impl RawLock {
@@ -412,36 +471,22 @@ impl RawLock {
     }
 }
 
-/// One acquisition of a `RawLock`, released when dropped.
-struct Hold<'a>(&'a RawLock);
-
-impl<'a> Hold<'a> {
-    fn new(lock: &'a RawLock) -> Hold<'a> {
-        lock.acquire();
-        Hold(lock)
-    }
-}
-
-impl Drop for Hold<'_> {
-    fn drop(&mut self) {
-        self.0.release();
-    }
-}
-
-/// The data of an object that several threads reach, behind its lock.
+/// The data of an object that several threads reach, behind its lock. The lock's word is also the
+/// borrow flag that a `RefCell` would keep: a borrow counts as a hold, and a borrow to change sets
+/// `WRITING` (`RawLock::acquire_read`, `RawLock::acquire_write`).
 pub struct Locked<T: ?Sized> {
     lock: RawLock,
-    value: RefCell<T>,
+    value: UnsafeCell<T>,
 }
 
-// The cell is only borrowed by the thread that holds the lock, as a `Mutex<T>` gives its value to
+// The data is only reached by the thread that holds the lock, as a `Mutex<T>` gives its value to
 // one thread at a time.
 unsafe impl<T: ?Sized + Send> Send for Locked<T> {}
 unsafe impl<T: ?Sized + Send> Sync for Locked<T> {}
 
 impl<T> Locked<T> {
     pub const fn new(value: T) -> Locked<T> {
-        Locked { lock: RawLock::new(), value: RefCell::new(value) }
+        Locked { lock: RawLock::new(), value: UnsafeCell::new(value) }
     }
 
     pub fn into_inner(self) -> T {
@@ -460,15 +505,21 @@ impl<T: ?Sized> Locked<T> {
     /// Locks the data and borrows it to read, as `RefCell::borrow`.
     #[inline]
     pub fn borrow(&self) -> Ref<'_, T> {
-        let hold = Hold::new(&self.lock);
-        Ref { value: self.value.borrow(), _hold: hold }
+        self.lock.acquire_read();
+        // The lock is held, and no borrow to change the data is alive.
+        Ref { value: unsafe { NonNull::new_unchecked(self.value.get()) }, lock: &self.lock }
     }
 
     /// Locks the data and borrows it to change, as `RefCell::borrow_mut`.
     #[inline]
     pub fn borrow_mut(&self) -> RefMut<'_, T> {
-        let hold = Hold::new(&self.lock);
-        RefMut { value: self.value.borrow_mut(), _hold: hold }
+        self.lock.acquire_write();
+        // The lock is held, and no other borrow is alive.
+        RefMut {
+            value: unsafe { NonNull::new_unchecked(self.value.get()) },
+            lock: &self.lock,
+            changes: PhantomData,
+        }
     }
 
     /// Runs `f` on the data, locked: a static field's read, as `LocalKey::with_borrow`.
@@ -495,7 +546,7 @@ impl<T: ?Sized> Locked<T> {
 
     /// The address of the data, which is the object's identity (as `RefCell::as_ptr`).
     pub fn as_ptr(&self) -> *mut T {
-        self.value.as_ptr()
+        self.value.get()
     }
 }
 
@@ -505,17 +556,19 @@ impl<T: Default> Default for Locked<T> {
     }
 }
 
-/// A borrow of a `Locked` to read. The cell's borrow ends before the lock is released (fields drop
-/// in order).
+/// A borrow of a `Locked` to read, which holds its lock.
 pub struct Ref<'a, T: ?Sized> {
-    value: std::cell::Ref<'a, T>,
-    _hold: Hold<'a>,
+    value: NonNull<T>,
+    lock: &'a RawLock,
 }
 
 impl<'a, T: ?Sized> Ref<'a, T> {
     /// A borrow of a part of the data, as `std::cell::Ref::map`: the fields struct of a superclass.
     pub fn map<U: ?Sized>(r: Ref<'a, T>, f: impl FnOnce(&T) -> &U) -> Ref<'a, U> {
-        Ref { value: std::cell::Ref::map(r.value, f), _hold: r._hold }
+        let r = ManuallyDrop::new(r);
+        // The part lives as long as the data, which the borrow keeps from changing.
+        let value = NonNull::from(f(unsafe { r.value.as_ref() }));
+        Ref { value, lock: r.lock }
     }
 }
 
@@ -524,20 +577,32 @@ impl<T: ?Sized> Deref for Ref<'_, T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        &self.value
+        // The borrow holds the lock, and no borrow to change the data is alive.
+        unsafe { self.value.as_ref() }
     }
 }
 
-/// A borrow of a `Locked` to change.
+impl<T: ?Sized> Drop for Ref<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.release();
+    }
+}
+
+/// A borrow of a `Locked` to change, which holds its lock.
 pub struct RefMut<'a, T: ?Sized> {
-    value: std::cell::RefMut<'a, T>,
-    _hold: Hold<'a>,
+    value: NonNull<T>,
+    lock: &'a RawLock,
+    changes: PhantomData<&'a mut T>,
 }
 
 impl<'a, T: ?Sized> RefMut<'a, T> {
     /// A borrow of a part of the data, as `std::cell::RefMut::map`.
     pub fn map<U: ?Sized>(r: RefMut<'a, T>, f: impl FnOnce(&mut T) -> &mut U) -> RefMut<'a, U> {
-        RefMut { value: std::cell::RefMut::map(r.value, f), _hold: r._hold }
+        let mut r = ManuallyDrop::new(r);
+        // The part lives as long as the data, which only this borrow reaches.
+        let value = NonNull::from(f(unsafe { r.value.as_mut() }));
+        RefMut { value, lock: r.lock, changes: PhantomData }
     }
 }
 
@@ -546,14 +611,22 @@ impl<T: ?Sized> Deref for RefMut<'_, T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        &self.value
+        // The borrow holds the lock, and no other borrow is alive.
+        unsafe { self.value.as_ref() }
     }
 }
 
 impl<T: ?Sized> DerefMut for RefMut<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
-        &mut self.value
+        unsafe { self.value.as_mut() }
+    }
+}
+
+impl<T: ?Sized> Drop for RefMut<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.release_write();
     }
 }
 

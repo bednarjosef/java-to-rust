@@ -10,6 +10,22 @@ use std::time::Duration;
 #[test]
 fn locks_taken_alone_are_still_held_once_a_thread_starts() {
     let shared = java::Arc::new(java::Locked::new(0));
+    // Alone, borrows conflict as in a `RefCell`, and a refused one leaves the lock as it was.
+    let conflict = |f: &dyn Fn()| std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err();
+    {
+        let _reading = shared.borrow();
+        assert!(conflict(&|| drop(shared.borrow_mut())));
+        let _again = shared.borrow();
+    }
+    {
+        let _changing = shared.borrow_mut();
+        assert!(conflict(&|| drop(shared.borrow())));
+        assert!(conflict(&|| drop(shared.borrow_mut())));
+    }
+    {
+        let _monitor = java::enter(&shared);
+        *shared.borrow_mut() += 0;
+    }
     // Taken alone: as the monitor, then borrowed to change and given back, then borrowed to read
     // across the start.
     let monitor = java::enter(&shared);
