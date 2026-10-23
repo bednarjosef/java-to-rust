@@ -151,6 +151,8 @@ What the translator does:
 
 Plans and larger goals:
 
+- [docs/native-speed.md](docs/native-speed.md): the plan for a collected object model and
+  whole-program optimizations that make translated programs faster than on the JVM.
 - [docs/thorough-mode.md](docs/thorough-mode.md): a slower whole-program mode with points-to
   analysis, ownership checked by rustc and typed errors.
 - [docs/natural-rust.md](docs/natural-rust.md): output that reads like hand-written Rust, and a

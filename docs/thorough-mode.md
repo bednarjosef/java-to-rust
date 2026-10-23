@@ -13,6 +13,11 @@ It fits the existing design. Analyses fill the representation table and the code
 follows it; thorough mode adds stronger analyses and design-level entries (per class or per
 pattern instead of per value), not a second generator.
 
+The speed side of this mode (the collected object model, points-to and escape analysis, and the
+transformations they allow) is planned in docs/native-speed.md, which also replaces analysis
+precision built from recorded runs: decisions come from the code alone. This doc keeps the idiom
+side.
+
 When: after the object model lands, because almost everything here works on its representation.
 The array-ownership work (arrays as owned `Vec`s, returned and moved arrays) is a small first
 version of the alias analysis for arrays only.
@@ -33,9 +38,6 @@ version of the alias analysis for arrays only.
    message ever reaches output. If a `HashMap` is only used with `put` and `get`, its order cannot
    show, and it can be Rust's own `HashMap`. The same decides `ArrayList` as `Vec` and streams as
    iterators (docs/lists-and-streams.md) per allocation site.
-5. **Profiling.** Running the program's tests records real aliasing and value ranges. They are
-   only guesses: an analysis then proves them, or a cheap runtime check guards them and falls
-   back to the general path.
 
 ## rustc as the proof checker for ownership
 
@@ -114,7 +116,6 @@ comes back in: as a stated assumption, not a guess hidden in the code.
 5. Shape analysis and arenas.
 6. Relaxations and the report that lists them.
 7. Data layout.
-8. Profiling.
 
 ## Limits
 
