@@ -492,9 +492,9 @@ pub fn computed_receiver(node: &Value, streams: bool) -> Option<&Value> {
         "MEMBER_SELECT" if matches!(qualifier.str("identifier"), "super" | "class") => true,
         "MEMBER_SELECT" => {
             streams
-                && qualifier
-                    .symbol()
-                    .is_some_and(|s| s.kind == "FIELD" && s.owner == "java.lang.System" && matches!(s.name, "out" | "err"))
+                && qualifier.symbol().is_some_and(|s| {
+                    s.kind == "FIELD" && s.owner == "java.lang.System" && matches!(s.name, "out" | "err")
+                })
         }
         _ => false,
     };
