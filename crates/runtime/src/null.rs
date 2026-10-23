@@ -92,7 +92,7 @@ impl<T: ?Sized> Handle for std::rc::Rc<T> {
     }
 }
 
-impl<T: ?Sized> Handle for crate::Arc<T> {
+impl<T> Handle for crate::Arc<T> {
     fn address(&self) -> *const u8 {
         crate::Arc::as_ptr(self) as *const u8
     }
