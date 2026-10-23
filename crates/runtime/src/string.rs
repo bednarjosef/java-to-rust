@@ -547,7 +547,12 @@ pub fn equals_ignore_case(a: &Wtf8, b: &Wtf8) -> bool {
 
 /// `s.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the code units, wrapping.
 pub fn string_hash(s: &Wtf8) -> i32 {
-    s.units().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+    // The ASCII bytes at the start are units of their own, read without decoding.
+    let bytes = s.as_bytes();
+    let ascii = bytes.iter().position(|&b| !b.is_ascii()).unwrap_or(bytes.len());
+    let step = |h: i32, c: i32| h.wrapping_mul(31).wrapping_add(c);
+    let h = bytes[..ascii].iter().fold(0i32, |h, &b| step(h, b as i32));
+    s.slice(ascii, bytes.len()).units().fold(h, |h, c| step(h, c as i32))
 }
 
 /// `new String(chars, offset, count)` and `String.valueOf(chars, offset, count)`.
@@ -970,6 +975,9 @@ mod tests {
         assert!(!equals_ignore_case(w("ß"), w("SS")));
         assert_eq!(string_hash(w("hello")), 99162322);
         assert_eq!(string_hash(w("")), 0);
+        assert_eq!(string_hash(w("héllo")), 103094734);
+        assert_eq!(string_hash(w("a😀")), 1866116);
+        assert_eq!(string_hash(w("ab😀c")), 147461023);
     }
 
     #[test]
