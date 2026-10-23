@@ -71,6 +71,7 @@ something a translated program does not have.
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; not `getSpace0` |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing; the path it gives them, `UnixPath.getByteArrayForSysCalls()`, is never null, as the JDK's code shows (`analysis/nullness.rs`: `never_null_result`), so a call has no message of a null path to know |
 | `UnixNativeDispatcher.statvfs0` (the translator's patch, `long[]` fields) | `unix.rs`: `unix_statvfs` | the four fields `UnixFileStoreAttributes.fill` copies (block size, blocks, free and available blocks) |
+| `UnixNativeDispatcher.fgetxattr0`, `fsetxattr0`, `fremovexattr0`, `flistxattr0` and `mknod0` (the translator's patch) | `unix.rs` | the extended attributes of an open file, read from and written to the native memory of the JDK's `NativeBuffer`s, as the DOS and user-defined attribute views and `Files.copy` use them, and `mknod` for the copy of a special file |
 | `LinuxNativeDispatcher.init`, `posix_fadvise`; `UnixFileSystem.directCopy0`, `bufferedCopy0` | `file_copy.rs`, `codegen/file_copy.rs` | `init` does nothing; `posix_fadvise` checks the descriptor is open and gives 0, as its advice has no effect a program can see. `directCopy0` gives `UNSUPPORTED` (-4), so the JDK copies through `bufferedCopy0`, which moves the same bytes between the two descriptors (`copy_file_range` is not used). The JDK's native is `bufferedCopy0Errno` in the translator's patch of `UnixFileSystem`: it answers the `errno` of a failed read or write, and `bufferedCopy` throws `UnixException(errno)` as HotSpot does, so `copyFile` raises the same `IOException` subclass and message (`NoSuchFileException`, `AccessDeniedException`, ...). `posix_fadvise` still raises `java.io.IOException` for a descriptor that is not open; `Files.copy` opens both descriptors first, so it is not reached from there |
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers |
@@ -83,6 +84,7 @@ something a translated program does not have.
 | `Unsafe.park`, `unpark` | `thread.rs` | `LockSupport`'s permits |
 | `CRC32.update`, `updateBytes0` | `java::crc32_update`, `crc32_update_bytes` | zlib's CRC-32 |
 | `Inflater` natives (`inflateBytesBytes`, `inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, ...) | `inflate.rs` | zlib inflation, from arrays or from memory outside the heap by address (direct buffers) |
+| `Deflater` natives (`init`, `deflateBytesBytes`, `deflateBytesBuffer`, `deflateBufferBytes`, `deflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, `getAdler`, `reset`, `end`) | `deflate.rs` | a compressor of the runtime's own, see "Compression" below |
 | `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()` | code on the field `referent`; `false` | see "References" below |
 | `SecureRandom.getSeed` | `random.rs` | seed bytes from the operating system |
 | the natives of the translator's `Thread` | `thread.rs` | see [multi-threading.md](multi-threading.md) |
@@ -116,21 +118,43 @@ values, and the interned object of its text where the program compares strings b
 0, `ImmutableCollections` seeds its order from `System.nanoTime()`. Their output cannot be
 compared with one recorded run.
 
+### Compression
+
+`Deflater` has no zlib to call, so the runtime compresses with code of its own (`deflate.rs`,
+without external crates), and its output is not zlib's byte for byte: it is valid DEFLATE data
+that zlib, the JDK's `Inflater` and the runtime's own read back to the same bytes. A program that
+prints or compares compressed bytes, or their number (`getBytesWritten`, `getTotalOut`), sees
+other values than Java; everything else is zlib's: the bytes read by each call (and so
+`needsInput`, `getBytesRead`, the input buffer's position), `finished`, the Adler-32 of the input
+(`getAdler`), the zlib header with the level's flags and a preset dictionary's id, the empty
+stored block that ends a `SYNC_FLUSH` or `FULL_FLUSH`, the input that a change of level or
+strategy compresses first, and the `IllegalArgumentException` of a level outside -1 to 9 (in the
+constructor) and of a dictionary zlib refuses.
+
+It is a real compressor rather than stored or fixed-code blocks only, since the compressed size
+is what a program uses `Deflater` for (javac's zip file system writes jars with it): input is
+gathered into blocks of 64 KiB, matches are found along hash chains of three-byte prefixes within
+the last 32 KiB, with the chain lengths and lazy matching of zlib's levels, and each block is
+written as stored bytes, with the fixed codes or with dynamic Huffman codes made for it, whichever
+is smallest. Level 0 writes stored blocks, and `HUFFMAN_ONLY` literals only. The output is within
+a few percent of zlib's size at each level.
+
 ### Not implemented
 
 - `Throwable.fillInStackTrace(int)` and `NullPointerException.getExtendedNPEMessage()` are not
   reached: the translator gives the program its own `Throwable` and standard exceptions
   (`java/Standard.java`). Stack traces and helpful null-pointer messages are in
   [exceptions.md](exceptions.md).
-- `FileChannelImpl` (the channel of `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`)
-  reaches the channel natives above, but its path stops before them: `AbstractInterruptibleChannel`
-  calls `JavaLangAccess.blockedOn`, and `InnocuousThread` uses a field offset as a value. So no
-  program reaches them yet. `FileChannel.open` and `Files.newByteChannel` do not use
-  `FileChannelImpl` at all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
+- `UnixFileDispatcherImpl.force0`, which `FileChannel.force` of `FileChannelImpl` (the channel of
+  `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`) reaches. Its reads, writes,
+  positions and sizes go through the channel natives above. `AbstractInterruptibleChannel` calls
+  `JavaLangAccess.blockedOn` to record the operation a thread is in, which does nothing in a
+  translation (`TranslatedLangAccess`): a file's operations do not wait indefinitely, so an
+  interrupt during one is seen just after it, when the next operation's `begin` closes the
+  channel. `FileChannel.open` and `Files.newByteChannel` do not use `FileChannelImpl` at all: they
+  use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
-  definition and module natives, sockets, extended attributes (`UnixNativeDispatcher.fsetxattr0` and
-  the other `sun.nio.fs` xattr natives, which `Files.copy` reaches through `copyNonPosixAttributes`),
-  `MappedMemoryUtils.isLoaded0`, `load0` and
+  definition and module natives, sockets, `MappedMemoryUtils.isLoaded0`, `load0` and
   `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
 
 ## The reachability boundary
@@ -369,10 +393,6 @@ Not done:
 
 - Hand-writing the remaining natives as programs need them, keeping to the policy above (for
   example `UnixFileSystem.getSpace0`, which needs `statvfs`).
-- The extended attributes of `Files.copy` (`fsetxattr0` and its siblings), so
-  `FileChannelTransfers` does not translate yet: it stops there. Every program that calls
-  `Files.copy` stops there too, so the `NoSuchFileException` message of a copy is not checked in
-  the corpus yet.
 - The `CharSequence` enum of the object model has no variants when a program's only conversion of a
   `CharBuffer` to `CharSequence` is the translator's own call (`char_sequence_call`). The flow
   analysis (`analysis/hierarchy.rs` `flows`) records no edge for it, so the interface's methods have

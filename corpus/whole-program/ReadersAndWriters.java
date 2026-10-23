@@ -2,16 +2,42 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.Reader;
 import java.io.Writer;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
 // Readers over System.in and over bytes in memory, and writers over System.out: lines, text
 // that is not ASCII split across reads, charsets, and what a writer that is never flushed loses.
 public class ReadersAndWriters {
+    /** A stream that gives at most three bytes a read, so that characters are split across reads. */
+    static class Trickle extends InputStream {
+        private final byte[] bytes;
+        private int at;
+
+        Trickle(byte[] bytes) {
+            this.bytes = bytes;
+        }
+
+        public int read() {
+            return at < bytes.length ? bytes[at++] & 0xff : -1;
+        }
+
+        public int read(byte[] b, int off, int len) {
+            if (at == bytes.length) {
+                return -1;
+            }
+            int n = Math.min(Math.min(len, 3), bytes.length - at);
+            System.arraycopy(bytes, at, b, off, n);
+            at += n;
+            return n;
+        }
+    }
+
     public static void main(String[] args) throws IOException {
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
         String line;
@@ -44,6 +70,14 @@ public class ReadersAndWriters {
         BufferedReader latinReader =
                 new BufferedReader(new InputStreamReader(new ByteArrayInputStream(latin), "ISO-8859-1"));
         System.out.println("latin: " + latinReader.readLine());
+        for (Charset cs : new Charset[] {StandardCharsets.UTF_16BE, StandardCharsets.UTF_16LE}) {
+            Reader utf16 = new InputStreamReader(new Trickle(text.toString().getBytes(cs)), cs);
+            StringBuilder read = new StringBuilder();
+            while ((n = utf16.read(chunk, 0, 5)) != -1) {
+                read.append(chunk, 0, n);
+            }
+            System.out.println(cs + " in pieces: same " + read.toString().equals(text.toString()));
+        }
         System.out.println("encoding: " + new InputStreamReader(System.in).getEncoding());
 
         BufferedWriter out = new BufferedWriter(new OutputStreamWriter(System.out));

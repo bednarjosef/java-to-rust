@@ -23,6 +23,7 @@ mod closures;
 mod code;
 mod code_point;
 mod covariant;
+mod deflate;
 mod dispatch;
 mod enums;
 mod exceptions;

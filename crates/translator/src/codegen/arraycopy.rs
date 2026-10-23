@@ -1,8 +1,9 @@
 //! `System.arraycopy` between two `Object`s, pair by pair. A pair of arrays of one type is a plain
 //! copy. A pair of arrays of other types is what Java does for it, or the `ArrayStoreException`
-//! that HotSpot throws, with HotSpot's message, which a program may print. The element classes
-//! that a message or a check would name are `String` and `Object`; another element class is
-//! rejected, as no check against it is written here.
+//! that HotSpot throws, with HotSpot's message, which a program may print. Between arrays of two
+//! classes or of strings each element is checked against the destination's class as it is stored
+//! (`arraycopy_classes.rs`), and so between arrays of `String` and of `Object`; a pair of arrays of
+//! other element types, such as arrays of arrays, is rejected.
 
 use super::*;
 
@@ -132,6 +133,9 @@ impl<'a> Gen<'a> {
             format!(
                 "|e: &Option<{object}>| -> Result<Option<{text}>, &'static str> {{ match e {{ None => Ok(None), Some({string_variant}(s)) => Ok(Some(s.clone())), Some(_) => Err(\"{message}\") }} }}"
             )
+        } else if let (Some(a), Some(b)) = (self.class_element(es), self.class_element(ed)) {
+            // Arrays of two classes: each element is checked against the destination's class.
+            self.class_element_convert((a, b), (es, ed))
         } else {
             let (from, to) = (self.binary_name(s), self.binary_name(d));
             self.rejected.push(Error {
@@ -143,6 +147,14 @@ impl<'a> Gen<'a> {
         let copy_call = format!("{copy}(src, {p}, dest, {q}, {n}, {convert})");
         let body = if checked { copy_call } else { format!("{copy_call}.unwrap_or_else({uncaught})") };
         (format!("({vs}(src), {vd}(dest))"), body)
+    }
+
+    /// The type of the elements of type `element`, when they are of a class or strings.
+    fn class_element(&self, element: Type) -> Option<usize> {
+        match element {
+            Type::Class(..) | Type::String => self.type_of(element),
+            _ => None,
+        }
     }
 
     /// The `ArrayStoreException` that HotSpot throws with `message`: the copy's `Err` when it is

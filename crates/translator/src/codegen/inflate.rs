@@ -26,14 +26,14 @@ impl<'a> Gen<'a> {
                 let dict = self.array_arg(&args[1], false);
                 let [off, len] = self.hoisted_ints(args, [2, 3]);
                 let f = self.runtime("inflate_set_dictionary");
-                self.dictionary(id, format!("{f}({addr}, {dict}, {off}, {len})"))
+                self.exception_call(id, format!("{f}({addr}, {dict}, {off}, {len})"))
             }
             Native::InflateSetDictionaryBuffer => {
                 let addr = self.value(&args[0], Type::Long).text;
                 let buffer = self.value(&args[1], Type::Long).text;
                 let [len] = self.hoisted_ints(args, [2]);
                 let f = self.runtime("inflate_set_dictionary_buffer");
-                self.dictionary(id, format!("{f}({addr}, {buffer}, {len})"))
+                self.exception_call(id, format!("{f}({addr}, {buffer}, {len})"))
             }
             Native::InflateBytes => {
                 let addr = self.value(&args[0], Type::Long).text;
@@ -68,22 +68,23 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn runtime_call(&mut self, f: &str, args: Vec<String>) -> Code {
+    pub(super) fn runtime_call(&mut self, f: &str, args: Vec<String>) -> Code {
         Code::atom(format!("{}({})", self.runtime(f), args.join(", ")))
     }
 
     /// The input bytes of `inflateBytesBytes` or `inflateBytesBuffer`, copied into a temporary,
     /// which it returns: the output may be the same array, which cannot be borrowed twice.
-    fn input_copy(&mut self, input: &'a Expr, off: &str, len: &str) -> String {
+    pub(super) fn input_copy(&mut self, input: &'a Expr, off: &str, len: &str) -> String {
         let source = self.slice_of(input);
         let copy = self.temp("input");
         self.line(&format!("let {copy} = ({source})[{off} as usize..({off} + {len}) as usize].to_vec();"));
         copy
     }
 
-    /// `setDictionary` and its buffer form: the runtime's `Result` is raised as an
-    /// `IllegalArgumentException` where a `catch` may see it (`Facts::raising`), else uncaught.
-    fn dictionary(&mut self, id: ExprId, call: String) -> Code {
+    /// A native whose runtime function answers a `Result` with Java's exception, such as
+    /// `setDictionary`'s `IllegalArgumentException`: raised where a `catch` may see it
+    /// (`Facts::raising`), else uncaught.
+    pub(super) fn exception_call(&mut self, id: ExprId, call: String) -> Code {
         if self.facts.raising.contains(&id) {
             return Code::atom(self.passed_on(Code::atom(call)));
         }

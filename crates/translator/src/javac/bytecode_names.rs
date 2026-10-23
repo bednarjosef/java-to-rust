@@ -151,9 +151,19 @@ pub fn jdk_temps(trees: &[&Value]) -> JdkTemps {
 /// (javac declares it in a `LetExpr` around the `switch`). A `switch` in code whose slots this
 /// does not follow is left out: in a constructor that javac gives parameters of its own (an
 /// enum's, or an inner, local or anonymous class's), an initializer or a lambda, in a `finally` block or
-/// a try-with-resources, in a method with patterns, in an expression whose own temps javac
-/// declares (a compound assignment, an increment), and in the cases of a `switch` expression
-/// with a `try`, whose stack javac keeps in variables.
+/// a try-with-resources, in a method with patterns other than those of `instanceof` that this
+/// follows (see `bindings`), in an expression whose own temps javac declares (a compound
+/// assignment, an increment), and in the cases of a `switch` expression with a `try`, whose stack
+/// javac keeps in variables.
+///
+/// The variables of `instanceof` patterns are javac's `TransPatterns`: a binding variable is
+/// declared, without a value, by the outermost of the statements (`if`, `for`, `while`, `do`) and
+/// expressions (`&&` and the other binary operators, `?:`, the `instanceof` itself) around it
+/// below the nearest block or lambda, before that construct runs, and freed after it; the value
+/// tested is kept in a variable of its own while it is tested, unless it is a local variable or a
+/// parameter. A binding that stays in scope after its statement (`if (!(o instanceof T t))
+/// return;`) is declared in the enclosing block instead, which this does not follow, so a method
+/// that may have one is left out (`untracked_patterns`).
 fn unit_temps(unit: &Value) -> JdkTemps {
     let mut out = Vec::new();
     for class in unit["typeDecls"].as_array().into_iter().flatten() {
@@ -172,10 +182,11 @@ fn classes(class: &Value, outermost: &str, plain: bool, out: &mut JdkTemps) {
         match member["kind"].as_str() {
             Some("METHOD") => {
                 let symbol = &member["symbol"];
-                if member["name"].as_str() == Some("<init>") && !plain || has_patterns(&member["body"]) {
+                if member["name"].as_str() == Some("<init>") && !plain || untracked_patterns(&member["body"])
+                {
                     continue;
                 }
-                let mut slots = SwitchSlots { outermost, out: &mut *out, next: 0 };
+                let mut slots = SwitchSlots { outermost, out: &mut *out, next: 0, claimed: false };
                 if symbol["static"].as_bool() != Some(true) {
                     slots.next = 1;
                 }
@@ -220,21 +231,132 @@ fn nested_classes(v: &Value, outermost: &str, out: &mut JdkTemps, top: bool) {
     }
 }
 
-/// Whether the code under `v` has a pattern, whose variables javac declares where this does not
-/// follow, or a `case null`.
-fn has_patterns(v: &Value) -> bool {
+/// Whether the code under `v` has patterns whose variables the walk of slots does not follow:
+/// a `switch` with patterns (or `case null`), a record pattern, `_` as a pattern, a pattern or
+/// `instanceof` of a primitive type, or a binding that may stay in scope after its statement
+/// (`preserved`).
+fn untracked_patterns(v: &Value) -> bool {
     match v {
         Value::Object(fields) => {
-            matches!(
-                v["kind"].as_str(),
-                Some("BINDING_PATTERN" | "RECORD_PATTERN" | "PATTERN_CASE_LABEL" | "ANY_PATTERN")
-            ) || v["kind"].as_str() == Some("CONSTANT_CASE_LABEL")
-                && v["constantExpression"]["kind"].as_str() == Some("NULL_LITERAL")
-                || fields.iter().any(|(key, value)| key != "symbol" && has_patterns(value))
+            let kind = v["kind"].as_str().unwrap_or_default();
+            matches!(kind, "DECONSTRUCTION_PATTERN" | "RECORD_PATTERN" | "PATTERN_CASE_LABEL" | "ANY_PATTERN")
+                || kind == "CONSTANT_CASE_LABEL"
+                    && v["constantExpression"]["kind"].as_str() == Some("NULL_LITERAL")
+                || kind == "INSTANCE_OF" && primitive(&v["type"])
+                || kind == "BINDING_PATTERN" && primitive(&v["variable"])
+                || preserved(v)
+                || fields.iter().any(|(key, value)| key != "symbol" && untracked_patterns(value))
         }
-        Value::Array(items) => items.iter().any(has_patterns),
+        Value::Array(items) => items.iter().any(untracked_patterns),
         _ => false,
     }
+}
+
+/// Whether the type of the tree `v` is a primitive type.
+fn primitive(v: &Value) -> bool {
+    let ty = v["symbol"]["type"].as_str().or(v["javaType"].as_str()).unwrap_or_default();
+    matches!(ty, "boolean" | "byte" | "short" | "char" | "int" | "long" | "float" | "double")
+}
+
+/// Whether statement `s` may introduce bindings of its condition after itself (JLS 6.3.2), which
+/// javac then declares in the enclosing block (`Attr.addBindings2Scope`): an `if` whose
+/// condition binds when false and that has no `else`, or one whose branch may not complete
+/// normally, and a loop whose condition binds when false.
+fn preserved(s: &Value) -> bool {
+    let (when_true, when_false) = condition_bindings(&s["condition"]);
+    match s["kind"].as_str().unwrap_or_default() {
+        "IF" if s["elseStatement"].is_null() => when_false,
+        "IF" => {
+            when_true && may_not_complete(&s["elseStatement"])
+                || when_false && may_not_complete(&s["thenStatement"])
+        }
+        "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP" => when_false,
+        _ => false,
+    }
+}
+
+/// Whether the condition `e` introduces bindings when true, and when false (JLS 6.3.1).
+fn condition_bindings(e: &Value) -> (bool, bool) {
+    match e["kind"].as_str().unwrap_or_default() {
+        "PARENTHESIZED" => condition_bindings(&e["expression"]),
+        "LOGICAL_COMPLEMENT" => {
+            let (t, f) = condition_bindings(&e["expression"]);
+            (f, t)
+        }
+        "CONDITIONAL_AND" => {
+            (condition_bindings(&e["leftOperand"]).0 || condition_bindings(&e["rightOperand"]).0, false)
+        }
+        "CONDITIONAL_OR" => {
+            (false, condition_bindings(&e["leftOperand"]).1 || condition_bindings(&e["rightOperand"]).1)
+        }
+        "INSTANCE_OF" => (e["pattern"]["kind"].as_str() == Some("BINDING_PATTERN"), false),
+        _ => (false, false),
+    }
+}
+
+/// Whether statement `s` may not complete normally, over-approximated: it has a jump, a `return`
+/// or a `throw` (outside the classes and lambdas in it), or a loop without a condition or with
+/// `true`.
+fn may_not_complete(s: &Value) -> bool {
+    match s {
+        Value::Object(fields) => {
+            let kind = s["kind"].as_str().unwrap_or_default();
+            if matches!(kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD" | "LAMBDA_EXPRESSION") {
+                return false;
+            }
+            let mut condition = &s["condition"];
+            while condition["kind"].as_str() == Some("PARENTHESIZED") {
+                condition = &condition["expression"];
+            }
+            let endless = matches!(kind, "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP")
+                && (condition.is_null() || condition["value"].as_bool() == Some(true));
+            endless
+                || matches!(kind, "RETURN" | "THROW" | "BREAK" | "CONTINUE" | "YIELD")
+                || fields.iter().any(|(key, value)| key != "symbol" && may_not_complete(value))
+        }
+        Value::Array(items) => items.iter().any(may_not_complete),
+        _ => false,
+    }
+}
+
+/// The number of binding variables that javac declares for the construct `v` (see
+/// `unit_temps`): those of the `instanceof` patterns under it, not in a block, a lambda or a
+/// class, which have contexts of their own; `_` has none.
+fn bindings(v: &Value) -> usize {
+    match v {
+        Value::Object(fields) => {
+            let kind = v["kind"].as_str().unwrap_or_default();
+            if matches!(kind, "BLOCK" | "LAMBDA_EXPRESSION" | "CLASS" | "INTERFACE" | "ENUM" | "RECORD") {
+                return 0;
+            }
+            let own =
+                kind == "BINDING_PATTERN" && !matches!(v["variable"]["name"].as_str(), None | Some("" | "_"));
+            usize::from(own)
+                + fields
+                    .iter()
+                    .filter(|(key, _)| *key != "symbol")
+                    .map(|(_, value)| bindings(value))
+                    .sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(bindings).sum(),
+        _ => 0,
+    }
+}
+
+/// Whether javac keeps the value that `instanceof` with a pattern tests in a variable of its
+/// own: unless it is a local variable or a parameter (`TransPatterns.visitTypeTest`).
+fn tested_in_temp(e: &Value) -> bool {
+    let mut value = &e["expression"];
+    while value["kind"].as_str() == Some("PARENTHESIZED") {
+        value = &value["expression"];
+    }
+    let local = matches!(
+        value["symbol"]["kind"].as_str(),
+        Some(
+            "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER" | "RESOURCE_VARIABLE" | "BINDING_VARIABLE"
+        )
+    );
+    !(value["kind"].as_str() == Some("IDENTIFIER") && local)
 }
 
 /// Whether the code of the `switch` expression `s` has a `try` or a `synchronized` block,
@@ -269,19 +391,52 @@ fn size(variable: &Value) -> usize {
     }
 }
 
+/// The kinds of the trees of binary operators, which are javac's `JCBinary`.
+const BINARY: &[&str] = &[
+    "PLUS",
+    "MINUS",
+    "MULTIPLY",
+    "DIVIDE",
+    "REMAINDER",
+    "LEFT_SHIFT",
+    "RIGHT_SHIFT",
+    "UNSIGNED_RIGHT_SHIFT",
+    "LESS_THAN",
+    "GREATER_THAN",
+    "LESS_THAN_EQUAL",
+    "GREATER_THAN_EQUAL",
+    "EQUAL_TO",
+    "NOT_EQUAL_TO",
+    "AND",
+    "XOR",
+    "OR",
+    "CONDITIONAL_AND",
+    "CONDITIONAL_OR",
+];
+
 /// The walk of a method's code, with the next free slot.
 struct SwitchSlots<'a> {
     outermost: &'a str,
     out: &'a mut JdkTemps,
     next: usize,
+    /// The walk is inside a construct that declares the binding variables under it (see
+    /// `unit_temps`), and not in a block below it.
+    claimed: bool,
 }
 
 impl SwitchSlots<'_> {
     fn statement(&mut self, s: &Value) {
         let start = self.next;
+        let claimed = self.claimed;
         let list = |v: &Value| v.as_array().cloned().unwrap_or_default();
-        match s["kind"].as_str().unwrap_or_default() {
+        let kind = s["kind"].as_str().unwrap_or_default();
+        // The binding variables of the patterns in the statement, declared before it.
+        if matches!(kind, "IF" | "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP") {
+            self.claim(s);
+        }
+        match kind {
             "BLOCK" => {
+                self.claimed = false;
                 for statement in list(&s["statements"]) {
                     self.statement(&statement);
                 }
@@ -345,12 +500,34 @@ impl SwitchSlots<'_> {
             _ => {}
         }
         self.next = start;
+        self.claimed = claimed;
+    }
+
+    /// Declares the binding variables under the construct `v`, unless one around it does.
+    fn claim(&mut self, v: &Value) {
+        if !self.claimed {
+            self.next += bindings(v);
+            self.claimed = true;
+        }
     }
 
     /// The `switch`es of an expression, through the expressions for which javac declares no
     /// variables of its own: not into a lambda's body or a class's, which are other methods.
     fn expression(&mut self, e: &Value) {
-        let parts: &[&str] = match e["kind"].as_str().unwrap_or_default() {
+        let (start, claimed) = (self.next, self.claimed);
+        let kind = e["kind"].as_str().unwrap_or_default();
+        if kind == "INSTANCE_OF" && !e["pattern"].is_null() {
+            self.claim(e);
+            // The value tested, kept in a variable of its own while it is.
+            self.next += usize::from(tested_in_temp(e));
+            self.expression(&e["expression"]);
+            (self.next, self.claimed) = (start, claimed);
+            return;
+        }
+        if kind == "CONDITIONAL_EXPRESSION" || BINARY.contains(&kind) {
+            self.claim(e);
+        }
+        let parts: &[&str] = match kind {
             "SWITCH_EXPRESSION" => return self.switch(e),
             "PARENTHESIZED" | "TYPE_CAST" | "MEMBER_SELECT" | "INSTANCE_OF" | "UNARY_PLUS"
             | "UNARY_MINUS" | "BITWISE_COMPLEMENT" | "LOGICAL_COMPLEMENT" => &["expression"],
@@ -360,25 +537,7 @@ impl SwitchSlots<'_> {
             "NEW_CLASS" => &["enclosingExpression", "arguments"],
             "NEW_ARRAY" => &["dimensions", "initializers"],
             "CONDITIONAL_EXPRESSION" => &["condition", "trueExpression", "falseExpression"],
-            "PLUS"
-            | "MINUS"
-            | "MULTIPLY"
-            | "DIVIDE"
-            | "REMAINDER"
-            | "LEFT_SHIFT"
-            | "RIGHT_SHIFT"
-            | "UNSIGNED_RIGHT_SHIFT"
-            | "LESS_THAN"
-            | "GREATER_THAN"
-            | "LESS_THAN_EQUAL"
-            | "GREATER_THAN_EQUAL"
-            | "EQUAL_TO"
-            | "NOT_EQUAL_TO"
-            | "AND"
-            | "XOR"
-            | "OR"
-            | "CONDITIONAL_AND"
-            | "CONDITIONAL_OR" => &["leftOperand", "rightOperand"],
+            _ if BINARY.contains(&kind) => &["leftOperand", "rightOperand"],
             _ => &[],
         };
         for part in parts {
@@ -387,6 +546,7 @@ impl SwitchSlots<'_> {
                 one => self.expression(one),
             }
         }
+        (self.next, self.claimed) = (start, claimed);
     }
 
     /// A `switch` statement or expression: the temps of one on a string, then its cases.
@@ -432,5 +592,75 @@ impl SwitchSlots<'_> {
             }
         }
         self.next = start;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Methods with `instanceof` patterns and a for-each loop each; the slots of the iterators are
+    /// javac's (`javap -c` of the class compiled by javac 26): 4, 4 and 5.
+    const PATTERNS: &str = "import java.util.List;
+
+class Patterns {
+    int statement(Object o, List<String> l) {
+        int n = 0;
+        if (o instanceof String s && s.length() > 0) {
+            n++;
+        }
+        for (String x : l) {
+            n += x.length();
+        }
+        return n;
+    }
+
+    int expression(Object o, List<String> l) {
+        int n = (o instanceof Integer i ? i : 0) + (get() instanceof String t ? t.length() : 0);
+        for (String x : l) {
+            n++;
+        }
+        return n;
+    }
+
+    int inside(Object o, List<String> l) {
+        int n = 0;
+        while (o instanceof String s && !s.isEmpty()) {
+            for (String x : l) {
+                n += x.length() + s.length();
+            }
+            o = get();
+        }
+        return n;
+    }
+
+    int kept(Object o, List<String> l) {
+        if (!(o instanceof String s)) {
+            return 0;
+        }
+        int n = s.length();
+        for (String x : l) {
+            n++;
+        }
+        return n;
+    }
+
+    Object get() {
+        return null;
+    }
+}
+";
+
+    #[test]
+    fn iterators_after_instanceof_patterns() {
+        let tree = crate::javac::tree(PATTERNS).expect("javac takes the source");
+        let iterators: Vec<(usize, String)> = unit_temps(&tree)
+            .into_iter()
+            .filter(|t| t.2 == "i$")
+            .map(|(_, pos, _, text)| (pos.line, text))
+            .collect();
+        // `kept`'s binding outlives its `if`, in a slot of the method's block: it is left out.
+        let expected = [(9, "<local4>"), (17, "<local4>"), (26, "<local5>")];
+        assert_eq!(iterators, expected.map(|(line, text)| (line, text.to_string())));
     }
 }

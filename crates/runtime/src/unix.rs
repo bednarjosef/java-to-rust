@@ -432,6 +432,95 @@ unsafe extern "C" {
     fn statvfs(path: *const std::ffi::c_char, buf: *mut [u64; 14]) -> i32;
 }
 
+unsafe extern "C" {
+    fn fgetxattr(fd: i32, name: *const std::ffi::c_char, value: *mut u8, size: usize) -> isize;
+    fn fsetxattr(fd: i32, name: *const std::ffi::c_char, value: *const u8, size: usize, flags: i32) -> i32;
+    fn fremovexattr(fd: i32, name: *const std::ffi::c_char) -> i32;
+    fn flistxattr(fd: i32, list: *mut u8, size: usize) -> isize;
+    fn mknod(path: *const std::ffi::c_char, mode: u32, dev: u64) -> i32;
+}
+
+/// The bytes that a call reading `len` bytes into memory outside the heap fills, or null for a
+/// call that asks only for the size (a length of 0, as the JDK passes with address 0).
+fn read_buffer(len: i32) -> Vec<u8> {
+    vec![0; len.max(0) as usize]
+}
+
+fn buffer_ptr(buf: &mut [u8]) -> *mut u8 {
+    if buf.is_empty() { std::ptr::null_mut() } else { buf.as_mut_ptr() }
+}
+
+/// Copies the first `n` bytes that a call wrote to `buf` to `address`, and answers `n`.
+fn copy_out(buf: &[u8], n: isize, address: i64) -> io::Result<i32> {
+    if n < 0 {
+        return Err(errno());
+    }
+    if !buf.is_empty() && n > 0 {
+        crate::write_native(address, &buf[..n as usize]);
+    }
+    Ok(n as i32)
+}
+
+/// `fgetxattr(fd, name, value, size)`: the value of the extended attribute `name`, into the
+/// memory at `address`, and its size; with a size of 0, only the size.
+pub fn unix_fgetxattr(fd: i32, name: &[i8], address: i64, len: i32) -> i32 {
+    let mut buf = read_buffer(len);
+    let got = c_path(name).and_then(|name| {
+        fd::with_file(fd, |f| {
+            // Safety: `name` is a C string and `buf` holds the `buf.len()` bytes the call may write.
+            Ok(unsafe { fgetxattr(f.as_raw_fd(), name.as_ptr(), buffer_ptr(&mut buf), buf.len()) })
+        })
+    });
+    record(got.and_then(|n| copy_out(&buf, n, address)), -1)
+}
+
+/// `fsetxattr(fd, name, value, size, 0)`, with the value from the memory at `address`.
+pub fn unix_fsetxattr(fd: i32, name: &[i8], address: i64, len: i32) {
+    let value = if len > 0 { crate::read_native(address, len as usize) } else { Vec::new() };
+    let set = c_path(name).and_then(|name| {
+        fd::with_file(fd, |f| {
+            // Safety: `name` is a C string and `value` holds the bytes the call reads.
+            if unsafe { fsetxattr(f.as_raw_fd(), name.as_ptr(), value.as_ptr(), value.len(), 0) } == 0 {
+                Ok(())
+            } else {
+                Err(errno())
+            }
+        })
+    });
+    record(set, ())
+}
+
+/// `fremovexattr(fd, name)`.
+pub fn unix_fremovexattr(fd: i32, name: &[i8]) {
+    let removed = c_path(name).and_then(|name| {
+        fd::with_file(fd, |f| {
+            // Safety: `name` is a C string.
+            if unsafe { fremovexattr(f.as_raw_fd(), name.as_ptr()) } == 0 { Ok(()) } else { Err(errno()) }
+        })
+    });
+    record(removed, ())
+}
+
+/// `flistxattr(fd, list, size)`: the names of the extended attributes, each ending in a zero
+/// byte, into the memory at `address`, and their length; with a size of 0, only the length.
+pub fn unix_flistxattr(fd: i32, address: i64, len: i32) -> i32 {
+    let mut buf = read_buffer(len);
+    let got = fd::with_file(fd, |f| {
+        // Safety: `buf` holds the `buf.len()` bytes the call may write.
+        Ok(unsafe { flistxattr(f.as_raw_fd(), buffer_ptr(&mut buf), buf.len()) })
+    });
+    record(got.and_then(|n| copy_out(&buf, n, address)), -1)
+}
+
+/// `mknod(path, mode, dev)`.
+pub fn unix_mknod(p: &[i8], mode: i32, dev: i64) {
+    let made = c_path(p).and_then(|p| {
+        // Safety: the path is a valid C string.
+        if unsafe { mknod(p.as_ptr(), mode as u32, dev as u64) } == 0 { Ok(()) } else { Err(errno()) }
+    });
+    record(made, ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +587,48 @@ mod tests {
         unix_rmdir(&dir);
         assert_eq!(unix_last_error(), 0);
         assert_eq!(unix_strerror(2), bytes("No such file or directory"));
+    }
+
+    #[test]
+    fn extended_attributes_and_nodes() {
+        let dir = std::env::temp_dir().join(format!("java-runtime-xattr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let dir = bytes(dir.to_str().unwrap());
+        unix_mkdir(&dir, 0o755);
+        let file = [dir.clone(), bytes("/a")].concat();
+        let fd = unix_open(&file, 2 | 0o100, 0o644);
+        let name = bytes("user.translated");
+        let value = crate::allocate_native(16);
+        crate::write_native(value, b"value");
+        unix_fsetxattr(fd, &name, value, 5);
+        // A file system without user attributes (tmpfs of some kernels) refuses them.
+        if unix_last_error() == 0 {
+            assert_eq!(unix_fgetxattr(fd, &name, 0, 0), 5);
+            let out = crate::allocate_native(16);
+            assert_eq!(unix_fgetxattr(fd, &name, out, 16), 5);
+            assert_eq!(crate::read_native(out, 5), b"value");
+            let size = unix_flistxattr(fd, 0, 0);
+            assert!(size >= 16);
+            assert_eq!(unix_flistxattr(fd, out, 16), 16);
+            assert_eq!(crate::read_native(out, 16), b"user.translated\0");
+            unix_fremovexattr(fd, &name);
+            assert_eq!(unix_last_error(), 0);
+        }
+        assert_eq!(unix_fgetxattr(fd, &name, 0, 0), -1);
+        assert_ne!(unix_last_error(), 0);
+        assert_eq!(unix_fgetxattr(99, &name, 0, 0), -1);
+        assert_eq!(unix_last_error(), EBADF);
+        unix_close(fd);
+        let fifo = [dir.clone(), bytes("/fifo")].concat();
+        unix_mknod(&fifo, 0o010644, 0);
+        assert_eq!(unix_last_error(), 0);
+        let mut stat = [0i64; 17];
+        unix_stat(&fifo, 0, &mut stat);
+        assert_eq!(stat[0] & 0o170000, 0o010000, "a FIFO");
+        unix_mknod(&fifo, 0o010644, 0);
+        assert_eq!(unix_last_error(), 17, "EEXIST");
+        unix_unlink(&fifo);
+        unix_unlink(&file);
+        unix_rmdir(&dir);
     }
 }

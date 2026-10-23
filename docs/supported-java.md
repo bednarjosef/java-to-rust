@@ -233,8 +233,8 @@ Design: [closures-and-nested-classes.md](closures-and-nested-classes.md).
   sources, `asList`, `stream` and `equals(null, b)` are rejected.
 - `System.arraycopy` between arrays of the same element type, or between arrays held as
   `Object`s (throwing `ArrayStoreException` on a mismatch, with HotSpot's message). Between
-  `String[]` and `Object[]` it copies the elements. Between arrays of classes (including `Object[]`)
-  it copies them with HotSpot's checks. Between `String[]` and a class's array, and between arrays
+  `String[]` and `Object[]` it copies the elements. Between arrays of classes (including `Object[]`),
+  typed or held as `Object`s, it copies them with HotSpot's checks. Between `String[]` and a class's array, and between arrays
   of arrays, it is rejected.
 
 ## Exceptions

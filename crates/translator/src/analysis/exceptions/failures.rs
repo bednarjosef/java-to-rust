@@ -295,6 +295,10 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         Builtin::Native(Native::InflateSetDictionary | Native::InflateSetDictionaryBuffer) => {
             &["java.lang.IllegalArgumentException"]
         }
+        // A level that zlib does not take (`deflate.rs`), and a dictionary it refuses.
+        Builtin::Native(
+            Native::DeflateInit | Native::DeflateSetDictionary | Native::DeflateSetDictionaryBuffer,
+        ) => &["java.lang.IllegalArgumentException"],
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -374,6 +378,15 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::InflateAdler
             | Native::InflateReset
             | Native::InflateEnd
+            // `setLevel` and `setStrategy` check the parameters that the compressing natives
+            // set, so they never fail (`deflate.rs`).
+            | Native::DeflateBytes
+            | Native::DeflateBytesBuffer
+            | Native::DeflateBufferBytes
+            | Native::DeflateBufferBuffer
+            | Native::DeflateAdler
+            | Native::DeflateReset
+            | Native::DeflateEnd
             | Native::NoPendingReferences
             | Native::TransferUnsupported
             | Native::DirectCopy

@@ -512,7 +512,12 @@ inside (`new String(s)`, `new StringBuilder(s)`) and its methods that do (a null
 `contentEquals`), a static by the class that declares it, an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
 the field it is, a string `switch`'s temporary and a for-each loop's iterator as `<localN>` from
-the slots javac would give (`javac::jdk_temps`), in an argument too, and a null locale of
+the slots javac would give (`javac::jdk_temps`), in an argument too, counting the slots of
+`instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
+statement are declared just around it, those of an expression just for it). A method with record,
+primitive or `switch` patterns, or a binding that outlives its statement (`if (!(o instanceof
+String s)) return;`), has no known slots for its temporaries, and a null message of one is not
+certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
 for which the JDK's code throws an exception without a message. The receiver of an unbound method reference has no message, as the
 JVM's hidden frame gives none; a bound one's, checked where the reference is created, is never

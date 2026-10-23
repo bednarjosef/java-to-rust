@@ -583,15 +583,20 @@ class an array carries. Also:
 `System.arraycopy` where the source or destination is an `Object` matches their array variants
 (`codegen::dispatch::object_array_copy`, `codegen::arraycopy`): two arrays of one type are copied,
 and a `String[]` and an `Object[]` are copied element by element, where an element that is not a
-`String` throws `ArrayStoreException` after the elements before it are stored. Other mismatches
-throw `ArrayStoreException` with HotSpot's message for them ("arraycopy: type mismatch: can not copy
-int[] into long[]", "arraycopy: source type java.lang.String is not an array"). A pair of arrays of
+`String` throws `ArrayStoreException` after the elements before it are stored. Two arrays of other
+classes are copied as two typed arrays are, below; an element whose class no value of the
+destination's element class is anywhere else has no variant to be stored as, and ends the program
+(the analysis does not follow which arrays an `Object`-typed copy is given: the JDK's
+`SpinedBuffer` copies only arrays of one type). Other mismatches throw `ArrayStoreException` with
+HotSpot's message for them ("arraycopy: type mismatch: can not copy int[] into long[]",
+"arraycopy: source type java.lang.String is not an array"). A pair of arrays of
 two other element classes is copied as HotSpot copies it (`codegen::arraycopy_classes`): when the
 source's class is a subtype of the destination's, every element is stored; otherwise each element is
 checked as it is stored, where null always passes and a non-null element must be an instance of the
 destination's class. The first element that fails throws `ArrayStoreException` after the elements
 before it are stored (`runtime::try_copy_refs`). The message names the two element classes by their
-static types, since a typed array holds no runtime class of its own.
+static types, since a typed array holds no runtime class of its own; for arrays held as `Object`s,
+by the classes of their variants.
 
 A value read back out of an erased container is a cast from `Object` that may be null, so an
 enum read back is an `Option` of the enum.

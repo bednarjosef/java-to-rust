@@ -172,7 +172,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `javax/annotation/processing/AbstractProcessor.java` (module `java.compiler`) | reads its processor's annotations through `TranslatedProcessorAnnotations` |
 | `sun/reflect/annotation/AnnotationParser.java`, `AnnotationInvocationHandler.java` | an annotation object is the handler itself, not a `Proxy`: `annotationType`, `toString`, `hashCode` and `equals` its own (`lower/annotation_objects.rs`) |
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
-| `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own, no extended attributes |
+| `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own |
 | `sun/security/util/Debug.java` | translated although `sun.security` is not; writing a message, which names the caller's frame, fails loudly |
 
 ## Checks

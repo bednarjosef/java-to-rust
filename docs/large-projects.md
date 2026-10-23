@@ -151,8 +151,9 @@ then a one-line reason. They are reported as `KNOWN` and do not fail the run; a 
 identical is reported as `NOTE`, to be removed from the list. The list is empty: every case
 matches.
 
-javac itself is never patched, as it is the program under test. All of its own code translates:
-its census reports rejections only in the JDK's code it reaches, none in javac's. One behaviour
+javac itself is never patched, as it is the program under test. All of its code translates, and
+so does all of the JDK's code it reaches: its census reports no rejections and no missing
+natives. One behaviour
 differs by design: the hidden option `-XDshowClass=NAME` prints the URL and SHA-256 checksum of
 the class file of `NAME` that javac runs from, which a translation does not have. Its
 `getResource` and `getResourceAsStream` of the class file are `null`, so the translated javac

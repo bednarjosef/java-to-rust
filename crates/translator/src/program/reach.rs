@@ -981,6 +981,7 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "decodeASCII",
     "uncheckedEncodeASCII",
     "concat",
+    "blockedOn",
 ];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
