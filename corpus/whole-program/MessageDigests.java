@@ -1,6 +1,7 @@
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
@@ -9,7 +10,8 @@ import java.security.NoSuchAlgorithmException;
 // Message digests of the JDK's own provider, as javac's `-XDshowClass` computes a class file's
 // SHA-256 checksum: `MessageDigest.getInstance` by standard names, aliases and object
 // identifiers, in any case; digests of several blocks fed in pieces, through a
-// `DigestInputStream` and directly; `reset`, `clone`, `isEqual` and an unknown name.
+// `DigestInputStream` and directly; `reset`, `clone`, `isEqual` and an unknown name. And the
+// class file that `-XDshowClass` looks for, of a class that is not there.
 public class MessageDigests {
     static String hex(byte[] bytes) {
         StringBuilder sb = new StringBuilder();
@@ -83,6 +85,11 @@ public class MessageDigests {
         System.out.println("on " + din.read() + " " + din.read() + " " + din.read());
         System.out.println("bc " + hex(off.digest()));
         System.out.println(din);
+
+        String name = "no.such.Thing";
+        URL url = MessageDigests.class.getResource('/' + name.replace('.', '/') + ".class");
+        InputStream missing = MessageDigests.class.getResourceAsStream('/' + name.replace('.', '/') + ".class");
+        System.out.println(url + " " + (missing == null));
 
         try {
             MessageDigest.getInstance("SHA-2");

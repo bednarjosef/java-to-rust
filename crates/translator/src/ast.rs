@@ -845,6 +845,7 @@ pub enum Builtin {
     /// program has no resources (the JDK's data files are not in its source), so the program ends
     /// with an `InternalError` that nothing catches. `class` is the name of the class, a string
     /// literal. `Class.getProtectionDomain()` is one too, of the name `(its protection domain)`.
+    /// A class file is not one: it is `null` (`lower::classes`).
     MissingResource,
     /// `[]`: runs the static initialization of the class, as its first use would, for
     /// `Class.forName` with a name that the code spells out (`lower::by_name`).

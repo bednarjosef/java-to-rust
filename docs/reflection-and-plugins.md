@@ -111,7 +111,8 @@ program where such a lookup can happen, so they can be checked before the progra
 - **`ClassLoader`** is a type. The system and platform loaders exist, with `getName`,
   `getParent` and `getClassLoader()` of a class. `loadClass` goes through the `forName` table.
   `getResource`, `getResources` and `getResourceAsStream` find nothing; javac does not need them
-  (its one use is `Class.getResource` behind the hidden `-XDshowClass` option).
+  (its one use is `Class.getResource` of a class file behind the hidden `-XDshowClass` option,
+  which is `null` in a translation, see [natives-and-input.md](natives-and-input.md)).
   `URLClassLoader` is patched by the translator (`java/patches/java/net/URLClassLoader.java`). It
   finds what its parent finds and nothing of its own. A class or resource that is in one of its
   directories, or a class asked of it while it has a jar file among its URLs, fails loudly:
