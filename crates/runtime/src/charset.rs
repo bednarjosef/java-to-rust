@@ -86,7 +86,8 @@ impl Charset {
     /// The charset that `forName(name)` finds, without failing: `None` where the name is not
     /// one of a charset that the runtime has. The translator finds the charset of a constant name
     /// with it.
-    pub fn known(name: &str) -> Option<Charset> {
+    pub fn known(name: &crate::Wtf8) -> Option<Charset> {
+        let name = &*name.to_string_lossy();
         Charset::lookup(name)
     }
 
@@ -109,7 +110,7 @@ impl Charset {
 
     /// `hashCode()`, which Java defines as the hash code of the name.
     pub fn hash_code(self) -> i32 {
-        string_hash(self.name())
+        string_hash(crate::Wtf8::new(self.name()))
     }
 
     /// `Charset.defaultCharset()`: UTF-8, as Java 18 and later have it (JEP 400).
@@ -120,13 +121,17 @@ impl Charset {
     /// `Charset.forName(name)`: a null name is an `IllegalArgumentException`, a malformed name an
     /// `IllegalCharsetNameException` and an unknown one an `UnsupportedCharsetException`, each
     /// with the name as its message.
-    pub fn for_name(name: Option<&str>) -> Charset {
+    pub fn for_name(name: Option<&crate::Wtf8>) -> Charset {
+        let name = name.map(|name| name.to_string_lossy());
+        let name = name.as_deref();
         let name = Charset::legal_name(name);
         Charset::lookup(name).unwrap_or_else(|| throw("java.nio.charset.UnsupportedCharsetException", name))
     }
 
     /// `Charset.isSupported(name)`, which checks the name as `for_name` does.
-    pub fn is_supported(name: Option<&str>) -> bool {
+    pub fn is_supported(name: Option<&crate::Wtf8>) -> bool {
+        let name = name.map(|name| name.to_string_lossy());
+        let name = name.as_deref();
         Charset::lookup(Charset::legal_name(name)).is_some()
     }
 
@@ -144,20 +149,24 @@ impl Charset {
 
     /// A charset given by name to `getBytes` or `new String`, which throws
     /// `UnsupportedEncodingException` for an unknown name.
-    pub fn for_encoding_name(name: &str) -> Charset {
+    pub fn for_encoding_name(name: &crate::Wtf8) -> Charset {
+        let name = &*name.to_string_lossy();
         Charset::lookup(name).unwrap_or_else(|| throw("java.io.UnsupportedEncodingException", name))
     }
 
     /// The bytes of `s` in this charset. What it cannot encode becomes `?` (one per character,
     /// so an emoji is one `?`), as Java replaces it.
-    pub fn encode(self, s: &str) -> Vec<u8> {
+    pub fn encode(self, s: &crate::Wtf8) -> Vec<u8> {
+        let s = &*s.to_string_lossy();
         match self {
             Charset::Utf8 => s.as_bytes().to_vec(),
             Charset::UsAscii => s.chars().map(|c| if c < '\u{80}' { c as u8 } else { b'?' }).collect(),
             Charset::Latin1 => s.chars().map(|c| if c < '\u{100}' { c as u8 } else { b'?' }).collect(),
             // The JDK writes the mark with the first character, so an empty string has no bytes.
             Charset::Utf16 if s.is_empty() => Vec::new(),
-            Charset::Utf16 => [0xFE, 0xFF].into_iter().chain(Charset::Utf16Be.encode(s)).collect(),
+            Charset::Utf16 => {
+                [0xFE, 0xFF].into_iter().chain(Charset::Utf16Be.encode(crate::Wtf8::new(s))).collect()
+            }
             Charset::Utf16Be => s.encode_utf16().flat_map(u16::to_be_bytes).collect(),
             Charset::Utf16Le => s.encode_utf16().flat_map(u16::to_le_bytes).collect(),
         }
@@ -181,17 +190,17 @@ impl Charset {
 }
 
 /// `s.getBytes(charset)`, a new array of bytes.
-pub fn get_bytes(s: &str, charset: Charset) -> Array<i8> {
+pub fn get_bytes(s: &crate::Wtf8, charset: Charset) -> Array<i8> {
     from_vec(charset.encode(s).into_iter().map(|b| b as i8).collect())
 }
 
 /// `new String(bytes, charset)`.
-pub fn new_string(bytes: &[i8], charset: Charset) -> String {
-    charset.decode(bytes)
+pub fn new_string(bytes: &[i8], charset: Charset) -> crate::JString {
+    charset.decode(bytes).into()
 }
 
 /// `new String(bytes, offset, length, charset)`, which throws for a range outside the array.
-pub fn new_string_range(bytes: &[i8], offset: i32, length: i32, charset: Charset) -> String {
+pub fn new_string_range(bytes: &[i8], offset: i32, length: i32, charset: Charset) -> crate::JString {
     try_new_string_range(bytes, offset, length, charset).unwrap_or_else(crate::uncaught)
 }
 
@@ -202,13 +211,13 @@ pub fn try_new_string_range(
     offset: i32,
     length: i32,
     charset: Charset,
-) -> Result<String, crate::Exception> {
+) -> Result<crate::JString, crate::Exception> {
     let len = bytes.len() as i64;
     if offset < 0 || length < 0 || i64::from(offset) > len - i64::from(length) {
         let message = format!("Range [{offset}, {offset} + {length}) out of bounds for length {len}");
         return Err(crate::Exception::new("java.lang.StringIndexOutOfBoundsException", message));
     }
-    Ok(charset.decode(&bytes[offset as usize..(offset + length) as usize]))
+    Ok(charset.decode(&bytes[offset as usize..(offset + length) as usize]).into())
 }
 
 /// A code point as a character; the callers only pass valid scalar values.

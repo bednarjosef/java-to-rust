@@ -156,14 +156,19 @@ impl<'a> Gen<'a> {
             }
             BoxedOp::ToString => {
                 let code = self.value(&args[0], kind);
+                if kind == Type::Char {
+                    // A lone surrogate stays one.
+                    return Code::atom(format!("{}({})", self.runtime("char_to_string"), code.text));
+                }
                 let text = self.shown_arg(kind, code);
-                Code::atom(format!("{text}.to_string()"))
+                Code::atom(format!("{}::from({text}.to_string())", self.runtime("JString")))
             }
             BoxedOp::HexString => {
                 let code = self.value(&args[0], kind);
                 let function =
                     if kind == Type::Float { "float_to_hex_string" } else { "double_to_hex_string" };
-                Code::atom(format!("{}({})", self.runtime(function), code.text))
+                let f = self.runtime(function);
+                Code::atom(format!("{}::from({f}({}))", self.runtime("JString"), code.text))
             }
             BoxedOp::HashCode => {
                 let code = self.value(&args[0], kind);
@@ -184,7 +189,14 @@ impl<'a> Gen<'a> {
             }
             BoxedOp::Compare => {
                 let a = self.value(&args[0], kind);
-                let b = self.value(&args[1], kind);
+                // A literal null throws as a dereference does; `None` alone states no type.
+                let b = match args[1].ty {
+                    Type::Null => {
+                        let none = format!("None::<{}>", rust_type(kind));
+                        Code::atom(self.dereference(&[args[1].id], &none))
+                    }
+                    _ => self.value(&args[1], kind),
+                };
                 match kind {
                     Type::Int | Type::Long => {
                         Code::new(format!("{}.cmp(&{}) as i32", a.at(ATOM), b.at(UNARY)), AS)
@@ -250,7 +262,7 @@ impl<'a> Gen<'a> {
         match kind {
             Type::Boolean => {
                 let text = if self.nullable(arg) {
-                    format!("{}.unwrap_or(\"\")", self.option_ref(arg))
+                    format!("{}.unwrap_or({})", self.option_ref(arg), self.wtf8_literal(""))
                 } else {
                     self.str_ref(arg)
                 };

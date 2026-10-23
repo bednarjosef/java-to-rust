@@ -146,13 +146,6 @@ impl<'a> Gen<'a> {
     /// The value of a `return`: a string variable is moved out rather than copied, since the
     /// method ends.
     pub(super) fn returned(&mut self, value: &'a Expr) -> Code {
-        if self.display {
-            // `Display::fmt` writes the text that `toString` returns.
-            let mut parts = Vec::new();
-            self.parts(value, &mut parts);
-            let text = self.format("write!", parts).text;
-            return Code::atom(text.replacen("write!(", "write!(f, ", 1));
-        }
         if self.optional_return() {
             return self.optional_to(value, self.ret);
         }
@@ -448,7 +441,9 @@ impl<'a> Gen<'a> {
                 self.line(&format!("{};", code.text));
             }
             _ => {
+                let discarded = self.discarded.replace(e.id);
                 let code = self.expr(e);
+                self.discarded = discarded;
                 self.line(&format!("{};", code.text));
             }
         }

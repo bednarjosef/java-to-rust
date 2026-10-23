@@ -1,8 +1,8 @@
 //! Java's `StringBuilder`. A builder is a mutable object that every holder of a reference sees
 //! change, so it is a shared handle, like `java::Array`: cloning it gives another name for the
 //! same builder. Its text is UTF-16 code units, as in Java, so `charAt`, `setCharAt`, `insert`
-//! and `reverse` work on units exactly, and a lone surrogate stays one until the text is
-//! converted to a Rust string, where it becomes `?`, as Java prints it.
+//! and `reverse` work on units exactly, and a lone surrogate stays one, in its text (`text`) too;
+//! it prints as `?`, as Java prints it.
 //!
 //! Each method borrows the cell only while it runs, so its arguments may read the builder
 //! (`sb.append(sb.length())`), and the methods return the builder for chaining
@@ -15,6 +15,7 @@
 use crate::Locked;
 use crate::string::from_units;
 use crate::throw;
+use crate::{JString, Wtf8};
 use std::cell::RefCell;
 use std::fmt::{self, Write};
 use std::ops::{Deref, DerefMut};
@@ -139,7 +140,7 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `new StringBuilder(s)`.
-    pub fn from_text(s: &str) -> Self {
+    pub fn from_text(s: &Wtf8) -> Self {
         let b = Self::new();
         b.append_str(s);
         b
@@ -151,8 +152,14 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.append(s)` of a string.
-    pub fn append_str(&self, s: &str) -> &Self {
-        let _ = Units(&mut self.0.units_mut()).write_str(s);
+    pub fn append_str(&self, s: &Wtf8) -> &Self {
+        let mut value = self.0.units_mut();
+        if s.is_ascii() {
+            value.extend(s.as_bytes().iter().map(|&b| u16::from(b)));
+        } else {
+            value.extend(s.units());
+        }
+        drop(value);
         self
     }
 
@@ -197,13 +204,13 @@ impl<C: BuilderCell> Builder<C> {
     /// `sb.append(s, start, end)` of a part of a string. The check is Java 26's
     /// `Preconditions.checkFromToIndex` on `s.length()`, so a null `s` (already "null") is checked
     /// as its four characters.
-    pub fn append_range(&self, s: &str, start: i32, end: i32) -> &Self {
+    pub fn append_range(&self, s: &Wtf8, start: i32, end: i32) -> &Self {
         self.try_append_range(s, start, end).unwrap_or_else(crate::uncaught)
     }
 
     /// `append_range` where the program observes the `IndexOutOfBoundsException`.
-    pub fn try_append_range(&self, s: &str, start: i32, end: i32) -> Result<&Self, crate::Exception> {
-        let units: Vec<u16> = s.encode_utf16().collect();
+    pub fn try_append_range(&self, s: &Wtf8, start: i32, end: i32) -> Result<&Self, crate::Exception> {
+        let units: Vec<u16> = s.units().collect();
         if start < 0 || start > end || end as usize > units.len() {
             let message = format!("Range [{start}, {end}) out of bounds for length {}", units.len());
             return Err(crate::Exception::new("java.lang.IndexOutOfBoundsException", message));
@@ -257,8 +264,8 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.insert(offset, s)` of a string.
-    pub fn insert_str(&self, offset: i32, s: &str) -> &Self {
-        let units: Vec<u16> = s.encode_utf16().collect();
+    pub fn insert_str(&self, offset: i32, s: &Wtf8) -> &Self {
+        let units: Vec<u16> = s.units().collect();
         self.insert_units(offset, &units)
     }
 
@@ -349,12 +356,17 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.replace(start, end, s)`.
-    pub fn replace(&self, start: i32, end: i32, s: &str) -> &Self {
+    pub fn replace(&self, start: i32, end: i32, s: &Wtf8) -> &Self {
         let mut value = self.0.units_mut();
         let (start, end) = Self::range(start, end, value.len());
-        value.splice(start..end, s.encode_utf16());
+        value.splice(start..end, s.units());
         drop(value);
         self
+    }
+
+    /// `sb.toString()`: the text, exactly.
+    pub fn text(&self) -> JString {
+        from_units(&self.0.units())
     }
 
     /// `sb.length()`.
@@ -384,9 +396,9 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.indexOf(s, from)`.
-    pub fn index_of(&self, s: &str, from: i32) -> i32 {
+    pub fn index_of(&self, s: &Wtf8, from: i32) -> i32 {
         let value = self.0.units();
-        let target: Vec<u16> = s.encode_utf16().collect();
+        let target: Vec<u16> = s.units().collect();
         let from = from.clamp(0, value.len() as i32) as usize;
         if target.len() > value.len() - from {
             return -1;
@@ -397,9 +409,9 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.lastIndexOf(s, from)`.
-    pub fn last_index_of(&self, s: &str, from: i32) -> i32 {
+    pub fn last_index_of(&self, s: &Wtf8, from: i32) -> i32 {
         let value = self.0.units();
-        let target: Vec<u16> = s.encode_utf16().collect();
+        let target: Vec<u16> = s.units().collect();
         let from = (from as i64).min(value.len() as i64 - target.len() as i64);
         if from < 0 {
             return -1;
@@ -408,7 +420,7 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.substring(start, end)`.
-    pub fn substring(&self, start: i32, end: i32) -> String {
+    pub fn substring(&self, start: i32, end: i32) -> JString {
         let value = self.0.units();
         if start < 0 || start > end || end as usize > value.len() {
             out_of_bounds(format!("Range [{start}, {end}) out of bounds for length {}", value.len()));
@@ -417,7 +429,7 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.substring(start)`.
-    pub fn substring_from(&self, start: i32) -> String {
+    pub fn substring_from(&self, start: i32) -> JString {
         let len = self.length();
         self.substring(start, len)
     }
@@ -438,9 +450,9 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.repeat(s, count)`: `count` copies of a string.
-    pub fn repeat_str(&self, s: &str, count: i32) -> &Self {
+    pub fn repeat_str(&self, s: &Wtf8, count: i32) -> &Self {
         if check_count(count) {
-            let units: Vec<u16> = s.encode_utf16().collect();
+            let units: Vec<u16> = s.units().collect();
             self.0.units_mut().extend(units.iter().cycle().take(units.len() * count as usize));
         }
         self
@@ -550,6 +562,15 @@ impl<C: BuilderCell + crate::HasMonitor> crate::HasMonitor for Builder<C> {
     }
 }
 
+/// A builder in a string concatenation: its text as it is, lone surrogates and all.
+impl<C: BuilderCell> crate::Piece for Builder<C> {
+    fn push_to(&self, out: &mut JString) {
+        for &unit in self.0.units().iter() {
+            out.push_unit(unit);
+        }
+    }
+}
+
 impl<C: BuilderCell> fmt::Display for Builder<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for c in char::decode_utf16(self.0.units().iter().copied()) {
@@ -566,30 +587,31 @@ mod tests {
     #[test]
     fn builders_edit_code_units() {
         let sb = StringBuilder::new();
-        sb.append_str("hello").append(42).append_char(b'!' as u16);
+        sb.append_str(Wtf8::new("hello")).append(42).append_char(b'!' as u16);
         assert_eq!(sb.to_string(), "hello42!");
-        sb.insert_str(0, ">> ").delete_char_at(1).reverse();
+        sb.insert_str(0, Wtf8::new(">> ")).delete_char_at(1).reverse();
         assert_eq!(sb.to_string(), "!24olleh >");
         sb.set_length(3);
-        sb.replace(1, 100, "xyz");
+        sb.replace(1, 100, Wtf8::new("xyz"));
         assert_eq!(sb.to_string(), "!xyz");
-        assert_eq!(sb.index_of("yz", 0), 2);
+        assert_eq!(sb.index_of(Wtf8::new("yz"), 0), 2);
         assert_eq!(sb.length(), 4);
     }
 
     #[test]
     fn reverse_keeps_surrogate_pairs() {
-        let sb = StringBuilder::from_text("a😀b");
+        let sb = StringBuilder::from_text(Wtf8::new("a😀b"));
         sb.reverse();
         assert_eq!(sb.to_string(), "b😀a");
     }
 
     #[test]
     fn a_shared_builder_is_seen_changed_by_another_thread() {
-        let sb = SharedStringBuilder::from_text("ab");
+        crate::locked::begin_threads();
+        let sb = SharedStringBuilder::from_text(Wtf8::new("ab"));
         let other = sb.clone();
         std::thread::spawn(move || {
-            other.append_str("cd");
+            other.append_str(Wtf8::new("cd"));
         })
         .join()
         .unwrap();
@@ -600,7 +622,7 @@ mod tests {
 
     #[test]
     fn appending_itself_copies_first() {
-        let sb = StringBuilder::from_text("ab");
+        let sb = StringBuilder::from_text(Wtf8::new("ab"));
         sb.append_builder(&sb.clone());
         assert_eq!(sb.to_string(), "abab");
     }

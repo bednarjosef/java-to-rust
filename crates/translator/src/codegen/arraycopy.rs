@@ -118,18 +118,19 @@ impl<'a> Gen<'a> {
             Some(c) => (c, es == Type::String && is_object(&ed), is_object(&es) && ed == Type::String),
             None => (0, false, false),
         };
+        let text = rust_type(Type::String);
         // Each element is stored as the `Object` it is: every `String` is an `Object`.
         let convert = if is_string_to_object {
             let string_variant = self.variant(t, string);
             format!(
-                "|e: &Option<String>| -> Result<Option<{object}>, &'static str> {{ Ok(e.clone().map({string_variant})) }}"
+                "|e: &Option<{text}>| -> Result<Option<{object}>, &'static str> {{ Ok(e.clone().map({string_variant})) }}"
             )
         } else if is_object_to_string {
             // An element is stored only if it is a `String`, which no other `Object` is.
             let string_variant = self.variant(t, string);
             let message = "arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String";
             format!(
-                "|e: &Option<{object}>| -> Result<Option<String>, &'static str> {{ match e {{ None => Ok(None), Some({string_variant}(s)) => Ok(Some(s.clone())), Some(_) => Err(\"{message}\") }} }}"
+                "|e: &Option<{object}>| -> Result<Option<{text}>, &'static str> {{ match e {{ None => Ok(None), Some({string_variant}(s)) => Ok(Some(s.clone())), Some(_) => Err(\"{message}\") }} }}"
             )
         } else {
             let (from, to) = (self.binary_name(s), self.binary_name(d));

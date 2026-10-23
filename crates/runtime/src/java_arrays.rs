@@ -74,7 +74,17 @@ impl JavaElement for f32 {
     }
 }
 
-impl JavaElement for String {
+impl JavaElement for crate::JString {
+    fn java_cmp(&self, other: &Self) -> Ordering {
+        compare_strings(self, other)
+    }
+
+    fn java_hash(&self) -> i32 {
+        string_hash(self)
+    }
+}
+
+impl JavaElement for crate::JStr {
     fn java_cmp(&self, other: &Self) -> Ordering {
         compare_strings(self, other)
     }
@@ -108,8 +118,8 @@ impl<T: JavaElement> JavaElement for Option<T> {
 }
 
 /// `String.compareTo`: the UTF-16 code units, in order.
-pub fn compare_strings(a: &str, b: &str) -> Ordering {
-    a.encode_utf16().cmp(b.encode_utf16())
+pub fn compare_strings(a: &crate::Wtf8, b: &crate::Wtf8) -> Ordering {
+    a.units().cmp(b.units())
 }
 
 /// Java's `rangeCheck` for the methods that take a range `from..to` of an array of `len` elements.
@@ -281,14 +291,13 @@ pub fn binary_search_range<T: JavaElement>(a: &impl Elements<T>, from: i32, to: 
 
 /// `Arrays.deepToString(a)`: `show` formats each element, a row being formatted the same way; a
 /// null array is `null`.
-pub fn deep_to_string<T: Clone>(a: Option<&impl Elements<T>>, show: impl Fn(T) -> String) -> String {
+pub fn deep_to_string<T: Clone, S: Into<crate::JString>>(
+    a: Option<&impl Elements<T>>,
+    show: impl Fn(T) -> S,
+) -> crate::JString {
     match a {
-        Some(a) => {
-            let items: Vec<T> = a.items().clone();
-            let items: Vec<String> = items.into_iter().map(show).collect();
-            format!("[{}]", items.join(", "))
-        }
-        None => String::from("null"),
+        Some(a) => crate::to_string(a, show),
+        None => crate::JString::from("null"),
     }
 }
 

@@ -32,9 +32,10 @@ hand-written itself.
 4. **An object's monitor is its data lock.** `synchronized` holds the reentrant lock of the
    object's `java::Locked` for the region; the field borrows inside take it once more. Monitors
    are kept only where the program can tell them from none (section 3).
-5. **Statics of a multi-threaded program are process-wide `static` items**: `java::Atomic<T>`
-   for primitives (acquire/release), `java::Locked<T>` for objects and strings, and a
-   `java::ClassInit` per class that runs its static initialization once for the process.
+5. **The statics that a started thread can touch are process-wide `static` items**:
+   `java::Atomic<T>` for primitives (acquire/release), `java::Locked<T>` for objects and strings,
+   and a `java::ClassInit` per class that runs its static initialization once for the process.
+   The statics of every other class stay thread-local cells, which only the main thread uses.
 6. **`Thread` and `ThreadGroup` are classes written in Java in the translator**
    (`crates/translator/java/Threads.java`), over natives in the runtime
    (`crates/runtime/src/thread.rs`). A program may extend `Thread`. Everything else in
@@ -180,8 +181,8 @@ of its `Rc`.
 
 ### 2.3 Statics
 
-A thread-local static would give each thread its own copy, so in a multi-threaded program every
-static is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
+A thread-local static gives each thread its own copy, so a static that a started thread can touch
+is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 
 | static | form | access |
 | --- | --- | --- |
@@ -196,8 +197,30 @@ own initialization in progress returns at once (a recursive initialization sees 
 Java). `std::sync::Once` cannot do the last case. `start`/`finish` have the shape of the
 thread-local flag's guard, so the initializer body is generated once for both forms.
 
-A static that only the main thread touches could stay thread-local; that needs the set of
-methods each thread runs, which does not exist yet (section 7).
+The statics that are process-wide are decided per class (`Facts::process_statics`): those of
+every class whose statics the code of a started thread may read or write, or whose static
+initialization it may run. That code is what a second walk of `analysis/live_methods.rs` finds
+(`thread_statics`), after the walk from `main` that decides which methods can run. It starts from
+what the runtime runs on a new thread (the call of `run` that lowering puts into
+`Native::ThreadStart`), from the dispatch of an exception that ends a thread
+(`Native::InstallUncaught`) and from the exceptions the runtime raises, and follows calls with the
+first walk's facts: the values known for every call and write of running code, the started
+threads' included, and every class that running code creates objects of, since a thread may be
+handed any of them. It starts with no class initialized, as a thread may be the first to use one:
+a static read or write, a static call, a `new` or an enum constant runs the class's static
+initialization in the walk, and the class's statics become process-wide. A class's statics are
+process-wide or thread-local together, with its flag, so that the thread that initializes a class
+writes the copies that every thread reads. When the walk meets something its facts do not answer,
+every static is process-wide.
+
+Every other static stays a thread-local cell (and an eager class's flag a `Cell<bool>`), which only
+the main thread uses: no code of another thread reads or writes it, and no other thread runs its
+class's initialization. The walk follows calls by the facts of `object_values`, which do not tell
+one call of a method from another: a thread's code that calls a library method that the program
+also calls elsewhere (`Iterable.forEach`, `ThreadLocal.get`, a class's static initializer) reaches
+every lambda and class that any caller hands it. In javac, whose one thread is the file manager's
+deferred close (`BaseFileManager.deferredClose`), that is nearly all of the compiler, and about 200
+of its 3,000 statics stay thread-local.
 
 ### 2.4 Objects used as locks
 
@@ -290,8 +313,8 @@ separate monitor type and no per-class choice.
 
 ### 4.1 Roots
 
-A thread reaches its `Thread` object and the statics. So the roots are the `Thread` class family
-and the types of every static field.
+A thread reaches its `Thread` object and the statics that it can touch. So the roots are the
+`Thread` class family and the types of the static fields that are process-wide (section 2.3).
 
 ### 4.2 Propagation
 
@@ -474,8 +497,6 @@ orders it at least as the plain, opaque, acquire, release and volatile modes ask
   allocation site; a class with both shared and thread-local sites would get two structs, and an
   array of a shared family that no other thread reaches would stay a `java::Array`. The escape analysis should then
   be a client of a "heap edges" interface so that only the edge provider changes.
-- **Main-only statics.** A static that only main-thread code touches could stay thread-local;
-  this needs the set of methods each thread runs.
 - **`SeqCst` volatile statics, and atomic fields.** A `volatile` static should be sequentially
   consistent. Per-field atomics (`AtomicI32`, ...; a lock-free `Arc<C>` with `&self` methods
   for a class whose every field is final or atomic) are the refinement for when a profile shows
@@ -533,9 +554,12 @@ unchanged and that a class no thread reaches keeps `Rc`.
 
 - **Single-threaded programs pay nothing**: the output is what it was without this work.
 - **A thread-shared mutable object** costs an uncontended lock and unlock per field access or
-  short method call (10 to 20 ns on Linux's futex mutex, against about 1 ns for a `RefCell`
-  borrow) and an atomic increment per handle clone. An immutable shared object costs nothing on
-  reads beyond the `Arc` count.
+  short method call: a compare-and-swap to take the data lock and a sequentially consistent
+  store to give it back, with a look at the parking bucket's waiters, against a flag check for a
+  `RefCell` borrow; and an atomic increment per handle clone. Until the program starts its first
+  thread, the lock is taken and given back with plain stores instead (`locked.rs`, `THREADS`): a
+  program whose threads start late, or never (javac's), pays no atomic operation for its locks
+  until then. An immutable shared object costs nothing on reads beyond the `Arc` count.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock.
 - **Primitive statics** are plain loads and stores on x86-64 (acquire/release); object statics
   cost a lock per access.

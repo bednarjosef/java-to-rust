@@ -15,12 +15,14 @@ const CAP: i128 = 1 << 100;
 
 /// Java's `parseInt(s, radix)` for the integer type `T`, which throws `NumberFormatException` for
 /// what Java rejects. `None` is a null string.
-pub fn parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> T {
+pub fn parse_radix<T: TryFrom<i128>>(s: Option<&crate::Wtf8>, radix: i32) -> T {
     try_parse_radix(s, radix).unwrap_or_else(uncaught)
 }
 
 /// `parse_radix` where the program observes the `NumberFormatException`.
-pub fn try_parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> Result<T, Exception> {
+pub fn try_parse_radix<T: TryFrom<i128>>(s: Option<&crate::Wtf8>, radix: i32) -> Result<T, Exception> {
+    let s = s.map(|s| s.to_string_lossy());
+    let s = s.as_deref();
     let fail = |message: String| Exception::new("java.lang.NumberFormatException", message);
     let Some(s) = s else { return Err(fail("Cannot parse null string".to_string())) };
     let value = read(s, radix).map_err(fail)?;
@@ -30,8 +32,10 @@ pub fn try_parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> Result<
 /// `Short.parseShort(s, radix)` and `Byte.parseByte(s, radix)`. Java reads an `int` first, so a
 /// value beyond `int` is "For input string", and a value out of the type's range is reported as
 /// "Value out of range" with the string and the radix.
-pub fn try_parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> Result<T, Exception> {
-    let value = try_parse_radix::<i32>(s, radix)?;
+pub fn try_parse_small_radix<T: TryFrom<i32>>(s: Option<&crate::Wtf8>, radix: i32) -> Result<T, Exception> {
+    let s = s.map(|s| s.to_string_lossy());
+    let s = s.as_deref();
+    let value = try_parse_radix::<i32>(s.map(crate::Wtf8::new), radix)?;
     T::try_from(value).map_err(|_| {
         let message = format!("Value out of range. Value:\"{}\" Radix:{radix}", s.unwrap_or_default());
         Exception::new("java.lang.NumberFormatException", message)
@@ -39,7 +43,7 @@ pub fn try_parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> Re
 }
 
 /// `parse_small_radix` where the program does not observe the `NumberFormatException`.
-pub fn parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> T {
+pub fn parse_small_radix<T: TryFrom<i32>>(s: Option<&crate::Wtf8>, radix: i32) -> T {
     try_parse_small_radix(s, radix).unwrap_or_else(uncaught)
 }
 
@@ -48,7 +52,9 @@ pub fn parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> T {
 /// Java's messages. Java parses the digits, and where that fails (as for the most negative value)
 /// the sign and the digits once more, whose failure is the one it throws. A null string throws
 /// `NullPointerException`, as `decode` calls `isEmpty` on it.
-pub fn try_decode<T: TryFrom<i128>>(s: Option<&str>) -> Result<T, Exception> {
+pub fn try_decode<T: TryFrom<i128>>(s: Option<&crate::Wtf8>) -> Result<T, Exception> {
+    let s = s.map(|s| s.to_string_lossy());
+    let s = s.as_deref();
     let fail = |message: String| Exception::new("java.lang.NumberFormatException", message);
     let Some(s) = s else {
         let message = "Cannot invoke \"String.isEmpty()\" because \"nm\" is null".to_string();
@@ -82,14 +88,16 @@ pub fn try_decode<T: TryFrom<i128>>(s: Option<&str>) -> Result<T, Exception> {
 }
 
 /// `try_decode` where the program does not observe the exception.
-pub fn decode<T: TryFrom<i128>>(s: Option<&str>) -> T {
+pub fn decode<T: TryFrom<i128>>(s: Option<&crate::Wtf8>) -> T {
     try_decode(s).unwrap_or_else(uncaught)
 }
 
 /// `Short.decode(s)` and `Byte.decode(s)`, which decode an `int` and report a value out of the
 /// type's range with the value and the string.
-pub fn try_decode_small<T: TryFrom<i32>>(s: Option<&str>) -> Result<T, Exception> {
-    let value = try_decode::<i32>(s)?;
+pub fn try_decode_small<T: TryFrom<i32>>(s: Option<&crate::Wtf8>) -> Result<T, Exception> {
+    let s = s.map(|s| s.to_string_lossy());
+    let s = s.as_deref();
+    let value = try_decode::<i32>(s.map(crate::Wtf8::new))?;
     T::try_from(value).map_err(|_| {
         let message = format!("Value {value} out of range from input {}", s.unwrap_or_default());
         Exception::new("java.lang.NumberFormatException", message)
@@ -97,7 +105,7 @@ pub fn try_decode_small<T: TryFrom<i32>>(s: Option<&str>) -> Result<T, Exception
 }
 
 /// `try_decode_small` where the program does not observe the exception.
-pub fn decode_small<T: TryFrom<i32>>(s: Option<&str>) -> T {
+pub fn decode_small<T: TryFrom<i32>>(s: Option<&crate::Wtf8>) -> T {
     try_decode_small(s).unwrap_or_else(uncaught)
 }
 
@@ -157,8 +165,8 @@ mod tests {
         assert_eq!(read("zz", 36), Ok(1295));
         assert_eq!(read("1010", 2), Ok(10));
         assert_eq!(read("-0", 8), Ok(0));
-        assert_eq!(parse_radix::<i32>(Some("-80000000"), 16), i32::MIN);
-        assert_eq!(parse_radix::<i64>(Some("7fffffffffffffff"), 16), i64::MAX);
+        assert_eq!(parse_radix::<i32>(Some(crate::Wtf8::new("-80000000")), 16), i32::MIN);
+        assert_eq!(parse_radix::<i64>(Some(crate::Wtf8::new("7fffffffffffffff")), 16), i64::MAX);
     }
 
     #[test]
@@ -203,12 +211,12 @@ mod tests {
 
     #[test]
     fn decodes_as_java_does() {
-        assert_eq!(try_decode::<i32>(Some("-0X1f")), Ok(-31));
-        assert_eq!(try_decode::<i32>(Some("#ff")), Ok(255));
-        assert_eq!(try_decode::<i32>(Some("010")), Ok(8));
-        assert_eq!(try_decode::<i32>(Some("-0")), Ok(0));
-        assert_eq!(try_decode::<i32>(Some("-0x80000000")), Ok(i32::MIN));
-        assert_eq!(try_decode::<i64>(Some("0x80000000")), Ok(0x8000_0000));
+        assert_eq!(try_decode::<i32>(Some(crate::Wtf8::new("-0X1f"))), Ok(-31));
+        assert_eq!(try_decode::<i32>(Some(crate::Wtf8::new("#ff"))), Ok(255));
+        assert_eq!(try_decode::<i32>(Some(crate::Wtf8::new("010"))), Ok(8));
+        assert_eq!(try_decode::<i32>(Some(crate::Wtf8::new("-0"))), Ok(0));
+        assert_eq!(try_decode::<i32>(Some(crate::Wtf8::new("-0x80000000"))), Ok(i32::MIN));
+        assert_eq!(try_decode::<i64>(Some(crate::Wtf8::new("0x80000000"))), Ok(0x8000_0000));
         for (bad, text) in [
             ("", "Zero length string"),
             ("0x", "For input string: \"\" under radix 16"),
@@ -220,12 +228,12 @@ mod tests {
             ("0x80000000", "For input string: \"80000000\" under radix 16"),
         ] {
             assert_eq!(
-                message(try_decode::<i32>(Some(bad))),
+                message(try_decode::<i32>(Some(crate::Wtf8::new(bad)))),
                 format!("java.lang.NumberFormatException: {text}")
             );
         }
         assert_eq!(
-            message(try_decode_small::<i16>(Some("-0x80000000"))),
+            message(try_decode_small::<i16>(Some(crate::Wtf8::new("-0x80000000")))),
             "java.lang.NumberFormatException: Value -2147483648 out of range from input -0x80000000"
         );
         assert_eq!(
@@ -236,13 +244,13 @@ mod tests {
 
     #[test]
     fn short_and_byte_report_their_own_range() {
-        assert_eq!(try_parse_small_radix::<i16>(Some("-32768"), 10), Ok(i16::MIN));
+        assert_eq!(try_parse_small_radix::<i16>(Some(crate::Wtf8::new("-32768")), 10), Ok(i16::MIN));
         assert_eq!(
-            message(try_parse_small_radix::<i16>(Some("32768"), 10)),
+            message(try_parse_small_radix::<i16>(Some(crate::Wtf8::new("32768")), 10)),
             "java.lang.NumberFormatException: Value out of range. Value:\"32768\" Radix:10"
         );
         assert_eq!(
-            message(try_parse_small_radix::<i16>(Some("3000000000"), 10)),
+            message(try_parse_small_radix::<i16>(Some(crate::Wtf8::new("3000000000")), 10)),
             "java.lang.NumberFormatException: For input string: \"3000000000\""
         );
         assert_eq!(
@@ -250,7 +258,7 @@ mod tests {
             "java.lang.NumberFormatException: Cannot parse null string"
         );
         assert_eq!(
-            message(try_parse_small_radix::<i8>(Some("ff"), 16)),
+            message(try_parse_small_radix::<i8>(Some(crate::Wtf8::new("ff")), 16)),
             "java.lang.NumberFormatException: Value out of range. Value:\"ff\" Radix:16"
         );
     }

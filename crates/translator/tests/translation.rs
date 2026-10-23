@@ -85,7 +85,7 @@ fn returns_that_end_a_function_become_its_value() {
             if (n > 0) { return \"pos\"; } else if (n < 0) { return \"neg\"; } else { return \"zero\"; }
         } }",
     );
-    assert_contains(&sign, &["} else if n < 0 {", "        String::from(\"zero\")\n    }\n}"]);
+    assert_contains(&sign, &["} else if n < 0 {", "        java::JString::from(\"zero\")\n    }\n}"]);
     assert!(!sign.contains("return"), "{sign}");
     let nested = translate(
         "class A { static int nested(int n) {
@@ -109,7 +109,7 @@ fn returns_that_end_a_function_become_its_value() {
             return \"none\";
         } }",
     );
-    assert_contains(&open, &["            return String::from(\"Mon\");\n"]);
+    assert_contains(&open, &["            return java::JString::from(\"Mon\");\n"]);
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn a_primitive_local_returned_at_the_end_is_the_value() {
     let twice = translate("class A { static int twice(int n) { int r = n + n; return r; } }");
     assert!(!twice.contains("let r") && !twice.contains("return"), "{twice}");
     let text = translate("class A { static String text() { String t = \"a\"; return t; } }");
-    assert_contains(&text, &["    let t = String::from(\"a\");\n"]);
+    assert_contains(&text, &["    let t = java::JString::from(\"a\");\n"]);
 }
 
 #[test]
@@ -213,7 +213,12 @@ fn string_parameters_are_borrowed() {
     );
     assert_contains(
         &rust,
-        &["fn greet(name: &str) -> String", "name.len() as i32", "greet(&n)", "greet(\"Bob\")"],
+        &[
+            "fn greet(name: &java::Wtf8) -> java::JString",
+            "name.len() as i32",
+            "greet(&n)",
+            "greet(java::wtf8(\"Bob\"))",
+        ],
     );
     assert_lacks(&rust, &["clone", "string_length"]);
 }
@@ -238,7 +243,14 @@ fn string_building_appends_in_place() {
             System.out.println(s);
         } }",
     );
-    assert_contains(&rust, &["let mut s = String::new();", "s += &i.to_string();", "s += \",\";"]);
+    assert_contains(
+        &rust,
+        &[
+            "let mut s = java::JString::new();",
+            "java::append!(s, format_args!(\"{i}\"));",
+            "s.push_str(\",\");",
+        ],
+    );
 }
 
 #[test]
@@ -252,7 +264,7 @@ fn strings_that_are_never_null_stay_plain() {
             }
         }",
     );
-    assert_contains(&rust, &["fn twice(s: &str) -> String"]);
+    assert_contains(&rust, &["fn twice(s: &java::Wtf8) -> java::JString"]);
     assert_lacks(&rust, &["Option"]);
 }
 
@@ -270,9 +282,9 @@ fn strings_that_may_be_null_are_options() {
     assert_contains(
         &rust,
         &[
-            "fn find(n: i32) -> Option<String>",
-            "let s: Option<String> = find(3);",
-            "s.as_deref().unwrap_or(\"null\")",
+            "fn find(n: i32) -> Option<java::JString>",
+            "let s: Option<java::JString> = find(3);",
+            "s.as_deref().unwrap_or(java::wtf8(\"null\"))",
         ],
     );
 }
@@ -289,7 +301,7 @@ fn null_checks_test_the_option() {
             }
         }",
     );
-    assert_contains(&rust, &["let s: Option<String> = None;", "if s.is_none() {"]);
+    assert_contains(&rust, &["let s: Option<java::JString> = None;", "if s.is_none() {"]);
 }
 
 #[test]
@@ -302,7 +314,7 @@ fn dereferencing_a_maybe_null_parameter_throws() {
             }
         }",
     );
-    assert_contains(&rust, &["fn size(s: Option<&str>) -> i32", "java::non_null(s).len() as i32"]);
+    assert_contains(&rust, &["fn size(s: Option<&java::Wtf8>) -> i32", "java::non_null(s).len() as i32"]);
     assert_lacks(&rust, &["unwrap()"]);
 }
 
@@ -480,7 +492,11 @@ fn nullable_parameters_that_are_only_read_are_borrowed() {
     );
     assert_contains(
         &rust,
-        &["fn describe(s: Option<&str>) -> String {", "let Some(s) = s else {", "describe(Some(\"x\"))"],
+        &[
+            "fn describe(s: Option<&java::Wtf8>) -> java::JString {",
+            "let Some(s) = s else {",
+            "describe(Some(java::wtf8(\"x\")))",
+        ],
     );
 }
 
@@ -521,7 +537,10 @@ fn a_default_for_null_is_unwrap_or() {
     );
     assert_contains(
         &rust,
-        &["fn or_default(m: Option<&str>) -> String {", "m.unwrap_or(\"missing\").to_string()"],
+        &[
+            "fn or_default(m: Option<&java::Wtf8>) -> java::JString {",
+            "m.unwrap_or(java::wtf8(\"missing\")).to_owned()",
+        ],
     );
 }
 
@@ -540,7 +559,7 @@ fn equals_on_null_evaluates_its_argument_first() {
     assert_contains(
         &rust,
         &[
-            "match (n.as_deref(), noisy(\"y\")) { (receiver_, other_) => java::non_null(receiver_) == other_ }",
+            "match (n.as_deref(), noisy(java::wtf8(\"y\"))) { (receiver_, other_) => java::non_null(receiver_) == other_ }",
         ],
     );
 }
@@ -585,7 +604,7 @@ fn arguments_that_read_the_receiver_run_before_it_is_borrowed() {
 }
 
 #[test]
-fn to_string_is_display() {
+fn to_string_is_a_method_that_printing_and_concatenation_call() {
     let rust = translate(
         "class P { int x; public String toString() { return \"P\" + x; } }
         class A { public static void main(String[] a) {
@@ -599,14 +618,13 @@ fn to_string_is_display() {
     assert_contains(
         &rust,
         &[
-            "impl fmt::Display for P {\n    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n        write!(f, \"P{}\", self.x)\n    }\n}",
-            "use std::fmt;",
-            "java::println!(\"{p}\");",
-            "s += &p.to_string();",
-            "java::println!(\"{s}{p}\");",
+            "fn to_string(&self) -> java::JString {\n        java::concat!(format_args!(\"P{}\", self.x))\n    }",
+            "java::println!(\"{}\", p.to_string());",
+            "s.push_wtf8(&p.to_string());",
+            "java::println!(\"{}\", java::concat!(s, p.to_string()));",
         ],
     );
-    assert_lacks(&rust, &["fn to_string"]);
+    assert_lacks(&rust, &["impl fmt::Display for P"]);
 }
 
 #[test]
@@ -663,7 +681,7 @@ fn superclass_fields_are_embedded() {
     assert_contains(
         &rust,
         &[
-            "struct ShapeFields {\n    name: String,\n    moves: i32,\n}",
+            "struct ShapeFields {\n    name: java::JString,\n    moves: i32,\n}",
             "struct Circle {\n    base: ShapeFields,\n    radius: f64,\n}",
         ],
     );
@@ -679,7 +697,7 @@ fn inherited_field_methods_live_on_the_fields_struct() {
         &rust,
         &[
             "impl ShapeFields {",
-            "fn name(&self) -> String {",
+            "fn name(&self) -> java::JString {",
             "fn move_(&mut self) {",
             "s.borrow_mut().base.move_();",
         ],
@@ -687,7 +705,7 @@ fn inherited_field_methods_live_on_the_fields_struct() {
     // `describe` calls `area`, which a subclass implements, so it runs on the subclass's object.
     assert_contains(
         &rust,
-        &["impl Circle {", "fn describe(&self) -> String {", "self.base.name", "self.area()"],
+        &["impl Circle {", "fn describe(&self) -> java::JString {", "self.base.name", "self.area()"],
     );
 }
 
@@ -702,7 +720,10 @@ fn a_subclass_constructor_initializes_the_superclass_first() {
     let rust = translate(SHAPES);
     assert_contains(
         &rust,
-        &["fn new(name: &str) -> ShapeFields {", "Circle { base: ShapeFields::new(\"circle\"), radius }"],
+        &[
+            "fn new(name: &java::Wtf8) -> ShapeFields {",
+            "Circle { base: ShapeFields::new(java::wtf8(\"circle\")), radius }",
+        ],
     );
 }
 
@@ -773,7 +794,10 @@ fn superclass_static_initialization_runs_first() {
         }
         class A { public static void main(String[] a) { System.out.println(new Sub().both()); } }",
     );
-    assert_contains(&rust, &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make(\"sub\"));"]);
+    assert_contains(
+        &rust,
+        &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make(java::wtf8(\"sub\")));"],
+    );
 }
 
 const TREE: &str = "
@@ -836,12 +860,12 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
         &rust,
         &[
             "impl Base {",
-            "fn to_string_in_base(&self) -> String {",
-            "format!(\"{}:{}\", self.base().name.clone(), java::Double(self.area()))",
+            "fn to_string_in_base(&self) -> java::JString {",
+            "java::concat!(self.base().name.clone(), format_args!(\":{}\", java::Double(self.area())))",
             // `super.toString()` wraps the subclass's object in the enum to call the body there.
             "Base::Circle(this.clone()).to_string_in_base()",
             "impl fmt::Display for Base {",
-            "Base::Rect(_) => f.write_str(&self.to_string_in_base()),",
+            "Base::Rect(_) => fmt::Display::fmt(&self.to_string_in_base(), f),",
         ],
     );
 }
@@ -1072,7 +1096,11 @@ fn printing_an_object_does_not_share_it() {
     );
     assert_contains(
         &rust,
-        &["let mut p = P::new();", "java::println!(\"{p}\");", "java::println!(\"p={p}\");"],
+        &[
+            "let mut p = P::new();",
+            "java::println!(\"{}\", p.to_string());",
+            "java::println!(\"p={}\", p.to_string());",
+        ],
     );
     assert_lacks(&rust, &["RefCell", "Rc"]);
 }
@@ -1360,14 +1388,14 @@ fn main_args_are_the_command_line_arguments() {
             public static void main(String[] args) { System.out.println(args.length); }
         }",
     );
-    assert_contains(&plain, &["let args: Vec<String> = java::main_args();"]);
+    assert_contains(&plain, &["let args: Vec<java::JString> = java::main_args();"]);
     let shared = translate(
         "class A {
             static String[] kept;
             public static void main(String[] args) { kept = args; System.out.println(kept.length); }
         }",
     );
-    assert_contains(&shared, &["let args: java::Array<String> = java::from_vec(java::main_args());"]);
+    assert_contains(&shared, &["let args: java::Array<java::JString> = java::from_vec(java::main_args());"]);
     let nullable = translate(
         "class A {
             public static void main(String[] args) { args[0] = null; System.out.println(args.length); }
@@ -1435,8 +1463,8 @@ fn object_varargs_are_a_slice_of_the_object_enum() {
     assert_contains(
         &rust,
         &[
-            "fn log(f: &str, xs: &[Object]) {",
-            "log(\"x\", &[Object::Integer(1), Object::String(String::from(\"two\"))]);",
+            "fn log(f: &java::Wtf8, xs: &[Object]) {",
+            "log(java::wtf8(\"x\"), &[Object::Integer(1), Object::String(java::JString::from(\"two\"))]);",
         ],
     );
 }
@@ -1478,18 +1506,18 @@ fn packages_become_nested_modules() {
         &[
             "use crate::com::example::app;\n\nfn main() {\n    app::main();\n}",
             "mod com {\n    pub(crate) mod example {\n        pub(crate) mod app {",
-            "        pub(crate) mod util {\n            use std::fmt;\n\n            use java_runtime as java;",
+            "        pub(crate) mod util {\n            use java_runtime as java;",
             // Imported, statically imported and fully qualified names are paths through the `use`
             // line of their module.
             "            use crate::com::example::util;\n",
-            "util::Counter::new(\"clicks\")",
+            "util::Counter::new(java::wtf8(\"clicks\"))",
             "util::square(7)",
             "util::NUMBERS_LIMIT - util::square(3)",
             "util::cube(3)",
             // Names in the same package are not.
-            "line(\"total\", clicks.total())",
+            "line(java::wtf8(\"total\"), clicks.total())",
             "x * square(x)",
-            "pub(crate) struct Counter {\n                pub(crate) name: String,",
+            "pub(crate) struct Counter {\n                pub(crate) name: java::JString,",
         ],
     );
 }
@@ -1506,7 +1534,7 @@ fn unreachable_code_is_not_translated() {
 #[test]
 fn anonymous_classes_are_reached_through_their_creation_and_calls() {
     let rust = translate_project("anonymous", "app.Main");
-    assert_contains(&rust, &["fn run(", "fn area(", "write!(f, \"task {}\", self.name)"]);
+    assert_contains(&rust, &["fn run(", "fn area(", "java::concat!(\"task \", self.name)"]);
     // `audit` and `describe` are never called, nor is `never`, whose anonymous class uses `extra`.
     assert_lacks(&rust, &["extra", "Audit", "audit", "describe", "fn never", "\"never\""]);
 }
@@ -1518,7 +1546,7 @@ fn classes_with_one_name_in_two_packages() {
         &rust,
         &[
             // The packages inside `com.shop` are in scope in its module without a `use` line.
-            "model::Item::new_string_i32(\"apple\", 3)",
+            "model::Item::new_string_i32(java::wtf8(\"apple\"), 3)",
             "legacy::Item::new(7)",
             "model::RegistryEntry::new(4)",
             "model::REGISTRY_CREATED.get()",
@@ -1646,7 +1674,12 @@ fn library_roots_are_read_only_where_used() {
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     assert_contains(
         &rust,
-        &["use crate::lib;", "lib::shout(\"hi\")", "mod lib {", "pub(crate) fn shout(s: &str) -> String"],
+        &[
+            "use crate::lib;",
+            "lib::shout(java::wtf8(\"hi\"))",
+            "mod lib {",
+            "pub(crate) fn shout(s: &java::Wtf8) -> java::JString",
+        ],
     );
     assert_lacks(&rust, &["unused", "Broken"]);
 }
@@ -1687,7 +1720,11 @@ fn library_roots_that_are_modules_are_read_as_sources() {
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     assert_contains(
         &rust,
-        &["use crate::org::lib::text;", "text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
+        &[
+            "use crate::org::lib::text;",
+            "text::shout(java::wtf8(\"hi\"))",
+            "pub(crate) fn shout(s: &java::Wtf8) -> java::JString",
+        ],
     );
     let report = survey(&program).report;
     assert_contains(&report, &["  Library: 1 pieces; 1 (100.0%) reach nothing outside the sources."]);
@@ -1789,7 +1826,7 @@ fn annotation_types_used_as_values_are_rejected_where_the_code_uses_them() {
 }
 
 #[test]
-fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
+fn library_code_compares_strings_by_value_and_the_programs_own_code_by_their_sources() {
     let library = (
         "lib/lib/Tags.java",
         "package lib;\npublic class Tags {\n    public static boolean none(String tag) { return tag == \"\"; }\n    public static boolean differ(String a, String b) { return a != b; }\n}\n",
@@ -1805,8 +1842,9 @@ fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
     let rust =
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     // Value equality, `Objects.equals`, of the two strings.
-    assert_contains(&rust, &["tag == \"\"", "!(a == b)"]);
-    // The same comparison in the program's own code compares references, which it cannot.
+    assert_contains(&rust, &["tag == java::wtf8(\"\")", "!(a == b)"]);
+    // The same comparison in the program's own code is decided by where its strings come from:
+    // an argument of `main` is a new string, never the literal.
     let own = "package main;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(a.length > 0 && a[0] == \"x\");\n    }\n}\n";
     let dir = write_sources("program-string-equality", &[("app/main/Main.java", own)]);
     let program = java_to_rust::Program {
@@ -1814,8 +1852,7 @@ fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
         sources: vec![dir.join("app")],
         ..Default::default()
     };
-    let err = java_to_rust::translate_program(&program).expect_err("== on the program's strings");
-    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+    java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
 }
 
 #[test]
@@ -1950,7 +1987,7 @@ fn system_natives_go_through_the_runtime() {
         "class A { public static void main(String[] a) { System.out.println(System.getenv(\"HOME\")); } }",
     )
     .unwrap();
-    assert!(out.contains("java::getenv(\"HOME\")"), "{out}");
+    assert!(out.contains("java::getenv(java::wtf8(\"HOME\"))"), "{out}");
     let err = java_to_rust::translate(
         "class A { public static void main(String[] a) { Object env = System.getenv(); } }",
     )
@@ -1969,7 +2006,7 @@ fn static_final_constants_are_consts_read_without_a_cell() {
             }
         }",
     );
-    assert_contains(&rust, &["const A_LIMIT: i32 = 10;", "const A_NAME: &str = \"a\";"]);
+    assert_contains(&rust, &["const A_LIMIT: i32 = 10;", "const A_NAME: &java::Wtf8 = java::wtf8(\"a\");"]);
     assert_lacks(&rust, &["A_LIMIT: RefCell", "A_NAME: RefCell", "A_LIMIT.with"]);
 }
 
@@ -2020,9 +2057,9 @@ fn an_enum_is_a_copy_rust_enum_with_its_name_and_value_of() {
         &rust,
         &[
             "#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]\nenum AColor {\n    Red,\n    VeryBig,\n}",
-            "fn enum_name(self) -> String {",
+            "fn enum_name(self) -> java::JString {",
             "AColor::VeryBig => \"VERY_BIG\",",
-            "fn enum_value_of(name: &str) -> AColor {",
+            "fn enum_value_of(name: &java::Wtf8) -> AColor {",
             "_ => java::throw(\"java.lang.IllegalArgumentException\", &format!(\"No enum constant A.Color.{name}\")),",
             "impl fmt::Display for AColor {",
             "write!(f, \"{}\", self.enum_name())",
@@ -2144,7 +2181,7 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_catches_it(
     assert_contains(
         &rust,
         &[
-            "fn to_string(&self) -> Result<String, Throwable> {",
+            "fn to_string(&self) -> Result<java::JString, Throwable> {",
             "java::println!(\"item {}\", java::or_break!(Rc::new(AItem::new()).to_string(), 'attempt));",
         ],
     );
@@ -2321,10 +2358,10 @@ fn switch_without_fall_through_is_a_match_on_int_char_and_string() {
             "_ => {",
             "match char::from_u32(u32::from(c)) {",
             "Some('a' | 'e') => {",
-            "match kind {",
-            "\"log\" => {",
-            "match s.as_str() {",
-            "match java::non_null(missing.as_deref()) {",
+            "match kind.as_bytes() {",
+            "b\"log\" => {",
+            "match s.as_bytes() {",
+            "match java::non_null(missing.as_deref()).as_bytes() {",
         ],
     );
     assert_lacks(&rust, &["'sw", "let mut case"]);
@@ -2381,7 +2418,11 @@ fn switch_expression_that_yields_from_inside_an_if_is_a_labeled_block() {
     );
     assert_contains(
         &rust,
-        &["'sw1: {", "break 'sw1 String::from(\"big\");", "break 'sw1 String::from(\"negative\");"],
+        &[
+            "'sw1: {",
+            "break 'sw1 java::JString::from(\"big\");",
+            "break 'sw1 java::JString::from(\"negative\");",
+        ],
     );
     assert_lacks(&rust, &["loop {"]);
 }
@@ -2663,7 +2704,8 @@ fn objects_that_may_be_null_print_as_null() {
     assert_contains(
         &rust,
         &[
-            "java::println!(\"{} {}\", java::or_null(p.as_ref()), java::or_null(q.as_ref()));",
+            // Two strings may be the halves of a pair, so the line is made before it is printed.
+            "java::println!(\"{}\", java::concat!(java::or_null(p.as_ref().map(|o| o.to_string())), \" \", java::or_null(q.as_ref().map(|o| o.to_string()))));",
             "if let Some(p) = p.as_ref() {\n        java::println!(\"{}\", p.x);",
         ],
     );
@@ -2686,9 +2728,9 @@ fn arrays_whose_elements_may_be_null_hold_options() {
     assert_contains(
         &rust,
         &[
-            "let mut words: Vec<Option<String>> = vec![None; 3];",
-            "words[1] = Some(String::from(\"mid\"));",
-            "java::println!(\"{}{}\", words[0].as_deref().unwrap_or(\"null\"), words[1].as_deref().unwrap_or(\"null\"));",
+            "let mut words: Vec<Option<java::JString>> = vec![None; 3];",
+            "words[1] = Some(java::JString::from(\"mid\"));",
+            "java::println!(\"{}\", java::concat!(words[0].as_deref().unwrap_or(java::wtf8(\"null\")), words[1].as_deref().unwrap_or(java::wtf8(\"null\"))));",
             "let rows: java::Array<Option<java::Array<i32>>> = java::filled(2, None);",
             "java::println!(\"{}\", java::get(&rows, 1).is_none());",
         ],
@@ -2719,12 +2761,11 @@ fn object_parameters_used_only_through_are_borrowed() {
 }
 
 #[test]
-fn strings_with_unpaired_surrogates_are_rejected() {
-    let err = java_to_rust::translate(
+fn a_string_literal_with_an_unpaired_surrogate_is_its_wtf8_bytes() {
+    let rust = translate(
         "class A { public static void main(String[] args) { System.out.println(\"a\\uD800b\".length()); } }",
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("a string with an unpaired surrogate not supported yet"), "{err}");
+    );
+    assert_contains(&rust, &["const { java::wtf8_bytes(b\"a\\xed\\xa0\\x80b\") }"]);
 }
 
 #[test]
@@ -3040,18 +3081,18 @@ fn survey_json_writes_the_census_to_the_file_given() {
 }
 
 /// A program in package `p` whose `main` reaches three methods that the translator rejects, each
-/// for its own reason, and one that it translates.
+/// for its own reason, and others that it translates.
 fn census_sources(dir: &str) -> std::path::PathBuf {
     write_sources(
         dir,
         &[
             (
                 "p/Main.java",
-                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.split(a);\n        Other.same();\n        Other.fine();\n    }\n}\n",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.split(a);\n        Other.compare(new Name());\n        Other.fine();\n    }\n}\n",
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = new String(\"x\");\n        System.out.println(s == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void compare(Comparable<String> c) {\n        System.out.println(c.compareTo(\"x\"));\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\nclass Name implements Comparable<String> {\n    public int compareTo(String s) {\n        return s == \"x\" ? 0 : 1;\n    }\n}\n",
             ),
         ],
     )
@@ -3074,15 +3115,16 @@ fn the_census_reports_every_rejection_not_only_the_first() {
     assert!(error.to_string().ends_with("type `java.lang.ProcessBuilder` not supported yet"), "{error}");
     let census = census(&program);
     let report = &census.report;
-    // Lowering, an analysis and the generator each reject one method; `main` and `fine` translate.
+    // Lowering and two analyses each reject one method; `main`, `compare`, `fine` and `Name`'s
+    // constructor translate.
     assert_lacks(report, &["Incomplete"]);
     assert_contains(
         report,
         &[
-            "  Program: 5 pieces; 2 (40.0%) translate, 3 rejected.",
+            "  Program: 7 pieces; 4 (57.1%) translate, 3 rejected.",
             "type `…` not supported yet\n          at p/Other.java:4:9",
             "catching the `PatternSyntaxException` that this call of the library may throw not supported yet\n          at p/Other.java:7",
-            "== on strings compares references; not supported yet\n          at p/Other.java:12",
+            "`==` on strings, where a string may come from where the translation does not follow it: a parameter of a method that the runtime calls\n          at p/Other.java:19",
         ],
     );
     let pieces = census.json["pieces"].as_array().expect("pieces");
@@ -3092,7 +3134,7 @@ fn the_census_reports_every_rejection_not_only_the_first() {
         piece["errors"].as_array().expect("errors").len()
     };
     assert_eq!(
-        (errors("process"), errors("split"), errors("same"), errors("fine"), errors("main")),
+        (errors("process"), errors("split"), errors("compareTo"), errors("fine"), errors("main")),
         (1, 1, 1, 0, 0)
     );
     assert_eq!(census.json["complete"], true);
@@ -3110,14 +3152,14 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
     let census = census(&program);
     assert_eq!(census.json["totals"]["program"]["rejected"], 3);
     let rust = census.modules.expect("a translation").one_file();
-    // The methods that lowering, an analysis and the generator reject each end the program with
+    // The methods that lowering and two analyses reject each end the program with
     // the rejection; `fine` translates.
     assert_contains(
         &rust,
         &[
             "java::not_translated(\"p.Other.process: type `java.lang.ProcessBuilder` not supported yet (line 4)\")",
             "java::not_translated(\"p.Other.split: catching the `PatternSyntaxException`",
-            "java::not_translated(\"p.Other.same: == on strings compares references; not supported yet (line 12)\")",
+            "java::not_translated(\"p.Name.compareTo: `==` on strings, where a string may come from where the translation does not follow it: a parameter of a method that the runtime calls (line 19)\")",
             "java::println!(\"fine\")",
         ],
     );
@@ -3370,7 +3412,7 @@ fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
             "fn mass_field(self) -> f64 {",
             "fn mass(self) -> f64 {\n        self.mass_field()\n    }",
             "fn rings(self) -> i32 {",
-            "f.write_str(&Self::to_string(*self))",
+            "fmt::Display::fmt(&Self::to_string(*self), f)",
         ],
     );
 }
@@ -3393,7 +3435,7 @@ fn string_builders_chain_and_are_shared_handles() {
         &rust,
         &[
             "fn fill(sb: java::StringBuilder)",
-            "sb.append(1).append_char(',' as u16).append_str(\"x\");",
+            "sb.append(1).append_char(',' as u16).append_str(java::wtf8(\"x\"));",
             "let sb = java::StringBuilder::new();",
             "fill(sb.clone());",
             "let same = sb.append(2).clone();",
@@ -3436,8 +3478,8 @@ fn format_arguments_keep_their_java_types() {
     );
     assert_contains(
         &rust,
-        &["java::print_format(\"%d %s %.2f%n\", &[java::Arg::Long(big), java::Arg::Str(\"x\"), \
-           java::Arg::Double(1.5)]);"],
+        &["java::print_format(java::wtf8(\"%d %s %.2f%n\"), &[java::Arg::Long(big), \
+           java::Arg::Str(java::wtf8(\"x\")), java::Arg::Double(1.5)]);"],
     );
 }
 
@@ -3507,7 +3549,7 @@ fn initializer_blocks_run_in_constructors() {
 }
 
 #[test]
-fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
+fn intern_is_the_string_itself_and_string_identity_follows_the_sources() {
     let rust = translate(
         "class A { public static void main(String[] a) {
             String s = \"x\" + a.length;
@@ -3516,18 +3558,17 @@ fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
         } }",
     );
     assert_contains(&rust, &["let t = s.clone();", "s.len() as i32"]);
-    // A string is a value in the translation, so `==` on two strings, which compares references
-    // in Java, is rejected rather than guessed, unless Java interns both (what `intern` exists
-    // for), when the references are the same exactly when the text is.
+    // Two strings that Java interns are the same object exactly when their texts are equal.
     let rust = translate(
         "class A { public static void main(String[] a) { String s = \"x\"; System.out.println(s.intern() == \"x\"); } }",
     );
-    assert_contains(&rust, &["s == \"x\""]);
-    let err = java_to_rust::translate(
+    assert_contains(&rust, &["s == java::wtf8(\"x\")"]);
+    // A new string is never a literal: only two nulls would be the same.
+    let rust = translate(
         "class A { public static void main(String[] a) { String s = new String(\"x\"); System.out.println(s == \"x\"); } }",
-    )
-    .expect_err("== on strings must be rejected");
-    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+    );
+    assert_contains(&rust, &["java::println!(\"{}\", false & false);"]);
+    assert_lacks(&rust, &["java::JStr::", "java::same_str"]);
 }
 
 /// Stand-ins for JDK classes with natives, in packages that java.base does not export, so that
@@ -3937,8 +3978,8 @@ fn default_methods_live_on_the_interface_enum() {
         &rust,
         &[
             "            Shape::Circle(o) => o.kind(),\n            Shape::Rect(_) => self.kind_in_shape(),",
-            "    fn kind_in_shape(&self) -> String {\n        String::from(\"shape\")\n    }",
-            "    fn describe(&self) -> String {\n        format!(\"{} {}\", self.kind(), java::Double(self.area()))\n    }",
+            "    fn kind_in_shape(&self) -> java::JString {\n        java::JString::from(\"shape\")\n    }",
+            "    fn describe(&self) -> java::JString {\n        java::concat!(self.kind(), format_args!(\" {}\", java::Double(self.area())))\n    }",
         ],
     );
 }
@@ -3974,7 +4015,7 @@ fn an_interface_with_one_implementor_is_that_class() {
     // body ignores.
     assert_contains(
         &rust,
-        &["let n = Rc::new(Person::new());", "    fn hello(&self, _times: i32) -> String {"],
+        &["let n = Rc::new(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
     );
     assert_lacks(&rust, &["enum Named"]);
 }
@@ -4548,7 +4589,10 @@ fn a_negated_pattern_that_returns_is_let_else() {
     let rust = translate(PATTERNS);
     assert_contains(
         &rust,
-        &["    let Some(r) = s.as_rect() else {\n", "    format!(\"rect {}\", java::Double(r.w))"],
+        &[
+            "    let Some(r) = s.as_rect() else {\n",
+            "    java::concat!(format_args!(\"rect {}\", java::Double(r.w)))",
+        ],
     );
 }
 
@@ -4558,8 +4602,8 @@ fn downcasts_are_checked() {
     assert_contains(
         &rust,
         &[
-            "let r = java::cast(all[1].as_rect(), \"Rect\");",
-            "java::cast(s.as_unit(), \"Unit\") as i32",
+            "let r = java::cast(&all[1], |o| o.as_rect(), (\"Rect\", java::APP));",
+            "java::cast(&s, |o| o.as_unit(), (\"Unit\", java::APP)) as i32",
             "    fn as_unit(&self) -> Option<Unit> {\n        match self {\n            Shape::Unit(o) => Some(*o),",
         ],
     );
@@ -4632,10 +4676,10 @@ fn object_values_are_an_enum() {
     assert_contains(
         &rust,
         &[
-            "enum Object {\n    Key(Rc<Key>),\n    Plain(Rc<Plain>),\n    String(String),\n    Integer(i32),\n}",
-            "let s = Object::String(String::from(\"text\"));",
+            "enum Object {\n    Key(Rc<Key>),\n    Plain(Rc<Plain>),\n    String(java::JString),\n    Integer(i32),\n}",
+            "let s = Object::String(java::JString::from(\"text\"));",
             "let n = Object::Integer(5);",
-            "let back = java::cast(n.as_integer(), \"java.lang.Integer\");",
+            "let back = java::cast(&n, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE));",
             "if let Some(s) = o.as_string() {",
         ],
     );
@@ -4653,7 +4697,7 @@ fn equals_takes_the_object_enum() {
             "fn equals(&self, other: &Object) -> bool {\n        match self {\n            Object::Key(o) => o.equals(other),\n            Object::Plain(o) => matches!(other, Object::Plain(b) if Rc::ptr_eq(o, b)),\n            Object::String(o) => matches!(other, Object::String(b) if o == b),",
             "Object::Plain(o) => java::address_hash(Rc::as_ptr(o)),",
             "Object::String(o) => java::string_hash(o),",
-            "Object::Plain(o) => f.write_str(&java::default_text(\"Plain\", java::address_hash(Rc::as_ptr(o)))),",
+            "Object::Plain(o) => fmt::Display::fmt(&java::default_text(\"Plain\", java::address_hash(Rc::as_ptr(o))), f),",
         ],
     );
 }
@@ -4712,7 +4756,9 @@ fn an_array_as_an_object_prints_as_its_jvm_name_and_hash() {
     );
     assert_contains(
         &rust,
-        &["Object::IntArray(o) => f.write_str(&java::default_text(\"[I\", java::identity_hash(o))),"],
+        &[
+            "Object::IntArray(o) => fmt::Display::fmt(&java::default_text(\"[I\", java::identity_hash(o)), f),",
+        ],
     );
 }
 
@@ -4775,7 +4821,9 @@ fn use_sites_check_cast() {
     // cast does.
     assert_contains(
         &rust,
-        &["let x = java::cast(b.borrow().get().as_integer(), \"java.lang.Integer\").wrapping_add(1);"],
+        &[
+            "let x = java::cast(&b.borrow().get(), |o| o.as_integer(), (\"java.lang.Integer\", java::BASE)).wrapping_add(1);",
+        ],
     );
 }
 
@@ -4788,9 +4836,9 @@ fn bounded_type_variables_erase_to_the_bound() {
         &rust,
         &[
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
-            "enum Comparable {\n    Point(Rc<Point>),\n    String(String),\n}",
+            "enum Comparable {\n    Point(Rc<Point>),\n    String(java::JString),\n}",
             "Comparable::Point(o) => o.compare_to(other),",
-            "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), _ => java::cast_failed(\"java.lang.String\") },",
+            "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), b => java::cast_failed(java::CastSource::cast_class(&b), (\"java.lang.String\", java::BASE)) },",
         ],
     );
 }
@@ -4820,7 +4868,7 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
         &[
             "fn max(a: Object, b: Object) -> Object {",
             // The argument, a cast that may fail, is computed before the receiver's check.
-            "let receiver_0 = java::cast(a.as_comparable(), \"Comparable\");",
+            "let receiver_0 = java::cast(&a, |o| o.as_comparable(), (\"java.lang.Comparable\", java::BASE));",
             "receiver_0.compare_to(",
             "t.name()",
         ],
@@ -4847,7 +4895,7 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
         &[
             "IntArray(java::Array<i32>),",
             "let held = Object::IntArray(cell.clone());",
-            "java::cast(held.as_int_array(), \"[I\")",
+            "java::cast(&held, |o| o.as_int_array(), (\"[I\", java::BASE))",
             "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
             "Object::IntArray(o) => java::identity_hash(o),",
         ],
@@ -4897,10 +4945,10 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
     assert_contains(
         &rust,
         &[
-            "String(String),",
+            "String(java::JString),",
             "fn first(a: &[Object]) -> Object {",
-            "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(\"b a\", \" \", 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
-            "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(s.as_string(), \"java.lang.String\")).collect::<Vec<_>>()).borrow())",
+            "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
+            "java::join(java::wtf8(\",\"), &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), (\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
         ],
     );
 }
@@ -4924,8 +4972,8 @@ fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_con
         &rust,
         &[
             "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
-            "java::non_null(last(&days).as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\"))) as i32",
-            "some[0].as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\")).is_none()",
+            "java::non_null(last(&days).as_ref().map(|o| java::cast(o, Object::as_day, (\"Main$Day\", java::APP)))) as i32",
+            "some[0].as_ref().map(|o| java::cast(o, Object::as_day, (\"Main$Day\", java::APP))).is_none()",
         ],
     );
 }
@@ -4942,7 +4990,7 @@ fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
     );
     assert_contains(
         &rust,
-        &["String(String),", "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()"],
+        &["String(java::JString),", "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()"],
     );
 }
 
@@ -5038,7 +5086,7 @@ fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
             "fn count(xs: &[Object]) -> i32 {",
             "let vs: Vec<Object> = vec![Object::V(Rc::new(V::new(1)))];",
             "count(&vs)",
-            "java::cast(vs[0].as_v(), \"V\").n",
+            "java::cast(&vs[0], |o| o.as_v(), (\"V\", java::APP)).n",
         ],
     );
 }
@@ -5054,7 +5102,7 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
             "fn next_integer(&mut self) -> i32 {",
             "fn next(&mut self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
             "fn compare_to_point(&self, o: &Rc<Point>) -> i32 {",
-            "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(other.as_point(), \"Point\"))\n    }",
+            "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(&other, |o| o.as_point(), (\"Point\", java::APP)))\n    }",
         ],
     );
 }
@@ -5063,7 +5111,10 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
 fn wildcards_and_raw_types_erase() {
     let rust = translate(GENERICS);
     // `? extends Shape` is `Shape`, and a raw `Box` is the class itself.
-    assert_contains(&rust, &["java::cast(b.borrow().get().as_shape(), \"Shape\").sides()", "let raw = b;"]);
+    assert_contains(
+        &rust,
+        &["java::cast(&b.borrow().get(), |o| o.as_shape(), (\"Shape\", java::APP)).sides()", "let raw = b;"],
+    );
 }
 
 #[test]
@@ -5077,8 +5128,8 @@ fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
         &rust,
         &[
             "fn first(xs: &[Object]) -> Object {",
-            "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
-            "java::cast(first(&s).as_string(), \"java.lang.String\")",
+            "let s: Vec<Object> = vec![Object::String(java::JString::from(\"a\"))];",
+            "java::cast(&first(&s), |o| o.as_string(), (\"java.lang.String\", java::BASE))",
         ],
     );
 }
@@ -5141,7 +5192,7 @@ fn a_simple_container_is_a_rust_generic() {
             "fn pop(&mut self) -> T {",
             "struct Pair<A, B> {\n    first: A,\n    second: B,\n}",
             "fn swap(&self) -> Rc<Pair<B, A>> {",
-            "words.push(String::from(\"a\"));",
+            "words.push(java::JString::from(\"a\"));",
         ],
     );
     assert!(!rust.contains("enum Object"), "{rust}");
@@ -5389,8 +5440,8 @@ fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_class
     assert_contains(
         &rust,
         &[
-            "java::StringBuilder::from_text(&text.to_string())",
-            "java::StringBuilder::from_text(&java::non_null(nothing.as_ref()).to_string())",
+            "java::StringBuilder::from_text(&text.java_string())",
+            "java::StringBuilder::from_text(&java::non_null(nothing.as_ref()).java_string())",
         ],
     );
     let program = "package app;\npublic class Main implements CharSequence {\n    public int length() { return 0; }\n    public char charAt(int i) { return 'x'; }\n    public CharSequence subSequence(int s, int e) { return this; }\n    public String toString() { return \"\"; }\n    public static void main(String[] a) {\n        CharSequence s = new Main();\n        System.out.println(new StringBuilder(s));\n    }\n}\n";
@@ -5467,10 +5518,11 @@ fn an_analysis_error_names_its_file_where_another_file_has_code_at_its_position(
 }
 
 #[test]
-fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_with_a_note() {
+fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_an_object() {
+    // `direct` returns the constant itself or a new string: only the objects decide, so every
+    // string of the program is shared, the literal interned.
     let java = "public class A {
         static final String ALL = \".*\";
-        static String pattern(String s) { return s.equals(\"*\") ? ALL : s.replace(\".\", \"\\\\.\"); }
         static String direct(String s) { if (s.isEmpty()) { return ALL; } return s + \"!\"; }
         public static void main(String[] args) {
             String p = direct(args.length > 0 ? args[0] : \"\");
@@ -5479,26 +5531,15 @@ fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_wit
         }
     }";
     let (rust, notes) = java_to_rust::translate_with_notes(java).expect("translates");
-    assert_contains(&rust, &["java::println!(\"{}\", p == String::from(A_ALL));"]);
-    let messages: Vec<String> =
-        notes.iter().map(|n| format!("{}:{}: {}", n.pos.line, n.pos.column, n.message)).collect();
-    assert_eq!(messages.len(), 2, "{messages:?}");
-    assert!(
-        messages[0].starts_with(
-            "7:32: `==` on strings compared as text: assumes that no string that `A.direct` computes"
-        ),
-        "{messages:?}"
+    assert_contains(
+        &rust,
+        &[
+            "java::println!(\"{}\", java::same_str(&p, &",
+            "java::interned_literal(&LITERAL, A_ALL)",
+            "!java::same_str(&direct(",
+        ],
     );
-    // A string that the method does not return as the constant itself is still rejected.
-    let error = java_to_rust::translate(
-        "public class A {
-            static final String ALL = \".*\";
-            static String other(String s) { return s + \"!\"; }
-            public static void main(String[] args) { System.out.println(other(\"x\") == ALL); }
-        }",
-    )
-    .expect_err("the method never returns the constant");
-    assert!(error.to_string().contains("== on strings compares references"), "{error}");
+    assert_eq!(notes.len(), 0);
 }
 
 #[test]

@@ -10,7 +10,7 @@ mod reach;
 mod survey;
 
 pub use census::{Census, census_program};
-pub use modules::Contents as ModuleContents;
+pub use modules::{Contents as ModuleContents, loader_name};
 pub use reach::{
     CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS,
     PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS,
@@ -122,6 +122,9 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
     }
+    phase("string identity", || analysis::string_identity(&mut class))
+        .map_err(|mut errors| errors.remove(0))
+        .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
@@ -195,6 +198,7 @@ fn narrow(
             live.unresolved.len()
         );
     }
+    class.thread_statics = live.thread_statics.clone();
     analysis::live_methods::prune(class, &live);
     (running, live.unresolved)
 }

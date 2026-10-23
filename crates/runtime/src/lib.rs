@@ -57,6 +57,7 @@ mod preconditions;
 mod random;
 pub mod regex;
 mod scalb;
+mod shared_string;
 mod statics;
 pub mod string;
 mod system;
@@ -66,6 +67,7 @@ mod translate_escapes;
 mod unix;
 mod unsigned;
 mod vm;
+pub mod wtf8;
 pub use allocator::{Allocator, release_thread_cache};
 pub use arguments::main_args;
 pub use boxed::*;
@@ -124,6 +126,7 @@ pub use preconditions::*;
 pub use random::*;
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
+pub use shared_string::*;
 pub use statics::*;
 pub use string::*;
 pub use system::*;
@@ -136,6 +139,7 @@ pub use unsigned::{
     try_parse_unsigned,
 };
 pub use vm::*;
+pub use wtf8::{JString, Piece, Wtf8, wtf8, wtf8_bytes};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
@@ -294,14 +298,8 @@ pub fn min(a: f64, b: f64) -> f64 {
 }
 
 /// Java's `String.length()`, which counts UTF-16 code units.
-pub fn string_length(s: &str) -> i32 {
-    if s.is_ascii() {
-        return s.len() as i32;
-    }
-    // Each character is one unit but those of four bytes, which are two: count the bytes that
-    // start a character, and once more those that start one of four bytes.
-    let units: usize = s.bytes().map(|b| usize::from((b as i8) >= -0x40) + usize::from(b >= 0xF0)).sum();
-    units as i32
+pub fn string_length(s: &Wtf8) -> i32 {
+    s.unit_len() as i32
 }
 
 /// Java's `System.exit`.
@@ -333,32 +331,87 @@ pub fn throw_exception(e: Exception) -> ! {
     exception::die(catching::raise_exception(e))
 }
 
-/// Java's checked cast `(T) x` on a non-null object: the object as a `T` if it is one, which
-/// the translation finds (`x.as_t()`), else a `ClassCastException`. `to` is the binary name of
-/// `T`.
-pub fn cast<T>(value: Option<T>, to: &str) -> T {
-    match value {
+/// A class as a `ClassCastException` names it: its binary name, and the module and class loader
+/// that HotSpot names with it ("unnamed module of loader 'app'").
+pub type CastClass = (&'static str, &'static str);
+
+/// The module of a class of the JDK's `java.base`, as HotSpot names it with the class.
+pub const BASE: &str = "module java.base of loader 'bootstrap'";
+
+/// The unnamed module of the system class loader, where a program's classes are.
+pub const APP: &str = "unnamed module of loader 'app'";
+
+/// What a `ClassCastException` names of the object that a cast fails on: the class of the
+/// object. The translation implements it for each enum of classes that it casts from.
+pub trait CastSource {
+    fn cast_class(&self) -> CastClass;
+}
+
+impl<T: CastSource + ?Sized> CastSource for &T {
+    fn cast_class(&self) -> CastClass {
+        (**self).cast_class()
+    }
+}
+
+/// HotSpot's message for a cast of an object of class `from` to class `to` that fails:
+/// "class A cannot be cast to class B (A and B are in unnamed module of loader 'app')", or with
+/// each class's module of its own when they differ.
+pub fn cast_message(from: CastClass, to: CastClass) -> String {
+    let ((a, a_module), (b, b_module)) = (from, to);
+    let modules = if a_module == b_module {
+        format!("{a} and {b} are in {a_module}")
+    } else {
+        format!("{a} is in {a_module}; {b} is in {b_module}")
+    };
+    format!("class {a} cannot be cast to class {b} ({modules})")
+}
+
+/// Java's checked cast `(T) x` on a non-null object `from`: the object as a `T` if it is one,
+/// which the translation finds (`|o| o.as_t()`), else a `ClassCastException`.
+pub fn cast<S: CastSource + ?Sized, T>(from: &S, as_t: impl FnOnce(&S) -> Option<T>, to: CastClass) -> T {
+    match as_t(from) {
         Some(value) => value,
-        None => cast_failed(to),
+        None => cast_failed(from.cast_class(), to),
     }
 }
 
 /// `cast`, where a `catch` or a `finally` sees its `ClassCastException`: the failure is
 /// returned, to go on as a thrown exception does.
-pub fn try_cast<T>(value: Option<T>, to: &str) -> Result<T, Exception> {
-    value.ok_or_else(|| {
-        Exception::new("java.lang.ClassCastException", format!("cannot be cast to class {to}"))
-    })
+pub fn try_cast<S: CastSource + ?Sized, T>(
+    from: &S,
+    as_t: impl FnOnce(&S) -> Option<T>,
+    to: CastClass,
+) -> Result<T, Exception> {
+    as_t(from).ok_or_else(|| cast_exception(from.cast_class(), to))
 }
 
-/// The `ClassCastException` of a cast to class `to` (by binary name) that fails.
-pub fn cast_failed(to: &str) -> ! {
-    throw("java.lang.ClassCastException", &format!("cannot be cast to class {to}"))
+/// The `ClassCastException` of a cast of an object of class `from` to class `to`.
+pub fn cast_exception(from: CastClass, to: CastClass) -> Exception {
+    Exception::new("java.lang.ClassCastException", cast_message(from, to))
+}
+
+/// Throws the `ClassCastException` of a cast of an object of class `from` to class `to`.
+pub fn cast_failed(from: CastClass, to: CastClass) -> ! {
+    throw("java.lang.ClassCastException", &cast_message(from, to))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cast_messages_are_hotspots() {
+        assert_eq!(
+            cast_message(("Main$Dog", APP), ("Main$Cat", APP)),
+            "class Main$Dog cannot be cast to class Main$Cat (Main$Dog and Main$Cat are in unnamed \
+             module of loader 'app')"
+        );
+        assert_eq!(
+            cast_message(("java.lang.Integer", BASE), ("Main$Cat", APP)),
+            "class java.lang.Integer cannot be cast to class Main$Cat (java.lang.Integer is in module \
+             java.base of loader 'bootstrap'; Main$Cat is in unnamed module of loader 'app')"
+        );
+    }
 
     #[test]
     fn ties_between_shortest_decimals_take_the_even_digit() {

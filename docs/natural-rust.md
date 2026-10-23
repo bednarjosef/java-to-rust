@@ -30,8 +30,8 @@ for s in &shapes {
     total += s.area();
 ```
 
-Some of the design is already natural: a class tree is an `enum` with a `match` per method,
-`toString` is `impl Display`, objects that are never changed have no `RefCell`.
+Some of the design is already natural: a class tree is an `enum` with a `match` per method, and
+objects that are never changed have no `RefCell`.
 
 ## Why it looks the way it does
 

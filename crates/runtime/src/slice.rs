@@ -161,7 +161,20 @@ macro_rules! shared_as_is {
     };
 }
 
-shared_as_is!(i8, i16, i32, i64, u16, f32, f64, bool, String, Option<String>);
+shared_as_is!(
+    i8,
+    i16,
+    i32,
+    i64,
+    u16,
+    f32,
+    f64,
+    bool,
+    crate::JString,
+    Option<crate::JString>,
+    crate::JStr,
+    Option<crate::JStr>
+);
 
 /// `Share` in a program with threads: a plain array made a `SharedArray`.
 pub trait ShareAcross {
@@ -194,4 +207,17 @@ macro_rules! shared_across_as_is {
     };
 }
 
-shared_across_as_is!(i8, i16, i32, i64, u16, f32, f64, bool, String, Option<String>);
+shared_across_as_is!(
+    i8,
+    i16,
+    i32,
+    i64,
+    u16,
+    f32,
+    f64,
+    bool,
+    crate::JString,
+    Option<crate::JString>,
+    crate::JStr,
+    Option<crate::JStr>
+);

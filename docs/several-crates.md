@@ -75,8 +75,8 @@ tables of functions would leave; see below).
 
 ## What a split would buy for javac
 
-javac does not translate yet, so this is measured on the code its census generates (2026-10-22),
-with every rejected piece stubbed:
+Measured on the code javac's census generated before the translation built, with every rejected
+piece stubbed. The translation that builds is larger (below), but its shape is the same:
 
 317,000 lines of Rust in 140 packages: 140,000 lines of javac's own code (`com.sun.*`,
 `javax.*`, 27 packages) and 177,000 of the JDK and the crate root (113 packages).
@@ -118,10 +118,12 @@ What this says:
 - Splitting further means cutting Java's own loops, which is the program's design, not the
   translator's. Inside a crate, rustc's parallel code generation is what remains.
 
-The census code is not a translation that builds yet, so its rustc time and memory are not
-measured. If rustc's memory grows with the lines as in the table at the top (about 600 MB for
-19,000 lines), one crate of 317,000 lines needs roughly 10 GB, and each of the two halves about
-half of that.
+javac's translation builds as one crate of about 516,000 lines (43 MB, beside the runtime's
+crate). `cargo check` takes about 100 s with rustc at 6.2 GB at its peak; a debug build
+(`debug = "line-tables-only"`, one job) takes about 210 s with rustc at 7.3 GB. That is far below
+the table's 600 MB per 19,000 lines carried on linearly (about 17 GB), so rustc's memory grows
+slower than the lines; the split is about build time and rebuilds after a change, not about
+whether one crate fits.
 
 ## Breaking the loops
 

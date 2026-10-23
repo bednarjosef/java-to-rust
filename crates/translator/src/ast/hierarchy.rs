@@ -352,8 +352,15 @@ impl Class {
             Type::Array(_) => self.type_index(&ty.to_string()),
             Type::StringBuilder => self.type_index(STRING_BUILDER),
             Type::JavaClass => self.type_index(CLASS_VALUE),
-            _ => self.type_index(runtime_name(ty)?),
+            _ => self.runtime_index(runtime_name(ty)?),
         }
+    }
+
+    /// The runtime class named `name`, which is the class of the values of a string or a box. A
+    /// box that the program also has from the JDK's source (`Character`, for its static methods)
+    /// has a class of that name too, which `type_index` finds first; the values are not its.
+    fn runtime_index(&self, name: &str) -> Option<usize> {
+        self.types.iter().position(|t| t.name == name && t.kind == TypeKind::Runtime)
     }
 
     /// The array type of runtime class `c`, when it is the class of arrays that become `Object`s

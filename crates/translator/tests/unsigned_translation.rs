@@ -34,7 +34,10 @@ fn unsigned_parsing_passes_the_width_of_the_type() {
     );
     assert_contains(
         &rust,
-        &["parse_unsigned(Some(\"ff\"), 16, 32) as i32", "parse_unsigned(Some(\"7\"), 10, 64) as i64"],
+        &[
+            "parse_unsigned(Some(java::wtf8(\"ff\")), 16, 32) as i32",
+            "parse_unsigned(Some(java::wtf8(\"7\")), 10, 64) as i64",
+        ],
     );
 }
 

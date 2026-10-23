@@ -24,6 +24,22 @@ use std::cell::RefCell;
 pub(crate) const SEARCH_NULL_KEY: &str = "Cannot read field \"value\" because \"anotherString\" is null";
 pub(crate) const SEARCH_NULL_ELEMENT: &str =
     "Cannot invoke \"java.lang.Comparable.compareTo(Object)\" because \"midVal\" is null";
+
+/// The message of the `NullPointerException` that an enum's `compareTo` raises for a null argument,
+/// which asks it for its class in `Enum`'s code.
+pub(crate) const ENUM_COMPARE_NULL: &str = "Cannot invoke \"Object.getClass()\" because \"other\" is null";
+
+/// The message of the `NullPointerException` that a string's or a box's `compareTo` raises for a
+/// null argument: it reads the argument's `value` in the JDK's code (`-g`, so the parameter has
+/// its name: `b` for a `Boolean`). `kind` is the type the receiver unboxes to.
+pub(crate) fn compare_null_message(kind: Type) -> String {
+    let param = match kind {
+        Type::String => return SEARCH_NULL_KEY.to_string(),
+        Type::Boolean => "b".to_string(),
+        _ => format!("another{}", Type::boxed(kind)),
+    };
+    format!("Cannot read field \"value\" because \"{param}\" is null")
+}
 use std::collections::{HashMap, HashSet};
 
 /// How many steps back the JVM follows where a null came from: `a.b.c.d.e` is shown from `b`.
@@ -354,6 +370,11 @@ impl Messages<'_> {
                             "Cannot invoke \"java.lang.CharSequence.length()\" because \"cs\" is null";
                         out.entry(text[0].id).or_insert(Some(message.to_string()));
                     }
+                    // A null argument of `compareTo` fails in `String.compareTo`, which reads its
+                    // `value` (`-g`, so the parameter has its name).
+                    if let (Builtin::String(StringOp::CompareTo), Some(other)) = (builtin, args.get(1)) {
+                        out.insert(other.id, Some(SEARCH_NULL_KEY.to_string()));
+                    }
                     return;
                 }
                 // A method of a builder, named as the call names it: by the receiver's type,
@@ -438,8 +459,7 @@ impl Messages<'_> {
                         named(method).or_else(|| (method == "name").then(|| named("toString")).flatten());
                     add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                     if let (Builtin::EnumCompareTo, Some(other)) = (builtin, args.get(1)) {
-                        let failure = "Cannot invoke \"Object.getClass()\" because \"other\" is null";
-                        out.insert(other.id, Some(failure.to_string()));
+                        out.insert(other.id, Some(ENUM_COMPARE_NULL.to_string()));
                     }
                     return;
                 }
@@ -452,6 +472,13 @@ impl Messages<'_> {
                             false => self.call(x.pos, &method),
                         };
                         add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
+                    }
+                    // A null argument of a box's `compareTo` fails in the JDK's code, which reads its
+                    // `value` (`-g`, so the parameter has its name: `b` for `Boolean`).
+                    Builtin::Boxed(BoxedOp::Compare, kind) => {
+                        if let Some(other) = args.get(1) {
+                            out.insert(other.id, Some(compare_null_message(*kind)));
+                        }
                     }
                     // `Arrays.copyOf` and `copyOfRange` of a null, which fail in the JDK's code
                     // (`-g`, so the parameter has its name): the copy of an array of objects first

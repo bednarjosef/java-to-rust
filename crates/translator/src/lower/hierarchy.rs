@@ -248,6 +248,17 @@ impl<'t> Lowering<'t> {
         if self.param_owner(to).is_some() {
             return e;
         }
+        // Erasure's checked cast of a generic member's value is javac's only where the value's
+        // declared type is not one of `to`'s (`TransTypes.retype`): javac's `JCTree result =
+        // translate(assignOp, type)`, of `<T extends JCExpression> T translate(T, Type)`, casts
+        // nothing, and the block that the call gives back for its `JCAssignOp` is no failure.
+        if let ExprKind::Cast(_, inner) = &e.kind
+            && self.erased_casts.borrow().contains(&inner.id)
+            && self.upcast_to(inner.ty, to)
+        {
+            let ExprKind::Cast(_, inner) = e.kind else { unreachable!() };
+            return self.convert(*inner, to);
+        }
         if e.ty != to {
             self.meets_object_array(e.ty, to);
         }
@@ -260,6 +271,19 @@ impl<'t> Lowering<'t> {
             // is an `Appendable`, and the generator rejects the others, which no type's values
             // include (see `codegen::dispatch::class_cast`).
             (Type::String | Type::StringBuilder | Type::Boxed(_), Type::Class(..)) => true,
+            // A primitive boxed into an interface that its box implements (`Serializable`,
+            // `Constable`): the value is the box, as it is for `Object` and `Comparable`.
+            (
+                Type::Int
+                | Type::Long
+                | Type::Byte
+                | Type::Short
+                | Type::Char
+                | Type::Double
+                | Type::Float
+                | Type::Boolean,
+                Type::Class(..),
+            ) => true,
             _ => false,
         };
         if !differs {
@@ -274,6 +298,19 @@ impl<'t> Lowering<'t> {
         }
         let pos = e.pos;
         self.synth(ExprKind::Cast(to, Box::new(e)), pos, to)
+    }
+
+    /// Whether a value of type `from` is one of type `to` without a checked cast: an object of
+    /// one of the program's classes as `Object` or as one of its supertypes.
+    fn upcast_to(&self, from: Type, to: Type) -> bool {
+        match (from, to) {
+            (Type::Class(..) | Type::Enum(_), _) if Self::is_object(to) => true,
+            (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => {
+                a == b
+                    || self.type_index(a).zip(self.type_index(b)).is_some_and(|(a, b)| self.is_subclass(a, b))
+            }
+            _ => false,
+        }
     }
 
     /// Whether `ty` is the JDK's `Appendable`, which the runtime's builders implement.

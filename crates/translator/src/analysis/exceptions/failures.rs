@@ -2,6 +2,7 @@
 //! one expression may raise: a null dereference, an index out of bounds, a division by zero, a
 //! malformed number, a failed cast, and what each method of the library throws.
 
+use super::comparable::is_compare_call;
 use super::*;
 
 /// Whether the generator has the checked form of dereferencing `object`: the object of a call or
@@ -107,8 +108,8 @@ fn format_samples(args: &[Expr]) -> Vec<java_runtime::format::Arg<'static>> {
             Type::Long => Arg::Long(0),
             Type::Float => Arg::Float(0.0),
             Type::Double => Arg::Double(0.0),
-            Type::String => Arg::Str(""),
-            _ => Arg::Text(""),
+            Type::String => Arg::Str(java_runtime::wtf8("")),
+            _ => Arg::Text(java_runtime::wtf8("")),
         })
         .collect()
 }
@@ -466,6 +467,7 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         Builtin::Charset(_) => &[],
         // What an object's `toString` throws is a point of its own (`text_objects`).
         Builtin::ObjectText => &[],
+        Builtin::StringSame | Builtin::Kept(_) | Builtin::ValueOf => &[],
         // An atomic update of an element, and a view of a byte array's bytes, fail as their
         // operand, the access of the element, does (`lower::handles`).
         Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => &[],
@@ -706,6 +708,15 @@ pub(super) fn runtime_failures(
                     out.push((NPE, "this call", true, args[0].id));
                 }
             }
+            // The receiver, or else the argument, which `String.compareTo` reads: both are
+            // dereferenced with the checked form (`Gen::text_ref`), as a `catch` sees them.
+            Builtin::String(StringOp::CompareTo) => {
+                if args.first().is_some_and(null) {
+                    out.push((NPE, "this call", true, args[0].id));
+                } else if args.get(1).is_some_and(null) {
+                    out.push((NPE, "this compareTo", true, args[1].id));
+                }
+            }
             Builtin::StringCharAt => {
                 if args.first().is_some_and(null) {
                     out.push((NPE, "this call", true, args[0].id));
@@ -726,11 +737,18 @@ pub(super) fn runtime_failures(
                 }
                 out.push(("java.lang.NumberFormatException", "this decode", true, x.id));
             }
+            // The argument of a box's `compareTo`, which `Integer.compareTo` reads (`Gen::value`
+            // gives it the checked form, as a dereference). Only where the receiver is not null,
+            // since that fails first.
+            Builtin::Boxed(BoxedOp::Compare, _) => {
+                if !null(&args[0]) && args.get(1).is_some_and(null) {
+                    out.push((NPE, "this compareTo", true, args[1].id));
+                }
+            }
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString
                 | BoxedOp::HexString
-                | BoxedOp::Compare
                 | BoxedOp::HashCode
                 | BoxedOp::Sum
                 | BoxedOp::FloatTest(_)
@@ -777,6 +795,9 @@ pub(super) fn runtime_failures(
             }
             // An atomic update of an element fails as its store does, which is its operand.
             Builtin::ElementUpdate(_) => {}
+            // Comparing strings, and the strings that the call or the text in them makes, fail as
+            // those operands do (`analysis::string_identity`).
+            Builtin::StringSame | Builtin::Kept(_) | Builtin::ValueOf => {}
             // A view of a byte array's bytes fails as its element access does, and also where
             // the index is in bounds but the bytes from it on are too few for the value.
             Builtin::ByteView { .. } => out.push((INDEX, "this array access", true, args[0].id)),
@@ -1005,6 +1026,16 @@ pub(super) fn runtime_failures(
         && !matches!(&value.kind, ExprKind::Var(v) if safe.contains(&instance_fact(v, name)))
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
+    }
+    // A null argument fails the call in the receiver's own `compareTo`, whose arm raises the
+    // message of its class (`Gen::dispatcher`), unchecked, inside `java::catching`.
+    if is_compare_call(class, x) {
+        out.push(("java.lang.ClassCastException", "this compareTo", false, x.id));
+        if let ExprKind::MethodCall { args, .. } = &x.kind
+            && args.first().is_some_and(null)
+        {
+            out.push((NPE, "this compareTo", false, x.id));
+        }
     }
     // A box that may be null is unboxed by arithmetic and comparisons, but not by `==` or `!=`
     // with an operand that is no primitive (`v == null`), which compares references.

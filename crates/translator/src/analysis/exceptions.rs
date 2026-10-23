@@ -34,6 +34,7 @@
 //! around the call are not looked for in its own code. The JDK's static initializers run on the
 //! JDK's own constants and flags, and so none of the program's code: one lets out nothing.
 
+mod comparable;
 mod conditions;
 mod entry;
 mod failures;
@@ -486,11 +487,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 } else if seen_here && let Some(c) = raised_class {
                     // No checked form of its own: the operation runs inside `java::catching`.
                     catching.insert(id, p.pos);
+                    // The null argument of a raw `compareTo` is raised with Java's message by the
+                    // receiver's arm (`Gen::dispatcher`), so a `catch` may read it.
                     if let Some(f) = catcher
                         && name == "java.lang.NullPointerException"
                     {
                         runtime_npe_tries.insert(f.id);
-                        unchecked_npe_tries.insert(f.id);
+                        if p.what != "this compareTo" {
+                            unchecked_npe_tries.insert(f.id);
+                        }
                     }
                     raised_classes.insert(c);
                 } else if seen_here {

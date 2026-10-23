@@ -96,7 +96,7 @@ local and anonymous classes by their binary names in types and owners, since jav
 | Captured | Held as |
 | --- | --- |
 | primitive, Java enum | a field of that type, copied |
-| `String` | a `String` field, cloned |
+| `String` | a `java::JString` field, cloned |
 | object, enum value, `Option<..>` | the handle, cloned (`Rc::clone`) |
 | object that threads may share | the `Arc`, cloned; a closure holding it is then `Send` |
 | array | the array is shared (`java::Array<T>`): the capture is a second name for it |
@@ -420,7 +420,7 @@ type UnaryOperator = Function;   // an interface that extends another names its 
 ```
 
 so a `UnaryOperator` is passed where a `Function` is taken. The argument and result types are
-those of the interface's method as its dispatcher would take them (`Fn(&str) -> i32` for a
+those of the interface's method as its dispatcher would take them (`Fn(&java::Wtf8) -> i32` for a
 borrowed string parameter, `-> Result<_, Throwable>` when the method throws).
 
 - **Stored form** (parameters, fields, statics, array elements, returns): `Rc::new(closure) as

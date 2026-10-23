@@ -440,6 +440,35 @@ Further speed-ups, not done:
   of the Rust generics, `lower::real_generics`); keeping what the first attempt learned
   instead of lowering everything again would halve it.
 
+## The translated javac
+
+javac translated as a whole program (`scripts/javac-check.sh` checks its output against the real
+javac's), timed against the real javac on two inputs: `scripts/javac-check/hello` (one class) and
+`corpus/programs` compiled together (47 files, 121 class files, `-d classes *.java`). Wall clock,
+the best of three runs on an otherwise quiet machine. Every run gives the same class files and
+the same standard error as the real javac.
+
+| build | rustc peak | build time | hello | 47 programs |
+|---|---:|---:|---:|---:|
+| real javac (JDK 25) | | | 0.20 s | 0.61 s |
+| debug (`debug = "line-tables-only"`) | 7.3 GB | 3.5 min | 0.35 s | 8.2 s |
+| `opt-level = 1`, 256 codegen units | 8.5 GB | 15 min | 0.077 s | 1.46 s |
+| `opt-level = 3`, 256 codegen units | 9.6 GB | 19 min | 0.073 s | 1.36 s |
+
+The builds are of one crate of about 516,000 lines, with one job (`CARGO_BUILD_JOBS=1`) in a
+12 GB memory scope. These times are from before the single-thread fast path below. Hello is
+faster than the real javac, which pays the JVM's start-up; on the 47 programs the optimized
+builds are about 2.3 times slower than the real javac, whose JIT has warmed up by then.
+
+Most of the rest is locking. javac starts one thread, the file manager's deferred close, which a
+normal run never starts, but its reachable `Thread.start()` makes the program threaded and most of
+its classes `Arc<java::Locked<..>>` (docs/multi-threading.md, section 4). Every field access then
+takes the object's data lock. Until a second thread starts, a lock is taken and given back with
+plain stores (`locked.rs`, `THREADS`); with that, at `opt-level = 1`, the 47 programs take 25%
+less time (3.68 s to 2.75 s, measured on a loaded machine where the real javac took 1.42 s), and
+so do the first 1,259 files of the decompiled Minecraft server (191 s to 144 s, real javac about
+6 s).
+
 ## NodeList: stack overflow when the list is freed (fixed)
 
 `benchmarks/NodeList.java` builds a linked list of about 667,000 nodes. It compiled once the

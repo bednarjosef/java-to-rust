@@ -12,18 +12,26 @@ const NUMBER_FORMAT: &str = "java.lang.NumberFormatException";
 
 /// `Integer.parseInt(s, begin, end, radix)` (`bits` 32) and `Long.parseLong` (`bits` 64). `None` is
 /// a null string, a `NullPointerException`.
-pub fn parse_range<T: TryFrom<i128>>(s: Option<&str>, begin: i32, end: i32, radix: i32, bits: u32) -> T {
+pub fn parse_range<T: TryFrom<i128>>(
+    s: Option<&crate::Wtf8>,
+    begin: i32,
+    end: i32,
+    radix: i32,
+    bits: u32,
+) -> T {
     try_parse_range(s, begin, end, radix, bits).unwrap_or_else(uncaught)
 }
 
 /// The checked form of `parse_range`.
 pub fn try_parse_range<T: TryFrom<i128>>(
-    s: Option<&str>,
+    s: Option<&crate::Wtf8>,
     begin: i32,
     end: i32,
     radix: i32,
     bits: u32,
 ) -> Result<T, Exception> {
+    let s = s.map(|s| s.to_string_lossy());
+    let s = s.as_deref();
     let units = check_range(s, begin, end)?;
     let value = read_signed(&units, begin as usize, end as usize, radix, bits)?;
     // The loop never reads a value outside the range of `bits`.
@@ -32,19 +40,21 @@ pub fn try_parse_range<T: TryFrom<i128>>(
 
 /// `Integer.parseUnsignedInt(s, begin, end, radix)` (`bits` 32) and `Long.parseUnsignedLong` (`bits`
 /// 64), as the `u64` of the value; the caller casts it to the Java type. `None` is a null string.
-pub fn parse_unsigned_range(s: Option<&str>, begin: i32, end: i32, radix: i32, bits: u32) -> u64 {
+pub fn parse_unsigned_range(s: Option<&crate::Wtf8>, begin: i32, end: i32, radix: i32, bits: u32) -> u64 {
     try_parse_unsigned_range(s, begin, end, radix, bits).unwrap_or_else(uncaught)
 }
 
 /// The checked form of `parse_unsigned_range`. Java hands short strings to `parseInt` and
 /// `parseLong`, and longer ones to a loop that checks the range of the unsigned type.
 pub fn try_parse_unsigned_range(
-    s: Option<&str>,
+    s: Option<&crate::Wtf8>,
     begin: i32,
     end: i32,
     radix: i32,
     bits: u32,
 ) -> Result<u64, Exception> {
+    let s = s.map(|s| s.to_string_lossy());
+    let s = s.as_deref();
     let units = check_range(s, begin, end)?;
     let (begin, end) = (begin as usize, end as usize);
     if begin == end {
@@ -170,39 +180,45 @@ mod tests {
 
     #[test]
     fn range_reads_the_indices_it_is_given() {
-        assert_eq!(try_parse_range::<i32>(Some("x-12y"), 1, 4, 10, 32), Ok(-12));
-        assert_eq!(try_parse_range::<i64>(Some("9223372036854775807"), 0, 19, 10, 64), Ok(i64::MAX));
-        assert_eq!(try_parse_range::<i32>(Some("-2147483648"), 0, 11, 10, 32), Ok(i32::MIN));
+        assert_eq!(try_parse_range::<i32>(Some(crate::Wtf8::new("x-12y")), 1, 4, 10, 32), Ok(-12));
         assert_eq!(
-            message(try_parse_range::<i32>(Some("abc"), 2, 1, 10, 32)),
+            try_parse_range::<i64>(Some(crate::Wtf8::new("9223372036854775807")), 0, 19, 10, 64),
+            Ok(i64::MAX)
+        );
+        assert_eq!(
+            try_parse_range::<i32>(Some(crate::Wtf8::new("-2147483648")), 0, 11, 10, 32),
+            Ok(i32::MIN)
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("abc")), 2, 1, 10, 32)),
             "java.lang.IndexOutOfBoundsException: Range [2, 1) out of bounds for length 3"
         );
         assert_eq!(
-            message(try_parse_range::<i32>(Some("abc"), 0, 4, 10, 32)),
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("abc")), 0, 4, 10, 32)),
             "java.lang.IndexOutOfBoundsException: Range [0, 4) out of bounds for length 3"
         );
         assert_eq!(
-            message(try_parse_range::<i32>(Some("a12"), 0, 3, 10, 32)),
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("a12")), 0, 3, 10, 32)),
             "java.lang.NumberFormatException: Error at index 0 in: \"a12\""
         );
         assert_eq!(
-            message(try_parse_range::<i32>(Some("12x"), 0, 3, 10, 32)),
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("12x")), 0, 3, 10, 32)),
             "java.lang.NumberFormatException: Error at index 2 in: \"12x\""
         );
         assert_eq!(
-            message(try_parse_range::<i32>(Some("2147483648"), 0, 10, 10, 32)),
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("2147483648")), 0, 10, 10, 32)),
             "java.lang.NumberFormatException: Error at index 9 in: \"2147483648\""
         );
         assert_eq!(
-            message(try_parse_range::<i32>(Some("-"), 0, 1, 10, 32)),
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("-")), 0, 1, 10, 32)),
             "java.lang.NumberFormatException: Error at index 1 in: \"-\""
         );
         assert_eq!(
-            message(try_parse_range::<i32>(Some("7"), 0, 0, 10, 32)),
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("7")), 0, 0, 10, 32)),
             "java.lang.NumberFormatException: For input string: \"\""
         );
         assert_eq!(
-            message(try_parse_range::<i32>(Some("7"), 0, 1, 1, 32)),
+            message(try_parse_range::<i32>(Some(crate::Wtf8::new("7")), 0, 1, 1, 32)),
             "java.lang.NumberFormatException: radix 1 less than Character.MIN_RADIX"
         );
     }

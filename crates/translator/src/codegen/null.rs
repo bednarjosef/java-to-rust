@@ -66,7 +66,7 @@ impl<'a> Gen<'a> {
             && self.borrowed_optional.contains(name)
             && self.nullable(e)
         {
-            return Code::atom(format!("{}.map(String::from)", self.local(name)));
+            return Code::atom(format!("{}.map(ToOwned::to_owned)", self.local(name)));
         }
         if self.nullable(e) {
             return self.expr(e);
@@ -137,6 +137,10 @@ impl<'a> Gen<'a> {
     fn narrowed_source(&self, name: &str, ty: Type) -> String {
         match ty {
             Type::Array(_) => format!("{}.clone()", self.local(name)),
+            // A shared string is bound as the object, a `&java::JStr`.
+            Type::String if super::shared_strings() && !self.borrowed_optional.contains(name) => {
+                format!("{}.as_ref()", self.local(name))
+            }
             _ => self.option_source(name, ty),
         }
     }
@@ -152,7 +156,7 @@ impl<'a> Gen<'a> {
                 self.expr(e).at(ATOM)
             }
             _ if e.ty == Type::StringBuilder => self.builder_option(e),
-            ExprKind::Null => "None::<&str>".to_string(),
+            ExprKind::Null => "None::<&java::Wtf8>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
             ExprKind::Cast(_, inner) if !matches!(inner.ty, Type::Class(..)) => self.option_ref(inner),
             // In a format, a field is borrowed until the text is formatted, after every operand,
@@ -273,9 +277,10 @@ impl<'a> Gen<'a> {
 
     /// `s += value` where `s` may be null: a null `s` prints as `null`.
     pub(super) fn append_optional(&mut self, name: &str, value: &'a Expr) -> String {
-        let mut parts = vec![Part::Arg(Code::atom(format!("{name}.as_deref().unwrap_or(\"null\")")))];
+        let null = self.wtf8_literal("null");
+        let mut parts = vec![Part::Text(Code::atom(format!("{name}.as_deref().unwrap_or({null})")))];
         self.parts(value, &mut parts);
-        let text = self.format("format!", parts).text;
+        let text = self.concat(parts).text;
         format!("{name} = Some({text})")
     }
 
@@ -293,12 +298,12 @@ impl<'a> Gen<'a> {
             return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
         if let Type::Enum(_) = e.ty {
-            // A nullable enum local is an `Option` of the enum, shown as its name or as `null`.
+            // A nullable enum local is an `Option` of the enum, shown as its text or as `null`.
             let option = match &e.kind {
                 ExprKind::Var(name) if assigned.contains(name) => format!("{}.clone()", self.local(name)),
                 _ => self.option_ref(e),
             };
-            return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
+            return Some(Part::Text(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
         if matches!(e.ty, Type::Boxed(_)) {
             return Some(Part::Arg(Code::atom(self.boxed_text(e, e.ty.unboxed()))));
@@ -306,11 +311,13 @@ impl<'a> Gen<'a> {
         if e.ty == Type::StringBuilder {
             let option = self.builder_option(e);
             let text = format!("{}({option})", self.runtime("or_null"));
-            return Some(Part::Arg(Code::atom(if self.lazy_text {
-                text
-            } else {
-                format!("{text}.to_string()")
-            })));
+            if self.lazy_text {
+                return Some(Part::Text(Code::atom(text)));
+            }
+            let null = self.wtf8_literal("null");
+            return Some(Part::Text(Code::atom(format!(
+                "{option}.map_or_else(|| {null}.to_owned(), |b| b.text())"
+            ))));
         }
         if matches!(e.ty, Type::Class(..)) {
             // `java::or_null` shows `null`, or the object as it shows when it is not null.
@@ -319,23 +326,26 @@ impl<'a> Gen<'a> {
             if raises {
                 // A `toString` that throws: its exception goes on from here, not from the closure.
                 let texts = self.passed_on(Code::atom(format!("{option}.map(|o| {text}).transpose()")));
-                return Some(Part::Arg(Code::atom(format!("{}({texts})", self.runtime("or_null")))));
+                return Some(Part::Text(Code::atom(format!("{}({texts})", self.runtime("or_null")))));
             }
             let option = match text.strip_suffix("(o)") {
-                _ if text == "o" => option,
+                // An object shown through its `Display`.
+                _ if text == "o" => {
+                    return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
+                }
                 Some(function) if !function.contains(['.', '(']) => format!("{option}.map({function})"),
                 _ => format!("{option}.map(|o| {text})"),
             };
-            return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
+            return Some(Part::Text(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
         let text = match &e.kind {
             // An operand that assigns the variable is read before the assignment, as a copy.
             ExprKind::Var(name) if assigned.contains(name) => {
                 format!("{}.clone().unwrap_or_else(|| \"null\".into())", self.local(name))
             }
-            _ => format!("{}.unwrap_or(\"null\")", self.option_ref(e)),
+            _ => format!("{}.unwrap_or({})", self.option_ref(e), self.wtf8_literal("null")),
         };
-        Some(Part::Arg(Code::atom(text)))
+        Some(Part::Text(Code::atom(text)))
     }
 }
 
@@ -542,10 +552,15 @@ impl<'a> Gen<'a> {
                     && let ExprKind::Str(text) = &other.kind
                     && !self.nullable(e)
                 {
+                    if super::shared_strings() {
+                        let source = self.narrowed_source(name, ty);
+                        let literal = self.string_literal(&rust_string(text));
+                        return Some(Code::atom(format!("{source}.cloned().unwrap_or_else(|| {literal})")));
+                    }
                     let source = self.option_source(name, ty);
                     return Some(Code::atom(format!(
-                        "{source}.unwrap_or({}).to_string()",
-                        rust_string(text)
+                        "{source}.unwrap_or({}).to_owned()",
+                        self.wtf8_literal(text)
                     )));
                 }
                 let head = format!("let Some({}) = {}", self.local(name), self.narrowed_source(name, ty));

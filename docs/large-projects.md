@@ -148,8 +148,8 @@ the number of class files that differ, with the work directory of the case), and
 
 `scripts/javac-check/known-differences` lists the cases expected to differ, one per line: the name,
 then a one-line reason. They are reported as `KNOWN` and do not fail the run; a listed case that is
-identical is reported as `NOTE`, to be removed from the list. The list holds the four cases whose
-only difference is the class files of lone surrogate char literals (see docs/supported-java.md).
+identical is reported as `NOTE`, to be removed from the list. The list is empty: every case
+matches.
 
 javac itself is never patched, as it is the program under test. Its census keeps the rejection
 of `new DigestInputStream` in `Main.showClass` (Main.java:485), which is only reached with the

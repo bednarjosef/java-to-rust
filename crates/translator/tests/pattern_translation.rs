@@ -39,7 +39,7 @@ fn a_record_is_an_immutable_struct_with_java_text_and_hash() {
             "struct APoint {\n    x: i32,\n    y: i32,\n}",
             "fn x(&self) -> i32 {\n        self.x\n    }",
             "fn hash_code(&self) -> i32 {\n        31i32.wrapping_mul(self.x).wrapping_add(self.y)\n    }",
-            "write!(f, \"Point[x={}, y={}]\", self.x, self.y)",
+            "java::concat!(format_args!(\"Point[x={}, y={}]\", self.x, self.y))",
             "let p = Rc::new(APoint::new_i32_i32(3, -4));",
         ],
     );
@@ -118,7 +118,7 @@ fn case_null_is_tested_first_and_a_null_selector_otherwise_throws() {
     );
     assert_contains(
         &rust,
-        &["if let Some(o) = o.as_ref() {", "{ java::non_null(o.as_ref()); String::from(\"other\") }"],
+        &["if let Some(o) = o.as_ref() {", "{ java::non_null(o.as_ref()); java::JString::from(\"other\") }"],
     );
 }
 
@@ -165,7 +165,7 @@ fn a_caught_value_of_failure_uses_the_checked_form() {
     assert_contains(
         &rust,
         &[
-            "fn try_enum_value_of(name: &str) -> Result<ASize, java::Exception> {",
+            "fn try_enum_value_of(name: &java::Wtf8) -> Result<ASize, java::Exception> {",
             "No enum constant A.Size.{name}",
             "ASize::try_enum_value_of(",
         ],

@@ -124,25 +124,30 @@ impl<'a> Gen<'a> {
             self.line("}");
         }
         self.gap();
-        self.line(&format!("{}fn enum_name(self) -> String {{", self.vis()));
+        // Where strings are shared, a constant's name is the interned literal of its declaration.
+        let shared = super::shared_strings();
+        let text = if shared { self.runtime("JStr") } else { "java::JString".to_string() };
+        self.line(&format!("{}fn enum_name(self) -> {text} {{", self.vis()));
         self.indent += 1;
-        self.line("let name: &str = match self {");
+        self.line(&format!("let name: {} = match self {{", if shared { &text } else { "&str" }));
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{name}::{} => {},", variant_name(&c.name), rust_string(&c.name)));
+            let literal = rust_string(&c.name);
+            let literal = if shared { self.string_literal(&literal) } else { literal };
+            self.line(&format!("{name}::{} => {literal},", variant_name(&c.name)));
         }
         self.indent -= 1;
         self.line("};");
-        self.line("name.to_string()");
+        self.line(if shared { "name" } else { "name.into()" });
         self.indent -= 1;
         self.line("}");
         self.gap();
-        self.line(&format!("{}fn enum_value_of(name: &str) -> {name} {{", self.vis()));
+        self.line(&format!("{}fn enum_value_of(name: &java::Wtf8) -> {name} {{", self.vis()));
         self.indent += 1;
-        self.line("match name {");
+        self.line("match name.as_bytes() {");
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{} => {name}::{},", rust_string(&c.name), variant_name(&c.name)));
+            self.line(&format!("{} => {name}::{},", byte_string(c.name.as_bytes()), variant_name(&c.name)));
         }
         let throw = self.runtime("throw");
         self.line(&format!(
@@ -176,11 +181,30 @@ impl<'a> Gen<'a> {
             // found first, which is this `Display`.
             // A `toString` that may return null shows "null", as Java's string conversion does.
             Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
-                "f.write_str(Self::{}(*self).as_deref().unwrap_or(\"null\"))",
+                "fmt::Display::fmt(Self::{}(*self).as_deref().unwrap_or(java::wtf8(\"null\")), f)",
                 self.fn_names[m]
             )),
-            Some(m) => self.line(&format!("f.write_str(&Self::{}(*self))", self.fn_names[m])),
+            Some(m) => self.line(&format!("fmt::Display::fmt(&Self::{}(*self), f)", self.fn_names[m])),
             None => self.line("write!(f, \"{}\", self.enum_name())"),
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        // In a concatenation, the string that `toString` returns as it is.
+        let (piece, jstring) = (self.runtime("Piece"), self.runtime("JString"));
+        self.gap();
+        self.line(&format!("impl {piece} for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn push_to(&self, out: &mut {jstring}) {{"));
+        self.indent += 1;
+        match self.enum_to_string(index) {
+            Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
+                "out.push_wtf8(Self::{}(*self).as_deref().unwrap_or(java::wtf8(\"null\")));",
+                self.fn_names[m]
+            )),
+            Some(m) => self.line(&format!("out.push_wtf8(&Self::{}(*self));", self.fn_names[m])),
+            None => self.line("let _ = fmt::Write::write_fmt(out, format_args!(\"{self}\"));"),
         }
         self.indent -= 1;
         self.line("}");
@@ -224,14 +248,14 @@ impl<'a> Gen<'a> {
         let exception = self.runtime("Exception");
         self.gap();
         self.line(&format!(
-            "{}fn try_enum_value_of(name: &str) -> Result<{name}, {exception}> {{",
+            "{}fn try_enum_value_of(name: &java::Wtf8) -> Result<{name}, {exception}> {{",
             self.vis()
         ));
         self.indent += 1;
-        self.line("Ok(match name {");
+        self.line("Ok(match name.as_bytes() {");
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{} => {name}::{},", rust_string(&c.name), variant_name(&c.name)));
+            self.line(&format!("{} => {name}::{},", byte_string(c.name.as_bytes()), variant_name(&c.name)));
         }
         self.line(&format!(
             "_ => return Err({exception}::new(\"java.lang.IllegalArgumentException\", format!(\"No enum constant {}.{{name}}\"))),",
@@ -282,6 +306,15 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The arm of a `match` on a value of the enum of `t` for an object that is no enum's
+    /// constant, which fails the cast to `Enum` that Java makes.
+    fn not_enum_arm(&mut self, t: usize) -> String {
+        self.need(Need::CastSource(t));
+        let (source, failed) = (self.runtime("CastSource"), self.runtime("cast_failed"));
+        let base = self.runtime("BASE");
+        format!("other => {failed}({source}::cast_class(&other), (\"java.lang.Enum\", {base}))")
+    }
+
     /// An enum's builtin on an `Enum` that is an `Object` (of the enum of type `t`): a `match`
     /// on the enums it can be.
     fn erased_enum_builtin(&mut self, builtin: Builtin, args: &'a [Expr], t: usize) -> Code {
@@ -294,7 +327,7 @@ impl<'a> Gen<'a> {
             let obj = g.object(e);
             let mut arms: Vec<String> =
                 enums.iter().map(|&c| format!("{}(e) => *e as i32", g.variant(t, c))).collect();
-            arms.push(format!("_ => {}(\"java.lang.Enum\")", g.runtime("cast_failed")));
+            arms.push(g.not_enum_arm(t));
             // Borrowed, the constant is a reference however the `Enum` is held.
             format!("(match &({obj}) {{ {} }})", arms.join(", "))
         };
@@ -308,7 +341,7 @@ impl<'a> Gen<'a> {
                 let obj = self.object(&args[0]);
                 let mut arms: Vec<String> =
                     enums.iter().map(|&c| format!("{}(e) => e.enum_name()", self.variant(t, c))).collect();
-                arms.push(format!("_ => {}(\"java.lang.Enum\")", self.runtime("cast_failed")));
+                arms.push(self.not_enum_arm(t));
                 Code::new(format!("match {obj} {{ {} }}", arms.join(", ")), LOWEST)
             }
             _ => unreachable!("not a builtin of an erased enum: {builtin:?}"),

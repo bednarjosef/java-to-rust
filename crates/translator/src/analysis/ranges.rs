@@ -838,6 +838,7 @@ impl<'a> Analysis<'a> {
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
+            | ExprKind::Units(_)
             | ExprKind::EnumConstant { .. }
             | ExprKind::Null => other,
             ExprKind::Var(name) => env.get(name).map_or(Interval::full(ty), |v| v.range),

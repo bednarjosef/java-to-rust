@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Result<i32, Exception> {
-        crate::try_parse_radix::<i32>(Some(s), 10)
+        crate::try_parse_radix::<i32>(Some(crate::Wtf8::new(s)), 10)
     }
 
     #[test]
@@ -199,33 +199,36 @@ mod tests {
         assert_eq!(crate::try_div(i32::MIN, -1), Ok(i32::MIN));
         assert_eq!(message(crate::try_non_null::<i32>(None)), "java.lang.NullPointerException");
         assert_eq!(
-            message(crate::try_substring("abc", 2, 1)),
+            message(crate::try_substring(crate::Wtf8::new("abc"), 2, 1)),
             "java.lang.StringIndexOutOfBoundsException: Range [2, 1) out of bounds for length 3"
         );
         assert_eq!(
-            message(crate::try_substring_from("abc", 5)),
+            message(crate::try_substring_from(crate::Wtf8::new("abc"), 5)),
             "java.lang.StringIndexOutOfBoundsException: Range [5, 3) out of bounds for length 3"
         );
-        assert_eq!(crate::try_substring_from("abc", 1), Ok("bc".to_string()));
+        assert_eq!(crate::try_substring_from(crate::Wtf8::new("abc"), 1), Ok(crate::JString::from("bc")));
         assert_eq!(
-            message(crate::try_char_at("é", 1)),
+            message(crate::try_char_at(crate::Wtf8::new("é"), 1)),
             "java.lang.StringIndexOutOfBoundsException: Index 1 out of bounds for length 1"
         );
-        assert_eq!(crate::try_ascii_char_at("ab", 1), Ok(b'b' as u16));
+        assert_eq!(crate::try_ascii_char_at(crate::Wtf8::new("ab"), 1), Ok(b'b' as u16));
         assert_eq!(
             message(crate::try_parse_radix::<i32>(None, 10)),
             "java.lang.NumberFormatException: Cannot parse null string"
         );
         assert_eq!(
-            message(crate::try_parse_radix::<i32>(Some("3000000000"), 10)),
+            message(crate::try_parse_radix::<i32>(Some(crate::Wtf8::new("3000000000")), 10)),
             "java.lang.NumberFormatException: For input string: \"3000000000\""
         );
-        assert_eq!(message(crate::try_parse_double(" ")), "java.lang.NumberFormatException: empty String");
         assert_eq!(
-            message(crate::try_parse_float(" 1x ")),
+            message(crate::try_parse_double(crate::Wtf8::new(" "))),
+            "java.lang.NumberFormatException: empty String"
+        );
+        assert_eq!(
+            message(crate::try_parse_float(crate::Wtf8::new(" 1x "))),
             "java.lang.NumberFormatException: For input string: \"1x\""
         );
-        assert_eq!(crate::try_parse_double("2.5"), Ok(2.5));
+        assert_eq!(crate::try_parse_double(crate::Wtf8::new("2.5")), Ok(2.5));
     }
 
     #[test]

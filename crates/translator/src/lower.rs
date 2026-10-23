@@ -87,6 +87,24 @@ pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
 
+/// The UTF-16 code units of a string that `JavaTree` wrote: a JSON string, or the array of its code
+/// units where it has a lone surrogate, which JSON cannot hold (`JavaTree.string`).
+fn string_units(value: &Value) -> Option<Vec<u16>> {
+    if let Some(text) = value.as_str() {
+        return Some(text.encode_utf16().collect());
+    }
+    value.as_array()?.iter().map(|u| u.as_u64().and_then(|u| u16::try_from(u).ok())).collect()
+}
+
+/// The literal of the string of code units `units`: a `Str` where they are well-formed UTF-16, else
+/// `Units`.
+fn string_literal(units: Vec<u16>) -> ExprKind {
+    match String::from_utf16(&units) {
+        Ok(text) => ExprKind::Str(text),
+        Err(_) => ExprKind::Units(units),
+    }
+}
+
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
     charsets::check(unit)?;
@@ -131,7 +149,20 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let class_file = lowering.class_file_names(&types);
         let notes = lowering.notes.take();
         let annotation_classes = lowering.annotation_classes.take();
-        let class = Class { name, types, methods, hierarchy, raised, class_file, notes, annotation_classes };
+        let module_labels = Default::default();
+        let class = Class {
+            name,
+            types,
+            methods,
+            hierarchy,
+            raised,
+            class_file,
+            notes,
+            annotation_classes,
+            shared_strings: false,
+            module_labels,
+            thread_statics: None,
+        };
         Ok((class, lowering.real.clone(), failed))
     })
 }
@@ -222,157 +253,22 @@ impl<'t> Node<'t> {
 pub const STRING_ARRAY_WRITE: &str = "a change in place of a `String[]` that is also an `Object[]`";
 
 impl<'t> Lowering<'t> {
-    /// `a == b` or `a != b` of two strings, which compares references. A translated string is a
-    /// value without an identity, so the program's own code is rejected. The JDK compares by
-    /// reference only strings it interned (the parts of a `Locale`, `Charset`'s canonical names)
-    /// or as a shortcut before comparing the characters (`LocaleUtils.caseIgnoreMatch`), and no
-    /// code of it that the targets reach makes a string with an identity of its own to tell it
-    /// apart (a `new String` kept as a marker): there, the reference comparison gives what value
-    /// equality does, which is how the library's code is lowered (`Objects.equals`).
-    ///
-    /// Two strings that Java interns are the same object exactly when they have the same text, so
-    /// the program's comparison of two of them is lowered that way too: constant expressions
-    /// (literals, constant variables and their concatenations, which the JVM shares), the result
-    /// of `intern()`, and a conditional of those. Any other string may be a copy with the same
-    /// text, and is rejected, but for a constant compared with what a method returns that returns
-    /// it on some path, which is compared as text with a note (`constant_or_computed`).
-    /// Whether the string `node` is one that Java interns: a constant expression, the result of
-    /// `intern()`, a conditional of two such, or a call of a method that no other method
-    /// overrides and that only returns such, followed `depth` calls deep.
-    fn interned(&self, node: Node<'t>, depth: usize) -> bool {
-        match node.kind() {
-            "PARENTHESIZED" => node.get("expression").is_some_and(|n| self.interned(n, depth)),
-            "CONDITIONAL_EXPRESSION" => {
-                node.get("trueExpression").is_some_and(|n| self.interned(n, depth))
-                    && node.get("falseExpression").is_some_and(|n| self.interned(n, depth))
-            }
-            "METHOD_INVOCATION" => {
-                let Some(symbol) = node.symbol() else { return false };
-                if symbol.owner == "java.lang.String" {
-                    return symbol.name == "intern" && !symbol.is_static && symbol.ty == "()java.lang.String";
-                }
-                let Some(m) = self.method_index(&symbol) else { return false };
-                let declaration = self.methods[m].node;
-                let fixed = symbol.is_static
-                    || declaration.has_flag("PRIVATE")
-                    || declaration.has_flag("FINAL")
-                    || self.types[self.methods[m].owner].node.has_flag("FINAL");
-                let Some(body) = declaration.get("body") else { return false };
-                if depth == 0 || !fixed {
-                    return false;
-                }
-                let mut returns = Vec::new();
-                fn collect<'t>(n: Node<'t>, out: &mut Vec<Option<Node<'t>>>) {
-                    match n.kind() {
-                        "RETURN" => out.push(n.get("expression")),
-                        // Their `return`s are not the method's.
-                        "LAMBDA_EXPRESSION" | "CLASS" | "ENUM" | "RECORD" | "INTERFACE" => {}
-                        _ => charsets::children(n).into_iter().for_each(|c| collect(c, out)),
-                    }
-                }
-                collect(body, &mut returns);
-                !returns.is_empty() && returns.iter().all(|r| r.is_some_and(|r| self.interned(r, depth - 1)))
-            }
-            _ => switch::constant_string(node),
-        }
-    }
-
-    /// Whether `node`, `a == b` of two strings, compares a constant with what a method returns
-    /// that returns that constant on some path and computes the string on the others (javac's
-    /// `MatchingUtils`: `pattern == allMatchesString`): the method is one that no other overrides,
-    /// called on that side or as the value of a local set once from the call. Compared as text,
-    /// this is wrong only if a string that the method computes has the constant's text, which the
-    /// translation assumes it does not: the note that says so, for the program's code.
-    fn constant_or_computed(&self, node: Node<'t>) -> Option<String> {
-        let (left, right) = (node.get("leftOperand")?, node.get("rightOperand")?);
-        let (constant, other) = match (switch::constant_text(left), switch::constant_text(right)) {
-            (Some(c), None) => (c, right),
-            (None, Some(c)) => (c, left),
-            _ => return None,
-        };
-        let call = match other.kind() {
-            "METHOD_INVOCATION" => other,
-            "IDENTIFIER" => self.set_once_from_call(other.str("name"))?,
-            _ => return None,
-        };
-        let symbol = call.symbol()?;
-        let m = self.method_index(&symbol)?;
-        let declaration = self.methods[m].node;
-        let fixed = symbol.is_static
-            || declaration.has_flag("PRIVATE")
-            || declaration.has_flag("FINAL")
-            || self.types[self.methods[m].owner].node.has_flag("FINAL");
-        let body = declaration.get("body")?;
-        let mut returns = Vec::new();
-        fn collect<'t>(n: Node<'t>, out: &mut Vec<Option<Node<'t>>>) {
-            match n.kind() {
-                "RETURN" => out.push(n.get("expression")),
-                "LAMBDA_EXPRESSION" | "CLASS" | "ENUM" | "RECORD" | "INTERFACE" => {}
-                _ => charsets::children(n).into_iter().for_each(|c| collect(c, out)),
-            }
-        }
-        collect(body, &mut returns);
-        let returns_constant =
-            returns.iter().any(|r| r.and_then(switch::constant_text).is_some_and(|c| c == constant));
-        (fixed && returns_constant).then(|| {
-            format!(
-                "`==` on strings compared as text: assumes that no string that `{}.{}` computes has the \
-                 text {constant:?} of the constant it returns",
-                symbol.owner, symbol.name
-            )
-        })
-    }
-
-    /// The call that local `name` of the method being lowered is set from: its one declaration's
-    /// initializer, where the method declares one local of that name and assigns it nowhere else.
-    fn set_once_from_call(&self, name: &str) -> Option<Node<'t>> {
-        let method = self.methods[self.method_ctx.get()?].node.get("body")?;
-        let (mut declarations, mut assigned) = (Vec::new(), false);
-        fn walk<'t>(n: Node<'t>, name: &str, declarations: &mut Vec<Node<'t>>, assigned: &mut bool) {
-            match n.kind() {
-                "VARIABLE" if n.str("name") == name => declarations.push(n),
-                "ASSIGNMENT" | "PLUS_ASSIGNMENT"
-                    if n.get("variable")
-                        .is_some_and(|v| v.kind() == "IDENTIFIER" && v.str("name") == name) =>
-                {
-                    *assigned = true
-                }
-                _ => {}
-            }
-            charsets::children(n).into_iter().for_each(|c| walk(c, name, declarations, assigned));
-        }
-        walk(method, name, &mut declarations, &mut assigned);
-        match (&declarations[..], assigned) {
-            ([declaration], false) => {
-                declaration.get("initializer").filter(|i| i.kind() == "METHOD_INVOCATION")
-            }
-            _ => None,
-        }
-    }
-
-    fn library_string_comparison(
-        &self,
-        node: Node<'t>,
-        op: BinOp,
-        left: Expr,
-        right: Expr,
-    ) -> Result<ExprKind, Error> {
+    /// `a == b` or `a != b` of two strings, which compares references. The program's own code
+    /// gets `Builtin::StringSame`, which `analysis::string_identity` decides from where the two
+    /// strings can come from. The JDK compares by reference only strings it interned (the parts of
+    /// a `Locale`, `Charset`'s canonical names) or as a shortcut before comparing the characters
+    /// (`LocaleUtils.caseIgnoreMatch`), and no code of it that the targets reach makes a string
+    /// with an identity of its own to tell it apart (a `new String` kept as a marker): there, the
+    /// reference comparison gives what value equality does, which is how the library's code is
+    /// lowered (`Objects.equals`).
+    fn string_comparison(&self, node: Node<'t>, op: BinOp, left: Expr, right: Expr) -> ExprKind {
         let library = self.library.get(self.current.get()).copied().unwrap_or(false);
-        let both_interned = ["leftOperand", "rightOperand"]
-            .iter()
-            .all(|side| node.get(side).is_some_and(|n| self.interned(n, 3)));
-        if !library && !both_interned {
-            let Some(message) = self.constant_or_computed(node) else {
-                return error(node.pos(), "== on strings compares references; not supported yet");
-            };
-            let method = self.method_ctx.get();
-            self.notes.borrow_mut().push(crate::ast::Note { method, pos: node.pos(), message });
-        }
-        let equal = ExprKind::Builtin(Builtin::ObjectsEquals, vec![left, right]);
-        Ok(match op {
+        let builtin = if library { Builtin::ObjectsEquals } else { Builtin::StringSame };
+        let equal = ExprKind::Builtin(builtin, vec![left, right]);
+        match op {
             BinOp::Eq => equal,
             _ => ExprKind::Unary(UnOp::Not, Box::new(self.synth(equal, node.pos(), Type::Boolean))),
-        })
+        }
     }
 }
 
@@ -425,6 +321,9 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The expressions that erasure's checked cast of a generic member's value wraps (see
+    /// `generics::erased_use`), by id.
+    erased_casts: RefCell<std::collections::HashSet<ExprId>>,
     /// The class that names each static field read, and the methods of `String` that calls name
     /// (see `Class::class_file`).
     static_qualifiers: RefCell<std::collections::HashMap<(String, Pos, String), Option<String>>>,
@@ -856,6 +755,15 @@ impl<'t> Lowering<'t> {
                 {
                     Stmt::Expr(*assign)
                 }
+                // The checked cast that erasure gives a generic method's result (`erased_use`):
+                // Java casts only a value that it uses, and this one is dropped. javac's
+                // `translate(tree.def);` in `Lower.visitNewClass` gets back the block that
+                // replaces an anonymous class's declaration, not the declaration.
+                Expr { kind: ExprKind::Cast(_, call), .. }
+                    if matches!(call.kind, ExprKind::MethodCall { .. } | ExprKind::Call { .. }) =>
+                {
+                    Stmt::Expr(*call)
+                }
                 e => Stmt::Expr(e),
             },
             // Reachability skipped the other branch (`program::live_branch`).
@@ -928,9 +836,9 @@ impl<'t> Lowering<'t> {
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
             "DOUBLE_LITERAL" => ExprKind::Double(self.number(node)?),
             "BOOLEAN_LITERAL" => ExprKind::Bool(node.0["value"] == true),
-            "STRING_LITERAL" => match node.0["value"].as_str() {
-                Some(text) => ExprKind::Str(text.to_string()),
-                None => return unsupported(node, "a string with an unpaired surrogate"),
+            "STRING_LITERAL" => match string_units(&node.0["value"]) {
+                Some(units) => string_literal(units),
+                None => return unsupported(node, "this string literal"),
             },
             "CHAR_LITERAL" => self.char_literal(node)?,
             "FLOAT_LITERAL" => self.float_literal(node)?,
@@ -1098,7 +1006,7 @@ impl<'t> Lowering<'t> {
                 let (left, right) = (self.expr(left)?, self.expr(node.child("rightOperand")?)?);
                 if left.ty == Type::String && right.ty == Type::String && matches!(op, BinOp::Eq | BinOp::Ne)
                 {
-                    self.library_string_comparison(node, op, left, right)?
+                    self.string_comparison(node, op, left, right)
                 } else {
                     // An array's text is its type and identity hash, such as `[I@1b6d3586`.
                     if op == BinOp::Add

@@ -6,6 +6,24 @@ use super::*;
 
 impl<'a> Gen<'a> {
     /// `Objects.equals(a, b)`.
+    /// `a == b` of two strings that only their identity decides (`analysis::string_identity`):
+    /// whether they are the same `java::JStr`.
+    pub(super) fn string_same(&mut self, args: &'a [Expr]) -> Code {
+        let (a, b) = (&args[0], &args[1]);
+        let nullable = self.nullable(a) || self.nullable(b);
+        let side = |g: &mut Self, e: &'a Expr| {
+            let code = g.expr(e).at(ATOM);
+            match (nullable, g.nullable(e)) {
+                (true, true) => format!("{code}.as_ref()"),
+                (true, false) => format!("Some(&{code})"),
+                _ => format!("&{code}"),
+            }
+        };
+        let (a, b) = (side(self, a), side(self, b));
+        let f = if nullable { "same_nullable_str" } else { "same_str" };
+        Code::atom(format!("{}({a}, {b})", self.runtime(f)))
+    }
+
     pub(super) fn objects_equals(&mut self, args: &'a [Expr]) -> Code {
         let (a, b) = (&args[0], &args[1]);
         if let [_, _, call] = args {

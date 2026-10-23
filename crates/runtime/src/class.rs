@@ -96,22 +96,26 @@ impl Class {
     pub const VOID: Class = Class::primitive("void");
 
     /// `getName()`.
-    pub fn get_name(&self) -> String {
-        self.name.to_string()
+    pub fn get_name(&self) -> crate::JString {
+        self.name.into()
     }
 
     /// `getSimpleName()`.
-    pub fn get_simple_name(&self) -> String {
-        self.simple.to_string()
+    pub fn get_simple_name(&self) -> crate::JString {
+        self.simple.into()
     }
 
     /// `getCanonicalName()`: the name in the source with its outer classes (`a.Outer.Inner`,
     /// `int[]`), `null` for a local or anonymous class, a class inside one, and an array of one.
     /// javac names a local class `Outer$1Local` and an anonymous one `Outer$1`, with an empty
     /// simple name, which tells them apart from member classes.
-    pub fn get_canonical_name(&self) -> Option<String> {
+    pub fn get_canonical_name(&self) -> Option<crate::JString> {
+        self.canonical_name().map(crate::JString::from)
+    }
+
+    fn canonical_name(&self) -> Option<String> {
         if let Some(component) = self.get_component_type() {
-            return component.get_canonical_name().map(|name| format!("{name}[]"));
+            return component.canonical_name().map(|name| format!("{name}[]"));
         }
         if self.kind == Kind::Primitive {
             return Some(self.name.to_string());
@@ -127,30 +131,31 @@ impl Class {
     }
 
     /// `descriptorString()`: the class's type descriptor, `I`, `[I` or `Ljava/lang/String;`.
-    pub fn descriptor_string(&self) -> String {
-        if self.kind == Kind::Primitive {
-            return match self.name {
+    pub fn descriptor_string(&self) -> crate::JString {
+        let text = if self.kind == Kind::Primitive {
+            match self.name {
                 "boolean" => "Z".to_string(),
                 "long" => "J".to_string(),
                 name => name[..1].to_uppercase(),
-            };
-        }
-        if self.component.is_some() {
-            return self.name.replace('.', "/");
-        }
-        format!("L{};", self.name.replace('.', "/"))
+            }
+        } else if self.component.is_some() {
+            self.name.replace('.', "/")
+        } else {
+            format!("L{};", self.name.replace('.', "/"))
+        };
+        text.into()
     }
 
     /// `getPackageName()`: the package of the class, of an array's element class, `java.lang`
     /// for a primitive type and `""` for the unnamed package.
-    pub fn get_package_name(&self) -> String {
+    pub fn get_package_name(&self) -> crate::JString {
         if let Some(component) = self.get_component_type() {
             return component.get_package_name();
         }
         if self.kind == Kind::Primitive {
-            return "java.lang".to_string();
+            return "java.lang".into();
         }
-        self.name.rsplit_once('.').map_or(String::new(), |(package, _)| package.to_string())
+        self.name.rsplit_once('.').map_or("", |(package, _)| package).into()
     }
 
     /// `getSuperclass()`: `null` for `Object`, an interface and a primitive type.
@@ -208,7 +213,7 @@ impl Class {
     /// `hashCode()`: Java's is the class object's identity hash, which nothing can depend on; this
     /// one is the hash of its name.
     pub fn hash_code(&self) -> i32 {
-        crate::string_hash(self.name)
+        crate::string_hash(crate::Wtf8::new(self.name))
     }
 }
 
@@ -270,12 +275,12 @@ mod tests {
         let inners = Class::array("[La.b.Outer$Inner;", "Inner[]", || {
             Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT))
         });
-        assert_eq!(inner.get_canonical_name().as_deref(), Some("a.b.Outer.Inner"));
-        assert_eq!(inners.get_canonical_name().as_deref(), Some("a.b.Outer.Inner[]"));
+        assert_eq!(inner.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner")));
+        assert_eq!(inners.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner[]")));
         assert_eq!(local.get_canonical_name(), None);
         assert_eq!(anonymous.get_canonical_name(), None);
         assert_eq!(in_local.get_canonical_name(), None);
-        assert_eq!(Class::INT.get_canonical_name().as_deref(), Some("int"));
+        assert_eq!(Class::INT.get_canonical_name().as_deref(), Some(crate::Wtf8::new("int")));
         assert_eq!(inner.get_package_name(), "a.b");
         assert_eq!(inners.get_package_name(), "a.b");
         assert_eq!(in_local.get_package_name(), "");

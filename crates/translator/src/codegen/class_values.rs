@@ -1,6 +1,8 @@
 //! Classes as values (see `lower::classes`): a `java::Class`, written out where it is used with
 //! its names and a function for its superclass or component type (`java::Class::new("Main$Dog",
-//! "Dog", Some(|| ..))`), so that no class needs a declaration of its own.
+//! "Dog", Some(|| ..))`), so that no class needs a declaration of its own. For a value of an enum
+//! of classes, the enum's `runtime_class()` and `runtime_type_names()` hold the `match` over its
+//! variants (`dispatch::class_value_impls`).
 
 use super::*;
 
@@ -14,17 +16,37 @@ pub(super) fn variant_match(obj: &str, arms: &[String]) -> String {
     }
 }
 
+/// `obj.method()`, with `obj` in parentheses unless it is a plain path, field or call.
+pub(super) fn method_on(obj: &str, method: &str) -> String {
+    let obj = obj.strip_prefix('&').filter(|rest| plain(rest)).unwrap_or(obj);
+    match plain(obj) {
+        true => format!("{obj}.{method}()"),
+        false => format!("({obj}).{method}()"),
+    }
+}
+
+/// A borrow of `obj`: `&obj`, with `obj` in parentheses unless it is a plain path, field or call.
+pub(super) fn borrow_of(obj: &str) -> String {
+    match plain(obj) {
+        true => format!("&{obj}"),
+        false => format!("&({obj})"),
+    }
+}
+
+/// Whether `text` is a path, a field or a call, which a method call can follow as it is.
+fn plain(text: &str) -> bool {
+    !text.is_empty()
+        && !text.contains(char::is_whitespace)
+        && !text.starts_with(['&', '*', '!', '-', '{', '(', '|'])
+}
+
 impl<'a> Gen<'a> {
     /// `GetClass(o)`: the class of the value of `o`, from the variant of an enum of classes.
     pub(super) fn get_class(&mut self, object: &'a Expr) -> Code {
         if let Some(t) = self.enum_of(object) {
             let obj = self.object(object);
-            let arms: Vec<String> = self
-                .enum_variants(t)
-                .into_iter()
-                .map(|c| format!("{}(_) => {}", self.variant(t, c), self.decl_class(c)))
-                .collect();
-            return Code::new(variant_match(&obj, &arms), LOWEST);
+            self.need(Need::RuntimeClass(t));
+            return Code::atom(method_on(&obj, "runtime_class"));
         }
         let class = match object.ty {
             Type::Class(..) => {
@@ -119,7 +141,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The `java::Class` of class `c` of the program, or of `Object` and the runtime classes.
-    fn decl_class(&mut self, c: usize) -> String {
+    pub(super) fn decl_class(&mut self, c: usize) -> String {
         let decl = &self.class.types[c];
         if let Some(ty) = runtime_type(&decl.name) {
             return self.type_class(ty);
@@ -168,7 +190,9 @@ impl<'a> Gen<'a> {
             ClassOp::IsInterface => "is_interface",
             ClassOp::IsPrimitive => "is_primitive",
             ClassOp::IsEnum => "is_enum",
-            ClassOp::ToString => "to_string",
+            ClassOp::ToString => {
+                return Code::atom(format!("{}::from({class}.to_string())", self.runtime("JString")));
+            }
             ClassOp::HashCode => "hash_code",
             ClassOp::GetCanonicalName => "get_canonical_name",
             ClassOp::GetPackageName => "get_package_name",
@@ -218,18 +242,14 @@ impl<'a> Gen<'a> {
         };
         let nullable = self.nullable(x);
         if let Some(t) = self.enum_of(x) {
-            // A value of the enum that may be null is matched as an `Option<&..>`.
-            let value = if nullable { self.enum_option(x) } else { self.expr(x).at(ATOM) };
-            let mut arms = Vec::new();
-            for c in self.enum_variants(t) {
-                let pattern = format!("{}(_)", self.variant(t, c));
-                let pattern = if nullable { format!("Some({pattern})") } else { pattern };
-                arms.push(format!("{pattern} => Some({})", list(self.decl_names(c))));
-            }
+            self.need(Need::RuntimeTypeNames(t));
             if nullable {
-                arms.push("None => None".to_string());
+                // A value of the enum that may be null is an `Option<&..>`.
+                let value = self.enum_option(x);
+                return format!("{}.map(|o| o.runtime_type_names())", Code::new(value, LOWEST).left_at(ATOM));
             }
-            return variant_match(&value, &arms);
+            let value = self.expr(x).at(ATOM);
+            return format!("Some({})", method_on(&value, "runtime_type_names"));
         }
         let names = match x.ty {
             Type::Class(..) => match self.struct_class(x) {
@@ -248,6 +268,12 @@ impl<'a> Gen<'a> {
             return format!("{{ let _ = {text}; Some({names}) }}");
         }
         format!("Some({names})")
+    }
+
+    /// `decl_names(c)` as a slice: `&["Main$Dog", .., "java.lang.Object"]`.
+    pub(super) fn names_list(&mut self, c: usize) -> String {
+        let names: Vec<String> = self.decl_names(c).iter().map(|n| rust_string(n)).collect();
+        format!("&[{}]", names.join(", "))
     }
 
     /// The binary names of class `c` of the program, or of a runtime class, and of the classes

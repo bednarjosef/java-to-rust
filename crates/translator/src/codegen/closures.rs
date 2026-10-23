@@ -27,7 +27,6 @@ struct Saved {
     throwing: bool,
     this_struct: usize,
     this_form: ThisForm,
-    display: bool,
     borrowed: HashSet<String>,
     borrowed_optional: HashSet<String>,
     int_receiver: bool,
@@ -219,8 +218,7 @@ impl<'a> Gen<'a> {
         let ExprKind::Cast(to, lambda) = &value.kind else { return None };
         let ExprKind::New { args, ctor: Some(ctor), .. } = &lambda.kind else { return None };
         let t = self.closure_type(*to)?;
-        let plain =
-            !self.display && !self.optional_return() && !self.facts.owned_returns.contains(&self.method);
+        let plain = !self.optional_return() && !self.facts.owned_returns.contains(&self.method);
         if !plain || *to != self.ret {
             return None;
         }
@@ -341,6 +339,13 @@ impl<'a> Gen<'a> {
         self.restore(saved);
         let moving = if moving { "move " } else { "" };
         let body = self.braced(&text);
+        // A body that only ends the program, as no object of the lambda's class is created, would
+        // make the closure return `!`, which is no `Fn()`.
+        let never = matches!(
+            &self.class.methods[body_method].body[..],
+            [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
+        );
+        let ret = if never && ret.is_empty() { " -> ()".to_string() } else { ret };
         (prelude, format!("{moving}|{}|{ret} {body}", params.join(", ")))
     }
 
@@ -456,7 +461,6 @@ impl<'a> Gen<'a> {
             throwing: self.throwing,
             this_struct: self.this_struct,
             this_form: self.this_form,
-            display: std::mem::replace(&mut self.display, false),
             borrowed: std::mem::take(&mut self.borrowed),
             borrowed_optional: std::mem::take(&mut self.borrowed_optional),
             int_receiver: self.int_receiver,
@@ -494,7 +498,6 @@ impl<'a> Gen<'a> {
         self.throwing = s.throwing;
         self.this_struct = s.this_struct;
         self.this_form = s.this_form;
-        self.display = s.display;
         self.borrowed = s.borrowed;
         self.borrowed_optional = s.borrowed_optional;
         self.int_receiver = s.int_receiver;

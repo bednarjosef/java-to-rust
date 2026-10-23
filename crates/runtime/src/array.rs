@@ -446,12 +446,22 @@ pub fn try_post_update<T: Clone>(
 }
 
 /// `Arrays.toString(a)`, with `show` formatting each element as Java does.
-pub fn to_string<T: Clone>(a: &impl Elements<T>, show: impl Fn(T) -> String) -> String {
+pub fn to_string<T: Clone, S: Into<crate::JString>>(
+    a: &impl Elements<T>,
+    show: impl Fn(T) -> S,
+) -> crate::JString {
     // The elements are copied out first: `show` may run code of the program, which must not run
     // while the array is borrowed (with threads, locked).
     let items: Vec<T> = a.items().clone();
-    let items: Vec<String> = items.into_iter().map(show).collect();
-    format!("[{}]", items.join(", "))
+    let mut out = crate::JString::from("[");
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_wtf8(&show(item).into());
+    }
+    out.push_str("]");
+    out
 }
 
 /// `Arrays.fill(a, v)`.

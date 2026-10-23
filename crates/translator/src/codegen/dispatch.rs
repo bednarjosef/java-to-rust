@@ -18,6 +18,7 @@
 
 use super::arraycopy::CopyCall;
 use super::*;
+use crate::analysis::{ENUM_COMPARE_NULL, compare_null_message};
 use std::collections::BTreeSet;
 
 /// An item of the enum of a type that the code being generated uses.
@@ -39,9 +40,22 @@ pub(super) enum Need {
     Display(usize),
     /// `nullable_text()`: what the object's `toString` returns, null as `None`, or its exception.
     NullableText(usize),
+    /// `java_string()`: the string that the object's `toString` returns, which does not throw.
+    JavaString(usize),
     /// `as_<t>()` on the enum of `s`: the object as a value of type `t` if it is one, as
     /// `(s, t)`.
     Narrow(usize, usize),
+    /// `runtime_class()`: the `java::Class` of the object's class (see `class_values`).
+    RuntimeClass(usize),
+    /// `runtime_class_name()`: the binary name of the object's class.
+    RuntimeClassName(usize),
+    /// `runtime_type_names()`: the binary names of the object's class and of every class and
+    /// interface above it (see `class_values::instance_names`).
+    RuntimeTypeNames(usize),
+    /// `object_identity_hash()`: `System.identityHashCode` of the object.
+    IdentityHash(usize),
+    /// `java::CastSource`: the object's class as a `ClassCastException` names it.
+    CastSource(usize),
 }
 
 /// How a value of one class type becomes a value of another, in a cast or an `instanceof`.
@@ -60,10 +74,18 @@ impl<'a> Gen<'a> {
     pub(super) fn need(&self, need: Need) {
         let mut needs = self.needs.borrow_mut();
         match need {
-            Need::Base(t) | Need::BaseMut(t) | Need::Dispatch(t, _) | Need::Display(t) => {
+            Need::Base(t)
+            | Need::BaseMut(t)
+            | Need::Dispatch(t, _)
+            | Need::Display(t)
+            | Need::RuntimeClass(t)
+            | Need::RuntimeClassName(t)
+            | Need::RuntimeTypeNames(t)
+            | Need::IdentityHash(t)
+            | Need::CastSource(t) => {
                 needs.insert(Need::Enum(t));
             }
-            Need::NullableText(t) => {
+            Need::NullableText(t) | Need::JavaString(t) => {
                 needs.insert(Need::Enum(t));
                 needs.insert(Need::Display(t));
             }
@@ -342,16 +364,18 @@ impl<'a> Gen<'a> {
             return self.failing_cast(to, value, checked);
         }
         self.need(Need::Narrow(s, t));
+        self.need(Need::CastSource(s));
         let name = self.as_name(t);
         let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
-        let target = rust_string(&self.binary_name(t));
+        let target = self.cast_class(t);
         let text = if self.nullable(value) {
             let option = self.object_place(value);
             let enum_name = struct_name(&self.class.types[s].name);
-            format!("{option}.as_ref().map(|o| {cast}({enum_name}::{name}(o), {target}))")
+            format!("{option}.as_ref().map(|o| {cast}(o, {enum_name}::{name}, {target}))")
         } else {
             let obj = self.object(value);
-            format!("{cast}({obj}.{name}(), {target})")
+            let obj = super::class_values::borrow_of(&obj);
+            format!("{cast}({obj}, |o| o.{name}(), {target})")
         };
         self.cast_result(text, checked, self.nullable(value))
     }
@@ -360,27 +384,33 @@ impl<'a> Gen<'a> {
     /// (unless the value is null).
     fn failing_cast(&mut self, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
+        let target = self.cast_class(t);
+        let ty = self.ty_name(to);
+        // The class of the object `o`: its variant's, or the one class it can be.
+        let (from, binding) = match self.enum_of(value) {
+            Some(s) => {
+                self.need(Need::CastSource(s));
+                (format!("{}::cast_class(&o)", self.runtime("CastSource")), "o")
+            }
+            None => (self.cast_class(self.value_class(value)), "_"),
+        };
         if checked.is_some() {
-            let ty = self.ty_name(to);
-            let fail =
-                format!("{}(None::<{ty}>, {})", self.runtime("try_cast"), rust_string(&self.binary_name(t)));
+            let fail = format!("Err::<{ty}, _>({}({from}, {target}))", self.runtime("cast_exception"));
             let text = if self.nullable(value) {
-                format!("{}.as_ref().map(|_| {fail})", self.object_place(value))
+                format!("{}.as_ref().map(|{binding}| {fail})", self.object_place(value))
             } else {
-                format!("{{ let _ = {}; {fail} }}", self.expr(value).text)
+                format!("{{ let {binding} = &{}; {fail} }}", self.expr(value).at(UNARY))
             };
             return self.cast_result(text, checked, self.nullable(value));
         }
-        let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&self.binary_name(t)));
+        let failed = format!("{}({from}, {target})", self.runtime("cast_failed"));
         if self.nullable(value) {
             let option = self.object_place(value);
-            let ty = self.ty_name(to);
-            return Code::atom(format!("{option}.as_ref().map(|_| -> {ty} {{ {failed} }})"));
+            return Code::atom(format!("{option}.as_ref().map(|{binding}| -> {ty} {{ {failed} }})"));
         }
         // The value is typed, as `cast_failed` returns `!` and a local it initializes may be used.
-        let v = self.expr(value).text;
-        let ty = self.ty_name(to);
-        Code::atom(format!("{{ let _ = {v}; None::<{ty}>.unwrap_or_else(|| {failed}) }}"))
+        let v = self.expr(value).at(UNARY);
+        Code::atom(format!("{{ let {binding} = &{v}; None::<{ty}>.unwrap_or_else(|| {failed}) }}"))
     }
 
     /// `value instanceof T`.
@@ -492,11 +522,12 @@ impl<'a> Gen<'a> {
             let object = self.object_index().expect("an `Object[]` in a program that uses `Object`");
             let string = self.type_of(Type::String).expect("strings among `Object`'s runtime classes");
             self.need(Need::Narrow(object, string));
+            self.need(Need::CastSource(object));
             let (cast, name) = (self.runtime("cast"), self.as_name(string));
-            let target = rust_string("java.lang.String");
+            let target = self.cast_class(string);
             (
-                format!("{cast}(s.{name}(), {target})"),
-                format!("s.as_ref().map(|o| {cast}(o.{name}(), {target}))"),
+                format!("{cast}(&s, |o| o.{name}(), {target})"),
+                format!("s.as_ref().map(|o| {cast}(o, |o| o.{name}(), {target}))"),
             )
         };
         let each = match (from_nullable, to_nullable) {
@@ -611,7 +642,7 @@ impl<'a> Gen<'a> {
         ));
         let code = Code::atom(format!(
             "{{ let ({c}, {n}) = ({class_text}, {length}); (|| -> Result<{object}, {exception}> {{ \
-             match {non_null}({c})?.get_name().as_str() {{ {} }} }})() }}",
+             match &*{non_null}({c})?.get_name().to_string_lossy() {{ {} }} }})() }}",
             arms.join(" ")
         ));
         self.reflect_result(code, id)
@@ -740,6 +771,53 @@ impl<'a> Gen<'a> {
                     None => descriptor,
                 }
             }
+        }
+    }
+
+    /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
+    /// module, `("Main$Dog", java::APP)`. The `Comparable` that the translation keeps under its
+    /// own name is `java.lang.Comparable` to HotSpot.
+    pub(super) fn cast_class(&mut self, c: usize) -> String {
+        let binary = if self.class.types[c].name == COMPARABLE {
+            "java.lang.Comparable".to_string()
+        } else {
+            self.binary_name(c)
+        };
+        let name = rust_string(&binary);
+        let module = self.cast_module(c);
+        format!("({name}, {module})")
+    }
+
+    /// The module and class loader of class `c` as HotSpot names them with the class: the JDK's
+    /// `java.base` (`java::BASE`) for the classes that the runtime holds, an array's element's,
+    /// and for any other class its package's (`Class::module_labels`), else the unnamed module of
+    /// the system class loader (`java::APP`).
+    fn cast_module(&mut self, c: usize) -> String {
+        if let Some(ty) = self.runtime_of(c).or_else(|| self.class.array_of(c)) {
+            return self.type_module(ty);
+        }
+        let decl = &self.class.types[c];
+        let jdk = matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE);
+        if jdk || decl.origin == Origin::Object {
+            return self.runtime("BASE");
+        }
+        match self.class.module_labels.get(&decl.package) {
+            Some(label) if label == "module java.base of loader 'bootstrap'" => self.runtime("BASE"),
+            Some(label) => rust_string(label),
+            None => self.runtime("APP"),
+        }
+    }
+
+    /// `cast_module` of the class of the values of type `ty`; an array's is its element's, and
+    /// a primitive's (in an array) `java.base`.
+    fn type_module(&mut self, ty: Type) -> String {
+        match ty {
+            Type::Array(element) => self.type_module(*element),
+            Type::Class(..) | Type::Enum(_) => match self.class.type_of(ty) {
+                Some(c) if self.runtime_of(c).is_none() => self.cast_module(c),
+                _ => self.runtime("BASE"),
+            },
+            _ => self.runtime("BASE"),
         }
     }
 
@@ -961,7 +1039,7 @@ impl<'a> Gen<'a> {
                         // A borrowed optional string is an `Option<&str>`.
                         Some(variant) if matches!(&value.kind, ExprKind::Var(name) if self.borrowed_optional.contains(name)) =>
                         {
-                            format!("{option}.map(|s| {variant}(s.to_string()))")
+                            format!("{option}.map(|s| {variant}(s.to_owned()))")
                         }
                         Some(variant) => format!("{option}.map({variant})"),
                         None => {
@@ -1060,8 +1138,14 @@ impl<'a> Gen<'a> {
             }
             return Code::atom(match (throws, self.enum_text_throws(t)) {
                 (true, true) => format!("{obj}.try_text()"),
-                (true, false) => format!("Ok::<_, {}>({obj}.to_string())", self.throwable_type()),
-                (false, _) => format!("{obj}.to_string()"),
+                (true, false) => {
+                    self.need(Need::JavaString(t));
+                    format!("Ok::<_, {}>({obj}.java_string())", self.throwable_type())
+                }
+                (false, _) => {
+                    self.need(Need::JavaString(t));
+                    format!("{obj}.java_string()")
+                }
             });
         }
         let name = self.dispatch_name(t, resolved);
@@ -1171,14 +1255,17 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The text of a value of an enum, through its `Display`.
+    /// The text of a value of an enum, a `java::Piece` of a concatenation: the value itself,
+    /// whose piece is its `java_string()`, where it is converted after the other operands, else
+    /// that string.
     pub(super) fn enum_text(&mut self, t: usize, obj: String) -> String {
         self.need(Need::Display(t));
         if self.enum_text_throws(t) {
             // A `toString` that throws is called, through `try_text`.
             return self.passed_on(Code::atom(format!("{obj}.try_text()")));
         }
-        if self.lazy_text && !self.printing { obj } else { format!("{obj}.to_string()") }
+        self.need(Need::JavaString(t));
+        if self.lazy_text && !self.printing { obj } else { format!("{obj}.java_string()") }
     }
 
     /// Whether turning a value of the enum of `t` into text may throw an exception that the
@@ -1252,10 +1339,14 @@ impl<'a> Gen<'a> {
             if self.enum_text_throws(t) {
                 self.try_text_impl(t, &variants);
             }
+            if self.wanted.contains(&Need::JavaString(t)) {
+                self.java_string_impl(t, &variants);
+            }
         }
         if self.wanted.contains(&Need::NullableText(t)) {
             self.nullable_text_impl(t, &variants);
         }
+        self.class_value_impls(t, &variants);
         self.raised_impl(t);
         self.chain_enum_items(t, &variants);
     }
@@ -1550,6 +1641,12 @@ impl<'a> Gen<'a> {
             let thrown = self.runtime("throw_exception");
             format!("{}(o, {start}, {end}).unwrap_or_else(|e| {thrown}(e))", self.runtime("try_substring"))
         };
+        // A shared string's `substring` of all of it is the string itself.
+        let text = match (super::shared_strings(), builder) {
+            (true, true) => format!("{}({text})", self.runtime("new_or_empty")),
+            (true, false) => format!("{}(o, {text})", self.runtime("kept")),
+            (false, _) => text,
+        };
         let char_sequence = method.class;
         let string =
             self.class.type_of(Type::String).filter(|&s| self.enum_variants(char_sequence).contains(&s));
@@ -1583,17 +1680,21 @@ impl<'a> Gen<'a> {
             ([p], [x]) if p.ty == Type::Char => format!("o.append_char({x})"),
             ([p, ..], [csq, rest @ ..]) if matches!(p.ty, Type::Class(..)) => {
                 if let Some(t) = self.type_of(p.ty) {
-                    self.need(Need::Display(t));
+                    self.need(Need::JavaString(t));
                 }
-                let text = if self.optional_var(r, p.ty, &p.name) {
-                    format!("match {csq} {{ Some(s) => s.to_string(), None => \"null\".to_string() }}")
-                } else {
-                    format!("{csq}.to_string()")
+                let call = |text: &str| match rest {
+                    [] => Some(format!("o.append_str({text})")),
+                    [start, end] => Some(format!("o.append_range({text}, {start}, {end})")),
+                    _ => None,
                 };
-                match rest {
-                    [] => format!("o.append_str(&{text})"),
-                    [start, end] => format!("o.append_range(&{text}, {start}, {end})"),
-                    _ => return "unreachable!()".to_string(),
+                let null = format!("{}(\"null\")", self.runtime("wtf8"));
+                let (Some(present), Some(absent)) = (call("&s.java_string()"), call(&null)) else {
+                    return "unreachable!()".to_string();
+                };
+                if self.optional_var(r, p.ty, &p.name) {
+                    format!("match &{csq} {{ Some(s) => {{ {present}; }} None => {{ {absent}; }} }}")
+                } else {
+                    call(&format!("&{csq}.java_string()")).unwrap_or_default()
                 }
             }
             _ => return "unreachable!()".to_string(),
@@ -1655,15 +1756,51 @@ impl<'a> Gen<'a> {
             // An enum's constants compare by their ordinals.
             None => "*o as i32 - *b as i32".to_string(),
         };
-        let name = self.binary_name(c);
-        let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&name));
-        let Some(e) = self.enum_for(comparable) else { return failed };
+        let target = self.cast_class(c);
+        let failed = |g: &mut Self, from: String| format!("{}({from}, {target})", g.runtime("cast_failed"));
+        let e = match self.rep(comparable) {
+            hierarchy::Rep::Enum(e) => e,
+            // Every `Comparable` is of the one class `x`.
+            hierarchy::Rep::Object(x) => {
+                let from = self.cast_class(x);
+                return failed(self, from);
+            }
+        };
         let variant = self.variant(e, c);
         let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
         if !optional && self.enum_variants(e).len() == 1 {
             return format!("{{ let {pattern} = {place}; {compare} }}");
         }
-        format!("match {place} {{ {pattern} => {compare}, _ => {failed} }}")
+        // Any other object fails the cast to `c` that `compareTo` makes; null fails first.
+        self.need(Need::CastSource(e));
+        let from = format!("{}::cast_class(&b)", self.runtime("CastSource"));
+        let fail = failed(self, from);
+        if optional {
+            // A null argument fails inside the class's own `compareTo`, with that one's message: a
+            // string's or a box's as a `Result` that the `?` of `compare_to` passes on, where the
+            // group gives a `Result`. Otherwise (an enum's, or a group of only `i32`s) it is
+            // thrown, which a `java::catching` around the call turns into the exception a
+            // `catch` sees. Any other class still fails the cast.
+            let other = match self.runtime_of(c) {
+                Some(ty) if self.facts.throwing.contains(&r) => {
+                    let message = compare_null_message(ty.unboxed());
+                    let checked =
+                        format!("{}(b.as_ref(), {message:?})?", self.runtime("try_non_null_message"));
+                    format!("{{ let b = {checked}; {fail} }}")
+                }
+                _ => {
+                    let message = match self.runtime_of(c) {
+                        Some(ty) => compare_null_message(ty.unboxed()),
+                        None => ENUM_COMPARE_NULL.to_string(),
+                    };
+                    let throw =
+                        format!("{}(\"java.lang.NullPointerException\", {message:?})", self.runtime("throw"));
+                    format!("{{ let Some(b) = b.as_ref() else {{ {throw} }}; {fail} }}")
+                }
+            };
+            return format!("match {place} {{ {pattern} => {compare}, b => {other} }}");
+        }
+        format!("match {place} {{ {pattern} => {compare}, b => {fail} }}")
     }
 
     /// `Object`'s `equals` or `hashCode` (method `r`) for a value of class `c` bound to `o`
@@ -1783,7 +1920,8 @@ impl<'a> Gen<'a> {
         if self.enum_text_throws(t) {
             return Code::atom(self.passed_on(Code::atom(format!("{obj}.try_text()"))));
         }
-        Code::atom(format!("{obj}.to_string()"))
+        self.need(Need::JavaString(t));
+        Code::atom(format!("{obj}.java_string()"))
     }
 
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
@@ -1975,10 +2113,15 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             for &c in variants {
                 let v = self.variant(t, c);
-                let same = self.same_variant(c);
+                let mut same = self.same_variant(c);
                 // A `Boolean` or a `Byte` is one of `valueOf`'s cached objects, the same object
-                // exactly when the values are equal (see `analysis::boxing`).
+                // exactly when the values are equal (see `analysis::boxing`). Shared strings are
+                // compared as objects.
                 let unkept = match self.runtime_of(c) {
+                    Some(Type::String) if super::shared_strings() => {
+                        same = format!("{}(a, b)", self.runtime("same_str"));
+                        false
+                    }
                     Some(Type::String) => true,
                     Some(ty @ Type::Boxed(b)) => {
                         !matches!(*b, Type::Boolean | Type::Byte) && !self.faithful_box(ty)
@@ -2078,13 +2221,13 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.match_arms(t, variants, &|g: &mut Self, c| {
             match g.runtime_of(c) {
-                Some(Type::String) => return ("f.write_str(o)".to_string(), true),
+                Some(Type::String) => return ("fmt::Display::fmt(o, f)".to_string(), true),
                 // A builder shows its text, as its `toString` makes it.
                 Some(Type::StringBuilder) => return ("fmt::Display::fmt(o, f)".to_string(), true),
                 // An array shows as `[I@` and its identity hash.
                 Some(Type::Array(_)) => {
                     let text = g.default_arm_text(t, c);
-                    return (format!("f.write_str(&{text})"), true);
+                    return (format!("fmt::Display::fmt(&{text}, f)"), true);
                 }
                 Some(ty) => {
                     let value = if g.faithful_box(ty) { "**o" } else { "*o" };
@@ -2100,7 +2243,7 @@ impl<'a> Gen<'a> {
                 Some(i) => g.display_arm(t, c, i),
                 None => {
                     let text = g.default_arm_text(t, c);
-                    (format!("f.write_str(&{text})"), true)
+                    (format!("fmt::Display::fmt(&{text}, f)"), true)
                 }
             }
         });
@@ -2111,21 +2254,23 @@ impl<'a> Gen<'a> {
     }
 
     /// `try_text()`: the text of a value whose class's `toString`, or the `hashCode` that
-    /// `Object`'s `toString` shows, may throw, or its exception; the other classes' text is their
-    /// `Display`.
+    /// `Object`'s `toString` shows, may throw, or its exception; the other classes' text is as
+    /// `java_string` makes it.
     fn try_text_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
         let throwable = self.throwable_type();
         self.gap();
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
-        self.line(&format!("pub(crate) fn try_text(&self) -> Result<String, {throwable}> {{"));
+        let text = self.string_type();
+        self.line(&format!("pub(crate) fn try_text(&self) -> Result<{text}, {throwable}> {{"));
         self.indent += 1;
         self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
             Some(i) if g.facts.throwing.contains(&i) => {
                 let (call, uses) = g.arm_call(t, c, i, "");
                 if g.facts.nullable_returns.contains(&i) {
-                    (format!("{call}.map(|text| text.unwrap_or_else(|| \"null\".to_string()))"), uses)
+                    let null = g.string_literal("\"null\"");
+                    (format!("{call}.map(|text| text.unwrap_or_else(|| {null}))"), uses)
                 } else {
                     (call, uses)
                 }
@@ -2134,14 +2279,103 @@ impl<'a> Gen<'a> {
                 let i = g.hash_index(c).expect("a hashCode that throws");
                 let (call, uses) = g.arm_call(t, c, i, "");
                 let text = g.default_text(c, "hash".to_string());
+                let text = if super::shared_strings() {
+                    format!("{}({text})", g.runtime("JStr::new"))
+                } else {
+                    text
+                };
                 (format!("{call}.map(|hash| {text})"), uses)
             }
-            _ => ("Ok(self.to_string())".to_string(), false),
+            _ => {
+                let (text, uses) = g.java_string_arm(t, c);
+                (format!("Ok({text})"), uses)
+            }
         });
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// `java_string()`: the string that `toString` returns for an object of the enum of `t`
+    /// whose `toString` does not throw.
+    fn java_string_impl(&mut self, t: usize, variants: &[usize]) {
+        let name = struct_name(&self.class.types[t].name);
+        let text = self.string_type();
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        self.line(&format!("pub(crate) fn java_string(&self) -> {text} {{"));
+        self.indent += 1;
+        self.match_arms(t, variants, &|g: &mut Self, c| g.java_string_arm(t, c));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        // In a concatenation, the string as it is.
+        let (piece, jstring) = (self.runtime("Piece"), self.runtime("JString"));
+        self.gap();
+        self.line(&format!("impl {piece} for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn push_to(&self, out: &mut {jstring}) {{"));
+        self.indent += 1;
+        self.line("out.push_wtf8(&self.java_string());");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The Rust type of a Java string: a `java::JStr` where the program's strings are shared.
+    pub(super) fn string_type(&mut self) -> String {
+        if super::shared_strings() { self.runtime("JStr") } else { self.runtime("JString") }
+    }
+
+    /// The string that `toString` returns for an object of class `c`, a variant of the enum of `t`
+    /// bound to `o`: the string itself, what the program's `toString` returns ("null" for null;
+    /// what it throws ends the program), a builder's text, or the text of its `Display`; where
+    /// the program's strings are shared, an enum constant's name is its interned string, and other
+    /// text a new string.
+    fn java_string_arm(&mut self, t: usize, c: usize) -> (String, bool) {
+        let shared = super::shared_strings();
+        let made = |g: &mut Self, text: &str| {
+            if shared {
+                format!("{}({text})", g.runtime("JStr::new"))
+            } else {
+                format!("{}::from({text})", g.runtime("JString"))
+            }
+        };
+        match self.runtime_of(c) {
+            Some(Type::String) => return ("o.clone()".to_string(), true),
+            Some(Type::StringBuilder) if !shared => return ("o.text()".to_string(), true),
+            Some(Type::StringBuilder) => return (made(self, "o.text()"), true),
+            Some(_) => return (made(self, "self.to_string()"), false),
+            None => {}
+        }
+        match hierarchy::to_string_impl(self.class, c) {
+            Some(i) => {
+                let (mut call, uses) = self.arm_call(t, c, i, "");
+                // What a `toString` throws here ends the program, as where the runtime makes the
+                // text (see `display_arm`); `try_text` passes it on.
+                if self.facts.throwing.contains(&i) {
+                    if let Some(t) =
+                        self.class.type_index("java.lang.Throwable").and_then(|t| self.enum_for(t))
+                    {
+                        self.need(Need::Display(t));
+                    }
+                    call = format!("{call}.unwrap_or_else({})", self.runtime("uncaught"));
+                }
+                if self.facts.nullable_returns.contains(&i) {
+                    let null = self.string_literal("\"null\"");
+                    return (format!("{call}.unwrap_or_else(|| {null})"), uses);
+                }
+                (call, uses)
+            }
+            None if shared && self.class.types[c].kind == TypeKind::Enum => {
+                (format!("{}(self.to_string())", self.runtime("interned_text")), false)
+            }
+            None => (made(self, "self.to_string()"), false),
+        }
     }
 
     /// `nullable_text()`: what `toString` returns for an object of the enum of `t`, its null as
@@ -2150,10 +2384,11 @@ impl<'a> Gen<'a> {
     fn nullable_text_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
         let fallible = self.has_throwable();
+        let text = self.string_type();
         let ret = if fallible {
-            format!("Result<Option<String>, {}>", self.throwable_type())
+            format!("Result<Option<{text}>, {}>", self.throwable_type())
         } else {
-            "Option<String>".to_string()
+            format!("Option<{text}>")
         };
         self.gap();
         self.line(&format!("impl {name} {{"));
@@ -2173,7 +2408,10 @@ impl<'a> Gen<'a> {
                 (call, uses)
             }
             _ if throws => ("self.try_text().map(Some)".to_string(), false),
-            _ => (ok("Some(self.to_string())".to_string()), false),
+            _ => {
+                let (text, uses) = g.java_string_arm(t, c);
+                (ok(format!("Some({text})")), uses)
+            }
         });
         self.indent -= 1;
         self.line("}");
@@ -2181,25 +2419,57 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// The methods of the enum of `t` that answer for the object's class, each written once here
+    /// rather than as a `match` over every variant wherever it is used: `Object`'s enum has a
+    /// variant for every class that the program creates, and javac's has thousands.
+    fn class_value_impls(&mut self, t: usize, variants: &[usize]) {
+        let wanted = |need: Need| self.wanted.contains(&need);
+        let methods = [
+            (Need::RuntimeClass(t), "runtime_class", "java::Class"),
+            (Need::RuntimeClassName(t), "runtime_class_name", "&'static str"),
+            (Need::RuntimeTypeNames(t), "runtime_type_names", "&'static [&'static str]"),
+            (Need::IdentityHash(t), "object_identity_hash", "i32"),
+        ];
+        let methods: Vec<_> = methods.into_iter().filter(|&(need, ..)| wanted(need)).collect();
+        let name = struct_name(&self.class.types[t].name);
+        if wanted(Need::CastSource(t)) {
+            self.gap();
+            let (source, class) = (self.runtime("CastSource"), self.runtime("CastClass"));
+            self.line(&format!("impl {source} for {name} {{"));
+            self.indent += 1;
+            self.line(&format!("fn cast_class(&self) -> {class} {{"));
+            self.indent += 1;
+            self.match_arms(t, variants, &|g: &mut Self, c| (g.cast_class(c), false));
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+        }
+        if methods.is_empty() {
+            return;
+        }
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        for (need, method, ret) in methods {
+            self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
+            self.indent += 1;
+            self.match_arms(t, variants, &|g: &mut Self, c| match need {
+                Need::RuntimeClass(_) => (g.decl_class(c), false),
+                Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
+                Need::RuntimeTypeNames(_) => (g.names_list(c), false),
+                _ => (g.value_hash(c, "o"), true),
+            });
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// How the `Display` of the enum of `t` shows an object of class `c` bound to `o`, whose
     /// `toString` is method `i`; and whether it uses `o`.
     fn display_arm(&mut self, t: usize, c: usize, i: usize) -> (String, bool) {
-        let immutable = self.facts.immutable.contains(&self.class.types[c].name);
-        let (path, displays) = match self.homes[i] {
-            Home::Class(_) => (String::new(), self.displays(i)),
-            Home::Fields(d) => (hierarchy::base_path(self.facts, self.class, c, d), self.displays(i)),
-            _ => (String::new(), false),
-        };
-        let path = path.trim_end_matches('.');
-        if displays {
-            let shown = match (immutable, path.is_empty()) {
-                (true, true) => "&**o".to_string(),
-                (true, false) => format!("&o.{path}"),
-                (false, true) => "&*o.borrow()".to_string(),
-                (false, false) => format!("&o.borrow().{path}"),
-            };
-            return (format!("fmt::Display::fmt({shown}, f)"), true);
-        }
         let (mut text, uses) = self.arm_call(t, c, i, "");
         // Where the runtime makes the text, what a `toString` throws ends the program (see
         // `analysis::exceptions`); the generator's own text calls it (`try_text`).
@@ -2211,9 +2481,12 @@ impl<'a> Gen<'a> {
         }
         // A `toString` that may return null shows "null", as `String.valueOf` does.
         if self.facts.nullable_returns.contains(&i) {
-            return (format!("f.write_str({text}.as_deref().unwrap_or(\"null\"))"), uses);
+            return (
+                format!("fmt::Display::fmt({text}.as_deref().unwrap_or(java::wtf8(\"null\")), f)"),
+                uses,
+            );
         }
-        (format!("f.write_str(&{text})"), uses)
+        (format!("fmt::Display::fmt(&{text}, f)"), uses)
     }
 }
 

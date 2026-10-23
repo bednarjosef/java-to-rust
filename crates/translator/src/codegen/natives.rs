@@ -360,18 +360,13 @@ impl<'a> Gen<'a> {
             )
         };
         let t = self.class.type_index("java.lang.Throwable").expect("the program has `Throwable`");
-        let arms: Vec<String> = self
-            .enum_variants(t)
-            .into_iter()
-            .map(|c| format!("{}(_) => {}", self.variant(t, c), rust_string(&self.java_class_name(c, false))))
-            .collect();
+        self.need(Need::RuntimeClassName(t));
         let (set, pending) = (self.runtime("set_uncaught_hook"), self.runtime("set_pending_uncaught"));
         Code::atom(format!(
             "{set}(|e: &dyn std::any::Any| {{ let uncaught: {throwable} = if let Some(e) = \
              e.downcast_ref::<{throwable}>() {{ e.clone() }}{runtime} else {{ return false; }}; \
              {pending}(uncaught); {body}; true }}, |e: &dyn std::any::Any| \
-             e.downcast_ref::<{throwable}>().map(|e| String::from(match e {{ {} }})))",
-            arms.join(", ")
+             e.downcast_ref::<{throwable}>().map(|e| String::from(e.runtime_class_name())))"
         ))
     }
 
@@ -382,7 +377,8 @@ impl<'a> Gen<'a> {
         let throwable = self.throwable_type();
         let attempts = std::mem::take(&mut self.attempts);
         let throwing = std::mem::replace(&mut self.throwing, false);
-        let text = self.value(&args[0], Type::String).text;
+        // The trace is printed, which shows a lone surrogate as `?`.
+        let text = format!("{}.to_string()", self.value(&args[0], Type::String).at(ATOM));
         self.attempts = attempts;
         self.throwing = throwing;
         let (set, pending) = (self.runtime("set_trace_hook"), self.runtime("set_pending_uncaught"));
@@ -392,10 +388,16 @@ impl<'a> Gen<'a> {
         ))
     }
 
-    /// A thread's name as a `String`, which `Thread` checks is not null.
+    /// A thread's name as a `String`, which `Thread` checks is not null. A Rust thread's name is
+    /// UTF-8, and the name is printed, so a lone surrogate in it is `?`.
     fn thread_name(&mut self, name: &'a Expr) -> String {
-        let text = self.value(name, Type::String).text;
-        if self.nullable(name) { format!("{}({text})", self.runtime("non_null")) } else { text }
+        let text = self.value(name, Type::String);
+        let text = if self.nullable(name) {
+            format!("{}({})", self.runtime("non_null"), text.text)
+        } else {
+            text.at(ATOM)
+        };
+        format!("{text}.to_string()")
     }
 
     /// `System.identityHashCode(e)` of a value of the enum of `t` (`Object`, an interface, a
@@ -403,18 +405,13 @@ impl<'a> Gen<'a> {
     /// `Object.hashCode` gives where no class overrides it; the hash of the value for a string or
     /// a box, which the translation holds by value; 0 for null.
     fn enum_identity_hash(&mut self, t: usize, e: &'a Expr) -> Code {
-        let nullable = self.nullable(e);
-        let value = if nullable { format!("{}.as_ref()", self.object_place(e)) } else { self.object_ref(e) };
-        let mut arms = Vec::new();
-        for c in self.enum_variants(t) {
-            let variant = self.variant(t, c);
-            let pattern = if nullable { format!("Some({variant}(o))") } else { format!("{variant}(o)") };
-            arms.push(format!("{pattern} => {},", self.value_hash(c, "o")));
+        self.need(Need::IdentityHash(t));
+        if self.nullable(e) {
+            let value = format!("{}.as_ref()", self.object_place(e));
+            return Code::atom(format!("{value}.map_or(0, |o| o.object_identity_hash())"));
         }
-        if nullable || arms.is_empty() {
-            arms.push("_ => 0,".to_string());
-        }
-        Code::atom(format!("match {value} {{ {} }}", arms.join(" ")))
+        let value = self.object_ref(e);
+        Code::atom(super::class_values::method_on(&value, "object_identity_hash"))
     }
 
     /// A `Math` or `StrictMath` function. `ty` is the type of the call, which picks the overload;

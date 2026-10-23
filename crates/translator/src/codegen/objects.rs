@@ -136,7 +136,8 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char => "0",
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
-        Type::String => "String::new()",
+        Type::String if super::shared_strings() => "java::JStr::default()",
+        Type::String => "java::JString::new()",
         // A `java::StringBuilder`, or a `java::SharedStringBuilder` in a program with threads.
         Type::StringBuilder => "Default::default()",
         Type::JavaClass => "java::Class::OBJECT",
@@ -882,31 +883,23 @@ impl<'a> Gen<'a> {
             };
             return (self.default_text(c, hash), false);
         };
-        if self.displays(index) {
-            let obj = self.handle_object(handle, e, index);
-            if self.lazy_text && !(self.printing && !self.quiet_text(e, 0)) {
-                // A thread-shared object's `java::Locked` borrow is not `Display`, so its
-                // `toString` gives the text.
-                let shared = !self.is_plain(e) && self.is_thread_shared(e);
-                return (if shared { format!("{obj}.to_string()") } else { obj }, false);
-            }
-            return (format!("{obj}.to_string()"), false);
-        }
         let call = self.handle_call(handle, e, index);
         if !self.facts.throwing.contains(&index) {
             return (self.null_text(index, call), false);
         }
         if self.facts.nullable_returns.contains(&index) {
-            return (format!("{call}.map(|text| text.unwrap_or_else(|| String::from(\"null\")))"), true);
+            let null = self.string_literal("\"null\"");
+            return (format!("{call}.map(|text| text.unwrap_or_else(|| {null}))"), true);
         }
         (call, true)
     }
 
     /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
     /// returns null, as `String.valueOf` shows it.
-    fn null_text(&self, index: usize, call: String) -> String {
+    fn null_text(&mut self, index: usize, call: String) -> String {
         if self.facts.nullable_returns.contains(&index) {
-            format!("{call}.unwrap_or_else(|| String::from(\"null\"))")
+            let null = self.string_literal("\"null\"");
+            format!("{call}.unwrap_or_else(|| {null})")
         } else {
             call
         }
@@ -1335,7 +1328,7 @@ impl<'a> Gen<'a> {
             let args = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             let path = self.method_path(receiver, index);
-            return Code::atom(format!("{obj}.{path}{}({args})", self.call_name(index)));
+            return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
         let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
@@ -1347,14 +1340,8 @@ impl<'a> Gen<'a> {
         let obj = self.object(receiver);
         let args = self.call_args(index, args).join(", ");
         let path = self.method_path(receiver, index);
-        let call = format!("{obj}{borrow}.{path}{}({args})", self.call_name(index));
+        let call = format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index]);
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
-    }
-
-    /// The name by which method `index` is called on its object: a `toString` that is the class's
-    /// `Display` (see `displays`) is `to_string`, as `super.toString()` calls it.
-    fn call_name(&self, index: usize) -> &str {
-        if self.displays(index) { "to_string" } else { &self.fn_names[index] }
     }
 
     /// A method call whose arguments are bound before the call borrows its object, in Java's order:
@@ -1397,7 +1384,7 @@ impl<'a> Gen<'a> {
         }
         self.guarded = outer;
         let path = self.method_path(receiver, index);
-        lines.push(format!("{obj}{borrow}.{path}{}({})", self.call_name(index), bound.join(", ")));
+        lines.push(format!("{obj}{borrow}.{path}{}({})", self.fn_names[index], bound.join(", ")));
         Code::atom(format!("{{ {} }}", lines.join(" ")))
     }
 
@@ -1422,31 +1409,9 @@ impl<'a> Gen<'a> {
             };
             return Code::atom(self.default_text(c, hash));
         };
-        if !self.displays(index) {
-            let call = self.text_call(e, index);
-            let call = self.raising(call, index);
-            return Code::atom(self.null_text(index, call.text));
-        }
-        if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
-            return self.method_call(e, index, &[]);
-        }
-        // The object is formatted through its `Display`. A `java::Locked` borrow has none, so a
-        // thread-shared object is converted by its `toString`, as `method_call` does.
-        let obj = self.object(e);
-        Code::atom(if self.is_plain(e) {
-            obj
-        } else if self.is_thread_shared(e) {
-            format!("{obj}.borrow().to_string()")
-        } else {
-            format!("{obj}.borrow()")
-        })
-    }
-
-    /// Whether `e` is an object of a class whose objects threads share: a `java::Locked` borrow of
-    /// it is not `Display`.
-    fn is_thread_shared(&self, e: &Expr) -> bool {
-        matches!(&e.ty, Type::Class(name, _) if self.class.type_index(self.rep_name(name))
-            .is_some_and(|t| self.facts.thread_shared.contains(&t)))
+        let call = self.text_call(e, index);
+        let call = self.raising(call, index);
+        Code::atom(self.null_text(index, call.text))
     }
 
     /// A call of a `toString` that is a plain method.
@@ -1612,11 +1577,13 @@ impl<'a> Gen<'a> {
                 let old = Slot::Static { cell: cell.clone(), plain: false }.read(true);
                 // A static that may be null shows as `null` and is written as `Some`.
                 let nullable = self.place_nullable(target);
-                let old =
-                    if nullable { format!("{old}.unwrap_or_else(|| String::from(\"null\"))") } else { old };
-                let mut parts = vec![Part::Arg(Code::atom(old))];
+                let old = match nullable {
+                    true => format!("{old}.as_deref().unwrap_or({})", self.wtf8_literal("null")),
+                    false => old,
+                };
+                let mut parts = vec![Part::Text(Code::atom(old))];
                 self.parts(value, &mut parts);
-                let text = self.format("format!", parts).text;
+                let text = self.concat(parts).text;
                 let text = if nullable { format!("Some({text})") } else { text };
                 lines.push(format!("{cell}.set({text});"));
             }
@@ -1748,13 +1715,13 @@ impl<'a> Gen<'a> {
                 // as `Some`: the text is never null.
                 let old = if self.place_nullable(place) {
                     wrap = true;
-                    format!("{old}.unwrap_or_else(|| String::from(\"null\"))")
+                    format!("{old}.as_deref().unwrap_or({})", self.wtf8_literal("null"))
                 } else {
                     old
                 };
-                let mut parts = vec![Part::Arg(Code::atom(old))];
+                let mut parts = vec![Part::Text(Code::atom(old))];
                 self.parts(value, &mut parts);
-                lines.push(format!("let {new} = {};", self.format("format!", parts).text));
+                lines.push(format!("let {new} = {};", self.concat(parts).text));
                 new.clone()
             }
             Update::Compound(op, value) => {
@@ -1816,49 +1783,17 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.this_struct = index;
         self.field_inits(index);
-        let mut display = None;
         // Its own constructors and methods first, then those it inherits.
         let mut order: Vec<usize> = (0..class.methods.len()).collect();
         order.sort_by_key(|&i| class.methods[i].class != index);
         for i in order {
             if self.emitted_in(i, index) {
-                if self.displays(i) {
-                    display = Some(i);
-                    continue;
-                }
                 self.gap();
                 self.method(i);
             }
         }
         self.indent -= 1;
         self.line("}");
-        // `toString` is how the object is displayed.
-        if let Some(i) = display {
-            self.gap();
-            self.line(&format!("impl{params} fmt::Display for {name}{args} {{"));
-            self.indent += 1;
-            self.method(i);
-            self.indent -= 1;
-            self.line("}");
-        } else if let Some(i) = hierarchy::to_string_impl(class, index)
-            && let Home::Fields(d) = self.homes[i]
-            && d != index
-            && class.hierarchy.is_concrete(index)
-            && self.displays(i)
-        {
-            // An inherited `toString` displays the superclass's fields struct.
-            let path = hierarchy::base_path(self.facts, class, index, d);
-            self.gap();
-            self.line(&format!("impl fmt::Display for {name} {{"));
-            self.indent += 1;
-            self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
-            self.indent += 1;
-            self.line(&format!("fmt::Display::fmt(&self.{}, f)", path.trim_end_matches('.')));
-            self.indent -= 1;
-            self.line("}");
-            self.indent -= 1;
-            self.line("}");
-        }
         self.chain_items(index);
     }
 
@@ -1878,80 +1813,6 @@ impl<'a> Gen<'a> {
             Home::Fields(d) => {
                 d == t && (h.concretes(d).into_iter().any(runs) || self.super_targets.contains(&i))
             }
-            _ => false,
-        }
-    }
-
-    /// Whether method `index` is a `toString` that becomes the class's `Display` implementation:
-    /// it borrows its object without changing it and never returns null, and it is what an object
-    /// of the struct it is emitted in runs. A Java enum's `toString` is a method of its own, which
-    /// its `Display` calls, and which may not be `to_string` (javac's `KindName` has the
-    /// `toString(Locale, Messages)` of `Formattable` too).
-    pub(super) fn displays(&self, index: usize) -> bool {
-        let m = &self.class.methods[index];
-        if self.class.types[m.class].kind == TypeKind::Enum {
-            return false;
-        }
-        let runs = match self.homes[index] {
-            Home::Class(c) => hierarchy::to_string_impl(self.class, c) == Some(index),
-            Home::Fields(_) => true,
-            _ => false,
-        };
-        m.name == "toString"
-            && m.params.is_empty()
-            && !m.is_static
-            && m.ret == Type::String
-            && runs
-            && self.facts.self_methods.contains(&index)
-            && !self.facts.mutating.contains(&index)
-            && !self.facts.nullable_returns.contains(&index)
-            // `Display` cannot return an exception: one that throws is called (`object_text`).
-            && !self.facts.throwing.contains(&index)
-    }
-
-    /// Whether displaying an object of `e`'s class can neither print nor throw, so that printing
-    /// may format it in the middle of the printed line: its `toString` returns a concatenation of
-    /// constants, variables and fields that cannot throw.
-    fn quiet_text(&self, e: &Expr, depth: usize) -> bool {
-        if self.enum_of(e).is_some() {
-            return false;
-        }
-        let Some(index) = self.to_string_index(e) else { return false };
-        let m = &self.class.methods[index];
-        depth < 4
-            && self.displays(index)
-            && matches!(&m.body[..], [Stmt::Return(Some(value), _)] if self.quiet(value, depth))
-    }
-
-    fn quiet(&self, e: &Expr, depth: usize) -> bool {
-        match &e.kind {
-            ExprKind::Int(_)
-            | ExprKind::Long(_)
-            | ExprKind::Double(_)
-            | ExprKind::Float(_)
-            | ExprKind::Char(_)
-            | ExprKind::Bool(_)
-            | ExprKind::Str(_)
-            | ExprKind::Var(_) => !matches!(e.ty, Type::Class(..) | Type::Array(_)),
-            ExprKind::Field { object, .. } => {
-                matches!(object.kind, ExprKind::This)
-                    && match e.ty {
-                        Type::Class(..) => self.quiet_text(e, depth + 1),
-                        Type::Array(_) => false,
-                        _ => true,
-                    }
-            }
-            ExprKind::Binary(op, l, r) => {
-                !matches!(op, BinOp::Div | BinOp::Rem)
-                    && [l, r].iter().all(|x| match x.ty {
-                        Type::Class(..) if matches!(x.kind, ExprKind::This) => false,
-                        _ => self.quiet(x, depth),
-                    })
-            }
-            ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::InstanceOf { value: x, .. } => {
-                self.quiet(x, depth)
-            }
-            ExprKind::Conditional(c, a, b) => [c, a, b].iter().all(|x| self.quiet(x, depth)),
             _ => false,
         }
     }

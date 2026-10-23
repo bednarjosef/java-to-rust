@@ -107,9 +107,9 @@ static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty");
 ```
 
 ```rust
-fn parse(s: &str) -> Result<i32, Throwable> {
+fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
     if s.is_empty() {
-        return Err(Throwable::Bad(Rc::new(Bad::new("empty"))));
+        return Err(Throwable::Bad(Rc::new(Bad::new(java::wtf8("empty")))));
     }
     Ok(java::try_parse_radix::<i32>(Some(s), 10)?)   // checked only if a caller observes it
 }
@@ -233,9 +233,15 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
 - **A null dereference** (`Facts::null_checked`) uses the checked `non_null`
   (`java::try_non_null`, or `try_non_null_message` where the message is read, see below).
 - **Anything else of a standard class** (`Facts::catching`), such as `new int[n]` with a
-  negative size or `System.arraycopy`, runs inside `java::catching(|| op)`
+  negative size, `System.arraycopy`, or a `compareTo` of a raw `Comparable` whose argument is of
+  another class (`comparable.rs`, the bridge's cast), runs inside `java::catching(|| op)`
   (`crates/runtime/src/catching.rs`): inside it, the runtime's `throw` unwinds with the exception
   and `catching` returns it as an `Err`. A panic of anything else still unwinds.
+- **A null argument of `compareTo`** on a `String` or a box is checked like a dereference:
+  `try_non_null_message` gives Java's message for the argument's class, and the `Result` of
+  `compare_to` passes it on with `?`. A raw `Comparable`'s call of any class's `compareTo` with a
+  null argument runs inside `java::catching`, and the receiver's arm raises Java's message for its
+  class, an enum's `Cannot invoke "Object.getClass()"` included (`dispatch.rs`, `compare_arm`).
 
 `impl From<java::Exception> for Throwable` builds an object of the standard class with its
 `(String)` constructor, so `getMessage` and `toString` read as Java's. Lowering declares such a
@@ -306,7 +312,7 @@ A static block or static field initializer that throws is wrapped in
   The state is its own guard, so the rewritten `<clinit>` gets no `init_guard`; its callers
   return `Result`, and so does a method that starts by running it (`Facts::entry_init`,
   `analysis/exceptions/entry.rs`). In a program that starts a thread, the two fields are
-  process-wide statics like the others.
+  process-wide or thread-local with the class's other statics.
 - **The JDK's static initializers** run on the JDK's own constants and flags and none of the
   program's code, so they throw only for bugs: one lets out nothing, and the `catch` clauses
   around a use of its class are not looked for in its own code. A `catch` inside a rewritten JDK
@@ -316,12 +322,11 @@ A static block or static field initializer that throws is wrapped in
 
 Making an object's text runs its `toString`. Where the generator makes the text (`"" + o`,
 `println(o)`, `String.valueOf(o)` and so `append(o)`, `String.format` with its arguments one by
-one), that call is like any other: what the program's `toString` throws goes on. A class whose
-`toString` throws is not `Display` then; the dispatching enum of its type gets `try_text`, which
-returns the exception. The `hashCode` that `Object.toString` shows, for a class without a
+one), that call is like any other: what the program's `toString` throws goes on. Where a class's
+`toString` throws, the dispatching enum of its type gets `try_text`, which returns the exception. The `hashCode` that `Object.toString` shows, for a class without a
 `toString` of its own, is treated the same way.
 
-Elsewhere the text goes through `Display`, which cannot return an exception, so what the
+Elsewhere the text goes through the enum's `Display`, which cannot return an exception, so what the
 `toString` throws ends the program: the text of an enum constant, the message of an exception,
 `printf` (which makes all its text before printing), and the objects other library calls show.
 Where a `toString` the program wrote may throw what a `catch` around such a text, or around a
@@ -535,7 +540,7 @@ renamed, of the enclosing instance of a nested class where javac's field or para
 not certain (a superclass's field, a lambda in a constructor that captures locals too), of a
 local captured by a local class in its constructor's code, a dereference in the code of `java.lang`,
 a failure of the runtime without the checked form (an unboxing the code does not write as a
-call, a library call given null), any other dereference in the body of a method reference's class, and a
+call, a library call given null other than a `compareTo`'s argument), any other dereference in the body of a method reference's class, and a
 field of a field of an enclosing instance.
 
 ## Differences from Java
@@ -560,8 +565,8 @@ Rejected, each with a message naming the construct:
 - catching a class that is neither a standard class nor translated (in a single file, for
   example `StackOverflowError` or `PatternSyntaxException`); the translation never raises
   `StackOverflowError` or `OutOfMemoryError`;
-- a `toString` of the program that throws what a `catch` around an object's `Display` text would
-  catch;
+- a `toString` of the program that throws what a `catch` around the text that an enum's `Display`
+  makes would catch;
 - a constructor of an enum that throws something a caller catches, and a caught call of `main`;
 - a `finally` that would see an uncaught static initializer's failure;
 - try-with-resources over a resource without a translated `close()`;

@@ -102,7 +102,18 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     // names, the fields of the object's class (`dispatch.rs`), beside a method of the JDK's own
     // `base` (`ByteBuffer.base()`, then `base_2`). So is `clone`, `Clone`'s, which copies a
     // handle: a Java `clone()` (`CalendarDate.clone()`) is `clone_2`.
-    let taken = ["base", "base_mut", "clone"].map(String::from);
+    // The methods that answer for an object's class on an enum (`dispatch::class_value_impls`)
+    // are taken too.
+    let taken = [
+        "base",
+        "base_mut",
+        "clone",
+        "runtime_class",
+        "runtime_class_name",
+        "runtime_type_names",
+        "object_identity_hash",
+    ]
+    .map(String::from);
     let mut used = vec![HashSet::from(taken); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {

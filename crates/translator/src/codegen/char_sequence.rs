@@ -71,7 +71,8 @@ impl<'a> Gen<'a> {
         };
         if self.nullable(s) {
             let option = self.expr(s);
-            let null = self.append_range_call(id, &builder, &format!("\"null\", {range}"));
+            let null = self.wtf8_literal("null");
+            let null = self.append_range_call(id, &builder, &format!("{null}, {range}"));
             return Code::atom(format!(
                 "match &{} {{ Some({seq}) => {}, None => {} }}",
                 option.at(ATOM),
@@ -115,9 +116,9 @@ impl<'a> Gen<'a> {
             return "\"\"".to_string();
         }
         let t = self.type_of(e.ty).expect("a CharSequence has an enum");
-        self.need(Need::Display(t));
+        self.need(Need::JavaString(t));
         let obj = self.object(e);
-        format!("&{obj}.to_string()")
+        format!("&{obj}.java_string()")
     }
 
     /// Whether the `CharSequence` `e` holds only strings and builders: no program class is one of

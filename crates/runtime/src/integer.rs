@@ -36,8 +36,8 @@ mod tests {
         assert_eq!(to_string_radix(-255, 2), "-11111111");
         assert_eq!(to_string_radix(i64::MIN, 10), "-9223372036854775808");
         assert_eq!(to_string_radix(7, 99), "7");
-        assert_eq!(crate::parse_radix::<i32>(Some("-ff"), 16), -255);
-        assert_eq!(crate::parse_radix::<i32>(Some("-80000000"), 16), i32::MIN);
+        assert_eq!(crate::parse_radix::<i32>(Some(crate::Wtf8::new("-ff")), 16), -255);
+        assert_eq!(crate::parse_radix::<i32>(Some(crate::Wtf8::new("-80000000")), 16), i32::MIN);
         assert_eq!(highest_one_bit(-1, 32), 1 << 31);
         assert_eq!(highest_one_bit(10, 32), 8);
         assert_eq!(highest_one_bit(0, 64), 0);

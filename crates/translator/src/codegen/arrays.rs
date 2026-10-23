@@ -420,15 +420,15 @@ impl<'a> Gen<'a> {
     ) -> String {
         if ty == Type::String && self.nullable_element(ty) {
             // A null element shows as `null`.
-            let shown = format!("{}({old}.as_deref())", self.runtime("or_null"));
-            let mut parts = vec![Part::Arg(Code::atom(shown))];
+            let shown = format!("{old}.as_deref().unwrap_or({})", self.wtf8_literal("null"));
+            let mut parts = vec![Part::Text(Code::atom(shown))];
             self.parts(rhs, &mut parts);
-            return format!("Some({})", self.format("format!", parts).text);
+            return format!("Some({})", self.concat(parts).text);
         }
         if ty == Type::String {
-            let mut parts = vec![Part::Arg(Code::atom(old))];
+            let mut parts = vec![Part::Text(Code::atom(old))];
             self.parts(rhs, &mut parts);
-            return self.format("format!", parts).text;
+            return self.concat(parts).text;
         }
         // As in `assignment`: the operation is computed in the promoted type, then cast back.
         let result = crate::types::binary_type(op, ty, rhs.ty).expect("checked");
@@ -509,6 +509,7 @@ pub(super) fn name_part(ty: Type) -> String {
         Type::Class(name, _) | Type::Enum(name) => struct_name(name).to_lowercase(),
         Type::Boxed(_) => ty.to_string().to_lowercase(),
         Type::StringBuilder => "stringbuilder".to_string(),
+        Type::String => "string".to_string(),
         // A type of the runtime, such as `java::Class`, by its own name.
         _ => rust_type(ty).rsplit("::").next().unwrap_or_default().to_lowercase(),
     }

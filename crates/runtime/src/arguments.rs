@@ -3,6 +3,6 @@
 //! into U+FFFD, as the JVM decodes it.
 
 /// The arguments of the program, as strings, in order.
-pub fn main_args() -> Vec<String> {
-    std::env::args_os().skip(1).map(|arg| arg.to_string_lossy().into_owned()).collect()
+pub fn main_args() -> Vec<crate::JString> {
+    std::env::args_os().skip(1).map(|arg| arg.to_string_lossy().into_owned().into()).collect()
 }

@@ -57,13 +57,8 @@ impl<'a> Gen<'a> {
             return self.after_object(object, &name);
         };
         let obj = self.object(object);
-        let arms: Vec<String> = self
-            .enum_variants(t)
-            .into_iter()
-            .map(|c| format!("{}(_) => {}", self.variant(t, c), rust_string(&self.java_class_name(c, false))))
-            .collect();
-        // A `match` (or a block) that starts a statement would be one, so it goes in parentheses.
-        Code::new(super::class_values::variant_match(&obj, &arms), LOWEST)
+        self.need(Need::RuntimeClassName(t));
+        Code::atom(super::class_values::method_on(&obj, "runtime_class_name"))
     }
 
     /// `value`, once `object` has run where it has effects or may fail: a null throws
