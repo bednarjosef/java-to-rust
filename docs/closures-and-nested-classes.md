@@ -378,7 +378,9 @@ gets the same conversions and library mappings and javac's referent symbol picks
 A bound receiver other than `this` (a local, a field, `a.b()`) is evaluated once where the
 reference is created, into a synthetic local of the creating code that is checked for null
 there, as javac's `Objects.requireNonNull` does (its exception has no message), and that the
-class captures (`plan_receivers`).
+class captures (`plan_receivers`). Without the JDK's sources the program has no `PrintStream`
+class for that local, so `System.out` and `System.err` are read where the reference is called
+(a `System.setOut` between creating and calling it is not translated then anyway).
 
 `super.m()` and `super::m` in a lambda run on the object of the class whose code holds the
 lambda, as javac's synthetic method does. Any other use of `super` in a lambda (including

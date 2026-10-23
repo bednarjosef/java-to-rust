@@ -319,7 +319,7 @@ impl Census {
                 let ty = text(node, "javaType");
                 match kind {
                     // A method reference whose receiver is computed.
-                    "MEMBER_REFERENCE" if crate::lower::computed_receiver(node).is_some() => {
+                    "MEMBER_REFERENCE" if crate::lower::computed_receiver(node, false).is_some() => {
                         scan.feature("computed method receivers", node)
                     }
                     // Tests and casts against the program's classes, the runtime's and the

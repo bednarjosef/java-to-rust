@@ -23,7 +23,8 @@
 //! held in the field `outer` (see `inner`). A bound method reference's receiver other than
 //! `this` (`p::toString`, `a.b()::c`) is evaluated once, where the reference is created, as Java
 //! does: into a synthetic local of the creating code, checked for null there, which the class
-//! captures (see `plan_receivers`).
+//! captures (see `plan_receivers`). Without the JDK's `PrintStream` class, which such a local
+//! would need, `System.out` and `System.err` are read where the reference is called instead.
 
 use super::inner::NestKind;
 use super::*;
@@ -142,7 +143,8 @@ impl<'t> Lowering<'t> {
         let mut taken: Vec<(*const Value, HashSet<&'t str>)> = Vec::new();
         for i in 0..self.lambdas.len() {
             let l = &self.lambdas[i];
-            let Some(qualifier) = computed_receiver(l.node.0) else { continue };
+            let streams = self.type_index("java.io.PrintStream").is_none();
+            let Some(qualifier) = computed_receiver(l.node.0, streams) else { continue };
             let (node, member, class) = (l.node, l.member, l.class);
             // A name that the member's code does not use, nor the reference's parameters.
             let at = match taken.iter().position(|(m, _)| std::ptr::eq(*m, member.0)) {
@@ -470,8 +472,9 @@ impl<'t> Lowering<'t> {
 /// The receiver of a bound method reference (`node`) that is not `this`, `super`, a class, a
 /// string literal or a class literal: javac evaluates it once, where the reference is, and checks
 /// it for null there (`Objects.requireNonNull`, whose exception has no message), and so does the
-/// translation. `None` for every other node.
-pub fn computed_receiver(node: &Value) -> Option<&Value> {
+/// translation. `None` for every other node, and for `System.out` and `System.err` when
+/// `streams` (the program has no `PrintStream` class, the type a local of them would need).
+pub fn computed_receiver(node: &Value, streams: bool) -> Option<&Value> {
     let node = Node(node);
     if node.kind() != "MEMBER_REFERENCE" || node.str("mode") != "INVOKE" {
         return None;
@@ -486,7 +489,13 @@ pub fn computed_receiver(node: &Value) -> Option<&Value> {
         // `super.m()` does.
         "IDENTIFIER" => matches!(qualifier.str("name"), "this" | "super"),
         // A class literal is a constant, and never null.
-        "MEMBER_SELECT" => matches!(qualifier.str("identifier"), "super" | "class"),
+        "MEMBER_SELECT" if matches!(qualifier.str("identifier"), "super" | "class") => true,
+        "MEMBER_SELECT" => {
+            streams
+                && qualifier
+                    .symbol()
+                    .is_some_and(|s| s.kind == "FIELD" && s.owner == "java.lang.System" && matches!(s.name, "out" | "err"))
+        }
         _ => false,
     };
     (!takes).then_some(qualifier.0)
