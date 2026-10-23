@@ -749,7 +749,8 @@ normal text stays plain UTF-8 at no cost:
   each string, `char`, builder or object's string as it is, and the text between them as a
   literal or a `format_args!` of numbers and the like, so that halves that meet join.
 - **Code units.** `charAt`, `substring` and the other unit-indexed methods keep their ASCII fast
-  paths; their other path decodes WTF-8 to units exactly and encodes a lone surrogate back
+  paths (`charAt` and `hashCode` read the ASCII bytes before the first other character as they
+  are, and decode only from there); their other path decodes WTF-8 to units exactly and encodes a lone surrogate back
   (`from_units`). A builder holds UTF-16 units, so its `toString` (`text()`) is exact.
 - **Objects.** A `toString` is a method returning the string, never a `Display` (see 1.10), so
   the string it returns is kept exactly; an enum's string is `java_string()`, and in a
