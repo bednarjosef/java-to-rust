@@ -277,10 +277,9 @@ impl<'a> Gen<'a> {
                 call(self, "crc32_update", ints)
             }
             Native::Crc32UpdateBytes => {
-                let crc = self.value(&args[0], Type::Int).text;
-                let bytes = self.slice_of(&args[1]);
-                let (off, len) = (self.value(&args[2], Type::Int).text, self.value(&args[3], Type::Int).text);
-                call(self, "crc32_update_bytes", vec![crc, bytes, off, len])
+                let mut texts = vec![self.value(&args[0], Type::Int).text, String::new()];
+                texts.extend(args[2..].iter().map(|a| self.value(a, Type::Int).text));
+                self.array_call(args, 1, texts, |g, t| call(g, "crc32_update_bytes", t.to_vec()))
             }
             Native::InflateInit
             | Native::InflateBytes

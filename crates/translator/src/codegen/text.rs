@@ -482,11 +482,12 @@ impl<'a> Gen<'a> {
                 method(&name, vec![value])
             }
             BuilderOp::Append => {
-                let (start, end) = (self.int_arg(&rest[1]), self.int_arg(&rest[2]));
                 if matches!(rest[0].ty, Type::Array(_)) {
-                    let chars = self.slice_of(&rest[0]);
-                    method("append_chars_range", vec![chars, start, end])
-                } else if matches!(rest[0].ty, Type::Class(..)) && !self.plain_sequence(&rest[0]) {
+                    let texts = vec![String::new(), self.int_arg(&rest[1]), self.int_arg(&rest[2])];
+                    return self.array_call(rest, 0, texts, |_, t| method("append_chars_range", t.to_vec()));
+                }
+                let (start, end) = (self.int_arg(&rest[1]), self.int_arg(&rest[2]));
+                if matches!(rest[0].ty, Type::Class(..)) && !self.plain_sequence(&rest[0]) {
                     self.program_range_call(id, &args[0], &sb, &rest[0], &format!("{start}, {end}"))
                 } else {
                     let text = self.range_text(&rest[0]);
