@@ -63,6 +63,7 @@ mod array_writes;
 mod arraycopy;
 mod arraycopy_classes;
 mod arrays;
+mod borrow_args;
 mod java_arrays;
 mod java_objects;
 mod main_args;
