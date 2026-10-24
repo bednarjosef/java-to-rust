@@ -33,28 +33,41 @@ pub fn remove_families(class: &Class, immutable: &mut HashSet<String>, classes: 
     }
 }
 
-/// The classes whose objects change and are shared, but by one thread only and without a kept
-/// monitor: their changing fields are `java::Field` cells in an `Arc<C>`, read and written by
-/// value. A class tree is celled together or not at all, like immutability, so that an enum over
-/// it reaches the fields it shares in one way; a tree with an owned class, a class that threads
-/// share or one whose monitor is kept keeps its `RefCell`s or locks.
-pub fn celled_classes(class: &Class, facts: &Facts, monitor_classes: &HashSet<String>) -> HashSet<String> {
-    let alone = |t: usize| {
+/// The classes whose objects change and are shared, whose fields are cells in an `Arc<C>`, read
+/// and written by value; and of those, the classes whose objects keep a monitor, because threads
+/// share them or the program waits on, notifies or asks about their monitor: an
+/// `Arc<java::Monitored<C>>` of `java::SharedField`s, where the others hold `java::Field`s. A
+/// class tree is celled and monitored together or not at all, like immutability, so that an enum
+/// over it reaches the fields it shares in one way; a tree with an owned class or a Java enum
+/// keeps its `RefCell`s or locks.
+pub fn celled_classes(
+    class: &Class,
+    facts: &Facts,
+    monitor_classes: &HashSet<String>,
+) -> (HashSet<String>, HashSet<String>) {
+    let celled = |t: usize| {
         let name = &class.types[t].name;
         class.types[t].enum_constants.is_none()
             && !facts.immutable.contains(name)
             && !facts.owned.contains(name)
-            && !monitor_classes.contains(name)
-            && !facts.thread_shared.contains(&t)
     };
+    let monitored =
+        |t: usize| monitor_classes.contains(&class.types[t].name) || facts.thread_shared.contains(&t);
     // Every class of a tree decides, its abstract ones too, whose fields structs the concrete
     // ones embed.
     let classes = || (0..class.types.len()).filter(|&t| class.types[t].kind == TypeKind::Class);
-    let mut trees: HashMap<usize, bool> = HashMap::new();
+    let mut trees: HashMap<usize, (bool, bool)> = HashMap::new();
     for t in classes() {
-        *trees.entry(class.hierarchy.root(t)).or_insert(true) &= alone(t);
+        let tree = trees.entry(class.hierarchy.root(t)).or_insert((true, false));
+        tree.0 &= celled(t);
+        tree.1 |= monitored(t);
     }
-    classes().filter(|&t| trees[&class.hierarchy.root(t)]).map(|t| class.types[t].name.clone()).collect()
+    let tree = |t: usize| trees[&class.hierarchy.root(t)];
+    let name = |t: usize| class.types[t].name.clone();
+    (
+        classes().filter(|&t| tree(t).0).map(name).collect(),
+        classes().filter(|&t| tree(t) == (true, true)).map(name).collect(),
+    )
 }
 
 /// The immutable concrete classes with a method that calls on `this` a body living on the enum of

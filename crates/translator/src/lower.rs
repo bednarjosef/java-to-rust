@@ -615,6 +615,7 @@ impl<'t> Lowering<'t> {
             overrides: self.overrides(node),
             type_params: self.method_type_params(index),
             jdk_code: false,
+            field_update: None,
         })
     }
 

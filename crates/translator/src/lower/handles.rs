@@ -27,9 +27,10 @@
 //! of `int`, `long` and reference fields
 //! (`program::FieldUpdate`), is a call of a method that lowering adds to the field's class, one
 //! per field and form: `compareAndSetValue(expected, value)` reads the field, compares and
-//! writes in its body. A method runs with its object borrowed, or in a program with threads with
-//! the object's lock held, for the whole call, so the update is atomic as Java's is: no other
-//! access of the object comes between the read and the write. The weak forms never fail
+//! writes in its body (`Method::field_update` names the update). On an object that threads share
+//! the generator writes the body as one atomic action of the field's `java::SharedField`
+//! (`codegen/field_updates.rs`); on an object of one thread no other access can come between the
+//! read and the write. So the update is atomic as Java's is. The weak forms never fail
 //! spuriously, which Java allows.
 //!
 //! An *element offset* is `base + (index << shift)` or `base + index * scale` (either way round),
@@ -1490,6 +1491,7 @@ impl<'t> Lowering<'t> {
             overrides: Vec::new(),
             type_params: Vec::new(),
             jdk_code: false,
+            field_update: Some((u.update, u.field.clone())),
         }
     }
 }

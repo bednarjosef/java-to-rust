@@ -94,7 +94,7 @@ pub use deflate::{
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
-pub use field::Field;
+pub use field::{Field, SharedField};
 pub use file_channel::*;
 pub use file_channels::*;
 pub use file_copy::*;

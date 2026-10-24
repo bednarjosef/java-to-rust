@@ -143,6 +143,7 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             overrides: Vec::new(),
             type_params: Vec::new(),
             jdk_code: false,
+            field_update: None,
         });
     }
     // The constructors of the classes with subclasses become `construct<Name>` methods, and those
@@ -172,6 +173,7 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
                 overrides: Vec::new(),
                 type_params: Vec::new(),
                 jdk_code: false,
+                field_update: None,
             });
             class.methods.len() - 1
         });
@@ -265,6 +267,7 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             overrides: Vec::new(),
             type_params,
             jdk_code: false,
+            field_update: None,
         });
     }
     let mut to_factory = |e: &mut Expr| {

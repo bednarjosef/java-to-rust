@@ -26,6 +26,7 @@ impl<'t> Lowering<'t> {
             overrides: vec![first + i],
             type_params: Vec::new(),
             jdk_code: false,
+            field_update: None,
         }
     }
 

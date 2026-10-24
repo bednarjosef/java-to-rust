@@ -248,9 +248,9 @@ build with PGO takes about 30 minutes.
 
 javac starts one thread, the file manager's deferred close, which a normal run never starts, but
 its reachable `Thread.start()` makes the program threaded and most of its classes
-`java::Arc<java::Locked<..>>` (docs/multi-threading.md, section 4). Until a second thread
-starts, the translation pays for being threaded with plain loads and stores only: taking and
-giving back a lock, and the borrow flag, which is kept in the lock's own word (`locked.rs`).
+`java::Arc<java::Monitored<..>>` (docs/multi-threading.md, section 4), whose fields are
+`java::SharedField`s: an acquire load or release store of a word, a plain move on x86-64. Until a
+second thread starts, a monitor costs plain loads and stores only (`locked.rs`).
 Object parameters that may be null are borrowed (`&Option<java::Arc<..>>`,
 docs/supported-java.md) rather than copied. `charAt` and `String.hashCode` read a string's
 leading ASCII bytes as they are.

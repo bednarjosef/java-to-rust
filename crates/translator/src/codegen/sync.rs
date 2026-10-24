@@ -72,7 +72,10 @@ impl<'a> Gen<'a> {
             }
             self.class_enter(method.class)
         } else {
-            if !self.facts.kept_monitor_of(method.class) || self.this_form != ThisForm::Shared {
+            // A method on an enum enters the monitor of the enum's value, whose variant has it.
+            if !self.facts.kept_monitor_of(method.class)
+                || !matches!(self.this_form, ThisForm::Shared | ThisForm::Enum)
+            {
                 return;
             }
             format!("{}({})", self.runtime("enter"), self.this_name())

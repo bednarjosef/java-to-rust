@@ -605,7 +605,9 @@ fn equals_on_null_evaluates_its_argument_first() {
 }
 
 #[test]
-fn borrows_are_scoped_only_beside_a_mutable_borrow() {
+fn a_shared_object_is_read_by_value_beside_a_call_that_changes_it() {
+    // The object is shared with a thread; its fields are cells, so a read holds nothing that the
+    // call beside it could conflict with.
     let rust = translate(
         "class P { int x; int bump() { x++; return x; } }
         class A {
@@ -621,18 +623,13 @@ fn borrows_are_scoped_only_beside_a_mutable_borrow() {
             }
         }",
     );
-    assert_contains(
-        &rust,
-        &[
-            "java::println!(\"{}\", p.borrow().x);",
-            // A lone braced argument would draw rustc's unused_braces lint, so it is a `let`.
-            "f({ let value = p.borrow().x; value }).wrapping_add({ let value = p.borrow_mut().bump(); value })",
-        ],
-    );
+    assert_contains(&rust, &["java::println!(\"{}\", p.x.get());", "f(p.x.get()).wrapping_add(p.bump())"]);
 }
 
 #[test]
-fn arguments_that_read_the_receiver_run_before_it_is_borrowed() {
+fn arguments_that_read_the_receiver_are_plain_calls() {
+    // The receiver, shared with a thread, is not borrowed, so an argument that reads it needs no
+    // binding before the call.
     let rust = translate(
         "class P { int x; void add(int n) { x += n; } int get() { return x; } }
         class A {
@@ -648,10 +645,7 @@ fn arguments_that_read_the_receiver_run_before_it_is_borrowed() {
             }
         }",
     );
-    assert_contains(
-        &rust,
-        &["{ let n = p.borrow().get(); q.borrow_mut().add(n) };", "q.borrow_mut().add(2);"],
-    );
+    assert_contains(&rust, &["q.add(p.get());", "q.add(2);"]);
 }
 
 #[test]
@@ -5742,14 +5736,14 @@ fn a_copy_between_unrelated_classes_names_the_type_mismatch() {
 
 #[test]
 fn a_range_loop_bound_that_reads_a_shared_field_is_bound_before_the_loop() {
-    // The start reads `this`'s field through a borrow (the object is shared with a thread, so it
-    // is locked); Rust keeps that borrow for the whole loop, so the bound is read into a local
-    // first, as Java reads it once before the loop.
+    // The start reads `this`'s field, a cell shared with a thread, by value: no borrow outlives
+    // the read, so the bound stays in the range, which Rust reads once before the loop, as Java
+    // reads it.
     let rust = translate(
         "public class Main {\n    static Main last;\n    int next = 2;\n    void end(int i) {\n        next++;\n        last = this;\n    }\n    void ends(int limit) {\n        for (int i = next; i < limit; i++) end(i);\n    }\n    public static void main(String[] a) throws Exception {\n        Main m = new Main();\n        Thread t = new Thread(() -> m.ends(6));\n        t.start();\n        t.join();\n    }\n}\n",
     );
-    assert_contains(&rust, &["let start_2 = this.borrow().next;", "for i in start_2..limit {"]);
-    assert_lacks(&rust, &["for i in this.borrow()"]);
+    assert_contains(&rust, &["for i in this.next.get()..limit {"]);
+    assert_lacks(&rust, &["this.borrow()"]);
 }
 
 #[test]

@@ -28,6 +28,7 @@ mod enums;
 mod exceptions;
 mod expr;
 mod field_inits;
+mod field_updates;
 mod file_channels;
 mod file_copy;
 mod files;
@@ -759,6 +760,8 @@ impl<'a> Gen<'a> {
             self.line(&no_object(&self.class.types[m.class].name));
         } else if m.is_ctor {
             self.constructor(m);
+        } else if let Some(update) = self.atomic_update(m, index) {
+            self.line(&update);
         } else {
             self.stmts(&m.body, !initializes);
             if initializes {

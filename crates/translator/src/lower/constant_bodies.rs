@@ -200,7 +200,14 @@ impl<'t> Lowering<'t> {
                 let init = member.get("initializer").map(|i| self.expr(i)).transpose()?;
                 let init = init.map(|e| self.convert(e, ty));
                 let name = member.str("name").to_string();
-                fields.push(Field { name, ty, init, constant: false, pos: member.pos() });
+                fields.push(Field {
+                    name,
+                    ty,
+                    init,
+                    constant: false,
+                    volatile: member.has_flag("VOLATILE"),
+                    pos: member.pos(),
+                });
             }
             all.push(fields);
         }
@@ -235,6 +242,7 @@ impl<'t> Lowering<'t> {
                     ty: field.ty,
                     init: None,
                     constant: false,
+                    volatile: field.volatile,
                     pos: field.pos,
                 }),
             }

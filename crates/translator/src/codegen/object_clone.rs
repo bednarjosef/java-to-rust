@@ -96,7 +96,9 @@ impl<'a> Gen<'a> {
         let pointer = self.pointer(c);
         if self.facts.owned.contains(name) {
             literal
-        } else if self.facts.immutable.contains(name) || self.celled(name) {
+        } else if self.celled(name) {
+            self.celled_new(c, &literal)
+        } else if self.facts.immutable.contains(name) {
             format!("{pointer}::new({literal})")
         } else {
             format!("{pointer}::new({}::new({literal}))", self.cell(c))
