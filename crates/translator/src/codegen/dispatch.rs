@@ -680,7 +680,9 @@ impl<'a> Gen<'a> {
                     let name = self.as_name(t);
                     let is = format!("is_some_and(|a| {}(&a, {class}))", self.runtime("array_is"));
                     return Code::atom(match nullable {
-                        true => format!("{}.as_ref().is_some_and(|o| o.{name}().{is})", self.object_place(value)),
+                        true => {
+                            format!("{}.as_ref().is_some_and(|o| o.{name}().{is})", self.object_place(value))
+                        }
                         false => format!("{}.{name}().{is}", operand(&self.object(value))),
                     });
                 }

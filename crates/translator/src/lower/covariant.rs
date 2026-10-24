@@ -225,7 +225,13 @@ impl<'t> Lowering<'t> {
     /// `name` and the translation holds as `ty`, an `Object[]`: noted to be tested against the
     /// array's own class (`Class::array_tests`) where that is narrower, as `String[]` is. An
     /// `Object[]` operand (`(String[]) objects`) is converted to `Object` for the test.
-    pub(super) fn array_test(&self, node: Node<'t>, value: Expr, ty: Type, name: &str) -> Result<Expr, Error> {
+    pub(super) fn array_test(
+        &self,
+        node: Node<'t>,
+        value: Expr,
+        ty: Type,
+        name: &str,
+    ) -> Result<Expr, Error> {
         if self.covariant.known.is_empty() || !Self::is_object_array(ty) {
             return Ok(value);
         }
