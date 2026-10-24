@@ -185,10 +185,13 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the variant of class `c` holds a handle (`java::Thin::pointer`), else a value
-    /// (`java::Thin::value`): an object, an array, a builder or a box that keeps its identity.
+    /// (`java::Thin::value`): an object, an array, a builder, a box that keeps its identity or a
+    /// string that does.
     pub(super) fn thin_pointer(&self, c: usize) -> bool {
         match self.runtime_of(c) {
             Some(Type::Array(_) | Type::StringBuilder) => true,
+            // A string with an identity is the address of its text (`java::JStr`).
+            Some(Type::String) => super::shared_strings(),
             Some(ty @ Type::Boxed(_)) => self.faithful_box(ty),
             Some(_) => false,
             None => !self.holds_value(c),
