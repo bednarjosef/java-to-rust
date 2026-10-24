@@ -132,6 +132,7 @@ impl Class {
     pub const ENUM: Class =
         Class::standard("java.lang.Enum", "Enum", &["java.lang.Enum", COMPARE, SERIAL, CONSTABLE, OBJECT]);
     pub const COMPARABLE: Class = Class::interface(COMPARE, "Comparable", &[COMPARE, OBJECT]);
+    pub const RECORD: Class = Class::standard("java.lang.Record", "Record", &["java.lang.Record", OBJECT]);
     pub const CHAR_SEQUENCE: Class =
         Class::interface("java.lang.CharSequence", "CharSequence", &["java.lang.CharSequence", OBJECT]);
     pub const INTEGER: Class = Class::number(

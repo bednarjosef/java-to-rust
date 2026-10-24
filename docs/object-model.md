@@ -514,7 +514,7 @@ to run.
   `fixed.rs` gives the reasons that the borrow cannot alias a write.
 - A fields struct has no representation of its own: it is always inside a concrete object.
 
-### 1.9 Comparable, Number, CharSequence, Enum and other JDK interfaces
+### 1.9 Comparable, Number, CharSequence, Enum, Record and other JDK interfaces
 
 A class may implement `Comparable<T>` and call `compareTo` directly with no extra machinery.
 When the program uses one of these JDK types as the type of a value, lowering adds it as a
@@ -544,6 +544,11 @@ the program's classes implement:
   rejected.
 - `ENUM` (`<E extends Enum<E>>`, the JDK's `EnumMap` and `EnumSet`): the program's enums, with
   `Enum`'s methods lowered by `lower/enums.rs`.
+- `RECORD` (a `Record` variable, a `(Record)` cast, the intersection `Record & Shape` that javac
+  infers over two records of an interface and erases to `Record`): the program's records. It
+  has no methods of its own: `equals`, `hashCode` and `toString`, which `Record` declares again,
+  are `Object`'s, which each record overrides. A record's class names `java.lang.Record` as its
+  superclass where the type exists.
 - The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it.
 - Plain interfaces of reflection and security that library code implements with classes of its
   own (`java.lang.reflect.Type` and `ParameterizedType`, `WildcardType`, `GenericArrayType`,

@@ -230,9 +230,13 @@ impl<'a> Gen<'a> {
             ENUM => return "java::Class::ENUM".to_string(),
             NUMBER => return "java::Class::NUMBER".to_string(),
             CHAR_SEQUENCE => return "java::Class::CHAR_SEQUENCE".to_string(),
+            RECORD => return "java::Class::RECORD".to_string(),
             _ => {}
         }
         let (kind, extends) = (decl.kind, decl.extends);
+        // A record's superclass is `Record`, which the program's records implement where it is a
+        // type.
+        let record = decl.implements.iter().any(|&i| self.class.types[i].name == RECORD);
         let name = rust_string(&self.java_class_name(c, false));
         let simple = rust_string(&self.java_class_name(c, true));
         let names = self.names_list(c);
@@ -242,6 +246,7 @@ impl<'a> Gen<'a> {
             _ => {
                 let superclass = match extends {
                     Some(s) => self.decl_class(s),
+                    None if record => "java::Class::RECORD".to_string(),
                     None => "java::Class::OBJECT".to_string(),
                 };
                 format!("java::Class::new({name}, {simple}, Some(|| {superclass}), {names})")
@@ -409,6 +414,7 @@ impl<'a> Gen<'a> {
                 ENUM => "java.lang.Enum".to_string(),
                 NUMBER => "java.lang.Number".to_string(),
                 CHAR_SEQUENCE => "java.lang.CharSequence".to_string(),
+                RECORD => "java.lang.Record".to_string(),
                 _ => match runtime_type(&decl.name) {
                     Some(ty) => class_name(self, ty),
                     None => self.java_class_name(d, false),
@@ -556,6 +562,7 @@ fn class_name(g: &Gen, ty: Type) -> String {
             Some(c) if g.class.types[c].name == OBJECT => "java.lang.Object".to_string(),
             Some(c) if g.class.types[c].name == COMPARABLE => "java.lang.Comparable".to_string(),
             Some(c) if g.class.types[c].name == ENUM => "java.lang.Enum".to_string(),
+            Some(c) if g.class.types[c].name == RECORD => "java.lang.Record".to_string(),
             Some(c) => g.java_class_name(c, false),
             None => "java.lang.Object".to_string(),
         },

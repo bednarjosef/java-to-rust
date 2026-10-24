@@ -426,6 +426,9 @@ pub const NUMBER: &str = "Number";
 /// The name of the type of `java.lang.CharSequence`'s values, which lowering adds to a program
 /// that uses it as a type, beside `OBJECT`: strings and builders are its values.
 pub const CHAR_SEQUENCE: &str = "CharSequence";
+/// The name of the type of `java.lang.Record`'s values, which lowering adds to a program that uses
+/// it as a type, beside `OBJECT`: an interface that the program's records implement.
+pub const RECORD: &str = "Record";
 
 /// The name of the function that builds a constant of the enum `name` with tables
 /// (`lower/enum_tables.rs`): its constructor, `initShapeConstant` for `Main.Shape`.
