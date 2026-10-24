@@ -376,29 +376,29 @@ fn reading_a_resource_ends_the_program() {
     }
 }
 
-/// `java.lang.reflect.Type` is translated as a plain interface that the program's classes
-/// implement (see `corpus/whole-program/JdkInterfacesImplemented.java`), but `Class` implements it
-/// too, and the runtime's classes are none of the program's types: a class converted to a `Type`,
-/// an `Object` that may hold a class cast to one and tested for one are rejected, not translated
-/// as values that are never a `Type`.
+/// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see
+/// `corpus/whole-program/ClassesAsReflectTypes.java`), but not `Constable`, whose
+/// `describeConstable()` would need the class's descriptor as an object: a class converted to a
+/// `Constable`, and an `Object` that may hold a class cast to one and tested for one, are
+/// rejected, not translated as values that are never a `Constable`.
 #[test]
-fn a_class_as_a_reflected_type_is_rejected() {
+fn a_class_as_a_constable_is_rejected() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
         return;
     };
-    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-class-as-type");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-class-as-constable");
     let statements = [
-        "Type type = String.class;\n        System.out.println(type.getTypeName());",
-        "Object value = args.length == 0 ? Integer.class : new Named();\n        System.out.println(value instanceof Type);",
-        "Object value = args.length == 0 ? Integer.class : new Named();\n        System.out.println(((Type) value).getTypeName());",
+        "Constable c = String.class;\n        System.out.println(c.describeConstable().isPresent());",
+        "Object value = args.length == 0 ? Integer.class : \"x\";\n        System.out.println(value instanceof Constable);",
+        "Object value = args.length == 0 ? Integer.class : \"x\";\n        System.out.println(((Constable) value).describeConstable().isPresent());",
     ];
     for (i, statements) in statements.iter().enumerate() {
         let sources = work.join(i.to_string());
         let _ = std::fs::remove_dir_all(&sources);
         std::fs::create_dir_all(&sources).unwrap();
         let java = format!(
-            "import java.lang.reflect.Type;\npublic class Main {{\n    static final class Named implements Type {{}}\n\n    \
+            "import java.lang.constant.Constable;\npublic class Main {{\n    \
              public static void main(String[] args) {{\n        {statements}\n    }}\n}}\n"
         );
         std::fs::write(sources.join("Main.java"), java).unwrap();
@@ -414,7 +414,7 @@ fn a_class_as_a_reflected_type_is_rejected() {
         let stderr = String::from_utf8_lossy(&translated.stderr);
         assert!(!translated.status.success(), "translated:\n{statements}");
         assert!(
-            stderr.contains("a `java.lang.Class` as a `java.lang.reflect.Type` not supported yet"),
+            stderr.contains("a `java.lang.Class` as a `java.lang.constant.Constable` not supported yet"),
             "not rejected for the class:\n{statements}\n{stderr}"
         );
     }

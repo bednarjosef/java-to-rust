@@ -253,6 +253,8 @@ impl<'a> Gen<'a> {
         let method = match op {
             ClassOp::GetName => "get_name",
             ClassOp::GetSimpleName => "get_simple_name",
+            ClassOp::GetTypeName if super::shared_strings() => "shared_type_name",
+            ClassOp::GetTypeName => "get_type_name",
             ClassOp::GetSuperclass => "get_superclass",
             ClassOp::GetComponentType => "get_component_type",
             ClassOp::IsArray => "is_array",
