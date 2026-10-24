@@ -54,5 +54,10 @@ public class SystemProperties {
         System.out.println("getBoolean: " + Boolean.getBoolean("no.such.flag") + " "
                 + Boolean.getBoolean(flag) + " " + Boolean.getBoolean("os.name") + " "
                 + Boolean.getBoolean(null) + " " + Boolean.getBoolean(quoted(flag)));
+
+        // A translation is headless, as Java with `-Djava.awt.headless=true`, which the tests run.
+        String headless = "java.awt.headless";
+        System.out.println("headless: " + quoted(System.getProperty("java.awt.headless")) + " "
+                + Boolean.getBoolean("java.awt.headless") + " " + quoted(System.getProperty(headless)));
     }
 }

@@ -315,9 +315,14 @@ Design: [natives-and-input.md](natives-and-input.md).
   lookups for `InetAddress` (`net.rs`), `Unsafe` memory outside the heap (`native_memory.rs`),
   and the `jrt:` file system over the JDK's `lib/modules` image.
 - `System.getProperty` gives what a plain `java Main` run gives (`lower/system.rs`): machine
-  values at run time, other keys fixed from the JDK the translator ran with.
+  values at run time, other keys fixed from the JDK the translator ran with, and
+  `java.awt.headless` `"true"`, as with `-Djava.awt.headless=true`.
   `sun.java.command` and `user.timezone` as constants are rejected. `System.getenv(name)` reads
   the environment; `System.getenv()` as a map is not translated yet.
+- A translation is headless, unlike a JVM on a machine with a display: AWT's natives are not
+  translated, so `GraphicsEnvironment.isHeadless()` is always true, and a program that would
+  open a window there (the Minecraft server without `nogui`) runs as it does on a server
+  without one. The tests run Java with `-Djava.awt.headless=true` to compare.
 - There is no security manager (`System.getSecurityManager()` is null), no garbage collector
   (`gc()` does nothing, `Runtime`'s memory figures are fixed values), no virtual threads, and no
   network connections: sockets stay rejected.

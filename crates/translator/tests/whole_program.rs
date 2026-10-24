@@ -122,6 +122,8 @@ fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
         std::fs::copy(resource, to).unwrap();
     }
     let mut java = Command::new("java");
+    // AWT is headless, as in every translation (`lower::system`).
+    java.arg("-Djava.awt.headless=true");
     match module_name(&p.sources) {
         // A source root with a `module-info.java` is a named module, which runs from the module path.
         Some(module) => java.arg("--module-path").arg(classes).arg("-m").arg(format!("{module}/{}", p.main)),
