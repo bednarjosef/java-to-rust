@@ -286,10 +286,11 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
 
 - Comparing the classes of the program's objects (`getClass() == o.getClass()`, `x.getClass() ==
   Dog.class`) is a `matches!` of the variant. Any other class is a `java::Class` value, `Copy` and
-  equal by binary name, with `getName`, `getSimpleName`, `getSuperclass`, `isArray`,
-  `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value carries the
-  binary names of the classes and interfaces above it, which `isAssignableFrom` tests. A class
-  held as an `Object` is `Object`'s `Class` variant.
+  equal by binary name, with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
+  `isArray`, `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value
+  carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests.
+  A class held as an `Object` is `Object`'s `Class` variant, and one held as a
+  `java.lang.reflect.Type` is `Type`'s.
 - `Class.forName` of a constant name is that class; of a computed name, a `switch` over the
   classes code can find by name. An unknown name throws `ClassNotFoundException`.
 - Reflection over the program's classes (`getMethod`, `getField`, `Method.invoke`,

@@ -240,7 +240,7 @@ impl<'c> Graph<'c> {
         match made(builtin) {
             Made::Interned => vec![interned],
             Made::New | Made::PerKey => vec![new],
-            Made::NewOrEmpty | Made::ArrayText => vec![interned, new],
+            Made::NewOrEmpty | Made::ArrayText | Made::TypeName => vec![interned, new],
             Made::Itself => args.last().map(|a| self.origins(m, a)).unwrap_or_default(),
             Made::Kept => {
                 let mut nodes = self.origins(m, &args[0]);
@@ -451,6 +451,15 @@ impl<'c> Graph<'c> {
                 }
             }
         }
+        // `Type.getTypeName()` of a class held as a `Type` is `Class`'s own (see
+        // `codegen::dispatch`), the class's interned name or an array's new type name.
+        for (m, method) in class.methods.iter().enumerate() {
+            if method.name == "getTypeName" && class.types[method.class].name == "java.lang.reflect.Type" {
+                let to = self.node(Key::Return(class.hierarchy.group_id(m)));
+                let from = vec![self.node(Key::Interned), self.node(Key::New)];
+                self.flow(&from, to);
+            }
+        }
         // The arguments of `main` are new strings.
         for method in &class.methods {
             if method.is_main
@@ -525,6 +534,9 @@ pub(crate) enum Made {
     NewOrEmpty,
     /// `Arrays.toString`: the literal `"null"` or `"[]"`, a new string otherwise.
     ArrayText,
+    /// `Class.getTypeName()`: the class's interned name, or an array's new type name, which the
+    /// generator makes as such (`java::Class::shared_type_name`).
+    TypeName,
     /// One object for each key, the same on every call: a system property, which Java stores
     /// once, `System.lineSeparator()`, an environment variable, a class's simple and canonical
     /// names (cached in its reflection data).
@@ -572,6 +584,7 @@ pub(crate) fn made(builtin: Builtin) -> Made {
         | Builtin::ClassName { simple: true }
         | Builtin::ClassLiteralName { simple: true, .. }
         | Builtin::ClassMethod(ClassOp::GetSimpleName | ClassOp::GetCanonicalName) => Made::PerKey,
+        Builtin::ClassMethod(ClassOp::GetTypeName) => Made::TypeName,
         // What a native method of the JDK returns is a new string on every call.
         Builtin::Native(_) => Made::New,
         Builtin::Format | Builtin::Builder(BuilderOp::ToString | BuilderOp::Substring) => Made::NewOrEmpty,

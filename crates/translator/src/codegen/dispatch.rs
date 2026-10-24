@@ -60,7 +60,8 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
 
-/// The interfaces that `java.lang.Class` implements in Java, which the runtime's classes do not.
+/// The interfaces that `java.lang.Class` implements in Java, of which the runtime's classes
+/// implement only `CLASS_VALUE_INTERFACES`.
 const CLASS_INTERFACES: &[&str] = &[
     "java.io.Serializable",
     "java.lang.constant.Constable",
@@ -531,12 +532,12 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether `value` may be a class that Java lets be a `to`, one of the interfaces that
-    /// `java.lang.Class` implements and the program translates as interfaces of its own
-    /// (`java.lang.reflect.Type`, see `program::reach::TRANSLATED_ANYWAY`): the runtime's classes
-    /// are of none of the program's types, so the cast or the test is rejected.
+    /// `java.lang.Class` implements and the program translates as interfaces of its own, which
+    /// the runtime's classes do not implement (`Constable`; `Type` and `Serializable` they do, see
+    /// `CLASS_VALUE_INTERFACES`): the cast or the test is rejected.
     fn rejects_class_as(&mut self, value: &Expr, to: Type) -> bool {
         let Type::Class(name, _) = to else { return false };
-        if !CLASS_INTERFACES.contains(&name) {
+        if !CLASS_INTERFACES.contains(&name) || CLASS_VALUE_INTERFACES.contains(&name) {
             return false;
         }
         let holds_class = value.ty == Type::JavaClass
@@ -1864,6 +1865,11 @@ impl<'a> Gen<'a> {
             .hierarchy
             .implementation(r, c)
         {
+            // A class answers `Type`'s `getTypeName()` itself, where the interface's default
+            // would give its `toString()`.
+            _ if g.is_type_name_method(r) && g.runtime_of(c) == Some(Type::JavaClass) => {
+                (g.type_name_arm(r), true)
+            }
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, &args);
                 (g.covariant_ret(i, r, text), uses)
@@ -2035,6 +2041,24 @@ impl<'a> Gen<'a> {
         };
         let value = format!("{}({text})", self.variant(char_sequence, string));
         if self.facts.nullable_returns.contains(&r) { format!("Some({value})") } else { value }
+    }
+
+    /// Whether method `r` is `java.lang.reflect.Type`'s `getTypeName()` or overrides it.
+    fn is_type_name_method(&self, r: usize) -> bool {
+        self.class.hierarchy.group(r).into_iter().any(|g| {
+            let m = &self.class.methods[g];
+            m.name == "getTypeName"
+                && m.params.is_empty()
+                && self.class.types[m.class].name == "java.lang.reflect.Type"
+        })
+    }
+
+    /// `getTypeName()` (method `r`) for a class bound to `o`: `Class`'s own, as the JDK makes it.
+    fn type_name_arm(&mut self, r: usize) -> String {
+        let name = if super::shared_strings() { "o.shared_type_name()" } else { "o.get_type_name()" };
+        let name =
+            if self.facts.nullable_returns.contains(&r) { format!("Some({name})") } else { name.to_string() };
+        if self.facts.throwing.contains(&r) { format!("Ok({name})") } else { name }
     }
 
     /// Whether method `r` is one of the JDK's `Appendable`'s own `append` methods, which a builder

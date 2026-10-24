@@ -551,9 +551,15 @@ the program's classes implement:
   `AlgorithmParameterSpec`, `PrivilegedExceptionAction`) are translated from the JDK's sources as
   any interface of the program (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their
   objects in the JDK (`Proxy`, a provider's keys, `getGenericSuperclass`) stays untranslated.
-  `Class` implements `Type` in Java, and the runtime's classes do not: a class converted to
-  `Type`, and a cast or an `instanceof` of `Type` (or of another interface of `Class`) on a value
-  that may be a class, are rejected (`codegen::dispatch::rejects_class_as`).
+  `Class` implements `Type` in Java, and so does the runtime's class where the program has
+  `Type` (and `Serializable`, `CLASS_VALUE_INTERFACES` in `ast.rs`): a class held as a `Type` is
+  the variant of the runtime's `java.lang.Class` in `Type`'s enum, found again by `instanceof
+  Class` and a cast, compared and hashed as a class, and its `getTypeName()` is `Class`'s own
+  (`int[]`, `java.lang.String`; `type_name_arm`), not the interface's default `toString()`.
+  `Class`'s other interfaces describe the class (`Constable`) or need reflection
+  (`GenericDeclaration`, `AnnotatedElement`): a class converted to one, and a cast or an
+  `instanceof` of one on a value that may be a class, are rejected
+  (`codegen::dispatch::rejects_class_as`).
 
 Other rules:
 

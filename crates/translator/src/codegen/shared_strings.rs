@@ -38,7 +38,9 @@ impl<'a> Gen<'a> {
                 Made::ArrayText => "array_text",
                 Made::PerKey => return self.per_key(e, code),
                 Made::Text if *builtin == Builtin::ObjectText => "shared",
-                Made::Kept | Made::Itself | Made::Text | Made::Element | Made::Never => return code,
+                Made::Kept | Made::Itself | Made::Text | Made::Element | Made::Never | Made::TypeName => {
+                    return code;
+                }
             },
             _ => return code,
         };

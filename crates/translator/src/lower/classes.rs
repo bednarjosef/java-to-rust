@@ -172,6 +172,7 @@ impl<'t> Lowering<'t> {
         let op = match (symbol.name, args.len()) {
             ("getName", 0) => ClassOp::GetName,
             ("getSimpleName", 0) => ClassOp::GetSimpleName,
+            ("getTypeName", 0) => ClassOp::GetTypeName,
             ("getSuperclass", 0) => ClassOp::GetSuperclass,
             ("getComponentType" | "componentType", 0) => ClassOp::GetComponentType,
             ("isArray", 0) => ClassOp::IsArray,

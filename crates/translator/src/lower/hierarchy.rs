@@ -72,8 +72,8 @@ impl<'t> Lowering<'t> {
             self.forget_alias(name);
         }
         // `Object` may also hold a string, a box, an array, a builder or a class, `Comparable` a
-        // string or a box, `CharSequence` a string or a builder, `Appendable` a builder, and
-        // `Number` a numeric box.
+        // string or a box, `CharSequence` a string or a builder, `Appendable` a builder, `Type` a
+        // class, and `Number` a numeric box.
         let char_sequence = matches!(value.ty, Type::Class(name, _) if name == CHAR_SEQUENCE);
         let comparable = matches!(value.ty, Type::Class(name, _) if name == COMPARABLE);
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
@@ -85,6 +85,7 @@ impl<'t> Lowering<'t> {
             || (comparable && matches!(ty, Type::String | Type::Boxed(_)))
             || (char_sequence && matches!(ty, Type::String | Type::StringBuilder))
             || (self.is_appendable(value.ty) && ty == Type::StringBuilder)
+            || (Self::is_class_interface(value.ty) && ty == Type::JavaClass)
             || Self::is_numeric_box_of(value.ty, ty);
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
@@ -271,8 +272,8 @@ impl<'t> Lowering<'t> {
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
             // A string, a builder, a box or a class as a value of one of the program's types: a
-            // builder is an `Appendable`, and the generator rejects the others, which no type's
-            // values include (see `codegen::dispatch::class_cast`).
+            // builder is an `Appendable`, a class a `Type`, and the generator rejects the others,
+            // which no type's values include (see `codegen::dispatch::class_cast`).
             (Type::String | Type::StringBuilder | Type::Boxed(_) | Type::JavaClass, Type::Class(..)) => true,
             // A primitive boxed into an interface that its box implements (`Serializable`,
             // `Constable`): the value is the box, as it is for `Object` and `Comparable`.
@@ -292,10 +293,11 @@ impl<'t> Lowering<'t> {
         if !differs {
             return e;
         }
-        // A builder that becomes an `Object`, a `CharSequence` or an `Appendable` is a value of
-        // its runtime class.
+        // A builder that becomes an `Object`, a `CharSequence` or an `Appendable`, and a class
+        // that becomes a `Type`, are values of their runtime class.
         if Self::is_object(to)
             || e.ty == Type::StringBuilder && (to == Type::class(CHAR_SEQUENCE) || self.is_appendable(to))
+            || e.ty == Type::JavaClass && Self::is_class_interface(to)
         {
             self.note_object_array(e.ty);
         }
@@ -316,6 +318,12 @@ impl<'t> Lowering<'t> {
         }
     }
 
+    /// Whether `ty` is one of the interfaces of `Class` that the runtime's classes implement
+    /// (`CLASS_VALUE_INTERFACES`): a type of the program wherever a value has it.
+    pub(super) fn is_class_interface(ty: Type) -> bool {
+        matches!(ty, Type::Class(name, _) if CLASS_VALUE_INTERFACES.contains(&name))
+    }
+
     /// Whether `ty` is the JDK's `Appendable`, which the runtime's builders implement.
     pub(super) fn is_appendable(&self, ty: Type) -> bool {
         let appendable = self.object.and_then(|at| at.appendable);
@@ -331,14 +339,19 @@ impl<'t> Lowering<'t> {
         if Self::is_object(right.ty) && left.ty != Type::Null {
             return (self.convert(left, Type::class(OBJECT)), right);
         }
-        // A builder compared with a `CharSequence` or an `Appendable` is one, as it is to an
-        // `Object`.
+        // A builder compared with a `CharSequence` or an `Appendable`, and a class with a `Type`,
+        // is one, as it is to an `Object`.
         let holds_builder = |ty: Type| ty == Type::class(CHAR_SEQUENCE) || self.is_appendable(ty);
-        if holds_builder(left.ty) && right.ty == Type::StringBuilder {
+        let holds = |held: Type, ty: Type| match held {
+            Type::StringBuilder => holds_builder(ty),
+            Type::JavaClass => Self::is_class_interface(ty),
+            _ => false,
+        };
+        if holds(right.ty, left.ty) {
             let ty = left.ty;
             return (left, self.convert(right, ty));
         }
-        if holds_builder(right.ty) && left.ty == Type::StringBuilder {
+        if holds(left.ty, right.ty) {
             let ty = right.ty;
             return (self.convert(left, ty), right);
         }

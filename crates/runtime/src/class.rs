@@ -248,6 +248,28 @@ impl Class {
         self.name.rsplit_once('.').map_or("", |(package, _)| package).into()
     }
 
+    /// `getTypeName()`: for an array, the name of its innermost component type with a `[]` for
+    /// each dimension (`int[][]`, `java.lang.String[]`); for any other class, its binary name.
+    pub fn get_type_name(&self) -> crate::JString {
+        self.type_name().into()
+    }
+
+    /// `getTypeName()` where the program's strings are shared: a class's name is the interned
+    /// string, an array's a new one, as the JDK makes them.
+    pub fn shared_type_name(&self) -> crate::JStr {
+        if self.is_array() { crate::JStr::new(self.type_name()) } else { crate::interned(self.name) }
+    }
+
+    fn type_name(&self) -> String {
+        let mut class = *self;
+        let mut dimensions = 0;
+        while let Some(component) = class.get_component_type() {
+            class = component;
+            dimensions += 1;
+        }
+        format!("{}{}", class.name, "[]".repeat(dimensions))
+    }
+
     /// `getSuperclass()`: `null` for `Object`, an interface and a primitive type.
     pub fn get_superclass(&self) -> Option<Class> {
         self.superclass.map(|f| f())
@@ -399,6 +421,15 @@ mod tests {
             Class::NUMBER.is_assignable_from(Class::INTEGER)
                 && Class::COMPARABLE.is_assignable_from(Class::STRING)
         );
+    }
+
+    #[test]
+    fn type_names_are_javas() {
+        let ints = Class::array("[[I", "int[][]", || Class::array("[I", "int[]", || Class::INT));
+        assert_eq!(&*ints.get_type_name(), crate::Wtf8::new("int[][]"));
+        assert_eq!(&*Class::STRING.get_type_name(), crate::Wtf8::new("java.lang.String"));
+        let inner = Class::new("a.Outer$Inner", "Inner", Some(|| Class::OBJECT), &["a.Outer$Inner", OBJECT]);
+        assert_eq!(&*inner.get_type_name(), crate::Wtf8::new("a.Outer$Inner"));
     }
 
     #[test]

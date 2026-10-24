@@ -463,6 +463,12 @@ pub const STRING_BUILDER: &str = "java.lang.StringBuilder";
 /// The runtime class of the classes (`Class<?>` values) that become `Object`s.
 pub const CLASS_VALUE: &str = "java.lang.Class";
 
+/// The interfaces of `java.lang.Class` that the runtime's classes implement where the program
+/// has them: `Type`, whose `getTypeName()` a class answers itself (see `codegen::dispatch`), and
+/// `Serializable`, which has no methods. `Class`'s others need reflection (`GenericDeclaration`,
+/// `AnnotatedElement`) or describe the class (`Constable`, `TypeDescriptor`), and stay rejected.
+pub const CLASS_VALUE_INTERFACES: [&str; 2] = ["java.io.Serializable", "java.lang.reflect.Type"];
+
 /// The runtime class whose values are of type `ty`, a primitive standing for its box.
 pub fn runtime_name(ty: Type) -> Option<&'static str> {
     let ty = if ty.is_numeric() || ty == Type::Boolean { Type::boxed(ty) } else { ty };
@@ -1048,6 +1054,8 @@ pub enum Builtin {
 pub enum ClassOp {
     GetName,
     GetSimpleName,
+    /// `getTypeName()`: the binary name, or an array's component's with a `[]` per dimension.
+    GetTypeName,
     /// `null` for `Object`, an interface or a primitive type.
     GetSuperclass,
     /// `null` for a class that is not an array.
