@@ -279,11 +279,12 @@ impl<'t> Lowering<'t> {
             ExprKind::Unary(_, x) => self.quiet(x, known) && (x.ty.is_numeric() || x.ty == Type::Boolean),
             ExprKind::Binary(op, a, b) => {
                 let primitive = |t: Type| t.is_numeric() || t == Type::Boolean;
-                !matches!(op, BinOp::Div | BinOp::Rem)
-                    && primitive(a.ty)
-                    && primitive(b.ty)
-                    && self.quiet(a, known)
-                    && self.quiet(b, known)
+                // Only an integer division by zero throws.
+                let divides = matches!(op, BinOp::Div | BinOp::Rem)
+                    && !matches!(e.ty, Type::Float | Type::Double)
+                    && !matches!(b.kind, ExprKind::Int(n) if n != 0)
+                    && !matches!(b.kind, ExprKind::Long(n) if n != 0);
+                !divides && primitive(a.ty) && primitive(b.ty) && self.quiet(a, known) && self.quiet(b, known)
             }
             ExprKind::Cast(to, x) => {
                 self.quiet(x, known)
