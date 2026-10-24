@@ -1,6 +1,7 @@
 // `Class.isAssignableFrom` of class values that are not class literals: a registry that accepts
 // only the classes below its base class, as a multimap keyed by class does, a filter by a class
-// parameter, and the rules for interfaces, enums, boxes, arrays and primitive types.
+// parameter, and the rules for interfaces, enums, boxes, arrays and primitive types; and
+// `asSubclass` of a class parameter, as a loader of plugins by a supertype that it is given does.
 public class ClassAssignability {
     interface Shape {}
 
@@ -66,6 +67,24 @@ public class ClassAssignability {
         return classes[i];
     }
 
+    static final StringBuilder order = new StringBuilder();
+
+    static <C> Class<C> traced(String step, Class<C> c) {
+        order.append(step);
+        return c;
+    }
+
+    static <T> String narrow(Class<?> c, Class<T> to) {
+        try {
+            Class<? extends T> narrowed = traced("c", c).asSubclass(traced("to", to));
+            return "as " + narrowed.getSimpleName();
+        } catch (ClassCastException e) {
+            return "cast: " + e.getMessage();
+        } catch (NullPointerException e) {
+            return "null";
+        }
+    }
+
     public static void main(String[] args) {
         Registry shapes = new Registry(Shape.class);
         Registry named = new Registry(Named.class);
@@ -93,6 +112,10 @@ public class ClassAssignability {
         System.out.println(Number.class.isAssignableFrom(Integer.class) + " " + Number.class.isAssignableFrom(String.class)
                 + " " + Enum.class.isAssignableFrom(Suit.class) + " " + Suit.class.isAssignableFrom(Suit.SPADES.getClass()));
         Class<?> none = args.length > 5 ? String.class : null;
+        System.out.println(narrow(Ring.class, Circle.class) + ", " + narrow(Suit.class, Named.class)
+                + ", " + narrow(Square.class, Circle.class) + ", " + narrow(int.class, Object.class)
+                + ", " + narrow(Integer.class, Comparable.class) + ", " + narrow(none, Shape.class)
+                + ", " + narrow(Ring.class, none) + " " + order);
         try {
             System.out.println(Shape.class.isAssignableFrom(none));
         } catch (NullPointerException e) {

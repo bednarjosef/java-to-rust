@@ -347,6 +347,7 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::LineSeparator
             | Native::SystemProperty(_)
             | Native::Getenv
+            | Native::Environ
             | Native::TotalMemory
             | Native::FreeMemory
             | Native::MaxMemory

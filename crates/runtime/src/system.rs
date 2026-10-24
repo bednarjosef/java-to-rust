@@ -18,6 +18,28 @@ pub fn getenv(name: &crate::Wtf8) -> Option<crate::JString> {
     std::env::var_os(name).map(|value| value.to_string_lossy().into_owned().into())
 }
 
+/// The entries of the environment the program runs in, as the JVM reads them for
+/// `System.getenv()`: each `name=value` as the C library's `environ` has it, followed by a zero
+/// byte, in its order. The patch of `ProcessEnvironment` splits them (`environ0`).
+pub fn environ() -> Vec<i8> {
+    unsafe extern "C" {
+        static environ: *const *const std::ffi::c_char;
+    }
+    let mut bytes = Vec::new();
+    // SAFETY: `environ` is a null-terminated array of C strings; a translated program never
+    // changes its environment, so nothing writes the array while it is read.
+    unsafe {
+        let mut entry = environ;
+        while !entry.is_null() && !(*entry).is_null() {
+            let text = std::ffi::CStr::from_ptr(*entry).to_bytes();
+            bytes.extend(text.iter().map(|&b| b as i8));
+            bytes.push(0);
+            entry = entry.add(1);
+        }
+    }
+    bytes
+}
+
 /// The value of a system property that depends on the machine or the run (the translation fixes
 /// the others, see `lower::system`).
 pub fn system_property(key: &str) -> crate::JString {

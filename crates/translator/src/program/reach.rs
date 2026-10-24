@@ -251,6 +251,13 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.security.PrivilegedAction",
     "java.security.PrivilegedActionException",
     "java.security.PrivilegedExceptionAction",
+    // A permission, which library code makes to check it, and the exception that the
+    // translator's `AccessController.checkPermission` throws for every permission
+    // (`REDIRECTED_CALLS`): plain classes, with nothing of a security manager's.
+    "java.security.AccessControlException",
+    "java.security.BasicPermission",
+    "java.security.Guard",
+    "java.security.Permission",
     // Plain interfaces that library code implements with classes of its own: abstract methods,
     // default methods over them and constants, nothing that the JVM or reflection gives. A class
     // of the program implements them as it would an interface of its own; what makes their
@@ -1420,6 +1427,19 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
             "<T>(java.security.PrivilegedExceptionAction<T>)T",
         ),
         ("java.lang.TranslatedAccessController", "doPrivilegedWithCombiner"),
+    ),
+    // The whole environment, which `System`, a class of the runtime's, gets from the JDK's
+    // `ProcessEnvironment`, patched to read the environment from the runtime
+    // (`java/patches/java/lang/ProcessEnvironment.java`).
+    (
+        ("java.lang.System", "getenv", "()java.util.Map<java.lang.String,java.lang.String>"),
+        ("java.lang.ProcessEnvironment", "getenv"),
+    ),
+    // A check of a permission, which the JDK, having no security manager, fails for every
+    // permission with an `AccessControlException`.
+    (
+        ("java.security.AccessController", "checkPermission", "(java.security.Permission)void"),
+        ("java.lang.TranslatedAccessController", "checkPermission"),
     ),
     // The default file system, whose provider a property could name and reflection create (the
     // property is not set in a translated program, see `lower::system`), and which the JDK finds

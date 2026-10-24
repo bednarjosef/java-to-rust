@@ -129,6 +129,10 @@ impl<'a> Gen<'a> {
                 call(self, "reallocate_native", vec![address, bytes])
             }
             Native::PageSize => call(self, "page_size", vec![]),
+            Native::Environ => {
+                let entries = format!("{}()", self.runtime("environ"));
+                Code::atom(format!("{}({entries})", self.array_maker("from_vec", ty)))
+            }
             Native::FreeNative => {
                 let address = self.value(&args[0], Type::Long).text;
                 call(self, "free_native", vec![address])

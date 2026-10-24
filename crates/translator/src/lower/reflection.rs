@@ -124,18 +124,25 @@ impl<'t> Lowering<'t> {
         let params = self.param_types(resolved)?;
         let args: Vec<Node<'t>> = node.list("arguments").collect();
         let value = self.expr(receiver)?;
+        // `c.asSubclass(of)`, which Java answers with `of.isAssignableFrom(c)`, evaluating `c`
+        // and then `of`: `{ Class c = ..; Class o = ..; yield subclass(c, o.isAssignableFrom(c)); }`,
+        // with no local for a class literal `of`.
         if name == "asSubclass" {
             let [of] = args[..] else { return unsupported(node, "this `asSubclass`") };
             let local = self.fresh_name("class");
             let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
-            // `of.isAssignableFrom(c)`, with `c` in its local, so evaluated first, as in Java.
+            let mut body =
+                vec![Stmt::Local { ty: Type::JavaClass, name: local.clone(), init: Some(value), pos }];
             let assignable = if super::classes::is_literal(of) {
                 self.literal_assignable_from(node, of, var())?
             } else {
                 let of = self.expr(of)?;
                 if !matches!(of.ty, Type::JavaClass | Type::Null) {
-                    return unsupported(node, "`asSubclass` of anything but a class");
+                    return unsupported(node, "this `asSubclass`");
                 }
+                let of_local = self.fresh_name("of");
+                body.push(Stmt::Local { ty: Type::JavaClass, name: of_local.clone(), init: Some(of), pos });
+                let of = self.synth(ExprKind::Var(of_local), pos, Type::JavaClass);
                 ExprKind::Builtin(Builtin::ClassMethod(ClassOp::IsAssignableFrom), vec![of, var()])
             };
             let assignable = self.synth(assignable, pos, Type::Boolean);
@@ -144,10 +151,7 @@ impl<'t> Lowering<'t> {
                 args: vec![var(), assignable],
                 resolved: Some(resolved),
             };
-            let body = vec![
-                Stmt::Local { ty: Type::JavaClass, name: local.clone(), init: Some(value), pos },
-                Stmt::Yield(self.synth(call, pos, Type::JavaClass)),
-            ];
+            body.push(Stmt::Yield(self.synth(call, pos, Type::JavaClass)));
             return Ok(Some(block(self, pos, body)));
         }
         let mut call_args = vec![value];

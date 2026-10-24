@@ -90,12 +90,9 @@ impl<'t> Lowering<'t> {
             ("java.security.SecureRandom", "getSeed") if symbol.ty == "(int)byte[]" => Native::SecureSeed,
             ("java.lang.System", "lineSeparator") => Native::LineSeparator,
             // The environment the program runs in, as Java reads it. `getenv()`, a map of all of
-            // it, is not translated yet.
+            // it, is the JDK's `ProcessEnvironment.getenv()` (`program::REDIRECTED_CALLS`).
             ("java.lang.System", "getenv") if symbol.ty == "(java.lang.String)java.lang.String" => {
                 Native::Getenv
-            }
-            ("java.lang.System", "getenv") => {
-                return unsupported(node, "`System.getenv()`, the whole environment");
             }
             ("java.lang.Runtime", "availableProcessors") if on_runtime => Native::AvailableProcessors,
             ("java.lang.Runtime", "totalMemory") if on_runtime => Native::TotalMemory,

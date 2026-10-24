@@ -61,6 +61,9 @@ pub enum Native {
     SystemProperty(&'static str),
     /// `System.getenv(name)`: the variable of the environment the program runs in, or null.
     Getenv,
+    /// The patched `ProcessEnvironment.environ0()`: every entry of the environment the program
+    /// runs in, each ending in a zero byte (`java_runtime::environ`).
+    Environ,
     /// `Runtime.getRuntime().totalMemory()`, `freeMemory()` and `maxMemory()`.
     TotalMemory,
     FreeMemory,
@@ -364,6 +367,9 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         }
         ("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String") => Native::SystemGmtOffsetId,
         ("jdk.internal.misc.CDS", "getCDSConfigStatus", "()int") => Native::CdsConfigStatus,
+        // The entries of the environment, which the patch of `ProcessEnvironment` splits as the
+        // JVM's `environ()` does (`java/patches/java/lang/ProcessEnvironment.java`).
+        ("java.lang.ProcessEnvironment", "environ0", "()byte[]") => Native::Environ,
         ("java.lang.reflect.Array", "newArray", "(java.lang.Class<?>,int)java.lang.Object") => {
             Native::ReflectNewArray
         }
