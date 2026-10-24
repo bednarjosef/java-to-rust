@@ -15,14 +15,15 @@
 //! (an object, or a free slot that a thread holds) and a bit per slot for marking.
 //!
 //! **Allocation** takes a slot from the calling thread's list of free slots of its size, a few
-//! instructions. A freed slot is zeroed and goes on the list of the thread that frees it. When a
-//! list is empty, the thread takes all the untaken slots of a block of that size under the heap's
-//! lock. Every untaken slot is zero, so memory is handed out zeroed.
+//! instructions. A freed slot goes on the list of the thread that frees it. When a list is empty,
+//! the thread takes all the untaken slots of a block of that size under the heap's lock. A slot
+//! that may hold pointers is zeroed as it is handed out, so that no old word in it keeps an object
+//! alive; a pointer-free one only for `alloc_zeroed`.
 //!
 //! **Collection** runs when the program has taken half as many bytes as were alive after the last
 //! one (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share). It stops every other thread
 //! (with `SIGPWR`; each records where its stack is and waits), marks every slot reachable from the
-//! roots, and zeroes and frees the taken slots left unmarked. With a large heap, helper threads
+//! roots, and frees the taken slots left unmarked. With a large heap, helper threads
 //! mark and sweep alongside (see "Marking"). The roots are scanned conservatively: any aligned word that points into a
 //! taken slot keeps it, which makes interior pointers and pointers in registers work. They are
 //! - the stacks of the threads (from the stack pointer recorded when it stopped, which is below
@@ -605,7 +606,7 @@ fn unregister(lists: &Lists) {
     let _ = ENTRY.try_with(|e| e.set(NO_ENTRY));
 }
 
-/// Marks a zeroed slot untaken, so that its block's next refill hands it out again.
+/// Marks a slot untaken, so that its block's next refill hands it out again.
 fn untake(h: &mut Heap, p: usize) {
     let b = (p - h.base) >> BLOCK_SHIFT;
     let start = h.block_address(b);
@@ -683,20 +684,28 @@ unsafe impl GlobalAlloc for Allocator {
             return allocate_large(layout);
         };
         let class = index * 2 + (layout.align() < 8) as usize;
-        if let Ok(p) = LISTS.try_with(|lists| {
-            let head = lists.heads[class].get();
-            if head.is_null() {
-                return if lists.ended.get() { allocate_without_lists(class) } else { refill(lists, class) };
-            }
-            let next = unsafe { (head as *mut *mut u8).read() };
-            lists.heads[class].set(next);
-            lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
-            unsafe { (head as *mut *mut u8).write(ptr::null_mut()) };
-            head
-        }) {
-            return p;
+        let p = LISTS
+            .try_with(|lists| {
+                let head = lists.heads[class].get();
+                if head.is_null() {
+                    return if lists.ended.get() {
+                        allocate_without_lists(class)
+                    } else {
+                        refill(lists, class)
+                    };
+                }
+                let next = unsafe { (head as *mut *mut u8).read() };
+                lists.heads[class].set(next);
+                lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
+                head
+            })
+            .unwrap_or_else(|_| allocate_without_lists(class));
+        // A slot that may hold pointers is zeroed whole as it is handed out, so that no old word
+        // in a part the program does not write keeps an object alive.
+        if layout.align() >= 8 {
+            unsafe { ptr::write_bytes(p, 0, SIZES[index] as usize) };
         }
-        allocate_without_lists(class)
+        p
     }
 
     #[inline]
@@ -707,7 +716,6 @@ unsafe impl GlobalAlloc for Allocator {
         };
         let class = index * 2 + (layout.align() < 8) as usize;
         let size = SIZES[index] as usize;
-        unsafe { ptr::write_bytes(p, 0, size) };
         let kept = LISTS.try_with(|lists| {
             let bytes = lists.bytes[class].get();
             if bytes >= LIST_MAX_BYTES || lists.entry.get() == NO_ENTRY {
@@ -726,8 +734,12 @@ unsafe impl GlobalAlloc for Allocator {
 
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // Memory is handed out zeroed.
-        unsafe { self.alloc(layout) }
+        let p = unsafe { self.alloc(layout) };
+        // A slot that may hold pointers, and a large allocation, are handed out zeroed already.
+        if layout.align() < 8 && size_index(layout.size(), layout.align()).is_some() {
+            unsafe { ptr::write_bytes(p, 0, layout.size()) };
+        }
+        p
     }
 
     #[inline]
@@ -741,7 +753,8 @@ unsafe impl GlobalAlloc for Allocator {
         };
         if same {
             if new_size < layout.size() {
-                // The bytes past the new end are zeroed, as an untaken slot's are.
+                // The bytes past the new end are zeroed, as at allocation: no old word there
+                // keeps an object alive.
                 unsafe { ptr::write_bytes(p.add(new_size), 0, layout.size() - new_size) };
             }
             return p;
@@ -1544,7 +1557,7 @@ fn sweep(h: &mut Heap, helpers: usize) {
 
 /// Sweeps chunks of blocks until none are left (see `SWEEP_NEXT`).
 fn sweep_share() {
-    let (base, meta) = (BASE.load(Ordering::Acquire), META.load(Ordering::Acquire));
+    let meta = META.load(Ordering::Acquire);
     let top = SWEEP_TOP.load(Ordering::Acquire);
     let mut alive = 0;
     loop {
@@ -1553,31 +1566,24 @@ fn sweep_share() {
             break;
         }
         for b in from..(from + SWEEP_CHUNK).min(top) {
-            alive += sweep_block(base, unsafe { meta.add(b) }, b);
+            alive += sweep_block(unsafe { meta.add(b) });
         }
     }
     SWEEP_ALIVE.fetch_add(alive, Ordering::AcqRel);
 }
 
-/// Sweeps block `b`, described by `m`: zeroes and frees the dead slots of a small block, records
+/// Sweeps the block described by `m`: frees the dead slots of a small block, records
 /// what lives (`live`, `untaken`), and clears the marks for the next collection. Returns the
 /// bytes alive in a small block.
-fn sweep_block(base: usize, m: *mut Meta, b: usize) -> usize {
+fn sweep_block(m: *mut Meta) -> usize {
     let m = unsafe { &mut *m };
     let alive = match m.kind {
         SMALL => {
-            let start = base + (b << BLOCK_SHIFT);
             let size = m.size as usize;
             let mut live = 0u32;
             let mut untaken = false;
             for w in 0..(m.slots as usize).div_ceil(64) {
                 let dead = m.taken[w] & !m.marks[w];
-                let mut bits = dead;
-                while bits != 0 {
-                    let slot = w * 64 + bits.trailing_zeros() as usize;
-                    unsafe { ptr::write_bytes((start + slot * size) as *mut u8, 0, size) };
-                    bits &= bits - 1;
-                }
                 m.taken[w] &= !dead;
                 live += m.taken[w].count_ones();
                 let valid = if (w + 1) * 64 <= m.slots as usize {
