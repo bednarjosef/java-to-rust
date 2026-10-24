@@ -3995,7 +3995,7 @@ fn an_interface_is_an_enum_over_its_implementors() {
         &[
             "enum ShapeView<'a> {\n    Circle(&'a Arc<Circle>) = 1,\n    Rect(&'a Arc<RectFields>) = 2,\n    Square(&'a Arc<Square>) = 3,\n    Color(&'a Color) = 4,\n}",
             "            3 => { let o: &Arc<Square> = unsafe { self.0.as_pointer() }; o.base.area() }\n            4 => { let o: &Color = unsafe { self.0.as_value() }; (*o).area() }",
-            "Shape::Circle(Arc::new(Circle::new(1.0))), Shape::Rect(r.clone())",
+            "Shape::Circle(slot_2.put(Circle::new(1.0))), Shape::Rect(r.clone())",
             "&s == &Shape::Rect(r.clone())",
         ],
     );
@@ -4047,7 +4047,7 @@ fn an_interface_with_one_implementor_is_that_class() {
     // body ignores.
     assert_contains(
         &rust,
-        &["let n = slot_1.put(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
+        &["let n = slot_4.put(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
     );
     assert_lacks(&rust, &["enum Named"]);
 }
@@ -4056,7 +4056,7 @@ fn an_interface_with_one_implementor_is_that_class() {
 fn a_class_whose_subclasses_never_become_its_values_is_not_an_enum() {
     let rust = translate(INTERFACES);
     // A `Square` is a `Shape` but never a `Rect`, so a `Rect` is always a `Rect` object.
-    assert_contains(&rust, &["let r = Arc::new(RectFields::new(2.0, 3.0));", "java::Double(r.area())"]);
+    assert_contains(&rust, &["let r = slot_1.put(RectFields::new(2.0, 3.0));", "java::Double(r.area())"]);
     assert_lacks(&rust, &["enum Rect"]);
 }
 
