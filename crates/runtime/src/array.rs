@@ -337,12 +337,20 @@ fn out_of_bounds(len: usize, i: i32) -> ! {
 }
 
 /// `position` where the program observes the `ArrayIndexOutOfBoundsException`.
+#[inline]
 pub(crate) fn try_position(len: usize, i: i32) -> Result<usize, Exception> {
     if (i as usize) < len {
         return Ok(i as usize);
     }
+    Err(index_out_of_bounds(len, i))
+}
+
+/// The `ArrayIndexOutOfBoundsException` of index `i` in an array of `len` elements.
+#[cold]
+#[inline(never)]
+fn index_out_of_bounds(len: usize, i: i32) -> Exception {
     let message = format!("Index {i} out of bounds for length {len}");
-    Err(Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))
+    Exception::new("java.lang.ArrayIndexOutOfBoundsException", message)
 }
 
 /// `new T[len]` where the program observes the `NegativeArraySizeException` of a negative length.
@@ -379,12 +387,14 @@ pub fn get<T: Clone>(a: &impl Elements<T>, i: i32) -> T {
 }
 
 /// `a[i]` where the program observes the `ArrayIndexOutOfBoundsException`.
+#[inline]
 pub fn try_get<T: Clone>(a: &impl Elements<T>, i: i32) -> Result<T, Exception> {
     let items = a.items();
     Ok(items[try_position(items.len(), i)?].clone())
 }
 
 /// `a[i] = v` where the program observes the `ArrayIndexOutOfBoundsException`.
+#[inline]
 pub fn try_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
     let mut items = a.items_mut();
     let i = try_position(items.len(), i)?;
