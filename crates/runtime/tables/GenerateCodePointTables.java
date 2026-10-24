@@ -7,7 +7,8 @@ import java.util.function.IntUnaryOperator;
 
 /**
  * Writes the two tables of the code points above U+FFFF that GenerateTables does not cover, into
- * the directory given as the argument: code_point_tables.rs (categories and numeric values) and
+ * the directory given as the argument: code_point_tables.rs (categories and numeric values, and
+ * the non-spacing marks of every plane, for regular expressions' word boundaries) and
  * code_point_case_tables.rs (case and alphabetic properties). Each table is sorted runs of code
  * points, so a range of letters or of one case mapping is one entry. Everything is read from the
  * JDK, so the tables are exact for the JDK that generates them.
@@ -37,6 +38,9 @@ public class GenerateCodePointTables {
 
         out.println("/// The code points whose numeric value is a fraction (`Character.getNumericValue` gives -2).");
         ranges(out, "FRACTIONS", c -> Character.getNumericValue(c) == -2);
+
+        out.println("/// Every code point, in the BMP too, of Unicode category Mn (`Character.NON_SPACING_MARK`).");
+        ranges(out, "NON_SPACING_MARKS", 0, c -> Character.getType(c) == Character.NON_SPACING_MARK);
         out.close();
 
         out = open(dir + "/code_point_case_tables.rs");
@@ -74,9 +78,14 @@ public class GenerateCodePointTables {
 
     /// Writes the runs of code points in the supplementary planes that satisfy `test`.
     static void ranges(PrintStream out, String name, IntPredicate test) {
+        ranges(out, name, FIRST, test);
+    }
+
+    /// Writes the runs of code points from `first` on that satisfy `test`.
+    static void ranges(PrintStream out, String name, int first, IntPredicate test) {
         out.println("pub(crate) static " + name + ": &[(u32, u32)] = &[");
         int start = -1;
-        for (int c = FIRST; c <= LAST + 1; c++) {
+        for (int c = first; c <= LAST + 1; c++) {
             boolean in = c <= LAST && test.test(c);
             if (in && start < 0) {
                 start = c;

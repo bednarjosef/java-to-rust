@@ -3652,12 +3652,12 @@ fn format_arguments_keep_their_java_types() {
 fn unsupported_regular_expressions_and_formats_are_rejected() {
     let cases = [
         (
-            "\"axb\".split(\"(?=x)\").length",
-            "lookaround, flags and named groups in the regular expression \"(?=x)\" not supported yet",
+            "\"axb\".split(\"(?<=x)\").length",
+            "lookbehind, flags and named groups in the regular expression \"(?<=x)\" not supported yet",
         ),
         (
-            "\"ab\".replaceAll(\"\\\\bb\", \"c\").length()",
-            "the escape \\b in the regular expression \"\\bb\" not supported yet",
+            "\"ab\".replaceAll(\"\\\\pLb\", \"c\").length()",
+            "the escape \\p in the regular expression \"\\pLb\" not supported yet",
         ),
         ("String.format(\"%tY\", 5L).length()", "dates in a format (%t) not supported yet: \"%tY\""),
     ];
