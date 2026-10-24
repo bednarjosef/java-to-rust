@@ -52,6 +52,12 @@ pub struct Reach {
     /// what their bodies use is not reached. Interfaces are left out, as the runtime's strings
     /// and boxes are objects of `CharSequence` and `Comparable` that no constructor shows.
     pub dormant: HashSet<MethodKey>,
+    /// Classes that are not live, which the `instanceof` of an `if` of reachable code tests for
+    /// (`instanceof_guard`): no object of theirs exists, so the `if`'s `then` branch never runs,
+    /// and neither reachability nor lowering takes it (`Reach::objectless_branch`). Like the
+    /// `dormant` methods, the branch is reached once the class is live. Interfaces are left out,
+    /// and so are exceptions and the standard classes, whose objects the runtime makes too.
+    pub without_objects: HashSet<String>,
     pub fields: HashSet<FieldKey>,
     /// Methods that reachable code calls but that are not among the sources: those of the
     /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing; and the
@@ -114,6 +120,13 @@ impl Reach {
     pub fn dormant(&self, class: &str, member: &Value) -> bool {
         let key = (class.to_string(), text(member, "name").to_string(), symbol_type(member).to_string());
         self.dormant.contains(&key)
+    }
+
+    /// Whether the `then` branch of the `if` statement `node` never runs, as the class its
+    /// condition tests for has no objects (`without_objects`).
+    pub fn objectless_branch(&self, node: &Value) -> bool {
+        !self.without_objects.is_empty()
+            && instanceof_guard(node).is_some_and(|class| self.without_objects.contains(&class))
     }
 }
 
@@ -898,6 +911,39 @@ pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
     }
     (archived_null_test(condition, true) || stub_null_test(condition, true) || always_true(condition))
         .then(|| then_branch(node))
+}
+
+/// The class that the condition of the `if` statement `node` tests a value to be an object of,
+/// when its `then` branch runs only if the value is: `x instanceof C` or `x instanceof C c`, alone
+/// or as an operand of `&&`. `None` when the test is of an array type or a record pattern, or
+/// when a pattern's variable could be in scope after the `if` (one with an `else` branch).
+pub fn instanceof_guard(node: &Value) -> Option<String> {
+    fn tested(condition: &Value) -> Option<&Value> {
+        match text(condition, "kind") {
+            "PARENTHESIZED" => tested(&condition["expression"]),
+            "CONDITIONAL_AND" => {
+                tested(&condition["leftOperand"]).or_else(|| tested(&condition["rightOperand"]))
+            }
+            "INSTANCE_OF" => Some(condition),
+            _ => None,
+        }
+    }
+    fn binds(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => text(value, "kind") == "BINDING_PATTERN" || map.values().any(binds),
+            Value::Array(items) => items.iter().any(binds),
+            _ => false,
+        }
+    }
+    if text(node, "kind") != "IF" || !node["elseStatement"].is_null() && binds(&node["condition"]) {
+        return None;
+    }
+    let test = tested(&node["condition"])?;
+    if text(&test["pattern"], "kind") == "DECONSTRUCTION_PATTERN" {
+        return None;
+    }
+    let class = strip_arguments(text(&test["type"], "javaType"));
+    (!class.is_empty() && !class.ends_with(']')).then_some(class)
 }
 
 /// Whether `node` is `Runtime.version().feature()`, the release of the JDK, which the translation
@@ -1778,6 +1824,9 @@ enum Item {
     Init(String),
     Method(MethodKey),
     Field(FieldKey),
+    /// The `then` branch of an `if` that waited for the class it tests for to be live
+    /// (`Walk::branches`).
+    Branch(usize),
 }
 
 /// The declarations of the program, and the worklist over them.
@@ -1851,17 +1900,26 @@ struct Walk<'t> {
     strings: HashSet<String>,
     class_literals: HashSet<String>,
     reflected_keys: HashSet<(String, String)>,
-    /// The service providers of the sources, and the services that
-    /// `ServiceLoader.load` of reachable code loads: by a class literal, or `None` for a
-    /// `Class` value, which may be any service whose class literal reachable code has
-    /// (`reflection.rs`).
+    /// The service providers of the sources, and the `Class` values that `ServiceLoader.load` of
+    /// reachable code loads services of (`reflection.rs`).
     providers: Vec<super::modules::ServiceProvider>,
-    service_loads: BTreeSet<Option<String>>,
+    service_loads: BTreeSet<reflection::ClassValue>,
+    /// The `Class` values that reachable calls pass each method's parameter, by method and
+    /// position; the methods that a method reference of reachable code names; and the methods
+    /// that reflection finds (`reflection.rs`).
+    class_values: HashMap<(MethodKey, usize), BTreeSet<reflection::ClassValue>>,
+    referenced: HashSet<MethodKey>,
+    reflected_methods: HashSet<MethodKey>,
     /// The providers found whose classes no unit declares yet, so that what makes them
     /// (`load_services`) is reached once a later round declares them.
     unmade: BTreeSet<String>,
     /// With `JAVA_TO_RUST_REACH_WHY`, the item whose visit first made each item reachable.
     why: Option<HashMap<Item, Item>>,
+    /// The `then` branches of the `if`s that test for a class without objects
+    /// (`Reach::without_objects`), each with the method and the class whose code it is, and
+    /// those that wait, by that class.
+    branches: Vec<(&'t Value, Option<MethodKey>, Option<String>)>,
+    waiting_branches: HashMap<String, Vec<usize>>,
 }
 
 impl<'t> Walk<'t> {
@@ -1893,6 +1951,10 @@ impl<'t> Walk<'t> {
                         format!("method {}.{}{}{live}", m.0, m.1, m.2)
                     }
                     Item::Field(f) => format!("field {}.{}", f.0, f.1),
+                    Item::Branch(b) => match &self.branches[*b].1 {
+                        Some(m) => format!("branch of an instanceof in {}.{}{}", m.0, m.1, m.2),
+                        None => "branch of an instanceof in an initializer".to_string(),
+                    },
                 };
                 eprintln!("  {line}");
                 match why.get(&item) {
@@ -2096,6 +2158,7 @@ impl<'t> Walk<'t> {
                     Item::Init(class) => self.init(class),
                     Item::Method(key) => self.method(key),
                     Item::Field(key) => self.field(key),
+                    Item::Branch(index) => self.branch(index),
                 }
                 if let (Some(why), Some(current)) = (&mut self.why, current) {
                     for pushed in &self.work[before.min(self.work.len())..] {
@@ -2269,6 +2332,40 @@ impl<'t> Walk<'t> {
         self.classes.get(class).is_some_and(|(decl, _)| text(decl, "kind") == "ENUM")
     }
 
+    /// The class that the `if` statement `node` tests for (`instanceof_guard`), when it has no
+    /// objects yet and its objects can only come from its constructors, which reachability sees:
+    /// `has_objects`, and neither an exception nor a standard class, which the runtime makes
+    /// objects of, nor one whose supertypes are not all declared.
+    fn objectless(&self, node: &Value) -> Option<String> {
+        let class = instanceof_guard(node)?;
+        if self.reach.live.contains(&class) || !self.has_objects(&class) {
+            return None;
+        }
+        let mut work = vec![class.clone()];
+        while let Some(c) = work.pop() {
+            if c == "java.lang.Throwable" || crate::lower::is_standard(&c) {
+                return None;
+            }
+            match self.supertypes.get(&c) {
+                Some(supertypes) => work.extend(supertypes.iter().cloned()),
+                None if outside(&c) => {}
+                None => return None,
+            }
+        }
+        Some(class)
+    }
+
+    /// The `then` branch of an `if` that waited for the class it tests for to be live, scanned as
+    /// part of the code it is in.
+    fn branch(&mut self, index: usize) {
+        let (node, method, class) = self.branches[index].clone();
+        let outer = std::mem::replace(&mut self.scanning, method);
+        let outer_class = std::mem::replace(&mut self.lookup_class, class);
+        self.scan(node);
+        self.scanning = outer;
+        self.lookup_class = outer_class;
+    }
+
     /// A class whose objects are created: it is live, and its instance initializers run.
     fn instantiate(&mut self, class: String) {
         if !self.reach.instantiated.insert(class.clone()) {
@@ -2353,6 +2450,11 @@ impl<'t> Walk<'t> {
             for overrider in self.waiting.remove(&class).unwrap_or_default() {
                 self.work.push(Item::Method(overrider));
             }
+            if self.reach.without_objects.remove(&class) {
+                for branch in self.waiting_branches.remove(&class).unwrap_or_default() {
+                    self.work.push(Item::Branch(branch));
+                }
+            }
             work.extend(self.supertypes.get(&class).cloned().unwrap_or_default());
         }
     }
@@ -2401,7 +2503,8 @@ impl<'t> Walk<'t> {
     /// by dispatch once the class is instantiated. (The body of an enum constant is not such a
     /// class, see `local_classes`, and is scanned with its constant.) Annotations are skipped:
     /// without reflection they do nothing at run time. So is the branch of an `if` or a `?:`
-    /// that never runs (`live_branch`).
+    /// that never runs (`live_branch`), and the `then` branch of an `if` that tests for a class
+    /// without objects waits for the class to have some (`objectless`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
@@ -2426,6 +2529,16 @@ impl<'t> Walk<'t> {
             // lowering drops: a flag's class need not exist.
             Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
                 self.scan(branch);
+            }
+            // The `then` branch of an `if` that tests for a class without objects waits until
+            // the class has some (`Reach::without_objects`).
+            Value::Object(_) if let Some(class) = self.objectless(value) => {
+                self.scan(&value["condition"]);
+                self.scan(&value["elseStatement"]);
+                let branch = (&value["thenStatement"], self.scanning.clone(), self.lookup_class.clone());
+                self.waiting_branches.entry(class.clone()).or_default().push(self.branches.len());
+                self.branches.push(branch);
+                self.reach.without_objects.insert(class);
             }
             Value::Object(_) if let Some((array, length)) = component_array(value) => {
                 self.scan(array);
@@ -3076,6 +3189,104 @@ mod tests {
         assert!(reach.methods.contains(&key("Used", "run")), "{reach:?}");
         assert!(!reach.methods.contains(&key("Main$1", "unused")), "{reach:?}");
         assert!(!reach.classes.contains("Unused"), "{reach:?}");
+    }
+
+    #[test]
+    fn an_instanceof_of_a_class_without_objects_guards_a_branch_that_waits_for_them() {
+        // `if (x instanceof Target) Inside.run();`, then `new Sub()` of `Sub extends Target`
+        // when `creates`.
+        let program = |kind: &str, creates: bool| {
+            let test = json!({"kind": "INSTANCE_OF", "expression": {"kind": "IDENTIFIER", "name": "x"},
+                "type": {"kind": "IDENTIFIER", "javaType": "Target", "symbol": {"kind": kind, "type": "Target"}}});
+            let guarded = json!({"kind": "IF", "condition": {"kind": "PARENTHESIZED", "expression": test},
+                "thenStatement": call("Inside", "run")});
+            let created = json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "NEW_CLASS",
+                "symbol": {"kind": "CONSTRUCTOR", "owner": "Sub", "name": "<init>", "type": "()void"}}});
+            let constructor = json!({"kind": "METHOD", "name": "<init>", "symbol": {"type": "()void"},
+                "body": {"kind": "BLOCK", "statements": []}});
+            let main = if creates { vec![guarded, created] } else { vec![guarded] };
+            json!({"typeDecls": [
+                class("Main", &[("main", main)]),
+                {"kind": kind, "symbol": {"type": "Target"}, "members": []},
+                {"kind": "CLASS", "symbol": {"type": "Sub"}, "members": [constructor],
+                 "extendsClause": {"kind": "IDENTIFIER", "symbol": {"type": "Target"}}},
+                class("Inside", &[("run", vec![])]),
+            ]})
+        };
+        let inside = ("Inside".to_string(), "run".to_string(), "()void".to_string());
+        let without = reach(&[&program("CLASS", false)], "Main").unwrap();
+        assert!(!without.methods.contains(&inside), "{without:?}");
+        assert!(without.classes.contains("Target"), "{without:?}");
+        assert_eq!(without.without_objects, HashSet::from(["Target".to_string()]));
+        let with = reach(&[&program("CLASS", true)], "Main").unwrap();
+        assert!(with.methods.contains(&inside), "{with:?}");
+        assert!(with.without_objects.is_empty(), "{with:?}");
+        // An interface's objects may come from classes reachability does not see.
+        let interface = reach(&[&program("INTERFACE", false)], "Main").unwrap();
+        assert!(interface.methods.contains(&inside), "{interface:?}");
+    }
+
+    #[test]
+    fn a_service_load_of_a_parameter_loads_the_services_its_callers_pass() {
+        let literal = |class: &str| {
+            json!({"kind": "MEMBER_SELECT", "identifier": "class", "javaType": format!("java.lang.Class<{class}>"),
+                "expression": {"kind": "IDENTIFIER", "javaType": class, "symbol": {"kind": "CLASS", "type": class}}})
+        };
+        let parameter = json!({"kind": "IDENTIFIER", "name": "c", "javaType": "java.lang.Class<capture#1 of ?>",
+            "symbol": {"kind": "PARAMETER", "name": "c"}});
+        let invoke = |owner: &str, name: &str, ty: &str, argument: Value| {
+            json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": owner, "name": name, "type": ty, "static": true},
+                "arguments": [argument]}})
+        };
+        let ty = "(java.lang.Class<?>)void";
+        // `Loader.load(Shape.class)` and `Other.class` as a value, then `Loader.load(Class<?> c)`
+        // is `Loader.loads(c)`, which is `ServiceLoader.load(c)`, after `c = c` if `assigns`.
+        let program = |assigns: bool| {
+            let method = |name: &str, mut statements: Vec<Value>| {
+                if assigns && name == "loads" {
+                    statements.insert(0, json!({"kind": "EXPRESSION_STATEMENT", "expression":
+                        {"kind": "ASSIGNMENT", "variable": parameter.clone(), "expression": parameter.clone()}}));
+                }
+                json!({"kind": "METHOD", "name": name, "symbol": {"type": ty, "static": true},
+                    "parameters": [{"kind": "VARIABLE", "name": "c"}],
+                    "body": {"kind": "BLOCK", "statements": statements}})
+            };
+            let constructor = json!({"kind": "METHOD", "name": "<init>", "symbol": {"type": "()void"},
+                "body": {"kind": "BLOCK", "statements": []}});
+            let load = "(java.lang.Class<S>)java.util.ServiceLoader<S>";
+            let main = vec![
+                invoke("Loader", "load", ty, literal("Shape")),
+                invoke("Sink", "take", ty, literal("Other")),
+            ];
+            json!({"typeDecls": [
+                class("Main", &[("main", main)]),
+                {"kind": "CLASS", "symbol": {"type": "Loader"}, "members": [
+                    method("load", vec![invoke("Loader", "loads", ty, parameter.clone())]),
+                    method("loads", vec![invoke("java.util.ServiceLoader", "load", load, parameter.clone())]),
+                ]},
+                {"kind": "CLASS", "symbol": {"type": "Sink"}, "members": [
+                    {"kind": "METHOD", "name": "take", "symbol": {"type": ty, "static": true},
+                     "parameters": [{"kind": "VARIABLE", "name": "c"}], "body": {"kind": "BLOCK", "statements": []}}]},
+                {"kind": "INTERFACE", "symbol": {"type": "Shape"}, "members": []},
+                {"kind": "INTERFACE", "symbol": {"type": "Other"}, "members": []},
+                {"kind": "CLASS", "symbol": {"type": "Circle"}, "members": [constructor.clone()]},
+                {"kind": "CLASS", "symbol": {"type": "OtherImpl"}, "members": [constructor]},
+            ]})
+        };
+        let providers = vec![
+            ("Shape".to_string(), "Circle".to_string(), false),
+            ("Other".to_string(), "OtherImpl".to_string(), false),
+        ];
+        let loaded = |assigns: bool| {
+            let unit = program(assigns);
+            let mut rounds = Rounds::new("Main").with_providers(providers.clone());
+            rounds.add(&[&unit]).unwrap();
+            rounds.finish().services.into_keys().collect::<Vec<_>>()
+        };
+        assert_eq!(loaded(false), ["Shape"]);
+        // A parameter that the code assigns may be any class.
+        assert_eq!(loaded(true), ["Other", "Shape"]);
     }
 
     /// A pipeline in the shape of `java.util.stream.AbstractPipeline`: a `parallel` field that its
