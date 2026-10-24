@@ -53,7 +53,7 @@
 use super::object_values::{self, Flow, ObjectValues, STATIC};
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 mod known;
 
@@ -76,6 +76,9 @@ pub struct LiveMethods {
     /// The types whose statics code that a started thread runs may touch (`Class::thread_statics`):
     /// `None` when the program starts no thread, or the facts do not tell.
     pub thread_statics: Option<HashSet<usize>>,
+    /// The classes whose objects the receiver of each instance call that can run may be, over
+    /// every object of every class that runs the calling method (`Class::receivers`).
+    pub receivers: HashMap<ExprId, BTreeSet<usize>>,
 }
 
 impl LiveMethods {
@@ -116,6 +119,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
                 touched: HashSet::new(),
                 unresolved: Vec::new(),
                 thread_statics: None,
+                receivers: HashMap::new(),
             },
             built: HashSet::new(),
         }),
@@ -238,6 +242,7 @@ impl Walk<'_> {
                     touched: HashSet::new(),
                     unresolved: Vec::new(),
                     thread_statics: None,
+                    receivers: HashMap::new(),
                 },
                 built: HashSet::new(),
             }),
@@ -539,7 +544,15 @@ impl Walk<'_> {
             | ExprKind::MethodCall { args, .. }
             | ExprKind::ThisCall { args, .. }
             | ExprKind::SuperInit { args, .. } => {
-                for (target, c) in self.values.targets(self.class, m, ctx, x) {
+                let targets = self.values.targets(self.class, m, ctx, x);
+                if let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
+                    && !self.class.methods[*r].is_static
+                {
+                    let mut state = self.state.borrow_mut();
+                    let classes = state.live.receivers.entry(receiver.id).or_default();
+                    classes.extend(targets.iter().map(|&(_, c)| c));
+                }
+                for (target, c) in targets {
                     self.enter(target, c, m, Some(args));
                 }
             }

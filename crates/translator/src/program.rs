@@ -199,6 +199,8 @@ fn narrow(
         );
     }
     class.thread_statics = live.thread_statics.clone();
+    class.receivers =
+        live.receivers.iter().map(|(&id, classes)| (id, classes.iter().copied().collect())).collect();
     analysis::live_methods::prune(class, &live);
     (running, live.unresolved)
 }

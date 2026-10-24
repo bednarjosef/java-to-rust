@@ -56,6 +56,19 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
     numbers
 }
 
+/// The most classes a call's receiver may be of for the call to dispatch among them alone
+/// (`Need::Among`).
+const AMONG_MOST: usize = 4;
+
+/// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
+/// generation and every translation.
+pub(super) fn receiver_key(classes: &[usize]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    classes.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// An item of the enum of a type that the code being generated uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Need {
@@ -67,6 +80,10 @@ pub(super) enum Need {
     BaseMut(usize),
     /// The dispatcher on an enum for an override group (by group id).
     Dispatch(usize, usize),
+    /// The dispatcher on an enum for an override group whose objects are known to be of a few of
+    /// its classes, the set of a call's receiver in `Class::receivers` (by its `receiver_key`):
+    /// arms for those, and the whole dispatcher for any other.
+    Among(usize, usize, u64),
     /// A method whose body is emitted on the enum of its type.
     Body(usize),
     /// `to_<t>()` on the enum of a subtype `s`: the same object as a value of `t`, as `(s, t)`.
@@ -141,6 +158,10 @@ impl<'a> Gen<'a> {
             }
             Need::Narrow(s, _) => {
                 needs.insert(Need::Enum(s));
+            }
+            Need::Among(t, group, _) => {
+                needs.insert(Need::Enum(t));
+                needs.insert(Need::Dispatch(t, group));
             }
             Need::Body(i) => {
                 if let Home::Enum(t) = self.homes[i] {
@@ -1325,10 +1346,29 @@ impl<'a> Gen<'a> {
                 }
             });
         }
-        let name = self.dispatch_name(t, resolved);
+        let name = match self.among(t, receiver) {
+            Some(key) if self.enum_body(t, resolved).is_none() => {
+                let group = self.class.hierarchy.group_id(resolved);
+                self.need(Need::Among(t, group, key));
+                format!("{}_among_{key:016x}", self.group_names[&group])
+            }
+            _ => self.dispatch_name(t, resolved),
+        };
         let obj = self.object(receiver);
         let args = self.call_args(resolved, args).join(", ");
         Code::atom(format!("{obj}.{name}({args})"))
+    }
+
+    /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
+    /// points-to facts narrow them to a few of the enum's (`Class::receivers`): a call on it
+    /// dispatches among those, in a dispatcher small enough to inline, with the whole one for any
+    /// other class, so that a call whose receiver is of one class is a test of its number and a
+    /// call the compiler can inline.
+    fn among(&self, t: usize, receiver: &Expr) -> Option<u64> {
+        let set = self.class.receivers.get(&receiver.id)?;
+        let variants = self.enum_variants(t);
+        let among = set.iter().filter(|c| variants.contains(c)).count();
+        (among > 0 && among <= AMONG_MOST && among < variants.len()).then(|| receiver_key(set))
     }
 
     /// The implementations that the variants of the enum of `t` run for a call of `resolved`.
@@ -1350,22 +1390,33 @@ impl<'a> Gen<'a> {
     /// (`Throwable`'s `Exception`s for `Error`'s `construct<Name>` methods, see
     /// `analysis::whole_objects`).
     pub(super) fn dispatch_name(&self, t: usize, resolved: usize) -> String {
-        let h = &self.class.hierarchy;
-        let declared = self.class.methods[resolved].class;
-        if let [only] = self.enum_targets(t, resolved)[..]
-            && self.homes[only] == Home::Enum(t)
-            && self.same_ret(only, resolved)
-            && self
-                .enum_variants(t)
-                .into_iter()
-                .all(|c| h.implementation(resolved, c).is_some() || !h.is_subtype(c, declared))
-        {
+        if let Some(only) = self.enum_body(t, resolved) {
             self.need(Need::Body(only));
             return self.fn_names[only].clone();
         }
         let group = self.class.hierarchy.group_id(resolved);
         self.need(Need::Dispatch(t, group));
         self.group_names[&group].clone()
+    }
+
+    /// The one method that every variant of the enum of `t` runs for a call of `resolved`, where
+    /// its body is emitted on the enum itself, so that the call needs no dispatcher.
+    fn enum_body(&self, t: usize, resolved: usize) -> Option<usize> {
+        let h = &self.class.hierarchy;
+        let declared = self.class.methods[resolved].class;
+        match self.enum_targets(t, resolved)[..] {
+            [only]
+                if self.homes[only] == Home::Enum(t)
+                    && self.same_ret(only, resolved)
+                    && self
+                        .enum_variants(t)
+                        .into_iter()
+                        .all(|c| h.implementation(resolved, c).is_some() || !h.is_subtype(c, declared)) =>
+            {
+                Some(only)
+            }
+            _ => None,
+        }
     }
 
     /// A call of method `index`, emitted on the enum of a type or on a fields struct, from code
@@ -1484,11 +1535,14 @@ impl<'a> Gen<'a> {
         if variants.is_empty() {
             self.line(&format!("{vis}enum {view} {{}}"));
         } else {
+            // Each variant's discriminant is its class number, so that `view()` keeps the number
+            // it reads instead of mapping it to another, and its arms differ in nothing else.
+            self.line("#[repr(u16)]");
             self.line(&format!("{vis}enum {view}<'a> {{"));
             self.indent += 1;
             for (&c, short) in variants.iter().zip(&shorts) {
                 let payload = self.payload(c);
-                self.line(&format!("{short}(&'a {payload}),"));
+                self.line(&format!("{short}(&'a {payload}) = {},", self.class_tag(c)));
             }
             self.indent -= 1;
             self.line("}");
@@ -1506,7 +1560,8 @@ impl<'a> Gen<'a> {
                 Need::BaseMut(s) if s == t => self.base_fn(t, true),
                 Need::Convert(s, to) if s == t => self.convert_fn(to),
                 Need::Narrow(s, to) if s == t => self.narrow_fn(t, to),
-                Need::Dispatch(s, group) if s == t => self.dispatcher(t, group),
+                Need::Dispatch(s, group) if s == t => self.dispatcher(t, group, None),
+                Need::Among(s, group, key) if s == t => self.dispatcher(t, group, Some(key)),
                 Need::Body(i) if self.homes[i] == Home::Enum(t) => {
                     self.gap();
                     self.method(i);
@@ -1543,6 +1598,16 @@ impl<'a> Gen<'a> {
     /// variant's class, which reads it as `o`; a `match` of the empty view for an enum without
     /// variants.
     fn match_arms(&mut self, variants: &[usize], arm: &dyn Fn(&mut Self, usize) -> (String, bool)) {
+        self.match_arms_or(variants, None, arm)
+    }
+
+    /// `match_arms`, where an object of a class outside `variants` runs `otherwise`, if given.
+    fn match_arms_or(
+        &mut self,
+        variants: &[usize],
+        otherwise: Option<String>,
+        arm: &dyn Fn(&mut Self, usize) -> (String, bool),
+    ) {
         if variants.is_empty() {
             self.line("match self.view() {}");
             return;
@@ -1555,7 +1620,7 @@ impl<'a> Gen<'a> {
             })
             .collect();
         // The same call for every variant needs no `match`.
-        if arms.iter().all(|(_, text, uses)| !uses && *text == arms[0].1) {
+        if otherwise.is_none() && arms.iter().all(|(_, text, uses)| !uses && *text == arms[0].1) {
             self.line(&arms[0].1);
             return;
         }
@@ -1576,7 +1641,10 @@ impl<'a> Gen<'a> {
                 self.line(&format!("{tag} => {text},"));
             }
         }
-        self.line("tag => java::bad_tag(tag),");
+        match otherwise {
+            Some(text) => self.line(&format!("_ => {text},")),
+            None => self.line("tag => java::bad_tag(tag),"),
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -1697,7 +1765,7 @@ impl<'a> Gen<'a> {
 
     /// The dispatcher on the enum of `t` for an override group: each variant runs what its class
     /// runs for the method.
-    fn dispatcher(&mut self, t: usize, group: usize) {
+    fn dispatcher(&mut self, t: usize, group: usize, among: Option<u64>) {
         let h = &self.class.hierarchy;
         let mut chain = vec![t];
         chain.extend(h.ancestors(t));
@@ -1726,19 +1794,39 @@ impl<'a> Gen<'a> {
         let ret = self.ret_text(r);
         let args: Vec<String> = m.params.iter().map(|p| self.local(&p.name)).collect();
         let args = args.join(", ");
-        let name = self.group_names[&group].clone();
-        let variants = self.enum_variants(t);
+        let general = self.group_names[&group].clone();
+        let mut variants = self.enum_variants(t);
+        let name = match among {
+            Some(key) => {
+                let set = &self.receiver_sets[&key];
+                variants.retain(|c| set.contains(c));
+                format!("{general}_among_{key:016x}")
+            }
+            None => general.clone(),
+        };
         self.gap();
+        if among.is_some() {
+            self.line("#[inline]");
+        }
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
-        if let Some(call) = self.fields_call(t, r, &variants, &args) {
+        // Every object of the enum runs the call that `fields_call` writes, which an object
+        // outside the classes of `among` would not.
+        if among.is_none()
+            && let Some(call) = self.fields_call(t, r, &variants, &args)
+        {
             self.line(&call);
             self.indent -= 1;
             self.line("}");
             return;
         }
-        self.match_arms(&variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
+        let otherwise = among.map(|_| format!("self.{general}({args})"));
+        self.match_arms_or(&variants, otherwise, &|g: &mut Self, c| match g
+            .class
+            .hierarchy
+            .implementation(r, c)
+        {
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, &args);
                 (g.covariant_ret(i, r, text), uses)

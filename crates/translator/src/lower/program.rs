@@ -275,6 +275,7 @@ fn lower_into<'t>(
         thread_statics: None,
         element_classes: lowering.element_classes.take(),
         volatile_elements: lowering.volatile_elements.take(),
+        receivers: Default::default(),
     };
     Ok((class, lowering.real.clone(), failed))
 }
