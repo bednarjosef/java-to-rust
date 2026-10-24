@@ -32,9 +32,14 @@ owned, and that Rust therefore never freed, is found unreachable too.
 ## Allocation
 
 A thread takes a slot from its own list of free slots of that size: a few instructions. A slot
-freed by Rust is zeroed and goes on the list of the thread that frees it. When a list is empty,
-the thread takes all the untaken slots of a block of that size under the heap's lock. Every
-untaken slot is zero, so memory is handed out zeroed.
+freed by Rust goes on the list of the thread that frees it. When a list is empty, the thread
+takes all the untaken slots of a block of that size under the heap's lock. A slot that may hold
+pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
+program does not write (the spare capacity of a `Vec`), keeps anything alive; a slot of a
+pointer-free block is zeroed only for `alloc_zeroed`. Zeroing there rather than when a slot is
+freed touches memory the program is about to write anyway: zeroing dead slots in the sweep took
+0.8 s of the translated javac's 30 s on the Minecraft benchmark, mostly on cache lines nothing
+else touched; at allocation the sweep takes 11 ms and the run is 0.4 s faster.
 
 ## Collection
 
@@ -46,7 +51,7 @@ much as is alive instead took the translated javac on the Minecraft benchmark fr
 1. stops every other thread with a signal (`SIGPWR`); each records where its stack is and waits;
 2. marks every slot reachable from the roots, with an explicit stack, so a long chain of objects
    needs no recursion;
-3. sweeps: zeroes the taken slots left unmarked and frees them, clears the marks for the next
+3. sweeps: frees the taken slots left unmarked (clears their bits), clears the marks for the next
    collection, lists the blocks with free slots, and gives the memory of blocks with nothing
    alive back to the system (neighbouring ones in one call).
 

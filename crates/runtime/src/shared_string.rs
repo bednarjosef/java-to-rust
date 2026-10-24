@@ -21,13 +21,17 @@ use std::sync::{Mutex, OnceLock};
 /// A string with an identity: copies are the same object, `same_str` compares objects. Its text
 /// is WTF-8, as a `JString`'s.
 ///
-/// The object is the text's length in four bytes followed by the text, in the collected heap,
-/// and a `JStr` is its address: one word, copied without a count. Its alignment of four puts it
+/// The object is the text's length in four bytes, then its hash in four (0 until `hash_code`
+/// computes it, as Java's `String.hash`), then the text, in the collected heap, and a `JStr` is
+/// its address: one word, copied without a count. Its alignment of four puts it
 /// in a block that the collector does not scan for pointers. The top 16 bits of the address are
 /// ignored, as a `java::Arc`'s are, so a `java::Thin` holds a `JStr` where it lies.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct JStr(NonNull<u32>);
+
+/// Where the text starts in a string object: after its length and its hash.
+const TEXT: usize = 8;
 
 // The text never changes once made.
 unsafe impl Send for JStr {}
@@ -41,15 +45,16 @@ impl JStr {
     pub fn new(text: impl AsRef<Wtf8>) -> JStr {
         let bytes = text.as_ref().as_bytes();
         let len = u32::try_from(bytes.len()).expect("a string of less than 4 GB of text");
-        let layout = Layout::from_size_align(4 + bytes.len(), 4).expect("a string's size fits");
-        // The allocation has room for the length and the text, aligned for the length.
+        let layout = Layout::from_size_align(TEXT + bytes.len(), 4).expect("a string's size fits");
+        // The allocation has room for the length, the hash and the text, aligned for the length.
         unsafe {
             let p = alloc(layout);
             if p.is_null() {
                 handle_alloc_error(layout);
             }
             (p as *mut u32).write(len);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(4), bytes.len());
+            (p as *mut u32).add(1).write(0);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(TEXT), bytes.len());
             JStr(NonNull::new_unchecked(p as *mut u32))
         }
     }
@@ -64,7 +69,22 @@ impl JStr {
     fn bytes(&self) -> &[u8] {
         let header = self.header();
         // The object is the length and then that many bytes, alive while it is reachable.
-        unsafe { std::slice::from_raw_parts((header as *const u8).add(4), *header as usize) }
+        unsafe { std::slice::from_raw_parts((header as *const u8).add(TEXT), *header as usize) }
+    }
+
+    /// `hashCode()`: computed on first use and kept in the object, as Java keeps it. Threads that
+    /// compute it at once store the same value.
+    #[inline]
+    pub fn hash_code(&self) -> i32 {
+        // The object's second word is its hash, alive while the object is reachable.
+        let cached = unsafe { std::sync::atomic::AtomicI32::from_ptr(self.header().add(1) as *mut i32) };
+        let hash = cached.load(std::sync::atomic::Ordering::Relaxed);
+        if hash != 0 {
+            return hash;
+        }
+        let hash = crate::string::text_hash(self.as_wtf8());
+        cached.store(hash, std::sync::atomic::Ordering::Relaxed);
+        hash
     }
 
     /// The text, as a new plain string.

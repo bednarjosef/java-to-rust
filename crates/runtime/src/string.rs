@@ -545,8 +545,45 @@ pub fn equals_ignore_case(a: &Wtf8, b: &Wtf8) -> bool {
     length(a) == length(b) && compare_to_ignore_case(a, b) == 0
 }
 
-/// `s.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the code units, wrapping.
-pub fn string_hash(s: &Wtf8) -> i32 {
+/// `s.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the code units, wrapping. A string object
+/// (`JStr`) keeps its hash once computed.
+#[inline]
+pub fn string_hash<S: StringHash + ?Sized>(s: &S) -> i32 {
+    s.string_hash()
+}
+
+/// A string `string_hash` takes: the text of any string type, or a string object, which keeps
+/// its hash.
+pub trait StringHash {
+    fn string_hash(&self) -> i32;
+}
+
+impl StringHash for Wtf8 {
+    fn string_hash(&self) -> i32 {
+        text_hash(self)
+    }
+}
+
+impl StringHash for JString {
+    fn string_hash(&self) -> i32 {
+        text_hash(self)
+    }
+}
+
+impl StringHash for crate::JStr {
+    fn string_hash(&self) -> i32 {
+        self.hash_code()
+    }
+}
+
+impl<S: StringHash + ?Sized> StringHash for &S {
+    fn string_hash(&self) -> i32 {
+        (**self).string_hash()
+    }
+}
+
+/// The hash of `s`'s text, computed.
+pub(crate) fn text_hash(s: &Wtf8) -> i32 {
     // The ASCII bytes at the start are units of their own, read without decoding.
     let bytes = s.as_bytes();
     let ascii = bytes.iter().position(|&b| !b.is_ascii()).unwrap_or(bytes.len());
