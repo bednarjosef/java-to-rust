@@ -4,7 +4,7 @@
 #
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
-# Steps: extract, decompile, best-of, repair, libraries, library-sources, library-best-of, jdk-sources,
+# Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, repair, jdk-sources,
 # parse, census, summary.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
@@ -22,7 +22,7 @@
 # SRC_ZIP            the JDK's src.zip that the jdk-sources step unpacks the modules from (default:
 #                    lib/src.zip of the JDK whose java is on PATH)
 # JAVA               the java that runs the decompiler and the repair (default: java on PATH)
-# REPAIR_ROUNDS      how many times the repair step compiles and edits the server (default 4)
+# REPAIR_ROUNDS      how many times the repair step compiles and edits each tree (default 4)
 # TRANSLATOR         the java-to-rust binary (default: target/release/java-to-rust, built if missing)
 # SLOT               a command that every heavy step runs under, such as a build-slot limiter
 #                    (default: none)
@@ -196,17 +196,31 @@ best-of() {
   best_of_setups "$(server_jar)" "$cache/decompiled" "$cache/src/server"
 }
 
-# Edits the decompiled server where javac rejects it, with edits that keep the bytecode's
-# behaviour: unchecked casts the decompiler left out, diamond type arguments, misnamed catch
-# variables (scripts/RepairDecompile.java). Each edit is listed in repair-log.txt.
-repair() {
+# Edits a decompiled tree where javac rejects it, compiled against CLASSPATH, with edits that keep
+# the bytecode's behaviour: unchecked casts the decompiler left out, diamond type arguments,
+# misnamed catch variables (scripts/RepairDecompile.java). Each edit is listed in LOG.
+repair_tree() {
+  local dir=$1 classpath=$2 log=$3
   local -a exports=()
   local package
   for package in api code tree util; do
     exports+=(--add-exports "jdk.compiler/com.sun.tools.javac.$package=ALL-UNNAMED")
   done
-  "${slot[@]}" nice -n 19 "$java" -Xmx4g "${exports[@]}" "$root/scripts/RepairDecompile.java" "$cache/src/server" \
-    "$(find "$cache/jar/META-INF/libraries" -name '*.jar' | paste -sd:)" "${REPAIR_ROUNDS:-4}" "$cache/repair-log.txt"
+  "${slot[@]}" nice -n 19 "$java" -Xmx4g "${exports[@]}" "$root/scripts/RepairDecompile.java" "$dir" "$classpath" \
+    "${REPAIR_ROUNDS:-4}" "$log"
+}
+
+# src/server repaired against the library jars, into repair-log.txt, and each library that has
+# no published sources (src/libraries/<artifact>) against the other library jars, into
+# repair-log-<artifact>.txt.
+repair() {
+  repair_tree "$cache/src/server" "$(library_jars | paste -sd:)" "$cache/repair-log.txt"
+  unpublished_jars | while IFS= read -r lib; do
+    local name
+    name=$(basename "$lib" .jar)
+    echo "$name:"
+    repair_tree "$cache/src/libraries/$name" "$(other_jars "$lib")" "$cache/repair-log-$name.txt" < /dev/null
+  done
 }
 
 # Each library jar into src/libraries/<artifact>, except the native-only ones (a single class
@@ -404,13 +418,13 @@ summary() {
 }
 
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of repair libraries library-sources library-best-of jdk-sources
+[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of libraries library-sources library-best-of repair jdk-sources
   parse census summary)
 for step in "${steps[@]}"; do
   case $step in
-    extract | decompile | best-of | repair | libraries | library-sources | library-best-of | jdk-sources | parse \
+    extract | decompile | best-of | libraries | library-sources | library-best-of | repair | jdk-sources | parse \
       | census | summary) "$step" ;;
-    *) echo "unknown step $step (extract, decompile, best-of, repair, libraries, library-sources, library-best-of," \
+    *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of, repair," \
       "jdk-sources, parse, census, summary)" >&2
       exit 2 ;;
   esac
