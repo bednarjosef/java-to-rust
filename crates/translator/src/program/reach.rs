@@ -230,9 +230,12 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.invoke.TypeDescriptor",
     "java.lang.invoke.TypeDescriptor.OfField",
     "java.lang.invoke.TypeDescriptor.OfMethod",
-    // An action that `AccessController.doPrivileged` runs, which the translator's runs directly
-    // (`REDIRECTED_CALLS`): a plain interface.
+    // The actions that `AccessController.doPrivileged` runs, which the translator's runs
+    // directly (`REDIRECTED_CALLS`): plain interfaces, and the plain exception that wraps a
+    // checked exception of an action that may throw one.
     "java.security.PrivilegedAction",
+    "java.security.PrivilegedActionException",
+    "java.security.PrivilegedExceptionAction",
     // Plain interfaces that library code implements with classes of its own: abstract methods,
     // default methods over them and constants, nothing that the JVM or reflection gives. A class
     // of the program implements them as it would an interface of its own; what makes their
@@ -247,7 +250,6 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.security.DEREncodable",
     "java.security.Key",
     "java.security.PrivateKey",
-    "java.security.PrivilegedExceptionAction",
     "java.security.PublicKey",
     "java.security.spec.AlgorithmParameterSpec",
     "java.security.spec.KeySpec",
@@ -1178,11 +1180,37 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
         ("java.lang.TranslatedRuntime", "version"),
     ),
-    // An action run with the caller's privileges, which, with no security manager, is running it
-    // (`java/lang/TranslatedAccessController.java`).
+    // An action run with the caller's privileges, which, with no security manager, is running it,
+    // a checked exception it throws wrapped in a `PrivilegedActionException`
+    // (`java/lang/TranslatedAccessController.java`). The overloads that take an
+    // `AccessControlContext` stay untranslated with it.
     (
         ("java.security.AccessController", "doPrivileged", "<T>(java.security.PrivilegedAction<T>)T"),
         ("java.lang.TranslatedAccessController", "doPrivileged"),
+    ),
+    (
+        (
+            "java.security.AccessController",
+            "doPrivilegedWithCombiner",
+            "<T>(java.security.PrivilegedAction<T>)T",
+        ),
+        ("java.lang.TranslatedAccessController", "doPrivilegedWithCombiner"),
+    ),
+    (
+        (
+            "java.security.AccessController",
+            "doPrivileged",
+            "<T>(java.security.PrivilegedExceptionAction<T>)T",
+        ),
+        ("java.lang.TranslatedAccessController", "doPrivileged"),
+    ),
+    (
+        (
+            "java.security.AccessController",
+            "doPrivilegedWithCombiner",
+            "<T>(java.security.PrivilegedExceptionAction<T>)T",
+        ),
+        ("java.lang.TranslatedAccessController", "doPrivilegedWithCombiner"),
     ),
     // The default file system, whose provider a property could name and reflection create (the
     // property is not set in a translated program, see `lower::system`), and which the JDK finds
