@@ -967,11 +967,15 @@ public class JavaTree {
     }
 
     /**
-     * A type as javac prints it, with local and anonymous classes named by {@link #className}, and
-     * a class that javac could not find (with {@code --keep-going}, see {@link MissingClasses}) as
-     * {@code java.lang.Object}: only {@code null} is of such a type.
+     * A type as javac prints it, without its type annotations, with local and anonymous classes
+     * named by {@link #className}, and a class that javac could not find (with {@code --keep-going},
+     * see {@link MissingClasses}) as {@code java.lang.Object}: only {@code null} is of such a type.
      */
     private static String typeText(TypeMirror t) {
+        // Type annotations (`java.lang.@Nullable String`) say nothing the translation uses.
+        if (t instanceof com.sun.tools.javac.code.Type annotated) {
+            t = annotated.stripMetadata();
+        }
         boolean erroneous = keepGoing && ((com.sun.tools.javac.code.Type) t).isErroneous();
         if (!erroneous && !mentionsLocal(t)) {
             return t.toString();

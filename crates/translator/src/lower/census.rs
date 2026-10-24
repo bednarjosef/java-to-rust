@@ -220,5 +220,23 @@ impl<'t> Lowering<'t> {
 /// The message of a panic.
 pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     let text = panic.downcast_ref::<String>().cloned();
-    text.or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
+    let text = text.or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+    match PANIC_PLACE.with(|p| p.take()) {
+        Some(place) => format!("{text} (at {place})"),
+        None => text,
+    }
+}
+
+thread_local! {
+    /// Where in the translator the last panic of this thread happened (`quiet_panics`).
+    static PANIC_PLACE: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+}
+
+/// Makes panics quiet, as rejections in a census are: each is reported with the rest, not
+/// printed, with the place in the translator where it happened (`panic_message`).
+pub fn quiet_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        let place = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
+        PANIC_PLACE.with(|p| p.set(place));
+    }));
 }

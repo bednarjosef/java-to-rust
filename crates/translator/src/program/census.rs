@@ -81,7 +81,7 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
     let (units, reach) = load(program, string_array_writes, program.keep_going)?;
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    lower::quiet_panics();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // The program's files are the first units (`load`).
     let lower =

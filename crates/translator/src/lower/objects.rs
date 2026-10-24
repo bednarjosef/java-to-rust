@@ -161,9 +161,17 @@ impl<'t> Lowering<'t> {
         let in_local = self.types[index].nested.as_ref().is_some_and(|n| n.kind != NestKind::Inner);
         let members: Vec<Node<'t>> = node.list("members").filter(|m| self.keeps(*m, &name)).collect();
         for member in members {
-            // In a census, a member that cannot be declared rejects its class, whose code is
-            // then rejected with it, and the census goes on.
-            let declared = self.declare_member(index, member, &name, in_local);
+            // In a census, a member that cannot be declared, or whose declaration panics, rejects
+            // its class, whose code is then rejected with it, and the census goes on.
+            let declared = if self.census.is_some() && self.catch_panics {
+                let declare = || self.declare_member(index, member, &name, in_local);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(declare)).unwrap_or_else(|panic| {
+                    let message = format!("the translator panicked: {}", census::panic_message(&*panic));
+                    Err(Error { pos: member.pos(), message })
+                })
+            } else {
+                self.declare_member(index, member, &name, in_local)
+            };
             self.reject_class(index, declared)?;
         }
         if node.kind() == "ENUM" {

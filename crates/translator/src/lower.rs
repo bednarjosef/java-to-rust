@@ -76,7 +76,7 @@ pub(crate) use argument_order::{ARGUMENT, RECEIVER, held_local, ordered_call};
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
-pub use census::panic_message;
+pub use census::{panic_message, quiet_panics};
 pub(crate) use clinit_errors::{STATE, rewritten_clinit};
 pub(crate) use enum_tables::{ORDINAL as TABLE_ORDINAL, tabled_field};
 pub use exceptions::{
@@ -522,7 +522,10 @@ impl<'t> Lowering<'t> {
         let node = info.node;
         self.current.set(info.owner);
         self.in_ctor.set(node.str("name") == "<init>");
-        self.check_throwable_override(node)?;
+        // A stub runs none of the method's code, so the override it stands in for is no matter.
+        if !self.stubbing.get() {
+            self.check_throwable_override(node)?;
+        }
         let is_ctor = node.str("name") == "<init>";
         let is_static = node.has_flag("STATIC");
         let name = node.str("name").to_string();

@@ -12,9 +12,6 @@
 
 use std::process::Command;
 
-/// javac's implementation, whose `analyze` of chosen classes `JavaTree` calls (see `javac.rs`).
-const JAVAC_API: &str = "jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED";
-
 /// The packages of javac's implementation that `JavaTree` and `java/BytecodeNames.java`, which
 /// reads what javac's code generator decided, use (see `javac.rs`).
 const JAVAC_PACKAGES: [&str; 5] = ["api", "code", "tree", "util", "jvm"];
@@ -54,8 +51,12 @@ fn main() {
         ("java/Threads.java", "threads.json", Some("java/ThreadLocalStub.java")),
         ("java/Reflection.java", "reflection.json", None),
     ] {
-        let tree = Command::new("java")
-            .args(["--add-exports", JAVAC_API, "-cp", &out, "JavaTree", "--program", source])
+        let mut tree = Command::new("java");
+        for package in JAVAC_PACKAGES {
+            tree.args(["--add-exports", &format!("jdk.compiler/com.sun.tools.javac.{package}=ALL-UNNAMED")]);
+        }
+        let tree = tree
+            .args(["-cp", &out, "JavaTree", "--program", source])
             .args(with)
             .output()
             .expect("building the translator needs java (a JDK) on PATH");
