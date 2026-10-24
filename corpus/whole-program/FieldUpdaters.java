@@ -1,6 +1,7 @@
 // Field updaters held in static finals (`AtomicIntegerFieldUpdater.newUpdater(C.class, "f")` and
 // the `long` and reference ones) are handles of their fields, as `findVarHandle` is: each access
-// is the field's, and the updates are atomic between threads.
+// is the field's, and the updates are atomic between threads. On an object other than `this`, a
+// null one throws the updater's `ClassCastException`, which has no message.
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -53,9 +54,50 @@ public class FieldUpdaters {
                 + COUNT.getAndSet(this, 0) + " " + TOTAL.get(this);
     }
 
+    final class Inner {
+        int bump() {
+            return COUNT.incrementAndGet(FieldUpdaters.this);
+        }
+    }
+
+    static String counts(FieldUpdaters other, long size) {
+        int a = COUNT.getAndIncrement(other);
+        int b = COUNT.incrementAndGet(other);
+        int c = COUNT.getAndDecrement(other);
+        int d = COUNT.decrementAndGet(other);
+        int step = 3;
+        int e = COUNT.addAndGet(other, -step);
+        long f = TOTAL.addAndGet(other, size);
+        long g = TOTAL.addAndGet(other, -size);
+        long h = TOTAL.getAndIncrement(other);
+        long i = TOTAL.decrementAndGet(other);
+        return a + " " + b + " " + c + " " + d + " " + e + " " + f + " " + g + " " + h + " " + i + " "
+                + other.new Inner().bump();
+    }
+
+    static void refused(FieldUpdaters none) {
+        try {
+            COUNT.incrementAndGet(none);
+        } catch (ClassCastException e) {
+            System.out.println("caught " + e + " " + e.getMessage());
+        }
+        try {
+            HEAD.compareAndSet(none, null, null);
+        } catch (RuntimeException e) {
+            System.out.println("caught " + e);
+        }
+        try {
+            System.out.println(TOTAL.get(none));
+        } catch (ClassCastException e) {
+            System.out.println("caught " + e);
+        }
+    }
+
     public static void main(String[] args) throws InterruptedException {
         FieldUpdaters u = new FieldUpdaters();
         System.out.println(u.show());
+        System.out.println(counts(new FieldUpdaters(), args.length + 2L));
+        refused(args.length > 5 ? u : null);
         Thread[] threads = new Thread[4];
         for (int t = 0; t < threads.length; t++) {
             threads[t] = new Thread(u::work);

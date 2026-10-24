@@ -488,9 +488,14 @@ name:
   one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`) are handles of a
   field for which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
   accessible to the class that makes it). `get`, `set`, `lazySet`, the compare-and-set forms,
-  `getAndSet` and `getAndAdd` on `this` are the field's access or update; on another object (the
-  updater throws `ClassCastException` for null), the other methods, and an updater that is not a
-  constant are rejected.
+  `getAndSet` and `getAndAdd` are the field's access or update; `getAndIncrement`,
+  `incrementAndGet`, `addAndGet` and their kin are its `getAndAdd`, with the new value computed
+  from the old as the JDK's updater does. The updater throws `ClassCastException` without a
+  message for a null object, where the field's access would throw `NullPointerException`: an
+  object other than `this` is tested first (`Builtin::UpdaterRefused`), so it must be a local or
+  an enclosing instance, and the other arguments constants or locals, which the test may come
+  before. `getAndUpdate`, `updateAndGet`, `getAndAccumulate` and `accumulateAndGet`, other
+  objects and arguments, and an updater that is not a constant are rejected.
 - **Atomic updates** (compare-and-set, compare-and-exchange, get-and-add, get-and-set,
   get-and-bitwise, every memory mode) of a field become a method that lowering adds to the
   field's class, one per field and form (`compareAndSetValue(expected, value)`), whose body

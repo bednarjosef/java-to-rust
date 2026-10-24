@@ -784,6 +784,8 @@ pub(super) fn runtime_failures(
             Builtin::MonitorEnter => {}
             // A class name that is not in the translation (`lower::by_name`).
             Builtin::UnknownClass => out.push(("java.lang.ClassNotFoundException", "this class name", false, x.id)),
+            // A field updater's object that is null (`lower::handles` tests it first).
+            Builtin::UpdaterRefused => out.push(("java.lang.ClassCastException", "this field updater", false, x.id)),
             // A class that is not the object's; a `catch` sees it through `java::catching`.
             Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.

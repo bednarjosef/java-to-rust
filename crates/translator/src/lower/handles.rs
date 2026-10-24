@@ -95,8 +95,10 @@
 //! A field updater constant (a static final whose value is `AtomicIntegerFieldUpdater`'s,
 //! `AtomicLongFieldUpdater`'s or `AtomicReferenceFieldUpdater`'s `newUpdater`) is a handle of
 //! its field when `newUpdater` would succeed for it (`updater_declaration`); its `get`, `set`,
-//! `lazySet`, compare-and-set forms, `getAndSet` and `getAndAdd` on `this` are `Unsafe`'s at the
-//! field's offset, which the updater's methods make. Any other use of an updater is rejected.
+//! `lazySet`, compare-and-set forms, `getAndSet` and `getAndAdd` are `Unsafe`'s at the field's
+//! offset, which the updater's methods make, and its increments and `addAndGet` its `getAndAdd`.
+//! An object other than `this` is tested for null first, which throws the updater's
+//! `ClassCastException` (`updater_access`). Any other use of an updater is rejected.
 //!
 //! A `MethodHandle` constant of a constructor is a handle too, resolved when translating:
 //! `lookup.findConstructor(C.class, MethodType.methodType(void.class, P.class, ..))`, where the
@@ -273,6 +275,39 @@ fn assigns<'t>(node: Node<'t>, target: impl Fn(Node<'t>) -> bool) -> bool {
         None
     };
     variable.is_some_and(|v| target(plain(v)))
+}
+
+/// Whether evaluating `e` again gives the same value and does nothing else: a constant, a local
+/// (which nothing assigns between the two reads), `this`, an enclosing instance, and their
+/// negations and conversions.
+fn is_reread(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var(_) | ExprKind::This | ExprKind::Int(_) | ExprKind::Long(_) => true,
+        ExprKind::Field { object, name } => name == super::inner::OUTER && is_reread(object),
+        ExprKind::Unary(UnOp::Neg, value) | ExprKind::Cast(_, value) => is_reread(value),
+        _ => false,
+    }
+}
+
+/// Whether evaluating the argument `n` can neither throw nor do anything else: a literal, a local
+/// or `this`, perhaps negated.
+fn quiet(n: Node) -> bool {
+    let n = plain(n);
+    match n.kind() {
+        "UNARY_MINUS" | "UNARY_PLUS" | "BITWISE_COMPLEMENT" | "LOGICAL_COMPLEMENT" => {
+            n.get("expression").is_some_and(quiet)
+        }
+        "IDENTIFIER" => {
+            n.str("name") == "this"
+                || n.symbol().is_some_and(|s| {
+                    matches!(
+                        s.kind,
+                        "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER" | "RESOURCE_VARIABLE"
+                    )
+                })
+        }
+        kind => kind.ends_with("_LITERAL"),
+    }
 }
 
 /// The kind of the fields that the field updater class `ty` (as javac names the type, with its
@@ -1017,9 +1052,13 @@ impl<'t> Lowering<'t> {
 
     /// `U.get(o)`, `U.set(o, x)`, `U.compareAndSet(o, expected, x)`, `U.getAndAdd(o, delta)` and
     /// the other accesses of a field updater constant `U` that take their operands as they are:
-    /// those of `Unsafe` at the field's offset, which the updater's methods make. The updater
-    /// throws `ClassCastException` for a null object, where the field's access would throw
-    /// `NullPointerException`, so the object must be `this`. `None` for any other call.
+    /// those of `Unsafe` at the field's offset, which the updater's methods make. Its
+    /// `getAndIncrement`, `incrementAndGet`, `addAndGet` and their kin are its `getAndAdd`, the
+    /// new value computed from the old as the JDK's updater computes it. The updater checks its
+    /// object first, and throws `ClassCastException` without a message for a null one, where the
+    /// field's access would throw `NullPointerException`: an object other than `this` is tested
+    /// (`Builtin::UpdaterRefused`), so it must be one that a second read gives again. `None` for
+    /// any other call.
     pub(super) fn updater_access(
         &self,
         node: Node<'t>,
@@ -1036,24 +1075,98 @@ impl<'t> Lowering<'t> {
                 &format!("`{owner}.{}` of an updater that is not a constant", symbol.name),
             );
         };
-        let (put, update) = match symbol.name {
-            "get" => (Some(false), None),
-            "set" | "lazySet" => (Some(true), None),
+        // The delta of `getAndAdd` that the methods of `int` and `long` updaters add, and whether
+        // they give the new value rather than the old (`None` for a delta that is their argument).
+        let (put, update, added) = match symbol.name {
+            "get" => (Some(false), None, None),
+            "set" | "lazySet" => (Some(true), None, None),
             "compareAndSet"
             | "weakCompareAndSet"
             | "weakCompareAndSetPlain"
-            | "weakCompareAndSetVolatile" => (None, Some(FieldUpdate::CompareAndSet)),
-            "getAndSet" => (None, Some(FieldUpdate::GetAndSet)),
-            "getAndAdd" => (None, Some(FieldUpdate::GetAndAdd)),
+            | "weakCompareAndSetVolatile" => (None, Some(FieldUpdate::CompareAndSet), None),
+            "getAndSet" => (None, Some(FieldUpdate::GetAndSet), None),
+            "getAndAdd" => (None, Some(FieldUpdate::GetAndAdd), None),
+            "getAndIncrement" => (None, None, Some((Some(1), false))),
+            "getAndDecrement" => (None, None, Some((Some(-1), false))),
+            "incrementAndGet" => (None, None, Some((Some(1), true))),
+            "decrementAndGet" => (None, None, Some((Some(-1), true))),
+            "addAndGet" => (None, None, Some((None, true))),
             name => return unsupported(node, &format!("`{owner}.{name}` of an updater")),
         };
         let args: Vec<Node> = node.list("arguments").collect();
-        if plain(args[0]).kind() != "IDENTIFIER" || plain(args[0]).str("name") != "this" {
-            return unsupported(node, &format!("`{owner}.{}` on an object other than `this`", symbol.name));
-        }
         let (object, ty) = self.handle_field(node, symbol, args[0], class, field)?;
-        let place = Place::Field { object: Box::new(object), name: field.to_string() };
-        self.access_at(node, place, ty, class, &args[1..], update, put, false).map(Some)
+        let checked = !matches!(object.kind, ExprKind::This);
+        if checked && !is_reread(&object) {
+            return unsupported(
+                node,
+                &format!("`{owner}.{}` on an object other than `this` or a local", symbol.name),
+            );
+        }
+        // Java tests the object after evaluating the other arguments, which the test here comes
+        // before: only arguments that can neither throw nor do anything else may come after it.
+        if checked && !args[1..].iter().all(|a| quiet(*a)) {
+            return unsupported(
+                node,
+                &format!("`{owner}.{}` of an argument that is not a constant or a local", symbol.name),
+            );
+        }
+        let test = checked.then(|| {
+            let null = Box::new(self.synth(ExprKind::Null, object.pos, Type::Null));
+            let object = Box::new(self.reread(&object));
+            self.synth(ExprKind::Binary(BinOp::Eq, object, null), node.pos(), Type::Boolean)
+        });
+        let ret = self.ty(node, node.java_type())?;
+        let value = match added {
+            Some((delta, new)) => {
+                let delta = match delta {
+                    Some(d) => {
+                        let kind = if ty == Type::Long { ExprKind::Long(d) } else { ExprKind::Int(d as i32) };
+                        self.synth(kind, node.pos(), ty)
+                    }
+                    None => self.stored(self.expr(args[1])?, ty),
+                };
+                if new && !is_reread(&delta) {
+                    return unsupported(
+                        node,
+                        &format!("`{owner}.{}` of a delta that is not a local", symbol.name),
+                    );
+                }
+                let again = new.then(|| self.reread(&delta));
+                let old =
+                    self.field_update(Some(object), class, field, ty, FieldUpdate::GetAndAdd, vec![delta]);
+                let mut value = self.synth(old, node.pos(), ty);
+                if let Some(again) = again {
+                    let sum = ExprKind::Binary(BinOp::Add, Box::new(value), Box::new(again));
+                    value = self.synth(sum, node.pos(), ty);
+                }
+                self.convert(value, ret)
+            }
+            None => {
+                let place = Place::Field { object: Box::new(object), name: field.to_string() };
+                let access = self.access_at(node, place, ty, class, &args[1..], update, put, false)?;
+                self.synth(access, node.pos(), ret)
+            }
+        };
+        let Some(test) = test else { return Ok(Some(value.kind)) };
+        let refused = self.synth(ExprKind::Builtin(Builtin::UpdaterRefused, Vec::new()), node.pos(), ret);
+        Ok(Some(ExprKind::Conditional(Box::new(test), Box::new(refused), Box::new(value))))
+    }
+
+    /// Another read of `e`, an expression that `is_reread` accepts.
+    fn reread(&self, e: &Expr) -> Expr {
+        let kind = match &e.kind {
+            ExprKind::Var(name) => ExprKind::Var(name.clone()),
+            ExprKind::This => ExprKind::This,
+            ExprKind::Int(v) => ExprKind::Int(*v),
+            ExprKind::Long(v) => ExprKind::Long(*v),
+            ExprKind::Field { object, name } => {
+                ExprKind::Field { object: Box::new(self.reread(object)), name: name.clone() }
+            }
+            ExprKind::Unary(op, value) => ExprKind::Unary(*op, Box::new(self.reread(value))),
+            ExprKind::Cast(ty, value) => ExprKind::Cast(*ty, Box::new(self.reread(value))),
+            _ => unreachable!("only an expression that a second read gives again is read again"),
+        };
+        self.synth(kind, e.pos, e.ty)
     }
 
     /// What the static final field `member` of class `owner` is the `VarHandle` of.

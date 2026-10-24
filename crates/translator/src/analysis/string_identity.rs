@@ -608,9 +608,11 @@ pub(crate) fn made(builtin: Builtin) -> Made {
         Builtin::String(StringOp::ToString) | Builtin::NullChecked | Builtin::Kept(_) => Made::Itself,
         Builtin::ObjectText | Builtin::ValueOf => Made::Text,
         Builtin::ElementUpdate(_) => Made::Element,
-        Builtin::NoObject { .. } | Builtin::UnknownClass | Builtin::MissingResource | Builtin::Unmatched => {
-            Made::Never
-        }
+        Builtin::NoObject { .. }
+        | Builtin::UnknownClass
+        | Builtin::UpdaterRefused
+        | Builtin::MissingResource
+        | Builtin::Unmatched => Made::Never,
         _ => Made::Unknown,
     }
 }

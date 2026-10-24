@@ -346,6 +346,13 @@ pub fn throw_exception(e: Exception) -> ! {
     exception::die(catching::raise_exception(e))
 }
 
+/// What a field updater (`AtomicIntegerFieldUpdater` and its kin) throws for a null object: its
+/// access check finds that the object is not of the field's class, a `ClassCastException`
+/// without a message.
+pub fn updater_refused() -> ! {
+    throw_exception(Exception::bare("java.lang.ClassCastException"))
+}
+
 /// A class as a `ClassCastException` names it: its binary name, and the module and class loader
 /// that HotSpot names with it ("unnamed module of loader 'app'").
 pub type CastClass = (&'static str, &'static str);

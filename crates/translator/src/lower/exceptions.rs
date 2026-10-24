@@ -144,7 +144,17 @@ const RAISED: &[(&str, &[&str])] = &[
         "java.lang.NullPointerException",
         &["METHOD_INVOCATION", "MEMBER_SELECT", "ARRAY_ACCESS", "SWITCH", "SWITCH_EXPRESSION"],
     ),
-    ("java.lang.ClassCastException", &["TYPE_CAST", "java.lang.Class#cast"]),
+    // A failed cast, and a field updater's object that is null (`Builtin::UpdaterRefused`).
+    (
+        "java.lang.ClassCastException",
+        &[
+            "TYPE_CAST",
+            "java.lang.Class#cast",
+            "java.util.concurrent.atomic.AtomicIntegerFieldUpdater#",
+            "java.util.concurrent.atomic.AtomicLongFieldUpdater#",
+            "java.util.concurrent.atomic.AtomicReferenceFieldUpdater#",
+        ],
+    ),
     // A class name that is not in the translation (`lower::by_name`).
     ("java.lang.ClassNotFoundException", &["java.lang.Class#forName"]),
     (
@@ -325,13 +335,15 @@ const RAISED_WHEN_INTERRUPTED: &[(&str, &[&str])] = &[
 
 /// The classes of `RAISED` that the runtime may raise without a message as well, which are built
 /// with the constructor without arguments then, so that `getMessage()` is null.
-/// (`java.lang.reflect.Array`'s natives throw the last three so.)
+/// (`java.lang.reflect.Array`'s natives throw the last three so, and a field updater its
+/// `ClassCastException`.)
 const BARE: &[&str] = &[
     "java.lang.InterruptedException",
     "java.lang.IndexOutOfBoundsException",
     "java.lang.IllegalArgumentException",
     "java.lang.ArrayIndexOutOfBoundsException",
     "java.lang.NullPointerException",
+    "java.lang.ClassCastException",
 ];
 
 /// The package of the standard class with this simple name.

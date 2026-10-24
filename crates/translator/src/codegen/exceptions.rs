@@ -40,6 +40,7 @@ pub(super) fn completes(stmt: &Stmt) -> bool {
                     Builtin::Exit
                     | Builtin::NoObject { .. }
                     | Builtin::UnknownClass
+                    | Builtin::UpdaterRefused
                     | Builtin::MissingResource,
                     _,
                 ),
