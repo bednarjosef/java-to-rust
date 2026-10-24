@@ -11,7 +11,7 @@ Limits:
 - A piece counts as translating when the census records no rejection in it. It may still call a piece that does not, and its translation was neither compiled nor run.
 - A piece is stubbed at its first rejection in each phase, so a piece with several blockers may show only some of them; the counts of pieces blocked are exact, the lists of blockers per piece are a lower bound.
 - An error of an analysis or of the generator has a line and column but no file. The census stubs the code at that position in every file, so on rare collisions it also hides the code of an innocent method from the later phases.
-- A rejection that no stub can take away ends the census early, and so does a panic of the translator outside the generator; the numbers then count only what was checked before the stop. A rejection of a class's declaration, or in code that lowering provides, belongs to no piece; it is listed in the census as rejected elsewhere.
+- A rejection that no stub can take away ends the census early, and so does a panic of the translator outside the generator; the numbers then count only what was checked before the stop. A rejection of a class's declaration, including a member that lowering cannot declare (such as a local enum), rejects the class with all of its code and the census goes on; it belongs to no piece, and is listed in the census as rejected elsewhere, as is a rejection in code that lowering provides.
 - The analyses run again after each round of stubs. Most programs take seconds, but those that reach `Scanner` (regular expressions, `java.time`; about 9000 pieces, where one run of the analyses takes minutes) take most of an hour or more.
 - Incomplete censuses: ScannerGrades, TextAdventure (see the per-program table).
 

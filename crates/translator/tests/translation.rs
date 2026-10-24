@@ -3285,6 +3285,31 @@ fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_go
 }
 
 #[test]
+fn the_census_rejects_a_class_with_a_member_it_cannot_declare_and_goes_on() {
+    // `Shapes.area` declares a local enum, which the translator does not declare yet: its
+    // class is rejected with all of its code, and the census goes on to `main` and `Other`.
+    let dir = write_sources(
+        "census_member",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Shapes.area(2) + Other.fine());\n    }\n}\n",
+            ),
+            (
+                "p/Shapes.java",
+                "package p;\nclass Shapes {\n    static int area(int side) {\n        enum Kind { SQUARE, CUBE }\n        return Kind.CUBE.ordinal() * side;\n    }\n}\n",
+            ),
+            ("p/Other.java", "package p;\nclass Other {\n    static int fine() { return 4; }\n}\n"),
+        ],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let census = census(&program);
+    assert_lacks(&census.report, &["Incomplete"]);
+    assert_contains(&census.report, &["local interfaces, enums and records not supported yet"]);
+    assert_eq!(census.json["complete"], true);
+}
+
+#[test]
 fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
     // `len` reads its parameter in a `finally` block whose copies name it differently, one after
     // the write and one before; `main`'s message is certain.
@@ -3570,13 +3595,18 @@ fn initializer_blocks_run_in_constructors() {
     );
     // The block becomes part of the struct literal of `C()`; `C(int)` runs it through `C()`.
     assert_contains(&rust, &["C { n: 3 }", "let mut this = C::new();"]);
-    let err = java_to_rust::translate(
-        "class C { { System.out.println(1); } int n = 2; }
+    // A field initializer written after a block runs after it, as an assignment.
+    let rust = translate(
+        "class C { int k = 1; { System.out.println(k); } int n = k + 2; }
         class A { public static void main(String[] a) { System.out.println(new C().n); } }",
-    )
-    .expect_err("a field initializer after a block must be rejected");
-    assert!(
-        err.to_string().contains("a field initializer after an instance initializer block not supported yet")
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::println!(\"{}\", this.k);",
+            "let mut this = C { k: 1, n: 0 };",
+            "this.n = this.k.wrapping_add(2);",
+        ],
     );
 }
 
