@@ -239,10 +239,10 @@ fn generate_with(
         slots: HashMap::new(),
         slot_param: String::new(),
         on_stack: false,
-        stack_constructors: HashSet::new(),
+        stack_forms: HashSet::new(),
     };
     g.shared_names = g.shared_names();
-    g.stack_constructors = g.stack_constructors();
+    g.stack_forms = g.stack_forms();
     let header = match modules {
         Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         None => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
@@ -459,16 +459,16 @@ struct Gen<'a> {
     rejected: Vec<Error>,
     /// The methods written with a call that throws inside a closure, at their positions.
     closures: Vec<Error>,
-    /// The slots of the method being written, by the `new` that makes its object in each: the
-    /// slot's name and the object's class (see `stack_objects`).
+    /// The slots of the method being written, by the `new` or call of a factory that makes its
+    /// object in each: the slot's name and the object's class (see `stack_objects`).
     slots: HashMap<ExprId, (String, usize)>,
-    /// The name of the slot that a constructor's form on the stack is given.
+    /// The name of the slot that a function's form on the stack is given.
     slot_param: String,
-    /// Whether the constructor being written is its form on the stack, which makes its object
-    /// in the slot it is given.
+    /// Whether the constructor or factory being written is its form on the stack, which makes
+    /// its object in the slot it is given.
     on_stack: bool,
-    /// The constructors that get a form on the stack (see `stack_objects`).
-    stack_constructors: HashSet<usize>,
+    /// The constructors and factories that get a form on the stack (see `stack_objects`).
+    stack_forms: HashSet<usize>,
 }
 
 impl<'a> Gen<'a> {
@@ -649,14 +649,14 @@ impl<'a> Gen<'a> {
 
     fn method(&mut self, index: usize) {
         self.method_form(index);
-        if self.stack_constructors.contains(&index) {
+        if self.stack_forms.contains(&index) {
             self.on_stack = true;
             self.method_form(index);
             self.on_stack = false;
         }
     }
 
-    /// Writes method `index`, or the form on the stack of a constructor when `on_stack` is set.
+    /// Writes method `index`, or its form on the stack when `on_stack` is set.
     fn method_form(&mut self, index: usize) {
         if !CATCHING.with(|c| c.get()) {
             return self.write_method(index);
@@ -708,6 +708,7 @@ impl<'a> Gen<'a> {
         } else if !m.is_static && !m.is_ctor {
             params.push(format!("this: {}", self.this_type()));
         }
+        let receivers = params.len();
         params.extend(self.typed_params(index, true));
         let ret = self.ret_text(index);
         // The body of a method or constructor that never runs may call what was never emitted,
@@ -751,12 +752,13 @@ impl<'a> Gen<'a> {
         } else {
             self.fn_names[index].clone()
         };
-        // The `new`s whose objects the method makes in slots on its stack.
+        // The `new`s and calls whose objects the method makes in slots on its stack.
         let sites = if never_runs { Vec::new() } else { self.stack_sites(index) };
-        self.name_slots(&sites);
+        self.name_slots(index, &sites);
         let fn_name = if self.on_stack {
-            let content = self.slot_content(m.class);
-            params.insert(0, format!("{}: &java::Slot<{content}>", self.slot_param));
+            // The slot comes after the receiver.
+            let param = format!("{}: {}", self.slot_param, self.slot_param_type(index));
+            params.insert(receivers, param);
             format!("{fn_name}_on_stack")
         } else {
             fn_name

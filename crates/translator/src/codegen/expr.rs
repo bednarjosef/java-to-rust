@@ -543,12 +543,17 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let code = self.static_call(index, args);
+                let code = match self.call_on_stack(e) {
+                    Some(code) => code,
+                    None => self.static_call(index, args),
+                };
                 self.raising(code, index)
             }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let code = if self.closure_type(receiver.ty).is_some() {
+                let code = if let Some(code) = self.call_on_stack(e) {
+                    code
+                } else if self.closure_type(receiver.ty).is_some() {
                     self.closure_call(receiver, index, args)
                 } else if self.inlined(receiver, index) {
                     self.inline_call(index, args)

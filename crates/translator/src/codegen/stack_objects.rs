@@ -3,9 +3,20 @@
 //! than in the collected heap, `Arc::new(..)`. The handle is the same `java::Arc`, so nothing
 //! else in the code changes (docs/collector.md, "Objects on the stack").
 //!
-//! A constructor that makes its object itself (one that uses `this` as a value, docs/object-model.md
-//! 1.4) gets a second form, `new_on_stack(obj_slot, ..)`, which makes it in the slot it is given.
+//! Two kinds of functions get a second form, `<name>_on_stack`, which takes a slot after its
+//! receiver and makes its object there:
+//!
+//! - a constructor that makes its object itself (one that uses `this` as a value,
+//!   docs/object-model.md 1.4), which a `new` on the stack calls;
+//! - a factory (`analysis::escape`), a method that returns a new object that does not otherwise
+//!   leave it, such as an `iterator()`. A call of it whose object stays in the calling method
+//!   passes a slot of the caller's, in which the factory makes its object, or which it passes on
+//!   to the factory whose object it returns.
+//!
+//! A call that the generator cannot write in its form on the stack is written as usual, and its
+//! object goes in the heap: the slot is then left empty, which is always correct.
 
+use super::objects::changes_object;
 use super::*;
 
 /// The most slots a method declares, so that a method that recursion runs deep keeps a small
@@ -33,10 +44,10 @@ impl<'a> Gen<'a> {
             && fields <= FIELDS_PER_SLOT
     }
 
-    /// The `new`s of method `m` whose objects it makes in slots, with their classes, in the order
-    /// of the code.
+    /// The `new`s and calls of factories of method `m` whose objects it makes in slots, with
+    /// their classes, in the order of the code.
     pub(super) fn stack_sites(&self, m: usize) -> Vec<(ExprId, usize)> {
-        if self.facts.stack_objects.is_empty() {
+        if self.facts.stack_objects.objects.is_empty() {
             return Vec::new();
         }
         let mut sites = Vec::new();
@@ -45,10 +56,9 @@ impl<'a> Gen<'a> {
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| {
-                        if let ExprKind::New { class: c, ctor: Some(_), .. } = x.kind
-                            && self.facts.stack_objects.contains(&x.id)
-                            && self.stack_class(c)
-                            && sites.len() < SLOTS_PER_METHOD
+                        if sites.len() < SLOTS_PER_METHOD
+                            && self.facts.stack_objects.objects.contains(&x.id)
+                            && let Some(c) = self.slot_class(x)
                         {
                             sites.push((x.id, c));
                         }
@@ -58,6 +68,114 @@ impl<'a> Gen<'a> {
             );
         }
         sites
+    }
+
+    /// The class of the object that `x`, a `new` or a call of a factory, makes, when it can be
+    /// made in a slot.
+    fn slot_class(&self, x: &Expr) -> Option<usize> {
+        match &x.kind {
+            ExprKind::New { class: c, ctor: Some(_), .. } => self.stack_class(*c).then_some(*c),
+            ExprKind::Call { resolved: Some(r), .. } => {
+                let t = self.call_of(x)?;
+                let c = self.facts.stack_objects.factories.get(&t)?.class;
+                (*r == t && self.class.methods[t].is_static && self.stack_class(c)).then_some(c)
+            }
+            ExprKind::MethodCall { receiver, is_super: false, .. } => {
+                let t = self.call_of(x)?;
+                let c = self.facts.stack_objects.factories.get(&t)?.class;
+                let home = self.class.methods[t].is_static
+                    || matches!(self.homes[t], Home::Class(_) | Home::Enum(_));
+                (home && self.closure_type(receiver.ty).is_none() && self.stack_class(c)).then_some(c)
+            }
+            _ => None,
+        }
+    }
+
+    /// The factory that the call `x` runs, when its object may go in a slot: a call whose
+    /// object stays in its method, or the call whose object a factory returns.
+    fn call_of(&self, x: &Expr) -> Option<usize> {
+        let found = &self.facts.stack_objects;
+        found.calls.get(&x.id).copied().or_else(|| found.factories.values().find(|p| p.made == x.id)?.call)
+    }
+
+    /// The call `x` of a factory in its form on the stack, which makes its object in the slot of
+    /// `x`, or `None` when it is written as usual. It follows the forms of `expr`'s calls.
+    pub(super) fn call_on_stack(&mut self, x: &'a Expr) -> Option<Code> {
+        let slot = self.slot_of(x.id)?;
+        let t = self.call_of(x)?;
+        if !self.stack_forms.contains(&t) {
+            return None;
+        }
+        let name = format!("{}_on_stack", self.fn_names[t]);
+        let with = |args: Vec<String>| {
+            std::iter::once(format!("&{slot}")).chain(args).collect::<Vec<_>>().join(", ")
+        };
+        let (index, receiver, args) = match &x.kind {
+            ExprKind::Call { resolved: Some(r), args, .. } => (*r, None, args),
+            ExprKind::MethodCall { receiver, resolved: Some(r), args, is_super: false, .. } => {
+                (*r, Some(&**receiver), args)
+            }
+            _ => return None,
+        };
+        let Some(receiver) = receiver.filter(|_| !self.class.methods[index].is_static) else {
+            // `static_call`, without its block for an array it lends.
+            if index != t || (0..args.len()).any(|i| self.facts.borrowed_arrays.contains_key(&(t, i))) {
+                return None;
+            }
+            let args = self.call_args(t, args);
+            return Some(Code::atom(format!("{}_on_stack({})", self.static_fn(t), with(args))));
+        };
+        if self.closure_type(receiver.ty).is_some() || self.inlined(receiver, index) {
+            return None;
+        }
+        // `enum_call`, calling the body itself.
+        if let Some(d) = self.enum_of(receiver) {
+            if self.enum_body(d, index) != Some(t) {
+                return None;
+            }
+            self.need(Need::Body(t));
+            let obj = self.object(receiver);
+            let args = self.call_args(t, args);
+            return Some(Code::atom(format!("{obj}.{name}({})", with(args))));
+        }
+        if self.dispatch(receiver, index, false) != t || self.is_object_method(t) {
+            return None;
+        }
+        // `method_call`, on the enum that has the method, then on the receiver's class.
+        match self.homes[t] {
+            Home::Enum(d) => {
+                self.need(Need::Body(t));
+                let obj = self.as_enum(d, receiver);
+                let args = self.call_args(t, args);
+                return Some(Code::atom(format!("{obj}.{name}({})", with(args))));
+            }
+            Home::Class(_) => {}
+            _ => return None,
+        }
+        if !self.facts.self_methods.contains(&t) {
+            let obj = self.receiver_ref(receiver);
+            let args = self.call_args(t, args);
+            return Some(Code::atom(format!("{}_on_stack({obj}, {})", self.qualified_fn(t), with(args))));
+        }
+        if self.is_plain(receiver) {
+            if args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
+                return None;
+            }
+            let args = self.call_args(t, args);
+            let obj = self.object(receiver);
+            let path = self.method_path(receiver, t);
+            return Some(Code::atom(format!("{obj}.{path}{name}({})", with(args))));
+        }
+        let Type::Class(class, _) = receiver.ty else { return None };
+        if args.iter().any(|a| has_effects(a) || reads_class(self.class, a, class)) {
+            return None;
+        }
+        let borrow = if self.facts.mutating.contains(&t) { ".borrow_mut()" } else { ".borrow()" };
+        let obj = self.object(receiver);
+        let args = self.call_args(t, args);
+        let path = self.method_path(receiver, t);
+        let call = format!("{obj}{borrow}.{path}{name}({})", with(args));
+        Some(Code::atom(if self.guarded { format!("{{ {call} }}") } else { call }))
     }
 
     /// The type of the value that a slot holds for an object of class `c`: what its handle
@@ -74,52 +192,74 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The constructors that make their object themselves and that a `new` on the stack calls,
-    /// directly or through `this(..)`: each gets a form that makes it in a slot.
-    pub(super) fn stack_constructors(&self) -> HashSet<usize> {
+    /// The functions that get a form on the stack (see the module's comment): the factories and
+    /// the constructors that make their object themselves, that a `new` or a call whose object
+    /// goes in a slot runs, directly, through a factory or through `this(..)`.
+    pub(super) fn stack_forms(&self) -> HashSet<usize> {
         let mut found = HashSet::new();
-        let mut work = Vec::new();
+        let mut made: Vec<&'a Expr> = Vec::new();
         for m in 0..self.class.methods.len() {
-            for (id, c) in self.stack_sites(m) {
-                if self.builds_plain(&self.class.types[c].name) {
-                    continue;
-                }
-                let mut ctor = None;
-                for s in &self.class.methods[m].body {
-                    visit_stmt(
-                        s,
-                        &mut |e| {
-                            visit_expr(e, &mut |x| {
-                                if x.id == id
-                                    && let ExprKind::New { ctor: Some(k), .. } = x.kind
-                                {
-                                    ctor = Some(k);
-                                }
-                            })
-                        },
-                        &mut |_| {},
-                    );
-                }
-                work.extend(ctor);
+            let sites = self.stack_sites(m);
+            if !sites.is_empty() {
+                made.extend(sites.iter().filter_map(|&(id, _)| self.find_expr(m, id)));
             }
         }
-        while let Some(k) = work.pop() {
+        let mut ctors = Vec::new();
+        while let Some(x) = made.pop() {
+            match x.kind {
+                ExprKind::New { class: c, ctor: Some(k), .. } => {
+                    if !self.builds_plain(&self.class.types[c].name) {
+                        ctors.push(k);
+                    }
+                }
+                _ => {
+                    if let Some(t) = self.call_of(x)
+                        && found.insert(t)
+                        && let Some(p) = self.facts.stack_objects.factories.get(&t)
+                        && let Some(inner) = self.find_expr(t, p.made)
+                        && self.slot_class(inner).is_some()
+                    {
+                        made.push(inner);
+                    }
+                }
+            }
+        }
+        while let Some(k) = ctors.pop() {
             if !found.insert(k) {
                 continue;
             }
             if let Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { resolved: Some(d), .. }, .. })) =
                 explicit_call(&self.class.methods[k].body).map(|i| &self.class.methods[k].body[i])
             {
-                work.push(*d);
+                ctors.push(*d);
             }
         }
         found
     }
 
-    /// Names the slots of the `new`s `sites` of the method being written, distinct from its
-    /// locals and the free functions, and the slot parameter of a constructor's form on the
-    /// stack.
-    pub(super) fn name_slots(&mut self, sites: &[(ExprId, usize)]) {
+    /// The expression `id` in the body of method `m`.
+    fn find_expr(&self, m: usize, id: ExprId) -> Option<&'a Expr> {
+        let mut found = None;
+        for s in &self.class.methods[m].body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if x.id == id {
+                            found = Some(x);
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        found
+    }
+
+    /// Names the slots of the `new`s and calls `sites` of method `index`, distinct from its
+    /// locals and the free functions, and the slot parameter of its form on the stack. In a
+    /// factory's form on the stack, the object it returns goes in the slot it is given.
+    pub(super) fn name_slots(&mut self, index: usize, sites: &[(ExprId, usize)]) {
         let taken: HashSet<String> = self.locals.values().cloned().collect();
         let free = |name: &str| !taken.contains(name) && !self.static_fn_names.contains(name);
         let mut next = 1;
@@ -138,8 +278,23 @@ impl<'a> Gen<'a> {
         while !free(&param) {
             param.push('_');
         }
+        if self.on_stack
+            && let Some(p) = self.facts.stack_objects.factories.get(&index)
+        {
+            slots.insert(p.made, (param.clone(), p.class));
+        }
         self.slots = slots;
         self.slot_param = param;
+    }
+
+    /// The type of the slot parameter of the form on the stack of method `index`.
+    pub(super) fn slot_param_type(&self, index: usize) -> String {
+        let m = &self.class.methods[index];
+        let c = match self.facts.stack_objects.factories.get(&index) {
+            Some(p) if !m.is_ctor => p.class,
+            _ => m.class,
+        };
+        format!("&java::Slot<{}>", self.slot_content(c))
     }
 
     /// Declares the slots named by `name_slots`, at the start of the method's body.
@@ -151,7 +306,7 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The slot that the `new` `id` makes its object in, if it is on the stack.
+    /// The slot that the `new` or call `id` makes its object in, if it is on the stack.
     pub(super) fn slot_of(&self, id: ExprId) -> Option<String> {
         self.slots.get(&id).map(|(name, _)| name.clone())
     }

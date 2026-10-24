@@ -351,7 +351,7 @@ fn same_object(a: &Expr, b: &Expr) -> bool {
 }
 
 /// Whether an expression writes a field of `object` or calls a method that changes it.
-fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
+pub(super) fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| {
         found |= match &x.kind {
@@ -719,7 +719,7 @@ impl<'a> Gen<'a> {
 
     /// The path from the struct of `receiver` to the struct whose `impl` has method `index`:
     /// `base.` for a method of a superclass's fields struct, else empty.
-    fn method_path(&self, receiver: &Expr, index: usize) -> String {
+    pub(super) fn method_path(&self, receiver: &Expr, index: usize) -> String {
         match (self.homes[index], self.struct_class(receiver)) {
             (Home::Fields(d), Some(s)) => hierarchy::base_path(self.facts, self.class, s, d),
             _ => String::new(),

@@ -26,20 +26,55 @@
 //! declared inside the body of the innermost loop around the `new` (a variable declared there is
 //! a new one on each iteration, and Java does not let the next iteration read it before it
 //! assigns it), and since the object is never stored anywhere else, nothing else holds it.
+//!
+//! **Factories.** A method that returns a new object of its own, which nothing else in it lets
+//! escape (`List.iterator()`), is a factory. It makes that object at most once per call: the
+//! `new` (or the call of another factory that makes it) is outside every loop, and constructors
+//! are not factories. A call whose only target is a factory is then a source in its caller, like
+//! a `new`, and the same rules decide whether its object stays there; when it does, the caller
+//! gives the factory a slot of its own to make the object in. A factory may also return other
+//! values (`emptyIterator()`): then the slot is left empty, and the caller's rules hold for the
+//! other value too, which it treats as its own object. The set of factories grows with the
+//! summaries known, a few rounds per method, and is then cut down until every method in it is
+//! still a factory with the factories that remain.
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-/// The `new`s (by expression id) whose objects never leave the method whose body holds them and,
-/// in a loop, are no longer reachable when the next iteration makes the next one.
-pub fn stack_objects(class: &Class) -> HashSet<ExprId> {
+/// What the analysis found (see the module's comment).
+#[derive(Default)]
+pub struct StackObjects {
+    /// The `new`s and the calls of factories (by expression id) whose objects never leave the
+    /// method whose body holds them and, in a loop, are no longer reachable when the next
+    /// iteration makes the next one.
+    pub objects: HashSet<ExprId>,
+    /// The method that each call of `objects` runs, a factory.
+    pub calls: HashMap<ExprId, usize>,
+    /// The factories: the methods that return a new object that does not otherwise leave them.
+    pub factories: HashMap<usize, Product>,
+}
+
+/// The object that a factory returns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Product {
+    /// The expression that makes it: a `new`, or a call of another factory.
+    pub made: ExprId,
+    /// Its class.
+    pub class: usize,
+    /// The factory that the call runs, if it is made by one.
+    pub call: Option<usize>,
+}
+
+/// The objects that may live on the stack (see the module's comment).
+pub fn stack_objects(class: &Class) -> StackObjects {
     let n = class.methods.len();
     let mut analysis = Analysis {
         class,
         summaries: class.methods.iter().map(|m| Summary::empty(arity(m))).collect(),
         targets: HashMap::new(),
         field_inits: field_inits(class),
+        factories: HashMap::new(),
     };
     // Who calls each method, to analyse them again when its summary grows.
     let mut callers: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -56,13 +91,11 @@ pub fn stack_objects(class: &Class) -> HashSet<ExprId> {
             callers[t].push(m);
         }
     }
-    let mut stays: Vec<Vec<ExprId>> = vec![Vec::new(); n];
     let mut queued = vec![true; n];
     let mut work: Vec<usize> = (0..n).rev().collect();
     while let Some(m) = work.pop() {
         queued[m] = false;
-        let (summary, staying) = analysis.method(m);
-        stays[m] = staying;
+        let summary = analysis.method(m).summary;
         if summary != analysis.summaries[m] {
             analysis.summaries[m] = summary;
             for &caller in &callers[m] {
@@ -72,7 +105,55 @@ pub fn stack_objects(class: &Class) -> HashSet<ExprId> {
             }
         }
     }
-    stays.into_iter().flatten().collect()
+    // The factories, with the summaries known: a method is one when what it returns of its own
+    // objects is one object, made by a `new` or a call of another factory. Adding a factory can
+    // take one away (a method that returned one new object and one factory's), so the set is
+    // grown a few rounds and then cut down until every method in it is one.
+    let mut queued = vec![true; n];
+    let mut work: Vec<usize> = (0..n).rev().collect();
+    let mut visits = vec![0u8; n];
+    while let Some(m) = work.pop() {
+        queued[m] = false;
+        visits[m] += 1;
+        let product = analysis.method(m).product;
+        if product != analysis.factories.get(&m).copied() {
+            match product {
+                Some(p) if visits[m] < 4 => _ = analysis.factories.insert(m, p),
+                _ => _ = analysis.factories.remove(&m),
+            }
+            for &caller in &callers[m] {
+                if !std::mem::replace(&mut queued[caller], true) {
+                    work.push(caller);
+                }
+            }
+        }
+    }
+    loop {
+        let wrong: Vec<usize> = analysis
+            .factories
+            .clone()
+            .into_iter()
+            .filter(|&(m, p)| analysis.method(m).product != Some(p))
+            .map(|(m, _)| m)
+            .collect();
+        if wrong.is_empty() {
+            break;
+        }
+        for m in wrong {
+            analysis.factories.remove(&m);
+        }
+    }
+    let mut found = StackObjects::default();
+    for m in 0..n {
+        for (id, call) in analysis.method(m).staying {
+            found.objects.insert(id);
+            if let Some(t) = call {
+                found.calls.insert(id, t);
+            }
+        }
+    }
+    found.factories = analysis.factories;
+    found
 }
 
 /// The parameters of a method, `this` first for an instance method or a constructor.
@@ -93,7 +174,19 @@ impl Summary {
     }
 }
 
-/// A set of the sources of one method's values: its parameters, then its `new`s.
+/// What one analysis of a method finds with the summaries and factories known so far.
+struct MethodFacts {
+    summary: Summary,
+    /// The `new`s and calls of factories whose objects stay in the method, with the factory that
+    /// each call runs.
+    staying: Vec<(ExprId, Option<usize>)>,
+    /// What makes the one object of its own that the method returns, and the object's class,
+    /// when the method is a factory.
+    product: Option<Product>,
+}
+
+/// A set of the sources of one method's values: its parameters, then its `new`s and its calls
+/// of factories.
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Sources(Vec<u64>);
 
@@ -137,6 +230,8 @@ struct Analysis<'a> {
     /// The instance field initializers of each class, which every constructor of the class that
     /// does not call another one with `this(..)` runs on its object.
     field_inits: Vec<Vec<&'a Expr>>,
+    /// The factories known so far (see `StackObjects::factories`).
+    factories: HashMap<usize, Product>,
 }
 
 fn field_inits(class: &Class) -> Vec<Vec<&Expr>> {
@@ -145,8 +240,9 @@ fn field_inits(class: &Class) -> Vec<Vec<&Expr>> {
 
 /// One analysis of a method's code.
 struct Code<'m> {
-    /// The source of each `new` that may stay, by expression id.
-    sites: HashMap<ExprId, usize>,
+    /// The source of each `new` and each call of a factory, by expression id, with the class of
+    /// its object and the factory that a call runs.
+    sites: HashMap<ExprId, (usize, usize, Option<usize>)>,
     /// The parameters by name, `this` excluded.
     params: HashMap<&'m str, usize>,
     has_this: bool,
@@ -192,11 +288,15 @@ impl<'a> Analysis<'a> {
 
     /// Analyses method `m` with the summaries known so far: its summary, and its `new`s whose
     /// objects stay in it.
-    fn method(&mut self, m: usize) -> (Summary, Vec<ExprId>) {
+    fn method(&mut self, m: usize) -> MethodFacts {
         let class = self.class;
         let method = &class.methods[m];
         if method.is_abstract {
-            return (Summary::empty(arity(method)), Vec::new());
+            return MethodFacts {
+                summary: Summary::empty(arity(method)),
+                staying: Vec::new(),
+                product: None,
+            };
         }
         let has_this = !method.is_static;
         let params: HashMap<&str, usize> = method
@@ -207,20 +307,33 @@ impl<'a> Analysis<'a> {
             .collect();
         let mut exprs: Vec<&'a Expr> = Vec::new();
         self.each_expr(m, &mut |x| exprs.push(x));
-        let mut sites = HashMap::new();
+        let mut made: Vec<(&Expr, usize, Option<usize>)> = Vec::new();
         for s in &method.body {
             visit_stmt(
                 s,
                 &mut |e| {
-                    visit_expr(e, &mut |x| {
-                        if let ExprKind::New { ctor: Some(_), .. } = x.kind {
-                            let next = arity(method) + sites.len();
-                            sites.insert(x.id, next);
-                        }
+                    visit_expr(e, &mut |x| match x.kind {
+                        ExprKind::New { class: c, ctor: Some(_), .. } => made.push((x, c, None)),
+                        ExprKind::Call { .. } | ExprKind::MethodCall { .. } => made.push((x, 0, None)),
+                        _ => {}
                     })
                 },
                 &mut |_| {},
             );
+        }
+        let mut sites = HashMap::new();
+        for (x, c, _) in made {
+            let made = match x.kind {
+                ExprKind::New { .. } => Some((c, None)),
+                _ => match self.call_targets(x).as_deref() {
+                    Some(&[t]) => self.factories.get(&t).map(|p| (p.class, Some(t))),
+                    _ => None,
+                },
+            };
+            if let Some((c, call)) = made {
+                let next = arity(method) + sites.len();
+                sites.insert(x.id, (next, c, call));
+            }
         }
         let mut vars: HashMap<&str, Sources> =
             params.iter().map(|(&name, &i)| (name, Sources::one(i))).collect();
@@ -271,17 +384,34 @@ impl<'a> Analysis<'a> {
             summary.escapes[i] = escaping.contains(i);
             summary.returned[i] = returned.contains(i);
         }
-        let mut staying: Vec<(ExprId, usize)> = code
+        let mut staying: Vec<(ExprId, usize, Option<usize>)> = code
             .sites
             .iter()
-            .filter(|&(_, &s)| !escaping.contains(s) && !returned.contains(s))
-            .map(|(&id, &s)| (id, s))
+            .filter(|&(_, &(s, ..))| !escaping.contains(s) && !returned.contains(s))
+            .map(|(&id, &(s, _, call))| (id, s, call))
             .collect();
-        if !staying.is_empty() {
-            let scopes = Scopes::of(method);
-            staying.retain(|&(id, s)| scopes.dead_by_next_iteration(id, s, &code));
+        let returned_sites: Vec<(ExprId, usize, usize, Option<usize>)> = code
+            .sites
+            .iter()
+            .filter(|&(_, &(s, ..))| returned.contains(s))
+            .map(|(&id, &(s, c, call))| (id, s, c, call))
+            .collect();
+        let mut product = None;
+        if !staying.is_empty() || returned_sites.len() == 1 {
+            let scopes = Scopes::of(method, &code.sites);
+            staying.retain(|&(id, s, _)| scopes.dead_by_next_iteration(id, s, &code));
+            // A factory makes the object it returns once per call, outside any loop, and lets
+            // it leave only by being returned.
+            if let [(id, s, class, call)] = returned_sites[..]
+                && !escaping.contains(s)
+                && scopes.sites.get(&id).is_some_and(|loops| loops.is_empty())
+                && !method.is_ctor
+            {
+                product = Some(Product { made: id, class, call });
+            }
         }
-        (summary, staying.into_iter().map(|(id, _)| id).collect())
+        let staying = staying.into_iter().map(|(id, _, call)| (id, call)).collect();
+        MethodFacts { summary, staying, product }
     }
 
     /// The sources whose objects `e` may be.
@@ -318,12 +448,7 @@ impl<'a> Analysis<'a> {
             | ExprKind::New { .. }
             | ExprKind::ThisCall { .. }
             | ExprKind::SuperInit { .. } => {
-                let mut s = match &e.kind {
-                    ExprKind::New { .. } => {
-                        code.sites.get(&e.id).map(|&i| Sources::one(i)).unwrap_or_default()
-                    }
-                    _ => Sources::default(),
-                };
+                let mut s = code.sites.get(&e.id).map(|&(i, ..)| Sources::one(i)).unwrap_or_default();
                 let Some(targets) = self.call_targets(e) else { return s };
                 let Some(args) = self.arguments(code, e, &targets) else { return s };
                 for &t in targets.iter() {
@@ -349,7 +474,7 @@ impl<'a> Analysis<'a> {
             }
             ExprKind::Call { args, resolved: Some(r), .. } if class.methods[*r].is_static => (None, args),
             ExprKind::New { args, .. } => {
-                (Some(code.sites.get(&x.id).map(|&i| Sources::one(i)).unwrap_or_default()), args)
+                (Some(code.sites.get(&x.id).map(|&(i, ..)| Sources::one(i)).unwrap_or_default()), args)
             }
             ExprKind::ThisCall { args, .. } | ExprKind::SuperInit { args, .. } => {
                 (Some(if code.has_this { Sources::one(0) } else { Sources::default() }), args)
@@ -420,7 +545,7 @@ impl<'a> Analysis<'a> {
                         if with_this && code.has_this {
                             escaping.insert(0);
                         }
-                        if let Some(&s) = code.sites.get(&x.id) {
+                        if let Some(&(s, ..)) = code.sites.get(&x.id) {
                             escaping.insert(s);
                         }
                         for a in args {
@@ -451,15 +576,18 @@ fn only_looks(builtin: &Builtin) -> bool {
 struct Scopes<'m> {
     /// How many loops have been numbered.
     count: usize,
-    /// The loops around each `new`, outermost first, as numbers of the loops.
+    /// The `new`s and calls of factories to place.
+    made: &'m HashMap<ExprId, (usize, usize, Option<usize>)>,
+    /// The loops around each `new` and call of a factory, outermost first, as numbers of the
+    /// loops.
     sites: HashMap<ExprId, Vec<usize>>,
     /// For each variable, the loops around each of its declarations.
     declarations: HashMap<&'m str, Vec<Vec<usize>>>,
 }
 
 impl<'m> Scopes<'m> {
-    fn of(method: &'m Method) -> Scopes<'m> {
-        let mut scopes = Scopes { count: 0, sites: HashMap::new(), declarations: HashMap::new() };
+    fn of(method: &'m Method, made: &'m HashMap<ExprId, (usize, usize, Option<usize>)>) -> Scopes<'m> {
+        let mut scopes = Scopes { count: 0, made, sites: HashMap::new(), declarations: HashMap::new() };
         for p in &method.params {
             scopes.declarations.entry(p.name.as_str()).or_default().push(Vec::new());
         }
@@ -567,7 +695,9 @@ impl<'m> Scopes<'m> {
     fn expr(&mut self, e: &'m Expr, loops: &mut Vec<usize>, bindings: Option<usize>) {
         let mut switches = Vec::new();
         visit_expr(e, &mut |x| match &x.kind {
-            ExprKind::New { .. } => {
+            ExprKind::New { .. } | ExprKind::Call { .. } | ExprKind::MethodCall { .. }
+                if self.made.contains_key(&x.id) =>
+            {
                 let at = self.sites.entry(x.id).or_default();
                 if at.len() <= loops.len() {
                     *at = loops.clone();
