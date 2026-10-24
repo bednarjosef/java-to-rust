@@ -226,10 +226,10 @@ with fat LTO, PGO and BOLT on the parts built so far:
 
 | workload | real javac | translation now |
 |---|---:|---:|
-| hello | 0.19 s | 0.009 s |
-| 47 programs | 0.63 s, 210 MB | 0.10 s, 104 MB |
-| 540 features | 1.85 s, 430 MB | 0.67 s, 185 MB |
-| Minecraft server | 11.3 s, 4.1 GB | 18.9 s, 1.05 GB |
+| hello | 0.19 s | 0.010 s |
+| 47 programs | 0.63 s, 210 MB | 0.08 s, 99 MB |
+| 540 features | 1.85 s, 430 MB | 0.54 s, 177 MB |
+| Minecraft server | 11.3 s, 4.1 GB | 13.1 s, 1.36 GB |
 
 ## Risks
 
