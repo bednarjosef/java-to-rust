@@ -1,7 +1,8 @@
 //! The natives of the JDK's internal classes that a translated JDK class calls and that only the
 //! JVM can answer: class data sharing (`jdk.internal.misc.CDS`), continuations
 //! (`jdk.internal.vm.ContinuationSupport`), the layout of arrays (`jdk.internal.misc.Unsafe`), the
-//! wall clock behind `Instant.now()` (`jdk.internal.misc.VM`) and `java.util.zip.CRC32`. Each
+//! wall clock behind `Instant.now()` (`jdk.internal.misc.VM`), the checksums of `java.util.zip`
+//! (`CRC32`, `Adler32`) and the processes of `java.lang.ProcessHandleImpl`. Each
 //! answers as HotSpot does, or as HotSpot does when run with the flag named, where the default
 //! depends on something a translated program does not have (an archive, continuations).
 
@@ -113,6 +114,98 @@ pub fn crc32_update(crc: i32, b: i32) -> i32 {
     crc32_update_bytes(crc, &[b as i8], 0, 1)
 }
 
+/// `CRC32.updateByteBuffer0(crc, address, off, len)`: the checksum continued with the `len` bytes
+/// at `address + off`, memory outside the heap (a direct buffer's); `CRC32` has checked that the
+/// address is not 0.
+pub fn crc32_update_buffer(crc: i32, address: i64, off: i32, len: i32) -> i32 {
+    let bytes: Vec<i8> =
+        crate::read_native(address + off as i64, len.max(0) as usize).into_iter().map(|b| b as i8).collect();
+    crc32_update_bytes(crc, &bytes[..], 0, bytes.len() as i32)
+}
+
+/// The modulus of Adler-32, the largest prime below 2^16.
+const ADLER_BASE: u32 = 65521;
+
+/// `Adler32.updateBytes(adler, b, off, len)`: zlib's `adler32(adler, b + off, len)`, the Adler-32
+/// of the bytes continued from the checksum `adler` (1 for none yet). The caller has checked the
+/// range.
+pub fn adler32_update_bytes(adler: i32, b: &(impl crate::Source<i8> + ?Sized), off: i32, len: i32) -> i32 {
+    adler32(adler, b.range(off as usize..(off + len) as usize).iter().map(|&b| b as u8))
+}
+
+/// `Adler32.update(adler, b)`: the checksum `adler` continued with the low eight bits of `b`.
+pub fn adler32_update(adler: i32, b: i32) -> i32 {
+    adler32(adler, [b as u8])
+}
+
+/// `Adler32.updateByteBuffer(adler, address, off, len)`: the checksum continued with the `len`
+/// bytes at `address + off`, memory outside the heap (a direct buffer's).
+pub fn adler32_update_buffer(adler: i32, address: i64, off: i32, len: i32) -> i32 {
+    adler32(adler, crate::read_native(address + off as i64, len.max(0) as usize))
+}
+
+/// The Adler-32 `adler` continued with `bytes`: its low half is 1 plus the sum of the bytes, its
+/// high half the sum of the low half after each byte, both modulo `ADLER_BASE`.
+fn adler32(adler: i32, bytes: impl IntoIterator<Item = u8>) -> i32 {
+    let (mut low, mut high) = (adler as u32 & 0xffff, (adler as u32 >> 16) & 0xffff);
+    for byte in bytes {
+        low = (low + byte as u32) % ADLER_BASE;
+        high = (high + low) % ADLER_BASE;
+    }
+    ((high << 16) | low) as i32
+}
+
+/// `ProcessHandleImpl.getCurrentPid0()`: the id of the process.
+pub fn current_pid() -> i64 {
+    std::process::id() as i64
+}
+
+/// `ProcessHandleImpl.isAlive0(pid)`, as the JDK answers it on Linux from `/proc/<pid>/stat`: -1
+/// when the process has no such file (it does not exist), 0 when the file's fields cannot be
+/// read, and otherwise the time the process started, in milliseconds since the epoch: the boot
+/// time (`btime` of `/proc/stat`) plus the start's clock ticks after boot (the 22nd field).
+pub fn process_start_time(pid: i64) -> i64 {
+    let Ok(stat) = std::fs::read(format!("/proc/{}/stat", pid as i32)) else { return -1 };
+    // The JDK reads at most 2047 bytes. The command is between parentheses and may hold anything,
+    // so the fields follow the last `)`.
+    let stat = String::from_utf8_lossy(&stat[..stat.len().min(2047)]).into_owned();
+    let Some(open) = stat.find('(') else { return -1 };
+    let Some(close) = stat[open + 1..].rfind(')') else { return -1 };
+    // From the state (the 3rd field): the parent (4th), the user and system times (14th and 15th),
+    // and the start (22nd), which the JDK all needs.
+    let fields: Vec<&str> = stat[open + 1 + close + 1..].split_ascii_whitespace().collect();
+    let number = |i: usize| fields.get(i).and_then(|f| f.parse::<u64>().ok());
+    let parent = fields.get(1).and_then(|p| p.parse::<i32>().ok());
+    let (Some(_), Some(_), Some(_), Some(start)) = (parent, number(11), number(12), number(19)) else {
+        return 0;
+    };
+    boot_time_ms().wrapping_add((start.wrapping_mul(1000) / clock_ticks_per_second()) as i64)
+}
+
+/// The kernel's clock ticks per second (`sysconf(_SC_CLK_TCK)`), from the process's auxiliary
+/// vector (`AT_CLKTCK`); without it 100, the kernel's `USER_HZ` on every architecture.
+fn clock_ticks_per_second() -> u64 {
+    const AT_CLKTCK: u64 = 17;
+    let auxv = std::fs::read("/proc/self/auxv").unwrap_or_default();
+    let word = |c: &[u8]| u64::from_ne_bytes(c.try_into().expect("eight bytes"));
+    auxv.as_chunks::<16>()
+        .0
+        .iter()
+        .find(|pair| word(&pair[..8]) == AT_CLKTCK)
+        .map(|pair| word(&pair[8..]))
+        .filter(|&ticks| ticks > 0)
+        .unwrap_or(100)
+}
+
+/// The time the system booted, in milliseconds since the epoch: `btime` of `/proc/stat`, in
+/// seconds; 0 without it, as the JDK has it.
+fn boot_time_ms() -> i64 {
+    let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+    let btime =
+        stat.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|t| t.trim().parse::<i64>().ok());
+    btime.unwrap_or(0) * 1000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +271,31 @@ mod tests {
         // Only the low eight bits of the `int` count.
         assert_eq!(crc32_update(0, 0x161), crc32_update(0, 0x61));
         assert_eq!(crc32_update(0, b'a' as i32), 0xe8b7_be43_u32 as i32);
+    }
+
+    #[test]
+    fn adler32_is_zlibs() {
+        let bytes: Vec<i8> = b"Wikipedia".iter().map(|&b| b as i8).collect();
+        assert_eq!(adler32_update_bytes(1, &bytes, 0, 9), 0x11e6_0398);
+        let half = adler32_update_bytes(1, &bytes, 0, 4);
+        assert_eq!(adler32_update_bytes(half, &bytes, 4, 5), 0x11e6_0398);
+        let one_by_one = bytes.iter().fold(1, |adler, &b| adler32_update(adler, b as i32));
+        assert_eq!(one_by_one, 0x11e6_0398);
+        assert_eq!(adler32_update_bytes(7, &bytes, 3, 0), 7);
+        assert_eq!(adler32_update(1, 0x161), adler32_update(1, 0x61));
+        // The sums wrap at the modulus: 0xff bytes past it.
+        let ff = vec![-1i8; 6000];
+        assert_eq!(adler32_update_bytes(1, &ff, 0, 6000), adler32(1, std::iter::repeat_n(0xff, 6000)));
+        assert_eq!(adler32(1, std::iter::repeat_n(0xff, 6000)) as u32 & 0xffff, (1 + 6000 * 255) % 65521);
+    }
+
+    #[test]
+    fn the_current_process_is_alive_since_it_started() {
+        assert_eq!(current_pid(), std::process::id() as i64);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        let started = process_start_time(current_pid());
+        // Started in the last day, and not after now (the boot time has whole seconds).
+        assert!((now - 86_400_000..=now + 1000).contains(&started), "{started} {now}");
+        assert_eq!(process_start_time(-5), -1);
     }
 }
