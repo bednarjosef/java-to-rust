@@ -941,7 +941,7 @@ impl<'t> Lowering<'t> {
                 self.created_by_name(node, Node(name))?
             }
             "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
-            "TYPE_CAST" if let Some(cast) = self.intersection_cast(node).transpose() => cast?,
+            "TYPE_CAST" if let Some(cast) = self.intersection_cast(node).transpose() => return cast,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 if let Some(created) = self.constructor_handle_call(node, ty)? {
