@@ -77,6 +77,10 @@ on a futex.
   idle marker takes up to 256 items.
 - A range longer than 64 KB (a large array) is split into 64 KB pieces as it is taken, all of
   which go on the stack at once, so other markers can take them.
+- A slot taken off a marker's stack waits in a ring of 8 while its memory is prefetched, and is
+  scanned as it leaves the ring, so the cache misses of reading eight slots overlap instead of
+  coming one after another. On the Minecraft benchmark this took the translated javac's marking
+  from 3.9 s to 2.7 s in all (median of runs; 16 slots did no better).
 - Marking ends when every marker is idle and the pool is empty: no marker can then make work.
 
 Sweeping is shared in chunks of 256 blocks: each thread sweeps the blocks of a chunk and records
