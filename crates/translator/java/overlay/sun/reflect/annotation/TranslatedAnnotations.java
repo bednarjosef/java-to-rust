@@ -11,6 +11,9 @@ import java.util.Map;
  * {@code lower/annotation_objects.rs}).
  */
 final class TranslatedAnnotations {
+    /** The annotations made so far, by the name that {@code cached} is given. */
+    private static final Map<String, Annotation> made = new HashMap<>();
+
     private TranslatedAnnotations() {
     }
 
@@ -35,6 +38,21 @@ final class TranslatedAnnotations {
         for (int i = 0; i < values.length; i += 2)
             memberValues.put((String) values[i], values[i + 1]);
         return new AnnotationInvocationHandler(type, memberValues);
+    }
+
+    /**
+     * The annotation that {@code key} names, a declaration's of one type, made as
+     * {@code annotation} makes it the first time it is asked for: Java's class or member keeps the
+     * annotations it has once made, so each call gives the same object.
+     */
+    static synchronized Annotation cached(String key, Class<? extends Annotation> type, Object[] defaults,
+            Object[] values) {
+        Annotation found = made.get(key);
+        if (found == null) {
+            found = annotation(type, defaults, values);
+            made.put(key, found);
+        }
+        return found;
     }
 
     /** {@code annotation.name()}, of a member of its type. */
