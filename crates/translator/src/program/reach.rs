@@ -1289,6 +1289,12 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.net.NetworkInterface", "getByName0", "(java.lang.String)java.net.NetworkInterface"),
         ("java.net.TranslatedNet", "getByName0"),
     ),
+    // The class of a primitive type by its name, which the JDK writes as a switch over class
+    // literals in `Class`, the runtime's class (`java/lang/TranslatedClasses.java`).
+    (
+        ("java.lang.Class", "forPrimitiveName", "(java.lang.String)java.lang.Class<?>"),
+        ("java.lang.TranslatedClasses", "forPrimitiveName"),
+    ),
 ];
 
 /// The translator's class of the JDK's modules and class loaders as the translation has them

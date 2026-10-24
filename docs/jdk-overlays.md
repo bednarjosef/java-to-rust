@@ -37,8 +37,9 @@ From the lightest to the heaviest:
    whose body must be different.
 3. **An overlay class.** A whole class of ours that the JDK does not have, in
    `crates/translator/java/overlay/`: the targets of redirects (`TranslatedFiles`,
-   `TranslatedNet`, `TranslatedCoders`), the objects behind `System.out` and `System.in`
-   (`StandardOutput`), the object behind `String.CASE_INSENSITIVE_ORDER` (`TranslatedStrings`),
+   `TranslatedNet`, `TranslatedCoders`, `TranslatedClasses`), the objects behind `System.out`
+   and `System.in` (`StandardOutput`), the object behind `String.CASE_INSENSITIVE_ORDER`
+   (`TranslatedStrings`),
    and classes that patches use (`sun/nio/fs/UnixFileChannel.java`). The overlay directory is on
    javac's source path before the JDK's sources. It holds no file at a path the JDK has: a
    change to a JDK class is a patch.
