@@ -323,3 +323,51 @@ fn parse(json: &[u8]) -> serde_json::Result<Value> {
     reader.end()?;
     Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::value::Value;
+
+    /// The types of the symbols named `name` anywhere in `value`.
+    fn symbol_types(value: &Value, name: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Object(fields) => {
+                let symbol = &value["symbol"];
+                if symbol["name"].as_str() == Some(name) {
+                    out.extend(symbol["type"].as_str().map(str::to_string));
+                }
+                fields.values().for_each(|child| symbol_types(child, name, out));
+            }
+            Value::Array(items) => items.iter().for_each(|child| symbol_types(child, name, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn types_drop_type_annotations_and_keep_type_parameters() {
+        let source = "
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Target;
+import java.util.List;
+
+public class Main {
+    @Target(ElementType.TYPE_USE)
+    @interface Nullable {}
+
+    static <T> @Nullable T first(List<@Nullable T> values) {
+        return values.get(0);
+    }
+
+    public static void main(String[] args) {
+        System.out.println(first(List.of(args.length)));
+    }
+}
+";
+        let tree = super::tree(source).expect("javac takes the source");
+        let mut types = Vec::new();
+        symbol_types(&tree, "first", &mut types);
+        // The declaration's symbol and the call's.
+        assert!(types.len() >= 2, "{types:?}");
+        assert!(types.iter().all(|ty| ty == "<T>(java.util.List<T>)T"), "{types:?}");
+    }
+}
