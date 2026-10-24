@@ -29,7 +29,8 @@ const FIELDS_PER_SLOT: usize = 16;
 impl<'a> Gen<'a> {
     /// Whether objects of class `c` can be made in a slot: a class whose objects are handles
     /// (not owned plain values or closures), with a struct that is not a Rust generic, and not
-    /// too large for a frame.
+    /// too large for a frame. A lambda that captures nothing is made once per place it is
+    /// written and kept (`captures_nothing`), so it is never in a slot.
     pub(super) fn stack_class(&self, c: usize) -> bool {
         let decl = &self.class.types[c];
         let fields: usize = std::iter::once(c)
@@ -42,6 +43,7 @@ impl<'a> Gen<'a> {
             && !self.facts.owned.contains(&decl.name)
             && !decl.implements.iter().any(|i| self.facts.closure_types.contains(i))
             && fields <= FIELDS_PER_SLOT
+            && !(matches!(decl.origin, Origin::Lambda { .. }) && decl.fields.is_empty())
     }
 
     /// The `new`s and calls of factories of method `m` whose objects it makes in slots, with
