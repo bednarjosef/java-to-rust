@@ -1,6 +1,7 @@
 package sun.reflect.annotation;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Array;
 import java.util.Map;
 
 /**
@@ -15,8 +16,8 @@ import java.util.Map;
  * {@code Annotation} alone, which the JDK's constructor checks by reflection; the patched one
  * checks that it is an annotation type. {@code equals} compares the values of the type's members,
  * which {@code TranslatedAnnotations.members0} names, as the JDK's does over the type's methods.
- * Reading a member's value is not translated: an annotation type is not, so its methods cannot be
- * called.
+ * An annotation type is not translated, so a call of one of its members is a call of
+ * {@code member}, which answers it as the proxy's {@code invoke} does.
  */
 @Edit(find = "class AnnotationInvocationHandler implements InvocationHandler, Serializable {",
       replace = "class AnnotationInvocationHandler implements Serializable, Annotation {")
@@ -28,6 +29,14 @@ class AnnotationInvocationHandler {
     @Add
     public Class<? extends Annotation> annotationType() {
         return type;
+    }
+
+    @Add
+    Object member(String name) {
+        Object result = memberValues.get(name);
+        if (result.getClass().isArray() && Array.getLength(result) != 0)
+            result = cloneArray(result);
+        return result;
     }
 
     @Add

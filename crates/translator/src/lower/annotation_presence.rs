@@ -105,7 +105,7 @@ impl<'t> Lowering<'t> {
 
     /// Whether the declaration `decl` has the annotation `name` itself: once, or as the
     /// container of an annotation that it has twice or more.
-    fn directly_present(&self, decl: Node<'t>, name: &str) -> bool {
+    pub(super) fn directly_present(&self, decl: Node<'t>, name: &str) -> bool {
         let Ok(modifiers) = decl.child("modifiers") else { return false };
         let mut counts: Vec<(&str, usize)> = Vec::new();
         for at in modifiers.list("annotations") {
@@ -135,7 +135,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether the declaration `decl` has the annotation `name`, whatever its values.
-    fn has_annotation(&self, decl: Node<'t>, name: &str) -> bool {
+    pub(super) fn has_annotation(&self, decl: Node<'t>, name: &str) -> bool {
         let Ok(modifiers) = decl.child("modifiers") else { return false };
         modifiers
             .list("annotations")

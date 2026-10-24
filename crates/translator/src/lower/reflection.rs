@@ -465,7 +465,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// `value`, an `Object`, as a `ty`: unboxed for a primitive, cast for any other type.
-    fn unboxed(&self, node: Node<'t>, value: Expr, ty: Type) -> Result<Expr, Error> {
+    pub(super) fn unboxed(&self, node: Node<'t>, value: Expr, ty: Type) -> Result<Expr, Error> {
         let pos = value.pos;
         if Self::is_object(ty) {
             return Ok(value);
@@ -724,7 +724,7 @@ impl<'t> Lowering<'t> {
 
     /// The method `name` with signature `sig` of the translator's class `class`, which the
     /// program has when it uses it.
-    fn template_method(&self, class: &str, name: &str, sig: &str) -> Option<usize> {
+    pub(super) fn template_method(&self, class: &str, name: &str, sig: &str) -> Option<usize> {
         self.methods.iter().position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == sig)
     }
 }

@@ -181,11 +181,15 @@ handles.
   `Reach::reflected` and `Reach::services`) in a whole program, and to `file_names` in a single
   file. The rest of the table needs nothing new.
 - **The report** of the lookups that cannot be resolved when translating is not written yet.
-- **Annotations read by reflection** (`getAnnotation`), method handles, `Proxy` and
-  `java.lang.invoke` are still rejected, except the annotation objects that the JDK's
+- **Annotations read by reflection** of a method, field or constructor (`getAnnotation`),
+  method handles, `Proxy` and `java.lang.invoke` are still rejected, except a class's
+  `getAnnotation(A.class)`, a chain of tests of the class against those whose declarations have
+  `A`, each making the annotation from the declared values and the defaults
+  (`lower/annotation_values.rs`; each call makes a new object, and a member that is an array of
+  strings or enum constants is rejected), the annotation objects that the JDK's
   `AnnotationParser.annotationForMap` makes (javac's `AnnotationProxyMaker`), which are the
-  patched `AnnotationInvocationHandler` itself (`lower/annotation_objects.rs`; reading a member's
-  value is not translated), the three annotations that
+  patched `AnnotationInvocationHandler` itself (`lower/annotation_objects.rs`; a member's call
+  is `TranslatedAnnotations.member`, which answers it as the proxy does), the three annotations that
   `AbstractProcessor` reads of its processor's class (`@SupportedOptions`,
   `@SupportedAnnotationTypes`, `@SupportedSourceVersion`): its overlay reads them through the
   native `TranslatedProcessorAnnotations.values0`, which the translator writes from the program's
