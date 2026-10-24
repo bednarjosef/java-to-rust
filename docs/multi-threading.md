@@ -478,9 +478,11 @@ name:
   class. Static fields (`staticFieldOffset`, `staticFieldBase`) work the same way.
 - **An element offset** is `base + (index << shift)` or `base + index * scale`, with `base` and
   `scale` the `arrayBaseOffset` and `arrayIndexScale` of one array class, written out, read from
-  a static final, computed by a one-line method (`ForkJoinPool.slotOffset`) or held in a `long`
-  local. An access at it is `a[index]`.
-- **`VarHandle` constants** of fields, of array elements and of `byte[]` views as numbers
+  a static final, computed by a one-line method (`ForkJoinPool.slotOffset`), held in a `long`
+  local, or passed to a `long` parameter of a private method by each of its calls
+  (`LazyCollections`). An access at it is `a[index]`.
+- **`VarHandle` constants** of fields (`findVarHandle`, `ConstantBootstraps.fieldVarHandle`), of
+  static fields (`findStaticVarHandle`), of array elements and of `byte[]` views as numbers
   (`byteArrayViewVarHandle`) are handles too, as is a `MethodHandle` constant of a constructor.
 - **Atomic updates** (compare-and-set, compare-and-exchange, get-and-add, get-and-set,
   get-and-bitwise, every memory mode) of a field become a method that lowering adds to the
@@ -591,7 +593,7 @@ own slot or object and `join` orders the output, or where the program checks its
 (every increment counted, every item consumed once) and prints the result. Programs that use the
 JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `AtomicArrayDekker`,
 `ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`,
-`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ScopedValues`). Shape tests of the generated Rust are in
+`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `StaticVarHandles`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
 unchanged and that a class no thread reaches has no monitor.
 

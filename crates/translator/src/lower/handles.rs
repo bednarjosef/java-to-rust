@@ -58,10 +58,13 @@
 //!
 //! An element offset may also be computed away from the access: by a static method whose body
 //! returns one of its parameter (`ForkJoinPool.slotOffset(i)`), whose call is the element at its
-//! argument, or into a `long` local that every assignment gives an element offset of one kind of
+//! argument, into a `long` local that every assignment gives an element offset of one kind of
 //! array (`U.getReferenceAcquire(a, k = slotOffset(i))`, then `U.compareAndSetReference(a, k, t,
-//! null)`). The local holds the offset Java computes, from `Unsafe`'s answers for the base and
-//! scale, so the element's index is `(k - base) / scale`. Any other offset arithmetic is rejected.
+//! null)`), or into a `long` parameter of a private method that every call passes one of one
+//! kind (`LazyCollections.Mutexes.acquireMutex(long offset)`): only its outermost class can
+//! call it, and no code there may name it otherwise. The local or parameter holds the offset Java
+//! computes, from `Unsafe`'s answers for the base and scale, so the element's index is
+//! `(k - base) / scale`. Any other offset arithmetic is rejected.
 //!
 //! The offset of a static field (`staticFieldOffset(f)`, with `staticFieldBase(f)` as the object,
 //! of a field `f` that `getDeclaredField` finds, as `ForkJoinPool` finds `poolIds`) is a handle of
@@ -70,7 +73,10 @@
 //! `Field` local is left out with the handles it makes.
 //!
 //! A `VarHandle` constant (a static final field) is a handle as well: of a field
-//! (`MethodHandles.lookup().findVarHandle(C.class, "f", T.class)`, or `MhUtil.findVarHandle`), of
+//! (`MethodHandles.lookup().findVarHandle(C.class, "f", T.class)`, `MhUtil.findVarHandle`, or
+//! `ConstantBootstraps.fieldVarHandle`), of a static field (`findStaticVarHandle`, as `SSLContext`
+//! keeps its default, or `ConstantBootstraps.staticFieldVarHandle`), whose accesses take no
+//! object and are those of `staticFieldOffset`'s handle, of
 //! the elements of an array (`arrayElementVarHandle(T[].class)`), or of the values whose bytes a
 //! `byte[]` holds (`byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN)`, as
 //! `DataOutputStream` and `DataInputStream` write and read numbers). Its `get`, `set`,
@@ -226,6 +232,25 @@ fn walk<'t>(v: &'t Value, f: &mut impl FnMut(Node<'t>)) {
     }
 }
 
+/// Calls `f` on every node of the tree under `v`, with the innermost method declaration that
+/// holds it, if any (`method` for `v` itself).
+fn walk_in_methods<'t>(
+    v: &'t Value,
+    method: Option<Node<'t>>,
+    f: &mut impl FnMut(Node<'t>, Option<Node<'t>>),
+) {
+    match v {
+        Value::Object(map) => {
+            let node = Node(v);
+            let method = if node.kind() == "METHOD" { Some(node) } else { method };
+            f(node, method);
+            map.values().for_each(|c| walk_in_methods(c, method, f));
+        }
+        Value::Array(items) => items.iter().for_each(|i| walk_in_methods(i, method, f)),
+        _ => {}
+    }
+}
+
 /// Whether `node` is the variable of an assignment, compound assignment, `++` or `--` that
 /// `target` tells apart.
 fn assigns<'t>(node: Node<'t>, target: impl Fn(Node<'t>) -> bool) -> bool {
@@ -245,6 +270,8 @@ fn assigns<'t>(node: Node<'t>, target: impl Fn(Node<'t>) -> bool) -> bool {
 enum VarHandleOf<'t> {
     /// The field of a class (`findVarHandle`), by the class's index.
     Field(usize, &'t str),
+    /// The static field of a class (`findStaticVarHandle`), by the class's index.
+    Static(usize, &'t str),
     /// The elements of an array of this kind (`arrayElementVarHandle`).
     Element(Kind),
     /// The values of this kind whose bytes are those of a `byte[]`, in big-endian order or not
@@ -587,21 +614,33 @@ impl<'t> Lowering<'t> {
     }
 
     /// The kind of array whose element offset the value of `offset` is, when the access is not
-    /// given the arithmetic itself: an assignment of an element offset (`k = slotOffset(i)`), or
-    /// a `long` local of the method being lowered that every assignment gives an element offset
-    /// of the same kind, as `ForkJoinPool` keeps one to compare and set the element it read.
-    /// Such a value is the real offset that Java computes, from `Unsafe`'s answers for the base
-    /// and scale, so the index is `(offset - base) / scale` (`computed_index`).
-    fn computed_offset(&self, offset: Node<'t>, depth: usize) -> Option<Kind> {
+    /// given the arithmetic itself: an assignment of an element offset (`k = slotOffset(i)`), a
+    /// `long` local of the method declaration `method` (the method being lowered when `None`) that
+    /// every assignment gives an element offset of the same kind, as `ForkJoinPool` keeps one to
+    /// compare and set the element it read, or a `long` parameter that every call passes one
+    /// (`parameter_offset`). Such a value is the real offset that Java computes, from `Unsafe`'s
+    /// answers for the base and scale, so the index is `(offset - base) / scale`
+    /// (`computed_index`).
+    fn computed_offset(&self, offset: Node<'t>, method: Option<Node<'t>>, depth: usize) -> Option<Kind> {
         let offset = plain(offset);
         if depth > 4 {
             return None;
         }
         match offset.kind() {
-            "ASSIGNMENT" => self.computed_offset(offset.get("expression")?, depth + 1),
+            "ASSIGNMENT" => self.computed_offset(offset.get("expression")?, method, depth + 1),
             "IDENTIFIER" => {
-                let symbol = offset.symbol().filter(|s| s.kind == "LOCAL_VARIABLE" && s.ty == "long")?;
-                let body = self.methods[self.method_ctx.get()?].node.get("body")?;
+                let symbol = offset.symbol().filter(|s| s.ty == "long")?;
+                let method = match method {
+                    Some(method) => method,
+                    None => self.methods[self.method_ctx.get()?].node,
+                };
+                if symbol.kind == "PARAMETER" {
+                    return self.parameter_offset(method, symbol.name, depth);
+                }
+                if symbol.kind != "LOCAL_VARIABLE" {
+                    return None;
+                }
+                let body = method.get("body")?;
                 let (mut kinds, mut other) = (Vec::new(), false);
                 walk(body.0, &mut |n| {
                     let value = match n.kind() {
@@ -617,7 +656,7 @@ impl<'t> Lowering<'t> {
                         }
                     };
                     if let Some(value) = value {
-                        kinds.push(self.computed_offset(value, depth + 1));
+                        kinds.push(self.computed_offset(value, Some(method), depth + 1));
                     }
                 });
                 let first = *kinds.first()?;
@@ -625,6 +664,51 @@ impl<'t> Lowering<'t> {
             }
             _ => self.element_offset(offset, &[]).map(|(_, kind)| kind),
         }
+    }
+
+    /// The kind of array whose element offset the `long` parameter `name` of the method
+    /// declaration `method` always is, as `LazyCollections` passes one to its private
+    /// `contentsAcquire(long offset)`: the method is private, so that only the code of its
+    /// outermost class can name it, nothing assigns the parameter, and that code names the method
+    /// only in calls, each in a method and passing an element offset of the same kind
+    /// (`computed_offset` of the argument in its caller).
+    fn parameter_offset(&self, method: Node<'t>, name: &str, depth: usize) -> Option<Kind> {
+        if method.kind() != "METHOD" || !method.has_flag("PRIVATE") {
+            return None;
+        }
+        let position = method.list("parameters").position(|p| p.str("name") == name)?;
+        let mut written = false;
+        walk(method.get("body")?.0, &mut |n| {
+            written |= assigns(n, |v| v.kind() == "IDENTIFIER" && v.str("name") == name);
+        });
+        let declared = method.symbol()?;
+        let named = |n: Node<'t>| {
+            matches!(n.kind(), "METHOD_INVOCATION" | "MEMBER_REFERENCE")
+                && n.symbol().is_some_and(|s| {
+                    s.kind == "METHOD"
+                        && (s.owner, s.name, s.ty) == (declared.owner, method.str("name"), declared.ty)
+                })
+        };
+        // The outermost class: an enclosing class is in the same compilation unit, so lowered
+        // with it, and a local or anonymous class is enclosed by code, which is not followed.
+        let mut class = self.type_index(declared.owner)?;
+        while let Some(outer) = self.types[class].node.symbol().and_then(|s| self.type_index(s.owner)) {
+            class = outer;
+        }
+        if written || self.types[class].nested.is_some() {
+            return None;
+        }
+        let (mut names, mut kinds) = (0, Vec::new());
+        walk_in_methods(self.types[class].node.0, None, &mut |n, caller| {
+            if !named(n) {
+                return;
+            }
+            names += 1;
+            let arg = n.list("arguments").nth(position).filter(|_| n.kind() == "METHOD_INVOCATION");
+            kinds.push(arg.zip(caller).and_then(|(a, c)| self.computed_offset(a, Some(c), depth + 1)));
+        });
+        let first = *kinds.first()?;
+        (names == kinds.len() && kinds.iter().all(|k| *k == first)).then_some(first?)
     }
 
     /// The body's one returned expression of the static method of the program that `call`
@@ -901,12 +985,27 @@ impl<'t> Lowering<'t> {
                 ("findVarHandle", [class, name, _]) => {
                     Some(VarHandleOf::Field(self.offset_class(arg(*class), block)?, field_name(*name)?))
                 }
+                ("findStaticVarHandle", [class, name, _]) => {
+                    Some(VarHandleOf::Static(self.offset_class(arg(*class), block)?, field_name(*name)?))
+                }
                 _ => None,
             };
         }
         let symbol = value.symbol().filter(|s| s.kind == "METHOD" && value.kind() == "METHOD_INVOCATION");
         if let Some(symbol) = symbol {
             let args: Vec<Node<'t>> = value.list("arguments").map(arg).collect();
+            // `ConstantBootstraps.fieldVarHandle(lookup, "f", VarHandle.class, C.class, T.class)`,
+            // the handle that `findVarHandle` makes (`SelectionKeyImpl` makes its own so).
+            if symbol.owner == "java.lang.invoke.ConstantBootstraps"
+                && let [_, name, _, class, _] = &args[..]
+            {
+                let (class, name) = (self.offset_class(*class, block)?, field_name(*name)?);
+                return match symbol.name {
+                    "fieldVarHandle" => Some(VarHandleOf::Field(class, name)),
+                    "staticFieldVarHandle" => Some(VarHandleOf::Static(class, name)),
+                    _ => None,
+                };
+            }
             if (symbol.owner, symbol.name) == ("jdk.internal.invoke.MhUtil", "findVarHandle") {
                 return match &args[..] {
                     [_, name, _] => Some(VarHandleOf::Field(owner, field_name(*name)?)),
@@ -983,6 +1082,7 @@ impl<'t> Lowering<'t> {
         };
         let args: Vec<Node> = node.list("arguments").collect();
         let count = match handle {
+            VarHandleOf::Static(..) => 0,
             VarHandleOf::Field(..) => 1,
             _ => 2,
         } + usize::from(put == Some(true))
@@ -999,6 +1099,11 @@ impl<'t> Lowering<'t> {
                 let (object, ty) = self.handle_field(node, symbol, args[0], class, field)?;
                 let place = Place::Field { object: Box::new(object), name: field.to_string() };
                 return self.access_at(node, place, ty, class, &args[1..], update, put, false).map(Some);
+            }
+            VarHandleOf::Static(class, field) => {
+                let ty = self.static_field_type(node, class, field)?;
+                let place = Place::Static { class, name: field.to_string() };
+                return self.access_at(node, place, ty, class, &args, update, put, false).map(Some);
             }
             VarHandleOf::Element(kind) => {
                 let (array, index, ty) =
@@ -1077,7 +1182,7 @@ impl<'t> Lowering<'t> {
         let offset = match (self.handle(args[1]), self.static_handle(args[1], false)) {
             (Some((class, field)), _) => Offset::Field(class, field),
             (_, Some((class, field))) => Offset::Static(class, field),
-            _ => match (self.element_offset(args[1], &[]), self.computed_offset(args[1], 0)) {
+            _ => match (self.element_offset(args[1], &[]), self.computed_offset(args[1], None, 0)) {
                 (Some((index, kind)), _) => Offset::Element(index, kind),
                 (_, Some(kind)) => Offset::Computed(args[1], kind),
                 _ => {
@@ -1170,6 +1275,14 @@ impl<'t> Lowering<'t> {
         volatile: bool,
     ) -> Result<ExprKind, Error> {
         let ret = self.ty(node, node.java_type())?;
+        // The update method of a static field compares with `==`, which the generator does not
+        // write between a string's owned and borrowed forms.
+        if ty == Type::String
+            && matches!(place, Place::Static { .. })
+            && matches!(update, Some(FieldUpdate::CompareAndSet | FieldUpdate::CompareAndExchange))
+        {
+            return unsupported(node, "a compare-and-set of a static `String` field");
+        }
         if let Some(update) = update {
             let operands =
                 values.iter().map(|a| Ok(self.stored(self.expr(*a)?, ty))).collect::<Result<_, Error>>()?;
@@ -1301,6 +1414,11 @@ impl<'t> Lowering<'t> {
                 &format!("`Unsafe.{}` on another base than its static field's", symbol.name),
             );
         }
+        self.static_field_type(node, class, field)
+    }
+
+    /// The type of the static field `field` of class `class`, which a handle names.
+    fn static_field_type(&self, node: Node<'t>, class: usize, field: &str) -> Result<Type, Error> {
         let member = self.types[class]
             .node
             .list("members")

@@ -380,13 +380,20 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
         return None;
     }
     let args = node["arguments"].as_array()?;
-    // The field of a `VarHandle` that `findVarHandle` of a class literal makes.
+    // The field of a `VarHandle` that `findVarHandle` (or `findStaticVarHandle`) of a class
+    // literal makes, or `ConstantBootstraps.fieldVarHandle` (or `staticFieldVarHandle`).
     let finds = matches!(
         (text(symbol, "owner"), text(symbol, "name")),
-        ("java.lang.invoke.MethodHandles.Lookup", "findVarHandle")
+        ("java.lang.invoke.MethodHandles.Lookup", "findVarHandle" | "findStaticVarHandle")
             | ("jdk.internal.invoke.MhUtil", "findVarHandle")
     );
     if finds && let [.., class, field, _] = &args[..] {
+        let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
+        return Some((literal_class(class)?, field.to_string()));
+    }
+    let bootstraps = text(symbol, "owner") == "java.lang.invoke.ConstantBootstraps"
+        && matches!(text(symbol, "name"), "fieldVarHandle" | "staticFieldVarHandle");
+    if bootstraps && let [_, field, _, class, _] = &args[..] {
         let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
         return Some((literal_class(class)?, field.to_string()));
     }
