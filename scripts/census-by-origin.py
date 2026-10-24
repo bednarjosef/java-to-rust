@@ -12,9 +12,24 @@ Prints, for each origin, the pieces, how many translate, and the rejections that
 its pieces (a piece's first error), and then the rejections over all of them."""
 
 import collections
+import functools
 import json
 import os
 import sys
+
+
+def origins(roots):
+    """The origin of a piece: the name of the first of `roots` (NAME, ROOT pairs) whose directory
+    has the piece's file, or "other"."""
+
+    @functools.cache
+    def of_file(file):
+        for name, root in roots:
+            if os.path.exists(os.path.join(root, file)):
+                return name
+        return "other"
+
+    return lambda piece: of_file(piece["location"].rsplit(":", 1)[0])
 
 
 def main():
@@ -26,13 +41,7 @@ def main():
         del args[at : at + 2]
     census = json.load(open(args[0]))
     roots = [tuple(a.split("=", 1)) for a in args[1:]]
-
-    def origin(piece):
-        file = piece["location"].rsplit(":", 1)[0]
-        for name, root in roots:
-            if os.path.exists(os.path.join(root, file)):
-                return name
-        return "other"
+    origin = origins(roots)
 
     pieces = collections.defaultdict(list)
     for piece in census["pieces"]:
@@ -58,4 +67,5 @@ def main():
         print()
 
 
-main()
+if __name__ == "__main__":
+    main()
