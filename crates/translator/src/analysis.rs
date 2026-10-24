@@ -22,6 +22,7 @@ pub(crate) mod closure;
 pub mod closures;
 mod constants;
 mod early_reads;
+mod escape;
 mod exceptions;
 mod fixed_fields;
 pub mod hierarchy;
@@ -268,6 +269,11 @@ pub struct Facts {
     /// The locals, by method and name, that hold a closure only to call it: a plain Rust
     /// closure, `let f = |x| ..;` (see `closures::closure_locals`).
     pub closure_locals: HashSet<(usize, String)>,
+    /// The `new`s, by expression id, whose objects never leave the method that creates them and,
+    /// in a loop, can no longer be reached when the next iteration makes the next one: their
+    /// objects may live in a slot on the method's stack (see `escape`). Empty when the
+    /// translation is made with `JAVA_TO_RUST_HEAP_ONLY` set.
+    pub stack_objects: HashSet<ExprId>,
 }
 
 impl Facts {
@@ -360,6 +366,9 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
     // The exceptions that the runtime raises are values of `Throwable` too.
     if !facts.raised_classes.is_empty() {
         facts.flows = hierarchy::flows(class, &facts.field_level, &facts.raised_classes);
+    }
+    if std::env::var_os("JAVA_TO_RUST_HEAP_ONLY").is_none() {
+        facts.stack_objects = phase("analysis: stack objects", || escape::stack_objects(class));
     }
     Ok(facts)
 }
