@@ -60,7 +60,6 @@ mod modules;
 mod natives;
 mod negated_patterns;
 mod patterns;
-mod platform_logger;
 mod primitives;
 mod processors;
 mod program;
@@ -743,8 +742,6 @@ impl<'t> Lowering<'t> {
             // Assertions are disabled by default in Java, so an `assert` does nothing at all.
             "ASSERT" => return Ok(()),
             "SYNCHRONIZED" => return self.synchronized(node, out),
-            // A `PlatformLogger` has no value of its own (see `platform_logger`).
-            "VARIABLE" if self.logger_variable(node)? => return Ok(()),
             "VARIABLE" => {
                 let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
                 let init = match node.get("initializer") {
@@ -754,10 +751,6 @@ impl<'t> Lowering<'t> {
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
             "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
-            "EXPRESSION_STATEMENT" if let Some(logged) = self.logger_statement(node)? => {
-                out.extend(logged);
-                return Ok(());
-            }
             // The value of a field handle is no field's (see `handles`).
             "EXPRESSION_STATEMENT" if self.handle_definition(node) => return Ok(()),
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
@@ -1155,9 +1148,6 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.module_call(node, &symbol, select)? {
-            return Ok(kind);
-        }
-        if let Some(kind) = self.logger_query(node, &symbol)? {
             return Ok(kind);
         }
         if let Some(kind) = self.class_call(node, &symbol, select)? {

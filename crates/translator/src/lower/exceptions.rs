@@ -806,11 +806,6 @@ impl Standard {
                 "()java.lang.String".into(),
             ));
         }
-        // A `Throwable` logged through a `PlatformLogger` prints its trace (see `platform_logger`).
-        if uses.operations.iter().any(|o| super::platform_logger::logs_throwable(o)) {
-            let (owner, name, sig) = super::platform_logger::PRINT_STACK_TRACE;
-            uses.members.insert((owner.into(), name.into(), sig.into()));
-        }
         let decls: Vec<(String, &'static Value)> = template().iter().map(|d| (qualified(d), d)).collect();
         let decl = template_type;
         let mut scanned: HashSet<(String, String, String)> = HashSet::new();
