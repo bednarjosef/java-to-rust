@@ -20,8 +20,8 @@
 //! that may hold pointers is zeroed as it is handed out, so that no old word in it keeps an object
 //! alive; a pointer-free one only for `alloc_zeroed`.
 //!
-//! **Collection** runs when the program has taken half as many bytes as were alive after the last
-//! one (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share). It stops every other thread
+//! **Collection** runs when the program has taken as many bytes as were alive after the last one
+//! (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share). It stops every other thread
 //! (with `SIGPWR`; each records where its stack is and waits), marks every slot reachable from the
 //! roots, and frees the taken slots left unmarked. With a large heap, helper threads
 //! mark and sweep alongside (see "Marking"). The roots are scanned conservatively: any aligned word that points into a
@@ -201,7 +201,7 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     collections: 0,
     every: MIN_COLLECT,
     log: false,
-    growth: 50,
+    growth: 100,
     threads_set: false,
 }));
 

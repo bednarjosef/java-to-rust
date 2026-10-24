@@ -54,10 +54,10 @@ else touched; at allocation the sweep takes 11 ms and the run is 0.4 s faster.
 
 ## Collection
 
-A collection runs when the program has taken half as many bytes as were alive after the last one
-(at least 64 MB), so the heap is about one and a half times what is alive. Collecting after as
-much as is alive instead took the translated javac on the Minecraft benchmark from 59.7 s and
-4.1 GB to 56.1 s and 5.4 GB. It:
+A collection runs when the program has taken as many bytes as were alive after the last one (at
+least 64 MB), so the heap is about twice what is alive. On the Minecraft benchmark the optimized
+translated javac takes 14.5 s and 1.03 GB collecting after half as much as is alive, 13.1 s and
+1.36 GB after as much, and 12.4 s and 2.0 GB after twice as much (the Java VM: 11.3 s, 4.1 GB). It:
 
 1. stops every other thread with a signal (`SIGPWR`); each records where its stack is and waits;
 2. marks every slot reachable from the roots, with an explicit stack, so a long chain of objects
@@ -123,7 +123,7 @@ thread unregisters when it ends; its later frees during its exit go straight bac
 - `JAVA_GC_LOG=1` writes a line per collection to standard error: bytes taken since the last,
   bytes alive, heap size, and the time spent marking and sweeping.
 - `JAVA_GC_GROWTH=<percent>` sets the bytes taken between collections as a percentage of the
-  bytes alive (50 by default), which trades memory for time.
+  bytes alive (100 by default), which trades memory for time.
 
 ## Costs and limits
 
