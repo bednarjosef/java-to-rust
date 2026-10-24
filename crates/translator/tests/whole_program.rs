@@ -485,3 +485,53 @@ fn programs_and_libraries_that_are_modules() {
         "{stderr}"
     );
 }
+
+/// `System.loadLibrary` and `System.load` (`java/lang/TranslatedLibraries.java`), which Java lets
+/// code of a module without native access call only after a warning naming where the caller's
+/// class was loaded from: translated in a module of the JDK that has native access (here a root
+/// that declares itself `java.prefs`, as the JDK's sources do), and rejected in the unnamed
+/// module, which Java would warn for.
+#[test]
+fn loading_native_libraries_needs_native_access() {
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-native-libraries");
+    let _ = std::fs::remove_dir_all(&work);
+    let main = "package p;\npublic class Main {\n    public static void main(String[] a) {\n        \
+                System.loadLibrary(\"zip\");\n        System.load(\"/nope/libx.so\");\n    }\n}\n";
+    let files = [
+        ("jdk/module-info.java", "module java.prefs {\n}\n"),
+        ("jdk/p/Main.java", main),
+        ("unnamed/p/Main.java", main),
+    ];
+    for (path, java) in files {
+        let path = work.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, java).unwrap();
+    }
+    let translate = |source: &str| {
+        Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+            .args(["--main", "p.Main", "--source"])
+            .arg(work.join(source))
+            .arg("--library")
+            .arg(&java_base)
+            .arg("-o")
+            .arg(work.join(format!("{source}.rs")))
+            .output()
+            .unwrap()
+    };
+    let translated = translate("jdk");
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("jdk.rs")).unwrap();
+    for wanted in ["fn load_library(", "fn load("] {
+        assert!(rust.contains(wanted), "no {wanted} in the translation");
+    }
+    let translated = translate("unnamed");
+    let stderr = String::from_utf8_lossy(&translated.stderr);
+    assert!(
+        stderr.contains("`java.lang.System.loadLibrary` outside the JDK's modules with native access"),
+        "{stderr}"
+    );
+}
