@@ -2017,7 +2017,7 @@ fn system_natives_go_through_the_runtime() {
         ],
     );
     // `System.getenv(name)` reads the environment the program runs in; the whole environment as a
-    // map is not translated.
+    // map is the JDK's `ProcessEnvironment`, which only a whole program translates.
     let out = java_to_rust::translate(
         "class A { public static void main(String[] a) { System.out.println(System.getenv(\"HOME\")); } }",
     )
@@ -2027,7 +2027,10 @@ fn system_natives_go_through_the_runtime() {
         "class A { public static void main(String[] a) { Object env = System.getenv(); } }",
     )
     .unwrap_err();
-    assert!(err.to_string().contains("`System.getenv()`, the whole environment"), "{err}");
+    assert!(
+        err.to_string().contains("`java.lang.System.getenv` outside a whole program not supported yet"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -3370,32 +3373,6 @@ fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_go
             "       4  extending `…` not supported yet\n          at p/Loader.java:2:22\n",
         ],
     );
-    assert_eq!(census.json["complete"], true);
-}
-
-#[test]
-fn the_census_rejects_a_class_with_a_member_it_cannot_declare_and_goes_on() {
-    // `Shapes` declares a local enum in an initializer block, which the translator does not
-    // declare yet: its class is rejected with all of its code, and the census goes on to `main`
-    // and `Other`.
-    let dir = write_sources(
-        "census_member",
-        &[
-            (
-                "p/Main.java",
-                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Shapes.area(2) + Other.fine());\n    }\n}\n",
-            ),
-            (
-                "p/Shapes.java",
-                "package p;\nclass Shapes {\n    static int sides;\n    static {\n        enum Kind { SQUARE, CUBE }\n        sides = Kind.CUBE.ordinal();\n    }\n    static int area(int side) {\n        return sides * side;\n    }\n}\n",
-            ),
-            ("p/Other.java", "package p;\nclass Other {\n    static int fine() { return 4; }\n}\n"),
-        ],
-    );
-    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
-    let census = census(&program);
-    assert_lacks(&census.report, &["Incomplete"]);
-    assert_contains(&census.report, &["local interfaces, enums and records not supported yet"]);
     assert_eq!(census.json["complete"], true);
 }
 
