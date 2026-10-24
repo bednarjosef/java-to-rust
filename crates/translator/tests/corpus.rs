@@ -51,6 +51,12 @@ struct Program {
     /// What both runs read on standard input: the file `Name.input` next to a single file. Without
     /// one, standard input is empty.
     input: Option<PathBuf>,
+    /// For a project, its library root `lib/`, if it has one: both runs have its classes.
+    library: Option<PathBuf>,
+    /// For a project, its root `optional/` of classes the library refers to, if it has one: Java
+    /// compiles against them but runs without them, and the translator never sees them, so the
+    /// code that uses them throws `NoClassDefFoundError` in both runs.
+    optional: Option<PathBuf>,
 }
 
 /// Standard input of a run: the program's input file, or nothing.
@@ -113,7 +119,8 @@ fn programs(root: &Path) -> Vec<Program> {
             let group = dir.file_name().unwrap().to_string_lossy().to_string();
             let args = read_args(&java);
             let input = Some(java.with_extension("input")).filter(|i| i.is_file());
-            out.push(Program { name: format!("{group}-{stem}"), java, main: None, args, input });
+            let name = format!("{group}-{stem}");
+            out.push(Program { name, java, main: None, args, input, library: None, optional: None });
         }
     }
     out
@@ -127,7 +134,8 @@ fn read_args(java: &Path) -> Vec<String> {
 }
 
 /// The multi-file programs: every directory of `projects/` with a source root `src/` laid out by
-/// package and a file `main` that names the main class, such as `com.example.Main`.
+/// package and a file `main` that names the main class, such as `com.example.Main`. A project may
+/// also have a library root `lib/`, and a root `optional/` of classes missing at run time.
 fn projects(root: &Path) -> Vec<Program> {
     let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
     let mut dirs: Vec<PathBuf> = entries.map(|e| e.unwrap().path()).filter(|d| d.is_dir()).collect();
@@ -136,13 +144,23 @@ fn projects(root: &Path) -> Vec<Program> {
         .map(|dir| {
             let main = std::fs::read_to_string(dir.join("main")).unwrap().trim().to_string();
             let name = format!("projects-{}", dir.file_name().unwrap().to_string_lossy());
-            Program { name, java: dir.join("src"), main: Some(main), args: Vec::new(), input: None }
+            let root = |name: &str| Some(dir.join(name)).filter(|d| d.is_dir());
+            Program {
+                name,
+                java: dir.join("src"),
+                main: Some(main),
+                args: Vec::new(),
+                input: None,
+                library: root("lib"),
+                optional: root("optional"),
+            }
         })
         .collect()
 }
 
 /// Runs a program on Java: a single file with the source launcher, a project compiled with javac
-/// into `classes/<name>` first.
+/// into `classes/<name>` first. A project's optional classes are compiled into
+/// `classes/<name>-optional`, which the program is compiled against but not run with.
 fn run_java(p: &Program, classes: &Path) -> Output {
     let java = || {
         let mut java = Command::new("java");
@@ -157,13 +175,33 @@ fn run_java(p: &Program, classes: &Path) -> Output {
             .output()
             .expect("running `java` failed; the corpus test needs a JDK on PATH");
     };
+    let javac = |out: &Path, roots: &[&PathBuf], class_path: Option<&Path>| {
+        let _ = std::fs::remove_dir_all(out);
+        let mut sources = Vec::new();
+        for root in roots {
+            java_files(root, &mut sources);
+        }
+        let mut javac = Command::new("javac");
+        javac.arg("-d").arg(out);
+        if let Some(class_path) = class_path {
+            javac.arg("-cp").arg(class_path);
+        }
+        let javac = javac.args(&sources).output().expect("running `javac` failed");
+        assert!(
+            javac.status.success(),
+            "javac failed on {}: {}",
+            p.name,
+            String::from_utf8_lossy(&javac.stderr)
+        );
+    };
+    let optional = p.optional.as_ref().map(|root| {
+        let out = classes.join(format!("{}-optional", p.name));
+        javac(&out, &[root], None);
+        out
+    });
     let out = classes.join(&p.name);
-    let _ = std::fs::remove_dir_all(&out);
-    let mut sources = Vec::new();
-    java_files(&p.java, &mut sources);
-    let javac =
-        Command::new("javac").arg("-d").arg(&out).args(&sources).output().expect("running `javac` failed");
-    assert!(javac.status.success(), "javac failed on {}: {}", p.name, String::from_utf8_lossy(&javac.stderr));
+    let roots: Vec<&PathBuf> = [&p.java].into_iter().chain(&p.library).collect();
+    javac(&out, &roots, optional.as_deref());
     java().arg("-cp").arg(&out).arg(main).output().expect("running `java` failed")
 }
 
@@ -179,7 +217,8 @@ fn java_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The Rust sources of a program, or why it does not translate: a single file is one `main.rs`, a
-/// project has a file per package, as the translator writes its crate.
+/// project has a file per package, as the translator writes its crate. A project with optional
+/// classes is translated past the compile errors of the code that uses them (`keep_going`).
 fn rust_source(p: &Program) -> Result<Vec<SourceFile>, String> {
     let translated: Result<Vec<SourceFile>, String> = match &p.main {
         None => java_to_rust::translate(&std::fs::read_to_string(&p.java).unwrap())
@@ -189,6 +228,8 @@ fn rust_source(p: &Program) -> Result<Vec<SourceFile>, String> {
             let program = java_to_rust::Program {
                 main: main.clone(),
                 sources: vec![p.java.clone()],
+                libraries: p.library.iter().cloned().collect(),
+                keep_going: p.optional.is_some(),
                 ..Default::default()
             };
             java_to_rust::translate_program_modules(&program)

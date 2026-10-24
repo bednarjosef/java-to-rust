@@ -251,7 +251,9 @@ the standard ones (`crates/translator/java/Standard.java`, given to every progra
 `finally` on every exit path, try-with-resources with suppressed exceptions, causes, failures
 of the runtime (division by zero, index out of bounds, null dereferences, failed casts) as the
 exceptions Java throws with Java's messages, and static initializers that throw
-(`ExceptionInInitializerError`, then `NoClassDefFoundError`). Stack traces are empty, as the
+(`ExceptionInInitializerError`, then `NoClassDefFoundError`). With `--keep-going`, code that
+names a class missing from the roots throws `NoClassDefFoundError` where it runs, as on the JVM
+([exceptions.md](exceptions.md#classes-missing-from-the-roots)). Stack traces are empty, as the
 specification allows ([exceptions.md, "Stack traces"](exceptions.md#stack-traces)).
 
 What is still rejected is listed under "Not done" in [exceptions.md](exceptions.md#not-done).

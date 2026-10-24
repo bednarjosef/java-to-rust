@@ -75,6 +75,12 @@ corpus_lines() {
     [ -d "$dir/src" ] || continue
     group=$(basename "$(dirname "$dir")")
     name=$(basename "$dir")
+    if [ -d "$dir/lib" ] || [ -d "$dir/optional" ]; then
+      # A project with a library root or optional classes is compiled with them, from its directory.
+      files=$(cd "$dir" && find src lib optional -name '*.java' 2>/dev/null | sort | tr '\n' ' ')
+      echo "$group-$name|${dir#"$root"/}|$files|"
+      continue
+    fi
     files=$(cd "$dir/src" && find . -name '*.java' | sed 's|^\./||' | sort | tr '\n' ' ')
     echo "$group-$name|${dir#"$root"/}src|$files|"
   done

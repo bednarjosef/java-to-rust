@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
-       java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
-                    [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]
-                     | --census [--census-json <file>] [--keep-going] [-o <output.rs> | --crate <directory>]]
+       java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [--keep-going]
+                    [<File.java>]... [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]
+                     | --census [--census-json <file>] [-o <output.rs> | --crate <directory>]]
                     [--modules-json <file>]";
 
 /// The stack that translation runs on: the trees of real code, and the recursion over them, can
@@ -82,11 +82,13 @@ fn emit(output: Option<(&str, &str)>, input: &str, files: &[SourceFile]) -> Resu
 /// only read from when the program uses them, and other arguments are single source files.
 /// `--survey` prints what the reachable code uses instead (`--survey-json` also writes it as JSON
 /// to a file), and `--census` what the translator rejects in it, past every rejection
-/// (`--census-json` also writes it as JSON); with `--keep-going`, a census goes on past javac's
-/// compile errors, and rejects the code that they are in; with `-o` or `--crate`, a census writes its
-/// translation too, a trial one in which each rejected piece of code ends the program with the
-/// rejection (`Program::ends_rejected`). `--modules-json` writes the modules of the translation (of
-/// a census: with every rejected piece stubbed) and what their items name
+/// (`--census-json` also writes it as JSON). With `--keep-going`, javac goes on past compile
+/// errors: code whose only errors name classes missing from the roots throws
+/// `NoClassDefFoundError` where it runs, as Java's would, and other code with an error is rejected
+/// (`Program::keep_going`). With `-o` or `--crate`, a census writes its translation too, a trial
+/// one in which each rejected piece of code ends the program with the rejection
+/// (`Program::ends_rejected`). `--modules-json` writes the modules of the translation (of a
+/// census: with every rejected piece stubbed) and what their items name
 /// (`output::ModuleTree::dependencies`).
 fn run_program(args: &[String]) -> Result<(), String> {
     let mut program = java_to_rust::Program::default();
@@ -122,9 +124,6 @@ fn run_program(args: &[String]) -> Result<(), String> {
     }
     if program.main.is_empty() {
         return Err(format!("--main is required for a program\n{USAGE}"));
-    }
-    if program.keep_going && !census {
-        return Err(format!("--keep-going is only for a census\n{USAGE}"));
     }
     if census {
         program.ends_rejected = output.is_some();

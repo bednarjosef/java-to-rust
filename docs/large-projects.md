@@ -67,7 +67,9 @@ None of this exists yet.
 - **Dependencies need source.** Most libraries publish source jars next to their binaries
   (Maven Central has them), and those go in as `--library`. A dependency published only as a
   binary cannot be translated; decompiling it is a separate step the user chooses, because
-  decompiled code is not always valid Java.
+  decompiled code is not always valid Java. An optional dependency that the program does not
+  ship can be left out: with `--keep-going`, the code that uses it throws `NoClassDefFoundError`
+  as on the JVM (built; [exceptions.md](exceptions.md#classes-missing-from-the-roots)).
 - **Generated sources.** Annotation processors (Lombok, AutoValue, Immutables, MapStruct,
   Dagger) generate or change code at compile time. Running javac with the project's processors
   and translating what it produces covers them, because the translator reads javac's own
@@ -139,7 +141,8 @@ made from; the translated one gets that JDK as `JAVA_HOME`, to read the platform
 `scripts/javac-check.sh TRANSLATED_JAVAC --corpus [PATTERN]` runs the corpus instead, one case at a
 time: each file of `corpus/features`, `corpus/threads` and `corpus/whole-program` on its own, each
 file of `corpus/programs` on its own and all of them together, and each project with a `src/`
-directory (`corpus/projects/*` and the multi-file `corpus/whole-program/*`) with all its sources.
+directory (`corpus/projects/*` and the multi-file `corpus/whole-program/*`) with all its sources,
+and with those of its `lib/` and `optional/` when it has them.
 A case is named by its directory and file names joined with a dash (`features-CodePoints`,
 `projects-anonymous`), and `PATTERN` is a shell pattern that the names must match (`features-*`).
 It prints one line for each case that differs, saying what differs (`exit`, `stdout`, `stderr`, or

@@ -3225,7 +3225,8 @@ fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
     program.keep_going = true;
     let census = census(&program);
     // The method, the field's initializer and the class that have the errors are rejected; the
-    // rest translates, `fine` too, whose annotation is missing: annotations are left out.
+    // rest translates, `fine` too, whose annotation is missing: annotations are left out. `Gone`
+    // and `Unknown` are not taken as missing classes: no import names them.
     assert_contains(
         &census.report,
         &[
@@ -3242,6 +3243,61 @@ fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
         piece["errors"].as_array().expect("errors").len()
     };
     assert_eq!((errors("fine"), errors("main"), errors("bad")), (0, 0, 1));
+}
+
+#[test]
+fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_census_lists_it() {
+    let dir = write_sources(
+        "missing_class",
+        &[
+            (
+                "app/p/Main.java",
+                "package p;\nimport lib.Codec;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Codec.encode(a.length > 0));\n        System.out.println(Codec.broken());\n    }\n}\n",
+            ),
+            (
+                "lib/lib/Codec.java",
+                "package lib;\nimport fast.Native;\npublic class Codec {\n    public static String encode(boolean fast) {\n        if (fast) {\n            return Native.encode();\n        }\n        return \"plain\";\n    }\n    public static int broken() { return missing(); }\n}\n",
+            ),
+        ],
+    );
+    let mut program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    // Without going on, the first compile error stops the translation.
+    let error = java_to_rust::translate_program(&program).expect_err("fast.Native is missing");
+    assert!(error.to_string().contains("does not exist"), "{error}");
+    program.keep_going = true;
+    // The branch that names the missing class throws as on the JVM; `broken`, whose error is not
+    // a missing class, is rejected.
+    let census = census(&program);
+    assert_contains(
+        &census.report,
+        &[
+            "Library code: pieces that translate, where a class is missing, into code that throws",
+            "  throws NoClassDefFoundError like Java: missing class fast/Native, 1 piece\n          at lib/Codec.java:4",
+            "javac reports a compile error (compiler.err.cant.resolve.location.args)",
+        ],
+    );
+    let missing = &census.json["missingClasses"];
+    assert_eq!(missing[0]["class"], "fast/Native", "{missing}");
+    assert_eq!(missing[0]["pieces"], 1, "{missing}");
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let encode = pieces.iter().find(|p| p["name"] == "encode").expect("encode is a piece");
+    assert_eq!(encode["missingClass"], "fast/Native");
+    assert_eq!(encode["errors"].as_array().map(Vec::len), Some(0));
+    // A translation that goes on stops only at the other error, and without it translates, with
+    // the branch throwing.
+    let error = java_to_rust::translate_program(&program).expect_err("broken is rejected");
+    assert!(error.to_string().contains("lib/Codec.java:10:5: javac reports a compile error"), "{error}");
+    let codec = dir.join("lib/lib/Codec.java");
+    let java = std::fs::read_to_string(&codec).unwrap().replace("return missing();", "return 1;");
+    std::fs::write(&codec, java).unwrap();
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["NoClassDefFoundError::new(java::wtf8(\"fast/Native\"))", "\"plain\""]);
 }
 
 #[test]

@@ -45,9 +45,12 @@ pub struct Program {
     /// Library roots, such as the JDK's own sources: javac reads a file from them only when the
     /// program uses one of its classes, and only what is reachable from `main` is translated.
     pub libraries: Vec<PathBuf>,
-    /// For a census only: javac's compile errors do not stop it, and the census rejects the piece
-    /// of code that each is in, the method, initializer or class (see `javac::Session::start`).
-    /// For code that is known to have some, such as a decompiler's output.
+    /// javac's compile errors do not stop the translation. A piece of code (a method, initializer
+    /// or class) whose only errors name classes missing from the roots throws
+    /// `NoClassDefFoundError` where it would use one, as on the JVM (`java/MissingClasses.java`);
+    /// a piece with any other error is rejected (see `javac::Session::start`). For code that is
+    /// known to have some, such as a library whose optional dependencies are not given, or a
+    /// decompiler's output.
     pub keep_going: bool,
     /// For a census only: its translation is written, and each piece of rejected code in it ends
     /// the program with the rejection's message, where a census otherwise leaves a rejected
@@ -99,7 +102,7 @@ pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, Progra
 /// `translate_program`, with `Reach::string_array_writes` or without.
 fn translate_reached(program: &Program, string_array_writes: bool) -> Result<ModuleTree, ProgramError> {
     use crate::timings::phase;
-    let (units, reach) = load(program, string_array_writes, false)?;
+    let (units, reach) = load(program, string_array_writes, program.keep_going)?;
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
     let (lowered, jdk_temps) = {
