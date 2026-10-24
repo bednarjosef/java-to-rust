@@ -14,9 +14,9 @@
 //! allocation takes whole blocks. Each block has a bit per slot saying that the slot is taken
 //! (an object, or a free slot that a thread holds) and a bit per slot for marking.
 //!
-//! **Allocation** takes a slot from the calling thread's list of free slots of its size, a few
-//! instructions. A freed slot goes on the list of the thread that frees it. When a list is empty,
-//! the thread takes all the untaken slots of a block of that size under the heap's lock. A slot
+//! **Allocation** takes a slot of its size from the calling thread's own free slots, a few
+//! instructions: from the list of slots it freed, or from its span, the untaken slots of one word
+//! of a block's bitmap that it took under the heap's lock (64 slots at most). A slot
 //! that may hold pointers is zeroed as it is handed out, so that no old word in it keeps an object
 //! alive; a pointer-free one only for `alloc_zeroed`.
 //!
@@ -30,7 +30,8 @@
 //!   the registers that the signal saved), and of the collecting thread, with its registers;
 //! - the program's static data, the writable segments of every loaded object;
 //! - each thread's static thread-local storage, where the slots its free lists start from are;
-//! - the free lists of every thread, whose slots are marked without being scanned.
+//! - the free lists of every thread, whose slots are marked without being scanned, and the words
+//!   of their spans, every taken slot of which is marked once marking is done (`keep_spans`).
 //!
 //! Slots are scanned whole, word by word, except in blocks that cannot hold pointers.
 //!
@@ -73,6 +74,9 @@ const MIN_COLLECT: usize = 64 << 20;
 
 /// How many slots of one class a thread's list keeps before freed ones go back to their blocks.
 const LIST_MAX_BYTES: usize = 1 << 20;
+
+/// The most bytes of a new span fetched into the cache ahead of the program's writes.
+const PREFETCH_SPAN: usize = 4096;
 
 /// The class of a size up to 1024 bytes, by `(size + 15) / 16`.
 static SMALL_CLASS: [u8; 65] = small_classes();
@@ -415,39 +419,37 @@ impl Heap {
         b
     }
 
-    /// Takes every untaken slot of a block of `class` and links them into a list, which it
-    /// returns with the bytes it holds.
-    fn refill(&mut self, class: usize) -> (*mut u8, usize) {
-        let b = loop {
+    /// A block of `class` that may have untaken slots: the first on its class's list, or a new one.
+    fn next_block(&mut self, class: usize) -> usize {
+        loop {
             let b = self.lists[class];
             if b == NONE {
-                break self.new_block(class);
+                return self.new_block(class);
             }
             let m = self.meta(b as usize);
             self.lists[class] = m.next;
             m.listed = false;
             if m.kind == SMALL && m.class as usize == class {
-                break b as usize;
-            }
-        };
-        let start = self.block_address(b);
-        let m = self.meta(b);
-        let size = m.size as usize;
-        let mut head: *mut u8 = ptr::null_mut();
-        let mut count = 0;
-        // From the last slot down, so that the list hands out slots in order of address.
-        for slot in (0..m.slots as usize).rev() {
-            let (w, bit) = (slot / 64, 1u64 << (slot % 64));
-            if m.taken[w] & bit == 0 {
-                m.taken[w] |= bit;
-                let p = (start + slot * size) as *mut u8;
-                unsafe { (p as *mut *mut u8).write(head) };
-                head = p;
-                count += 1;
+                return b as usize;
             }
         }
-        self.taken += count * size;
-        (head, count * size)
+    }
+
+    /// Takes the untaken slots of the first word of block `b`'s bitmap, from word `from`, that
+    /// has any: the word's index and the bits of the slots taken.
+    fn take_word(&mut self, b: usize, from: usize) -> Option<(usize, u64)> {
+        let m = self.meta(b);
+        let slots = m.slots as usize;
+        for w in from..slots.div_ceil(64) {
+            let valid = if (w + 1) * 64 <= slots { u64::MAX } else { (1u64 << (slots % 64)) - 1 };
+            let free = valid & !m.taken[w];
+            if free != 0 {
+                m.taken[w] |= free;
+                self.taken += free.count_ones() as usize * m.size as usize;
+                return Some((w, free));
+            }
+        }
+        None
     }
 
     /// Puts a block with untaken slots on its class's list, unless it is there.
@@ -476,10 +478,18 @@ fn fail(message: &[u8]) -> ! {
     }
 }
 
-/// A thread's free slots: per class, a list linked through the slots' first words.
+/// A thread's free slots, per class: those Rust freed, in a list linked through the slots' first
+/// words, and a span, the untaken slots of one word of a block's bitmap that the thread took.
 struct Lists {
     heads: [Cell<*mut u8>; CLASSES],
     bytes: [Cell<usize>; CLASSES],
+    /// The address of the first slot of the span's word, and the bits of the slots not handed out
+    /// yet. The collector keeps every taken slot of that word (see `keep_spans`).
+    span_base: [Cell<usize>; CLASSES],
+    span_bits: [Cell<u64>; CLASSES],
+    /// The block the span is in, and the next word of its bitmap to take slots from.
+    span_block: [Cell<u32>; CLASSES],
+    span_next: [Cell<u32>; CLASSES],
     /// This thread's entry in `THREADS`, once registered.
     entry: Cell<usize>,
     /// Set when the thread has unregistered at its end: it allocates without lists from then on.
@@ -491,6 +501,10 @@ thread_local! {
         Lists {
             heads: [const { Cell::new(ptr::null_mut()) }; CLASSES],
             bytes: [const { Cell::new(0) }; CLASSES],
+            span_base: [const { Cell::new(0) }; CLASSES],
+            span_bits: [const { Cell::new(0) }; CLASSES],
+            span_block: [const { Cell::new(NONE) }; CLASSES],
+            span_next: [const { Cell::new(0) }; CLASSES],
             entry: Cell::new(NO_ENTRY),
             ended: Cell::new(false),
         }
@@ -600,6 +614,14 @@ fn unregister(lists: &Lists) {
         }
         lists.heads[class].set(ptr::null_mut());
         lists.bytes[class].set(0);
+        let mut bits = lists.span_bits[class].get();
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            untake(h, lists.span_base[class].get() + slot * SIZES[class / 2] as usize);
+            bits &= bits - 1;
+        }
+        lists.span_bits[class].set(0);
+        lists.span_block[class].set(NONE);
     }
     THREADS[i].used.store(false, Ordering::Release);
     lists.entry.set(NO_ENTRY);
@@ -687,17 +709,19 @@ unsafe impl GlobalAlloc for Allocator {
         let p = LISTS
             .try_with(|lists| {
                 let head = lists.heads[class].get();
-                if head.is_null() {
-                    return if lists.ended.get() {
-                        allocate_without_lists(class)
-                    } else {
-                        refill(lists, class)
-                    };
+                if !head.is_null() {
+                    let next = unsafe { (head as *mut *mut u8).read() };
+                    lists.heads[class].set(next);
+                    lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
+                    return head;
                 }
-                let next = unsafe { (head as *mut *mut u8).read() };
-                lists.heads[class].set(next);
-                lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
-                head
+                let bits = lists.span_bits[class].get();
+                if bits != 0 {
+                    lists.span_bits[class].set(bits & (bits - 1));
+                    let slot = bits.trailing_zeros() as usize;
+                    return (lists.span_base[class].get() + slot * SIZES[index] as usize) as *mut u8;
+                }
+                if lists.ended.get() { allocate_without_lists(class) } else { refill(lists, class) }
             })
             .unwrap_or_else(|_| allocate_without_lists(class));
         // A slot that may hold pointers is zeroed whole as it is handed out, so that no old word
@@ -790,18 +814,37 @@ fn prepare() -> Guard {
     g
 }
 
-/// Refills an empty list of `class`, collecting first when enough has been taken.
+/// Starts a new span of `class` when the free list and the span are empty: the untaken slots of
+/// the next word of the span's block that has any, or of a block from the heap. Collects first
+/// when enough has been taken. Returns the first slot of the span.
 #[cold]
 #[inline(never)]
 fn refill(lists: &Lists, class: usize) -> *mut u8 {
     let g = prepare();
     let h = heap(&g);
-    let (head, bytes) = h.refill(class);
-    let next = unsafe { (head as *mut *mut u8).read() };
-    unsafe { (head as *mut *mut u8).write(ptr::null_mut()) };
-    lists.heads[class].set(next);
-    lists.bytes[class].set(bytes - SIZES[class / 2] as usize);
-    head
+    loop {
+        let b = lists.span_block[class].get();
+        if b != NONE
+            && let Some((w, bits)) = h.take_word(b as usize, lists.span_next[class].get() as usize)
+        {
+            let size = SIZES[class / 2] as usize;
+            let base = h.block_address(b as usize) + w * 64 * size;
+            lists.span_next[class].set(w as u32 + 1);
+            lists.span_base[class].set(base);
+            lists.span_bits[class].set(bits & (bits - 1));
+            // The span's slots are fetched into the cache now, before the program writes them.
+            let from = base + bits.trailing_zeros() as usize * size;
+            let to = (base + (64 - bits.leading_zeros() as usize) * size).min(from + PREFETCH_SPAN);
+            for line in (from..to).step_by(64) {
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(line as *const i8)
+                };
+            }
+            return from as *mut u8;
+        }
+        lists.span_block[class].set(h.next_block(class) as u32);
+        lists.span_next[class].set(0);
+    }
 }
 
 /// An allocation on a thread whose free lists are gone (while its thread-local storage is
@@ -813,18 +856,19 @@ fn allocate_without_lists(class: usize) -> *mut u8 {
     if h.base == 0 {
         start(h);
     }
-    let (head, _) = h.refill(class);
-    // Gives back all the slots but the first.
-    let mut p = unsafe { (head as *mut *mut u8).read() };
-    unsafe { (head as *mut *mut u8).write(ptr::null_mut()) };
-    while !p.is_null() {
-        let next = unsafe { (p as *mut *mut u8).read() };
-        unsafe { (p as *mut *mut u8).write(ptr::null_mut()) };
-        untake(h, p as usize);
-        h.taken -= SIZES[class / 2] as usize;
-        p = next;
+    loop {
+        let b = h.next_block(class);
+        if let Some((w, bits)) = h.take_word(b, 0) {
+            // Gives back all the slots but the first, and lists the block for them.
+            let first = bits.isolate_lowest_one();
+            let m = h.meta(b);
+            m.taken[w] &= !(bits & !first);
+            h.taken -= (bits & !first).count_ones() as usize * m.size as usize;
+            h.list(b);
+            let slot = w * 64 + first.trailing_zeros() as usize;
+            return (h.block_address(b) + slot * m.size as usize) as *mut u8;
+        }
     }
-    head
 }
 
 #[cold]
@@ -1456,6 +1500,7 @@ fn collect(g: &Guard) {
         futex_wait(&MARK_DONE, done);
     }
     let h = heap(g);
+    keep_spans(h);
     let marked = started.elapsed();
     sweep(h, helpers);
     h.collections += 1;
@@ -1467,6 +1512,30 @@ fn collect(g: &Guard) {
         t.thread_pointer.set(0);
     }
     resume_others(stopped);
+}
+
+/// Keeps every taken slot of the word of each thread's spans, once marking is done. Those are the
+/// slots of the span not handed out yet, and the slot a thread stopped in `alloc` was handing out
+/// before its address was anywhere the marking looks; the others are kept one collection longer.
+/// Marking scans each slot that something reaches the first time it marks it, which a mark set
+/// here before would prevent.
+fn keep_spans(h: &mut Heap) {
+    for t in &THREADS {
+        if !t.used.load(Ordering::Acquire) {
+            continue;
+        }
+        let lists = unsafe { &*t.lists.get() };
+        for class in 0..CLASSES {
+            let base = lists.span_base[class].get();
+            if base == 0 {
+                continue;
+            }
+            let b = (base - h.base) >> BLOCK_SHIFT;
+            let m = h.meta(b);
+            let w = (base - h.block_address(b)) / (64 * m.size as usize);
+            m.marks[w] |= m.taken[w];
+        }
+    }
 }
 
 /// Writes a line about the collection that just ended to standard error, without allocating.
