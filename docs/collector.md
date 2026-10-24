@@ -31,9 +31,20 @@ owned, and that Rust therefore never freed, is found unreachable too.
 
 ## Allocation
 
-A thread takes a slot from its own list of free slots of that size: a few instructions. A slot
-freed by Rust goes on the list of the thread that frees it. When a list is empty, the thread
-takes all the untaken slots of a block of that size under the heap's lock. A slot that may hold
+A thread takes a slot of its size from its own free slots, a few instructions: first from the
+list of slots Rust freed (a freed slot goes on the list of the thread that frees it), then from
+its span, the untaken slots of one 64-slot word of a block's bitmap, held as a mask of bits, the
+lowest one handed out next. When both are empty, the thread takes the next word with untaken
+slots under the heap's lock: of its span's block, or of a block from its class's list, or of a
+new block. That is one lock per 64 slots at most, and touches no slot. The slots of a new span
+are fetched into the cache right away (up to 4 KB), before the program writes them. Linking every
+untaken slot of a block into a list, as the allocator did before, cost 5% of the translated
+javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
+without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
+
+The collector keeps every taken slot of the word of each thread's spans, after marking: those
+are the slots not handed out yet, and the one a thread stopped in `alloc` may be handing out
+before its address is in a register. A slot that may hold
 pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
 program does not write (the spare capacity of a `Vec`), keeps anything alive; a slot of a
 pointer-free block is zeroed only for `alloc_zeroed`. Zeroing there rather than when a slot is
