@@ -1,8 +1,9 @@
 # Native speed
 
 The plan for making translated programs much faster and smaller than the same programs on the
-JVM, for any Java program, with no input beyond its sources, and how far it has got: the
-collected heap of step 1 is built (docs/collector.md); the rest is planned. The translated javac is the main
+JVM, for any Java program, with no input beyond its sources, and how far it has got: of step 1,
+the collected heap (docs/collector.md), thin references and fields as cells are built (1.6 lists
+what is built and what is planned); steps 2 and 3 are planned. The translated javac is the main
 benchmark. The object model it replaces is described in docs/object-model.md. The idiom side of
 the whole-program mode (designs a person would write, relaxations) stays in docs/thorough-mode.md.
 
@@ -215,14 +216,15 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
 
 Every landed part is measured on four workloads: hello world, the 47 corpus programs, the 540
 corpus features, and the Minecraft benchmark. Each is measured for time and peak memory, and
-always with identical output to the real javac's. The numbers to beat:
+always with identical output to the real javac's. The numbers to beat, and the translation's
+with fat LTO, PGO and BOLT on the parts built so far:
 
-| workload | real javac | translation now (fat LTO, PGO) |
+| workload | real javac | translation now |
 |---|---:|---:|
-| hello | 0.19 s | 0.02 s |
-| 47 programs | 0.61 s | 0.36 s |
-| 540 features | 1.90 s | 2.43 s |
-| Minecraft server | 11.3 s, 4.1 GB | 60 s, 6.2 GB |
+| hello | 0.19 s | 0.009 s |
+| 47 programs | 0.63 s, 210 MB | 0.10 s, 104 MB |
+| 540 features | 1.85 s, 430 MB | 0.67 s, 185 MB |
+| Minecraft server | 11.3 s, 4.1 GB | 18.9 s, 1.05 GB |
 
 ## Risks
 
