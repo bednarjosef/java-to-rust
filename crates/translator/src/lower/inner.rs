@@ -316,7 +316,8 @@ impl<'t> Lowering<'t> {
 
     /// The statements that start the body of a constructor of class `t` that does not call
     /// another one: the synthetic fields set from the parameters, then the field initializers when
-    /// they move here (`moves_initializers`), in order, which read those fields.
+    /// they move here (`moves_initializers`), in order, which read those fields. Those written
+    /// after an initializer block run with the blocks (`run_initializer_blocks`).
     pub(super) fn synthetic_statements(&self, t: usize) -> Result<Vec<Stmt>, Error> {
         let Some(nested) = self.nesting(t) else { return Ok(Vec::new()) };
         let pos = self.types[t].node.pos();
@@ -344,6 +345,7 @@ impl<'t> Lowering<'t> {
                     && !m.has_flag("STATIC")
                     && m.get("initializer").is_some()
                     && self.keeps(*m, javac)
+                    && !self.runs_after_a_block(node, *m)
             }) {
                 let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
                 let initializing = self.initializing.replace(true);

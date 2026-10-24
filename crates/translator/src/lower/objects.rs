@@ -161,54 +161,66 @@ impl<'t> Lowering<'t> {
         let in_local = self.types[index].nested.as_ref().is_some_and(|n| n.kind != NestKind::Inner);
         let members: Vec<Node<'t>> = node.list("members").filter(|m| self.keeps(*m, &name)).collect();
         for member in members {
-            match member.kind() {
-                "METHOD" => {
-                    self.methods.push(MethodInfo {
-                        owner: index,
-                        node: member,
-                        name: member.str("name"),
-                        sig: member.symbol().map_or("", |s| s.ty),
-                    });
-                    let method = self.methods.len() - 1;
-                    self.declare_local_classes(index, member, Some(method))?;
-                    self.declare_lambdas(member, index, Some(method))?;
-                }
-                "VARIABLE" if enums::is_enum_constant(member) => self.declare_lambdas(member, index, None)?,
-                "VARIABLE" => {
-                    self.declare_local_classes(index, member, None)?;
-                    self.declare_lambdas(member, index, None)?;
-                }
-                "EMPTY_STATEMENT" => {}
-                // Does nothing when the program runs (see `annotation_types`).
-                "ANNOTATION_TYPE" => {
-                    self.annotation_types.insert(crate::program::class_name(member.0), member);
-                    self.nested_annotation_types.insert(crate::program::class_name(member.0));
-                }
-                "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
-                    // Named after its outer class once that is named (see `inner::name_nested`).
-                    self.member_outers.push((self.types.len(), index));
-                    if member.kind() == "CLASS" && !member.has_flag("STATIC") {
-                        self.declare_inner(index, member)?;
-                    } else {
-                        self.declare_type(member, Some(&name))?;
-                    }
-                }
-                "ENUM" | "INTERFACE" | "RECORD" => self.declare_type(member, Some(&name))?,
-                "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
-                "CLASS" => self.declare_inner(index, member)?,
-                "BLOCK" => {
-                    if !Self::is_static_block(member) {
-                        self.check_initializer_block(node, member)?;
-                    }
-                    self.declare_local_classes(index, member, None)?;
-                    self.declare_lambdas(member, index, None)?;
-                }
-                kind => return unsupported(member, &kind_words(kind)),
-            }
+            // In a census, a member that cannot be declared rejects its class, whose code is
+            // then rejected with it, and the census goes on.
+            let declared = self.declare_member(index, member, &name, in_local);
+            self.reject_class(index, declared)?;
         }
         if node.kind() == "ENUM" {
             self.body_methods(index);
             self.declare_body_lambdas(index)?;
+        }
+        Ok(())
+    }
+
+    /// Declares one member of the class `index` (see `declare_members`).
+    fn declare_member(
+        &mut self,
+        index: usize,
+        member: Node<'t>,
+        name: &str,
+        in_local: bool,
+    ) -> Result<(), Error> {
+        match member.kind() {
+            "METHOD" => {
+                self.methods.push(MethodInfo {
+                    owner: index,
+                    node: member,
+                    name: member.str("name"),
+                    sig: member.symbol().map_or("", |s| s.ty),
+                });
+                let method = self.methods.len() - 1;
+                self.declare_local_classes(index, member, Some(method))?;
+                self.declare_lambdas(member, index, Some(method))?;
+            }
+            "VARIABLE" if enums::is_enum_constant(member) => self.declare_lambdas(member, index, None)?,
+            "VARIABLE" => {
+                self.declare_local_classes(index, member, None)?;
+                self.declare_lambdas(member, index, None)?;
+            }
+            "EMPTY_STATEMENT" => {}
+            // Does nothing when the program runs (see `annotation_types`).
+            "ANNOTATION_TYPE" => {
+                self.annotation_types.insert(crate::program::class_name(member.0), member);
+                self.nested_annotation_types.insert(crate::program::class_name(member.0));
+            }
+            "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
+                // Named after its outer class once that is named (see `inner::name_nested`).
+                self.member_outers.push((self.types.len(), index));
+                if member.kind() == "CLASS" && !member.has_flag("STATIC") {
+                    self.declare_inner(index, member)?;
+                } else {
+                    self.declare_type(member, Some(name))?;
+                }
+            }
+            "ENUM" | "INTERFACE" | "RECORD" => self.declare_type(member, Some(name))?,
+            "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(name))?,
+            "CLASS" => self.declare_inner(index, member)?,
+            "BLOCK" => {
+                self.declare_local_classes(index, member, None)?;
+                self.declare_lambdas(member, index, None)?;
+            }
+            kind => return unsupported(member, &kind_words(kind)),
         }
         Ok(())
     }
@@ -247,8 +259,11 @@ impl<'t> Lowering<'t> {
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
             .filter(|m| !self.is_handle(index, *m))
         {
-            // Moved initializers run in the constructors (see `inner`).
-            let field = self.field(member, !rejected && !(moved && !member.has_flag("STATIC")))?;
+            // Moved initializers run in the constructors (see `inner`), and so do those written
+            // after an initializer block (see `initializers`).
+            let runs_in_constructors =
+                (moved && !member.has_flag("STATIC")) || self.runs_after_a_block(node, member);
+            let field = self.field(member, !rejected && !runs_in_constructors)?;
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
         // An enum's constants need its constructors, which `lower` lowers after this.

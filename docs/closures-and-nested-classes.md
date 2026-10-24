@@ -132,8 +132,8 @@ thread keeps `Rc`.
 `this` captured in a constructor or a field initializer (`new Inner()`, a lambda, an anonymous
 class) works: a constructor that uses `this` as a value builds the object behind its handle
 first and runs the rest of its body on the handle. Field initializers of a class with an
-enclosing instance or captures run inside its constructors, after the synthetic fields are set
-and before the initializer blocks, as javac orders them.
+enclosing instance or captures run inside its constructors, after the synthetic fields are set,
+in the order they are written among the initializer blocks, as javac orders them.
 
 The synthetic fields are set after `super(..)`, not before it as javac does, because the
 superclass's constructor builds the struct's `base`. A superclass constructor that calls a
