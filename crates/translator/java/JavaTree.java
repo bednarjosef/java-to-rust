@@ -561,6 +561,13 @@ public class JavaTree {
             if (type != null && (tree instanceof LambdaExpressionTree || tree instanceof MemberReferenceTree)) {
                 descriptor(type, tree, path, out);
             }
+            if (tree instanceof TypeCastTree cast && cast.getType() instanceof IntersectionTypeTree) {
+                TypeMirror expected = expected(path);
+                if (expected != null) {
+                    out.append(",\"expected\":");
+                    string(typeText(expected), out);
+                }
+            }
         }
         if (tree instanceof IdentifierTree || tree instanceof MemberSelectTree || tree instanceof MethodInvocationTree
                 || tree instanceof NewClassTree || tree instanceof VariableTree || tree instanceof MethodTree
@@ -726,6 +733,49 @@ public class JavaTree {
             return (com.sun.tools.javac.code.Type) types.erasure(m.getReturnType());
         }
         return null;
+    }
+
+    /**
+     * The type that javac's erasure ({@code TransTypes}) translates a cast in {@code path} for: the
+     * erasure of the variable it initializes or is assigned to, of the parameter it is an
+     * argument for, of the method it returns from, or of the cast or the receiver it is in.
+     * javac casts a value to an intersection's bounds but that one, then to its erasure, and
+     * the place converts it to that one last; {@code null} for other places.
+     */
+    private TypeMirror expected(TreePath path) {
+        TreePath inner = path;
+        while (inner.getParentPath().getLeaf() instanceof ParenthesizedTree) {
+            inner = inner.getParentPath();
+        }
+        Tree child = inner.getLeaf();
+        TreePath parent = inner.getParentPath();
+        TypeMirror type = switch (parent.getLeaf()) {
+            case VariableTree v when v.getInitializer() == child -> trees.getTypeMirror(parent);
+            case AssignmentTree a when a.getExpression() == child -> trees.getTypeMirror(new TreePath(parent, a.getVariable()));
+            case TypeCastTree c -> trees.getTypeMirror(parent);
+            case MemberSelectTree s -> trees.getTypeMirror(path);
+            case MethodInvocationTree m -> parameter(trees.getElement(parent), m.getArguments().indexOf(child));
+            case NewClassTree n -> parameter(trees.getElement(parent), n.getArguments().indexOf(child));
+            case ReturnTree r -> {
+                TreePath at = parent;
+                while (at != null && !(at.getLeaf() instanceof MethodTree) && !(at.getLeaf() instanceof LambdaExpressionTree)) {
+                    at = at.getParentPath();
+                }
+                yield at != null && at.getLeaf() instanceof MethodTree
+                        && trees.getElement(at) instanceof ExecutableElement method ? method.getReturnType() : null;
+            }
+            default -> null;
+        };
+        return type == null ? null : types.erasure(type);
+    }
+
+    /** The declared type of parameter {@code index} of a method, but of its varargs parameter. */
+    private static TypeMirror parameter(Element method, int index) {
+        if (!(method instanceof ExecutableElement m) || index < 0) {
+            return null;
+        }
+        int last = m.getParameters().size() - 1;
+        return index > last || m.isVarArgs() && index == last ? null : m.getParameters().get(index).asType();
     }
 
     /** Interfaces that declare no methods, which an intersection type adds nothing with. */
@@ -992,6 +1042,9 @@ public class JavaTree {
         } else if (t instanceof com.sun.tools.javac.code.Type annotated) {
             t = annotated.stripMetadata();
         }
+        if (t instanceof IntersectionType intersection) {
+            return intersectionText(intersection);
+        }
         boolean erroneous = keepGoing && ((com.sun.tools.javac.code.Type) t).isErroneous();
         if (!erroneous && !mentionsLocal(t)) {
             return t.toString();
@@ -1011,6 +1064,23 @@ public class JavaTree {
                     : "? super " + typeText(w.getSuperBound());
         }
         return t.toString();
+    }
+
+    /**
+     * An intersection type, which javac prints as an empty name: its erasure, which is the type
+     * the JVM gives its values (its first bound's, or {@code Object} for a type variable's), then
+     * its other bounds but {@code Object}, joined by {@code " & "}: {@code Main.Base & Main.Named}.
+     */
+    private static String intersectionText(IntersectionType intersection) {
+        TypeMirror erasure = types.erasure(intersection);
+        StringBuilder text = new StringBuilder(typeText(erasure));
+        for (TypeMirror bound : intersection.getBounds()) {
+            String name = typeText(bound);
+            if (!name.equals("java.lang.Object") && !types.isSameType(types.erasure(bound), erasure)) {
+                text.append(" & ").append(name);
+            }
+        }
+        return text.toString();
     }
 
     private static void string(String s, StringBuilder out) {

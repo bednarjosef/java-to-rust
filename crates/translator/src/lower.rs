@@ -665,9 +665,15 @@ impl<'t> Lowering<'t> {
                 Ok(Type::class(&self.types[t].name))
             }
             "<nulltype>" => Ok(Type::Null),
-            // javac gives no name to the intersection of a `?:`'s branch types, such as
-            // `Serializable & Comparable<?>` for an enum and a string: the value is an `Object`.
-            "" if matches!(node.kind(), "CONDITIONAL_EXPRESSION" | "PARENTHESIZED") => {
+            // The intersection of a `?:`'s or a `switch`'s branch types, such as `Serializable &
+            // Comparable<?>` for an enum and a string, whose erasure may be a JDK interface that
+            // a single file lacks: the value is an `Object`, which holds any of them.
+            _ if generics::intersection_bounds(name).is_some()
+                && matches!(
+                    node.kind(),
+                    "CONDITIONAL_EXPRESSION" | "SWITCH_EXPRESSION" | "PARENTHESIZED"
+                ) =>
+            {
                 self.ty(node, "java.lang.Object")
             }
             // `this` in the body of an enum constant, which is the constant.
@@ -926,6 +932,7 @@ impl<'t> Lowering<'t> {
                 self.created_by_name(node, Node(name))?
             }
             "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
+            "TYPE_CAST" if let Some(cast) = self.intersection_cast(node).transpose() => cast?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 if let Some(created) = self.constructor_handle_call(node, ty)? {

@@ -597,8 +597,24 @@ existed:
   `java::cast(x.as_integer(), ..)`. Arguments convert through the conversions every call makes.
 - A type variable with several bounds (`T extends Object & Comparable<? super T>`, as
   `Collections.max` has) erases to the first, and a call of a later bound's method casts the
-  receiver to that bound (`generics::receiver`). An intersection type written elsewhere is
-  rejected ("intersection types").
+  receiver to that bound (`generics::receiver`).
+- An intersection type, which javac prints as an empty name, `JavaTree` writes as its erasure
+  and then its other bounds, `Main.Base & Main.Named`. A value of it is of its erasure (its first
+  bound's, or `Object` for a type variable's), as on the JVM, and a call of a later bound's
+  method casts the receiver to that bound, as for a type variable. That covers the casts
+  `(Base & Named) o`, `var`s of such a type, and the types javac infers: the least upper bound of
+  a generic call's arguments (`first(new A(), new B())`), and the greatest lower bound of a
+  bounded type variable and its target (`<S extends Base & Named> S make()`). A type argument
+  that is one makes a Rust generic fall back to erasure. A `?:` or a `switch` of such a type
+  is an `Object` instead, as its erasure may be a JDK interface (`Serializable` for an enum and
+  a string) that a single file lacks.
+- A cast to an intersection is javac's erasure of it (`TransTypes.visitTypeCast`,
+  `generics::intersection_cast`): a checked cast to each bound in order but the erasure and the
+  type that the place converts the value to, then to the erasure, and the place's conversion
+  last, so that the `ClassCastException` names the same bound as Java's. `JavaTree` writes that
+  type as the cast's `expected`, for an initializer, an assignment, an argument (but a varargs
+  one), a `return` from a method, a cast or a receiver; an intersection cast anywhere else is
+  rejected ("a cast to an intersection type in this place").
 - A varargs parameter `T...` is an array of the erasure.
 - Generic constructors, explicit type arguments, raw types and diamonds need nothing of their
   own.
