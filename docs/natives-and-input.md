@@ -288,6 +288,15 @@ A translated program is closed: it knows all its classes. So:
   loudly.
 - `System.getLogger(name).log(level, message)` prints `LEVEL: message` on standard error from
   `INFO` up, as the JDK's default logger does, without its line of time and caller.
+- The JDK's internal `sun.util.logging.PlatformLogger` logs the same way (`lower/platform_logger.rs`):
+  `info`, `warning` and `severe` print `LEVEL: message`, with the stack trace of a `Throwable`
+  logged with one, the lower levels only evaluate their arguments, and `isLoggable(level)` is
+  whether the level is `INFO` or above. A logger has no value: it is `getLogger(name)` itself, a
+  local that `getLogger(name)` sets, or a static field that its declaration sets so, with a
+  constant name, that nothing reassigns and that is set before the rest of its class's static
+  initializer runs. A read of such a field from another class (a nested class's read of its
+  outer class's) initializes the field's class first, as in Java. A message with parameters at
+  a level that is printed, and any other use of a logger, is rejected.
 
 ### References
 
