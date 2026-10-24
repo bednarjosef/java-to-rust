@@ -540,6 +540,13 @@ fn longer_traces(members: &HashSet<(String, String, String)>) -> bool {
 pub(super) const UNCAUGHT_TRACE: (&str, &str) = ("uncaughtTrace", "()java.lang.String");
 const UNCAUGHT_EXCEPTION: (&str, &str) = ("uncaught0", "()java.lang.Throwable");
 
+/// The method of `Thread` that copies the parent's inheritable thread locals into a new thread
+/// (`java/Threads.java`). The constructor's call does not make it used: a program has it once it
+/// sets inheritable thread locals (`setInheritableThreadLocals`), and in any other the call does
+/// nothing (`inherit_call`), so that a thread does not bring in the JDK's `ThreadLocal`.
+pub(super) const INHERIT_THREAD_LOCALS: (&str, &str, &str) =
+    ("java.lang.Thread", "inheritThreadLocals", "(java.lang.Thread)void");
+
 /// The classes that a static initializer's failure is seen as (see `lower/clinit_errors.rs`): a
 /// program that catches one of these, or a supertype of them, declares them, with the constructors
 /// that the rewritten `<clinit>` calls.
@@ -722,8 +729,10 @@ impl Uses {
                     }
                     _ => _ = self.operations.insert(kind),
                 }
+                let inherit = (owner.as_str(), text(symbol, "name").as_str(), text(symbol, "type").as_str())
+                    == INHERIT_THREAD_LOCALS;
                 match symbol["kind"].as_str() {
-                    Some("METHOD" | "CONSTRUCTOR") if is_standard(&owner) => {
+                    Some("METHOD" | "CONSTRUCTOR") if is_standard(&owner) && !inherit => {
                         self.members.insert((owner.clone(), text(symbol, "name"), text(symbol, "type")));
                         if map.get("kind").and_then(Value::as_str) == Some("NEW_CLASS") {
                             self.instantiated.insert(owner);
@@ -893,6 +902,11 @@ impl Standard {
             // The thread that `start0` starts runs the thread's `run()`.
             if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "start0") {
                 uses.members.insert(("java.lang.Thread".into(), "run".into(), "()void".into()));
+            }
+            // A new thread copies its parent's inheritable thread locals once there may be some.
+            if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "setInheritableThreadLocals") {
+                let (class, name, signature) = INHERIT_THREAD_LOCALS;
+                uses.members.insert((class.into(), name.into(), signature.into()));
             }
             // The runtime runs `dispatchUncaught()` once a handler is set (see `lower/natives.rs`).
             if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "installUncaught0") {
@@ -1387,6 +1401,15 @@ impl<'t> Lowering<'t> {
             }
         }
         Ok(())
+    }
+
+    /// The call of `Thread.inheritThreadLocals` in a program that does not have the method
+    /// (`INHERIT_THREAD_LOCALS`): it does nothing, and its argument is a parameter. `None` for any
+    /// other call.
+    pub(super) fn inherit_call(&self, symbol: &Symbol) -> Option<ExprKind> {
+        ((symbol.owner, symbol.name, symbol.ty) == INHERIT_THREAD_LOCALS
+            && self.method_index(symbol).is_none())
+        .then(|| ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new()))
     }
 
     /// Rejects a constructor or method of a standard class that the translator does not have,

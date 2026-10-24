@@ -33,9 +33,8 @@ class Thread {
     int threadLocalRandomSecondarySeed;
     Object parkBlocker;
     // The values of the thread's `ThreadLocal`s, which the JDK's `ThreadLocal` keeps in the thread
-    // (and those of its `TerminatingThreadLocal`s). The inheritable ones are only a field, which
-    // `ForkJoinWorkerThread` clears: without the accessors of the JDK's `Thread`, and without a new
-    // thread's copy of its parent's, `InheritableThreadLocal` is rejected rather than wrong.
+    // (and those of its `InheritableThreadLocal`s and `TerminatingThreadLocal`s). A new thread
+    // copies its parent's inheritable ones (`inheritThreadLocals`).
     ThreadLocal.ThreadLocalMap threadLocals;
     ThreadLocal.ThreadLocalMap inheritableThreadLocals;
     ThreadLocal.ThreadLocalMap terminatingThreadLocals;
@@ -65,14 +64,7 @@ class Thread {
     }
 
     public Thread(Runnable task, String name) {
-        Thread parent = currentThread();
-        this.task = task;
-        this.name = checkName(name);
-        this.tid = nextThreadId();
-        this.daemon = parent.daemon;
-        this.priority = parent.priority;
-        this.group = parent.group;
-        this.contextClassLoader = parent.contextClassLoader;
+        this(null, task, name, 0, true);
     }
 
     public Thread(ThreadGroup group, Runnable task) {
@@ -84,20 +76,40 @@ class Thread {
     }
 
     public Thread(ThreadGroup group, Runnable task, String name) {
-        this(task, name);
-        if (group != null) {
-            this.group = group;
-        }
+        this(group, task, name, 0, true);
     }
 
     public Thread(ThreadGroup group, Runnable task, String name, long stackSize) {
-        this(group, task, name);
+        this(group, task, name, 0, true);
     }
 
-    // `ForkJoinWorkerThread`'s. A new thread copies none of its parent's inheritable thread
-    // locals (see the fields above), so `inheritInheritableThreadLocals` changes nothing.
+    // The constructor of every new thread, and `ForkJoinWorkerThread`'s. As Java's, a thread that
+    // does not inherit its parent's inheritable thread locals has the application's class loader.
     Thread(ThreadGroup group, Runnable task, String name, long stackSize, boolean inheritInheritableThreadLocals) {
-        this(group, task, name);
+        Thread parent = currentThread();
+        this.task = task;
+        this.name = checkName(name);
+        this.tid = nextThreadId();
+        this.daemon = parent.daemon;
+        this.priority = parent.priority;
+        this.group = group != null ? group : parent.group;
+        if (inheritInheritableThreadLocals) {
+            inheritThreadLocals(parent);
+            this.contextClassLoader = parent.contextClassLoader;
+        } else {
+            this.contextClassLoader = ClassLoader.getSystemClassLoader();
+        }
+    }
+
+    // The parent's inheritable thread locals, each value through its `childValue`, as the JDK's
+    // constructor copies them. Only a program that sets one (`setInheritableThreadLocals`) has
+    // this method; in any other, the call above does nothing (`lower/exceptions.rs`), so that a
+    // program's threads do not bring in the JDK's `ThreadLocal`.
+    private void inheritThreadLocals(Thread parent) {
+        ThreadLocal.ThreadLocalMap parentMap = parent.inheritableThreadLocals;
+        if (parentMap != null && parentMap.size() > 0) {
+            inheritableThreadLocals = ThreadLocal.createInheritedMap(parentMap);
+        }
     }
 
     // The main thread, which `currentThread` makes when the main thread first asks for itself.
@@ -193,6 +205,14 @@ class Thread {
 
     void setThreadLocals(ThreadLocal.ThreadLocalMap map) {
         threadLocals = map;
+    }
+
+    ThreadLocal.ThreadLocalMap inheritableThreadLocals() {
+        return inheritableThreadLocals;
+    }
+
+    void setInheritableThreadLocals(ThreadLocal.ThreadLocalMap map) {
+        inheritableThreadLocals = map;
     }
 
     ThreadLocal.ThreadLocalMap terminatingThreadLocals() {

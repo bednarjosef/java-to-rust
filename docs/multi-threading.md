@@ -419,12 +419,17 @@ and the members a program uses are added to it. It holds `Thread`, `Thread.Uncau
   (`docs/reflection-and-plugins.md`).
 - **Fields for the JDK's code**: `threadLocalRandomSeed`, `threadLocalRandomProbe`,
   `threadLocalRandomSecondarySeed` and `parkBlocker`, which `ThreadLocalRandom` and
-  `LockSupport` reach through `Unsafe` offsets; `threadLocals` and `terminatingThreadLocals`, in
-  which the JDK's own `ThreadLocal` keeps a thread's values (`java/ThreadLocalStub.java` gives
-  `Threads.java` the map's name); the scoped-value bindings and cache that `ScopedValue` keeps
-  in the thread (a new thread inherits none). `inheritableThreadLocals` is only a field, which
-  `ForkJoinWorkerThread` clears; a new thread copies nothing from its parent, so
-  `InheritableThreadLocal` is rejected rather than wrong.
+  `LockSupport` reach through `Unsafe` offsets; `threadLocals`, `inheritableThreadLocals` and
+  `terminatingThreadLocals`, in which the JDK's own `ThreadLocal` keeps a thread's values
+  (`java/ThreadLocalStub.java` gives `Threads.java` the map's name); the scoped-value bindings
+  and cache that `ScopedValue` keeps in the thread (a new thread inherits none).
+- **Inheritable thread locals**: as in Java, a new thread starts with a copy of its parent's
+  `InheritableThreadLocal` values, each through `childValue`, run in the parent; a
+  `ForkJoinWorkerThread` that asks not to inherit them gets none, and the application's class
+  loader as its context loader. Only a program that sets an inheritable value
+  (`setInheritableThreadLocals`) has the copy (`inheritThreadLocals`); in any other the
+  constructor's call does nothing (`lower/exceptions.rs`), so that threads do not bring in the
+  JDK's `ThreadLocal`.
 - **`ThreadGroup`** has a name, a parent and `maxpri` 10, prints as
   `java.lang.ThreadGroup[name=main,maxpri=10]`, and a thread joins the group of the thread that
   creates it (`main`, whose parent is `system`). A thread that has ended has no group and no

@@ -355,6 +355,9 @@ type Member = (&'static str, &'static str, &'static str);
 
 /// The methods of the JDK that the translator's standard classes (`lower::exceptions`) call, by
 /// the standard method that calls them: reachability does not read the standard classes' code.
+/// What a new thread calls to copy its parent's inheritable thread locals is reached by
+/// `setInheritableThreadLocals`, with which a program has that copy
+/// (`lower/exceptions.rs`).
 const STANDARD_CALLS: &[(Member, Member)] = &[
     (
         ("java.lang.Throwable", "printStackTrace", "(java.io.PrintStream)void"),
@@ -363,6 +366,18 @@ const STANDARD_CALLS: &[(Member, Member)] = &[
     (
         ("java.lang.Throwable", "printStackTrace", "(java.io.PrintWriter)void"),
         ("java.io.PrintWriter", "println", "(java.lang.String)void"),
+    ),
+    (
+        ("java.lang.Thread", "setInheritableThreadLocals", "(java.lang.ThreadLocal.ThreadLocalMap)void"),
+        ("java.lang.ThreadLocal.ThreadLocalMap", "size", "()int"),
+    ),
+    (
+        ("java.lang.Thread", "setInheritableThreadLocals", "(java.lang.ThreadLocal.ThreadLocalMap)void"),
+        (
+            "java.lang.ThreadLocal",
+            "createInheritedMap",
+            "(java.lang.ThreadLocal.ThreadLocalMap)java.lang.ThreadLocal.ThreadLocalMap",
+        ),
     ),
 ];
 

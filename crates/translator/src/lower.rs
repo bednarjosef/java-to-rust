@@ -1293,6 +1293,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_name_call(&symbol, receiver)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.inherit_call(&symbol) {
+            return Ok(kind);
+        }
         self.check_standard_member(node, &symbol)?;
         let builtin = match (symbol.owner, symbol.name) {
             ("java.io.PrintStream", "println") if system_out => Builtin::Println,
