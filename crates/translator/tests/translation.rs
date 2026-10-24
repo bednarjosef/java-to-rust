@@ -3310,6 +3310,24 @@ fn the_census_rejects_a_class_with_a_member_it_cannot_declare_and_goes_on() {
 }
 
 #[test]
+fn the_census_stubs_an_exception_that_prints_its_own_stack_trace_and_goes_on() {
+    // `Loud` overrides `printStackTrace(PrintStream)`, which the translation would not run where
+    // Java does. `main` is rejected (`PrintStream` needs the JDK's sources), so the override
+    // becomes a stub that runs none of its code, and the census goes on instead of stopping at it.
+    let dir = write_sources(
+        "census_print_stack_trace",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    public static void main(String[] a) {\n        new Loud().printStackTrace((java.io.PrintStream) null);\n    }\n}\nclass Loud extends RuntimeException {\n    @Override\n    public void printStackTrace(java.io.PrintStream s) { throw new IllegalStateException(\"loud\"); }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let census = census(&program);
+    assert_lacks(&census.report, &["Incomplete"]);
+    assert_eq!(census.json["complete"], true);
+}
+
+#[test]
 fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
     // `len` reads its parameter in a `finally` block whose copies name it differently, one after
     // the write and one before; `main`'s message is certain.

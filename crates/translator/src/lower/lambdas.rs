@@ -420,8 +420,15 @@ impl<'t> Lowering<'t> {
             && qualifier
                 .symbol()
                 .is_some_and(|s| matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD"));
+        // With compile errors, javac may give the reference a functional interface with fewer
+        // parameters than the call needs (`Program::keep_going`).
+        let array = node.str("mode") == "NEW" && qualifier.kind() == "ARRAY_TYPE";
+        let needed = usize::from(array || (node.str("mode") != "NEW" && unbound));
+        if params.len() != param_types.len() || params.len() < needed {
+            return unsupported(node, "a method reference whose functional interface javac did not resolve");
+        }
         let call = match node.str("mode") {
-            "NEW" if qualifier.kind() == "ARRAY_TYPE" => at(json!({"kind": "NEW_ARRAY",
+            "NEW" if array => at(json!({"kind": "NEW_ARRAY",
                 "javaType": qualifier.java_type(), "type": qualifier.0["type"].clone(),
                 "dimensions": [param(0)]})),
             "NEW" => {
