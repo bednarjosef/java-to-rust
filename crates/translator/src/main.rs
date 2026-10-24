@@ -143,7 +143,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
             let Some(tree) = &census.modules else {
                 return Err("the census ended early, so it has no translation to write".to_string());
             };
-            emit(Some((flag, path.as_str())), &crate_name(&program.main), &tree.files(layout(flag)))?;
+            return write_translation(tree, crate_name(&program.main), crates, flag, path);
         }
         return Ok(());
     }
@@ -160,13 +160,26 @@ fn run_program(args: &[String]) -> Result<(), String> {
     if let Some(path) = modules_json {
         write_dependencies(&path, &tree)?;
     }
-    let name = crate_name(&program.main);
-    if let (Some(crates), Some(("--crate", dir))) = (crates, output.as_ref().map(|(f, d)| (*f, d.as_str()))) {
-        let workspace = java_to_rust::split::split(&tree, crates)?;
-        return workspace.write(Path::new(dir), &name).map_err(|e| format!("{dir}: {e}"));
+    match &output {
+        Some((flag, path)) => write_translation(&tree, crate_name(&program.main), crates, flag, path),
+        None => emit(None, &crate_name(&program.main), &tree.files(Layout::OneFile)),
     }
-    let layout = output.as_ref().map_or(Layout::OneFile, |(flag, _)| layout(flag));
-    emit(output.as_ref().map(|(flag, path)| (*flag, path.as_str())), &name, &tree.files(layout))
+}
+
+/// Writes a whole program's translation with `flag` (`-o` or `--crate`) to `path`: with
+/// `--crates`, a project is a workspace split into that many body crates (`split.rs`).
+fn write_translation(
+    tree: &java_to_rust::output::ModuleTree,
+    name: String,
+    crates: Option<usize>,
+    flag: &str,
+    path: &str,
+) -> Result<(), String> {
+    if let (Some(crates), "--crate") = (crates, flag) {
+        let workspace = java_to_rust::split::split(tree, crates)?;
+        return workspace.write(Path::new(path), &name).map_err(|e| format!("{path}: {e}"));
+    }
+    emit(Some((flag, path)), &name, &tree.files(layout(flag)))
 }
 
 /// The name of a whole program's project: its main class's simple name.

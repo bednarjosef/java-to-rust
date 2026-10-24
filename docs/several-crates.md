@@ -160,6 +160,13 @@ it has its share of the moved code, so the same program is split the same way ev
 neighbouring packages share a crate. A module is the unit, so a crate root with much code of its
 own makes its crate larger than the others.
 
+`--crates N` with `--crate DIR` writes the split workspace, for a translation or for a census's
+trial translation (`--census --crate DIR --crates N`, each rejected piece ending the program with
+its rejection), which is how the Minecraft server's trial is built ([minecraft-server.md](minecraft-server.md),
+the `trial` step). Every program of `targets/` builds and prints what Java prints split into
+three body crates, and the whole-program test `a_program_split_into_crates_matches_java` builds
+one so.
+
 What it costs: a call of a moved function from another crate goes through the header's wrapper and
 cannot be inlined without link-time optimization. The release profile's fat LTO inlines across
 crates again, at the memory of a whole-program build; debug builds and `cargo check` gain the
