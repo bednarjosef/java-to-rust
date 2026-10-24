@@ -3,8 +3,8 @@
 // natives of the runtime (`java_runtime::thread`). `build.rs` prints its syntax tree with
 // `JavaTree`, and lowering gives it its real package and adds it, with the members a program uses,
 // to the programs that use it, as it adds the standard exception classes of `Standard.java` (see
-// `lower/exceptions.rs`). A program may extend it. The thread's state and stack, and virtual
-// threads, are left out. The interrupt status is the runtime's, by the thread's id, so that
+// `lower/exceptions.rs`). A program may extend it. The thread's stack has no frames, as an
+// exception's has none; its state and virtual threads are left out. The interrupt status is the runtime's, by the thread's id, so that
 // `sleep`, `join` and `wait` observe it. An uncaught exception goes to the thread's handler once
 // the program has set a handler (`installUncaught0`); until then the runtime prints it, as the
 // thread group would.
@@ -16,6 +16,7 @@ class Thread {
     }
 
     private static UncaughtExceptionHandler defaultUncaughtExceptionHandler;
+    private static final StackTraceElement[] EMPTY_STACK_TRACE = new StackTraceElement[0];
 
     private String name;
     private final long tid;
@@ -317,6 +318,21 @@ class Thread {
         return defaultUncaughtExceptionHandler;
     }
 
+    // A thread's stack has no frames, as an exception's has none (see `Standard.java`), which the
+    // specification of `getStackTrace` allows: Java's prints the exception without its frames.
+    public static void dumpStack() {
+        new Exception("Stack trace").printStackTrace();
+    }
+
+    // Empty, as an exception's (see `dumpStack`): a new array for a thread that is alive, and
+    // Java's shared one for a thread that is not, as the JDK's.
+    public StackTraceElement[] getStackTrace() {
+        if (this != currentThread() && !isAlive()) {
+            return EMPTY_STACK_TRACE;
+        }
+        return new StackTraceElement[0];
+    }
+
     void dispatchUncaughtException(Throwable e) {
         getUncaughtExceptionHandler().uncaughtException(this, e);
     }
@@ -547,6 +563,20 @@ class ThreadGroup implements Thread.UncaughtExceptionHandler {
 
     public final int getMaxPriority() {
         return maxPriority;
+    }
+
+    public final boolean parentOf(ThreadGroup g) {
+        for (; g != null; g = g.parent) {
+            if (g == this) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // A thread group is never destroyed (Java's always answers so).
+    public boolean isDestroyed() {
+        return false;
     }
 
     public void uncaughtException(Thread t, Throwable e) {

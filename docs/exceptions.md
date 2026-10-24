@@ -465,7 +465,9 @@ Stack traces have no frames, by design: the specification of `Throwable.getStack
 virtual machine omit frames, and a translation has none to give (a Rust backtrace has Rust
 functions, not Java methods and lines). So `getStackTrace()` is empty, `fillInStackTrace()` does
 nothing and returns the exception, and `setStackTrace(frames)` stores a copy (with Java's
-`NullPointerException` for a null frame), which `getStackTrace()` then returns.
+`NullPointerException` for a null frame), which `getStackTrace()` then returns. A thread's
+stack is the same: `Thread.getStackTrace()` is empty, and `Thread.dumpStack()` prints its
+`java.lang.Exception: Stack trace` without frames.
 `StackTraceElement` is the translator's (`Standard.java`): its constructor from class, method,
 file and line (with Java's null checks), its getters and `toString`, without class loader and
 module, and without `equals` and `hashCode`.
