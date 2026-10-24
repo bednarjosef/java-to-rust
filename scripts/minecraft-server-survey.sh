@@ -13,8 +13,9 @@
 # MINECRAFT_JAR      the server jar from Mojang (default $MINECRAFT_CACHE/server-26.3.jar)
 # VINEFLOWER         the Vineflower 1.12.0 decompiler jar (default $MINECRAFT_CACHE/vineflower-1.12.0.jar;
 #                    Maven Central: org.vineflower:vineflower:1.12.0, SHA-1 below)
-# JDK_SOURCES        a root with the JDK's sources by module (java.base/, java.logging/, ...), such as
-#                    an unpacked src.zip (default $MINECRAFT_CACHE/jdk-src)
+# JDK_SOURCES        a root with the JDK's sources by module (java.base/, java.logging/, ...), where
+#                    the jdk-sources step unpacks the modules that the sources use and lists them
+#                    in modules.txt (default $MINECRAFT_CACHE/jdk-src)
 # SRC_ZIP            the JDK's src.zip that the jdk-sources step unpacks the modules from (default:
 #                    lib/src.zip of the JDK whose java is on PATH)
 # JAVA               the java that runs the decompiler (default: java on PATH)
@@ -36,11 +37,6 @@ java=${JAVA:-java}
 translator=${TRANSLATOR:-${CARGO_TARGET_DIR:-$root/target}/release/java-to-rust}
 read -r -a slot <<< "${SLOT:-}"
 memory_cap=${MEMORY_CAP-6G}
-
-# The JDK modules whose sources are libraries of the translation, besides java.base.
-# java.desktop needs java.datatransfer and java.prefs; the server records events with jdk.jfr.
-jdk_modules="java.datatransfer java.desktop java.logging java.management java.naming java.net.http java.prefs
-  java.rmi java.scripting java.sql java.xml jdk.jfr jdk.management jdk.unsupported"
 
 # Unpacks the bundler jar: the server jar is META-INF/versions/<v>/server-<v>.jar, its libraries
 # are under META-INF/libraries, and META-INF/main-class names the class the bundler starts.
@@ -136,23 +132,31 @@ library_args() {
     [ -d "$cache/src/library-sources/$name" ] && dir=$cache/src/library-sources/$name
     printf -- '--library\n%s\n' "${dir%/}"
   done
-  printf -- '--library\n%s\n' "$jdk_sources/java.base"
-  for module in $jdk_modules; do
-    [ -d "$jdk_sources/$module" ] && printf -- '--library\n%s\n' "$jdk_sources/$module"
-  done
-  return 0
+  local module
+  while IFS= read -r module; do
+    printf -- '--library\n%s\n' "$jdk_sources/$module"
+  done < "$jdk_sources/modules.txt"
 }
 
-# The JDK's sources of java.base and of the modules above, from its src.zip.
+# The JDK's sources of the modules that the server and its libraries use, from its src.zip:
+# java.base, each module with a package that their code names, and the modules that those need
+# in turn (scripts/jdk-modules.py), listed in modules.txt.
 jdk-sources() {
   local zip=${SRC_ZIP:-$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")/lib/src.zip}
   [ -f "$zip" ] || { echo "no src.zip at $zip (set SRC_ZIP)" >&2; exit 1; }
   mkdir -p "$jdk_sources"
+  local -a roots=()
+  local dir
+  for dir in "$cache/src/server" "$cache/src/libraries" "$cache/src/library-sources"; do
+    [ -d "$dir" ] && roots+=("$dir")
+  done
+  python3 -I "$root/scripts/jdk-modules.py" "$zip" "${roots[@]}" > "$jdk_sources/modules.txt"
   local module
-  for module in java.base $jdk_modules; do
+  while IFS= read -r module; do
     rm -rf "${jdk_sources:?}/$module"
     unzip -q "$zip" "$module/*" -d "$jdk_sources"
-  done
+  done < "$jdk_sources/modules.txt"
+  echo "$(wc -l < "$jdk_sources/modules.txt") JDK modules: $(paste -sd' ' "$jdk_sources/modules.txt")"
   echo "$(find "$jdk_sources" -name '*.java' | wc -l) JDK source files"
 }
 
@@ -205,6 +209,7 @@ census() {
   [ -x "$translator" ] || (cd "$root" && "${slot[@]}" cargo build -q --release -p java-to-rust)
   local out=$cache/census
   mkdir -p "$out"
+  [ -f "$jdk_sources/modules.txt" ] || { echo "no $jdk_sources/modules.txt (run the jdk-sources step)" >&2; exit 1; }
   local -a libraries
   mapfile -t libraries < <(library_args)
   local main
@@ -239,9 +244,10 @@ summary() {
     dir=${dir%/}
     roots+=("$(basename "$dir" | sed -E 's/-[0-9][0-9.]*(-jre|\.Final)?$//')=$dir")
   done
-  for dir in "$jdk_sources"/*/; do
-    roots+=("JDK=${dir%/}")
-  done
+  local module
+  while IFS= read -r module; do
+    roots+=("JDK=$jdk_sources/$module")
+  done < "$jdk_sources/modules.txt"
   python3 -I "$root/scripts/census-by-origin.py" "$cache/census/census.json" "${roots[@]}" \
     | tee "$cache/census/by-origin.txt"
 }
