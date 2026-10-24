@@ -63,6 +63,8 @@ pub mod regex;
 mod scalb;
 mod shared;
 mod shared_string;
+#[cfg(unix)]
+mod socket;
 mod statics;
 pub mod string;
 mod system;
@@ -141,6 +143,8 @@ pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
 pub use shared::{Arc, Slot};
 pub use shared_string::*;
+#[cfg(unix)]
+pub use socket::*;
 pub use statics::*;
 pub use string::*;
 pub use system::*;

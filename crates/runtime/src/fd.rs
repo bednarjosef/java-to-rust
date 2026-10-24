@@ -32,6 +32,10 @@ enum Entry {
     Write(File),
     /// A `RandomAccessFile` opened with `"rw"`, which reads and writes.
     ReadWrite(File),
+    /// A socket, a pipe, an `epoll` instance or an event counter of `sun.nio.ch` (`socket.rs`),
+    /// which its natives use by the system's descriptor.
+    #[cfg(unix)]
+    System(std::os::fd::OwnedFd),
 }
 
 /// The descriptors of the process. Tests supply standard input as a reader (`stdin`); the
@@ -398,6 +402,7 @@ fn os_descriptor(entry: &Entry) -> Option<i32> {
         Entry::Stdout => 1,
         Entry::Stderr => 2,
         Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file) => file.as_raw_fd(),
+        Entry::System(fd) => fd.as_raw_fd(),
     })
 }
 
@@ -449,6 +454,28 @@ pub(crate) fn duplicate(fd: i32) -> io::Result<i32> {
         };
         Ok(t.insert(entry))
     })
+}
+
+/// A descriptor for `fd`, a socket, pipe, `epoll` instance or event counter (`socket.rs`).
+#[cfg(unix)]
+pub(crate) fn insert_system(fd: std::os::fd::OwnedFd) -> i32 {
+    with(|t| t.insert(Entry::System(fd)))
+}
+
+/// The system's descriptor behind descriptor `fd` of a socket (or another entry of
+/// `insert_system`), which stays open until `close`; `EBADF` where it holds none.
+#[cfg(unix)]
+pub(crate) fn system_descriptor(fd: i32) -> io::Result<i32> {
+    use std::os::unix::io::AsRawFd;
+    with(|t| match t.entries.get(fd as usize).and_then(Option::as_ref) {
+        Some(Entry::System(system)) if fd >= 0 => Ok(system.as_raw_fd()),
+        _ => Err(io::Error::from_raw_os_error(EBADF)),
+    })
+}
+
+/// `close(fd)` of the table's descriptor `fd`.
+pub(crate) fn close_descriptor(fd: i32) {
+    with(|t| t.close(fd));
 }
 
 /// Whether descriptor `fd` is open.
