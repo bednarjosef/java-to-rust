@@ -60,6 +60,17 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
 
+/// The interfaces that `java.lang.Class` implements in Java, which the runtime's classes do not.
+const CLASS_INTERFACES: &[&str] = &[
+    "java.io.Serializable",
+    "java.lang.constant.Constable",
+    "java.lang.invoke.TypeDescriptor",
+    "java.lang.invoke.TypeDescriptor.OfField",
+    "java.lang.reflect.AnnotatedElement",
+    "java.lang.reflect.GenericDeclaration",
+    "java.lang.reflect.Type",
+];
+
 /// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
 /// generation and every translation.
 pub(super) fn receiver_key(classes: &[usize]) -> u64 {
@@ -519,6 +530,26 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether `value` may be a class that Java lets be a `to`, one of the interfaces that
+    /// `java.lang.Class` implements and the program translates as interfaces of its own
+    /// (`java.lang.reflect.Type`, see `program::reach::TRANSLATED_ANYWAY`): the runtime's classes
+    /// are of none of the program's types, so the cast or the test is rejected.
+    fn rejects_class_as(&mut self, value: &Expr, to: Type) -> bool {
+        let Type::Class(name, _) = to else { return false };
+        if !CLASS_INTERFACES.contains(&name) {
+            return false;
+        }
+        let holds_class = value.ty == Type::JavaClass
+            || self.type_of(value.ty).is_some_and(|s| {
+                self.enum_variants(s).into_iter().any(|c| self.runtime_of(c) == Some(Type::JavaClass))
+            });
+        if holds_class {
+            let message = format!("a `java.lang.Class` as a `{name}` not supported yet");
+            self.rejected.push(Error { pos: value.pos, message });
+        }
+        holds_class
+    }
+
     /// The variants of the enum of `s` whose objects are of type `t`.
     fn passing(&self, s: usize, t: usize) -> Vec<usize> {
         self.enum_variants(s).into_iter().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect()
@@ -594,6 +625,9 @@ impl<'a> Gen<'a> {
 
     /// `value instanceof T`.
     pub(super) fn instance_test(&mut self, value: &'a Expr, to: Type) -> Code {
+        if self.rejects_class_as(value, to) {
+            return Code::atom("false");
+        }
         let nullable = self.nullable(value);
         let known = |g: &mut Self, passes: bool| {
             if nullable && passes {
@@ -1177,6 +1211,9 @@ impl<'a> Gen<'a> {
         let checked = self.checked_cast.take();
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
+        }
+        if self.rejects_class_as(value, to) {
+            return Code::atom("unreachable!()");
         }
         // A string, a builder or a box as a value of a type of the program whose values do not
         // include it, which `lower::hierarchy::convert` leaves to the generator.

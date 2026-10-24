@@ -544,6 +544,15 @@ the program's classes implement:
 - `ENUM` (`<E extends Enum<E>>`, the JDK's `EnumMap` and `EnumSet`): the program's enums, with
   `Enum`'s methods lowered by `lower/enums.rs`.
 - The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it.
+- Plain interfaces of reflection and security that library code implements with classes of its
+  own (`java.lang.reflect.Type` and `ParameterizedType`, `WildcardType`, `GenericArrayType`,
+  `InvocationHandler`, `java.security.Key` and its private and public keys, `KeySpec`,
+  `AlgorithmParameterSpec`, `PrivilegedExceptionAction`) are translated from the JDK's sources as
+  any interface of the program (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their
+  objects in the JDK (`Proxy`, a provider's keys, `getGenericSuperclass`) stays untranslated.
+  `Class` implements `Type` in Java, and the runtime's classes do not: a class converted to
+  `Type`, and a cast or an `instanceof` of `Type` (or of another interface of `Class`) on a value
+  that may be a class, are rejected (`codegen::dispatch::rejects_class_as`).
 
 Other rules:
 
