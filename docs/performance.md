@@ -43,7 +43,7 @@ alone at a load of 2.9.
 | TokenScanner   |     958 |    1624 |      1.70 |           - |           - |            - |
 
 Differences of 20% or less between two runs are often noise or the placement of code and data
-(see Statics below); the large ratios are not.
+(see "Colors" in docs/collector.md); the large ratios are not.
 
 ## What the times come from
 
@@ -62,7 +62,7 @@ sites (class, and the method the `new` is in) that made the most objects, on sta
   the short-lived trees without marking the old one. NodeList walks and rebuilds a linked list of
   about 667,000 nodes; its nodes are taken from blocks in address order, so the walk follows
   memory.
-- **Strings read from a field (TokenScanner 1.7x).** A parser that reads its input one character
+- **Strings read from a field (TokenScanner 0.8x).** A parser that reads its input one character
   at a time with `input.substring(index, index + 1)` and checks `index < input.length()` runs in
   linear time:
   - `java::string_length` counts ASCII text by its byte length, and other text from its bytes
@@ -75,11 +75,12 @@ sites (class, and the method the `new` is in) that made the most objects, on sta
     exceptions the runtime raises. On a string proved ASCII, `length()` is the byte length and
     `substring` is `java::ascii_substring`, a byte slice with Java's bounds check. A call of a
     method that returns a type variable is not taken for ASCII.
-  - What remains is a stall: the new one-letter string comes back from `ascii_substring` written
-    as 8-byte stores and is copied into the field with a 16-byte load, which the processor cannot
-    forward from those stores. `perf stat` counts about one blocked forward per character
-    (`ls_bad_status2.stli_other`, 1.09 billion), about a quarter of the run's cycles. Which copy
-    instruction rustc picks there depends on the build.
+  - `ascii_substring` is inlined. Called, it returned the new one-letter string written as 8-byte
+    stores, which the caller copied into the field with a 16-byte load that the processor cannot
+    forward from those stores: about one blocked forward per character, 1388 ms against 757 ms
+    inlined.
+  - `"0123456789".contains(current)` searches for one byte without checking first that the text
+    is UTF-8 (`Wtf8::find_from`).
 - **Elements of an object array read again (NBody 1.0x, ParticleArray 0.7x).** Consecutive
   statements that read the same element, with an array that is a local, a field of `this` or a
   static and an index that is a local or a constant, read it once into a local, when none of
@@ -106,12 +107,13 @@ sites (class, and the method the `new` is in) that made the most objects, on sta
   `&b[k][..n]` and `&mut c[i][..n]` without a check, and vectorizes (`analysis/arrays/slices.rs`);
   otherwise it runs with every check. The remaining gap against the JIT is not profiled; the
   loop computes with `wrapping_add` and `wrapping_mul` on `i32`.
-- **Statics (2.1x).** A primitive static is a `thread_local!` `Cell`, read with `get` and
-  written with `set`; the histogram, an `int[]`, is a `thread_local!` `RefCell`. The hot loop
-  does no allocation and no extra work, but 59% of its samples sit on a single store into a
-  thread-local that the next iteration reads back: the cost moves with where the thread-locals
-  and the loop land in the binary, and has ranged from 1.0x to 2.1x Java with the same generated
-  code.
+- **Statics (1.0x).** In a program that starts no thread, a primitive static is a
+  `java::Global<Cell<_>>`, a plain `static`, read with `get` and written with `set`; the
+  histogram, an `int[]`, is a `java::LazyGlobal<RefCell<_>>`. The compiler keeps the
+  xorshift state in a register through the loop, which it could not do for a `thread_local!`,
+  whose address it does not know: each iteration stored the state and the next read it back
+  (2.6 s). Reading or writing one element of a `java::Array` checks no borrow flag
+  (`array.rs`, `ArrayData::raw`), whose store and reload also chained the iterations.
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
