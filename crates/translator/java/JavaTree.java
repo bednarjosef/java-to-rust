@@ -855,8 +855,15 @@ public class JavaTree {
         return false;
     }
 
-    /** A type as javac prints it, with local and anonymous classes named by {@link #className}. */
+    /**
+     * A type as javac prints it, without its type annotations, with local and anonymous classes
+     * named by {@link #className}.
+     */
     private static String typeText(TypeMirror t) {
+        // Type annotations (`java.lang.@Nullable String`) say nothing the translation uses.
+        if (t instanceof com.sun.tools.javac.code.Type annotated) {
+            t = annotated.stripMetadata();
+        }
         if (!mentionsLocal(t)) {
             return t.toString();
         } else if (t instanceof ArrayType a) {
