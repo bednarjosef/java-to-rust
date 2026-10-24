@@ -1,6 +1,6 @@
 //! The `Math` methods that throw on overflow or on bad bounds, and the ones that need the runtime's
-//! exact helpers: `addExact` and the rest, `clamp`, `copySign`, `nextDown` and the products
-//! `multiplyHigh`, `unsignedMultiplyHigh` and `multiplyFull`.
+//! exact helpers: `addExact` and the rest, `powExact`, `clamp`, `copySign`, `nextDown` and the
+//! products `multiplyHigh`, `unsignedMultiplyHigh` and `multiplyFull`.
 
 use super::*;
 
@@ -25,6 +25,12 @@ impl<'a> Gen<'a> {
             let (shift, mask, bias) =
                 if operand == Type::Float { (23, "0xff", 127) } else { (52, "0x7ff", 1023) };
             return Some(Code::atom(format!("((({x}.to_bits() >> {shift}) & {mask}) as i32 - {bias})")));
+        }
+        // `powExact(x, n)`: the power has the type of `x`, and `n` is an `int`.
+        if name == "powExact" {
+            let x = self.value(&args[0], ty).typed();
+            let n = self.value(&args[1], Type::Int).text;
+            return Some(self.exact_call("pow_exact", &[x, n]));
         }
         // `toIntExact` takes a `long`, and `clamp(long, int, int)` computes in `long`. The products
         // take `long`s, except `multiplyFull`, which takes `int`s and returns the exact `long`.

@@ -41,6 +41,19 @@ impl<'t> Lowering<'t> {
         Ok(Some(ExprKind::Call { name: to.to_string(), args, resolved: Some(resolved) }))
     }
 
+    /// Whether the code being lowered is in a module that Java gives native access
+    /// (`program::NATIVE_ACCESS_MODULES`): the named module whose root has the package of the
+    /// class that holds it.
+    pub(super) fn has_native_access(&self) -> bool {
+        let Some(reach) = self.reach else { return false };
+        let package = self.package_of(self.lambda_holder(self.current.get()));
+        let package = package.strip_suffix('.').unwrap_or(&package);
+        // A package in two roots is the first's, as the class path would have it (`moduleOf0`).
+        reach.modules.iter().find(|m| m.packages.iter().any(|p| p == package)).is_some_and(|m| {
+            !m.name.is_empty() && crate::program::NATIVE_ACCESS_MODULES.contains(&m.name.as_str())
+        })
+    }
+
     /// The method `name` of `java.lang.TranslatedModules` with javac's signature `signature`, if
     /// the translation has it.
     pub(super) fn translated_modules(&self, name: &str, signature: &str) -> Option<usize> {

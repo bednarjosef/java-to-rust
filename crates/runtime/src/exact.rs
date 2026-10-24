@@ -15,6 +15,7 @@ pub trait Exact: Copy + Ord + Display {
     fn try_mul(self, b: Self) -> Option<Self>;
     fn try_neg(self) -> Option<Self>;
     fn try_abs(self) -> Option<Self>;
+    fn try_pow(self, n: u32) -> Option<Self>;
 }
 
 macro_rules! exact {
@@ -41,6 +42,10 @@ macro_rules! exact {
 
             fn try_abs(self) -> Option<Self> {
                 self.checked_abs()
+            }
+
+            fn try_pow(self, n: u32) -> Option<Self> {
+                self.checked_pow(n)
             }
         }
     };
@@ -76,6 +81,14 @@ pub fn neg_exact<T: Exact>(a: T) -> T {
 /// `Math.absExact`, whose overflow has its own message.
 pub fn abs_exact<T: Exact>(a: T) -> T {
     a.try_abs().unwrap_or_else(|| overflow(T::ABS_OVERFLOW))
+}
+
+/// `Math.powExact` on `int` and `long`: `x` to the power `n`, which throws for a negative `n` and
+/// where the power overflows. Java squares and multiplies as Rust's `checked_pow` does, so a
+/// power that fits never overflows on the way.
+pub fn pow_exact<T: Exact>(x: T, n: i32) -> T {
+    let Ok(n) = u32::try_from(n) else { overflow("negative exponent") };
+    x.try_pow(n).unwrap_or_else(|| overflow(T::OVERFLOW))
 }
 
 /// `Math.toIntExact`.
@@ -132,6 +145,8 @@ mod tests {
         assert_eq!(mul_exact(-3i64, 4), -12);
         assert_eq!(abs_exact(-5), 5);
         assert_eq!(to_int_exact(-7), -7);
+        assert_eq!((pow_exact(-2, 31), pow_exact(3i64, 0), pow_exact(-1, 7)), (i32::MIN, 1, -1));
+        assert_eq!(pow_exact(10i64, 18), 1_000_000_000_000_000_000);
         assert_eq!(clamp(5i64, 1, 3), 3);
         assert_eq!(clamp_f64(-0.0, 0.0, 1.0).to_bits(), 0.0f64.to_bits());
         assert_eq!(clamp_f64(-0.0, -1.0, -0.0).to_bits(), (-0.0f64).to_bits());
