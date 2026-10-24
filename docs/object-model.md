@@ -662,7 +662,8 @@ and a store converts to `Object`. Every other array keeps its exact type.
 Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle
 next to its elements; every other array carries `None`, one word). Lowering notes the class of
 each array the code makes where it is an `Object[]` (`Class::element_classes`): a `new String[n]`
-or `{a, b}`, and an `Arrays.copyOf` or `copyOfRange` into a class literal, or into a class held in
+or `{a, b}`, an enum's `values()`, a class literal's `getInterfaces()`, the value of an annotation's
+member, and an `Arrays.copyOf` or `copyOfRange` into a class literal, or into a class held in
 a variable, which is taken as `Object[]`. The `String[]`s that the runtime makes as `Object[]`s
 (`split`, `main`'s arguments) carry `String[]`. A clone or a copy without a class keeps its
 source's class. So:
@@ -676,14 +677,23 @@ source's class. So:
   element, and stores those before the first that fails, which throws HotSpot's
   `ArrayStoreException` ("arraycopy: element type mismatch: ...");
 - `getClass()` of an `Object[]` (`java::array_class`), as a value or as an `Object`, is the class
-  it carries.
+  it carries, and so are its `getName()` and `getSimpleName()`; a class literal of an array type
+  (`String[].class`) is that array's own class, not `Object[]`'s (`covariant::exact_ty`);
+- `o instanceof String[]`, `o instanceof String[] s` and `(String[]) o` of an `Object`, and
+  `(String[]) objects` of an `Object[]`, test the class the array carries
+  (`Class::array_tests`, `java::array_is`, `java::cast_array`): an array of another class fails
+  the test, and the cast throws HotSpot's `ClassCastException` ("class [Ljava.lang.Integer;
+  cannot be cast to class [Ljava.lang.String; (...)"), which a `catch` may see.
 
 An array of arrays (`String[][]` as an `Object[][]`) carries no class, nor does an array that a
 method keeps to itself as a plain `Vec` (`analysis::arrays`), an array that
-`Array.newInstance(a.getClass().getComponentType(), n)` makes, or an enum's `values()` as an
-`Object[]`: storing an object of another class in one of them does not throw, and its `getClass()`
-is `Object[]`'s. `instanceof String[]` and a cast to `String[]` of an `Object` do not look at the
-class an array carries. Also:
+`new Object[n]` makes, or one that `Array.newInstance` makes of a component class that the code
+neither makes nor tests arrays of:
+storing an object of another class in one of them does not throw, its `getClass()` is
+`Object[]`'s, and it passes every `instanceof` and cast to an array class held as an `Object[]`,
+as an array of that class would (an `Object[]` passes `instanceof String[]`). A test of an
+`Object` against an array type that is not an `Object[]` (`Comparable[]` where no `String[]` meets
+it) looks at the variant only, so a `String[]` held as an `Object[]` fails it. Also:
 
 - a `String[]` that is an `Object[]` is copied where the runtime's string builtins take or make
   one (`Builtin::StringArrayOf`, `Builtin::ObjectArrayOf`; the copy of a null is null, so
@@ -817,9 +827,10 @@ A call may run any member of an override group, so the analyses treat the group 
 - Real generics need no trait: a generic whose type variables are used for text, `equals`,
   `hashCode`, a bound, a cast or an array stays erased. Traits for interfaces used as bounds and
   per-instantiation enum variants (`Shape::BoxOfInteger`) are not built.
-- Arrays of arrays, plain arrays and the arrays that `Array.newInstance` and `values()` make as
-  `Object[]`s do not carry their class (1.11, covariant arrays), and `instanceof` and casts
-  of an array as an `Object` do not look at the class an array carries.
+- Arrays of arrays, plain arrays, `new Object[n]` and the arrays that `Array.newInstance` makes
+  of a class the code neither makes nor tests arrays of do not carry their class (1.11, covariant arrays), so tests of their class pass where Java's
+  would fail, and a test against an array type of references that is not an `Object[]` does not
+  see an array held as one.
 - `Number.byteValue()` or `shortValue()` overridden by a program class, `CharSequence`'s methods
   beyond those listed in 1.9, and other `java.lang.Enum` methods implementing an interface method
   are rejected.

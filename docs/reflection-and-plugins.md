@@ -263,7 +263,7 @@ handles.
   (`getAnnotation`, `isAnnotationPresent`, `getAnnotations`, `getDeclaredAnnotations`), a
   `switch` over the slot of the member (both in `lower/annotation_values.rs`; a declaration's
   annotation is made once, so every call gives the same object, as in Java; a member may be an
-  annotation, and one that is an array of strings, enum constants or annotations is rejected),
+  annotation, and one that is an array of annotations or of arrays is rejected),
   the annotation objects that the JDK's
   `AnnotationParser.annotationForMap` makes (javac's `AnnotationProxyMaker`), which are the
   patched `AnnotationInvocationHandler` itself (`lower/annotation_objects.rs`; a member's call

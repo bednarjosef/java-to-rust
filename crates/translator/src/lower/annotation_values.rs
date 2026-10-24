@@ -18,11 +18,11 @@
 //!
 //! A value may be a constant, a class literal, an enum constant, an annotation (kept as the one
 //! that has it is, and a default one once for its type, as Java parses a type's defaults once),
-//! or an array of primitives or of classes, written as one element where the member is an array.
-//! Rejected: a member whose type is an array of annotations, strings or enum constants (such an
-//! array has the class of a `Class[]` in a translation, as its elements are objects, so the JDK's
-//! `memberValueToString` would take it for an array of classes), a nested annotation type, and
-//! the container that a repeated annotation leaves.
+//! or an array of any of them but annotations, written as one element where the member is an
+//! array; an array that the translation holds as an `Object[]` carries its own class
+//! (`covariant::made_as`), which the JDK's `memberValueToString` tells apart. Rejected: a member
+//! whose type is an array of annotations or of arrays, a nested annotation type, and the
+//! container that a repeated annotation leaves.
 //! The call of a member, `a.value()`, is `TranslatedAnnotations.member(a, "value")`, unboxed or
 //! cast to the member's type; it copies an array that is not empty, as the JDK's proxy does.
 
@@ -246,11 +246,6 @@ impl<'t> Lowering<'t> {
         };
         let java = method.child("returnType")?.java_type();
         let element = java.strip_suffix("[]").unwrap_or(java);
-        // An array of strings or enum constants has the class of a `Class[]` in a translation
-        // (its elements are objects), which the JDK's `toString` takes it for.
-        let primitive =
-            matches!(element, "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double");
-        let objects = java.ends_with("[]") && !primitive && !element.starts_with("java.lang.Class");
         // An annotation, made as the one that has it is.
         if let Some(&nested) = self.annotation_types.get(java)
             && value.kind() == "ANNOTATION"
@@ -260,10 +255,17 @@ impl<'t> Lowering<'t> {
             let made = self.annotation_object(node, make, key, java, nested, value, annotation)?;
             return Ok(self.convert(made, object));
         }
-        if self.annotation_types.contains_key(element) || element.ends_with("[]") || objects {
+        if self.annotation_types.contains_key(element) || element.ends_with("[]") {
             return unsupported(node, &format!("`getAnnotation` of a member of type `{java}`"));
         }
         let ty = self.ty(method, java)?;
+        // The JDK's `toString` takes an array of enum constants as an `Enum<?>[]`, so it is an
+        // `Object[]` (`covariant`).
+        if let Type::Array(element) = ty
+            && matches!(*element, Type::Enum(_))
+        {
+            self.note_covariant(ty);
+        }
         let value = match ty {
             Type::Array(_) => {
                 let items: Vec<Node<'t>> = match value.kind() {
@@ -275,9 +277,9 @@ impl<'t> Lowering<'t> {
                     .into_iter()
                     .map(|i| self.element_value(i, element_ty))
                     .collect::<Result<_, Error>>()?;
-                let made = self.synth(ExprKind::ArrayLit(items), value.pos(), ty);
-                self.note_made_array_class(method, java, &made)?;
-                made
+                let array = self.synth(ExprKind::ArrayLit(items), value.pos(), ty);
+                self.made_as(&array, self.exact_ty(method, java)?);
+                array
             }
             _ => self.element_value(value, ty)?,
         };

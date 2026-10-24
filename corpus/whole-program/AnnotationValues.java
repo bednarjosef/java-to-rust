@@ -24,6 +24,15 @@ import java.lang.annotation.RetentionPolicy;
     char mark() default 'x';
 
     Class<?> adapter() default Object.class;
+
+    String[] nicknames() default {};
+
+    Level[] levels() default {Level.LOW};
+}
+
+enum Level {
+    LOW,
+    HIGH
 }
 
 @interface Dropped {
@@ -35,13 +44,14 @@ import java.lang.annotation.RetentionPolicy;
 // superclass, as gson's `Excluder` reads `@Since`; the annotation's `toString`, and its identity.
 public class AnnotationValues {
     @Since(1.5)
-    @Named(value = "base", alternate = {String.class, Integer.class}, weight = 10, codes = 4)
+    @Named(value = "base", alternate = {String.class, Integer.class}, weight = 10, codes = 4,
+            nicknames = {"basis", "root"}, levels = {Level.HIGH, Level.LOW})
     @Dropped("gone")
     static class Base {}
 
     static class Derived extends Base {}
 
-    @Named(value = "solo", adapter = Derived.class, size = 40)
+    @Named(value = "solo", adapter = Derived.class, size = 40, nicknames = "alone")
     static class Solo {}
 
     @Named(value = "one", alternate = Long.class, codes = {})
@@ -67,7 +77,8 @@ public class AnnotationValues {
             int[] codes = named.codes();
             System.out.println("  named " + named.value() + " " + names(alternate) + " " + alternate.length + " "
                     + codes.length + " " + named.weight() + " " + named.size() + " " + named.mark() + " "
-                    + named.adapter().getSimpleName());
+                    + named.adapter().getSimpleName() + " " + String.join("/", named.nicknames()) + " "
+                    + named.levels().length + " " + named.levels()[0]);
             if (alternate.length > 0) {
                 alternate[0] = Plain.class;
             }

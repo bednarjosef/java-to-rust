@@ -177,7 +177,10 @@ Design: [object-model.md](object-model.md).
   generic instead (`struct Stack<T>`, `fn choose<T: Clone>`), with no casts.
 - An array of references used as an `Object[]` is an `Object[]` throughout. Where the code makes
   one, it carries the class it was made of, so storing an object of another class throws
-  `ArrayStoreException` and `getClass()` is its own; an array of arrays carries none.
+  `ArrayStoreException`, `getClass()` is its own, and `instanceof` and casts to an array class
+  test it; an array of arrays and `new Object[n]` carry none and pass those
+  tests, as does an array that `Array.newInstance` makes of a class the code neither makes nor
+  tests arrays of.
 
 ## Enums and records
 

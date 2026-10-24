@@ -25,10 +25,12 @@
 //! (`analysis::nullness`).
 //!
 //! Where the code makes such an array (`new String[n]`, `{a, b}`, `Arrays.copyOf` into a class
-//! literal), the array carries the class Java makes it of (`Class::element_classes`,
-//! `java::ElementClass`): a store into an `Object[]` of an object the array cannot hold throws
-//! `ArrayStoreException` (`Class::checks_store`), and its `getClass()` is its own class. An
-//! array of arrays (`String[][]` as an `Object[][]`) carries no class.
+//! literal, an enum's `values()`), the array carries the class Java makes it of
+//! (`Class::element_classes`, `java::ElementClass`): a store into an `Object[]` of an object the
+//! array cannot hold throws `ArrayStoreException` (`Class::checks_store`), its `getClass()` is its
+//! own class, and an `instanceof` or a cast to an array class tests that class
+//! (`Class::array_tests`). A class literal of an array type is the array's own class
+//! (`exact_ty`). An array of arrays (`String[][]` as an `Object[][]`) carries no class.
 
 use super::*;
 use std::rc::Rc;
@@ -70,7 +72,7 @@ impl<'t> Lowering<'t> {
 
     /// Notes that array type `ty` is an `Object[]`, unless it already is or holds a Rust generic's
     /// type variable.
-    fn note_covariant(&self, ty: Type) -> bool {
+    pub(super) fn note_covariant(&self, ty: Type) -> bool {
         if self.object.is_none() || self.has_param(ty) || self.covariant.known.contains(&ty) {
             return false;
         }
@@ -206,22 +208,12 @@ impl<'t> Lowering<'t> {
         Ok(())
     }
 
-    /// Notes the class of an array that lowering makes itself where Java makes one of the class
-    /// `java` (`java.lang.Class<?>[]`), as `note_element_class` does for one the source makes: an
-    /// annotation's array member, which the JDK's `memberValueToString` tells by its class.
-    pub(super) fn note_made_array_class(&self, node: Node<'t>, java: &str, made: &Expr) -> Result<(), Error> {
-        if self.covariant.known.is_empty() {
-            return Ok(());
+    /// Notes that `x`, an array that lowering makes, is an array of class `exact`, where the
+    /// translation holds it as an `Object[]` (`Class::element_classes`).
+    pub(super) fn made_as(&self, x: &Expr, exact: Type) {
+        if Self::is_object_array(x.ty) && exact != x.ty && Self::of_objects(exact.element()) {
+            self.element_classes.borrow_mut().insert(x.id, exact);
         }
-        let Some(element) = java.strip_suffix("[]") else { return Ok(()) };
-        if element.ends_with("[]") || !Self::is_object_array(made.ty) {
-            return Ok(());
-        }
-        let exact = Type::array(self.ty(node, element)?);
-        if Self::of_objects(exact.element()) && exact != made.ty {
-            self.element_classes.borrow_mut().insert(made.id, exact);
-        }
-        Ok(())
     }
 
     /// Whether `ty` is `Object[]`.
