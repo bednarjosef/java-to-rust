@@ -534,8 +534,9 @@ pub enum FieldUpdate {
     GetAndBitwise(crate::ast::BinOp),
 }
 
-/// Whether the method is one of `Unsafe`'s atomic updates of an `int`, `long` or reference field
-/// at an offset, in any of its memory-order modes, and which.
+/// Whether the method is one of `Unsafe`'s atomic updates of a field at an offset, in any of its
+/// memory-order modes, and which: of an `int`, `long`, reference, `float` or `double` field, or
+/// the compare forms and get-and-set of a `byte`, `short`, `char` or `boolean` one.
 pub fn unsafe_field_update(class: &str, name: &str, signature: &str) -> Option<FieldUpdate> {
     if class != "jdk.internal.misc.Unsafe" {
         return None;
@@ -551,12 +552,29 @@ pub fn unsafe_field_update(class: &str, name: &str, signature: &str) -> Option<F
         ("weakCompareAndSet", FieldUpdate::CompareAndSet, &["", "Plain", "Acquire", "Release"]),
         ("compareAndExchange", FieldUpdate::CompareAndExchange, &["", "Acquire", "Release"]),
     ];
-    let kinds = [("Int", "int"), ("Long", "long"), ("Reference", "java.lang.Object")];
+    // The `float` and `double` forms, and the compare forms and `getAndSet` of the narrower
+    // integers, are written in Java over the `int` and `long` ones, at the same offset or at the
+    // word that holds the field; they make the same update of the field itself.
+    let kinds = [
+        ("Int", "int"),
+        ("Long", "long"),
+        ("Reference", "java.lang.Object"),
+        ("Float", "float"),
+        ("Double", "double"),
+        ("Byte", "byte"),
+        ("Short", "short"),
+        ("Char", "char"),
+        ("Boolean", "boolean"),
+    ];
     forms.into_iter().find_map(|(prefix, update, modes)| {
         let rest = name.strip_prefix(prefix)?;
         let (kind, ty) = kinds.into_iter().find(|(k, _)| rest.starts_with(k))?;
-        let numeric = matches!(update, FieldUpdate::GetAndAdd | FieldUpdate::GetAndBitwise(_));
-        if !modes.contains(&&rest[kind.len()..]) || (numeric && kind == "Reference") {
+        let supported = match update {
+            FieldUpdate::GetAndAdd => matches!(kind, "Int" | "Long" | "Float" | "Double"),
+            FieldUpdate::GetAndBitwise(_) => matches!(kind, "Int" | "Long"),
+            _ => true,
+        };
+        if !modes.contains(&&rest[kind.len()..]) || !supported {
             return None;
         }
         let expected = match update {
@@ -2554,6 +2572,12 @@ mod tests {
         let exchange = "(java.lang.Object,long,long,long)long";
         assert_eq!(found("compareAndExchangeLongAcquire", exchange), Some(FieldUpdate::CompareAndExchange));
         assert_eq!(found("getIntVolatile", "(java.lang.Object,long)int"), None);
+        let add = "(java.lang.Object,long,float)float";
+        assert_eq!(found("getAndAddFloatAcquire", add), Some(FieldUpdate::GetAndAdd));
+        let narrow = "(java.lang.Object,long,byte,byte)byte";
+        assert_eq!(found("compareAndExchangeByte", narrow), Some(FieldUpdate::CompareAndExchange));
+        assert_eq!(found("getAndBitwiseOrByte", "(java.lang.Object,long,byte)byte"), None);
+        assert_eq!(found("getAndAddShort", "(java.lang.Object,long,short)short"), None);
         assert!(replaced(unsafe_, "compareAndSetLong", "(java.lang.Object,long,long,long)boolean"));
     }
 

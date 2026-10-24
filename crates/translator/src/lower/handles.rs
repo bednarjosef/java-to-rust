@@ -24,14 +24,18 @@
 //!
 //! An atomic update through a handle, `U.compareAndSetInt(this, VALUE, expect, update)` and the
 //! get-and-add, get-and-bitwise-or (and `And`, `Xor`), get-and-set and compare-and-exchange forms
-//! of `int`, `long` and reference fields
-//! (`program::FieldUpdate`), is a call of a method that lowering adds to the field's class, one
+//! of `int`, `long` and reference fields, and the forms of `float`, `double`, `byte`, `short`,
+//! `char` and `boolean` fields that `program::unsafe_field_update` names (the JDK writes them in
+//! Java over the `int` and `long` forms, at the same offset or at the word that holds the field,
+//! so their bodies are not translated) (`program::FieldUpdate`), is a call of a method that
+//! lowering adds to the field's class, one
 //! per field and form: `compareAndSetValue(expected, value)` reads the field, compares and
 //! writes in its body (`Method::field_update` names the update). On an object that threads share
 //! the generator writes the body as one atomic action of the field's `java::SharedField`
 //! (`codegen/field_updates.rs`); on an object of one thread no other access can come between the
-//! read and the write. So the update is atomic as Java's is. The weak forms never fail
-//! spuriously, which Java allows.
+//! read and the write. So the update is atomic as Java's is. A `float` or `double` compares by
+//! its raw bits, as `Unsafe` compares them. The weak forms never fail spuriously, which Java
+//! allows.
 //!
 //! An *element offset* is `base + (index << shift)` or `base + index * scale` (either way round),
 //! where `base` is `arrayBaseOffset(T[].class)`, `scale` is `arrayIndexScale(T[].class)` and
@@ -1580,8 +1584,19 @@ impl<'t> Lowering<'t> {
         let param = |name: &str| Param { name: name.to_string(), ty };
         let old = || Stmt::Local { ty, name: "old".to_string(), init: Some(read()), pos };
         let ret = |e: Expr| Stmt::Return(Some(e), pos);
+        // `Unsafe` compares a `float` or `double` by its raw bits, as its `int` or `long`
+        // compare-and-set does (so `NaN` is itself, and `-0.0` is not `0.0`).
+        let bits = |e: Expr| {
+            let (native, bits) = match ty {
+                Type::Float => (Native::FloatToRawIntBits, Type::Int),
+                Type::Double => (Native::DoubleToRawLongBits, Type::Long),
+                _ => return e,
+            };
+            self.synth(ExprKind::Builtin(Builtin::Native(native), vec![e]), pos, bits)
+        };
         let is = |a: Expr, b: Expr| {
-            self.synth(ExprKind::Binary(BinOp::Eq, Box::new(a), Box::new(b)), pos, Type::Boolean)
+            let (a, b) = (Box::new(bits(a)), Box::new(bits(b)));
+            self.synth(ExprKind::Binary(BinOp::Eq, a, b), pos, Type::Boolean)
         };
         let boolean = |b: bool| self.synth(ExprKind::Bool(b), pos, Type::Boolean);
         let (params, result, body) = match u.update {

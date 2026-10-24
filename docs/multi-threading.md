@@ -494,8 +494,13 @@ name:
   an object of one thread no other access can. Of an element, they are runtime functions
   (`java::compare_and_set_element` and its kin in `array.rs`): one borrow of an array of one
   thread, and one atomic action of the element's cell in a shared array (a compare-and-swap of a
-  word, or the striped lock for a wider element). References compare by identity. The weak forms never fail spuriously,
-  which Java allows.
+  word, or the striped lock for a wider element). References compare by identity, and `float`
+  and `double` values by their raw bits, as `Unsafe` does. The weak forms never fail spuriously,
+  which Java allows. `Unsafe`'s `float` and `double` updates and the compare forms and
+  get-and-set of `byte`, `short`, `char` and `boolean`, which the JDK writes in Java over the
+  `int` and `long` ones (a compare-and-set of the bits, or of the word that holds the byte), are
+  the same updates of the field or element, so their bodies, which compute offsets, are not
+  translated.
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
 
