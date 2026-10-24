@@ -376,6 +376,50 @@ fn reading_a_resource_ends_the_program() {
     }
 }
 
+/// `java.lang.reflect.Type` is translated as a plain interface that the program's classes
+/// implement (see `corpus/whole-program/JdkInterfacesImplemented.java`), but `Class` implements it
+/// too, and the runtime's classes are none of the program's types: a class converted to a `Type`,
+/// an `Object` that may hold a class cast to one and tested for one are rejected, not translated
+/// as values that are never a `Type`.
+#[test]
+fn a_class_as_a_reflected_type_is_rejected() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-class-as-type");
+    let statements = [
+        "Type type = String.class;\n        System.out.println(type.getTypeName());",
+        "Object value = args.length == 0 ? Integer.class : new Named();\n        System.out.println(value instanceof Type);",
+        "Object value = args.length == 0 ? Integer.class : new Named();\n        System.out.println(((Type) value).getTypeName());",
+    ];
+    for (i, statements) in statements.iter().enumerate() {
+        let sources = work.join(i.to_string());
+        let _ = std::fs::remove_dir_all(&sources);
+        std::fs::create_dir_all(&sources).unwrap();
+        let java = format!(
+            "import java.lang.reflect.Type;\npublic class Main {{\n    static final class Named implements Type {{}}\n\n    \
+             public static void main(String[] args) {{\n        {statements}\n    }}\n}}\n"
+        );
+        std::fs::write(sources.join("Main.java"), java).unwrap();
+        let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+            .args(["--main", "Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join(format!("{i}.rs")))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr);
+        assert!(!translated.status.success(), "translated:\n{statements}");
+        assert!(
+            stderr.contains("a `java.lang.Class` as a `java.lang.reflect.Type` not supported yet"),
+            "not rejected for the class:\n{statements}\n{stderr}"
+        );
+    }
+}
+
 /// A program whose source root and libraries are modules, with a `module-info.java` each, as the
 /// JDK's own are: the libraries' sources are read and translated as those of a program without
 /// modules are, and a module that the program uses but that is not given is named in the error.

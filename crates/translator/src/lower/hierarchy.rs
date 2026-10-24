@@ -267,10 +267,10 @@ impl<'t> Lowering<'t> {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
-            // A string, a builder or a box as a value of one of the program's types: a builder
-            // is an `Appendable`, and the generator rejects the others, which no type's values
-            // include (see `codegen::dispatch::class_cast`).
-            (Type::String | Type::StringBuilder | Type::Boxed(_), Type::Class(..)) => true,
+            // A string, a builder, a box or a class as a value of one of the program's types: a
+            // builder is an `Appendable`, and the generator rejects the others, which no type's
+            // values include (see `codegen::dispatch::class_cast`).
+            (Type::String | Type::StringBuilder | Type::Boxed(_) | Type::JavaClass, Type::Class(..)) => true,
             // A primitive boxed into an interface that its box implements (`Serializable`,
             // `Constable`): the value is the box, as it is for `Object` and `Comparable`.
             (

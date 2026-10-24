@@ -228,6 +228,24 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // An action that `AccessController.doPrivileged` runs, which the translator's runs directly
     // (`REDIRECTED_CALLS`): a plain interface.
     "java.security.PrivilegedAction",
+    // Plain interfaces that library code implements with classes of its own: abstract methods,
+    // default methods over them and constants, nothing that the JVM or reflection gives. A class
+    // of the program implements them as it would an interface of its own; what makes their
+    // objects in the JDK (`Class` as a `Type`, a provider's keys, `Proxy` calling a handler)
+    // stays untranslated, so only the program's objects ever implement them.
+    "java.lang.reflect.GenericArrayType",
+    "java.lang.reflect.InvocationHandler",
+    "java.lang.reflect.ParameterizedType",
+    "java.lang.reflect.Type",
+    "java.lang.reflect.WildcardType",
+    "java.security.AsymmetricKey",
+    "java.security.DEREncodable",
+    "java.security.Key",
+    "java.security.PrivateKey",
+    "java.security.PrivilegedExceptionAction",
+    "java.security.PublicKey",
+    "java.security.spec.AlgorithmParameterSpec",
+    "java.security.spec.KeySpec",
     // The security code's debugging output, off unless a property turns it on, which library
     // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
     // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
@@ -2710,6 +2728,9 @@ mod tests {
         assert_eq!(untranslated("java.lang.reflect.Method"), None);
         assert_eq!(untranslated("java.lang.reflect.Array"), None);
         assert_eq!(untranslated("java.lang.reflect.Modifier"), None);
+        assert_eq!(untranslated("java.lang.reflect.ParameterizedType"), None);
+        assert_eq!(untranslated("java.security.PrivateKey"), None);
+        assert_eq!(untranslated("java.security.KeyPair"), Some("security"));
         assert_eq!(untranslated("java.util.ArrayList"), None);
         // Reachability stops at method handles, and goes into `Array`.
         let unit = json!({"typeDecls": [
