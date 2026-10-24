@@ -460,9 +460,17 @@ to run.
   argument (a generic holds its values as `T: Clone`).
 - **Immutable** (`Arc<C>`, `analysis/objects.rs::immutable_classes`): decided on the whole object
   (a write of an inherited field by any method makes the family mutable), then unified per
-  family, so `base()` has one type for the whole enum: `Ref<'_, XFields>` for a mutable family,
-  `&XFields` for an immutable one. The cost is that a leaf loses `Arc<C>` when a sibling is
-  mutable. Interface enums and `Object` may mix `Arc<C>` and `Arc<RefCell<C>>` variants.
+  family, so `base()` has one type for the whole enum: `Ref<'_, XFields>` for a family behind
+  `RefCell`s, `&XFields` for an immutable or celled one. The cost is that a leaf loses `Arc<C>`
+  when a sibling is mutable. Interface enums and `Object` may mix `Arc<C>` and `Arc<RefCell<C>>`
+  variants.
+- **Celled** (`Arc<C>` whose fields are `java::Field` cells, `analysis/objects.rs::celled_classes`):
+  a mutable family none of whose classes is owned, reachable by a second thread, or locked
+  (a kept monitor). Every field of the family is a cell: a read copies the value out
+  (`o.count.get()`), a write puts a new one in (`o.count.set(v)`), so no borrow is held and
+  none can conflict, and there is no borrow flag. Methods take `&self`, and `base()` lends the
+  fields struct as `&XFields`. A field assignment whose object may be null computes the value
+  first, as Java does. The families that threads share keep their `java::Locked`.
 - **Fixed fields** (`analysis/fixed_fields.rs`): a field of a mutable class that only
   constructors write, through `this` (a `final` field, or one written the same way), keeps its
   value once the object is built. Its read on a concrete receiver is `java::fixed!(c, base.name)`

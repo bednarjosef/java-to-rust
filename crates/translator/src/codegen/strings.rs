@@ -54,6 +54,8 @@ impl<'a> Gen<'a> {
     /// object and the field alone (`Steady`).
     pub(super) fn field_in_place(&self, object: &Expr, field: &str) -> bool {
         match object.ty {
+            // A cell is read by value.
+            Type::Class(..) if self.celled_object(object) => false,
             Type::Class(name, _) if self.facts.immutable.contains(name) => true,
             Type::Class(..) if self.is_plain(object) => {
                 let key = match &object.kind {

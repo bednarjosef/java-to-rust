@@ -65,14 +65,17 @@ A heap managed by a tracing collector, references of 4 bytes, objects without he
 
 ### 1.2 Fields as cells
 
-Java lets any reference read or write any field at any time. Today that is a `RefCell` (or a
-lock) per object, with a borrow flag checked on each access, and copies where a borrow cannot
-last. With `Copy` references every field value is plain data, so a field is read and written by
+Java lets any reference read or write any field at any time. Where objects are not celled, that
+is a `RefCell` (or a lock) per object, with a borrow flag checked on each access, and copies
+where a borrow cannot last. With `Copy` references every field value is plain data, so a field is read and written by
 value, through the object's address, the way Java does it:
 
 - No borrow flags, no `Ref` guards, no copies taken to end a borrow, no field-level borrow rules.
-- In a class whose objects can reach a second thread, field accesses are relaxed atomic loads and
-  stores. On x86-64 these are the same instructions as plain ones. Java's memory model allows
+- Built for the classes whose objects one thread uses (docs/object-model.md 1.8, "Celled"): an
+  object is an `Arc<C>` whose fields are `java::Field` cells, read with `get()` and written with
+  `set()`. The classes that threads share, which are all of javac's, still have a `java::Locked`.
+- Planned: in a class whose objects can reach a second thread, field accesses are relaxed
+  atomic loads and stores. On x86-64 these are the same instructions as plain ones. Java's memory model allows
   exactly the races this permits.
 - `synchronized` and `wait`/`notify` use monitors kept in a side table, only for the objects that
   are locked. No object carries a lock word.
@@ -141,7 +144,7 @@ Each part lands on its own and passes the gate (all checks and the 28 targets):
 3. Built: thin references for multi-class types, replacing the enums of handles, with dispatch
    on the class number.
 4. Fields as cells, monitors and identity hashes in side tables, removing `RefCell` and
-   `Locked`.
+   `Locked`. Built for the classes that one thread uses; the classes that threads share are next.
 5. Strings and arrays in the heap; boxed values in references.
 6. Young generation, huge pages, field order.
 

@@ -665,7 +665,10 @@ impl<'a> Gen<'a> {
             // An enum is a `Copy` value, so its methods take `self` by value.
             params.push("self".to_string());
         } else if borrows {
-            params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
+            // A celled object's fields are cells, written through `&self`.
+            let mutable = self.facts.mutating.contains(&index)
+                && !self.celled(&self.class.types[self.this_struct].name);
+            params.push(if mutable { "&mut self" } else { "&self" }.to_string());
         } else if on_enum {
             params.push("&self".to_string());
         } else if !m.is_static && !m.is_ctor {

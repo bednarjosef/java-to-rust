@@ -1006,18 +1006,23 @@ impl<'a> Gen<'a> {
         }
         let structure = self.struct_of(c);
         let (pointer, cell) = (self.pointer(c), self.cell(c));
-        if self.facts.immutable.contains(&self.class.types[c].name) {
+        let name = &self.class.types[c].name;
+        if self.facts.immutable.contains(name) || self.celled(name) {
             format!("{pointer}<{structure}>")
         } else {
             format!("{pointer}<{cell}<{structure}>>")
         }
     }
 
-    /// Whether the objects of the enum of `t` are immutable: a family is immutable together.
-    pub(super) fn immutable_enum(&self, t: usize) -> bool {
+    /// Whether the objects of the enum of `t` are reached without a `RefCell`: immutable, or
+    /// celled. A family is immutable together, and celled together.
+    pub(super) fn plain_enum(&self, t: usize) -> bool {
         let concretes = self.class.hierarchy.concretes(t);
         !concretes.is_empty()
-            && concretes.iter().all(|&c| self.facts.immutable.contains(&self.class.types[c].name))
+            && concretes.iter().all(|&c| {
+                let name = &self.class.types[c].name;
+                self.facts.immutable.contains(name) || self.celled(name)
+            })
     }
 
     /// The class whose fields struct `base()` of the enum of `t` borrows: `t`'s own, or the
@@ -1044,7 +1049,8 @@ impl<'a> Gen<'a> {
 
     /// The borrow of the fields of a value of the enum of `t`: `.base()` or `.base_mut()`.
     pub(super) fn enum_borrow(&self, t: usize, mutable: bool) -> &'static str {
-        if mutable {
+        // A celled object's fields are cells, written through `base()`.
+        if mutable && !self.plain_enum(t) {
             self.need(Need::BaseMut(t));
             ".base_mut()"
         } else {
@@ -1513,7 +1519,7 @@ impl<'a> Gen<'a> {
         let Some(root) = self.fields_root(t) else { return };
         let structure = self.struct_of(root);
         let variants = self.enum_variants(t);
-        let immutable = self.immutable_enum(t);
+        let immutable = self.plain_enum(t);
         if mutable && immutable {
             return;
         }
@@ -1995,7 +2001,9 @@ impl<'a> Gen<'a> {
     pub(super) fn address(&self, c: usize, handle: &str) -> String {
         if self.facts.owned.contains(&self.class.types[c].name) {
             format!("std::ptr::from_ref({handle})")
-        } else if self.facts.immutable.contains(&self.class.types[c].name) {
+        } else if self.facts.immutable.contains(&self.class.types[c].name)
+            || self.celled(&self.class.types[c].name)
+        {
             format!("{}::as_ptr({handle})", self.pointer(c))
         } else {
             // A method call borrows the handle itself; `&x.as_ptr()` would be a reference to the pointer.
@@ -2009,7 +2017,11 @@ impl<'a> Gen<'a> {
         let receiver = self.peel(receiver);
         match receiver.kind {
             ExprKind::This if self.this_form == ThisForm::Local => "std::ptr::from_ref(&this)".to_string(),
-            ExprKind::This if self.this_form == ThisForm::SelfRef || self.is_plain(receiver) => {
+            // A celled object's `this` is its handle, as a shared object's is.
+            ExprKind::This
+                if self.this_form == ThisForm::SelfRef
+                    || self.is_plain(receiver) && !self.celled_object(receiver) =>
+            {
                 format!("std::ptr::from_ref({})", self.this_name())
             }
             _ if self.nullable(receiver) => {
@@ -2134,7 +2146,8 @@ impl<'a> Gen<'a> {
     /// `o`, running method `i`; and whether it uses `o`.
     fn arm_call(&mut self, t: usize, c: usize, i: usize, args: &str) -> (String, bool) {
         let name = self.fn_names[i].clone();
-        let immutable = self.facts.immutable.contains(&self.class.types[c].name);
+        let class_name = &self.class.types[c].name;
+        let immutable = self.facts.immutable.contains(class_name) || self.celled(class_name);
         let borrow = match () {
             _ if immutable || self.holds_value(c) => "",
             _ if self.facts.mutating.contains(&i) => ".borrow_mut()",

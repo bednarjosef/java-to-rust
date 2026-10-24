@@ -187,7 +187,7 @@ fn a_local_that_only_calls_its_lambda_is_a_closure_that_borrows_its_captures() {
     assert_contains(
         &rust,
         &[
-            "let scaled = |a: i32| -> i32 { a.wrapping_mul(this.borrow().base) };",
+            "let scaled = |a: i32| -> i32 { a.wrapping_mul(this.base.get()) };",
             "let op = |a: i32| -> i32 { a.wrapping_add(name.len() as i32) };",
             "op(1)",
         ],
@@ -213,8 +213,8 @@ fn a_lambda_reaches_the_enclosing_object_through_outer() {
     assert_contains(
         &rust,
         &[
-            "fn adder(this: &Arc<RefCell<A>>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(java::fixed!(outer, base)) })\n    }",
-            "let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { outer.borrow().scaled(a) })\n",
+            "fn adder(this: &Arc<A>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(outer.base.get()) })\n    }",
+            "let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { outer.scaled(a) })\n",
             "A::adder(&o)(1)",
         ],
     );
@@ -307,10 +307,10 @@ fn a_closure_read_from_a_field_is_taken_out_before_the_call() {
     assert_contains(
         &rust,
         &[
-            "op: AOp,",
+            "op: java::Field<AOp>,",
             "type AOp = Rc<dyn Fn(i32) -> i32>;",
-            "(self.op)(self.total.wrapping_add(1))",
-            "({ let f = a.borrow().op.clone(); f })(3)",
+            "(self.op.get())(self.total.get().wrapping_add(1))",
+            "(a.op.get())(3)",
         ],
     );
 }
@@ -332,7 +332,7 @@ fn a_closure_in_a_field_only_constructors_write_is_called_in_place() {
             }
         }",
     );
-    assert_contains(&rust, &["(java::fixed!(a, op))(3)"]);
+    assert_contains(&rust, &["(a.op.get())(3)"]);
 }
 
 #[test]
