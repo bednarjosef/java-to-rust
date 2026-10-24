@@ -1214,7 +1214,7 @@ impl<'a> Gen<'a> {
         };
         // A new object becomes a value of the target's enum directly.
         if let ExprKind::New { ctor: Some(ctor), args, .. } = &value.kind {
-            return self.new_object_as(*ctor, args, Some(t));
+            return self.new_object_as(value.id, *ctor, args, Some(t));
         }
         let from = self.enum_of(value);
         if from == Some(t) {

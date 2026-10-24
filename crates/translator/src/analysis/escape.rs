@@ -127,7 +127,6 @@ impl Sources {
         }
         grew
     }
-
 }
 
 struct Analysis<'a> {
@@ -200,8 +199,12 @@ impl<'a> Analysis<'a> {
             return (Summary::empty(arity(method)), Vec::new());
         }
         let has_this = !method.is_static;
-        let params: HashMap<&str, usize> =
-            method.params.iter().enumerate().map(|(i, p)| (p.name.as_str(), i + usize::from(has_this))).collect();
+        let params: HashMap<&str, usize> = method
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name.as_str(), i + usize::from(has_this)))
+            .collect();
         let mut exprs: Vec<&'a Expr> = Vec::new();
         self.each_expr(m, &mut |x| exprs.push(x));
         let mut sites = HashMap::new();
@@ -316,7 +319,9 @@ impl<'a> Analysis<'a> {
             | ExprKind::ThisCall { .. }
             | ExprKind::SuperInit { .. } => {
                 let mut s = match &e.kind {
-                    ExprKind::New { .. } => code.sites.get(&e.id).map(|&i| Sources::one(i)).unwrap_or_default(),
+                    ExprKind::New { .. } => {
+                        code.sites.get(&e.id).map(|&i| Sources::one(i)).unwrap_or_default()
+                    }
                     _ => Sources::default(),
                 };
                 let Some(targets) = self.call_targets(e) else { return s };
@@ -365,7 +370,11 @@ impl<'a> Analysis<'a> {
     /// expressions inside it.
     fn escaping(&mut self, code: &Code, x: &Expr, escaping: &mut Sources) {
         match &x.kind {
-            ExprKind::Assign { target: Place::Field { .. } | Place::Static { .. } | Place::Index(..), value, .. }
+            ExprKind::Assign {
+                target: Place::Field { .. } | Place::Static { .. } | Place::Index(..),
+                value,
+                ..
+            }
             | ExprKind::Assign { op: Some(_), value, .. } => _ = escaping.union(&self.eval(code, value)),
             ExprKind::ArrayLit(items) => {
                 for item in items {
@@ -404,8 +413,10 @@ impl<'a> Analysis<'a> {
                         if let ExprKind::MethodCall { receiver, .. } = &x.kind {
                             escaping.union(&self.eval(code, receiver));
                         }
-                        let with_this =
-                            matches!(x.kind, ExprKind::Call { .. } | ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. });
+                        let with_this = matches!(
+                            x.kind,
+                            ExprKind::Call { .. } | ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. }
+                        );
                         if with_this && code.has_this {
                             escaping.insert(0);
                         }
@@ -475,17 +486,18 @@ impl<'m> Scopes<'m> {
 
     /// Notes the `new`s and declarations of the statement `s`, inside the loops `loops`.
     fn stmt(&mut self, s: &'m Stmt, loops: &mut Vec<usize>) {
-        let in_loop = |scopes: &mut Scopes<'m>, loops: &mut Vec<usize>, body: &'m Stmt, exprs: &[&'m Expr]| {
-            scopes.count += 1;
-            loops.push(scopes.count);
-            // A pattern variable of the condition may stay in scope after the loop: it is
-            // declared outside it, while a `new` there runs on every iteration.
-            for e in exprs {
-                scopes.expr(e, loops, Some(loops.len() - 1));
-            }
-            scopes.stmt(body, loops);
-            loops.pop();
-        };
+        let in_loop =
+            |scopes: &mut Scopes<'m>, loops: &mut Vec<usize>, body: &'m Stmt, exprs: &[&'m Expr]| {
+                scopes.count += 1;
+                loops.push(scopes.count);
+                // A pattern variable of the condition may stay in scope after the loop: it is
+                // declared outside it, while a `new` there runs on every iteration.
+                for e in exprs {
+                    scopes.expr(e, loops, Some(loops.len() - 1));
+                }
+                scopes.stmt(body, loops);
+                loops.pop();
+            };
         match s {
             Stmt::Local { name, init, .. } => {
                 self.declare(name, loops);
@@ -493,7 +505,9 @@ impl<'m> Scopes<'m> {
                     self.expr(e, loops, None);
                 }
             }
-            Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e) | Stmt::Throw(e) => self.expr(e, loops, None),
+            Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e) | Stmt::Throw(e) => {
+                self.expr(e, loops, None)
+            }
             Stmt::If { cond, then, otherwise } => {
                 self.expr(cond, loops, None);
                 self.stmt(then, loops);
@@ -538,7 +552,11 @@ impl<'m> Scopes<'m> {
                 }
                 finally.iter().flatten().for_each(|s| self.stmt(s, loops));
             }
-            Stmt::Return(None, _) | Stmt::Break | Stmt::Continue | Stmt::BreakLabel(_) | Stmt::ContinueLabel(_) => {}
+            Stmt::Return(None, _)
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::BreakLabel(_)
+            | Stmt::ContinueLabel(_) => {}
         }
     }
 

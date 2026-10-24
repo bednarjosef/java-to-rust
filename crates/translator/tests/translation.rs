@@ -973,7 +973,7 @@ fn a_class_that_is_never_upcast_stays_a_plain_value_beside_its_siblings() {
     // `Tri` is only ever a `Tri`, so it is an owned value; only `Square` is a `Shape`.
     assert_contains(&rust, &["let mut t = Tri::new();", "t.base.move_();", "t.base.moves"]);
     // With one class left, the type is that class: no enum.
-    assert_contains(&rust, &["let s = Arc::new(RefCell::new(Square::new()));"]);
+    assert_contains(&rust, &["let s = slot_1.put(RefCell::new(Square::new()));"]);
     assert_lacks(&rust, &["enum Shape"]);
 }
 
@@ -996,7 +996,7 @@ fn a_class_that_is_upcast_is_shared() {
         &rust,
         &[
             "enum ShapeView<'a> {\n    Square(&'a Arc<Square>) = 2,\n    Tri(&'a Arc<Tri>) = 3,\n}",
-            "let s = Arc::new(Square::new());",
+            "let s = slot_1.put(Square::new());",
             "total(&Shape::Square(s.clone()), &Shape::Tri(t))",
         ],
     );
@@ -1019,7 +1019,7 @@ fn immutable_objects_are_shared_without_a_refcell() {
             "this.field_inits();",
             "this.x = x;",
             "fn sum(&self) -> i32 {",
-            "let p = Arc::new(P::new(3));",
+            "let p = slot_1.put(P::new(3));",
             "p.sum().wrapping_add(p.x)",
         ],
     );
@@ -1041,7 +1041,7 @@ fn methods_borrow_their_shared_object() {
             "fn new(x: i32) -> P {\n        P { x: java::Field::new(x) }\n    }",
             "fn set(&self, v: i32) {\n        self.x.set(v);\n    }",
             "fn get(&self) -> i32 {",
-            "let p = Arc::new(P::new(1));",
+            "let p = slot_1.put(P::new(1));",
             "p.set(2);",
             "java::println!(\"{}\", p.get());",
         ],
@@ -2669,7 +2669,7 @@ fn object_fields_that_may_be_null_are_options() {
             "n = java::non_null(n.as_ref()).next.clone();",
             "fn sum(head: &Arc<Node>) -> i32 {",
             "let mut n: Option<Arc<Node>> = Some(head.clone());",
-            "sum(&Arc::new(Node::new(1, Some(Arc::new(Node::new(2, None))))))",
+            "sum(&slot_1.put(Node::new(1, Some(Arc::new(Node::new(2, None))))))",
         ],
     );
 }
@@ -4047,7 +4047,7 @@ fn an_interface_with_one_implementor_is_that_class() {
     // body ignores.
     assert_contains(
         &rust,
-        &["let n = Arc::new(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
+        &["let n = slot_1.put(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
     );
     assert_lacks(&rust, &["enum Named"]);
 }

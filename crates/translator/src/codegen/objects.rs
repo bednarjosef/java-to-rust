@@ -1402,17 +1402,23 @@ impl<'a> Gen<'a> {
 
     /// `new C(args)` of type `ty`, which calls the constructor that the checker chose. A
     /// constructor that builds a plain value is wrapped here, unless the class is owned.
-    pub(super) fn new_object(&mut self, ctor: usize, args: &'a [Expr], ty: Type) -> Code {
+    pub(super) fn new_object(&mut self, id: ExprId, ctor: usize, args: &'a [Expr], ty: Type) -> Code {
         let c = self.class.methods[ctor].class;
         let rep = self.enum_for(c);
         let turbofish = self.constructor_turbofish(ctor, args, ty);
-        self.build_object(ctor, args, rep, &turbofish)
+        self.build_object(id, ctor, args, rep, &turbofish)
     }
 
     /// `new_object`, as a value of the enum of type `rep` if not `None` (an object of a class
     /// with subclasses is a value of its class's enum; an upcast makes it one of a superclass's).
-    pub(super) fn new_object_as(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>) -> Code {
-        self.build_object(ctor, args, rep, "")
+    pub(super) fn new_object_as(
+        &mut self,
+        id: ExprId,
+        ctor: usize,
+        args: &'a [Expr],
+        rep: Option<usize>,
+    ) -> Code {
+        self.build_object(id, ctor, args, rep, "")
     }
 
     /// The type arguments of `new C<..>(args)` of a Rust generic, `::<String>`, where the
@@ -1436,7 +1442,14 @@ impl<'a> Gen<'a> {
         format!("::<{}>", names.join(", "))
     }
 
-    fn build_object(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>, turbofish: &str) -> Code {
+    fn build_object(
+        &mut self,
+        id: ExprId,
+        ctor: usize,
+        args: &'a [Expr],
+        rep: Option<usize>,
+        turbofish: &str,
+    ) -> Code {
         // Java initializes the class when `new` runs, before the arguments, which may see what
         // the initialization does; the constructor initializes it again, which does nothing.
         let init = self.init_call(self.class.methods[ctor].class).filter(|_| args.iter().any(sees_statics));
@@ -1446,7 +1459,15 @@ impl<'a> Gen<'a> {
             Some((owner, name)) if !turbofish.is_empty() => format!("{owner}{turbofish}::{name}"),
             _ => path,
         };
-        let call = format!("{path}({args})");
+        // An object that never leaves the method is made in a slot on its stack (`stack_objects`):
+        // by the constructor's form on the stack, when the constructor makes the object itself.
+        let slot = self.slot_of(id);
+        let makes_itself = !self.builds_plain(&self.class.types[self.class.methods[ctor].class].name);
+        let call = match &slot {
+            Some(slot) if makes_itself && args.is_empty() => format!("{path}_on_stack(&{slot})"),
+            Some(slot) if makes_itself => format!("{path}_on_stack(&{slot}, {args})"),
+            _ => format!("{path}({args})"),
+        };
         let call = self.raising(Code::atom(call), ctor).text;
         let call = match init {
             Some(init) => format!("{{ {init} {call} }}"),
@@ -1457,6 +1478,15 @@ impl<'a> Gen<'a> {
         let (pointer, cell) = (self.pointer(c), self.cell(c));
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
             call
+        } else if let Some(slot) = slot {
+            let value = if self.celled(name) && self.monitored(name) {
+                format!("java::Monitored::new({call})")
+            } else if self.celled(name) || self.facts.immutable.contains(name) {
+                call
+            } else {
+                format!("{cell}::new({call})")
+            };
+            format!("{slot}.put({value})")
         } else if self.celled(name) {
             self.celled_new(c, &call)
         } else if self.facts.immutable.contains(name) {
@@ -2157,7 +2187,14 @@ impl<'a> Gen<'a> {
         match delegate {
             Some((args, index)) => {
                 let args = self.call_args(index, args).join(", ");
-                let call = Code::atom(format!("{}({args})", self.qualified_fn(index)));
+                let call = match self.on_stack {
+                    true if args.is_empty() => {
+                        format!("{}_on_stack({})", self.qualified_fn(index), self.slot_param)
+                    }
+                    true => format!("{}_on_stack({}, {args})", self.qualified_fn(index), self.slot_param),
+                    false => format!("{}({args})", self.qualified_fn(index)),
+                };
+                let call = Code::atom(call);
                 let call = self.raising(call, index).text;
                 self.line(&format!("let obj = {call};"));
             }
@@ -2172,6 +2209,16 @@ impl<'a> Gen<'a> {
                 if immutable {
                     let mut_kw = if mutable { "mut " } else { "" };
                     self.line(&format!("let {mut_kw}obj = {name} {{ {fields} }};"));
+                } else if self.on_stack {
+                    let value = format!("{name} {{ {fields} }}");
+                    let value = if self.celled(&decl.name) && self.monitored(&decl.name) {
+                        format!("java::Monitored::new({value})")
+                    } else if self.celled(&decl.name) {
+                        value
+                    } else {
+                        format!("{}::new({value})", self.cell(m.class))
+                    };
+                    self.line(&format!("let obj = {}.put({value});", self.slot_param));
                 } else if self.celled(&decl.name) {
                     let obj = self.celled_new(m.class, &format!("{name} {{ {fields} }}"));
                     self.line(&format!("let obj = {obj};"));
@@ -2193,6 +2240,8 @@ impl<'a> Gen<'a> {
         }
         let result = match () {
             _ if !immutable => "obj",
+            // (The text is the slot's name, made once per constructor's form on the stack.)
+            _ if self.on_stack => Box::leak(format!("{}.put(obj)", self.slot_param).into_boxed_str()),
             _ => "Arc::new(obj)",
         };
         self.ctor_result = Some(result);
