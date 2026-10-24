@@ -172,7 +172,8 @@ impl<'t> Lowering<'t> {
     /// class it is made of, which is a class literal (`Object[].class`), the `getClass()` of a
     /// variable, or a variable that holds a class (cast or not), dropped unlowered; where the
     /// copy is a covariant array, the class it carries is noted from it
-    /// (`covariant::note_element_class`). The copy must be of the array's own type.
+    /// (`covariant::note_element_class`). The copy must be of the array's own type, or an
+    /// `Object[]` of a class literal.
     pub(super) fn copy_of_with_class(
         &self,
         node: Node<'t>,
@@ -203,7 +204,14 @@ impl<'t> Lowering<'t> {
             return unsupported(node, &format!("`Arrays.{}` into a class that is computed", symbol.name));
         }
         let args: Vec<Expr> = nodes.into_iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-        if args[0].ty != self.ty(node, node.java_type())? {
+        let ty = self.ty(node, node.java_type())?;
+        // Into an `Object[]` (a literal's), which holds any reference: the copy of an array of
+        // other references is the source's, once the two are `Object[]`s (`covariant`), and no
+        // element throws `ArrayStoreException`. Into any other class an element might.
+        let into_objects = literal
+            && matches!(ty, Type::Array(e) if Self::is_object(*e))
+            && matches!(args[0].ty, Type::Array(e) if Self::of_objects(*e));
+        if args[0].ty != ty && !(into_objects && self.meets_object_array(args[0].ty, ty)) {
             return unsupported(node, &format!("`Arrays.{}` into an array of another type", symbol.name));
         }
         self.arrays_call(node, symbol.name, args).map(Some)
