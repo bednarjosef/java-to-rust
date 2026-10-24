@@ -117,6 +117,25 @@ fn size_index(size: usize, align: usize) -> Option<usize> {
     SIZES.iter().position(|&s| s as usize >= size)
 }
 
+/// Where the first slot of small block `b` of slots of `size` bytes is, past the block's
+/// address: one of eight cache lines, by the block's number. Blocks are aligned to 64 KB, so
+/// without this the first slots of every block would share their offset in a page, and the
+/// objects a program makes first, often the ones it uses most, would sit at the same offset in
+/// their pages whatever their size. A processor then takes a store to one for a store that a
+/// later load of another may depend on (both addresses agree in their low 12 bits) and makes the
+/// load wait. Each large allocation starts at another cache line of the page for the same reason
+/// (`allocate_large`). A slot whose size is a power of two stays aligned to it, which an
+/// allocation aligned to more than 16 bytes needs (`size_index`); from 1 KB, such a block is not
+/// moved, as a whole slot would be lost.
+fn color(b: usize, size: usize) -> usize {
+    let start = b % 8 * 64;
+    match size.is_power_of_two() {
+        false => start,
+        true if size < 1024 => start.next_multiple_of(size),
+        true => 0,
+    }
+}
+
 /// What a block holds.
 const FREE: u8 = 0;
 const SMALL: u8 = 1;
@@ -138,6 +157,8 @@ struct Meta {
     /// block), or the index of that first block (on the others).
     size: u32,
     slots: u32,
+    /// Where a small block's first slot is, past the block's address (see `color`).
+    start: u32,
     /// The next block on its class's list.
     next: u32,
     /// `slot = offset * magic >> 32`, a division by the slot size.
@@ -183,6 +204,8 @@ struct Heap {
     /// Whether `JAVA_GC_THREADS` sets the markers, which then mark every collection, however
     /// small (to test marking with helpers).
     threads_set: bool,
+    /// The large allocations made, which choose where the next one starts.
+    larges: usize,
 }
 
 struct Shared(UnsafeCell<Heap>);
@@ -203,6 +226,7 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     log: false,
     growth: 100,
     threads_set: false,
+    larges: 0,
 }));
 
 /// The heap's lock: a spin lock that yields, since it is taken rarely and briefly, and must not
@@ -411,7 +435,8 @@ impl Heap {
         m.no_scan = class % 2 == 1;
         m.listed = false;
         m.size = size;
-        m.slots = (BLOCK as u32) / size;
+        m.start = color(b, size as usize) as u32;
+        m.slots = (BLOCK as u32 - m.start) / size;
         m.next = NONE;
         m.magic = (1u64 << 32) / size as u64 + 1;
         m.taken = [0; BITMAP_WORDS];
@@ -631,8 +656,8 @@ fn unregister(lists: &Lists) {
 /// Marks a slot untaken, so that its block's next refill hands it out again.
 fn untake(h: &mut Heap, p: usize) {
     let b = (p - h.base) >> BLOCK_SHIFT;
-    let start = h.block_address(b);
     let m = h.meta(b);
+    let start = h.block_address(b) + m.start as usize;
     let slot = (((p - start) as u64 * m.magic) >> 32) as usize;
     m.taken[slot / 64] &= !(1u64 << (slot % 64));
     h.list(b);
@@ -772,7 +797,10 @@ unsafe impl GlobalAlloc for Allocator {
         // needs as many: `dealloc` finds the slot's class from the size it is given.
         let same = match (size_index(layout.size(), layout.align()), size_index(new_size, layout.align())) {
             (Some(a), Some(b)) => a == b,
-            (None, None) => layout.size().div_ceil(BLOCK) == new_size.div_ceil(BLOCK),
+            (None, None) => {
+                let color = p as usize & (BLOCK - 1);
+                (color + layout.size()).div_ceil(BLOCK) == (color + new_size).div_ceil(BLOCK)
+            }
             _ => false,
         };
         if same {
@@ -828,7 +856,7 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
             && let Some((w, bits)) = h.take_word(b as usize, lists.span_next[class].get() as usize)
         {
             let size = SIZES[class / 2] as usize;
-            let base = h.block_address(b as usize) + w * 64 * size;
+            let base = h.block_address(b as usize) + h.meta(b as usize).start as usize + w * 64 * size;
             lists.span_next[class].set(w as u32 + 1);
             lists.span_base[class].set(base);
             lists.span_bits[class].set(bits & (bits - 1));
@@ -866,7 +894,7 @@ fn allocate_without_lists(class: usize) -> *mut u8 {
             h.taken -= (bits & !first).count_ones() as usize * m.size as usize;
             h.list(b);
             let slot = w * 64 + first.trailing_zeros() as usize;
-            return (h.block_address(b) + slot * m.size as usize) as *mut u8;
+            return (h.block_address(b) + m.start as usize + slot * m.size as usize) as *mut u8;
         }
     }
 }
@@ -876,9 +904,12 @@ fn allocate_large(layout: Layout) -> *mut u8 {
     if layout.align() > BLOCK {
         return ptr::null_mut();
     }
-    let n = layout.size().div_ceil(BLOCK).max(1);
     let g = prepare();
     let h = heap(&g);
+    // Each starts at another of the 64 cache lines of a page (see `color`).
+    let color = if layout.align() <= 64 { (h.larges * 23 % 64) * 64 } else { 0 };
+    h.larges += 1;
+    let n = (color + layout.size()).div_ceil(BLOCK).max(1);
     let b = h.take_blocks(n);
     let m = h.meta(b);
     m.kind = LARGE;
@@ -892,7 +923,7 @@ fn allocate_large(layout: Layout) -> *mut u8 {
         m.size = b as u32;
     }
     h.taken += n << BLOCK_SHIFT;
-    h.block_address(b) as *mut u8
+    (h.block_address(b) + color) as *mut u8
 }
 
 #[cold]
@@ -1183,7 +1214,10 @@ impl Marker {
         // The table is read through raw places: other markers set mark bits beside these fields.
         match unsafe { (*m).kind } {
             SMALL => {
-                let start = self.base + (b << BLOCK_SHIFT);
+                let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
+                if word < start {
+                    return;
+                }
                 let slot = (((word - start) as u64 * unsafe { (*m).magic }) >> 32) as usize;
                 if slot >= unsafe { (*m).slots } as usize {
                     return;
@@ -1353,8 +1387,8 @@ impl Marker {
     /// Marks a slot on a free list without scanning it.
     fn keep(&mut self, p: usize) {
         let b = (p - self.base) >> BLOCK_SHIFT;
-        let start = self.base + (b << BLOCK_SHIFT);
         let m = unsafe { self.meta.add(b) };
+        let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
         let slot = (((p - start) as u64 * unsafe { (*m).magic }) >> 32) as usize;
         set_mark(unsafe { &raw mut (*m).marks[slot / 64] }, 1u64 << (slot % 64), self.shares);
     }
@@ -1532,7 +1566,7 @@ fn keep_spans(h: &mut Heap) {
             }
             let b = (base - h.base) >> BLOCK_SHIFT;
             let m = h.meta(b);
-            let w = (base - h.block_address(b)) / (64 * m.size as usize);
+            let w = (base - h.block_address(b) - m.start as usize) / (64 * m.size as usize);
             m.marks[w] |= m.taken[w];
         }
     }

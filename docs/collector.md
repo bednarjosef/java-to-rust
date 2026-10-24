@@ -26,6 +26,17 @@ owned, and that Rust therefore never freed, is found unreachable too.
   that may hold pointers and those that cannot (an alignment below 8, as in the bytes of a
   string) use blocks of their own, and the collector does not scan the second kind.
 - **Large allocations** take whole blocks.
+- **Colors.** A small block's first slot is at one of eight cache lines past the block's start,
+  chosen by the block's number, and each large allocation starts at one of the 64 cache lines of
+  a page, in turn (`gc.rs`, `color`). With every block aligned to 64 KB, the first objects of
+  each size would share their offset in a page, and the objects a program makes first are often
+  the ones it uses most: two addresses that agree in their low 12 bits make the processor hold a
+  load until an earlier store to the other is done ("4K aliasing"). In a loop that increments an
+  element of an `int[]` and reads the array's length and buffer from its handle, all made first,
+  that held each iteration's loads behind the last one's store: 2.05 s for 10^9 iterations, and
+  1.21 s with colors, Java's time. A power-of-two slot stays aligned to its size, which
+  allocations aligned to more than 16 bytes need, and blocks of 1 KB slots and larger are not
+  moved.
 - **Bitmaps.** Each small block has a bit per slot saying that the slot is taken (an object, or
   a free slot that a thread holds) and a bit per slot for marking.
 

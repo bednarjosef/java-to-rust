@@ -116,7 +116,7 @@ fn a_single_threaded_program_is_unchanged() {
             }
         }",
     );
-    assert_contains(&rust, &["thread_local! {", "Arc<ANode>"]);
+    assert_contains(&rust, &["static A_COUNT: java::Global<Cell<i32>>", "Arc<ANode>"]);
     assert_lacks(&rust, &["java::Locked", "java::Atomic", "main_thread"]);
 }
 

@@ -198,11 +198,14 @@ impl Wtf8 {
     /// (`has_half_edges`), which can match half of a pair.
     pub fn find_from(&self, t: &Wtf8, from: usize) -> Option<usize> {
         let (h, n) = (&self.0[from..], &t.0);
-        let found = match (n.len(), std::str::from_utf8(h), std::str::from_utf8(n)) {
-            (0, ..) => Some(0),
-            (1, ..) => h.iter().position(|&b| b == n[0]),
-            (_, Ok(h), Ok(n)) => h.find(n),
-            _ => h.windows(n.len()).position(|w| w == n),
+        // A one-byte pattern is searched for as a byte, without checking that the text is UTF-8.
+        let found = match n.len() {
+            0 => Some(0),
+            1 => h.iter().position(|&b| b == n[0]),
+            _ => match (std::str::from_utf8(h), std::str::from_utf8(n)) {
+                (Ok(h), Ok(n)) => h.find(n),
+                _ => h.windows(n.len()).position(|w| w == n),
+            },
         };
         found.map(|i| i + from)
     }
@@ -210,11 +213,13 @@ impl Wtf8 {
     /// The byte offset of the last occurrence of `t` that ends by byte `end`.
     pub fn rfind_before(&self, t: &Wtf8, end: usize) -> Option<usize> {
         let (h, n) = (&self.0[..end], &t.0);
-        match (n.len(), std::str::from_utf8(h), std::str::from_utf8(n)) {
-            (0, ..) => Some(end),
-            (1, ..) => h.iter().rposition(|&b| b == n[0]),
-            (_, Ok(h), Ok(n)) => h.rfind(n),
-            _ => h.windows(n.len()).rposition(|w| w == n),
+        match n.len() {
+            0 => Some(end),
+            1 => h.iter().rposition(|&b| b == n[0]),
+            _ => match (std::str::from_utf8(h), std::str::from_utf8(n)) {
+                (Ok(h), Ok(n)) => h.rfind(n),
+                _ => h.windows(n.len()).rposition(|w| w == n),
+            },
         }
     }
 

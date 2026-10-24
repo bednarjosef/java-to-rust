@@ -1321,10 +1321,10 @@ fn primitive_statics_are_cells_and_other_statics_stay_ref_cells() {
     assert_contains(
         &rust,
         &[
-            "static A_COUNT: Cell<i32> = const { Cell::new(0) };",
+            "static A_COUNT: java::Global<Cell<i32>> = java::Global::new(Cell::new(0));",
             "A_COUNT.get()",
             "A_COUNT.set(value);",
-            "static A_NAME: RefCell<",
+            "static A_NAME: java::LazyGlobal<RefCell<",
         ],
     );
     assert_lacks(&rust, &["A_COUNT.with_borrow"]);
@@ -1585,7 +1585,7 @@ fn classes_with_one_name_in_two_packages() {
             "legacy::Item::new(7)",
             "model::RegistryEntry::new(4)",
             "model::REGISTRY_CREATED.get()",
-            "pub(crate) static COUNTER_HITS: Cell<i32>",
+            "pub(crate) static COUNTER_HITS: java::Global<Cell<i32>>",
         ],
     );
 }
@@ -2060,7 +2060,7 @@ fn static_blocks_run_once_in_an_init_function_guarded_by_a_flag() {
     assert_contains(
         &rust,
         &[
-            "static HELPER__INITIALIZED: Cell<bool> = const { Cell::new(false) };",
+            "static HELPER__INITIALIZED: java::Global<Cell<bool>> = java::Global::new(Cell::new(false));",
             "fn init_helper() {",
             "if HELPER__INITIALIZED.get() {",
             "fn make() -> i32 {\n    init_helper();",
@@ -4390,7 +4390,7 @@ fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
     assert_contains(
         &rust,
         &[
-            "static A_EMPTY_INSTANCE: RefCell<Option<Arc<AEmpty>>> = const { RefCell::new(None) };",
+            "static A_EMPTY_INSTANCE: java::Global<RefCell<Option<Arc<AEmpty>>>> = java::Global::new(RefCell::new(None));",
             "A_EMPTY_INSTANCE.set(Some(Arc::new(AEmpty::new())));",
             "java::non_null(A_EMPTY_INSTANCE.with_borrow(|v| v.clone()))",
         ],

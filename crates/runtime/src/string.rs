@@ -81,22 +81,26 @@ pub fn substring(s: &Wtf8, begin: i32, end: i32) -> JString {
 
 /// `s.substring(begin, end)` of a string that the translation proved ASCII, whose code units are
 /// its bytes: no scan of the string.
+#[inline]
 pub fn ascii_substring(s: &Wtf8, begin: i32, end: i32) -> JString {
     try_ascii_substring(s, begin, end).unwrap_or_else(crate::uncaught)
 }
 
 /// `s.substring(begin)` of an ASCII string.
+#[inline]
 pub fn ascii_substring_from(s: &Wtf8, begin: i32) -> JString {
     try_ascii_substring_from(s, begin).unwrap_or_else(crate::uncaught)
 }
 
 /// `ascii_substring` where the program observes the `StringIndexOutOfBoundsException`.
+#[inline]
 pub fn try_ascii_substring(s: &Wtf8, begin: i32, end: i32) -> Result<JString, crate::Exception> {
     check_begin_end(begin, end, s.len())?;
     Ok(s.slice(begin as usize, end as usize).to_owned())
 }
 
 /// `ascii_substring_from` where the program observes the `StringIndexOutOfBoundsException`.
+#[inline]
 pub fn try_ascii_substring_from(s: &Wtf8, begin: i32) -> Result<JString, crate::Exception> {
     try_ascii_substring(s, begin, s.len() as i32)
 }
