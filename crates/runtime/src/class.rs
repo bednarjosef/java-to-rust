@@ -270,6 +270,11 @@ impl Class {
         format!("{}{}", class.name, "[]".repeat(dimensions))
     }
 
+    /// The binary name, as `getName` gives it, without a copy.
+    pub fn binary_name(&self) -> &'static str {
+        self.name
+    }
+
     /// `getSuperclass()`: `null` for `Object`, an interface and a primitive type.
     pub fn get_superclass(&self) -> Option<Class> {
         self.superclass.map(|f| f())

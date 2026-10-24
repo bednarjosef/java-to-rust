@@ -101,6 +101,9 @@ pub struct ElementClass<T> {
     class: fn() -> Class,
     /// The binary name of the class of the elements: `java.lang.String`.
     pub(crate) element: &'static str,
+    /// The module and class loader of the class of the elements as HotSpot names them, which a
+    /// `ClassCastException` gives with the array's class (`java::BASE`, `java::APP`).
+    module: &'static str,
     /// The binary names of the class of an element and of every class and interface above it,
     /// its own first (`None` for null), which the store of the element tests.
     names: fn(&T) -> Option<&'static [&'static str]>,
@@ -110,9 +113,10 @@ impl<T> ElementClass<T> {
     pub fn new(
         class: fn() -> Class,
         element: &'static str,
+        module: &'static str,
         names: fn(&T) -> Option<&'static [&'static str]>,
     ) -> ElementClass<T> {
-        ElementClass { class, element, names }
+        ElementClass { class, element, module, names }
     }
 
     /// The binary name of the class of `v` where the array cannot hold it (`java.lang.Integer` in
@@ -125,7 +129,7 @@ impl<T> ElementClass<T> {
 
 impl<T> Clone for ElementClass<T> {
     fn clone(&self) -> ElementClass<T> {
-        ElementClass { class: self.class, element: self.element, names: self.names }
+        ElementClass { class: self.class, element: self.element, module: self.module, names: self.names }
     }
 }
 
@@ -671,6 +675,29 @@ pub fn tagged<T: Clone, A: MadeElements<T>>(a: A, class: Option<ElementClass<T>>
 /// `a.getClass()` of an `Object[]`: the class of a covariant array, or `exact`, `Object[]`'s.
 pub fn array_class<T>(a: &impl Elements<T>, exact: fn() -> Class) -> Class {
     a.element_class().map_or_else(exact, |c| (c.class)())
+}
+
+/// `o instanceof C[]` of an `Object[]` `a`, given the array class `class` (`C[]`) where the
+/// translation holds arrays of it as `Object[]`s: whether the class that `a` carries is `class`
+/// or below it. An array that carries no class passes, as one of `class` would.
+pub fn array_is<T>(a: &impl Elements<T>, class: Class) -> bool {
+    a.element_class().is_none_or(|c| class.is_assignable_from((c.class)()))
+}
+
+/// `(C[]) o` of an `Object[]` `a` (as `array_is`): `a`, or the `ClassCastException` of a cast
+/// of its class to `to`, the class `class` names.
+pub fn try_cast_array<T, A: Elements<T>>(a: A, class: Class, to: crate::CastClass) -> Result<A, Exception> {
+    match a.element_class() {
+        Some(c) if !class.is_assignable_from((c.class)()) => {
+            Err(crate::cast_exception(((c.class)().binary_name(), c.module), to))
+        }
+        _ => Ok(a),
+    }
+}
+
+/// `try_cast_array`, which throws its `ClassCastException`.
+pub fn cast_array<T, A: Elements<T>>(a: A, class: Class, to: crate::CastClass) -> A {
+    try_cast_array(a, class, to).unwrap_or_else(|e| crate::throw_exception(e))
 }
 
 /// Java's check of `a[i] = v` in an `Object[]` that may be a covariant array: the index is

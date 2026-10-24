@@ -315,6 +315,11 @@ pub struct Class {
     /// the expression that makes it: `String[]` for a `new String[n]`, and `Object[]` for a copy
     /// into a class that is not the source's (`Arrays.copyOf(a, n, Object[].class)`).
     pub element_classes: HashMap<ExprId, Type>,
+    /// The array type that Java tests a value held as an `Object` against, where the translation
+    /// holds arrays of that type as `Object[]`s (`lower::covariant`), by the tested value: the
+    /// value of `o instanceof String[]` or `(String[]) o`. The test passes an array that carries
+    /// a class (`element_classes`) only when that class is one (`java::array_is`).
+    pub array_tests: HashMap<ExprId, Type>,
     /// The element accesses that Java makes sequentially consistent, a volatile read or write
     /// through a `VarHandle` (`getVolatile`, `setVolatile`) or `Unsafe` (`getIntVolatile`), by
     /// the index expression of the read `a[i]` or the write `a[i] = x` that lowering makes of it

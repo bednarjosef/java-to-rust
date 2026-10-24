@@ -91,6 +91,7 @@ impl<'t> Lowering<'t> {
             return unsupported(node, "instanceof on these types");
         }
         self.object_array(node, ty)?;
+        let value = self.array_test(type_node, value, ty, type_node.java_type())?;
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
     }
 

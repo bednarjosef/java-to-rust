@@ -154,6 +154,17 @@ impl<'t> Lowering<'t> {
         }
         let (java, made) = match node.kind() {
             "NEW_ARRAY" => (node.java_type().to_string(), x),
+            // An enum's `values()` and a class literal's `getInterfaces()`, which make a new
+            // array of the call's type.
+            "METHOD_INVOCATION"
+                if matches!(x.kind, ExprKind::ArrayLit(_) | ExprKind::NewArray(_))
+                    && node.symbol().is_some_and(|s| {
+                        s.is_static && s.name == "values" && self.enum_index(s.owner).is_some()
+                            || !s.is_static && s.name == "getInterfaces" && s.owner == "java.lang.Class"
+                    }) =>
+            {
+                (node.java_type().to_string(), x)
+            }
             "METHOD_INVOCATION" => {
                 let mut made = x;
                 while let ExprKind::Cast(_, inner) = &made.kind {
@@ -198,6 +209,34 @@ impl<'t> Lowering<'t> {
     /// Whether `ty` is `Object[]`.
     fn is_object_array(ty: Type) -> bool {
         matches!(ty, Type::Array(element) if Self::is_object(*element))
+    }
+
+    /// The type that javac names `name` as Java has it, with a covariant array type kept as its
+    /// own (`String[]`, not the `Object[]` that holds it): the class of a class literal, an
+    /// `instanceof` or a cast, which is the array's own class.
+    pub(super) fn exact_ty(&self, node: Node<'t>, name: &str) -> Result<Type, Error> {
+        match name.strip_suffix("[]") {
+            Some(element) => Ok(Type::array(self.exact_ty(node, element)?)),
+            None => self.ty(node, name),
+        }
+    }
+
+    /// `value`, the operand of an `instanceof` or a cast to the array type that javac names
+    /// `name` and the translation holds as `ty`, an `Object[]`: noted to be tested against the
+    /// array's own class (`Class::array_tests`) where that is narrower, as `String[]` is. An
+    /// `Object[]` operand (`(String[]) objects`) is converted to `Object` for the test.
+    pub(super) fn array_test(&self, node: Node<'t>, value: Expr, ty: Type, name: &str) -> Result<Expr, Error> {
+        if self.covariant.known.is_empty() || !Self::is_object_array(ty) {
+            return Ok(value);
+        }
+        let exact = self.exact_ty(node, name)?;
+        if exact == ty || !(Self::is_object(value.ty) || value.ty == ty) {
+            return Ok(value);
+        }
+        self.object_array(node, ty)?;
+        let value = self.convert(value, Type::class(OBJECT));
+        self.array_tests.borrow_mut().insert(value.id, exact);
+        Ok(value)
     }
 
     /// Array type `array` as it is translated: an `Object[]` when it is covariant.
