@@ -876,7 +876,7 @@ fn a_type_with_several_concrete_classes_is_an_enum() {
     assert_contains(
         &rust,
         &[
-            "enum BaseView<'a> {\n    Circle(&'a Arc<Circle>),\n    Rect(&'a Arc<Rect>),\n}",
+            "enum BaseView<'a> {\n    Circle(&'a Arc<Circle>) = 2,\n    Rect(&'a Arc<Rect>) = 3,\n}",
             "    fn area(&self) -> f64 {\n        match self.0.tag() {\n            2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.area() }\n            3 => { let o: &Arc<Rect> = unsafe { self.0.as_pointer() }; o.area() }\n            tag => java::bad_tag(tag),\n        }\n    }",
             // Every class keeps the fields struct at the start of its object, where `base()`
             // reads it whatever the class.
@@ -948,7 +948,7 @@ fn an_immutable_family_has_no_refcell() {
     assert_contains(
         &rust,
         &[
-            "enum NView<'a> {\n    Leaf(&'a Arc<Leaf>),\n    Twice(&'a Arc<Twice>),\n}",
+            "enum NView<'a> {\n    Leaf(&'a Arc<Leaf>) = 2,\n    Twice(&'a Arc<Twice>) = 3,\n}",
             "fn base(&self) -> &NFields {",
             "2 => { let o: &Arc<Leaf> = unsafe { self.0.as_pointer() }; o.eval() }",
             "self.inner.base().v",
@@ -995,7 +995,7 @@ fn a_class_that_is_upcast_is_shared() {
     assert_contains(
         &rust,
         &[
-            "enum ShapeView<'a> {\n    Square(&'a Arc<Square>),\n    Tri(&'a Arc<Tri>),\n}",
+            "enum ShapeView<'a> {\n    Square(&'a Arc<Square>) = 2,\n    Tri(&'a Arc<Tri>) = 3,\n}",
             "let s = Arc::new(Square::new());",
             "total(&Shape::Square(s.clone()), &Shape::Tri(t))",
         ],
@@ -3993,7 +3993,7 @@ fn an_interface_is_an_enum_over_its_implementors() {
     assert_contains(
         &rust,
         &[
-            "enum ShapeView<'a> {\n    Circle(&'a Arc<Circle>),\n    Rect(&'a Arc<RectFields>),\n    Square(&'a Arc<Square>),\n    Color(&'a Color),\n}",
+            "enum ShapeView<'a> {\n    Circle(&'a Arc<Circle>) = 1,\n    Rect(&'a Arc<RectFields>) = 2,\n    Square(&'a Arc<Square>) = 3,\n    Color(&'a Color) = 4,\n}",
             "            3 => { let o: &Arc<Square> = unsafe { self.0.as_pointer() }; o.base.area() }\n            4 => { let o: &Color = unsafe { self.0.as_value() }; (*o).area() }",
             "Shape::Circle(Arc::new(Circle::new(1.0))), Shape::Rect(r.clone())",
             "&s == &Shape::Rect(r.clone())",
@@ -4032,7 +4032,7 @@ fn an_enum_constant_implements_an_interface() {
     assert_contains(
         &rust,
         &[
-            "    Color(&'a Color),",
+            "    Color(&'a Color) = 4,",
             "(ShapeView::Color(a), ShapeView::Color(b)) => a == b,",
             "let c = Shape::Color(Color::Blue);",
             "    fn area(self) -> f64 {",
@@ -4737,7 +4737,7 @@ fn object_values_are_an_enum() {
     assert_contains(
         &rust,
         &[
-            "enum ObjectView<'a> {\n    Key(&'a Arc<Key>),\n    Plain(&'a Arc<Plain>),\n    String(&'a java::JString),\n    Integer(&'a i32),\n}",
+            "enum ObjectView<'a> {\n    Key(&'a Arc<Key>) = 1,\n    Plain(&'a Arc<Plain>) = 2,\n    String(&'a java::JString) = 4,\n    Integer(&'a i32) = 5,\n}",
             "let s = Object::String(java::JString::from(\"text\"));",
             "let n = Object::Integer(5);",
             "let back = java::cast(&n, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE));",
@@ -4897,7 +4897,7 @@ fn bounded_type_variables_erase_to_the_bound() {
         &rust,
         &[
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
-            "enum ComparableView<'a> {\n    Point(&'a Arc<Point>),\n    String(&'a java::JString),\n}",
+            "enum ComparableView<'a> {\n    Point(&'a Arc<Point>) = 5,\n    String(&'a java::JString) = 7,\n}",
             "5 => { let o: &Arc<Point> = unsafe { self.0.as_pointer() }; o.compare_to(other) }",
             "7 => { let o: &java::JString = unsafe { self.0.as_value() }; match (&other).view() { ComparableView::String(b) => java::compare_to(o, b), _ => { let b = &other; java::cast_failed(java::CastSource::cast_class(&b), (\"java.lang.String\", java::BASE)) } } }",
         ],
@@ -4954,7 +4954,7 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
     assert_contains(
         &rust,
         &[
-            "IntArray(&'a java::Array<i32>),",
+            "IntArray(&'a java::Array<i32>) = 11,",
             "let held = Object::IntArray(cell.clone());",
             "java::cast(&held, |o| o.as_int_array(), (\"[I\", java::BASE))",
             "fn eq(&self, other: &Object) -> bool {",
@@ -5007,7 +5007,7 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
     assert_contains(
         &rust,
         &[
-            "String(&'a java::JString),",
+            "String(&'a java::JString) = 2,",
             "fn first(a: &[Object]) -> Object {",
             "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || java::Class::STRING), \"java.lang.String\", |v| Some(v.runtime_type_names()))));",
             "java::join(java::wtf8(\",\"), &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), (\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
@@ -5053,7 +5053,7 @@ fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
     assert_contains(
         &rust,
         &[
-            "String(&'a java::JString),",
+            "String(&'a java::JString) = 2,",
             "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()",
         ],
     );
@@ -5095,7 +5095,7 @@ fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
     assert_contains(
         &rust,
         &[
-            "StringBuilder(&'a java::StringBuilder),",
+            "StringBuilder(&'a java::StringBuilder) = 11,",
             "let held = Object::StringBuilder(sb.clone());",
             "11 => { let o: &java::StringBuilder = unsafe { self.0.as_pointer() }; matches!(other.view(), ObjectView::StringBuilder(b) if o.same(b)) }",
             "11 => { let o: &java::StringBuilder = unsafe { self.0.as_pointer() }; fmt::Display::fmt(o, f) }",
