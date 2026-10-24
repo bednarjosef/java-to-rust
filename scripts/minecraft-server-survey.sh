@@ -4,7 +4,7 @@
 #
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
-# Steps: extract, decompile, libraries, library-sources, jdk-sources, parse, census, summary.
+# Steps: extract, decompile, best-of, libraries, library-sources, jdk-sources, parse, census, summary.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -12,7 +12,9 @@
 # MINECRAFT_CACHE    the work directory (default ~/.cache/java-to-rust-targets/minecraft-26.3)
 # MINECRAFT_JAR      the server jar from Mojang (default $MINECRAFT_CACHE/server-26.3.jar)
 # VINEFLOWER         the Vineflower 1.12.0 decompiler jar (default $MINECRAFT_CACHE/vineflower-1.12.0.jar;
-#                    Maven Central: org.vineflower:vineflower:1.12.0, SHA-1 below)
+#                    fetched from Maven Central, org.vineflower:vineflower:1.12.0, if missing; SHA-1 below)
+# CFR                the CFR 0.152 decompiler jar (default $MINECRAFT_CACHE/cfr-0.152.jar; fetched from
+#                    Maven Central, org.benf:cfr:0.152, if missing; SHA-1 below)
 # JDK_SOURCES        a root with the JDK's sources by module (java.base/, java.logging/, ...), such as
 #                    an unpacked src.zip (default $MINECRAFT_CACHE/jdk-src)
 # SRC_ZIP            the JDK's src.zip that the jdk-sources step unpacks the modules from (default:
@@ -31,6 +33,8 @@ cache=${MINECRAFT_CACHE:-$HOME/.cache/java-to-rust-targets/minecraft-26.3}
 jar=${MINECRAFT_JAR:-$cache/server-26.3.jar}
 vineflower=${VINEFLOWER:-$cache/vineflower-1.12.0.jar}
 vineflower_sha1=85570609a0a5941a7d2918b6260b209de810f66f
+cfr=${CFR:-$cache/cfr-0.152.jar}
+cfr_sha1=48ef4892cfe8feffddbbd0ff077735140557db74
 jdk_sources=${JDK_SOURCES:-$cache/jdk-src}
 java=${JAVA:-java}
 translator=${TRANSLATOR:-${CARGO_TARGET_DIR:-$root/target}/release/java-to-rust}
@@ -52,40 +56,106 @@ extract() {
   echo "$(find "$cache/jar/META-INF/libraries" -name '*.jar' | wc -l) library jars"
 }
 
-check_vineflower() {
-  [ -f "$vineflower" ] || { echo "no Vineflower at $vineflower" >&2; exit 1; }
-  echo "$vineflower_sha1  $vineflower" | sha1sum -c --quiet
+# Fetches a jar from Maven Central into the cache, unless it is there, and checks its SHA-1.
+fetch_tool() {
+  local path=$1 sha1=$2 out=$3
+  [ -f "$out" ] || curl -fsS -o "$out" "https://repo1.maven.org/maven2/$path" \
+    || { rm -f "$out"; echo "could not fetch $path from Maven Central" >&2; exit 1; }
+  echo "$sha1  $out" | sha1sum -c --quiet
 }
 
-# Decompiles one jar into a directory, keeping only the Java sources (Vineflower copies the
-# jar's resources too). The flags are those haste uses: generic signatures, synthetic members
-# renamed. Every other library jar is given to Vineflower as a library (-e), so that it knows the
-# generic signatures of the classes the code uses. Without them it cannot tell where a generic
-# call needs its type arguments written out (`RecordCodecBuilder.<T>mapCodec(...)`,
-# `ImmutableList.<T>builder()`) and types variables as Object, and javac then infers other types
-# than the original's. Vineflower reads options only before the first -e or --only argument.
+check_vineflower() {
+  fetch_tool org/vineflower/vineflower/1.12.0/vineflower-1.12.0.jar "$vineflower_sha1" "$vineflower"
+}
+
+# The library jars, one per line.
+library_jars() {
+  find "$cache/jar/META-INF/libraries" -name '*.jar' | LC_ALL=C sort
+}
+
+# Deletes everything but the Java sources from a decompiler's output (Vineflower copies the jar's
+# resources too, CFR writes a summary).
+keep_java() {
+  find "$1" -type f ! -name '*.java' -delete
+  find "$1" -type d -empty -delete
+  echo "$(find "$1" -name '*.java' | wc -l) source files from $(basename "$2") ($3)"
+}
+
+# Decompiles one jar into a directory with Vineflower, keeping only the Java sources. The flags
+# are those haste uses: generic signatures, synthetic members renamed. With a third argument of yes, every other
+# library jar is given to Vineflower as a library (-e), so that it knows the generic signatures of
+# the classes the code uses. Without them it cannot tell where a generic call needs its type
+# arguments written out (`RecordCodecBuilder.<T>mapCodec(...)`, `ImmutableList.<T>builder()`) and
+# types variables as Object, and javac then infers other types than the original's. Vineflower
+# reads options only before the first -e or --only argument.
 decompile_jar() {
-  local in=$1 out=$2
-  shift 2
+  local in=$1 out=$2 with_libs=$3
+  shift 3
   local -a libs=()
   local lib
-  while IFS= read -r lib; do
-    [ "$lib" = "$in" ] || libs+=("-e=$lib")
-  done < <(find "$cache/jar/META-INF/libraries" -name '*.jar' | LC_ALL=C sort)
+  if [ "$with_libs" = yes ]; then
+    while IFS= read -r lib; do
+      [ "$lib" = "$in" ] || libs+=("-e=$lib")
+    done < <(library_jars)
+  fi
   rm -rf "$out" && mkdir -p "$out"
   "${slot[@]}" nice -n 19 "$java" -Xmx3g -jar "$vineflower" -dgs=1 -rsy=1 -log=WARN -thr=4 "$@" "${libs[@]}" \
     "$in" "$out" > "$out.log" 2>&1 || { echo "Vineflower failed on $in (see $out.log)" >&2; return 1; }
-  find "$out" -type f ! -name '*.java' -delete
-  find "$out" -type d -empty -delete
-  echo "$(find "$out" -name '*.java' | wc -l) source files from $(basename "$in")"
+  keep_java "$out" "$in" "Vineflower, libraries: $with_libs"
 }
 
-# The server: net.minecraft and com.mojang.
+# Decompiles the classes of a jar whose names FILTER matches with CFR, the library jars on its
+# class path.
+decompile_cfr() {
+  local in=$1 out=$2 filter=$3
+  rm -rf "$out" && mkdir -p "$out"
+  "${slot[@]}" nice -n 19 "$java" -Xmx3g -jar "$cfr" "$in" --outputdir "$out" --silent true \
+    --jarfilter "$filter" --extraclasspath "$(library_jars | paste -sd:)" \
+    > "$out.log" 2>&1 || { echo "CFR failed on $in (see $out.log)" >&2; return 1; }
+  keep_java "$out" "$in" CFR
+}
+
+# javac on the files listed in LIST (paths relative to DIR, where it runs), every error into LOG.
+# --should-stop=ifError=FLOW makes it attribute every file even when one does not parse, so that
+# a syntax error in one file does not hide the errors of the others.
+javac_errors() {
+  local dir=$1 list=$2 classpath=$3 log=$4 classes
+  classes=$(mktemp -d)
+  (cd "$dir" && "${slot[@]}" javac -J-Xmx3g -proc:none -nowarn -Xmaxerrs 100000 -encoding UTF-8 \
+    --should-stop=ifError=FLOW -d "$classes" -cp "$classpath" @"$list") > "$log" 2>&1 || true
+  rm -rf "$classes"
+}
+
+# The number of javac errors in each file of a javac log, as "count<TAB>file", sorted by file.
+error_counts() {
+  grep ': error: ' "$1" | cut -d: -f1 | LC_ALL=C sort | uniq -c | awk '{print $1 "\t" $2}'
+}
+
+# The server: net.minecraft and com.mojang, decompiled three ways into decompiled/<setup>:
+# Vineflower with the library jars, Vineflower without them, and CFR. CFR, which takes 25
+# minutes on the whole server, only decompiles the classes of the files that have javac errors
+# with the first (compiled all together against the library jars, as the parse step does).
 decompile() {
   check_vineflower
-  local server
+  fetch_tool org/benf/cfr/0.152/cfr-0.152.jar "$cfr_sha1" "$cfr"
+  local server dir=$cache/decompiled
   server=$(find "$cache/jar/META-INF/versions" -name 'server-*.jar' | head -n 1)
-  decompile_jar "$server" "$cache/src/server" --only=net/minecraft --only=com/mojang
+  decompile_jar "$server" "$dir/vineflower" yes --only=net/minecraft --only=com/mojang
+  decompile_jar "$server" "$dir/vineflower-nolibs" no --only=net/minecraft --only=com/mojang
+  (cd "$dir/vineflower" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) > "$dir/all-files.txt"
+  javac_errors "$dir/vineflower" "$dir/all-files.txt" "$(library_jars | paste -sd:)" "$dir/vineflower-javac.txt"
+  error_counts "$dir/vineflower-javac.txt" > "$dir/vineflower-errors.txt"
+  # The top-level classes of those files, and their nested classes.
+  decompile_cfr "$server" "$dir/cfr" "^($(cut -f2 "$dir/vineflower-errors.txt" | sed -E 's|\.java$||; s|/|\\.|g' \
+    | paste -sd'|'))(\\$.*)?\$"
+}
+
+# src/server from the three decompiles, file by file: Vineflower with the libraries, except
+# where another setup's file gives the whole tree fewer javac errors (decompile-best-of.py), in at
+# most 8 compiles of the whole server.
+best-of() {
+  python3 -I "$root/scripts/decompile-best-of.py" "$cache/decompiled" "$cache/src/server" \
+    "$(library_jars | paste -sd:)" 8 vineflower vineflower-nolibs cfr -- "${slot[@]}"
 }
 
 # Each library jar into src/libraries/<artifact>, except the native-only ones (a single class
@@ -97,7 +167,7 @@ libraries() {
     local name
     name=$(basename "$lib" .jar)
     case $name in *-linux-* | *-osx-* | *-windows-*) continue ;; esac
-    decompile_jar "$lib" "$cache/src/libraries/$name"
+    decompile_jar "$lib" "$cache/src/libraries/$name" yes
   done
 }
 
@@ -167,7 +237,7 @@ parse() {
   # Against the library jars as compiled (their own decompiled sources are checked separately).
   local classpath
   classpath=$(find "$cache/jar/META-INF/libraries" -name '*.jar' | paste -sd:)
-  "${slot[@]}" javac -J-Xmx3g -proc:none -nowarn -Xmaxerrs 100000 -encoding UTF-8 -d "$out/classes" \
+  "${slot[@]}" javac -J-Xmx3g -proc:none -nowarn -Xmaxerrs 100000 -encoding UTF-8 --should-stop=ifError=FLOW -d "$out/classes" \
     -cp "$classpath" @"$out/server-files.txt" > "$out/server-javac.txt" 2>&1 || true
   summarize_errors "$out/server-javac.txt" > "$out/server-errors.txt"
   echo "server: $(grep -c ': error: ' "$out/server-javac.txt" || true) errors in" \
@@ -180,7 +250,7 @@ parse() {
     name=$(basename "$dir")
     find "$dir" -name '*.java' > "$out/$name-files.txt"
     [ -s "$out/$name-files.txt" ] || continue
-    "${slot[@]}" javac -J-Xmx3g -proc:none -nowarn -Xmaxerrs 100000 -encoding UTF-8 \
+    "${slot[@]}" javac -J-Xmx3g -proc:none -nowarn -Xmaxerrs 100000 -encoding UTF-8 --should-stop=ifError=FLOW \
       -d "$out/classes-$name" -cp "$classpath" @"$out/$name-files.txt" > "$out/$name-javac.txt" 2>&1 || true
     echo "$name: $(grep -c ': error: ' "$out/$name-javac.txt" || true) errors in" \
       "$(grep ': error: ' "$out/$name-javac.txt" | cut -d: -f1 | sort -u | wc -l) of" \
@@ -247,11 +317,11 @@ summary() {
 }
 
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(extract decompile libraries library-sources jdk-sources parse census summary)
+[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of libraries library-sources jdk-sources parse census summary)
 for step in "${steps[@]}"; do
   case $step in
-    extract | decompile | libraries | library-sources | jdk-sources | parse | census | summary) "$step" ;;
-    *) echo "unknown step $step (extract, decompile, libraries, library-sources, jdk-sources, parse, census, summary)" >&2
+    extract | decompile | best-of | libraries | library-sources | jdk-sources | parse | census | summary) "$step" ;;
+    *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, jdk-sources, parse, census, summary)" >&2
       exit 2 ;;
   esac
 done
