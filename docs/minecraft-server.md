@@ -308,6 +308,38 @@ needs the server's census first.
 
 ## Next
 
-1. Get the census through loading: a run with the library sources under a 12 GB cap on a quiet
-   machine, then the memory steps if that is not enough.
-2. Compare the server's rejections with javac's, and list the new kinds.
+These are plans. Work on several of them is under way but not merged yet.
+
+1. Run the census again with the fixes since the last one: the survey's `jdk-sources` step once
+   (it writes `jdk-src/modules.txt`), then the decompile and best-of steps, then the census. Then
+   compare its rejections with the last census's and with javac's, and list the new kinds.
+2. The decompiled code javac still rejects: 159 errors in the server's best-of decompile, mostly
+   type arguments and casts that no decompiler writes. Planned: an automatic repair pass for these,
+   and the same per-file best-of choice for the libraries without published sources.
+3. The census's speed: the last one lowered the whole program five times, about 370 s each,
+   because a failed try with Rust generics starts lowering over. Planned: cheaper retries.
+4. The translator's refusals still open from the last census, by kind:
+   - reflection: generic types of interfaces, methods and fields; type variables; the rest of
+     `Class`'s interfaces (`AnnotatedElement`, `GenericDeclaration`, ...); member and parameter
+     annotations; `Method.getExceptionTypes` and `toGenericString`; dynamic proxies
+     (`Proxy.newProxyInstance`);
+   - method handles: constant handles (`lookup`, `findVirtual`, `insertArguments`, ...), the
+     handles Netty builds at run time, byte array and byte buffer view handles, and field
+     updaters' `getAndUpdate`/`accumulateAndGet` loops;
+   - logging: JDK logging at the levels it prints (the console handler's header line has the date
+     and the caller), `System.Logger` values, and `PlatformLogger` translated from its source;
+   - natives: library natives (Netty's epoll, JNA, jtracy) should throw `UnsatisfiedLinkError`
+     as on a JVM where the library is not loaded, so Netty falls back to NIO; and
+     `NetworkInterface`'s natives;
+   - JDK APIs: NIO networking (channels and selectors, which Netty's server uses), processes
+     (`ProcessBuilder`, `Runtime.exec`), `java.lang.management` and JFR, and service providers
+     that live in JDK modules the code does not name;
+   - small ones, one to four pieces each: `Runtime` held as a value, the whole `System.getenv()`
+     map, `Integer.getInteger` with a key that is not a constant, `getProperty` defaults that are
+     not literals, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some
+     `String` constructors, switches and patterns on some types, a few lambda forms,
+     `JavaLangAccess`'s thread and module calls, `isAnnotationPresent(Deprecated.class)`, and
+     DataFixerUpper's generic method types as values.
+5. Two behaviours waiting for a decision: the objects `getAnnotation` and `getGenericSuperclass`
+   return are equal but not the same object across calls, and `Thread.dumpStack` and
+   `getStackTrace` print and return no frames.
