@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn paths_are_encoded_as_the_class_loader_encodes_them() {
-        assert_eq!(encode_path("/home/me/classes"), "/home/me/classes");
+        assert_eq!(encode_path("/work/classes"), "/work/classes");
         assert_eq!(encode_path("/a b/c#d%e"), "/a%20b/c%23d%25e");
         assert_eq!(encode_path("/x/é/€/😀"), "/x/%c3%a9/%e2%82%ac/%ed%a0%bd%ed%b8%80");
         assert_eq!(encode_path("/(ok)~!*'-_.:@&+$,"), "/(ok)~!*'-_.:@&+$,");

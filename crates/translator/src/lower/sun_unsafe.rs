@@ -16,7 +16,7 @@
 //!
 //! ```text
 //! WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
-//! WARNING: sun.misc.Unsafe::objectFieldOffset has been called by Main (file:/home/me/classes/)
+//! WARNING: sun.misc.Unsafe::objectFieldOffset has been called by Main (file:/work/classes/)
 //! WARNING: Please consider reporting this to the maintainers of class Main
 //! WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
 //! ```
