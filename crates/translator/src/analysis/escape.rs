@@ -114,12 +114,13 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let mut visits = vec![0u8; n];
     while let Some(m) = work.pop() {
         queued[m] = false;
-        visits[m] += 1;
-        let product = analysis.method(m).product;
+        visits[m] = visits[m].saturating_add(1);
+        // A method visited too often is no factory from then on, so the rounds end.
+        let product = analysis.method(m).product.filter(|_| visits[m] < 4);
         if product != analysis.factories.get(&m).copied() {
             match product {
-                Some(p) if visits[m] < 4 => _ = analysis.factories.insert(m, p),
-                _ => _ = analysis.factories.remove(&m),
+                Some(p) => _ = analysis.factories.insert(m, p),
+                None => _ = analysis.factories.remove(&m),
             }
             for &caller in &callers[m] {
                 if !std::mem::replace(&mut queued[caller], true) {
