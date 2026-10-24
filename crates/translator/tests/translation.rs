@@ -3809,6 +3809,26 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
         }",
     ),
     (
+        "lib/jdk/internal/misc/Names.java",
+        "package jdk.internal.misc;
+        public final class Names {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            public static final class Tag { final String n; public Tag(String n) { this.n = n; } public String toString() { return n; } }
+            private static final long BASE = U.arrayBaseOffset(Tag[].class);
+            private static final int SCALE = U.arrayIndexScale(Tag[].class);
+            private final Tag[] tags = new Tag[3];
+            private static long offsetFor(long index) { return BASE + SCALE * index; }
+            private Tag read(long offset) { return (Tag) U.getReferenceAcquire(tags, offset); }
+            private boolean claim(long offset, Tag t) { return U.compareAndSetReference(tags, offset, null, t); }
+            public Tag take(int i, Tag t) {
+                final long offset = offsetFor(i);
+                return claim(offset, t) ? t : read(offsetFor(i));
+            }
+            private Tag peek(long offset) { return (Tag) U.getReferenceAcquire(tags, offset); }
+            public Tag stray(int i) { return peek(BASE + i); }
+        }",
+    ),
+    (
         "lib/jdk/internal/misc/Lazy.java",
         "package jdk.internal.misc;
         public final class Lazy {
@@ -4012,6 +4032,35 @@ fn offsets_computed_elsewhere_and_static_fields_are_handles_too() {
     );
     // The reflection that names the static field is left out with its handles.
     assert_lacks(&rust, &["get_declared_field", "MADE_BASE", "fn get_and_add_int"]);
+}
+
+#[test]
+fn an_element_offset_passed_to_a_private_method_is_the_element() {
+    let rust = translate_with_natives(
+        "jdk-parameter-handles",
+        "Names n = new Names(); System.out.println(n.take(1, new Names.Tag(\"a\")) + \" \" + n.take(1, new Names.Tag(\"b\")));",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // The parameter holds Java's offset, so the index is computed back from it.
+    assert_contains(
+        &rust,
+        &[
+            "java::compare_and_set_element(&",
+            "java::div(offset.wrapping_sub(java::array_base_offset()), \
+             java::array_index_scale(\"java.lang.Object\") as i64) as i32",
+        ],
+    );
+    assert_lacks(&rust, &["fn compare_and_set_reference", "fn get_reference_acquire"]);
+    // A call that passes an offset of no element leaves the parameter no element offset.
+    let error = translate_with_natives("jdk-parameter-stray", "System.out.println(new Names().stray(1));")
+        .expect_err("must be rejected");
+    assert!(
+        error.ends_with(
+            "`Unsafe.getReferenceAcquire` with an offset that is neither a field's nor an array element's \
+             not supported yet"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
