@@ -4,7 +4,7 @@
 #
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
-# Steps: extract, decompile, best-of, libraries, library-sources, jdk-sources, parse, census, summary.
+# Steps: extract, decompile, best-of, repair, libraries, library-sources, jdk-sources, parse, census, summary.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -20,7 +20,8 @@
 #                    in modules.txt (default $MINECRAFT_CACHE/jdk-src)
 # SRC_ZIP            the JDK's src.zip that the jdk-sources step unpacks the modules from (default:
 #                    lib/src.zip of the JDK whose java is on PATH)
-# JAVA               the java that runs the decompiler (default: java on PATH)
+# JAVA               the java that runs the decompiler and the repair (default: java on PATH)
+# REPAIR_ROUNDS      how many times the repair step compiles and edits the server (default 4)
 # TRANSLATOR         the java-to-rust binary (default: target/release/java-to-rust, built if missing)
 # SLOT               a command that every heavy step runs under, such as a build-slot limiter
 #                    (default: none)
@@ -156,6 +157,19 @@ decompile() {
 best-of() {
   python3 -I "$root/scripts/decompile-best-of.py" "$cache/decompiled" "$cache/src/server" \
     "$(library_jars | paste -sd:)" 8 vineflower vineflower-nolibs cfr -- "${slot[@]}"
+}
+
+# Edits the decompiled server where javac rejects it, with edits that keep the bytecode's
+# behaviour: unchecked casts the decompiler left out, diamond type arguments, misnamed catch
+# variables (scripts/RepairDecompile.java). Each edit is listed in repair-log.txt.
+repair() {
+  local -a exports=()
+  local package
+  for package in api code tree util; do
+    exports+=(--add-exports "jdk.compiler/com.sun.tools.javac.$package=ALL-UNNAMED")
+  done
+  "${slot[@]}" nice -n 19 "$java" -Xmx4g "${exports[@]}" "$root/scripts/RepairDecompile.java" "$cache/src/server" \
+    "$(find "$cache/jar/META-INF/libraries" -name '*.jar' | paste -sd:)" "${REPAIR_ROUNDS:-4}" "$cache/repair-log.txt"
 }
 
 # Each library jar into src/libraries/<artifact>, except the native-only ones (a single class
@@ -338,11 +352,11 @@ summary() {
 }
 
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of libraries library-sources jdk-sources parse census summary)
+[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of repair libraries library-sources jdk-sources parse census summary)
 for step in "${steps[@]}"; do
   case $step in
-    extract | decompile | best-of | libraries | library-sources | jdk-sources | parse | census | summary) "$step" ;;
-    *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, jdk-sources, parse, census, summary)" >&2
+    extract | decompile | best-of | repair | libraries | library-sources | jdk-sources | parse | census | summary) "$step" ;;
+    *) echo "unknown step $step (extract, decompile, best-of, repair, libraries, library-sources, jdk-sources, parse, census, summary)" >&2
       exit 2 ;;
   esac
 done
