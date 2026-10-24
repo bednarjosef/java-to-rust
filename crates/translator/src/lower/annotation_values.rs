@@ -71,7 +71,7 @@ impl<'t> Lowering<'t> {
         let mut found: Vec<(Expr, Node<'t>)> = Vec::new();
         if runtime {
             for t in 0..self.types.len() {
-                if let Some(holder) = self.holder_of(node, t, name, inherited)? {
+                if let Some(holder) = self.holder_of(t, name, inherited)? {
                     found.push((self.class_literal_of(node, t)?, holder));
                 }
             }
@@ -117,13 +117,7 @@ impl<'t> Lowering<'t> {
 
     /// The declaration that gives class `t` of the program the annotation `name`: its own, or,
     /// for an `inherited` one, its superclass's (an interface inherits none).
-    fn holder_of(
-        &self,
-        node: Node<'t>,
-        t: usize,
-        name: &str,
-        inherited: bool,
-    ) -> Result<Option<Node<'t>>, Error> {
+    fn holder_of(&self, t: usize, name: &str, inherited: bool) -> Result<Option<Node<'t>>, Error> {
         let decl = self.types[t].node;
         if self.directly_present(decl, name) {
             return Ok(Some(decl));
@@ -132,7 +126,7 @@ impl<'t> Lowering<'t> {
             return Ok(None);
         }
         match self.superclass(t)? {
-            Some(s) => self.holder_of(node, s, name, inherited),
+            Some(s) => self.holder_of(s, name, inherited),
             None => Ok(None),
         }
     }
