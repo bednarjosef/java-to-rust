@@ -151,6 +151,17 @@ program where such a lookup can happen, so they can be checked before the progra
   that a root holds. Two differences from Java: `addExports` and the other `add` methods do not
   check that their caller is in the module, and the boot layer holds only the translation's
   named modules, where the JVM's also holds the system modules that service binding resolves.
+- **Packages.** With the JDK's sources, `Class.getPackage()` goes to `TranslatedModules` too
+  (without them it is rejected): `null` for an array, a
+  primitive type and `void`, and otherwise one `Package` per package name (`""` for the unnamed
+  package), in the class's module, so `==`, `getName`, `hashCode` and `equals` are Java's. A
+  package of a named module has no versioning information, as the JVM's class loaders define
+  it: its titles, versions and vendors are `null`, it is sealed, and `toString` is `package `
+  and the name. One of the unnamed module has the attributes of the manifest of the jar it was
+  loaded from, or none from a directory, which the translation does not know, so asking for
+  them (and `toString`, which shows two of them) throws `UnsupportedOperationException` with
+  the "not in the translation" message; so do a package's annotations, which are its
+  `package-info` class's (`java/patches/java/lang/Package.java`).
 
 #### javac's survey, before and after
 

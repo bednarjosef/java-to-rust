@@ -1,16 +1,24 @@
 package java.lang;
 
 import java.net.URL;
+import java.util.LinkedHashMap;
 
 /**
  * The translator's methods that calls of the JDK's class loading methods of {@code BootLoader},
  * {@code ClassLoaders} and {@code Reflection} call instead ({@code REDIRECTED_CALLS} in
  * {@code program/reach.rs}), and those that {@code Class.getModule()},
- * {@code Class.getClassLoader()}, {@code ClassLoader.getUnnamedModule()} and
- * {@code Class.forName(module, name)} are ({@code MODULE_CALLS}, {@code lower/modules.rs}):
+ * {@code Class.getClassLoader()}, {@code Class.getPackage()}, {@code ClassLoader.getUnnamedModule()}
+ * and {@code Class.forName(module, name)} are ({@code MODULE_CALLS}, {@code lower/modules.rs}):
  * over the translation's modules ({@link Module}), whose classes are all the code there is.
  */
 public final class TranslatedModules {
+    /**
+     * The packages asked for so far, by name: one {@code Package} each, as a class loader keeps
+     * them, since a package is in one module of the translation. (A {@code LinkedHashMap}, so that
+     * its calls reach only that class's methods, as in {@code Module}.)
+     */
+    private static final LinkedHashMap<String, Package> PACKAGES = new LinkedHashMap<>();
+
     private TranslatedModules() {
     }
 
@@ -22,6 +30,24 @@ public final class TranslatedModules {
     /** {@code c.getClassLoader()}: that of the class's module. */
     public static ClassLoader classLoaderOf(Class<?> c) {
         return Module.of(c).getClassLoader();
+    }
+
+    /**
+     * {@code c.getPackage()}: null for an array, a primitive type and {@code void}, as in Java;
+     * otherwise the package of the class's package name, {@code ""} for the unnamed package, in
+     * the class's module ({@link Package#ofTranslation}).
+     */
+    public static synchronized Package packageOf(Class<?> c) {
+        if (c.isArray() || c.isPrimitive()) {
+            return null;
+        }
+        String name = c.getPackageName();
+        Package p = PACKAGES.get(name);
+        if (p == null) {
+            p = Package.ofTranslation(name, Module.of(c));
+            PACKAGES.put(name, p);
+        }
+        return p;
     }
 
     /** {@code loader.getUnnamedModule()}. */
