@@ -112,7 +112,7 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// `a[i]` as a value.
+    /// `a[i]` as a value; a volatile read where Java makes it one (`Class::volatile_elements`).
     pub(super) fn index(&mut self, id: ExprId, array: &'a Expr, index: &'a Expr) -> Code {
         if let Some(item) = self.elements.get(&id) {
             return Code::atom(item.clone());
@@ -132,8 +132,10 @@ impl<'a> Gen<'a> {
         };
         let bound = matches!(array.kind, ExprKind::Field { .. }) && calls(index);
         let (binding, handle) = self.write_handle(array, bound);
+        let volatile = self.class.volatile_elements.contains(&index.id);
         let i = self.value(index, Type::Int).text;
-        let get = self.may_fail(id, "get", "", &format!("{handle}, {i}"));
+        let name = if volatile { "get_volatile" } else { "get" };
+        let get = self.may_fail(id, name, "", &format!("{handle}, {i}"));
         match binding {
             Some(binding) => Code::atom(format!("{{ {binding} {} }}", get.text)),
             None => get,
@@ -204,7 +206,9 @@ impl<'a> Gen<'a> {
 
     /// `a[i] = v`, as a call of a runtime helper. Java evaluates the array, the index and then
     /// `v`, and checks the index last; the arguments come in that order. `used` says whether the
-    /// assignment's value is needed, which picks `store` over `set`.
+    /// assignment's value is needed, which picks `store` over `set`. A volatile write
+    /// (`Class::volatile_elements`) is `set_volatile`, whose value is never used: it is the
+    /// lowering of a `void` method.
     pub(super) fn index_set(
         &mut self,
         id: ExprId,
@@ -220,7 +224,9 @@ impl<'a> Gen<'a> {
         let (mut binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
         let mut i = self.value(index, Type::Int).text;
         // The value of the assignment is an `Option` only where the stored value may be null.
-        let (helper, mut v) = if used && self.stores_some(rhs, ty) {
+        let (helper, mut v) = if self.class.volatile_elements.contains(&index.id) {
+            ("set_volatile", self.element_value(rhs, ty))
+        } else if used && self.stores_some(rhs, ty) {
             ("store_some", self.value(rhs, ty).text)
         } else {
             (if used { "store" } else { "set" }, self.element_value(rhs, ty))

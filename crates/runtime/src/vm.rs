@@ -100,9 +100,9 @@ const CRC_TABLE: [u32; 256] = {
 
 /// `CRC32.updateBytes0(crc, b, off, len)`: zlib's `crc32(crc, b + off, len)`, the CRC-32 of the
 /// bytes continued from the checksum `crc` (0 for none yet). The caller has checked the range.
-pub fn crc32_update_bytes(crc: i32, b: &[i8], off: i32, len: i32) -> i32 {
+pub fn crc32_update_bytes(crc: i32, b: &(impl crate::Source<i8> + ?Sized), off: i32, len: i32) -> i32 {
     let mut c = !(crc as u32);
-    for &byte in &b[off as usize..(off + len) as usize] {
+    for &byte in b.range(off as usize..(off + len) as usize).iter() {
         c = CRC_TABLE[((c ^ byte as u8 as u32) & 0xff) as usize] ^ (c >> 8);
     }
     !c as i32

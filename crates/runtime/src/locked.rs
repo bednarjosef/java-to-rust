@@ -1,7 +1,8 @@
 //! `java::Locked<T>`: the data lock of a value that several threads can reach, which takes the
-//! place of the `RefCell` of a thread-local one: a shared array's elements, a shared builder's
-//! units, a static's value, the object of a Java enum's constant. (An object of a class that
-//! threads share holds its fields in `java::SharedField` cells, `java::Monitored`.)
+//! place of the `RefCell` of a thread-local one: a shared builder's units, a static's value, the
+//! object of a Java enum's constant. (An object of a class that threads share holds its fields in
+//! `java::SharedField` cells, `java::Monitored`, and an array that threads share its elements,
+//! `java::SharedArray`.)
 //!
 //! It is a reentrant lock whose word is a `RefCell`'s borrow flag too. `borrow()` and
 //! `borrow_mut()` take the lock (or count once more when the calling thread holds it already) and

@@ -67,9 +67,9 @@ The translation maps every Java memory action to one of:
 | read/write of a field of an object only one thread reaches | plain read/write |
 | read/write of a field of a thread-shared object | its `java::SharedField`: an acquire load or release store of a word, under a striped lock for a wider value |
 | read/write of a `volatile` field of a thread-shared object | its `java::SharedField`, sequentially consistent |
-| read/write of an element of an array of a threaded program | under the array's lock (`java::SharedArray`) |
+| read/write of an element of an array that threads share | the element's cell (`java::SharedArray`): an acquire load or release store of a word, under a striped lock for a wider value |
 | `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on a field | one atomic action of its `java::SharedField` (5.3) |
-| `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on an element | the array's lock, held for the whole read-compare-write (5.3) |
+| `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on an element | one atomic action of the element's cell, sequentially consistent in the volatile mode (5.3) |
 | monitor enter/exit, `wait`, `notify` | the object's reentrant lock and its wait set (section 3) |
 | `Thread.start`, `join`, `park`/`unpark` | `std::thread` spawn, the thread record's condition variables |
 | static field access | `java::Atomic` (acquire/release) or `java::Locked` statics |
@@ -107,17 +107,20 @@ synchronization removes behaviours and never adds one, except for progress (1.3)
 ### 1.3 Progress and deadlock
 
 Java guarantees no fairness, so a thread that never gets a lock is legal; a deadlock, though, is
-observable, and the data locks are locks Java does not have: those of shared arrays, builders and
-statics (`java::Locked`), and the striped locks of wide fields. The rule that keeps them invisible
+observable, and the data locks are locks Java does not have: those of shared builders and
+statics (`java::Locked`), and the striped locks of wide fields and array elements. The rule that
+keeps them invisible
 is the one `RefCell` already imposes: **a data lock is held only while values are read or
 written, and never while the thread waits for anything else.**
 
-- An object's fields take no data lock: an access is one atomic action of the field's cell, and
-  a striped lock is held only to copy or replace one value, whose copy reaches no other cell.
+- An object's fields and a shared array's elements take no data lock: an access is one atomic
+  action of the field's or element's cell, and a striped lock is held only to copy or replace one
+  value, whose copy reaches no other cell. A bulk operation on a shared array (a copy, a fill, a
+  sort) takes each element on its own.
 - A method of a shared class takes `&self` only if it is short: no loop, no call of a method or
   constructor, no access to another object or array, no blocking native (`analysis/threads.rs`,
   `long_methods`). Any other method takes the object's handle.
-- In a threaded program two borrows of shared arrays, builders or statics in one statement count
+- In a threaded program two borrows of shared objects, builders or statics in one statement count
   as conflicting even when neither is mutable (`codegen/objects.rs`, `conflicts`), and a blocking
   native counts as one, so the operands are read into locals first. A conditional expression
   whose condition reads two of them is guarded the same way, so it never holds both locks at
@@ -174,14 +177,35 @@ are a known gap (section 7). In a single-threaded program `volatile` is nothing.
 ### 2.2 Arrays and builders
 
 In a threaded program an array that is not a plain `Vec` (see the array analysis) is a
-`java::SharedArray<T>`, an `Arc<java::Locked<Vec<T>>>`, when two threads may reach arrays of its
-family, and a `java::Array<T>` otherwise. The family is the type of the innermost elements, so
+`java::SharedArray<T>` when two threads may reach arrays of its family, and a `java::Array<T>`
+(an `Arc` of a `RefCell<Vec<T>>`) otherwise. The family is the type of the innermost elements, so
 `int[]` and `int[][]` are decided together and a `SharedArray` never holds an `Array`. A family is
 shared by the same rule as builders below: a static holds such an array, or a field or capture of
 a shared class does, or such an array becomes a shared `Object` (`analysis/threads.rs`,
 `shared_arrays`). In a whole program the JDK's statics hold arrays of the common families (`int`,
 `char`, `byte`, `String`, `Object`), so those stay shared there. The runtime's array functions take
 either form through the `Elements<T>` trait (`crates/runtime/src/array.rs`).
+
+A `SharedArray` keeps each element in a cell of its own, a `java::SharedField` (an `Arc` of
+`java::SharedElements`, a boxed slice of cells, and no lock), as a thread-shared object keeps its
+fields: `a[i]` and `a[i] = v` are one atomic action each, an acquire load or a release store of
+a word for an element of 1, 2, 4 or 8 bytes without drop glue (a primitive, `long` and `double`
+too, or a reference), and a copy under a striped lock for a wider one (a string without an
+identity). No access takes a lock or checks a borrow flag. Java makes each element access atomic
+(a `long` or `double` one may even tear) and promises nothing about the order or atomicity of a
+bulk operation, so `System.arraycopy`, `Arrays.fill`, a sort or a copy reads and writes a shared
+array one element at a time, and another thread may see it half done, as on the JVM.
+
+No slice of a shared array's elements is ever lent, since another thread may write them while it
+is in use. A runtime function that the generated code gives an array as a slice (`&a.borrow()`
+of an `Array`, `&v` of a plain array) gets a `java::Lent` of a shared array instead
+(`crates/runtime/src/lent.rs`): a function that reads or writes a range of it
+(`new String(chars, offset, count)`, `System.arraycopy` with a plain array, a file read into a
+buffer, `getChars`) takes it as a `java::Source` or `java::Target`, reads only that range out of
+the cells and stores only the elements it writes; any other function gets a copy of the whole
+array through `Deref`, and a `LentMut` stores back the elements that changed when the call ends. A
+method parameter that the array analysis borrows as a slice (`&[T]`) is never given a shared
+array: such a parameter stays a handle (`analysis/arrays.rs`, `lends`).
 
 A `StringBuilder` is a `java::SharedStringBuilder` (its units in an `Arc<java::Locked<..>>`,
 whose monitor is that lock) when two threads may reach builders: a static holds one, or a field
@@ -274,8 +298,8 @@ held as an Object is not supported by the translation" (`java::unkept_monitor`).
 
 An object whose monitor is kept, of a class that threads share or one whose monitor the program
 waits on, notifies or asks about, is an `Arc<java::Monitored<C>>`, whose reentrant lock is its
-monitor. Its fields take no lock, so the monitor is the only lock its object has. (A builder, an
-array and a `java::Locked` object have their data lock as their monitor.)
+monitor. Its fields take no lock, so the monitor is the only lock its object has. (A builder and
+a `java::Locked` object have their data lock as their monitor; an array has none, as 3.1 says.)
 
 - `synchronized (x) { .. }` is `{ let _monitor = java::enter(&x); { .. } }`. The guard drops
   however the block ends, so `?`, `break` and `return` release it as `monitorexit` does.
@@ -466,14 +490,22 @@ name:
   `compare_exchange_by`, `replace`, `get_and_update`: a compare-and-swap of a word, or the
   striped lock for a wider value), so no other access comes between the read and the write; on
   an object of one thread no other access can. Of an element, they are runtime functions
-  (`java::compare_and_set_element` and its kin in `array.rs`) that hold the array's borrow or lock
-  for the whole update. References compare by identity. The weak forms never fail spuriously,
+  (`java::compare_and_set_element` and its kin in `array.rs`): one borrow of an array of one
+  thread, and one atomic action of the element's cell in a shared array (a compare-and-swap of a
+  word, or the striped lock for a wider element). References compare by identity. The weak forms never fail spuriously,
   which Java allows.
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
 
-The fields and arrays themselves stay plain: an access holds the object's or array's lock, which
-orders it at least as the plain, opaque, acquire, release and volatile modes ask.
+The fields and arrays themselves stay plain: an access through a handle is an ordinary access of
+the field or element, an acquire load or a release store of its cell, which orders it at least
+as the plain, opaque, acquire and release modes ask. An element's access in the volatile mode
+(`getVolatile` and `setVolatile`, which `AtomicIntegerArray.get` and `set` and their kin make,
+or `Unsafe.getIntVolatile`) is sequentially consistent, as Java's is: lowering records it
+(`Class::volatile_elements`), and the generator makes it a `SeqCst` load or store of the
+element's cell (`java::get_volatile`, `java::set_volatile`). A field's accesses are as its
+declaration makes them, sequentially consistent for a `volatile` field; the volatile mode on a
+field that is not `volatile` asks for more (section 7).
 
 ## 6. Exceptions across threads, daemon threads, exit
 
@@ -513,10 +545,11 @@ orders it at least as the plain, opaque, acquire, release and volatile modes ask
   allocation site; a class with both shared and thread-local sites would get two structs, and an
   array of a shared family that no other thread reaches would stay a `java::Array`. The escape analysis should then
   be a client of a "heap edges" interface so that only the edge provider changes.
-- **`SeqCst` volatile statics, and atomic elements.** A `volatile` static should be sequentially
-  consistent. Shared primitive arrays that workers write would be `Arc<Vec<AtomicI32>>` and the
-  like, and arrays filled before sharing and never written after `Arc<Vec<T>>`, so that neither
-  needs a lock per element.
+- **`SeqCst` volatile statics and volatile-mode accesses of fields.** A `volatile` static
+  should be sequentially consistent, and so should a volatile-mode access through `Unsafe` or a
+  `VarHandle` (`getVolatile`, `setVolatile`) of a field that is not `volatile`, which lowering
+  turns into an ordinary access, acquire or release (5.3). The atomic updates, and the
+  volatile-mode accesses of array elements, are sequentially consistent already.
 - **The rest of `java.util.concurrent`.** The pieces exercised by the whole-program corpus are
   the atomics (`AtomicInteger`, `AtomicLong`, atomic arrays), `LockSupport`, `ConcurrentHashMap`,
   `ConcurrentSkipListMap`/`Set`, `ThreadLocal`, `ThreadLocalRandom`, `ScopedValue`,
@@ -556,9 +589,9 @@ Thread programs are tested by the same differential test as all others, so their
 not depend on scheduling. `corpus/threads/` holds programs where each thread computes into its
 own slot or object and `join` orders the output, or where the program checks its own invariant
 (every increment counted, every item consumed once) and prints the result. Programs that use the
-JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `ConcurrentCounters`,
-`ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`, `ParkWithPermit`,
-`LockAmongValues`, `VarHandleViews`, `ScopedValues`). Shape tests of the generated Rust are in
+JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `AtomicArrayDekker`,
+`ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`,
+`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
 unchanged and that a class no thread reaches has no monitor.
 

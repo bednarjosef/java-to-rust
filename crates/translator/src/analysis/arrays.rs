@@ -17,9 +17,11 @@
 //! A parameter is borrowed, as `&[T]` or `&mut [T]` when its elements are written, when its
 //! method uses it only through its elements and every call can lend it an array: a plain array
 //! or one of its rows (`&v`, `&m[i]`), a new array, or a shared one-dimensional array
-//! (`&a.borrow()`) when nothing else can reach that array while the call runs. Passing a plain
-//! array to a borrowed parameter keeps it plain; passing it to any other parameter shares it,
-//! unless it is moved there.
+//! (`&a.borrow()`) when nothing else can reach that array while the call runs. An array that
+//! threads share (`java::SharedArray`, `Facts::shared_arrays`) is never lent: other threads may
+//! write its elements while the call runs, which no slice may see. Passing a plain array to a
+//! borrowed parameter keeps it plain; passing it to any other parameter shares it, unless it is
+//! moved there.
 //!
 //! A method returns a `Vec` when every array it returns is one nobody else holds.
 //!
@@ -306,6 +308,7 @@ fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Sol
                         borrowed: &borrowed,
                         owned_returns: &owned_returns,
                         lend_shared,
+                        threads_share: &facts.shared_arrays,
                     };
                     if borrowed.contains(&(call.callee, i)) && !lent.lends(m, call, i) {
                         borrowed.remove(&(call.callee, i));
@@ -406,6 +409,8 @@ struct Lending<'s> {
     borrowed: &'s HashSet<(usize, usize)>,
     owned_returns: &'s HashSet<usize>,
     lend_shared: bool,
+    /// The families of the arrays that threads share, which are never lent.
+    threads_share: &'s HashSet<Type>,
 }
 
 impl Lending<'_> {
@@ -435,7 +440,12 @@ impl Lending<'_> {
             return true;
         }
         let param = &self.class.methods[call.callee].params[i];
-        if arg.row || scan::depth(param.ty) > 1 || !self.lend_shared || !self.scans[m].arrays.contains(name) {
+        if arg.row
+            || scan::depth(param.ty) > 1
+            || !self.lend_shared
+            || !self.scans[m].arrays.contains(name)
+            || self.threads_share.contains(&crate::analysis::array_family(param.ty))
+        {
             return false;
         }
         others().all(|(j, other)| {

@@ -43,13 +43,18 @@
 //! access must be. The values themselves stay what they are (`Unsafe`'s answers for a class
 //! literal, see `natives.rs`), so the static fields and the static block that compute them run as
 //! in Java; only the offset arithmetic is never computed. A read or write at an element offset is
-//! a read or write of `a[index]`, which in a program with threads holds the array's lock for the
-//! access. An atomic update of an element is `Builtin::ElementUpdate`, whose operands are the
-//! store it makes, `a[index] = x` (or `a[index] += delta`), so that every analysis sees the store,
-//! and for the compare forms the expected value first; the runtime's function for it
-//! (`java::compare_and_set_element`, ...) reads, compares and writes the element under one borrow
-//! of the array, which in a program with threads is one hold of the array's lock, so no other
-//! access of the array comes between the read and the write.
+//! a read or write of `a[index]`, which in an array that threads share is one atomic action of the
+//! element's cell (an acquire load or a release store of a word). A volatile one
+//! (`getIntVolatile`, `putReferenceVolatile`, a `VarHandle`'s `getVolatile` and `setVolatile`) is
+//! recorded by the index expression of the read or write (`Class::volatile_elements`), which the
+//! generator makes a `SeqCst` load or store of the cell. An atomic update of an element
+//! is `Builtin::ElementUpdate`, whose operands are the store it makes, `a[index] = x` (or
+//! `a[index] += delta`), so that every analysis sees the store, and for the compare forms the
+//! expected value first; the runtime's function for it (`java::compare_and_set_element`, ...)
+//! reads, compares and writes the element in one atomic action: under one borrow of an array of
+//! one thread, and as one compare-and-swap of the element's cell (or under its striped lock, for
+//! an element wider than a word) in an array that threads share, so no other access of the
+//! element comes between the read and the write.
 //!
 //! An element offset may also be computed away from the access: by a static method whose body
 //! returns one of its parameter (`ForkJoinPool.slotOffset(i)`), whose call is the element at its
@@ -993,13 +998,16 @@ impl<'t> Lowering<'t> {
             VarHandleOf::Field(class, field) => {
                 let (object, ty) = self.handle_field(node, symbol, args[0], class, field)?;
                 let place = Place::Field { object: Box::new(object), name: field.to_string() };
-                return self.access_at(node, place, ty, class, &args[1..], update, put).map(Some);
+                return self.access_at(node, place, ty, class, &args[1..], update, put, false).map(Some);
             }
             VarHandleOf::Element(kind) => {
                 let (array, index, ty) =
                     self.handle_element(node, symbol, args[0], (args[1], false), kind, None)?;
                 let place = Place::Index(Box::new(array), Box::new(index));
-                return self.access_at(node, place, ty, usize::MAX, &args[2..], update, put).map(Some);
+                let volatile = matches!(symbol.name, "getVolatile" | "setVolatile");
+                return self
+                    .access_at(node, place, ty, usize::MAX, &args[2..], update, put, volatile)
+                    .map(Some);
             }
             VarHandleOf::ByteView(kind, big_endian) => (kind, big_endian),
         };
@@ -1107,7 +1115,10 @@ impl<'t> Lowering<'t> {
                 (Place::Index(Box::new(array), Box::new(index)), ty, usize::MAX)
             }
         };
-        self.access_at(node, place, ty, class, &args[2..], update, put).map(Some)
+        // `get<Kind>Volatile` and `put<Kind>Volatile`, which matter at an element offset (a
+        // field's accesses are as its declaration makes them).
+        let volatile = symbol.name.ends_with("Volatile");
+        self.access_at(node, place, ty, class, &args[2..], update, put, volatile).map(Some)
     }
 
     /// `U.get<Kind>(base, offset)` or `U.put<Kind>(base, offset, x)` of a primitive of kind `kind`
@@ -1144,7 +1155,8 @@ impl<'t> Lowering<'t> {
 
     /// The access of `Unsafe` or of a `VarHandle` `node` at `place`, of type `ty`, a field of class
     /// `class` or an element: the read, the write of `values[0]` (`put`), or the atomic update
-    /// `update` with `values` as its operands.
+    /// `update` with `values` as its operands. A `volatile` read or write of an element is one of
+    /// `Class::volatile_elements`.
     #[allow(clippy::too_many_arguments)]
     fn access_at(
         &self,
@@ -1155,6 +1167,7 @@ impl<'t> Lowering<'t> {
         values: &[Node<'t>],
         update: Option<FieldUpdate>,
         put: Option<bool>,
+        volatile: bool,
     ) -> Result<ExprKind, Error> {
         let ret = self.ty(node, node.java_type())?;
         if let Some(update) = update {
@@ -1170,6 +1183,9 @@ impl<'t> Lowering<'t> {
             let result = if update == FieldUpdate::CompareAndSet { Type::Boolean } else { ty };
             let call = self.synth(call, node.pos(), result);
             return Ok(self.convert(call, ret).kind);
+        }
+        if let (Place::Index(_, index), true) = (&place, volatile) {
+            self.volatile_elements.borrow_mut().insert(index.id);
         }
         if put == Some(true) {
             let value = self.stored(self.expr(values[0])?, ty);

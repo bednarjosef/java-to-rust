@@ -9,7 +9,8 @@
 //!
 //! The atomic updates of an element through `Unsafe` (`Builtin::ElementUpdate`) are writes of the
 //! same kind, bound the same way; their runtime functions read, compare and write the element
-//! under one borrow of the array, which in a program with threads is one hold of its lock.
+//! under one borrow of an array of one thread, and as one atomic action of the element's cell in
+//! an array that threads share.
 
 use super::*;
 use crate::program::FieldUpdate;

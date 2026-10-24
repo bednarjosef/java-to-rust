@@ -4,7 +4,7 @@
 //! monitor (see docs/multi-threading.md, 3.2); its fields are cells that take no lock. A
 //! `synchronized (o) { .. }` holds the lock for the block (`let _monitor = java::enter(&o);`). So
 //! the lock is taken in the order the Java program takes its monitors, and a deadlock of the
-//! translation is one the Java program has. A `java::Locked` (a shared builder's or array's data)
+//! translation is one the Java program has. A `java::Locked` (a shared builder's data)
 //! is its own monitor too, which the borrows inside a region take once more, as a reentrant lock
 //! allows.
 //!

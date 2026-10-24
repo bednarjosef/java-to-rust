@@ -274,6 +274,7 @@ fn lower_into<'t>(
         module_labels: module_labels(reach),
         thread_statics: None,
         element_classes: lowering.element_classes.take(),
+        volatile_elements: lowering.volatile_elements.take(),
     };
     Ok((class, lowering.real.clone(), failed))
 }

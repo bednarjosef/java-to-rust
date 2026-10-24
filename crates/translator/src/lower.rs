@@ -164,6 +164,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             module_labels,
             thread_statics: None,
             element_classes: lowering.element_classes.take(),
+            volatile_elements: lowering.volatile_elements.take(),
         };
         Ok((class, lowering.real.clone(), failed))
     })
@@ -400,6 +401,8 @@ struct Lowering<'t> {
     notes: RefCell<Vec<crate::ast::Note>>,
     /// The classes of the covariant arrays the code makes (`Class::element_classes`).
     element_classes: RefCell<std::collections::HashMap<ExprId, Type>>,
+    /// The volatile element accesses (`Class::volatile_elements`).
+    volatile_elements: RefCell<std::collections::HashSet<ExprId>>,
     /// The annotation types whose class literals the code has (`Class::annotation_classes`).
     annotation_classes: RefCell<std::collections::BTreeSet<String>>,
     /// The annotation types declared in other classes, whose binary names lowering does not

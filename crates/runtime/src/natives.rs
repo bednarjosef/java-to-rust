@@ -3,7 +3,7 @@
 //! properties that are the same on every run. They behave as HotSpot's do.
 
 use crate::array::Elements;
-use crate::{Exception, throw};
+use crate::{Exception, Source, Target, throw};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,10 +16,11 @@ pub fn arraycopy<T: Clone, A: Elements<T>>(src: &A, src_pos: i32, dest: &A, dest
         return checked_copy(src, src_pos, dest, dest_pos, length, class)
             .unwrap_or_else(|e| crate::throw_exception(e));
     }
+    let (from, to, n) = check_copy::<T>(src.length(), src_pos, dest.length(), dest_pos, length);
     if src.address() == dest.address() {
-        copy_within(&mut dest.items_mut(), src_pos, dest_pos, length);
+        dest.copy_within(from, to, n);
     } else {
-        copy_slice(&src.items(), src_pos, &mut dest.items_mut(), dest_pos, length);
+        src.reading(from..from + n, |items| dest.store_from(to, items));
     }
 }
 
@@ -42,11 +43,11 @@ fn checked_copy<T: Clone, A: Elements<T>>(
     length: i32,
     class: &crate::ElementClass<T>,
 ) -> Result<(), Exception> {
-    let (from, to, n) = copy_bounds::<T>(src.items().len(), src_pos, dest.items().len(), dest_pos, length)
+    let (from, to, n) = copy_bounds::<T>(src.length(), src_pos, dest.length(), dest_pos, length)
         .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
-    let items: Vec<T> = src.items()[from..from + n].to_vec();
+    let items: Vec<T> = src.reading(from..from + n, <[T]>::to_vec);
     let fits = items.iter().take_while(|v| class.refuses(v).is_none()).count();
-    dest.items_mut()[to..to + fits].clone_from_slice(&items[..fits]);
+    dest.store_from(to, &items[..fits]);
     if fits < n {
         let source = src.element_class().map_or("java.lang.Object", |c| c.element);
         let message = format!(
@@ -58,10 +59,17 @@ fn checked_copy<T: Clone, A: Elements<T>>(
     Ok(())
 }
 
-/// `System.arraycopy` from one array to a different one, either of which may be a plain array.
-pub fn copy_slice<T: Clone>(src: &[T], src_pos: i32, dest: &mut [T], dest_pos: i32, length: i32) {
-    let (from, to, n) = check_copy::<T>(src.len(), src_pos, dest.len(), dest_pos, length);
-    dest[to..to + n].clone_from_slice(&src[from..from + n]);
+/// `System.arraycopy` from one array to a different one, either of which may be a plain array:
+/// only the elements copied are read and stored.
+pub fn copy_slice<T: Clone>(
+    src: &(impl Source<T> + ?Sized),
+    src_pos: i32,
+    dest: &mut (impl Target<T> + ?Sized),
+    dest_pos: i32,
+    length: i32,
+) {
+    let (from, to, n) = check_copy::<T>(src.length(), src_pos, dest.length(), dest_pos, length);
+    dest.store(to, &src.range(from..from + n));
 }
 
 /// `System.arraycopy(a, src_pos, a, dest_pos, length)` within one array: overlapping ranges are
@@ -151,7 +159,7 @@ pub fn try_arraycopy<T: Clone, A: Elements<T>>(
     if let Some(class) = checked_destination(src, dest) {
         return checked_copy(src, src_pos, dest, dest_pos, length, class);
     }
-    let (src_len, dest_len) = (src.items().len(), dest.items().len());
+    let (src_len, dest_len) = (src.length(), dest.length());
     try_bounds::<T>(src_len, src_pos, dest_len, dest_pos, length)?;
     arraycopy(src, src_pos, dest, dest_pos, length);
     Ok(())
@@ -169,20 +177,10 @@ pub fn try_arraycopy_with<T: Clone, U: Clone, S: Elements<T>, D: Elements<U>>(
     length: i32,
     convert: impl Fn(&T) -> Result<U, &'static str>,
 ) -> Result<(), Exception> {
-    let (from, to, n) = copy_bounds::<T>(src.items().len(), src_pos, dest.items().len(), dest_pos, length)
+    let (from, to, n) = copy_bounds::<T>(src.length(), src_pos, dest.length(), dest_pos, length)
         .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
-    let mut stored = Vec::with_capacity(n);
-    let mut failure = None;
-    for item in &src.items()[from..from + n] {
-        match convert(item) {
-            Ok(u) => stored.push(u),
-            Err(message) => {
-                failure = Some(message);
-                break;
-            }
-        }
-    }
-    dest.items_mut()[to..to + stored.len()].clone_from_slice(&stored);
+    let (stored, failure) = src.reading(from..from + n, |items| crate::copy_refs::converted(items, &convert));
+    dest.store_from(to, &stored);
     match failure {
         Some(message) => Err(Exception::new("java.lang.ArrayStoreException", message)),
         None => Ok(()),
@@ -217,13 +215,13 @@ pub fn arraycopy_mismatch(src: CopyKind, dest: CopyKind) -> Exception {
 
 /// `copy_slice`, where the program observes the exception (see `try_arraycopy`).
 pub fn try_copy_slice<T: Clone>(
-    src: &[T],
+    src: &(impl Source<T> + ?Sized),
     src_pos: i32,
-    dest: &mut [T],
+    dest: &mut (impl Target<T> + ?Sized),
     dest_pos: i32,
     length: i32,
 ) -> Result<(), Exception> {
-    try_bounds::<T>(src.len(), src_pos, dest.len(), dest_pos, length)?;
+    try_bounds::<T>(src.length(), src_pos, dest.length(), dest_pos, length)?;
     copy_slice(src, src_pos, dest, dest_pos, length);
     Ok(())
 }
@@ -396,34 +394,40 @@ fn byte_range(len: usize, size: usize, offset: i64, bytes: i64) -> std::ops::Ran
 /// The bytes `offset..offset + bytes` of an array of primitives, the offset counted from the start
 /// of the array object (`array_base_offset`), as the JVM keeps them.
 fn read_bytes<S: RawBytes, A: Elements<S>>(array: &A, offset: i64, bytes: i64) -> Vec<u8> {
-    let items = array.items();
-    let range = byte_range(items.len(), S::SIZE, offset, bytes);
-    let mut out = Vec::with_capacity(range.len());
-    let mut element = vec![0; S::SIZE];
-    for i in range.start / S::SIZE..range.end.div_ceil(S::SIZE) {
-        items[i].put(&mut element);
-        let from = range.start.max(i * S::SIZE) - i * S::SIZE;
-        let to = range.end.min((i + 1) * S::SIZE) - i * S::SIZE;
-        out.extend_from_slice(&element[from..to]);
-    }
-    out
+    let range = byte_range(array.length(), S::SIZE, offset, bytes);
+    let first = range.start / S::SIZE;
+    array.reading(first..range.end.div_ceil(S::SIZE), |items| {
+        let mut out = Vec::with_capacity(range.len());
+        let mut element = vec![0; S::SIZE];
+        for (k, item) in items.iter().enumerate() {
+            let i = first + k;
+            RawBytes::put(*item, &mut element);
+            let from = range.start.max(i * S::SIZE) - i * S::SIZE;
+            let to = range.end.min((i + 1) * S::SIZE) - i * S::SIZE;
+            out.extend_from_slice(&element[from..to]);
+        }
+        out
+    })
 }
 
 /// Writes `bytes` into an array of primitives from `offset` on (see `read_bytes`), changing only
 /// those bytes of the elements they fall in.
 fn write_bytes<D: RawBytes, B: Elements<D>>(array: &B, offset: i64, bytes: &[u8]) {
-    let mut items = array.items_mut();
-    let range = byte_range(items.len(), D::SIZE, offset, bytes.len() as i64);
-    let mut element = vec![0; D::SIZE];
-    let mut taken = 0;
-    for i in range.start / D::SIZE..range.end.div_ceil(D::SIZE) {
-        items[i].put(&mut element);
-        let from = range.start.max(i * D::SIZE) - i * D::SIZE;
-        let to = range.end.min((i + 1) * D::SIZE) - i * D::SIZE;
-        element[from..to].copy_from_slice(&bytes[taken..taken + to - from]);
-        taken += to - from;
-        items[i] = D::get(&element);
-    }
+    let range = byte_range(array.length(), D::SIZE, offset, bytes.len() as i64);
+    let first = range.start / D::SIZE;
+    array.writing(first..range.end.div_ceil(D::SIZE), |items| {
+        let mut element = vec![0; D::SIZE];
+        let mut taken = 0;
+        for (k, item) in items.iter_mut().enumerate() {
+            let i = first + k;
+            RawBytes::put(*item, &mut element);
+            let from = range.start.max(i * D::SIZE) - i * D::SIZE;
+            let to = range.end.min((i + 1) * D::SIZE) - i * D::SIZE;
+            element[from..to].copy_from_slice(&bytes[taken..taken + to - from]);
+            taken += to - from;
+            *item = D::get(&element);
+        }
+    })
 }
 
 /// `Unsafe.copyMemory0` and `copySwapMemory0` between two arrays of primitives (which may be one
@@ -586,23 +590,23 @@ mod tests {
         let bytes = crate::from_vec(vec![1i8, 0, 2, 0, 3, 0]);
         let chars = crate::from_vec(vec![0u16; 3]);
         copy_memory(&bytes, base, &chars, base, 6, 0);
-        assert_eq!(*chars.items(), vec![1, 2, 3]);
+        assert_eq!(chars.take_items(), vec![1, 2, 3]);
         // Within one array, overlapping: as if through a buffer.
         let ints = crate::from_vec(vec![1i32, 2, 3, 4]);
         copy_memory(&ints, base, &ints, base + 4, 12, 0);
-        assert_eq!(*ints.items(), vec![1, 1, 2, 3]);
+        assert_eq!(ints.take_items(), vec![1, 1, 2, 3]);
         // Swapping the bytes of each `char`.
         let swapped = crate::from_vec(vec![0u16; 1]);
         copy_memory(&crate::from_vec(vec![0x0102u16]), base, &swapped, base, 2, 2);
-        assert_eq!(*swapped.items(), vec![0x0201]);
+        assert_eq!(swapped.take_items(), vec![0x0201]);
         // Part of a `long`.
         let longs = crate::from_vec(vec![0i64]);
         copy_memory(&crate::from_vec(vec![-1i8; 2]), base, &longs, base + 2, 2, 0);
-        assert_eq!(*longs.items(), vec![0xffff_0000]);
+        assert_eq!(longs.take_items(), vec![0xffff_0000]);
         // A char read from the bytes of a `byte[]`, and an int written over two chars.
         assert_eq!(get_memory::<u16, _, _>(&crate::from_vec(vec![0i8, 0x41, 0x42]), base + 1), 0x4241);
         let two = crate::from_vec(vec![0u16; 2]);
         put_memory(&two, base, 0x0003_0002i32);
-        assert_eq!(*two.items(), vec![2, 3]);
+        assert_eq!(two.take_items(), vec![2, 3]);
     }
 }

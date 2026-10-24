@@ -193,15 +193,20 @@ impl<C: BuilderCell> Builder<C> {
     }
 
     /// `sb.append(chars, offset, len)`.
-    pub fn append_chars_range(&self, chars: &[u16], offset: i32, len: i32) -> &Self {
+    pub fn append_chars_range(
+        &self,
+        chars: &(impl crate::Source<u16> + ?Sized),
+        offset: i32,
+        len: i32,
+    ) -> &Self {
         let end = offset as i64 + len as i64;
-        if offset < 0 || len < 0 || end > chars.len() as i64 {
+        if offset < 0 || len < 0 || end > chars.length() as i64 {
             throw(
                 "java.lang.IndexOutOfBoundsException",
-                &format!("Range [{offset}, {offset} + {len}) out of bounds for length {}", chars.len()),
+                &format!("Range [{offset}, {offset} + {len}) out of bounds for length {}", chars.length()),
             );
         }
-        self.append_chars(&chars[offset as usize..end as usize])
+        self.append_chars(&chars.range(offset as usize..end as usize))
     }
 
     /// `sb.append(s, start, end)` of a part of a string. The check is Java 26's
@@ -492,24 +497,29 @@ impl<C: BuilderCell> Builder<C> {
 
     /// `sb.getChars(begin, end, dst, dst_begin)`: the units `begin..end` into `dst` from
     /// `dst_begin`.
-    pub fn get_chars(&self, begin: i32, end: i32, dst: &mut [u16], dst_begin: i32) {
+    pub fn get_chars(
+        &self,
+        begin: i32,
+        end: i32,
+        dst: &mut (impl crate::Target<u16> + ?Sized),
+        dst_begin: i32,
+    ) {
         let value = self.0.units();
         if begin < 0 || begin > end || end as usize > value.len() {
             out_of_bounds(format!("Range [{begin}, {end}) out of bounds for length {}", value.len()));
         }
         let count = (end - begin) as usize;
-        if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
+        if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.length() as i64 {
             throw(
                 "java.lang.IndexOutOfBoundsException",
                 &format!(
                     "Range [{dst_begin}, {}) out of bounds for length {}",
                     dst_begin as i64 + count as i64,
-                    dst.len()
+                    dst.length()
                 ),
             );
         }
-        let at = dst_begin as usize;
-        dst[at..at + count].copy_from_slice(&value[begin as usize..end as usize]);
+        dst.store(dst_begin as usize, &value[begin as usize..end as usize]);
     }
 
     /// `sb.getChars(begin, end, dst, dst_begin)` on a builder held as a `CharSequence`, whose
@@ -522,7 +532,7 @@ impl<C: BuilderCell> Builder<C> {
         dst_begin: i32,
     ) {
         match dst {
-            Some(dst) => self.get_chars(begin, end, &mut dst.items_mut(), dst_begin),
+            Some(dst) => self.get_chars(begin, end, &mut crate::lent::Handled(dst), dst_begin),
             None => {
                 self.substring(begin, end);
                 crate::throw_exception(crate::string::null_destination())

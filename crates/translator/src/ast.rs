@@ -315,6 +315,12 @@ pub struct Class {
     /// the expression that makes it: `String[]` for a `new String[n]`, and `Object[]` for a copy
     /// into a class that is not the source's (`Arrays.copyOf(a, n, Object[].class)`).
     pub element_classes: HashMap<ExprId, Type>,
+    /// The element accesses that Java makes sequentially consistent, a volatile read or write
+    /// through a `VarHandle` (`getVolatile`, `setVolatile`) or `Unsafe` (`getIntVolatile`), by
+    /// the index expression of the read `a[i]` or the write `a[i] = x` that lowering makes of it
+    /// (`lower::handles`). In an array that threads share, they are `SeqCst` loads and stores of
+    /// the element's cell.
+    pub volatile_elements: HashSet<ExprId>,
 }
 
 impl Class {
