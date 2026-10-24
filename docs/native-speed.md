@@ -136,7 +136,8 @@ at each collection, and marking in parallel. Planned beyond it:
 
 ### 1.5 Memory pages and layout
 
-- The heap and the program's code use huge pages, which attacks the TLB misses.
+- Built: the heap uses huge pages (docs/collector.md, "Huge pages"). The program's code on huge
+  pages (BOLT's `-hugify`) measured within noise on the Minecraft benchmark, and is not used.
 - Hot fields of an object go first and cold ones last. Hot means read in loops or in many
   methods, by static count.
 

@@ -159,6 +159,8 @@ struct Meta {
     slots: u32,
     /// Where a small block's first slot is, past the block's address (see `color`).
     start: u32,
+    /// Whether a free block's memory holds what it last held rather than zeros (`free_blocks`).
+    dirty: bool,
     /// The next block on its class's list.
     next: u32,
     /// `slot = offset * magic >> 32`, a division by the slot size.
@@ -320,6 +322,9 @@ unsafe extern "C" {
 const PROT_READ_WRITE: i32 = 3;
 const MAP_PRIVATE_ANONYMOUS_NORESERVE: i32 = 0x02 | 0x20 | 0x4000;
 const MADV_DONTNEED: i32 = 4;
+const MADV_HUGEPAGE: i32 = 14;
+/// The size of a huge page, to which the heap is aligned.
+const HUGE_PAGE: usize = 2 << 20;
 const SIGPWR: i32 = 30;
 const SA_SIGINFO_RESTART: i32 = 4 | 0x1000_0000;
 const SYS_FUTEX: i64 = 202;
@@ -358,8 +363,15 @@ fn number_from(name: &std::ffi::CStr) -> Option<usize> {
 /// Sets the heap up, on the first allocation.
 #[cold]
 fn start(h: &mut Heap) {
-    let raw = reserve(HEAP_BYTES + BLOCK) as usize;
-    h.base = (raw + BLOCK - 1) & !(BLOCK - 1);
+    let raw = reserve(HEAP_BYTES + HUGE_PAGE) as usize;
+    h.base = (raw + HUGE_PAGE - 1) & !(HUGE_PAGE - 1);
+    // The heap asks for huge pages, which the system then makes at a fault even when it would
+    // have to compact memory first: without them, each 4 KB of the heap takes an entry of the
+    // processor's address cache (TLB), which a program that follows pointers across a large heap
+    // keeps missing. `JAVA_GC_HUGE_PAGES=0` leaves the system's default.
+    if number_from(c"JAVA_GC_HUGE_PAGES") != Some(0) {
+        unsafe { madvise(h.base as *mut u8, HEAP_BYTES, MADV_HUGEPAGE) };
+    }
     h.meta = reserve(MAX_BLOCKS * std::mem::size_of::<Meta>()) as *mut Meta;
     h.runs = reserve(MAX_BLOCKS * std::mem::size_of::<(u32, u32)>()) as *mut (u32, u32);
     BASE.store(h.base, Ordering::Release);
@@ -413,14 +425,24 @@ impl Heap {
         start
     }
 
-    /// Gives `n` blocks from `start` back: their memory goes back to the system, zeroed.
+    /// Gives `n` blocks from `start` back. Their memory goes back to the system, zeroed, only as
+    /// whole huge pages: the huge page that one 64 KB block was cut out of would become small
+    /// pages. A free block whose memory stays keeps what it held (`dirty`).
     fn free_blocks(&mut self, start: usize, n: usize) {
         for b in start..start + n {
             let m = self.meta(b);
             m.kind = FREE;
             m.listed = false;
+            m.dirty = true;
         }
-        unsafe { madvise(self.block_address(start) as *mut u8, n << BLOCK_SHIFT, MADV_DONTNEED) };
+        const PER_PAGE: usize = HUGE_PAGE >> BLOCK_SHIFT;
+        let (first, end) = (start / PER_PAGE * PER_PAGE, (start + n).div_ceil(PER_PAGE) * PER_PAGE);
+        for page in (first..end).step_by(PER_PAGE) {
+            if (page..page + PER_PAGE).all(|b| self.meta(b).kind == FREE) {
+                unsafe { madvise(self.block_address(page) as *mut u8, HUGE_PAGE, MADV_DONTNEED) };
+                (page..page + PER_PAGE).for_each(|b| self.meta(b).dirty = false);
+            }
+        }
         unsafe { *self.runs.add(self.run_count) = (start as u32, n as u32) };
         self.run_count += 1;
     }
@@ -911,6 +933,13 @@ fn allocate_large(layout: Layout) -> *mut u8 {
     h.larges += 1;
     let n = (color + layout.size()).div_ceil(BLOCK).max(1);
     let b = h.take_blocks(n);
+    // A large allocation is handed out zeroed.
+    for k in b..b + n {
+        if h.meta(k).dirty {
+            unsafe { ptr::write_bytes(h.block_address(k) as *mut u8, 0, BLOCK) };
+            h.meta(k).dirty = false;
+        }
+    }
     let m = h.meta(b);
     m.kind = LARGE;
     m.no_scan = layout.align() < 8;
