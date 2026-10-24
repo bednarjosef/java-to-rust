@@ -23,14 +23,33 @@ the machine running out of memory.
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`: `java.base` plus 14 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events) and `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) | seconds |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
-| `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below) | stopped by the memory cap, see below |
-| `summary` | splits the census by origin, into the server, each library and the JDK (`scripts/census-by-origin.py`) | seconds |
+| `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
+| `summary` | splits the census by origin, into the server, each library and the JDK (`scripts/census-by-origin.py`), and compares it with the previous one (`scripts/census-compare.py`, below) | seconds |
 
 The census gives the translator only `Main.java` as a source file. The rest of the server is a
 `--library` root like the libraries and the JDK modules. Each library's root is its published
 sources where `library-sources` has them, and its decompiled code otherwise. This way javac reads and
 attributes only the classes that the code reachable from `main` uses, not all 5,037 server files
 and 2,411 fastutil files. fastutil is then only the few dozen classes the server reaches.
+
+### Comparing censuses
+
+`scripts/census-compare.py OLD NEW [NAME=ROOT...]` reads two censuses (each a `census.json` or a
+directory with one) and prints, in plain text:
+
+- whether each is complete, or where it stopped. A census that stopped has only the rejections
+  found before it stopped, so its pieces look better than they are;
+- for each origin, the pieces and the share that translate, old and new side by side, with the
+  change in points and in pieces that translate. With no roots given, the origins are the
+  census's own, program and library;
+- the rejection messages whose pieces went down the most and up the most, and the new ones, each
+  with its old and new count (a message's pieces as the census counts them, `--top N` of each,
+  20 by default).
+
+The `summary` step runs it with the roots of `census-by-origin.py`, against `census-previous/`
+(or `PREVIOUS_CENSUS`, such as a census kept by hand under another name), and writes the result
+to `census/compare.txt` as well. Only one previous census is kept: each `census` step deletes
+the one before last.
 
 ### Decompiling with the libraries
 

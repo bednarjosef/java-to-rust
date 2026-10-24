@@ -24,6 +24,9 @@
 # MEMORY_CAP         the most memory the census (the translator with its javac) may take, as
 #                    systemd's MemoryMax, such as 6G; it is stopped there rather than the machine
 #                    running out (default 6G; empty for none, or where systemd-run is missing)
+# PREVIOUS_CENSUS    the census that the summary compares the latest with, a directory with a
+#                    census.json (default $MINECRAFT_CACHE/census-previous, where the census step
+#                    moves the census before it, if it has one)
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,6 +39,7 @@ java=${JAVA:-java}
 translator=${TRANSLATOR:-${CARGO_TARGET_DIR:-$root/target}/release/java-to-rust}
 read -r -a slot <<< "${SLOT:-}"
 memory_cap=${MEMORY_CAP-6G}
+previous=${PREVIOUS_CENSUS:-$cache/census-previous}
 
 # The JDK modules whose sources are libraries of the translation, besides java.base.
 # java.desktop needs java.datatransfer and java.prefs; the server records events with jdk.jfr.
@@ -200,10 +204,15 @@ summarize_errors() {
 # The translator's census of the server, past every rejection and every compile error in the
 # decompiled sources (--keep-going), with its time and peak memory. Only the main class's file is
 # given: the rest of the server is a library root like the others, so javac reads and attributes
-# only the classes that the code reachable from main uses.
+# only the classes that the code reachable from main uses. The census before, if it wrote its JSON,
+# is moved to census-previous for the summary to compare with; the one before that is deleted.
 census() {
   [ -x "$translator" ] || (cd "$root" && "${slot[@]}" cargo build -q --release -p java-to-rust)
   local out=$cache/census
+  if [ -f "$out/census.json" ]; then
+    rm -rf "$cache/census-previous"
+    mv "$out" "$cache/census-previous"
+  fi
   mkdir -p "$out"
   local -a libraries
   mapfile -t libraries < <(library_args)
@@ -231,7 +240,8 @@ census() {
   head -n 40 "$out/census.txt"
 }
 
-# The census split by origin: the server, each library, the JDK (census-by-origin.py).
+# The census split by origin: the server, each library, the JDK (census-by-origin.py), and
+# compared with the previous census, if one is kept (census-compare.py).
 summary() {
   local -a roots=("server=$cache/src/server")
   local dir
@@ -244,6 +254,11 @@ summary() {
   done
   python3 -I "$root/scripts/census-by-origin.py" "$cache/census/census.json" "${roots[@]}" \
     | tee "$cache/census/by-origin.txt"
+  if [ -f "$previous/census.json" ]; then
+    echo
+    python3 -I "$root/scripts/census-compare.py" "$previous" "$cache/census" "${roots[@]}" \
+      | tee "$cache/census/compare.txt"
+  fi
 }
 
 steps=("$@")
