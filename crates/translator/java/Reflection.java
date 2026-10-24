@@ -67,6 +67,15 @@ final class Method {
         return (modifiers & 0x80) != 0;
     }
 
+    // The table holds the methods that the sources declare, none of which is synthetic.
+    public boolean isSynthetic() {
+        return (modifiers & 0x1000) != 0;
+    }
+
+    public boolean isDefault() {
+        return (modifiers & (0x400 | 1 | 8)) == 1 && clazz.isInterface();
+    }
+
     public void setAccessible(boolean flag) {
     }
 

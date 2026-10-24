@@ -98,7 +98,9 @@ program where such a lookup can happen, so they can be checked before the progra
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final
   field is never written, even after `setAccessible(true)`; `set` throws
   `IllegalAccessException`, since the analyses rely on final fields keeping their value. Generic methods, and members
-  whose types do not box to and from `Object`, are not in the table.
+  whose types do not box to and from `Object`, are not in the table, and neither are enum
+  constants nor the methods that javac adds (bridges, lambdas' bodies), so no method of the
+  table is synthetic; `isDefault` is Java's test of the modifiers.
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
   and `NoSuchMethodException` or `NoSuchFieldException` for a member the table does not hold.
