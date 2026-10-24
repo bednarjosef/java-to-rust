@@ -858,6 +858,20 @@ class InvocationTargetException extends ReflectiveOperationException {
     }
 }
 
+class UndeclaredThrowableException extends RuntimeException {
+    public UndeclaredThrowableException(Throwable undeclaredThrowable) {
+        super((String) null, undeclaredThrowable);
+    }
+
+    public UndeclaredThrowableException(Throwable undeclaredThrowable, String s) {
+        super(s, undeclaredThrowable);
+    }
+
+    public Throwable getUndeclaredThrowable() {
+        return super.getCause();
+    }
+}
+
 class InstantiationException extends ReflectiveOperationException {
     public InstantiationException() {
     }
