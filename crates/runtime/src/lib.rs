@@ -10,6 +10,7 @@ pub use slice::*;
 
 use std::fmt;
 
+mod allocation_counts;
 mod arguments;
 mod boxed;
 mod builder;
@@ -73,6 +74,7 @@ mod unix;
 mod unsigned;
 mod vm;
 pub mod wtf8;
+pub use allocation_counts::{AllocationCount, count_allocation};
 pub use arguments::main_args;
 pub use boxed::*;
 pub use builder::{Builder, BuilderCell, SharedStringBuilder, StringBuilder, same_builder};

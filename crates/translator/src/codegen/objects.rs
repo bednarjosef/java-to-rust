@@ -1464,6 +1464,21 @@ impl<'a> Gen<'a> {
         } else {
             format!("{pointer}::new({cell}::new({call}))")
         };
+        let object = match std::env::var_os("JAVA_TO_RUST_COUNT_ALLOCATIONS") {
+            // Counts of the objects made at each `new`, for profiling (`java::count_allocation`).
+            Some(_) => {
+                let at =
+                    self.class.methods.get(self.method).map_or(String::new(), |m| {
+                        format!(" in {}.{}", self.class.types[m.class].name, m.name)
+                    });
+                format!(
+                    "{{ static COUNT: java::AllocationCount = java::AllocationCount::new({:?}); \
+                     java::count_allocation(&COUNT); {object} }}",
+                    format!("{name}{at}")
+                )
+            }
+            None => object,
+        };
         Code::atom(match rep {
             Some(t) => format!("{}({object})", self.variant(t, c)),
             None => object,

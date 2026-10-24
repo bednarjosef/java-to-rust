@@ -47,8 +47,11 @@ Differences of 20% or less between two runs are often noise or the placement of 
 
 ## What the times come from
 
-Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`, and from
-profiles taken with `perf`.
+Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`, from
+profiles taken with `perf`, and from counts of the objects each `new` makes: a program
+translated with `JAVA_TO_RUST_COUNT_ALLOCATIONS=1` set prints, when it exits, the 60 `new`
+sites (class, and the method the `new` is in) that made the most objects, on standard error
+(`java::count_allocation`).
 
 - **Allocation (BinaryTrees 2.7x, NodeList 0.7x).** Objects live in the runtime's garbage
   collected heap (docs/collector.md): an allocation takes a slot from a per-thread list, and a
