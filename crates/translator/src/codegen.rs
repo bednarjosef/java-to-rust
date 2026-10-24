@@ -77,6 +77,7 @@ mod plain_arrays;
 mod range_loops;
 mod shared_strings;
 mod sliced_loops;
+mod stack_objects;
 mod sync;
 
 use arrays::name_part;
@@ -235,8 +236,13 @@ fn generate_with(
         written: HashSet::new(),
         rejected: Vec::new(),
         closures: Vec::new(),
+        slots: HashMap::new(),
+        slot_param: String::new(),
+        on_stack: false,
+        stack_forms: HashSet::new(),
     };
     g.shared_names = g.shared_names();
+    g.stack_forms = g.stack_forms();
     let header = match modules {
         Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         None => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
@@ -453,6 +459,16 @@ struct Gen<'a> {
     rejected: Vec<Error>,
     /// The methods written with a call that throws inside a closure, at their positions.
     closures: Vec<Error>,
+    /// The slots of the method being written, by the `new` or call of a factory that makes its
+    /// object in each: the slot's name and the object's class (see `stack_objects`).
+    slots: HashMap<ExprId, (String, usize)>,
+    /// The name of the slot that a function's form on the stack is given.
+    slot_param: String,
+    /// Whether the constructor or factory being written is its form on the stack, which makes
+    /// its object in the slot it is given.
+    on_stack: bool,
+    /// The constructors and factories that get a form on the stack (see `stack_objects`).
+    stack_forms: HashSet<usize>,
 }
 
 impl<'a> Gen<'a> {
@@ -632,6 +648,16 @@ impl<'a> Gen<'a> {
     }
 
     fn method(&mut self, index: usize) {
+        self.method_form(index);
+        if self.stack_forms.contains(&index) {
+            self.on_stack = true;
+            self.method_form(index);
+            self.on_stack = false;
+        }
+    }
+
+    /// Writes method `index`, or its form on the stack when `on_stack` is set.
+    fn method_form(&mut self, index: usize) {
         if !CATCHING.with(|c| c.get()) {
             return self.write_method(index);
         }
@@ -651,6 +677,7 @@ impl<'a> Gen<'a> {
     fn write_method(&mut self, index: usize) {
         let m = &self.class.methods[index];
         let outer = WRITING.with(|w| w.replace(Some(m.pos)));
+        let outer_slots = std::mem::take(&mut self.slots);
         self.enter_method(index);
         let start = self.out.len();
         let name = &self.class.types[m.class].name;
@@ -681,6 +708,7 @@ impl<'a> Gen<'a> {
         } else if !m.is_static && !m.is_ctor {
             params.push(format!("this: {}", self.this_type()));
         }
+        let receivers = params.len();
         params.extend(self.typed_params(index, true));
         let ret = self.ret_text(index);
         // The body of a method or constructor that never runs may call what was never emitted,
@@ -724,9 +752,21 @@ impl<'a> Gen<'a> {
         } else {
             self.fn_names[index].clone()
         };
+        // The `new`s and calls whose objects the method makes in slots on its stack.
+        let sites = if never_runs { Vec::new() } else { self.stack_sites(index) };
+        self.name_slots(index, &sites);
+        let fn_name = if self.on_stack {
+            // The slot comes after the receiver.
+            let param = format!("{}: {}", self.slot_param, self.slot_param_type(index));
+            params.insert(receivers, param);
+            format!("{fn_name}_on_stack")
+        } else {
+            fn_name
+        };
         let generics = self.type_params(&m.type_params).0;
         self.line(&format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")));
         self.indent += 1;
+        self.declare_slots(&sites);
         if m.name == "<clinit>" {
             // A rewritten `<clinit>` keeps its own state, which is its guard (`lower/clinit_errors.rs`).
             if !crate::lower::rewritten_clinit(&self.class.types[m.class]) {
@@ -788,6 +828,7 @@ impl<'a> Gen<'a> {
         if let Err(e) = exceptions::check_closures(&self.out[start..]) {
             self.closures.push(Error { pos: m.pos, ..e });
         }
+        self.slots = outer_slots;
         WRITING.with(|w| w.set(outer));
     }
 

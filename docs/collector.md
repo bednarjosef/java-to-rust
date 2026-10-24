@@ -90,6 +90,54 @@ possible classes (`java::Thin`, docs/object-model.md 1.2). The roots are:
 
 Slots are scanned whole, word by word, except in blocks that cannot hold pointers.
 
+## Objects on the stack
+
+An object that never leaves the method that makes it (`analysis/escape.rs`) is made in a
+`java::Slot` in that method's frame instead of the heap: the method declares `let slot_1 =
+java::Slot::<Point>::new();` at its start, and where Java says `new`, `slot_1.put(Point::new(1,
+2))` makes the object there and returns the same `java::Arc` handle that the heap would, pointing
+into the frame, so no other code changes. A method that returns a new object of its own, such as
+`List.iterator()`, has a second form that makes it in a slot its caller passes,
+`iterator_on_stack(this, &slot_2)`, used where the caller keeps the object. So does a
+constructor that makes its object itself (docs/object-model.md 1.4).
+
+The collector needs nothing for them:
+
+- **What they point to stays alive.** A slot is in a live frame, between the stack pointer its
+  thread stopped at and the stack's top, so its words are scanned as roots like any local.
+- **They are never collected.** A handle to a slot points outside the heap's address range, and
+  the marker drops every word outside it (`Marker::candidate`): the slot is never marked,
+  scanned as a heap slot, or freed.
+- **Nothing reaches them once the frame is gone.** The analysis proves that no handle to the
+  object is stored in a field, an array element, a static or a closure, returned, thrown, or
+  passed to a call that may keep it; anything it does not model counts as kept. The one field
+  it may be stored in is one of another object of the same frame that only that object's own
+  methods read (a lambda's capture, an iterator's list), when that object is kept no longer.
+  The object is then held only by the method's variables and its other objects.
+- **A slot in a loop** is filled again on every iteration, so the object of the previous one
+  must be unreachable by then: every variable that may hold the object must be declared inside
+  the body of the innermost loop around the `new`, which makes it a new variable on each
+  iteration that Java does not let the next iteration read before assigning it, and every
+  object of the frame that holds it must be made in that loop and follow the same rule. A
+  factory's object is made outside every loop of the factory, once per call, and the caller's
+  slot then follows the caller's loops by the same rule.
+- **Identity.** The identity hash is the address, unique while the object lives; two objects of
+  one slot in a loop, never alive at once, may share it, which Java allows. A `synchronized`
+  block, `wait` or `notify` on an object counts as an escape; a `synchronized` method called on
+  one locks it by its address or by the lock inside it, as on the heap, and unlocks it before it
+  returns.
+- **Threads.** Passing an object to another thread is an escape, so a stack object is only ever
+  used by the thread whose stack holds it.
+- **What it owns.** A slot is never dropped, as a heap object is not: memory its fields own (a
+  `Vec`'s buffer, in the heap) is found unreachable once no frame or object points to it.
+
+A method declares at most 8 slots, and only for objects of up to 16 fields of a class that is
+not a Rust generic, an owned value or a closure. A call of a factory is written in its form on
+the stack only when it is one of the plain forms of a call (a static method, a method of the
+receiver's class, or a body on an enum without a dispatcher); any other is written as usual, its
+object goes in the heap, and the slot stays empty. Translating with `JAVA_TO_RUST_HEAP_ONLY=1`
+puts every object in the heap.
+
 ## Marking and sweeping in parallel
 
 Once more than 16 MB was alive after the last collection, helper threads mark and sweep with the
@@ -141,7 +189,8 @@ thread unregisters when it ends; its later frees during its exit go straight bac
 - An integer on a stack that happens to look like an address keeps its slot alive: memory,
   never correctness.
 - A pointer kept where the collector does not look would be freed while in use. Everything the
-  program allocates is in the heap, statics and thread-local storage are scanned, and the only
+  program allocates is in the heap or, for objects on the stack, in a frame that is scanned;
+  statics and thread-local storage are scanned, and the only
   memory outside them is the C library's own, which holds no handles except a starting thread's
   closure (covered above).
 - The plan for a faster and smaller heap (objects without headers, 4-byte references,

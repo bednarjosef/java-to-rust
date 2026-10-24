@@ -1214,7 +1214,7 @@ impl<'a> Gen<'a> {
         };
         // A new object becomes a value of the target's enum directly.
         if let ExprKind::New { ctor: Some(ctor), args, .. } = &value.kind {
-            return self.new_object_as(*ctor, args, Some(t));
+            return self.new_object_as(value.id, *ctor, args, Some(t));
         }
         let from = self.enum_of(value);
         if from == Some(t) {
@@ -1399,9 +1399,9 @@ impl<'a> Gen<'a> {
         self.group_names[&group].clone()
     }
 
-    /// The one method that every variant of the enum of `t` runs for a call of `resolved`, where
-    /// its body is emitted on the enum itself, so that the call needs no dispatcher.
-    fn enum_body(&self, t: usize, resolved: usize) -> Option<usize> {
+    /// The body that a call of `resolved` on the enum of `t` calls directly, when it calls no
+    /// dispatcher (see `dispatch_name`).
+    pub(super) fn enum_body(&self, t: usize, resolved: usize) -> Option<usize> {
         let h = &self.class.hierarchy;
         let declared = self.class.methods[resolved].class;
         match self.enum_targets(t, resolved)[..] {

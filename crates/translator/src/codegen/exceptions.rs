@@ -727,7 +727,7 @@ impl<'a> Gen<'a> {
                 continue;
             }
             self.method = *ctor;
-            let object = self.new_object_as(*ctor, args, Some(throwable)).text;
+            let object = self.new_object_as(new.id, *ctor, args, Some(throwable)).text;
             // The form without a message comes first (`Lowering::raised_objects`).
             let bare = if args.is_empty() { " if e.message.is_none()" } else { "" };
             self.line(&format!("{}{bare} => {object},", rust_string(&self.class.types[*c].name)));

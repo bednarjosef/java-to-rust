@@ -204,7 +204,7 @@ fn an_anonymous_class_is_a_variant_of_its_interface() {
             "struct OrderInMain {\n}",
             "struct OrderInMain2 {\n}",
             "enum AOrderView<'a> {\n    OrderInMain(&'a Arc<OrderInMain>) = 2,\n    OrderInMain2(&'a Arc<OrderInMain2>) = 3,\n}",
-            "AOrder::OrderInMain(Arc::new(OrderInMain::new()))",
+            "AOrder::OrderInMain(slot_1.put(OrderInMain::new()))",
         ],
     );
 }

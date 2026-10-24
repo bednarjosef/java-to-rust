@@ -47,6 +47,9 @@ extern "C" fn report() {
     counts.sort_unstable_by(|a, b| b.cmp(a));
     let total: u64 = counts.iter().map(|c| c.0).sum();
     eprintln!("[allocations] {total} objects of {} classes", counts.len());
+    // The sites whose objects go in slots on the stack (docs/collector.md) say so in their names.
+    let stack: u64 = counts.iter().filter(|c| c.1.ends_with(" on the stack")).map(|c| c.0).sum();
+    eprintln!("[allocations] {stack} on the stack ({:.1}%)", 100.0 * stack as f64 / total.max(1) as f64);
     for (count, name) in counts.iter().take(60) {
         eprintln!("[allocations] {count:>12} {:5.1}% {name}", 100.0 * *count as f64 / total.max(1) as f64);
     }
