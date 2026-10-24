@@ -167,7 +167,8 @@ impl Circle {
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 struct Base(java::Thin);
-enum BaseView<'a> { Circle(&'a Arc<RefCell<Circle>>), Rect(&'a Arc<RefCell<Rect>>) }
+#[repr(u16)]
+enum BaseView<'a> { Circle(&'a Arc<RefCell<Circle>>) = 2, Rect(&'a Arc<RefCell<Rect>>) = 3 }
 impl Base {
     fn Circle(o: Arc<RefCell<Circle>>) -> Base { Base(java::Thin::pointer(2, o)) }
     fn Rect(o: Arc<RefCell<Rect>>) -> Base { Base(java::Thin::pointer(3, o)) }
