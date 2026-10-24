@@ -136,6 +136,9 @@ impl<'t> Lowering<'t> {
             ("isAnnotationPresent", [annotation]) => {
                 return Ok(Some(self.annotation_present(node, receiver, *annotation)?));
             }
+            ("getAnnotation", [annotation]) => {
+                return Ok(Some(self.annotation_of(node, receiver, *annotation)?));
+            }
             ("getEnumConstants", []) => {
                 let class = self.expr(receiver)?;
                 return Ok(Some(self.class_enum_constants(node, class)?));

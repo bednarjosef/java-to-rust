@@ -964,6 +964,22 @@ pub fn writes_string_array(node: &Value) -> bool {
 pub const TRANSLATED_PROPERTIES: JdkMethod =
     ("java.lang.TranslatedProperties", "all", "()java.util.Properties");
 
+/// The translator's methods that make an annotation that `getAnnotation` finds and read its
+/// members (`java/overlay/sun/reflect/annotation/TranslatedAnnotations.java`, see
+/// `lower::annotation_values`).
+pub const ANNOTATION_VALUES: [JdkMethod; 2] = [
+    (
+        "sun.reflect.annotation.TranslatedAnnotations",
+        "annotation",
+        "(java.lang.Class<? extends java.lang.annotation.Annotation>,java.lang.Object[],java.lang.Object[])java.lang.annotation.Annotation",
+    ),
+    (
+        "sun.reflect.annotation.TranslatedAnnotations",
+        "member",
+        "(java.lang.annotation.Annotation,java.lang.String)java.lang.Object",
+    ),
+];
+
 /// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
 /// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
 /// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
@@ -2318,6 +2334,12 @@ impl<'t> Walk<'t> {
             // The security manager, which is null: its type is a stub's (see `stubs`).
             "METHOD" if owner == "java.lang.System" && name == "getSecurityManager" => {
                 self.stub_type("java.lang.SecurityManager");
+            }
+            // The annotations that reflection finds (`ANNOTATION_VALUES`).
+            "METHOD" if name == "getAnnotation" && owner == "java.lang.Class" => {
+                for (class, method, signature) in ANNOTATION_VALUES {
+                    self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+                }
             }
             // The translator's properties (see `lower::system`).
             "METHOD" if owner == "java.lang.System" && name == "getProperties" => {

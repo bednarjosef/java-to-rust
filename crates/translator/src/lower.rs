@@ -37,6 +37,7 @@ use std::cell::{Cell, RefCell};
 
 mod annotation_objects;
 mod annotation_presence;
+mod annotation_values;
 mod argument_order;
 mod arraycopy_classes;
 mod arrays;
@@ -1167,6 +1168,10 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
+            return Ok(kind);
+        }
+        let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if let Some(kind) = self.annotation_member(node, &symbol, receiver)? {
             return Ok(kind);
         }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
