@@ -46,6 +46,7 @@ mod initializer;
 mod integer;
 mod integer_parse;
 mod java_arrays;
+mod lent;
 mod locked;
 mod math;
 mod monitor;
@@ -116,6 +117,7 @@ pub use integer_parse::{
     try_parse_small_radix,
 };
 pub use java_arrays::*;
+pub use lent::{Lent, LentMut, Source, Target, copy_range};
 pub use locked::{Locked, RawLock, Ref, RefMut};
 pub use math::*;
 pub use monitor::*;

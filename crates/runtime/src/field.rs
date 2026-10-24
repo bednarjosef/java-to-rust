@@ -9,7 +9,8 @@
 //! write the field it reads.
 //!
 //! Only the objects of one thread hold `Field`s (it is not `Sync`). The objects that threads share
-//! hold `SharedField`s, which are read and written by value too, each access one atomic action.
+//! hold `SharedField`s, which are read and written by value too, each access one atomic action, and
+//! so does an array that threads share, one per element (`java::SharedArray`).
 
 use std::cell::UnsafeCell;
 use std::fmt;
@@ -81,7 +82,8 @@ impl<T: Clone + fmt::Debug> fmt::Debug for Field<T> {
     }
 }
 
-/// `java::SharedField<T>`: a field of an object that threads share (docs/multi-threading.md, 1.1).
+/// `java::SharedField<T>`: a field of an object that threads share, or an element of an array that
+/// threads share (docs/multi-threading.md, 1.1).
 ///
 /// A value of 1, 2, 4 or 8 bytes without drop glue (a primitive, a reference, a string with an
 /// identity) is its bits, which a clone copies: it is loaded with acquire and stored with release,
@@ -128,7 +130,7 @@ fn striped<R>(address: usize, f: impl FnOnce() -> R) -> R {
 
 impl<T> SharedField<T> {
     /// Whether the value is an atomic word: its bits, which a clone copies.
-    const WORD: bool =
+    pub(crate) const WORD: bool =
         !needs_drop::<T>() && matches!(size_of::<T>(), 1 | 2 | 4 | 8) && align_of::<T>() >= size_of::<T>();
 
     #[inline(always)]
@@ -217,7 +219,7 @@ impl<T> SharedField<T> {
 
     /// The bits of a word value.
     #[inline(always)]
-    fn bits(value: &T) -> u64 {
+    pub(crate) fn bits(value: &T) -> u64 {
         // `WORD`: the value is its bits, of its size.
         unsafe {
             match size_of::<T>() {

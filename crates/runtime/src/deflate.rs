@@ -828,14 +828,17 @@ pub fn deflate_init(level: i32, strategy: i32, nowrap: bool) -> Result<i64, crat
 pub fn deflate_bytes(
     addr: i64,
     input: &[i8],
-    output: &mut [i8],
+    output: &mut (impl crate::Target<i8> + ?Sized),
     out_off: i32,
     out_len: i32,
     flush: i32,
     params: i32,
 ) -> i64 {
-    let output = &mut output[out_off as usize..(out_off + out_len) as usize];
-    run(addr, input, output, flush, params).0
+    // The bytes written are stored, from `out_off`.
+    let mut written = vec![0; out_len.max(0) as usize];
+    let (packed, n) = run(addr, input, &mut written, flush, params);
+    output.store(out_off as usize, &written[..n]);
+    packed
 }
 
 /// `Deflater.deflateBytesBuffer`: as `deflate_bytes`, with the output in memory outside the heap,
@@ -861,7 +864,7 @@ pub fn deflate_buffer_bytes(
     addr: i64,
     input_addr: i64,
     in_len: i32,
-    output: &mut [i8],
+    output: &mut (impl crate::Target<i8> + ?Sized),
     out_off: i32,
     out_len: i32,
     flush: i32,

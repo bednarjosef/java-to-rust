@@ -593,23 +593,33 @@ pub(crate) fn text_hash(s: &Wtf8) -> i32 {
 }
 
 /// `new String(chars, offset, count)` and `String.valueOf(chars, offset, count)`.
-pub fn from_chars_range(chars: &[u16], offset: i32, count: i32) -> JString {
+pub fn from_chars_range(chars: &(impl crate::Source<u16> + ?Sized), offset: i32, count: i32) -> JString {
     try_from_chars_range(chars, offset, count).unwrap_or_else(crate::uncaught)
 }
 
 /// `from_chars_range` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_from_chars_range(chars: &[u16], offset: i32, count: i32) -> Result<JString, crate::Exception> {
-    let len = chars.len();
+pub fn try_from_chars_range(
+    chars: &(impl crate::Source<u16> + ?Sized),
+    offset: i32,
+    count: i32,
+) -> Result<JString, crate::Exception> {
+    let len = chars.length();
     if offset < 0 || count < 0 || offset as i64 + count as i64 > len as i64 {
         let message = format!("offset {offset}, count {count}, length {len}");
         return Err(crate::Exception::new("java.lang.StringIndexOutOfBoundsException", message));
     }
-    Ok(from_units(&chars[offset as usize..(offset + count) as usize]))
+    Ok(from_units(&chars.range(offset as usize..(offset + count) as usize)))
 }
 
 /// `s.getChars(begin, end, dst, dst_begin)`: the UTF-16 units `begin..end` of `s` into `dst` from
 /// `dst_begin`.
-pub fn get_chars(s: &Wtf8, begin: i32, end: i32, dst: &mut [u16], dst_begin: i32) {
+pub fn get_chars(
+    s: &Wtf8,
+    begin: i32,
+    end: i32,
+    dst: &mut (impl crate::Target<u16> + ?Sized),
+    dst_begin: i32,
+) {
     try_get_chars(s, begin, end, dst, dst_begin).unwrap_or_else(crate::uncaught)
 }
 
@@ -619,20 +629,19 @@ pub fn try_get_chars(
     s: &Wtf8,
     begin: i32,
     end: i32,
-    dst: &mut [u16],
+    dst: &mut (impl crate::Target<u16> + ?Sized),
     dst_begin: i32,
 ) -> Result<(), crate::Exception> {
     const OUT: &str = "java.lang.StringIndexOutOfBoundsException";
     let units = units(s);
     check_begin_end(begin, end, units.len())?;
     let count = end - begin;
-    if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
+    if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.length() as i64 {
         let message =
-            format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.len());
+            format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.length());
         return Err(crate::Exception::new(OUT, message));
     }
-    let at = dst_begin as usize;
-    dst[at..at + count as usize].copy_from_slice(&units[begin as usize..end as usize]);
+    dst.store(dst_begin as usize, &units[begin as usize..end as usize]);
     Ok(())
 }
 
@@ -647,7 +656,7 @@ pub fn sequence_get_chars(
     dst_begin: i32,
 ) {
     let checked = match dst {
-        Some(dst) => try_get_chars(s, begin, end, &mut dst.items_mut(), dst_begin),
+        Some(dst) => try_get_chars(s, begin, end, &mut crate::lent::Handled(dst), dst_begin),
         None => check_begin_end(begin, end, crate::string_length(s) as usize)
             .and_then(|()| Err(null_destination())),
     };
@@ -662,19 +671,23 @@ pub(crate) fn null_destination() -> crate::Exception {
 
 /// `s.getBytes(begin, end, dst, dst_begin)`, the deprecated form that keeps the low byte of each
 /// code unit.
-pub fn get_low_bytes(s: &Wtf8, begin: i32, end: i32, dst: &mut [i8], dst_begin: i32) {
+pub fn get_low_bytes(
+    s: &Wtf8,
+    begin: i32,
+    end: i32,
+    dst: &mut (impl crate::Target<i8> + ?Sized),
+    dst_begin: i32,
+) {
     let units = units(s);
     check_begin_end(begin, end, units.len()).unwrap_or_else(|e| throw_exception(e));
     let count = end - begin;
-    if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
+    if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.length() as i64 {
         let message =
-            format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.len());
+            format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.length());
         throw("java.lang.StringIndexOutOfBoundsException", &message);
     }
-    let at = dst_begin as usize;
-    for (d, &u) in dst[at..at + count as usize].iter_mut().zip(&units[begin as usize..end as usize]) {
-        *d = u as i8;
-    }
+    let bytes: Vec<i8> = units[begin as usize..end as usize].iter().map(|&u| u as i8).collect();
+    dst.store(dst_begin as usize, &bytes);
 }
 
 fn is_high(c: u16) -> bool {
@@ -859,10 +872,10 @@ pub fn strip_indent(s: &Wtf8) -> JString {
 
 /// `new String(codePoints, offset, count)`, which throws for a range outside the array and for
 /// an invalid code point.
-pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> JString {
-    let range = range_of(points.len(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
+pub fn from_code_points(points: &(impl crate::Source<i32> + ?Sized), offset: i32, count: i32) -> JString {
+    let range = range_of(points.length(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
     let mut s = JString::new();
-    for &point in &points[range] {
+    for &point in points.range(range).iter() {
         if !(0..=0x10FFFF).contains(&point) {
             let message = format!("Not a valid Unicode code point: 0x{point:X}");
             crate::throw("java.lang.IllegalArgumentException", &message);
@@ -873,10 +886,15 @@ pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> JString {
 }
 
 /// `new String(ascii, hibyte, offset, count)`: each `char` is `hibyte`'s low byte over a byte.
-pub fn from_high_byte(bytes: &[i8], hibyte: i32, offset: i32, count: i32) -> JString {
-    let range = range_of(bytes.len(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
+pub fn from_high_byte(
+    bytes: &(impl crate::Source<i8> + ?Sized),
+    hibyte: i32,
+    offset: i32,
+    count: i32,
+) -> JString {
+    let range = range_of(bytes.length(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
     let high = ((hibyte & 0xff) as u16) << 8;
-    let units: Vec<u16> = bytes[range].iter().map(|&b| high | u16::from(b as u8)).collect();
+    let units: Vec<u16> = bytes.range(range).iter().map(|&b| high | u16::from(b as u8)).collect();
     from_units(&units)
 }
 
@@ -892,15 +910,15 @@ fn range_of(len: usize, offset: i32, count: i32) -> Result<std::ops::Range<usize
 
 /// `String.join(prefix, suffix, delimiter, elements, size)` of the JDK: the first `size` of
 /// `elements` joined by `delimiter`, between `prefix` and `suffix`.
-pub fn join_range<T: JoinItem>(
+pub fn join_range<T: JoinItem + Clone>(
     prefix: &Wtf8,
     suffix: &Wtf8,
     delimiter: &Wtf8,
-    elements: &[T],
+    elements: &(impl crate::Source<T> + ?Sized),
     size: i32,
 ) -> JString {
     let mut out = prefix.to_owned();
-    out.push_wtf8(&join(delimiter, &elements[..size as usize]));
+    out.push_wtf8(&join(delimiter, &elements.range(0..size as usize)));
     out.push_wtf8(suffix);
     out
 }

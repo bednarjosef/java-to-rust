@@ -1,9 +1,21 @@
 //! Java arrays. An array is a shared handle to its elements: copying the handle gives a second
 //! name for the same array, as in Java, and every access is bounds-checked the way Java checks it.
 //!
-//! A program that starts threads has its arrays behind an `Arc` and a `java::Locked`
-//! (`SharedArray`), which one thread at a time may borrow; the functions here take either handle
-//! (`Elements`), and those that make an array have a `shared_` twin.
+//! An array of a program without threads, or of a family that no two threads reach (`Array`),
+//! keeps its elements in a `RefCell<Vec<T>>`, which an access borrows. An array that threads
+//! share (`SharedArray`) keeps each element in a cell of its own (`SharedElements`, a slice of
+//! `java::SharedField`s), as a thread-shared object keeps its fields: a read or write of an
+//! element is one atomic action, which takes no lock and checks no borrow flag. An element of
+//! 1, 2, 4 or 8 bytes without drop glue (a primitive, a reference) is an atomic word, loaded with
+//! acquire and stored with release (plain moves on x86-64); a wider one (a string without an
+//! identity) is copied under a striped lock. Java makes each element access atomic and promises
+//! nothing about the order or atomicity of a bulk operation, so `Arrays.fill`, a sort or
+//! `System.arraycopy` reads and writes a shared array one element at a time (`Elements::reading`
+//! and `writing`), and other threads may see it half done, as on the JVM.
+//!
+//! The functions here take either handle (`Elements`), and those that make an array have a
+//! `shared_` twin. Runtime functions that read or write a range of an array lent by the generated
+//! code take it as a `Source` or a `Target` (`lent.rs`).
 //!
 //! An array that the translation holds as an `Object[]` though the program made it as an array of
 //! a narrower class (a covariant array, see the translator's `lower::covariant`) carries that
@@ -11,17 +23,19 @@
 //! and `getClass()` is the array's own class, as in Java. Every other array carries none.
 
 use crate::Arc;
-use crate::{Class, Exception, Locked, throw};
+use crate::lent::{Lent, LentMut};
+use crate::{Class, Exception, SharedField, throw};
 use std::cell::RefCell;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, Range};
 
 pub type Array<T> = Arc<ArrayData<RefCell<Vec<T>>, T>>;
 
-/// An array of a program with threads.
-pub type SharedArray<T> = Arc<ArrayData<Locked<Vec<T>>, T>>;
+/// An array of a program with threads, whose arrays of its family two threads may reach.
+pub type SharedArray<T> = Arc<ArrayData<SharedElements<T>, T>>;
 
-/// What an array handle points to: the elements, in a `RefCell` or a `Locked` (`C`), which the
-/// handle borrows through `Deref` as it would the cell itself, and the class of a covariant array.
+/// What an array handle points to: the elements, in a `RefCell` or as `SharedElements` (`C`),
+/// which the handle reaches through `Deref` (the generated code lends them to a runtime function
+/// as `&a.borrow()`), and the class of a covariant array.
 pub struct ArrayData<C, T> {
     items: C,
     class: Option<Box<ElementClass<T>>>,
@@ -39,6 +53,40 @@ impl<C, T> Deref for ArrayData<C, T> {
 impl<C: std::fmt::Debug, T> std::fmt::Debug for ArrayData<C, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.items.fmt(f)
+    }
+}
+
+/// The elements of a `SharedArray`: a cell per element, each read and written as one atomic action
+/// (`java::SharedField`). The length never changes.
+pub struct SharedElements<T>(Box<[SharedField<T>]>);
+
+impl<T> SharedElements<T> {
+    fn new(items: Vec<T>) -> SharedElements<T> {
+        let items: Box<[T]> = items.into_boxed_slice();
+        // A `SharedField<T>` is a transparent `UnsafeCell<T>`, which has the layout of a `T`.
+        SharedElements(unsafe { Box::from_raw(Box::into_raw(items) as *mut [SharedField<T>]) })
+    }
+
+    /// The elements lent to a runtime function that reads them (`lent.rs`): read from their cells
+    /// as the function asks for them, never borrowed in place.
+    #[inline]
+    pub fn borrow(&self) -> Lent<'_, T> {
+        Lent::new(&self.0)
+    }
+
+    /// The elements lent to a runtime function that writes them (`lent.rs`).
+    #[inline]
+    pub fn borrow_mut(&self) -> LentMut<'_, T>
+    where
+        T: Clone,
+    {
+        LentMut::new(&self.0)
+    }
+}
+
+impl<T: Clone + std::fmt::Debug> std::fmt::Debug for SharedElements<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()
     }
 }
 
@@ -77,15 +125,70 @@ impl<T> Clone for ElementClass<T> {
     }
 }
 
-/// A handle of an array: an `Array`, or a `SharedArray`, whose elements are borrowed the same way,
-/// or a reference to one.
+/// A handle of an array: an `Array` or a `SharedArray`, or a reference to one. Each access of an
+/// element is checked against the length the way Java checks it; the `try_` forms give the
+/// `ArrayIndexOutOfBoundsException` back instead of throwing it.
 pub trait Elements<T> {
-    fn items(&self) -> impl Deref<Target = Vec<T>> + '_;
-    fn items_mut(&self) -> impl DerefMut<Target = Vec<T>> + '_;
+    /// `a.length`.
+    fn length(&self) -> usize;
+    /// `a[i]`.
+    fn element(&self, i: i32) -> T
+    where
+        T: Clone;
+    fn try_element(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone;
+    /// `a[i] = v`.
+    fn put(&self, i: i32, v: T);
+    fn try_put(&self, i: i32, v: T) -> Result<(), Exception>;
+    /// `a[i] = v` in one atomic action with the read of the old element, which it returns.
+    fn try_swap(&self, i: i32, v: T) -> Result<T, Exception>;
+    /// The old `a[i]`, which is now `value` if it was `same` as `expected`, in one atomic action.
+    fn try_compare_exchange(
+        &self,
+        i: i32,
+        expected: T,
+        value: T,
+        same: impl Fn(&T, &T) -> bool,
+    ) -> Result<T, Exception>
+    where
+        T: Clone;
+    /// The old `a[i]`, which is now `f` of it, in one atomic action.
+    fn try_get_and_update(&self, i: i32, f: impl Fn(&T) -> T) -> Result<T, Exception>
+    where
+        T: Clone;
+    /// Runs `f` on the elements in `range` (within the length): borrowed from an `Array`, read
+    /// one at a time into a copy from a `SharedArray`. `f` runs no code of the program.
+    fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
+    where
+        T: Clone;
+    /// Runs `f` on the elements in `range` (within the length) to change them: borrowed from an
+    /// `Array`; from a `SharedArray` copied out one at a time and stored back one at a time.
+    /// `f` runs no code of the program.
+    fn writing<R>(&self, range: Range<usize>, f: impl FnOnce(&mut [T]) -> R) -> R
+    where
+        T: Clone;
+    /// Stores `values` from position `at` on, which the caller has checked they fit; into a
+    /// `SharedArray` one at a time.
+    fn store_from(&self, at: usize, values: &[T])
+    where
+        T: Clone;
+    /// Copies the `n` elements from position `from` to position `to`, which the caller has
+    /// checked, as if through a temporary array where the two overlap (`System.arraycopy` within
+    /// one array); within a `SharedArray`, one element at a time, in the order that keeps each
+    /// element from being overwritten before it is copied.
+    fn copy_within(&self, from: usize, to: usize, n: usize)
+    where
+        T: Clone;
     /// The array's address, which is its identity.
     fn address(&self) -> *const u8;
     /// The class of a covariant array.
     fn element_class(&self) -> Option<&ElementClass<T>>;
+    /// The elements of an array that nothing else holds yet, taken out of it (or copied, from a
+    /// `SharedArray`, whose cells cannot be emptied).
+    fn take_items(&self) -> Vec<T>
+    where
+        T: Clone;
 }
 
 /// A handle that a new array can be made as: an `Array` or a `SharedArray`.
@@ -112,13 +215,88 @@ pub trait MadeElements<T>: Elements<T> {
 
 impl<T, A: Elements<T>> Elements<T> for &A {
     #[inline]
-    fn items(&self) -> impl Deref<Target = Vec<T>> + '_ {
-        (**self).items()
+    fn length(&self) -> usize {
+        (**self).length()
     }
 
     #[inline]
-    fn items_mut(&self) -> impl DerefMut<Target = Vec<T>> + '_ {
-        (**self).items_mut()
+    fn element(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        (**self).element(i)
+    }
+
+    #[inline]
+    fn try_element(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        (**self).try_element(i)
+    }
+
+    #[inline]
+    fn put(&self, i: i32, v: T) {
+        (**self).put(i, v)
+    }
+
+    #[inline]
+    fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
+        (**self).try_put(i, v)
+    }
+
+    fn try_swap(&self, i: i32, v: T) -> Result<T, Exception> {
+        (**self).try_swap(i, v)
+    }
+
+    fn try_compare_exchange(
+        &self,
+        i: i32,
+        expected: T,
+        value: T,
+        same: impl Fn(&T, &T) -> bool,
+    ) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        (**self).try_compare_exchange(i, expected, value, same)
+    }
+
+    fn try_get_and_update(&self, i: i32, f: impl Fn(&T) -> T) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        (**self).try_get_and_update(i, f)
+    }
+
+    #[inline]
+    fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        (**self).reading(range, f)
+    }
+
+    #[inline]
+    fn writing<R>(&self, range: Range<usize>, f: impl FnOnce(&mut [T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        (**self).writing(range, f)
+    }
+
+    fn store_from(&self, at: usize, values: &[T])
+    where
+        T: Clone,
+    {
+        (**self).store_from(at, values)
+    }
+
+    fn copy_within(&self, from: usize, to: usize, n: usize)
+    where
+        T: Clone,
+    {
+        (**self).copy_within(from, to, n)
     }
 
     fn address(&self) -> *const u8 {
@@ -128,17 +306,127 @@ impl<T, A: Elements<T>> Elements<T> for &A {
     fn element_class(&self) -> Option<&ElementClass<T>> {
         (**self).element_class()
     }
+
+    fn take_items(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        (**self).take_items()
+    }
 }
 
 impl<T> Elements<T> for Array<T> {
     #[inline]
-    fn items(&self) -> impl Deref<Target = Vec<T>> + '_ {
-        self.borrow()
+    fn length(&self) -> usize {
+        self.borrow().len()
     }
 
     #[inline]
-    fn items_mut(&self) -> impl DerefMut<Target = Vec<T>> + '_ {
-        self.borrow_mut()
+    fn element(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        let items = self.borrow();
+        items[position(items.len(), i)].clone()
+    }
+
+    #[inline]
+    fn try_element(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        let items = self.borrow();
+        Ok(items[try_position(items.len(), i)?].clone())
+    }
+
+    #[inline]
+    fn put(&self, i: i32, v: T) {
+        let mut items = self.borrow_mut();
+        let i = position(items.len(), i);
+        items[i] = v;
+    }
+
+    #[inline]
+    fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
+        let mut items = self.borrow_mut();
+        let i = try_position(items.len(), i)?;
+        items[i] = v;
+        Ok(())
+    }
+
+    fn try_swap(&self, i: i32, v: T) -> Result<T, Exception> {
+        let mut items = self.borrow_mut();
+        let k = try_position(items.len(), i)?;
+        Ok(std::mem::replace(&mut items[k], v))
+    }
+
+    // One borrow of the array: no other access comes between the read and the write.
+    fn try_compare_exchange(
+        &self,
+        i: i32,
+        expected: T,
+        value: T,
+        same: impl Fn(&T, &T) -> bool,
+    ) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        let mut items = self.borrow_mut();
+        let k = try_position(items.len(), i)?;
+        let old = items[k].clone();
+        if same(&old, &expected) {
+            items[k] = value;
+        }
+        Ok(old)
+    }
+
+    fn try_get_and_update(&self, i: i32, f: impl Fn(&T) -> T) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        let mut items = self.borrow_mut();
+        let k = try_position(items.len(), i)?;
+        let new = f(&items[k]);
+        Ok(std::mem::replace(&mut items[k], new))
+    }
+
+    #[inline]
+    fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        f(&self.borrow()[range])
+    }
+
+    #[inline]
+    fn writing<R>(&self, range: Range<usize>, f: impl FnOnce(&mut [T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        f(&mut self.borrow_mut()[range])
+    }
+
+    fn store_from(&self, at: usize, values: &[T])
+    where
+        T: Clone,
+    {
+        self.borrow_mut()[at..at + values.len()].clone_from_slice(values);
+    }
+
+    fn copy_within(&self, from: usize, to: usize, n: usize)
+    where
+        T: Clone,
+    {
+        let mut items = self.borrow_mut();
+        if from < to {
+            for k in (0..n).rev() {
+                items[to + k] = items[from + k].clone();
+            }
+        } else {
+            for k in 0..n {
+                items[to + k] = items[from + k].clone();
+            }
+        }
     }
 
     fn address(&self) -> *const u8 {
@@ -148,6 +436,13 @@ impl<T> Elements<T> for Array<T> {
     #[inline]
     fn element_class(&self) -> Option<&ElementClass<T>> {
         self.class.as_deref()
+    }
+
+    fn take_items(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        std::mem::take(&mut *self.borrow_mut())
     }
 }
 
@@ -159,13 +454,113 @@ impl<T> MadeElements<T> for Array<T> {
 
 impl<T> Elements<T> for SharedArray<T> {
     #[inline]
-    fn items(&self) -> impl Deref<Target = Vec<T>> + '_ {
-        self.borrow()
+    fn length(&self) -> usize {
+        self.items.0.len()
     }
 
     #[inline]
-    fn items_mut(&self) -> impl DerefMut<Target = Vec<T>> + '_ {
-        self.borrow_mut()
+    fn element(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        let cells = &self.items.0;
+        cells[position(cells.len(), i)].get()
+    }
+
+    #[inline]
+    fn try_element(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        let cells = &self.items.0;
+        Ok(cells[try_position(cells.len(), i)?].get())
+    }
+
+    #[inline]
+    fn put(&self, i: i32, v: T) {
+        let cells = &self.items.0;
+        cells[position(cells.len(), i)].set(v)
+    }
+
+    #[inline]
+    fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
+        let cells = &self.items.0;
+        cells[try_position(cells.len(), i)?].set(v);
+        Ok(())
+    }
+
+    fn try_swap(&self, i: i32, v: T) -> Result<T, Exception> {
+        let cells = &self.items.0;
+        Ok(cells[try_position(cells.len(), i)?].replace(v))
+    }
+
+    // The cell's compare-and-swap, or its striped lock for a wide element.
+    fn try_compare_exchange(
+        &self,
+        i: i32,
+        expected: T,
+        value: T,
+        same: impl Fn(&T, &T) -> bool,
+    ) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        let cells = &self.items.0;
+        Ok(cells[try_position(cells.len(), i)?].compare_exchange_by(expected, value, same))
+    }
+
+    fn try_get_and_update(&self, i: i32, f: impl Fn(&T) -> T) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        let cells = &self.items.0;
+        Ok(cells[try_position(cells.len(), i)?].get_and_update(f))
+    }
+
+    fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        let copy: Vec<T> = self.items.0[range].iter().map(SharedField::get).collect();
+        f(&copy)
+    }
+
+    fn writing<R>(&self, range: Range<usize>, f: impl FnOnce(&mut [T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        let cells = &self.items.0[range];
+        let mut copy: Vec<T> = cells.iter().map(SharedField::get).collect();
+        let result = f(&mut copy);
+        for (cell, v) in cells.iter().zip(copy) {
+            cell.set(v);
+        }
+        result
+    }
+
+    fn store_from(&self, at: usize, values: &[T])
+    where
+        T: Clone,
+    {
+        for (cell, v) in self.items.0[at..at + values.len()].iter().zip(values) {
+            cell.set(v.clone());
+        }
+    }
+
+    fn copy_within(&self, from: usize, to: usize, n: usize)
+    where
+        T: Clone,
+    {
+        let (src, dest) = (&self.items.0[from..from + n], &self.items.0[to..to + n]);
+        if from < to {
+            for (d, s) in dest.iter().zip(src).rev() {
+                d.set(s.get());
+            }
+        } else {
+            for (d, s) in dest.iter().zip(src) {
+                d.set(s.get());
+            }
+        }
     }
 
     fn address(&self) -> *const u8 {
@@ -176,11 +571,18 @@ impl<T> Elements<T> for SharedArray<T> {
     fn element_class(&self) -> Option<&ElementClass<T>> {
         self.class.as_deref()
     }
+
+    fn take_items(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.items.0.iter().map(SharedField::get).collect()
+    }
 }
 
 impl<T> MadeElements<T> for SharedArray<T> {
     fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> SharedArray<T> {
-        Arc::new(ArrayData { items: Locked::new(items), class: class.map(Box::new) })
+        Arc::new(ArrayData { items: SharedElements::new(items), class: class.map(Box::new) })
     }
 }
 
@@ -199,19 +601,17 @@ pub fn shared_from_vec<T>(items: Vec<T>) -> SharedArray<T> {
 pub fn to_shared<T: Clone>(a: Array<T>) -> SharedArray<T> {
     let class = a.element_class().cloned();
     // Nothing else holds an array the runtime just made, so its elements can be taken.
-    let items = std::mem::take(&mut *a.borrow_mut());
-    SharedArray::made_as(items, class)
+    SharedArray::made_as(a.take_items(), class)
 }
 
 /// The array `a` just made, as an array of class `class`: a covariant array (`new String[n]`
 /// that the translation holds as an `Object[]`), or with `None` one that carries no class (a copy
 /// into `Object[].class`).
-pub fn tagged<T, A: MadeElements<T>>(a: A, class: Option<ElementClass<T>>) -> A {
+pub fn tagged<T: Clone, A: MadeElements<T>>(a: A, class: Option<ElementClass<T>>) -> A {
     if class.is_none() && a.element_class().is_none() {
         return a;
     }
-    let items = std::mem::take(&mut *a.items_mut());
-    A::made_as(items, class)
+    A::made_as(a.take_items(), class)
 }
 
 /// `a.getClass()` of an `Object[]`: the class of a covariant array, or `exact`, `Object[]`'s.
@@ -236,7 +636,7 @@ fn check_store<T>(class: &ElementClass<T>, len: usize, i: i32, v: &T) -> Result<
 #[inline]
 pub fn checked_set<T>(a: &impl Elements<T>, i: i32, v: T) {
     if let Some(class) = a.element_class() {
-        check_store(class, a.items().len(), i, &v).unwrap_or_else(|e| crate::throw_exception(e));
+        check_store(class, a.length(), i, &v).unwrap_or_else(|e| crate::throw_exception(e));
     }
     set(a, i, v)
 }
@@ -244,7 +644,7 @@ pub fn checked_set<T>(a: &impl Elements<T>, i: i32, v: T) {
 /// `checked_set` where the program observes the exception.
 pub fn try_checked_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
     if let Some(class) = a.element_class() {
-        check_store(class, a.items().len(), i, &v)?;
+        check_store(class, a.length(), i, &v)?;
     }
     try_set(a, i, v)
 }
@@ -376,38 +776,31 @@ pub fn try_shared_tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Result<
 /// `a.length`.
 #[inline]
 pub fn len<T>(a: &impl Elements<T>) -> i32 {
-    a.items().len() as i32
+    a.length() as i32
 }
 
 /// `a[i]`.
 #[inline]
 pub fn get<T: Clone>(a: &impl Elements<T>, i: i32) -> T {
-    let items = a.items();
-    items[position(items.len(), i)].clone()
+    a.element(i)
 }
 
 /// `a[i]` where the program observes the `ArrayIndexOutOfBoundsException`.
 #[inline]
 pub fn try_get<T: Clone>(a: &impl Elements<T>, i: i32) -> Result<T, Exception> {
-    let items = a.items();
-    Ok(items[try_position(items.len(), i)?].clone())
+    a.try_element(i)
 }
 
 /// `a[i] = v` where the program observes the `ArrayIndexOutOfBoundsException`.
 #[inline]
 pub fn try_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
-    let mut items = a.items_mut();
-    let i = try_position(items.len(), i)?;
-    items[i] = v;
-    Ok(())
+    a.try_put(i, v)
 }
 
 /// `a[i] = v`. Java evaluates `a`, `i` and `v` before the check, and so do the arguments.
 #[inline]
 pub fn set<T>(a: &impl Elements<T>, i: i32, v: T) {
-    let mut items = a.items_mut();
-    let i = position(items.len(), i);
-    items[i] = v;
+    a.put(i, v)
 }
 
 /// `a[i] op= ...`: `f` computes the new element from the old one. The old element is read, and
@@ -426,36 +819,32 @@ pub fn post_update<T: Clone>(a: &impl Elements<T>, i: i32, f: impl FnOnce(T) -> 
 }
 
 // The atomic updates of an element that `Unsafe` makes at an element offset. Each reads, compares
-// and writes the element under one borrow of the array, which in a program with threads is one
-// hold of the array's lock: no other access of the array, from any thread, comes between the read
-// and the write, as with Java's atomic instructions. `same` is Java's `==` on the elements.
+// and writes the element in one atomic action: under one borrow of an `Array`, and as one
+// compare-and-swap of a `SharedArray`'s cell (or under its striped lock, for a wide element), so
+// no other access of the element, from any thread, comes between the read and the write, as with
+// Java's atomic instructions. `same` is Java's `==` on the elements.
 
 /// `Unsafe.compareAndSet<Kind>`: whether `a[i]` was `expected`, in which case it is now `value`.
-pub fn compare_and_set_element<T>(
+pub fn compare_and_set_element<T: Clone>(
     a: &impl Elements<T>,
     i: i32,
     expected: T,
     value: T,
-    same: impl FnOnce(&T, &T) -> bool,
+    same: impl Fn(&T, &T) -> bool,
 ) -> bool {
     try_compare_and_set_element(a, i, expected, value, same).unwrap_or_else(|e| crate::throw_exception(e))
 }
 
 /// `compare_and_set_element` where the program observes the `ArrayIndexOutOfBoundsException`.
-pub fn try_compare_and_set_element<T>(
+pub fn try_compare_and_set_element<T: Clone>(
     a: &impl Elements<T>,
     i: i32,
     expected: T,
     value: T,
-    same: impl FnOnce(&T, &T) -> bool,
+    same: impl Fn(&T, &T) -> bool,
 ) -> Result<bool, Exception> {
-    let mut items = a.items_mut();
-    let k = try_position(items.len(), i)?;
-    let swapped = same(&items[k], &expected);
-    if swapped {
-        items[k] = value;
-    }
-    Ok(swapped)
+    let old = a.try_compare_exchange(i, expected.clone(), value, &same)?;
+    Ok(same(&old, &expected))
 }
 
 /// `Unsafe.compareAndExchange<Kind>`: the old `a[i]`, which is now `value` if it was `expected`.
@@ -464,7 +853,7 @@ pub fn compare_and_exchange_element<T: Clone>(
     i: i32,
     expected: T,
     value: T,
-    same: impl FnOnce(&T, &T) -> bool,
+    same: impl Fn(&T, &T) -> bool,
 ) -> T {
     try_compare_and_exchange_element(a, i, expected, value, same)
         .unwrap_or_else(|e| crate::throw_exception(e))
@@ -476,15 +865,9 @@ pub fn try_compare_and_exchange_element<T: Clone>(
     i: i32,
     expected: T,
     value: T,
-    same: impl FnOnce(&T, &T) -> bool,
+    same: impl Fn(&T, &T) -> bool,
 ) -> Result<T, Exception> {
-    let mut items = a.items_mut();
-    let k = try_position(items.len(), i)?;
-    let old = items[k].clone();
-    if same(&old, &expected) {
-        items[k] = value;
-    }
-    Ok(old)
+    a.try_compare_exchange(i, expected, value, same)
 }
 
 /// `Unsafe.getAndSet<Kind>`: the old `a[i]`, which is now `value`.
@@ -494,9 +877,7 @@ pub fn get_and_set_element<T>(a: &impl Elements<T>, i: i32, value: T) -> T {
 
 /// `get_and_set_element` where the program observes the `ArrayIndexOutOfBoundsException`.
 pub fn try_get_and_set_element<T>(a: &impl Elements<T>, i: i32, value: T) -> Result<T, Exception> {
-    let mut items = a.items_mut();
-    let k = try_position(items.len(), i)?;
-    Ok(std::mem::replace(&mut items[k], value))
+    a.try_swap(i, value)
 }
 
 /// `Unsafe.getAndAdd<Kind>` (and the bitwise forms): the old `a[i]`, which is now
@@ -512,11 +893,7 @@ pub fn try_get_and_add_element<T: Copy>(
     delta: T,
     add: fn(T, T) -> T,
 ) -> Result<T, Exception> {
-    let mut items = a.items_mut();
-    let k = try_position(items.len(), i)?;
-    let old = items[k];
-    items[k] = add(old, delta);
-    Ok(old)
+    a.try_get_and_update(i, |old| add(*old, delta))
 }
 
 /// A value that `MethodHandles.byteArrayViewVarHandle` reads from and writes to the bytes of a
@@ -574,9 +951,8 @@ pub fn try_byte_view_get<V: ByteView>(
     i: i32,
     big_endian: bool,
 ) -> Result<V, Exception> {
-    let items = a.items();
-    let k = view_position(items.len(), V::SIZE, i)?;
-    Ok(V::from_bytes(&items[k..k + V::SIZE], big_endian))
+    let k = view_position(a.length(), V::SIZE, i)?;
+    Ok(a.reading(k..k + V::SIZE, |bytes| V::from_bytes(bytes, big_endian)))
 }
 
 /// `VIEW.set(a, i, v)` of a `byteArrayViewVarHandle`: `v`'s bytes written to `a[i..]`, all of them
@@ -592,9 +968,8 @@ pub fn try_byte_view_set<V: ByteView>(
     v: V,
     big_endian: bool,
 ) -> Result<(), Exception> {
-    let mut items = a.items_mut();
-    let k = view_position(items.len(), V::SIZE, i)?;
-    v.write_bytes(&mut items[k..k + V::SIZE], big_endian);
+    let k = view_position(a.length(), V::SIZE, i)?;
+    a.writing(k..k + V::SIZE, |bytes| v.write_bytes(bytes, big_endian));
     Ok(())
 }
 
@@ -627,8 +1002,8 @@ pub fn to_string<T: Clone, S: Into<crate::JString>>(
     show: impl Fn(T) -> S,
 ) -> crate::JString {
     // The elements are copied out first: `show` may run code of the program, which must not run
-    // while the array is borrowed (with threads, locked).
-    let items: Vec<T> = a.items().clone();
+    // while the array is borrowed.
+    let items: Vec<T> = a.reading(0..a.length(), <[T]>::to_vec);
     let mut out = crate::JString::from("[");
     for (i, item) in items.into_iter().enumerate() {
         if i > 0 {
@@ -642,12 +1017,12 @@ pub fn to_string<T: Clone, S: Into<crate::JString>>(
 
 /// `Arrays.fill(a, v)`.
 pub fn fill<T: Clone>(a: &impl Elements<T>, v: T) {
-    a.items_mut().fill(v);
+    a.writing(0..a.length(), |items| items.fill(v));
 }
 
 /// `Arrays.sort(a)` for integers and booleans.
-pub fn sort<T: Ord>(a: &impl Elements<T>) {
-    a.items_mut().sort();
+pub fn sort<T: Ord + Clone>(a: &impl Elements<T>) {
+    a.writing(0..a.length(), |items| items.sort());
 }
 
 /// `Arrays.sort(a)` for doubles, in Java's order (`Double.compare`): -0.0 before 0.0, and every
@@ -655,21 +1030,23 @@ pub fn sort<T: Ord>(a: &impl Elements<T>) {
 /// first).
 pub fn sort_doubles(a: &impl Elements<f64>) {
     let key = |v: f64| if v.is_nan() { i64::MAX } else { v.to_bits() as i64 };
-    a.items_mut()
-        .sort_by(|x, y| x.partial_cmp(y).filter(|o| o.is_ne()).unwrap_or_else(|| key(*x).cmp(&key(*y))));
+    a.writing(0..a.length(), |items| {
+        items.sort_by(|x, y| x.partial_cmp(y).filter(|o| o.is_ne()).unwrap_or_else(|| key(*x).cmp(&key(*y))))
+    });
 }
 
 /// `Arrays.sort(a)` for floats, in Java's order (`Float.compare`), as for doubles.
 pub fn sort_floats(a: &impl Elements<f32>) {
     let key = |v: f32| if v.is_nan() { i32::MAX } else { v.to_bits() as i32 };
-    a.items_mut()
-        .sort_by(|x, y| x.partial_cmp(y).filter(|o| o.is_ne()).unwrap_or_else(|| key(*x).cmp(&key(*y))));
+    a.writing(0..a.length(), |items| {
+        items.sort_by(|x, y| x.partial_cmp(y).filter(|o| o.is_ne()).unwrap_or_else(|| key(*x).cmp(&key(*y))))
+    });
 }
 
 /// `Arrays.copyOf(a, len)`: the first `len` elements, padded with `zero`, of `a`'s class.
 pub fn copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> A {
     let len = size(len);
-    let mut items = a.items().clone();
+    let mut items = a.reading(0..len.min(a.length()), <[T]>::to_vec);
     items.resize(len, zero);
     a.made_like(items)
 }
@@ -677,7 +1054,7 @@ pub fn copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> A {
 /// `copy_of` where the program observes the `NegativeArraySizeException`.
 pub fn try_copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> Result<A, Exception> {
     let len = try_size(len)?;
-    let mut items = a.items().clone();
+    let mut items = a.reading(0..len.min(a.length()), <[T]>::to_vec);
     items.resize(len, zero);
     Ok(a.made_like(items))
 }
@@ -726,4 +1103,61 @@ pub fn try_check_sizes(dims: &[i32]) -> Result<(), Exception> {
         try_size(d)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::JString;
+
+    #[test]
+    fn a_shared_array_is_read_and_written_one_element_at_a_time() {
+        let longs = shared_filled(4, 0i64);
+        let names = shared_from_vec(vec![Some(JString::from("left")); 4]);
+        let (a, b) = (0x0123_4567_89ab_cdefi64, -0x0123_4567_89ab_cdf0i64);
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let (longs, names) = (longs.clone(), names.clone());
+                std::thread::spawn(move || {
+                    for i in 0..2000 {
+                        set(&longs, i & 3, if (i + w) & 1 == 0 { a } else { b });
+                        let name = if (i + w) & 1 == 0 { "left" } else { "right" };
+                        set(&names, i & 3, Some(JString::from(name)));
+                    }
+                })
+            })
+            .collect();
+        for i in 0..2000 {
+            // A reader sees only values that a writer stored, never half of one.
+            assert!([0, a, b].contains(&get(&longs, i & 3)));
+            let name = get(&names, i & 3).expect("never null");
+            assert!(name == "left" || name == "right");
+        }
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert!(try_get(&longs, 4).is_err());
+    }
+
+    #[test]
+    fn bulk_operations_on_a_shared_array_match_those_on_an_array() {
+        let shared = shared_from_vec(vec![5, 3, 9, 1, 7]);
+        let local = from_vec(vec![5, 3, 9, 1, 7]);
+        crate::arraycopy(&shared, 0, &shared, 1, 4);
+        crate::arraycopy(&local, 0, &local, 1, 4);
+        assert_eq!(shared.take_items(), local.take_items());
+        let shared = shared_from_vec(vec![5, 3, 9, 1, 7]);
+        sort(&shared);
+        assert_eq!(shared.take_items(), [1, 3, 5, 7, 9]);
+        assert_eq!(compare_and_exchange_element(&shared, 2, 5, 6, |x, y| x == y), 5);
+        assert!(!compare_and_set_element(&shared, 2, 5, 8, |x, y| x == y));
+        assert_eq!(get_and_add_element(&shared, 2, 10, i32::wrapping_add), 6);
+        assert_eq!(copy_of(&shared, 3, 0).take_items(), [1, 3, 16]);
+        let mut chars = vec![0u16; 3];
+        crate::copy_slice(&shared_from_vec(vec![7u16, 8, 9]).borrow(), 1, &mut chars, 0, 2);
+        assert_eq!(chars, [8, 9, 0]);
+        let target = shared_filled(4, 0u16);
+        crate::copy_slice(&chars, 0, &mut target.borrow_mut(), 2, 2);
+        assert_eq!(target.take_items(), [0, 0, 8, 9]);
+    }
 }

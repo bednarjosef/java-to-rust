@@ -350,7 +350,13 @@ pub fn unix_strerror(errnum: i32) -> Vec<i8> {
 /// Reads up to `len` bytes into `buf[off..]` from descriptor `fd`, at its position (moving it)
 /// or, where `position` is not negative, at that position (leaving it): the count, or -1 at the
 /// end of the file.
-pub fn unix_read(fd: i32, buf: &mut [i8], off: i32, len: i32, position: i64) -> i32 {
+pub fn unix_read(
+    fd: i32,
+    buf: &mut (impl crate::Target<i8> + ?Sized),
+    off: i32,
+    len: i32,
+    position: i64,
+) -> i32 {
     let read = fd::with_file(fd, |mut f| {
         let mut bytes = vec![0u8; len as usize];
         let n = if position < 0 {
@@ -358,9 +364,9 @@ pub fn unix_read(fd: i32, buf: &mut [i8], off: i32, len: i32, position: i64) -> 
         } else {
             std::os::unix::fs::FileExt::read_at(f, &mut bytes, position as u64)?
         };
-        for (to, from) in buf[off as usize..].iter_mut().zip(&bytes[..n]) {
-            *to = *from as i8;
-        }
+        let fits = n.min(buf.length().saturating_sub(off as usize));
+        let read: Vec<i8> = bytes[..fits].iter().map(|&b| b as i8).collect();
+        buf.store(off as usize, &read);
         Ok(if n == 0 && len > 0 { -1 } else { n as i32 })
     });
     record(read, -1)
@@ -368,8 +374,14 @@ pub fn unix_read(fd: i32, buf: &mut [i8], off: i32, len: i32, position: i64) -> 
 
 /// Writes `buf[off..off + len]` to descriptor `fd`, at its position (moving it) or, where
 /// `position` is not negative, at that position (leaving it): the count written.
-pub fn unix_write(fd: i32, buf: &[i8], off: i32, len: i32, position: i64) -> i32 {
-    let bytes: Vec<u8> = buf[off as usize..(off + len) as usize].iter().map(|&b| b as u8).collect();
+pub fn unix_write(
+    fd: i32,
+    buf: &(impl crate::Source<i8> + ?Sized),
+    off: i32,
+    len: i32,
+    position: i64,
+) -> i32 {
+    let bytes: Vec<u8> = buf.range(off as usize..(off + len) as usize).iter().map(|&b| b as u8).collect();
     let written = fd::with_file(fd, |mut f| {
         let n = if position < 0 {
             f.write(&bytes)?

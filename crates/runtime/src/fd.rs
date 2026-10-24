@@ -245,7 +245,13 @@ impl FdTable {
 
     /// `readBytes(b, off, len)`: fills `buf[off..off + len]` and returns the count, or `-1` at the
     /// end (when `len` is not 0).
-    pub fn read_bytes(&mut self, fd: i32, buf: &mut [i8], off: i32, len: i32) -> Result<i32, Failure> {
+    pub fn read_bytes(
+        &mut self,
+        fd: i32,
+        buf: &mut (impl crate::Target<i8> + ?Sized),
+        off: i32,
+        len: i32,
+    ) -> Result<i32, Failure> {
         if len == 0 {
             return Ok(0);
         }
@@ -255,9 +261,8 @@ impl FdTable {
         if count == 0 {
             return Ok(-1);
         }
-        for (dest, &byte) in buf[off..off + count].iter_mut().zip(&bytes) {
-            *dest = byte as i8;
-        }
+        let read: Vec<i8> = bytes[..count].iter().map(|&b| b as i8).collect();
+        buf.store(off, &read);
         Ok(count as i32)
     }
 
@@ -483,7 +488,12 @@ pub fn fd_read(fd: i32) -> Result<i32, Failure> {
     with(|t| t.read(fd))
 }
 
-pub fn fd_read_bytes(fd: i32, buf: &mut [i8], off: i32, len: i32) -> Result<i32, Failure> {
+pub fn fd_read_bytes(
+    fd: i32,
+    buf: &mut (impl crate::Target<i8> + ?Sized),
+    off: i32,
+    len: i32,
+) -> Result<i32, Failure> {
     with(|t| t.read_bytes(fd, buf, off, len))
 }
 
@@ -499,8 +509,13 @@ pub fn fd_write(fd: i32, b: i32) -> Result<(), Failure> {
     with(|t| t.write(fd, &[b as u8]))
 }
 
-pub fn fd_write_bytes(fd: i32, buf: &[i8], off: i32, len: i32) -> Result<(), Failure> {
-    let bytes: Vec<u8> = buf[off as usize..(off + len) as usize].iter().map(|&b| b as u8).collect();
+pub fn fd_write_bytes(
+    fd: i32,
+    buf: &(impl crate::Source<i8> + ?Sized),
+    off: i32,
+    len: i32,
+) -> Result<(), Failure> {
+    let bytes: Vec<u8> = buf.range(off as usize..(off + len) as usize).iter().map(|&b| b as u8).collect();
     with(|t| t.write(fd, &bytes))
 }
 

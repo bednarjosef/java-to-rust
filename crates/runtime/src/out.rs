@@ -300,8 +300,8 @@ pub fn standard_write(fd: i32, b: i32) {
 }
 
 /// `write(bytes, off, len)` of the stream on descriptor `fd`, whose bounds the caller checked.
-pub fn standard_write_bytes(fd: i32, bytes: &[i8], off: i32, len: i32) {
-    let bytes: Vec<u8> = bytes[off as usize..(off + len) as usize].iter().map(|&b| b as u8).collect();
+pub fn standard_write_bytes(fd: i32, bytes: &(impl crate::Source<i8> + ?Sized), off: i32, len: i32) {
+    let bytes: Vec<u8> = bytes.range(off as usize..(off + len) as usize).iter().map(|&b| b as u8).collect();
     with_stream(fd, |s| {
         if !s.closed {
             s.buffer_bytes(&bytes);

@@ -43,13 +43,15 @@
 //! access must be. The values themselves stay what they are (`Unsafe`'s answers for a class
 //! literal, see `natives.rs`), so the static fields and the static block that compute them run as
 //! in Java; only the offset arithmetic is never computed. A read or write at an element offset is
-//! a read or write of `a[index]`, which in a program with threads holds the array's lock for the
-//! access. An atomic update of an element is `Builtin::ElementUpdate`, whose operands are the
-//! store it makes, `a[index] = x` (or `a[index] += delta`), so that every analysis sees the store,
-//! and for the compare forms the expected value first; the runtime's function for it
-//! (`java::compare_and_set_element`, ...) reads, compares and writes the element under one borrow
-//! of the array, which in a program with threads is one hold of the array's lock, so no other
-//! access of the array comes between the read and the write.
+//! a read or write of `a[index]`, which in an array that threads share is one atomic action of the
+//! element's cell (an acquire load or a release store of a word). An atomic update of an element
+//! is `Builtin::ElementUpdate`, whose operands are the store it makes, `a[index] = x` (or
+//! `a[index] += delta`), so that every analysis sees the store, and for the compare forms the
+//! expected value first; the runtime's function for it (`java::compare_and_set_element`, ...)
+//! reads, compares and writes the element in one atomic action: under one borrow of an array of
+//! one thread, and as one compare-and-swap of the element's cell (or under its striped lock, for
+//! an element wider than a word) in an array that threads share, so no other access of the
+//! element comes between the read and the write.
 //!
 //! An element offset may also be computed away from the access: by a static method whose body
 //! returns one of its parameter (`ForkJoinPool.slotOffset(i)`), whose call is the element at its

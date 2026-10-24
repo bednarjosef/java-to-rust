@@ -496,16 +496,19 @@ pub fn inflate_init(nowrap: bool) -> i64 {
 
 /// `Inflater.inflateBytesBytes`: the result packs the bytes read (bits 0 to 30), the bytes
 /// written (31 to 61), `finished` (bit 62) and `needDict` (bit 63), as Java unpacks it. The
-/// output is the array from `out_off` for `out_len` bytes; the input is copied by the caller.
+/// output is the array from `out_off` for `out_len` bytes, of which the bytes written are stored;
+/// the input is copied by the caller.
 pub fn inflate_bytes(
     addr: i64,
     input: &[i8],
-    output: &mut [i8],
+    output: &mut (impl crate::Target<i8> + ?Sized),
     out_off: i32,
     out_len: i32,
 ) -> Result<i64, Failure> {
-    let output = &mut output[out_off as usize..(out_off + out_len) as usize];
-    run(addr, input, output).map(|(packed, _)| packed)
+    let mut written = vec![0; out_len.max(0) as usize];
+    let (packed, n) = run(addr, input, &mut written)?;
+    output.store(out_off as usize, &written[..n]);
+    Ok(packed)
 }
 
 /// `Inflater.inflateBytesBuffer`: as `inflate_bytes`, with the input copied by the caller and the
@@ -523,7 +526,7 @@ pub fn inflate_buffer_bytes(
     addr: i64,
     input_addr: i64,
     in_len: i32,
-    output: &mut [i8],
+    output: &mut (impl crate::Target<i8> + ?Sized),
     out_off: i32,
     out_len: i32,
 ) -> Result<i64, Failure> {
