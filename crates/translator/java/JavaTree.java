@@ -985,8 +985,11 @@ public class JavaTree {
      * see {@link MissingClasses}) as {@code java.lang.Object}: only {@code null} is of such a type.
      */
     private static String typeText(TypeMirror t) {
-        // Type annotations (`java.lang.@Nullable String`) say nothing the translation uses.
-        if (t instanceof com.sun.tools.javac.code.Type annotated) {
+        // Type annotations (`java.lang.@Nullable String`) say nothing the translation uses. javac
+        // strips a generic method's type of its type parameters too, so those are kept.
+        if (t instanceof com.sun.tools.javac.code.Type.ForAll generic) {
+            t = new com.sun.tools.javac.code.Type.ForAll(generic.tvars, generic.qtype.stripMetadata());
+        } else if (t instanceof com.sun.tools.javac.code.Type annotated) {
             t = annotated.stripMetadata();
         }
         boolean erroneous = keepGoing && ((com.sun.tools.javac.code.Type) t).isErroneous();
