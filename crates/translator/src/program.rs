@@ -317,6 +317,10 @@ fn load(
     }
     walks += rounds.restarts();
     let mut reach = rounds.finish();
+    // The chains asked for are written (`reach::Rounds::finish`); nothing else is.
+    if std::env::var_os("JAVA_TO_RUST_REACH_WHY").is_some() {
+        std::process::exit(0);
+    }
     if !program.libraries.is_empty() {
         let roots = program.sources.iter().chain(&program.libraries);
         reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
