@@ -92,6 +92,12 @@
 //! too, and so does `withInvokeExactBehavior()` of one (`SHA3.asLittleEndian`). Any other use of
 //! a `VarHandle` is rejected.
 //!
+//! A field updater constant (a static final whose value is `AtomicIntegerFieldUpdater`'s,
+//! `AtomicLongFieldUpdater`'s or `AtomicReferenceFieldUpdater`'s `newUpdater`) is a handle of
+//! its field when `newUpdater` would succeed for it (`updater_declaration`); its `get`, `set`,
+//! `lazySet`, compare-and-set forms, `getAndSet` and `getAndAdd` on `this` are `Unsafe`'s at the
+//! field's offset, which the updater's methods make. Any other use of an updater is rejected.
+//!
 //! A `MethodHandle` constant of a constructor is a handle too, resolved when translating:
 //! `lookup.findConstructor(C.class, MethodType.methodType(void.class, P.class, ..))`, where the
 //! lookup is `MethodHandles.lookup()` or `privateLookupIn(D.class, ..)` of one (which only grant
@@ -267,6 +273,18 @@ fn assigns<'t>(node: Node<'t>, target: impl Fn(Node<'t>) -> bool) -> bool {
         None
     };
     variable.is_some_and(|v| target(plain(v)))
+}
+
+/// The kind of the fields that the field updater class `ty` (as javac names the type, with its
+/// type arguments) updates: `int`, `long` or `reference`.
+fn updater_kind(ty: &str) -> Option<Kind> {
+    let raw = ty.split_once('<').map_or(ty, |(raw, _)| raw);
+    match raw.strip_prefix("java.util.concurrent.atomic.")? {
+        "AtomicIntegerFieldUpdater" => Some("int"),
+        "AtomicLongFieldUpdater" => Some("long"),
+        "AtomicReferenceFieldUpdater" => Some("reference"),
+        _ => None,
+    }
 }
 
 /// What a `VarHandle` constant reads and writes.
@@ -787,6 +805,9 @@ impl<'t> Lowering<'t> {
         if self.constructor_handle(node).is_some() {
             return unsupported(node, "a constructor's `MethodHandle` used as a value");
         }
+        if self.updater(node).is_some() {
+            return unsupported(node, "a field updater used as a value");
+        }
         Ok(())
     }
 
@@ -798,6 +819,7 @@ impl<'t> Lowering<'t> {
             || self.static_declaration(owner, member, false).is_some()
             || self.static_declaration(owner, member, true).is_some()
             || self.constructor_handle_declaration(owner, member).is_some()
+            || self.updater_declaration(owner, member).is_some()
     }
 
     /// The class and the constructor's parameter types (as javac names them) that the static
@@ -924,6 +946,114 @@ impl<'t> Lowering<'t> {
             );
         }
         Ok(())
+    }
+
+    /// The class and the name of the field that the static final field `member` of class `owner`
+    /// is the field updater of: `AtomicIntegerFieldUpdater.newUpdater(C.class, "f")`, or that of
+    /// `AtomicLongFieldUpdater`, or `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class,
+    /// "f")`, of a field for which `newUpdater` succeeds: a `volatile` field of `C` that is not
+    /// static, of type `int`, `long`, or `V` itself (a reference type), which `owner` may access
+    /// (in the same outermost class when it is private, in the same package when it is neither
+    /// public nor protected; a protected one, whose updater checks the class of its objects
+    /// against `owner`'s, is not followed).
+    fn updater_declaration(&self, owner: usize, member: Node<'t>) -> Option<(usize, &'t str)> {
+        let kind = member.symbol().and_then(|s| updater_kind(s.ty))?;
+        let (value, block) = self.static_value(owner, member)?;
+        let value = plain(value);
+        let symbol =
+            value.symbol().filter(|s| value.kind() == "METHOD_INVOCATION" && s.name == "newUpdater")?;
+        (updater_kind(symbol.owner)? == kind).then_some(())?;
+        let args: Vec<Node<'t>> = value.list("arguments").collect();
+        let (class, value_class, name) = match (kind, &args[..]) {
+            ("reference", [class, value_class, name]) => (*class, Some(*value_class), *name),
+            ("int" | "long", [class, name]) => (*class, None, *name),
+            _ => return None,
+        };
+        let class = self.offset_class(class, block)?;
+        let name = plain(name);
+        let name = name.0["value"].as_str().filter(|_| name.kind() == "STRING_LITERAL")?;
+        let field = self.types[class]
+            .node
+            .list("members")
+            .find(|m| m.kind() == "VARIABLE" && m.str("name") == name)?;
+        if field.has_flag("STATIC") || !field.has_flag("VOLATILE") || field.has_flag("PROTECTED") {
+            return None;
+        }
+        let ty = field.symbol()?.ty;
+        let ty = ty.split_once('<').map_or(ty, |(raw, _)| raw);
+        match value_class.map(plain) {
+            None => (ty == kind).then_some(())?,
+            Some(v) => {
+                let named = (v.kind() == "MEMBER_SELECT" && v.str("identifier") == "class")
+                    .then(|| v.get("expression"))
+                    .flatten()?
+                    .java_type();
+                (named == ty && !PRIMITIVES.contains(&ty)).then_some(())?
+            }
+        }
+        let outermost = |mut t: usize| {
+            while let Some(outer) = self.types[t].node.symbol().and_then(|s| self.type_index(s.owner)) {
+                t = outer;
+            }
+            t
+        };
+        let package =
+            |t: usize| self.types[outermost(t)].javac.rsplit_once('.').map_or("", |(p, _)| p).to_string();
+        let accessible = if field.has_flag("PRIVATE") {
+            outermost(class) == outermost(owner)
+        } else {
+            field.has_flag("PUBLIC") || package(class) == package(owner)
+        };
+        accessible.then_some((class, name))
+    }
+
+    /// The field whose updater the static field read `node` holds.
+    fn updater(&self, node: Node<'t>) -> Option<(usize, &'t str)> {
+        let symbol = plain(node).symbol().filter(|s| s.kind == "FIELD" && s.is_static)?;
+        updater_kind(symbol.ty)?;
+        let (owner, member) = self.static_field(&symbol)?;
+        self.updater_declaration(owner, member)
+    }
+
+    /// `U.get(o)`, `U.set(o, x)`, `U.compareAndSet(o, expected, x)`, `U.getAndAdd(o, delta)` and
+    /// the other accesses of a field updater constant `U` that take their operands as they are:
+    /// those of `Unsafe` at the field's offset, which the updater's methods make. The updater
+    /// throws `ClassCastException` for a null object, where the field's access would throw
+    /// `NullPointerException`, so the object must be `this`. `None` for any other call.
+    pub(super) fn updater_access(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+    ) -> Result<Option<ExprKind>, Error> {
+        if updater_kind(symbol.owner).is_none() {
+            return Ok(None);
+        }
+        let receiver = node.child("methodSelect")?.get("expression");
+        let owner = symbol.owner.rsplit('.').next().unwrap_or_default();
+        let Some((class, field)) = receiver.and_then(|r| self.updater(r)) else {
+            return unsupported(
+                node,
+                &format!("`{owner}.{}` of an updater that is not a constant", symbol.name),
+            );
+        };
+        let (put, update) = match symbol.name {
+            "get" => (Some(false), None),
+            "set" | "lazySet" => (Some(true), None),
+            "compareAndSet"
+            | "weakCompareAndSet"
+            | "weakCompareAndSetPlain"
+            | "weakCompareAndSetVolatile" => (None, Some(FieldUpdate::CompareAndSet)),
+            "getAndSet" => (None, Some(FieldUpdate::GetAndSet)),
+            "getAndAdd" => (None, Some(FieldUpdate::GetAndAdd)),
+            name => return unsupported(node, &format!("`{owner}.{name}` of an updater")),
+        };
+        let args: Vec<Node> = node.list("arguments").collect();
+        if plain(args[0]).kind() != "IDENTIFIER" || plain(args[0]).str("name") != "this" {
+            return unsupported(node, &format!("`{owner}.{}` on an object other than `this`", symbol.name));
+        }
+        let (object, ty) = self.handle_field(node, symbol, args[0], class, field)?;
+        let place = Place::Field { object: Box::new(object), name: field.to_string() };
+        self.access_at(node, place, ty, class, &args[1..], update, put, false).map(Some)
     }
 
     /// What the static final field `member` of class `owner` is the `VarHandle` of.

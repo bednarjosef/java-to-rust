@@ -1147,6 +1147,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.var_handle_access(node, &symbol)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.updater_access(node, &symbol)? {
+            return Ok(kind);
+        }
         self.check_method_handle_call(node, &symbol)?;
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);

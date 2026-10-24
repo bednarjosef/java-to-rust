@@ -509,6 +509,13 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
         // reaches, and the handle's accesses are those of the field or element (`lower/handles.rs`).
         || signature.ends_with(")java.lang.invoke.VarHandle")
         || class == "java.lang.invoke.VarHandle"
+        // A field updater constant is a handle of its field, and its accesses are the field's.
+        || matches!(
+            class,
+            "java.util.concurrent.atomic.AtomicIntegerFieldUpdater"
+                | "java.util.concurrent.atomic.AtomicLongFieldUpdater"
+                | "java.util.concurrent.atomic.AtomicReferenceFieldUpdater"
+        )
         || REPLACED_BY_NAME.contains(&(class, name))
         || caller_query(class, name, signature).is_some()
         || (class == "java.lang.Character" && crate::lower::runtime_character_method(name, signature))
