@@ -8,10 +8,11 @@
 //!
 //! The classes are the program's and its annotation types, the only ones a class value can be of
 //! besides the object model's own (`String`, the boxes, ...), arrays and primitive types, which
-//! have no annotation of the program. A JDK annotation that the object model's classes could
-//! have is rejected unless it can only be on annotation types (`@Target(ANNOTATION_TYPE)`), as
-//! `Inherited` and `Documented` are. A nested annotation type has no class value (its class
-//! literal is rejected), so it is not tested.
+//! have no annotation of the program. Of the JDK's annotations, those classes have only
+//! `PROVIDED_ANNOTATIONS` in the JDK's sources: one of those is rejected unless it can only be on
+//! annotation types (`@Target(ANNOTATION_TYPE)`), and any other (`Deprecated`) is tested as the
+//! program's are. A nested annotation type has no class value (its class literal is rejected), so
+//! it is not tested.
 
 use super::*;
 
@@ -19,6 +20,13 @@ const RETENTION: &str = "java.lang.annotation.Retention";
 const TARGET: &str = "java.lang.annotation.Target";
 const INHERITED: &str = "java.lang.annotation.Inherited";
 const REPEATABLE: &str = "java.lang.annotation.Repeatable";
+
+/// The JDK's annotations kept when the program runs that the JDK's sources put on a class that
+/// the translator provides (`program::RUNTIME_CLASSES` and the standard classes): `Object`,
+/// `Class` and `ClassLoader` are `@AOTSafeClassInitializer`, and
+/// `Thread.UncaughtExceptionHandler` is a `@FunctionalInterface`.
+const PROVIDED_ANNOTATIONS: &[&str] =
+    &["java.lang.FunctionalInterface", "jdk.internal.vm.annotation.AOTSafeClassInitializer"];
 
 impl<'t> Lowering<'t> {
     /// `receiver.isAnnotationPresent(annotation)` (see the module's comment).
@@ -41,7 +49,11 @@ impl<'t> Lowering<'t> {
         let runtime = self.annotation_values(decl, RETENTION)?.is_some_and(|v| v == ["RUNTIME"]);
         let only_annotation_types =
             self.annotation_values(decl, TARGET)?.is_some_and(|v| v == ["ANNOTATION_TYPE"]);
-        if runtime && !only_annotation_types && self.library_annotations.contains(name) {
+        if runtime
+            && !only_annotation_types
+            && self.library_annotations.contains(name)
+            && PROVIDED_ANNOTATIONS.contains(&name)
+        {
             return unsupported(node, &format!("`isAnnotationPresent` of the JDK's `{name}`"));
         }
         let inherited = self.has_annotation(decl, INHERITED);

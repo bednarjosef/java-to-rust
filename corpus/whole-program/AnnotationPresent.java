@@ -27,7 +27,8 @@ import java.lang.annotation.Target;
 
 // `isAnnotationPresent`, as javac's ClassSymbol asks an annotation type whether it is
 // `@Inherited`: what is kept when the program runs, what a subclass inherits, and what a repeated
-// annotation leaves (its container).
+// annotation leaves (its container); also the JDK's `@Deprecated`, which none of the classes that
+// the translator provides has.
 public class AnnotationPresent {
     @Kept
     @Passed
@@ -43,6 +44,11 @@ public class AnnotationPresent {
 
     @Tag("one")
     static class Once {}
+
+    @Deprecated
+    static class Old {}
+
+    static class Older extends Old {}
 
     @Tag("one")
     @Tag("two")
@@ -62,6 +68,10 @@ public class AnnotationPresent {
         show("Once", Once.class);
         show("Twice", Twice.class);
         show("String", String.class);
+        Class<?>[] old = {Old.class, Older.class, String.class, Object.class, Integer.class, Base.class};
+        for (Class<?> c : old) {
+            System.out.println(c.getSimpleName() + ": deprecated " + c.isAnnotationPresent(Deprecated.class));
+        }
         Class<?>[] types = {Kept.class, Passed.class, Documented.class, Retention.class, Inherited.class};
         for (Class<?> type : types) {
             System.out.println(type.getSimpleName() + ": inherited " + type.isAnnotationPresent(Inherited.class)
