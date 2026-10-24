@@ -170,7 +170,11 @@ the translation.
 3. **Escape**: whether an object can leave its method, its parent object, or its thread.
    Built for methods (`analysis/escape.rs`): the `new`s whose objects never leave their method,
    and the methods that return a new object of their own, with a summary of each method's
-   parameters over the calls of `Class::callees` rather than points-to.
+   parameters over the calls that the classes of each receiver (`Class::receivers`, from
+   `live_methods`) can run. A receiver escapes only through what its own class's methods do
+   with `this`, and what an object holds in fields only its own methods read (a lambda's
+   captures, an iterator's list) escapes only with it. On the Minecraft benchmark, 34% of
+   javac's objects are made on the stack.
 4. **Uniqueness and ownership**: fields that hold the only reference to their object, and the
    parent each object is reachable through.
 5. **Immutability**: objects, and whole classes, never written after their constructor ends,
