@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Puts the server's sources together from several decompiles, file by file (see
-docs/minecraft-server.md, and the best-of step of minecraft-server-survey.sh).
+"""Puts a jar's sources together from several decompiles, file by file (see
+docs/minecraft-server.md, and the best-of and library-best-of steps of minecraft-server-survey.sh).
 
   decompile-best-of.py DIR OUT CLASSPATH MAX_COMPILES SETUP... [-- SLOT...]
 
 DIR holds one tree per setup (DIR/<setup>), all-files.txt (the first setup's files, relative) and
 <first setup>-javac.txt (javac's log on the first setup's whole tree). The first setup is the
 base: a file is taken from another setup only where the whole tree then has fewer javac errors.
+A setup without a tree (CFR is not run where the base has no errors) is skipped.
 
 1. For each other setup, the base tree with that setup's version of every file that has errors
    in the base. A file is a candidate from the setup where it has the fewest errors, if fewer
@@ -16,7 +17,7 @@ base: a file is taken from another setup only where the whole tree then has fewe
    file that is not swapped and has more errors than in the base. The round with the fewest
    errors over the whole tree is kept, if it has fewer than the base.
 
-Every compile is of the whole tree, against the library jars only (CLASSPATH), at most
+Every compile is of the whole tree, against the other jars only (CLASSPATH), at most
 MAX_COMPILES of them, counting the base's. Writes OUT (the tree kept) and DIR/chosen.txt
 ("setup<TAB>file<TAB>base errors<TAB>errors"), and prints the counts.
 """
@@ -83,6 +84,8 @@ for setup in setups[1:]:
     if compiles >= max_compiles:
         break
     swapped = {f: setup for f in base if os.path.isfile(f"{dir}/{setup}/{f}")}
+    if not swapped:
+        continue
     counts = compile_with(swapped, setup)
     print(f"{setup} in place of {len(swapped)} files: {sum(counts.values())} errors in the tree")
     for f in swapped:
