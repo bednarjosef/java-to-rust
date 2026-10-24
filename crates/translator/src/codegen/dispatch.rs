@@ -1463,18 +1463,19 @@ impl<'a> Gen<'a> {
         self.raised_impl(t);
     }
 
-    /// The arms of a `match self` over the variants, each made by `arm` from the variant's class;
-    /// a `match` with no arms for an enum without variants.
-    fn match_arms(&mut self, t: usize, variants: &[usize], arm: &dyn Fn(&mut Self, usize) -> (String, bool)) {
+    /// The arms of a `match` on the class number over the variants, each made by `arm` from the
+    /// variant's class, which reads it as `o`; a `match` of the empty view for an enum without
+    /// variants.
+    fn match_arms(&mut self, variants: &[usize], arm: &dyn Fn(&mut Self, usize) -> (String, bool)) {
         if variants.is_empty() {
             self.line("match self.view() {}");
             return;
         }
-        let arms: Vec<(String, String, bool)> = variants
+        let arms: Vec<(usize, String, bool)> = variants
             .iter()
             .map(|&c| {
                 let (text, uses) = arm(self, c);
-                (self.view_pattern(t, c), text, uses)
+                (c, text, uses)
             })
             .collect();
         // The same call for every variant needs no `match`.
@@ -1482,12 +1483,24 @@ impl<'a> Gen<'a> {
             self.line(&arms[0].1);
             return;
         }
-        self.line("match self.view() {");
+        // A match on the class number, whose arm lends the object where it lies, as `view()`
+        // does: one jump to the class's code rather than one to the view and one to the code.
+        self.line("match self.0.tag() {");
         self.indent += 1;
-        for (variant, text, uses) in arms {
-            let binding = if uses { "o" } else { "_" };
-            self.line(&format!("{variant}({binding}) => {text},"));
+        for (c, text, uses) in arms {
+            let tag = self.class_tag(c);
+            if uses {
+                let payload = self.payload(c);
+                let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
+                // The class number is the one its constructor gives.
+                self.line(&format!(
+                    "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; {text} }}"
+                ));
+            } else {
+                self.line(&format!("{tag} => {text},"));
+            }
         }
+        self.line("tag => java::bad_tag(tag),");
         self.indent -= 1;
         self.line("}");
     }
@@ -1511,7 +1524,7 @@ impl<'a> Gen<'a> {
             _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
         });
         self.indent += 1;
-        self.match_arms(t, &variants, &|g: &mut Self, c| {
+        self.match_arms(&variants, &|g: &mut Self, c| {
             let path = hierarchy::base_path(g.facts, g.class, c, root);
             let path = path.trim_end_matches('.');
             let text = match (mutable, immutable, path.is_empty()) {
@@ -1617,7 +1630,7 @@ impl<'a> Gen<'a> {
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
-        self.match_arms(t, &variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
+        self.match_arms(&variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, &args);
                 (g.covariant_ret(i, r, text), uses)
@@ -2341,7 +2354,7 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         self.indent += 1;
-        self.match_arms(t, variants, &|g: &mut Self, c| {
+        self.match_arms(variants, &|g: &mut Self, c| {
             match g.runtime_of(c) {
                 Some(Type::String) => return ("fmt::Display::fmt(o, f)".to_string(), true),
                 // A builder shows its text, as its `toString` makes it.
@@ -2387,7 +2400,7 @@ impl<'a> Gen<'a> {
         let text = self.string_type();
         self.line(&format!("pub(crate) fn try_text(&self) -> Result<{text}, {throwable}> {{"));
         self.indent += 1;
-        self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
+        self.match_arms(variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
             Some(i) if g.facts.throwing.contains(&i) => {
                 let (call, uses) = g.arm_call(t, c, i, "");
                 if g.facts.nullable_returns.contains(&i) {
@@ -2429,7 +2442,7 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("pub(crate) fn java_string(&self) -> {text} {{"));
         self.indent += 1;
-        self.match_arms(t, variants, &|g: &mut Self, c| g.java_string_arm(t, c));
+        self.match_arms(variants, &|g: &mut Self, c| g.java_string_arm(t, c));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -2519,7 +2532,7 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         let throws = self.enum_text_throws(t);
         let ok = |text: String| if fallible { format!("Ok({text})") } else { text };
-        self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
+        self.match_arms(variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
             Some(i) if g.facts.throwing.contains(&i) || g.facts.nullable_returns.contains(&i) => {
                 let (call, uses) = g.arm_call(t, c, i, "");
                 let call = match (g.facts.throwing.contains(&i), g.facts.nullable_returns.contains(&i)) {
@@ -2562,7 +2575,7 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             self.line(&format!("fn cast_class(&self) -> {class} {{"));
             self.indent += 1;
-            self.match_arms(t, variants, &|g: &mut Self, c| (g.cast_class(c), false));
+            self.match_arms(variants, &|g: &mut Self, c| (g.cast_class(c), false));
             self.indent -= 1;
             self.line("}");
             self.indent -= 1;
@@ -2577,7 +2590,7 @@ impl<'a> Gen<'a> {
         for (need, method, ret) in methods {
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
-            self.match_arms(t, variants, &|g: &mut Self, c| match need {
+            self.match_arms(variants, &|g: &mut Self, c| match need {
                 // An `Object[]` that may be a covariant array, which carries its class.
                 Need::RuntimeClass(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
                     (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
