@@ -171,6 +171,22 @@ pub fn fs_name_max(path: &crate::Wtf8) -> i64 {
     if max < 0 { 255 } else { i64::from(max) }
 }
 
+/// `getSpace0(path, t)`: the size of the file system that holds the file in bytes
+/// (`FileSystem.SPACE_TOTAL`, 0), its free bytes (`SPACE_FREE`, 1), or the free bytes that this
+/// user may take (`SPACE_USABLE`, 2), each `statvfs`'s count of blocks of `f_frsize` bytes; 0
+/// where `statvfs` fails.
+pub fn fs_space(path: &crate::Wtf8, t: i32) -> i64 {
+    let path = &*path.to_string_lossy();
+    let Ok([block, blocks, free, usable]) = crate::unix::file_system_space(path.as_bytes()) else { return 0 };
+    let count = match t {
+        0 => blocks,
+        1 => free,
+        2 => usable,
+        _ => return 0,
+    };
+    block.wrapping_mul(count) as i64
+}
+
 /// `canonicalize0(path)` of an absolute path: the path with its symbolic links resolved and `.`
 /// and `..` taken out. As the JVM's `JDK_Canonicalize` does, a path that does not exist resolves
 /// its longest part that does and keeps the rest as written.

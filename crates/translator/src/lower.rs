@@ -1293,6 +1293,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.vm_code_call(&symbol) {
+            return Ok(kind);
+        }
         if let Some(kind) = self.channel_native_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }

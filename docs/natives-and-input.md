@@ -68,7 +68,7 @@ something a translated program does not have.
 | `FileDescriptor.getAppend(fd)` | `java::fd_append(fd)` | the descriptor's `O_APPEND` (from `/proc/self/fdinfo`, `false` where missing); `true` for a descriptor that is not open, as Java reads `fcntl`'s -1 |
 | `FileInputStream`, `FileOutputStream`, `RandomAccessFile`, `FileDescriptor` natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `write`, `seek0`, `close0`, ...) | `fd.rs` | a descriptor table of the process; 0, 1 and 2 are the standard streams |
 | `sun.nio.ch.UnixFileDispatcherImpl` natives (`read0`, `pread0`, `write0`, `pwrite0`, `seek0`, `size0`, `truncate0`, `available0`, `isOther0`, `setDirect0`, `release0`); `FileDispatcherImpl.init0`, `IOUtil.iovMax`, `IOUtil.writevMax`, `NativeThread.init`, `current0`, `signal0` | `file_channel.rs` | the channel natives of `FileChannelImpl`, on the descriptor table: `read0` and `pread0` give -1 at the end of the file; `seek0` with -1 gives the position; `setDirect0` always fails with an `IOException` ("Operation not supported": the standard library cannot set `O_DIRECT` on an open file); `release0` does nothing (no lock is taken, as `lock0` is not implemented); `signal0` does nothing (no translated thread is blocked in a native call to wake); `current0` is never 0 |
-| `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; not `getSpace0` |
+| `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; `getSpace0` is `statvfs`'s block size times its blocks, free or available blocks, 0 where it fails |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing; the path it gives them, `UnixPath.getByteArrayForSysCalls()`, is never null, as the JDK's code shows (`analysis/nullness.rs`: `never_null_result`), so a call has no message of a null path to know |
 | `UnixNativeDispatcher.statvfs0` (the translator's patch, `long[]` fields) | `unix.rs`: `unix_statvfs` | the four fields `UnixFileStoreAttributes.fill` copies (block size, blocks, free and available blocks) |
 | `UnixNativeDispatcher.fgetxattr0`, `fsetxattr0`, `fremovexattr0`, `flistxattr0` and `mknod0` (the translator's patch) | `unix.rs` | the extended attributes of an open file, read from and written to the native memory of the JDK's `NativeBuffer`s, as the DOS and user-defined attribute views and `Files.copy` use them, and `mknod` for the copy of a special file |
@@ -76,10 +76,11 @@ something a translated program does not have.
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers |
 | `FileDispatcherImpl.transferTo0`, `transferFrom0` | `file_channels.rs`: `UNSUPPORTED_CASE` | the JDK's `transferToArbitraryChannel` (or its `transferFrom` twin) copies through buffers at the same positions and counts, so `Files.copy` and `FileChannel.transferTo`/`transferFrom` give Java's bytes and positions; `copy_file_range` is not used |
-| `UnixFileDispatcherImpl.map0(fd, prot, position, length, isSync)` | `file_channels.rs`, lowered with the descriptor's number (`lower/file_channels.rs`) | a read-only (`MAP_RO`) or private (`MAP_PV`) mapping is a block of memory outside the heap holding the file's bytes from `position` (zeros past the end of the file), taken when the map is made. Later writes to the file are not seen, and writes to a private mapping do not reach the file, as in Java. A read-write or synchronous mapping ends the program with a message |
+| `UnixFileDispatcherImpl.map0(fd, prot, position, length, isSync)` | `file_channels.rs`, lowered with the descriptor's number (`lower/file_channels.rs`) | a read-only (`MAP_RO`) or private (`MAP_PV`) mapping is a block of memory outside the heap, at the start of a page as `mmap` places one, holding the file's bytes from `position` (zeros past the end of the file), taken when the map is made. Later writes to the file are not seen, and writes to a private mapping do not reach the file, as in Java. A read-write or synchronous mapping ends the program with a message |
 | `UnixFileDispatcherImpl.unmap0(address, length)` | `file_channels.rs` | frees the block; 0 |
 | `UnixFileDispatcherImpl.allocationGranularity0()` | `file_channels.rs` | the page size (4096), which `FileChannelImpl` aligns mapping positions to |
 | `MappedMemoryUtils.force0`, `Unsafe.writeback0`, `writebackPreSync0`, `writebackPostSync0` | nothing (statement dropped) | exact because no mapping is writable or synchronous, so there is nothing to write back |
+| `MappedMemoryUtils.isLoaded0`, `load0`, `unload0` | `true`; nothing | a mapping is a copy in the process's memory, so it is loaded; `load` then reads one byte of each page from the page's start, which is why the block starts a page. Unloading drops nothing, as dropping a copy's pages would lose them |
 | `Unsafe.fullFence()` (and `loadFence`, `storeFence`) | a full fence | |
 | `Unsafe.park`, `unpark` | `thread.rs` | `LockSupport`'s permits |
 | `CRC32.update`, `updateBytes0`, `updateByteBuffer0` | `java::crc32_update`, `crc32_update_bytes`, `crc32_update_buffer` | zlib's CRC-32, of an array or of memory outside the heap by address (direct buffers) |
@@ -89,7 +90,9 @@ something a translated program does not have.
 | `ProcessHandleImpl.isAlive0(pid)` | `java::process_start_time(pid)` | as the JDK reads `/proc/<pid>/stat` on Linux: -1 when there is no such process, 0 when its fields cannot be read, else its start time in milliseconds since the epoch (`btime` of `/proc/stat` plus the start's clock ticks at `AT_CLKTCK` per second) |
 | `Inflater` natives (`inflateBytesBytes`, `inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, ...) | `inflate.rs` | zlib inflation, from arrays or from memory outside the heap by address (direct buffers) |
 | `Deflater` natives (`init`, `deflateBytesBytes`, `deflateBytesBuffer`, `deflateBufferBytes`, `deflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, `getAdler`, `reset`, `end`) | `deflate.rs` | a compressor of the runtime's own, see "Compression" below |
-| `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()` | code on the field `referent`; `false` | see "References" below |
+| `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()`, `getAndClearReferencePendingList()`, `waitForReferencePendingList()` | code on the field `referent`; `false`; `null`; `java::wait_for_pending_references()`, which parks for ever | see "References" below |
+| `Unsafe.getLoadAverage0(loadavg, nelems)` | `java::load_average` | the C library's `getloadavg`: the number of samples written, or -1 |
+| `OperatingSystemImpl.initialize0`, `getTotalMemorySize0`, `getFreeMemorySize0`, `getTotalSwapSpaceSize0`, `getFreeSwapSpaceSize0`, `getCommittedVirtualMemorySize0`, `getProcessCpuTime0`, `getOpenFileDescriptorCount0`, `getMaxFileDescriptorCount0`, `getHostOnlineCpuCount0` | nothing; `java::os_total_memory`, ... (`vm.rs`) | as the JDK's `libmanagement_ext` reads them on Linux: `sysconf`'s pages times the page size, `sysinfo`'s swap, `vsize` of `/proc/self/stat`, `times()` in whole clock ticks, the entries of `/proc/self/fd` but the one that reads it, and the hard `RLIMIT_NOFILE` (HotSpot raises the soft limit to it when it starts) |
 | `SecureRandom.getSeed` | `random.rs` | seed bytes from the operating system |
 | the natives of the translator's `Thread` | `thread.rs` | see [multi-threading.md](multi-threading.md) |
 | `StandardOutput.write0`, `writeBytes0`, `flush0`, `close0` | `out.rs` | see "System.out, System.err and System.in as values" |
@@ -186,8 +189,7 @@ the program could call, and what is left of it is its outcome. In a whole progra
   channel. `FileChannel.open` and `Files.newByteChannel` do not use `FileChannelImpl` at all: they
   use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
-  definition and module natives, sockets, `MappedMemoryUtils.isLoaded0`, `load0` and
-  `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
+  definition and module natives, sockets, and every native not in the table.
 - The natives of a library's own classes, outside the JDK (jtracy's `TracyBindings`, JNA's
   `Native`, netty's `epoll` and `kqueue` classes). Their code is in a JNI library that the
   program loads with `System.load` or `System.loadLibrary`, which a translation rejects. Planned:
@@ -387,7 +389,9 @@ A translated program is closed: it knows all its classes. So:
 garbage collector that clears a reference behind its back: an object is freed when its last strong
 reference goes, and a reference holds one. So a reference behaves as on a JVM whose collector
 never needs the memory: `get` gives the referent until `clear`, and no reference is enqueued but
-by `enqueue`.
+by `enqueue`. No reference is ever pending, so the reference handler thread that `Reference`
+starts waits for ever in `waitForReferencePendingList`; it is a daemon thread, so the program
+ends without it.
 
 ## Standard streams and `java.io` in a translation
 
@@ -483,8 +487,7 @@ reason as `PrintStream`: the JDK's decode and encode through `StreamDecoder` and
 
 Not done:
 
-- Hand-writing the remaining natives as programs need them, keeping to the policy above (for
-  example `UnixFileSystem.getSpace0`, which needs `statvfs`).
+- Hand-writing the remaining natives as programs need them, keeping to the policy above.
 - The `CharSequence` enum of the object model has no variants when a program's only conversion of a
   `CharBuffer` to `CharSequence` is the translator's own call (`char_sequence_call`). The flow
   analysis (`analysis/hierarchy.rs` `flows`) records no edge for it, so the interface's methods have
