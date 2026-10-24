@@ -15,7 +15,7 @@ impl<'t> Lowering<'t> {
         self.stmt_into(node.child("block")?, out)
     }
 
-    /// `o.wait()`, `o.wait(millis)`, `o.notify()` and `o.notifyAll()`, with `this` as the object
+    /// `o.wait()`, `o.wait(millis)`, `o.wait(millis, nanos)`, `o.notify()` and `o.notifyAll()`, with `this` as the object
     /// when the call names none; `None` for `Object`'s other methods.
     pub(super) fn monitor_call(
         &self,
@@ -37,8 +37,7 @@ impl<'t> Lowering<'t> {
                 args.push(self.synth(ExprKind::Long(0), node.pos(), Type::Long));
                 Native::MonitorWait
             }
-            ("wait", 1) => Native::MonitorWait,
-            ("wait", _) => return unsupported(node, "`wait` with a timeout in nanoseconds"),
+            ("wait", _) => Native::MonitorWait,
             (name, _) => Native::MonitorNotify { all: name == "notifyAll" },
         };
         args.insert(0, object);

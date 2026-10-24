@@ -227,6 +227,36 @@ pub fn monitor_wait(held: &impl HasMonitor, millis: i64) {
     }
 }
 
+/// `o.wait(millis, nanos)`, where the program observes its exceptions: as `Object`'s, which
+/// checks both and waits a millisecond longer for any nanoseconds.
+pub fn try_monitor_wait_nanos(
+    held: &impl HasMonitor,
+    millis: i64,
+    nanos: i32,
+) -> Result<(), crate::Exception> {
+    if millis < 0 {
+        return Err(crate::Exception::new(
+            "java.lang.IllegalArgumentException",
+            "timeoutMillis value is negative",
+        ));
+    }
+    if !(0..=999_999).contains(&nanos) {
+        return Err(crate::Exception::new(
+            "java.lang.IllegalArgumentException",
+            "nanosecond timeout value out of range",
+        ));
+    }
+    let millis = if nanos > 0 && millis < i64::MAX { millis + 1 } else { millis };
+    try_monitor_wait(held, millis)
+}
+
+/// `o.wait(millis, nanos)`.
+pub fn monitor_wait_nanos(held: &impl HasMonitor, millis: i64, nanos: i32) {
+    if let Err(e) = try_monitor_wait_nanos(held, millis, nanos) {
+        crate::uncaught::<()>(e);
+    }
+}
+
 /// `o.notify()` or, with `all`, `o.notifyAll()`, where the program observes the
 /// `IllegalMonitorStateException`.
 pub fn try_monitor_notify(held: &impl HasMonitor, all: bool) -> Result<(), crate::Exception> {

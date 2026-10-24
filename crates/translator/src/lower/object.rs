@@ -1068,9 +1068,9 @@ impl<'t> Lowering<'t> {
         })
     }
 
-    /// `super.m()` of `Object`'s `hashCode`, `equals` or `toString` in a class that overrides
-    /// it: the identity hash of `this`, identity, and `getClass().getName() + "@" +
-    /// Integer.toHexString(hashCode())`.
+    /// `super.m()` of `Object`'s `hashCode`, `equals`, `toString` or `finalize` in a class that
+    /// overrides it: the identity hash of `this`, identity, `getClass().getName() + "@" +
+    /// Integer.toHexString(hashCode())`, and nothing.
     fn object_super_call(&self, node: Node<'t>, symbol: &Symbol, args: Vec<Expr>) -> Result<ExprKind, Error> {
         let at = self.object.expect("`object_call` checked `Object`");
         // In a lambda, `super` is the object of the class whose code holds it.
@@ -1108,6 +1108,8 @@ impl<'t> Lowering<'t> {
                 );
                 Ok(ExprKind::Binary(BinOp::Add, Box::new(left), Box::new(hex)))
             }
+            // `Object`'s `finalize` is empty.
+            "finalize" => Ok(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())),
             name => unsupported(node, &format!("`super.{name}()` of `Object`")),
         }
     }

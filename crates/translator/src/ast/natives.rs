@@ -120,7 +120,8 @@ pub enum Native {
     Park,
     /// `Unsafe.unpark(thread)`: gives the thread its permit. Lowering passes the thread's id.
     Unpark,
-    /// `o.wait()` and `o.wait(millis)`: the object, and the timeout in milliseconds (0 for none).
+    /// `o.wait()`, `o.wait(millis)` and `o.wait(millis, nanos)`: the object, the timeout in
+    /// milliseconds (0 for none), and any nanoseconds.
     MonitorWait,
     /// `o.notify()`, or with `all` `o.notifyAll()`: the object.
     MonitorNotify {
