@@ -27,6 +27,13 @@ import java.lang.reflect.Method;
 @interface Dropped {
 }
 
+@Retention(RetentionPolicy.RUNTIME)
+@interface Range {
+    Label low();
+
+    Label high() default @Label(value = "top", order = 9);
+}
+
 // `getAnnotation` and `getDeclaredAnnotations` of a method, a field and a constructor, as gson
 // and the JDK's beans read them, and the identity of the annotations: Java gives the same object
 // on every call for the same declaration, also through a subclass that inherits the member.
@@ -41,6 +48,12 @@ public class MemberAnnotations {
         public String name;
 
         public long plain;
+
+        @Range(low = @Label(value = "bottom", order = 2))
+        public int span;
+
+        @Range(low = @Label("floor"), high = @Label("ceiling"))
+        public int reach;
 
         @Label("make")
         public Base() {
@@ -121,6 +134,12 @@ public class MemberAnnotations {
         } catch (InstantiationException e) {
             System.out.println("abstract");
         }
+        Range span = Base.class.getField("span").getAnnotation(Range.class);
+        Range reach = Base.class.getField("reach").getAnnotation(Range.class);
+        System.out.println(span + " " + span.low().value() + " " + span.high().order());
+        System.out.println(reach + " " + reach.high().value());
+        System.out.println((span.low() == span.low()) + " " + (span.high() == Derived.class.getField("span")
+                .getAnnotation(Range.class).high()) + " " + span.low().equals(reach.low()));
         Method none = null;
         try {
             none.getAnnotation(Label.class);

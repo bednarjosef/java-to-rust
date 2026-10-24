@@ -16,11 +16,13 @@
 //! whose `@Target` allows such a member (not a type annotation such as `@Nullable`), in the order
 //! of the declaration.
 //!
-//! A value may be a constant, a class literal, an enum constant, or an array of primitives or of
-//! classes, written as one element where the member is an array. Rejected: a member whose type is
-//! an annotation type, an array of strings or of enum constants (such an array has the class of a
-//! `Class[]` in a translation, as its elements are objects, so the JDK's `memberValueToString`
-//! would take it for an array of classes), and the container that a repeated annotation leaves.
+//! A value may be a constant, a class literal, an enum constant, an annotation (kept as the one
+//! that has it is, and a default one once for its type, as Java parses a type's defaults once),
+//! or an array of primitives or of classes, written as one element where the member is an array.
+//! Rejected: a member whose type is an array of annotations, strings or enum constants (such an
+//! array has the class of a `Class[]` in a translation, as its elements are objects, so the JDK's
+//! `memberValueToString` would take it for an array of classes), a nested annotation type, and
+//! the container that a repeated annotation leaves.
 //! The call of a member, `a.value()`, is `TranslatedAnnotations.member(a, "value")`, unboxed or
 //! cast to the member's type; it copies an array that is not empty, as the JDK's proxy does.
 
@@ -199,7 +201,11 @@ impl<'t> Lowering<'t> {
         for member in decl.list("members").filter(|m| m.kind() == "METHOD") {
             if let Some(value) = member.get("defaultValue") {
                 defaults.push(text(member.str("name")));
-                defaults.push(self.member_value(node, decl, member.str("name"), value, objects.element())?);
+                // Java parses a type's defaults once, so its default annotations are shared.
+                let key = format!("{name}.{} default", member.str("name"));
+                let value =
+                    self.member_value(node, make, &key, decl, member.str("name"), value, objects.element())?;
+                defaults.push(value);
             }
         }
         let mut values = Vec::new();
@@ -209,7 +215,8 @@ impl<'t> Lowering<'t> {
                 _ => ("value", argument),
             };
             values.push(text(member));
-            values.push(self.member_value(node, decl, member, value, objects.element())?);
+            let key = format!("{holder}@{name}.{member}");
+            values.push(self.member_value(node, make, &key, decl, member, value, objects.element())?);
         }
         self.annotation_classes.borrow_mut().insert(name.to_string());
         let literal = ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new());
@@ -220,10 +227,14 @@ impl<'t> Lowering<'t> {
         Ok(self.synth(call, pos, annotation_type))
     }
 
-    /// The value `value` of the member `member` of the annotation type `decl`, as an `object`.
+    /// The value `value` of the member `member` of the annotation type `decl`, as an `object`;
+    /// an annotation is made with `make` and kept under `key` and its type.
+    #[allow(clippy::too_many_arguments)]
     fn member_value(
         &self,
         node: Node<'t>,
+        make: usize,
+        key: &str,
         decl: Node<'t>,
         member: &str,
         value: Node<'t>,
@@ -240,6 +251,15 @@ impl<'t> Lowering<'t> {
         let primitive =
             matches!(element, "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double");
         let objects = java.ends_with("[]") && !primitive && !element.starts_with("java.lang.Class");
+        // An annotation, made as the one that has it is.
+        if let Some(&nested) = self.annotation_types.get(java)
+            && value.kind() == "ANNOTATION"
+            && !self.nested_annotation_types.contains(java)
+            && let Some(annotation) = self.type_index(ANNOTATION).map(|t| self.self_type(t))
+        {
+            let made = self.annotation_object(node, make, key, java, nested, value, annotation)?;
+            return Ok(self.convert(made, object));
+        }
         if self.annotation_types.contains_key(element) || element.ends_with("[]") || objects {
             return unsupported(node, &format!("`getAnnotation` of a member of type `{java}`"));
         }

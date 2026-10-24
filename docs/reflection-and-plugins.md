@@ -187,8 +187,9 @@ handles.
   defaults, the same annotations of the table's methods, fields and constructors
   (`getAnnotation`, `isAnnotationPresent`, `getAnnotations`, `getDeclaredAnnotations`), a
   `switch` over the slot of the member (both in `lower/annotation_values.rs`; a declaration's
-  annotation is made once, so every call gives the same object, as in Java, and a member that is
-  an array of strings or enum constants is rejected), the annotation objects that the JDK's
+  annotation is made once, so every call gives the same object, as in Java; a member may be an
+  annotation, and one that is an array of strings, enum constants or annotations is rejected),
+  the annotation objects that the JDK's
   `AnnotationParser.annotationForMap` makes (javac's `AnnotationProxyMaker`), which are the
   patched `AnnotationInvocationHandler` itself (`lower/annotation_objects.rs`; a member's call
   is `TranslatedAnnotations.member`, which answers it as the proxy does), the three annotations that
