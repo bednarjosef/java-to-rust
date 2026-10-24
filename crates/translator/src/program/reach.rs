@@ -1304,6 +1304,20 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
         ("java.lang.TranslatedRuntime", "version"),
     ),
+    // Whether a class is a proxy's, and a proxy's handler: a translation makes no proxies but its
+    // annotations, which are their own handlers (`java/lang/TranslatedProxies.java`).
+    (
+        ("java.lang.reflect.Proxy", "isProxyClass", "(java.lang.Class<?>)boolean"),
+        ("java.lang.TranslatedProxies", "isProxyClass"),
+    ),
+    (
+        (
+            "java.lang.reflect.Proxy",
+            "getInvocationHandler",
+            "(java.lang.Object)java.lang.reflect.InvocationHandler",
+        ),
+        ("java.lang.TranslatedProxies", "getInvocationHandler"),
+    ),
     // An action run with the caller's privileges, which, with no security manager, is running it,
     // a checked exception it throws wrapped in a `PrivilegedActionException`
     // (`java/lang/TranslatedAccessController.java`). The overloads that take an
