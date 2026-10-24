@@ -181,8 +181,38 @@ handles.
   `Reach::reflected` and `Reach::services`) in a whole program, and to `file_names` in a single
   file. The rest of the table needs nothing new.
 - **The report** of the lookups that cannot be resolved when translating is not written yet.
+- **Proxies.** `Proxy.newProxyInstance` is still rejected, so a translation makes no proxies
+  but its annotation objects, which Java makes as proxies and the translation as the patched
+  `AnnotationInvocationHandler` itself (see below). `Proxy.isProxyClass` and
+  `getInvocationHandler` are redirected to `java/overlay/java/lang/TranslatedProxies.java`
+  (`REDIRECTED_CALLS`): no class is a proxy class, and a non-proxy's handler is Java's
+  `IllegalArgumentException`. An annotation's class, a proxy class in Java, throws
+  `UnsupportedOperationException` instead, since code that finds a proxy class goes on to treat
+  it as one (JMX's `Introspector` takes its first interface). JNA's `Native.synchronizedLibrary`
+  and `getNativeLibrary` and its `CallbackReference` ask this of objects that only
+  `newProxyInstance` makes.
+
+  *Plan for `newProxyInstance`.* A list of interfaces known when translating (class literals
+  in an array creation) gets one synthetic proxy class, declared as a lambda's class is
+  (`lower/lambdas.rs`): it implements the interfaces and holds the handler, and each method boxes
+  its arguments into an `Object[]` and calls `h.invoke(this, m, args)`, `m` the interface
+  method's `Method` from the reflection table (reachability puts the interfaces' methods in it),
+  then unboxes the result: `null` for a primitive is the `NullPointerException` whose message
+  names `InvocationHandler.invoke(Object, java.lang.reflect.Method, Object[])` as the return
+  value, a value of another type a `ClassCastException`, and a checked exception that the method
+  does not declare is wrapped in an `UndeclaredThrowableException`. `equals`, `hashCode` and
+  `toString` go to the handler too, with `Object`'s `Method`s, which the table does not hold yet
+  (members of the runtime's classes are not in it). Java 26 names a proxy class `$ProxyN` in the
+  package of a non-public interface and `jdk.proxyK.$ProxyN` for public ones (`K` numbering the
+  class loaders' dynamic modules), `N` counting every proxy class as it is defined, annotations'
+  included; matching those names needs a run-time counter that the annotation objects also
+  advance. Every caller in the Minecraft census (JNA's `Native.load` and `CallbackReference`,
+  JMX's `JMX.newMBeanProxy` and `MXBeanLookup`, JFR's `AnnotationConstruct`, netty's
+  `BouncyCastleAlpnSslUtils`) passes a list computed at run time (a `Class` parameter, or a class
+  found by name), so covering them needs a proxy class for each interface that such code can be
+  given, chosen as the reflection table's candidates are, and a test of the list against them.
 - **Annotations read by reflection** of a method, field or constructor (`getAnnotation`),
-  method handles, `Proxy` and `java.lang.invoke` are still rejected, except a class's
+  method handles and `java.lang.invoke` are still rejected, except a class's
   `getAnnotation(A.class)`, a chain of tests of the class against those whose declarations have
   `A`, each making the annotation from the declared values and the defaults
   (`lower/annotation_values.rs`; each call makes a new object, and a member that is an array of
