@@ -14,7 +14,9 @@ import java.net.URL;
  * directory: the translation does not know which, so asking for them (the titles, versions and
  * vendors, whether it is sealed, {@code isCompatibleWith} and {@code toString}, which shows the
  * specification's title and version) throws {@code UnsupportedOperationException}, saying so.
- * So do a package's annotations, which are those of its {@code package-info} class.
+ * So do a package's annotations, which are those of its {@code package-info} class. The lowering
+ * rejects both where it knows the package ({@code lower/packages.rs}), and answers
+ * {@link #getPackage(String)} where it is called, if the answer is certain.
  */
 // Not an `AnnotatedElement`: a package's annotations are not in the translation.
 @Edit(find = "implements java.lang.reflect.AnnotatedElement", replace = "")
@@ -29,6 +31,22 @@ class Package {
         Package p = new Package(name, module);
         p.manifestUnknown = !module.isNamed();
         return p;
+    }
+
+    // A package by name, and all of them, are those of the classes loaded so far: a call is
+    // answered where it is made, if the answer is certain, or rejected (`lower/packages.rs`), so
+    // these run only through a method reference. The JDK's ask their caller's class loader.
+    @Replace
+    @Deprecated(since = "9")
+    public static Package getPackage(String name) {
+        throw new UnsupportedOperationException("the package \"" + name
+                + "\" by name, which depends on the classes loaded so far: code that is not in the translation cannot run");
+    }
+
+    @Replace
+    public static Package[] getPackages() {
+        throw new UnsupportedOperationException(
+                "the packages loaded so far: code that is not in the translation cannot run");
     }
 
     /** The package's versioning information, if the translation knows it. */

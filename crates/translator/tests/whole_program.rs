@@ -388,7 +388,8 @@ fn reading_a_resource_ends_the_program() {
 /// The manifest attributes of a package of the program's unnamed module are those of the jar it
 /// is run from, or null without one, which the translation does not know: asking for them throws
 /// (`java/patches/java/lang/Package.java`), where those of the JDK's packages are null as in Java
-/// (`corpus/whole-program/PackagesOfClasses`).
+/// (`corpus/whole-program/PackagesOfClasses`). Where the class is known to be the program's, the
+/// call is rejected instead (`uncertain_package_lookups_are_rejected`).
 #[test]
 fn a_program_package_manifest_is_not_in_the_translation() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
@@ -401,7 +402,8 @@ fn a_program_package_manifest_is_not_in_the_translation() {
     std::fs::create_dir_all(&sources).unwrap();
     let java = "public class Main {
     public static void main(String[] args) {
-        System.out.println(Main.class.getPackage().getImplementationVersion());
+        Class<?> c = args.length == 0 ? Main.class : String.class;
+        System.out.println(c.getPackage().getImplementationVersion());
     }
 }
 ";
@@ -418,6 +420,65 @@ fn a_program_package_manifest_is_not_in_the_translation() {
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
     let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
     assert!(rust.contains("the manifest attributes of package"), "no manifest's failure in the translation");
+}
+
+/// What a package knows of itself where the translation cannot know it, and packages by name
+/// that may or may not have been loaded yet, are rejected (`lower/packages.rs`;
+/// `corpus/whole-program/PackageLookups` has those that are certain).
+#[test]
+fn uncertain_package_lookups_are_rejected() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-package-lookups");
+    let not_loaded = "`Package.getPackage` of a package that the caller has not loaded";
+    let manifest = "the manifest attributes of a package of the class path";
+    let cases = [
+        ("System.out.println(Package.getPackage(\"javax.swing\"));", not_loaded),
+        ("System.out.println(Package.getPackage(args[0]));", not_loaded),
+        (
+            "System.out.println(Package.getPackages().length);",
+            "`Package.getPackages`, which depends on the classes",
+        ),
+        (
+            "System.out.println(Main.class.getClassLoader().getDefinedPackage(\"p\"));",
+            "`ClassLoader.getDefinedPackage`, which depends on the classes",
+        ),
+        ("System.out.println(p.Main.class.getPackage().getImplementationVersion());", manifest),
+        ("System.out.println(new Main().getClass().getPackage().isSealed());", manifest),
+        ("System.out.println(Package.getPackage(\"p\").toString());", manifest),
+        (
+            "System.out.println(String.class.getPackage().getAnnotations());",
+            "the annotations of a package (`Package.getAnnotations`)",
+        ),
+        (
+            "Package pkg = Main.class.getPackage();\n        System.out.println(pkg != null ? pkg.getSpecificationTitle() : \"none\");",
+            manifest,
+        ),
+    ];
+    for (i, (statements, message)) in cases.iter().enumerate() {
+        let sources = work.join(i.to_string());
+        let _ = std::fs::remove_dir_all(&sources);
+        std::fs::create_dir_all(sources.join("p")).unwrap();
+        let java = format!(
+            "package p;\npublic class Main {{\n    @SuppressWarnings(\"deprecation\")\n    \
+             public static void main(String[] args) {{\n        {statements}\n    }}\n}}\n"
+        );
+        std::fs::write(sources.join("p/Main.java"), java).unwrap();
+        let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+            .args(["--main", "p.Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join(format!("{i}.rs")))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr);
+        assert!(!translated.status.success(), "translated: {statements}");
+        assert!(stderr.contains(message), "not rejected so: {statements}\n{stderr}");
+    }
 }
 
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see

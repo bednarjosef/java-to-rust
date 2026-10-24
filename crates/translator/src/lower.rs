@@ -61,6 +61,7 @@ mod local_types;
 mod modules;
 mod natives;
 mod negated_patterns;
+mod packages;
 mod patterns;
 mod primitives;
 mod processors;
@@ -1195,6 +1196,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.module_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.package_call(node, &symbol, select)? {
             return Ok(kind);
         }
         if let Some(kind) = self.class_call(node, &symbol, select)? {

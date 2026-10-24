@@ -181,7 +181,21 @@ program where such a lookup can happen, so they can be checked before the progra
   loaded from, or none from a directory, which the translation does not know, so asking for
   them (and `toString`, which shows two of them) throws `UnsupportedOperationException` with
   the "not in the translation" message; so do a package's annotations, which are its
-  `package-info` class's (`java/patches/java/lang/Package.java`).
+  `package-info` class's (`java/patches/java/lang/Package.java`). Where the package is known
+  at translation time, these calls are rejected instead (`lower/packages.rs`): the annotations
+  always, and the manifest attributes when the package is of the unnamed module and is that of a
+  class literal (`Native.class.getPackage().getImplementationVersion()`), of the `getClass()` of
+  a value of a class, or a constant name of `Package.getPackage`, directly or through a local
+  variable that holds nothing else.
+- **Packages by name.** Java knows a package by name only once one of its classes has been
+  loaded, and the JVM loads classes when it first needs them, some of the JDK's at startup:
+  `Package.getPackage("javax.swing")` is null until a Swing class is loaded, and
+  `Package.getPackages()` lists 49 packages or 90 depending on the JVM's class data sharing. So
+  the deprecated `Package.getPackage(name)` is translated only where the answer is certain: the
+  name is a constant and is the package of the class whose code calls it, of one of that class's
+  supertypes (loaded before it), or `java.lang`. It is then that class's `getPackage()`. Any
+  other name is rejected, as are `Package.getPackages()` and `ClassLoader`'s
+  `getDefinedPackage`, `getDefinedPackages`, `getPackage` and `getPackages`.
 
 #### javac's survey, before and after
 

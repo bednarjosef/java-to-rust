@@ -716,7 +716,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// The class `t` and its supertypes of the program, directly or not, superclasses first.
-    fn supertypes_of(&self, t: usize) -> Result<Vec<usize>, Error> {
+    pub(super) fn supertypes_of(&self, t: usize) -> Result<Vec<usize>, Error> {
         let mut out = Vec::new();
         let mut at = Some(t);
         while let Some(c) = at {

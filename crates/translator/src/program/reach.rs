@@ -2902,6 +2902,13 @@ impl<'t> Walk<'t> {
         {
             self.work.push(Item::Method((TRANSLATED_MODULES.into(), to.into(), signature.into())));
         }
+        // `Package.getPackage(name)`, which is `c.getPackage()` of a class of that package
+        // (`lower/packages.rs`).
+        if member == ("java.lang.Package", "getPackage", "(java.lang.String)java.lang.Package")
+            && let Some((to, signature)) = module_call("java.lang.Class", "getPackage", "()java.lang.Package")
+        {
+            self.work.push(Item::Method((TRANSLATED_MODULES.into(), to.into(), signature.into())));
+        }
         match text(symbol, "kind") {
             "METHOD"
                 if owner == "java.lang.String"
