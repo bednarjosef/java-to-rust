@@ -263,9 +263,10 @@ impl<'a> Gen<'a> {
             let code = self.expr(e);
             self.catching_now.remove(&e.id);
             let caught = self.caught(e.id, code, mark);
-            // The `ClassNotFoundException` of a name not in the translation always throws: its
-            // closure's value is `Infallible`, which ends the code here as Java's throw does.
-            if matches!(e.kind, ExprKind::Builtin(Builtin::UnknownClass, _)) {
+            // The `ClassNotFoundException` of a name not in the translation, and a field
+            // updater's `ClassCastException`, always throw: the closure's value is `Infallible`,
+            // which ends the code here as Java's throw does.
+            if matches!(e.kind, ExprKind::Builtin(Builtin::UnknownClass | Builtin::UpdaterRefused, _)) {
                 return Code::atom(format!("match {} {{}}", caught.text));
             }
             return caught;
@@ -776,6 +777,13 @@ impl<'a> Gen<'a> {
                 let class = "java.lang.ClassNotFoundException";
                 let throw =
                     format!("{}({class:?}, &format!({message:?}, {}))", self.runtime("throw"), name.text);
+                if self.catching_now.contains(&id) {
+                    return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
+                }
+                Code::never(throw)
+            }
+            Builtin::UpdaterRefused => {
+                let throw = format!("{}()", self.runtime("updater_refused"));
                 if self.catching_now.contains(&id) {
                     return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
                 }

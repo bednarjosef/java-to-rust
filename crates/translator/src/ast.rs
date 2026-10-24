@@ -865,6 +865,10 @@ pub enum Builtin {
     /// is of no class of the translated program, which throws a `ClassNotFoundException` that
     /// says so, through `java::catching`.
     UnknownClass,
+    /// `[]`: the `ClassCastException` without a message that a field updater
+    /// (`AtomicIntegerFieldUpdater` and its kin) throws for a null object (`lower::handles`),
+    /// through `java::catching`. It never completes.
+    UpdaterRefused,
     /// `[class, name]`: `Class.getResourceAsStream(name)` and `getResource(name)`. A translated
     /// program has no resources (the JDK's data files are not in its source), so the program ends
     /// with an `InternalError` that nothing catches. `class` is the name of the class, a string
@@ -1268,6 +1272,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
                         | Builtin::UnknownClass
+                        | Builtin::UpdaterRefused
                         | Builtin::MissingResource
                         | Builtin::InitializeClass { .. }
                         | Builtin::Native(_),

@@ -439,7 +439,10 @@ impl ObjectValues {
             // For dispatch: what ends the program has no value, a checked value or a copy is the
             // value it is given.
             ExprKind::Builtin(
-                Builtin::UnknownClass | Builtin::MissingResource | Builtin::NoObject { .. },
+                Builtin::UnknownClass
+                | Builtin::UpdaterRefused
+                | Builtin::MissingResource
+                | Builtin::NoObject { .. },
                 _,
             ) if self.dispatch => Flow::default(),
             ExprKind::Builtin(Builtin::NullChecked | Builtin::ObjectClone, args)
