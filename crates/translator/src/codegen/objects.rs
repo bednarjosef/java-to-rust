@@ -1476,6 +1476,7 @@ impl<'a> Gen<'a> {
         let c = self.class.methods[ctor].class;
         let name = &self.class.types[c].name;
         let (pointer, cell) = (self.pointer(c), self.cell(c));
+        let place = if slot.is_some() { " on the stack" } else { "" };
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
             call
         } else if let Some(slot) = slot {
@@ -1504,7 +1505,7 @@ impl<'a> Gen<'a> {
                 format!(
                     "{{ static COUNT: java::AllocationCount = java::AllocationCount::new({:?}); \
                      java::count_allocation(&COUNT); {object} }}",
-                    format!("{name}{at}")
+                    format!("{name}{at}{place}")
                 )
             }
             None => object,
