@@ -925,9 +925,9 @@ fn enum_identity_is_pointer_equality() {
     assert_contains(
         &rust,
         &[
+            // Every variant is an object compared by identity: the same bits, class and address.
             "impl PartialEq for Base {",
-            "(BaseView::Circle(a), BaseView::Circle(b)) => Arc::ptr_eq(a, b),",
-            "_ => false,",
+            "self.0 == other.0",
             "&b == &r",
             "&b == &Base::Circle(c.clone())",
         ],
@@ -4957,7 +4957,8 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
             "IntArray(&'a java::Array<i32>),",
             "let held = Object::IntArray(cell.clone());",
             "java::cast(&held, |o| o.as_int_array(), (\"[I\", java::BASE))",
-            "(ObjectView::IntArray(a), ObjectView::IntArray(b)) => Arc::ptr_eq(a, b),",
+            "fn eq(&self, other: &Object) -> bool {",
+            "self.0 == other.0",
             "11 => { let o: &java::Array<i32> = unsafe { self.0.as_pointer() }; java::identity_hash(o) }",
         ],
     );

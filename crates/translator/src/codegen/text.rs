@@ -125,7 +125,12 @@ impl<'a> Gen<'a> {
                     StringOp::ToLowerCase => "lowercase",
                     _ => "string_hash",
                 };
-                let s = self.text_ref(&args[0]);
+                // A shared string keeps its hash (`java::JStr`): its text would hash it again.
+                let s = if op == StringOp::HashCode && args[0].ty == Type::String && super::shared_strings() {
+                    self.shared_ref(&args[0])
+                } else {
+                    self.text_ref(&args[0])
+                };
                 call(self, f, vec![s])
             }
             StringOp::Replace if args[1].ty == Type::Char => {
