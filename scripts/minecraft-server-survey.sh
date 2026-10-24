@@ -5,7 +5,7 @@
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
 # Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, repair, jdk-sources,
-# parse, census, summary.
+# parse, census, summary, and on their own (not run by default) trial and java-run.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -16,6 +16,9 @@
 #                    fetched from Maven Central, org.vineflower:vineflower:1.12.0, if missing; SHA-1 below)
 # CFR                the CFR 0.152 decompiler jar (default $MINECRAFT_CACHE/cfr-0.152.jar; fetched from
 #                    Maven Central, org.benf:cfr:0.152, if missing; SHA-1 below)
+# PROCYON            a directory with the Procyon 0.6.0 decompiler's jars, procyon-compilertools and
+#                    procyon-core (default $MINECRAFT_CACHE/decompilers; fetched from Maven Central,
+#                    org.bitbucket.mstrobel, if missing; SHA-1s below)
 # JDK_SOURCES        a root with the JDK's sources by module (java.base/, java.logging/, ...), where
 #                    the jdk-sources step unpacks the modules that the sources use and lists them
 #                    in modules.txt (default $MINECRAFT_CACHE/jdk-src)
@@ -29,6 +32,14 @@
 # MEMORY_CAP         the most memory the census (the translator with its javac) may take, as
 #                    systemd's MemoryMax, such as 6G; it is stopped there rather than the machine
 #                    running out (default 6G; empty for none, or where systemd-run is missing)
+# TRIAL_CRATES       with a number, the census also writes its trial translation (each rejected
+#                    piece ends the program with the rejection) to $MINECRAFT_CACHE/trial, as a
+#                    workspace with that many body crates (--crates); the trial step builds and
+#                    runs it (default: none)
+# TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G),
+#                    with CARGO_BUILD_JOBS crates built at once (default 4)
+# TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
+#                    memory and time to build)
 # PREVIOUS_CENSUS    the census that the summary compares the latest with, a directory with a
 #                    census.json (default $MINECRAFT_CACHE/census-previous, where the census step
 #                    moves the census before it, if it has one)
@@ -41,6 +52,9 @@ vineflower=${VINEFLOWER:-$cache/vineflower-1.12.0.jar}
 vineflower_sha1=85570609a0a5941a7d2918b6260b209de810f66f
 cfr=${CFR:-$cache/cfr-0.152.jar}
 cfr_sha1=48ef4892cfe8feffddbbd0ff077735140557db74
+procyon=${PROCYON:-$cache/decompilers}
+procyon_compilertools_sha1=44c59529227960fec1be237ac97304303caf0ba3
+procyon_core_sha1=8f5a33f81d7027d11f1eeb609d9f467f97454c1c
 jdk_sources=${JDK_SOURCES:-$cache/jdk-src}
 java=${JAVA:-java}
 translator=${TRANSLATOR:-${CARGO_TARGET_DIR:-$root/target}/release/java-to-rust}
@@ -117,6 +131,27 @@ decompile_cfr() {
   keep_java "$out" "$in" CFR
 }
 
+check_procyon() {
+  mkdir -p "$procyon"
+  fetch_tool org/bitbucket/mstrobel/procyon-compilertools/0.6.0/procyon-compilertools-0.6.0.jar \
+    "$procyon_compilertools_sha1" "$procyon/procyon-compilertools-0.6.0.jar"
+  fetch_tool org/bitbucket/mstrobel/procyon-core/0.6.0/procyon-core-0.6.0.jar \
+    "$procyon_core_sha1" "$procyon/procyon-core-0.6.0.jar"
+}
+
+# Decompiles the top-level classes of a jar that the files listed in LIST hold (paths such as
+# net/minecraft/util/Util.java) with Procyon (scripts/DecompileProcyon.java), the other library
+# jars on its class path.
+decompile_procyon() {
+  local in=$1 out=$2 list=$3
+  rm -rf "$out" && mkdir -p "$out"
+  sed 's|\.java$||' "$list" | xargs "${slot[@]}" nice -n 19 "$java" -Xmx3g \
+    -cp "$procyon/procyon-compilertools-0.6.0.jar:$procyon/procyon-core-0.6.0.jar" \
+    "$root/scripts/DecompileProcyon.java" "$in" "$(other_jars "$in")" "$out" > "$out.log" 2>&1 \
+    || { echo "Procyon failed on $in (see $out.log)" >&2; return 1; }
+  keep_java "$out" "$in" Procyon
+}
+
 # javac on the files listed in LIST (paths relative to DIR, where it runs), every error into LOG.
 # --should-stop=ifError=FLOW makes it attribute every file even when one does not parse, so that
 # a syntax error in one file does not hide the errors of the others.
@@ -151,11 +186,11 @@ other_jars() {
   library_jars | grep -vxF "$1" | paste -sd:
 }
 
-# Decompiles a jar three ways into DIR/<setup>: Vineflower with the library jars, Vineflower
-# without them, and CFR; the rest of the arguments go to Vineflower. CFR, which takes 25 minutes on
-# the whole server, only decompiles the classes of the files that have javac errors with the first
-# (compiled all together against the other library jars, as the parse step does), and is not run
-# where there are none.
+# Decompiles a jar four ways into DIR/<setup>: Vineflower with the library jars, Vineflower
+# without them, CFR and Procyon; the rest of the arguments go to Vineflower. CFR, which takes 25
+# minutes on the whole server, and Procyon only decompile the classes of the files that have javac
+# errors with the first (compiled all together against the other library jars, as the parse step
+# does), and are not run where there are none.
 decompile_setups() {
   local in=$1 dir=$2
   shift 2
@@ -164,62 +199,66 @@ decompile_setups() {
   (cd "$dir/vineflower" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) > "$dir/all-files.txt"
   javac_errors "$dir/vineflower" "$dir/all-files.txt" "$(other_jars "$in")" "$dir/vineflower-javac.txt"
   error_counts "$dir/vineflower-javac.txt" > "$dir/vineflower-errors.txt"
-  rm -rf "$dir/cfr"
+  rm -rf "$dir/cfr" "$dir/procyon"
   [ -s "$dir/vineflower-errors.txt" ] || return 0
+  cut -f2 "$dir/vineflower-errors.txt" > "$dir/error-files.txt"
+  decompile_procyon "$in" "$dir/procyon" "$dir/error-files.txt"
   # The top-level classes of those files, and their nested classes.
   decompile_cfr "$in" "$dir/cfr" "^($(cut -f2 "$dir/vineflower-errors.txt" | sed -E 's|\.java$||; s|/|\\.|g' \
     | paste -sd'|'))(\\$.*)?\$"
 }
 
-# OUT from the three decompiles of a jar in DIR, file by file: Vineflower with the libraries,
+# OUT from the four decompiles of a jar in DIR, file by file: Vineflower with the libraries,
 # except where another setup's file gives the whole tree fewer javac errors
 # (decompile-best-of.py), in at most 8 compiles of the whole tree.
 best_of_setups() {
   local in=$1 dir=$2 out=$3
   python3 -I "$root/scripts/decompile-best-of.py" "$dir" "$out" "$(other_jars "$in")" 8 \
-    vineflower vineflower-nolibs cfr -- "${slot[@]}"
+    vineflower vineflower-nolibs cfr procyon -- "${slot[@]}"
 }
 
 server_jar() {
   find "$cache/jar/META-INF/versions" -name 'server-*.jar' | head -n 1
 }
 
-# The server: net.minecraft and com.mojang, decompiled three ways into decompiled/<setup>.
+# The server: net.minecraft and com.mojang, decompiled four ways into decompiled/<setup>.
 decompile() {
   check_vineflower
+  check_procyon
   fetch_tool org/benf/cfr/0.152/cfr-0.152.jar "$cfr_sha1" "$cfr"
   decompile_setups "$(server_jar)" "$cache/decompiled" --only=net/minecraft --only=com/mojang
 }
 
-# src/server from the server's three decompiles.
+# src/server from the server's four decompiles.
 best-of() {
   best_of_setups "$(server_jar)" "$cache/decompiled" "$cache/src/server"
 }
 
 # Edits a decompiled tree where javac rejects it, compiled against CLASSPATH, with edits that keep
-# the bytecode's behaviour: unchecked casts the decompiler left out, diamond type arguments,
-# misnamed catch variables (scripts/RepairDecompile.java). Each edit is listed in LOG.
+# the bytecode's behaviour: casts the decompiler left out (checked ones only where the class file
+# in the jar CLASSES has the check), diamond type arguments, misnamed catch variables
+# (scripts/RepairDecompile.java). Each edit is listed in LOG.
 repair_tree() {
-  local dir=$1 classpath=$2 log=$3
+  local dir=$1 classpath=$2 log=$3 classes=$4
   local -a exports=()
   local package
   for package in api code tree util; do
     exports+=(--add-exports "jdk.compiler/com.sun.tools.javac.$package=ALL-UNNAMED")
   done
   "${slot[@]}" nice -n 19 "$java" -Xmx4g "${exports[@]}" "$root/scripts/RepairDecompile.java" "$dir" "$classpath" \
-    "${REPAIR_ROUNDS:-4}" "$log"
+    "${REPAIR_ROUNDS:-4}" "$log" "$classes"
 }
 
 # src/server repaired against the library jars, into repair-log.txt, and each library that has
 # no published sources (src/libraries/<artifact>) against the other library jars, into
 # repair-log-<artifact>.txt.
 repair() {
-  repair_tree "$cache/src/server" "$(library_jars | paste -sd:)" "$cache/repair-log.txt"
+  repair_tree "$cache/src/server" "$(library_jars | paste -sd:)" "$cache/repair-log.txt" "$(server_jar)"
   unpublished_jars | while IFS= read -r lib; do
     local name
     name=$(basename "$lib" .jar)
     echo "$name:"
-    repair_tree "$cache/src/libraries/$name" "$(other_jars "$lib")" "$cache/repair-log-$name.txt" < /dev/null
+    repair_tree "$cache/src/libraries/$name" "$(other_jars "$lib")" "$cache/repair-log-$name.txt" "$lib" < /dev/null
   done
 }
 
@@ -262,11 +301,12 @@ library-sources() {
   done
 }
 
-# Each library that has no published sources, decompiled three ways into
+# Each library that has no published sources, decompiled four ways into
 # decompiled/libraries/<artifact>/<setup> and put together into src/libraries/<artifact> as the
 # server is, compiled against the other library jars.
 library-best-of() {
   check_vineflower
+  check_procyon
   fetch_tool org/benf/cfr/0.152/cfr-0.152.jar "$cfr_sha1" "$cfr"
   unpublished_jars | while IFS= read -r lib; do
     local name
@@ -376,15 +416,17 @@ census() {
   # --timings prints each phase's time and the peak memory of the translator and of javac.
   local start
   start=$(date +%s)
-  local -a cap=()
-  if [ -n "$memory_cap" ] && command -v systemd-run > /dev/null; then
-    cap=(systemd-run --user --scope --quiet -p "MemoryMax=$memory_cap" -p MemorySwapMax=0)
+  local -a cap trial=()
+  mapfile -t cap < <(memory_cap_command "$memory_cap")
+  if [ -n "${TRIAL_CRATES:-}" ]; then
+    rm -rf "$cache/trial"
+    trial=(--crate "$cache/trial" --crates "$TRIAL_CRATES")
   fi
   set +e
   "${slot[@]}" "${cap[@]}" "$translator" --timings --main "$main" "$cache/src/server/${main//.//}.java" \
     --library "$cache/src/server" "${libraries[@]}" \
     --census --keep-going --census-json "$out/census.json" --modules-json "$out/modules.json" \
-    > "$out/census.txt" 2> "$out/stderr.txt"
+    "${trial[@]}" > "$out/census.txt" 2> "$out/stderr.txt"
   local code=$?
   set -e
   echo "exit $code after $(($(date +%s) - start)) s (with the wait for a slot)" | tee "$out/run.txt"
@@ -393,6 +435,56 @@ census() {
     | sort -rn > "$out/javac-errors.txt" || true
   echo "$(grep -c '^javac error: ' "$out/stderr.txt" || true) compile errors in the code that javac attributed"
   head -n 40 "$out/census.txt"
+}
+
+# The command that runs another under a memory cap of CAP (one word per line), or none.
+memory_cap_command() {
+  if [ -n "$1" ] && command -v systemd-run > /dev/null; then
+    printf '%s\n' systemd-run --user --scope --quiet -p "MemoryMax=$1" -p MemorySwapMax=0
+  fi
+}
+
+# The server's first start in DIR, a new directory with the EULA accepted (as eula.txt), run as
+# COMMAND...: it makes a world and stops at the "stop" that it reads on standard input once
+# loaded, printing the console's log to DIR/stdout.txt. At most 10 minutes.
+run_server() {
+  local dir=$1
+  shift
+  rm -rf "$dir" && mkdir -p "$dir"
+  echo eula=true > "$dir/eula.txt"
+  local start code
+  start=$(date +%s)
+  set +e
+  (cd "$dir" && echo stop | timeout 600 "$@" --nogui > stdout.txt 2> stderr.txt)
+  code=$?
+  set -e
+  echo "exit $code after $(($(date +%s) - start)) s" | tee "$dir/run.txt"
+  tail -n 5 "$dir/stdout.txt" "$dir/stderr.txt"
+}
+
+# Builds the census's trial translation (TRIAL_CRATES) in trial-target and runs the server with it
+# in trial-run.
+trial() {
+  [ -f "$cache/trial/Cargo.toml" ] || { echo "no trial translation (run the census with TRIAL_CRATES)" >&2; exit 1; }
+  local -a cap
+  mapfile -t cap < <(memory_cap_command "${TRIAL_MEMORY_CAP:-16G}")
+  local start
+  start=$(date +%s)
+  (cd "$cache/trial" && CARGO_TARGET_DIR=$cache/trial-target CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} \
+    "${slot[@]}" "${cap[@]}" cargo build -q --profile "${TRIAL_PROFILE:-dev}" > "$cache/trial-build.txt" 2>&1) \
+    || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
+  echo "built in $(($(date +%s) - start)) s"
+  local name profile=${TRIAL_PROFILE:-dev}
+  [ "$profile" = dev ] && profile=debug
+  name=$(sed -n 's/^members = \[.*, "\([^"]*\)"\]$/\1/p' "$cache/trial/Cargo.toml")
+  run_server "$cache/trial-run" "$cache/trial-target/$profile/$name"
+}
+
+# The server on Java, from the jars, in java-run: what the trial's run is compared with.
+java-run() {
+  local classpath
+  classpath=$(server_jar):$(library_jars | paste -sd:)
+  run_server "$cache/java-run" "$java" -cp "$classpath" "$(cat "$cache/jar/META-INF/main-class")"
 }
 
 # The census split by origin: the server, each library, the JDK (census-by-origin.py), and
@@ -423,9 +515,9 @@ steps=("$@")
 for step in "${steps[@]}"; do
   case $step in
     extract | decompile | best-of | libraries | library-sources | library-best-of | repair | jdk-sources | parse \
-      | census | summary) "$step" ;;
+      | census | summary | trial | java-run) "$step" ;;
     *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of, repair," \
-      "jdk-sources, parse, census, summary)" >&2
+      "jdk-sources, parse, census, summary, trial, java-run)" >&2
       exit 2 ;;
   esac
 done

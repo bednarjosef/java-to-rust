@@ -18,16 +18,18 @@ the machine running out of memory.
 | step | what it does | time |
 |---|---|---|
 | `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required | seconds |
-| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Also Vineflower without the libraries, and CFR on the files that have errors. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 3 min 12 s for Vineflower with the libraries on a busy machine (34 s without them on a quiet one) |
-| `best-of` | `src/server` from the three decompiles, taking each file from Vineflower with the libraries except where another setup's file gives the whole server fewer javac errors ([below](#2-decompiled-sources-that-do-not-compile)) | 5 compiles of the server, about 1.5 min each |
+| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Also Vineflower without the libraries, and CFR and Procyon on the files that have errors. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 3 min 12 s for Vineflower with the libraries on a busy machine (34 s without them on a quiet one) |
+| `best-of` | `src/server` from the four decompiles, taking each file from Vineflower with the libraries except where another setup's file gives the whole server fewer javac errors ([below](#2-decompiled-sources-that-do-not-compile)) | 5 compiles of the server, about 1.5 min each |
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
-| `library-best-of` | each library without published sources decompiled the three ways of `decompile` into `decompiled/libraries/<artifact>`, and put together into `src/libraries/<artifact>` as `best-of` does for the server, compiled against the other library jars | 3 min |
+| `library-best-of` | each library without published sources decompiled the four ways of `decompile` into `decompiled/libraries/<artifact>`, and put together into `src/libraries/<artifact>` as `best-of` does for the server, compiled against the other library jars | 3 min |
 | `repair` | edits `src/server`, and each library in `src/libraries` that has no published sources, where javac rejects it, with edits that keep the bytecode's behaviour ([below](#repairing-what-the-decompiler-left-out)), up to `REPAIR_ROUNDS` (4) rounds; every edit is listed in `repair-log.txt` for the server and `repair-log-<artifact>.txt` for a library | about 5 min, and 1 min for the libraries |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`, [below](#the-jdk-modules): `java.base` plus 30 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events), `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) and `jdk.httpserver` (the HTTP server of an authentication library) | under a minute |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
 | `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
 | `summary` | splits the census by origin, into the server, each library and the JDK (`scripts/census-by-origin.py`), and compares it with the previous one (`scripts/census-compare.py`, below) | seconds |
+| `trial` | not run by default. Builds the trial translation that the census writes when `TRIAL_CRATES` is set: the whole server with each rejected piece of code ending the program with its rejection, as a workspace split into that many body crates ([several-crates.md](several-crates.md)), in `trial/`. Then runs it in a new directory `trial-run/` with the EULA accepted, as `--nogui`, with `stop` on standard input, so that the server makes a world, loads, and stops. The build is capped at `TRIAL_MEMORY_CAP` (16 GB), with the `dev` profile unless `TRIAL_PROFILE` says otherwise | |
+| `java-run` | not run by default. The same run of the server on Java, from the jars, in `java-run/`: what the trial's run is compared with | |
 
 The census gives the translator only `Main.java` as a source file. The rest of the server is a
 `--library` root like the libraries and the JDK modules. Each library's root is its published
@@ -113,8 +115,18 @@ bytecode the class file already has:
   super.getBrain();`, `(List<Component>) (List<?>) stream.toList()`. Such a cast is unchecked:
   javac emits no `checkcast` for it, which is what the original's cast compiled to. The cast
   through the wildcard type is what makes it legal when the two parameterizations are provably
-  distinct. A cast that would need a check (`Object` to `EntityHitResult`) is not made, since
-  the class file may not have one there.
+  distinct. When the expected type is a capture, which source cannot write, the cast is to its
+  erasure, a raw type (`(Codec) codec`), which javac accepts with an unchecked warning.
+- **A downcast to the type javac expects**, where the expected type's erasure is a subtype of
+  the found type's (`Object` to `EntityHitResult`). That cast is checked, so it is made only
+  when the class file of the enclosing class has a `checkcast` to that class: the jar is read with
+  `java.lang.classfile`, and a class without one gets no such edit.
+- **A loop over a raw collection** (`for (EntityHitResult hit : (Collection) hits)`), where the
+  class file casts each element to the loop variable's class: the collection is cast to
+  `Iterable` of that class, through the raw type, so that javac emits that cast on each element.
+- **A diamond in an argument** `new C(..)` of a generic class C, written raw, of a call whose
+  type variables javac then cannot infer (`register(registry, "resource", ..., new
+  ResourceArgument.Info())`): `new C<>(..)`, tried before a cast at the same error.
 - **Type arguments for a diamond** that javac cannot infer, copied from the declared type of
   the variable it initializes or the method result it is returned as, when that is the same
   class: `return new SortedArraySet<T>(...)`. Type arguments are inference only, with no
@@ -132,10 +144,9 @@ captured wildcard outside a type argument, an intersection, a local class) gets 
 each round, a file whose errors (outside imports and annotations) did not go down gets its text
 back, and those edits are not tried again.
 
-On the server taken file by file from the decompile setup that compiles best (159 errors in 104
-files), it keeps 41 edits in 39 files from one round (a second finds nothing more) and leaves 118
-errors in 68 files; 42 of those are imports and annotations of annotation packages that no
-library jar has (`javax.annotation`, `org.jetbrains.annotations`).
+On the server taken file by file from the decompile setups that compile best (151 errors in 100
+files), it leaves 100 errors in 59 files; 42 of those are imports and annotations of annotation
+packages that no library jar has (`javax.annotation`, `org.jetbrains.annotations`).
 
 What is left is mostly inference that fails inside a lambda or a method reference (a lambda
 returning `List<EntityReference<EndCrystal>>` where `List<EntityReference<UniquelyIdentifyable>>`
@@ -182,7 +193,7 @@ dependencies can be built: it stops only at a rejected piece, as any translation
 
 - **The server:** 185 errors in 117 of its 5,037 files with Vineflower and the libraries alone,
   compiled against the original library jars (579 in 282 when decompiled without the libraries;
-  159 in 104 with the files chosen from the three setups by the `best-of` step, and 118 in 68
+  151 in 100 with the files chosen from the four setups by the `best-of` step, and 100 in 59
   after the `repair` step, see
   [below](#2-decompiled-sources-that-do-not-compile)). The largest kinds, with Vineflower alone:
 
@@ -313,14 +324,17 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   cannot be fixed by hand under this target's rules. Most are type arguments and casts that the
   class files do not record at all, so no pass over the class files can bring them back.
 
-  So the server is decompiled three ways and put together file by file. The `decompile` step
-  writes three trees into `decompiled/`: Vineflower with the libraries, Vineflower without them,
-  and CFR 0.152. CFR is fetched from Maven Central like Vineflower, and runs only on the classes
-  of the files that have errors, since it takes about 25 minutes on the whole server. Procyon is
-  not on Maven Central as a runnable jar. The `best-of` step (`scripts/decompile-best-of.py`)
+  So the server is decompiled four ways and put together file by file. The `decompile` step
+  writes four trees into `decompiled/`: Vineflower with the libraries, Vineflower without them,
+  CFR 0.152 and Procyon 0.6.0. CFR and Procyon's two jars are fetched from Maven Central like
+  Vineflower, and run only on the classes of the files that have errors (CFR takes about 25
+  minutes on the whole server). Procyon has no runnable jar there, so `scripts/DecompileProcyon.java`
+  calls its decompiler with the server jar, the library jars and the JDK as the classes it reads;
+  it also gives a public top-level class back the `public` that Procyon leaves off records. The
+  `best-of` step (`scripts/decompile-best-of.py`)
   then builds `src/server` from the Vineflower-with-libraries tree, taking a file from another
   tree only where the whole tree then has fewer errors. A file's own errors are not enough to
-  judge: a file from CFR often declares its classes differently enough that the files using
+  judge: a file from CFR or Procyon often declares its classes differently enough that the files using
   them stop compiling. It works in whole-server compiles, at most 8:
   1. for each other setup, the Vineflower tree with that setup's version of every file that has
      errors; a file whose own errors drop becomes a candidate, from the setup where they drop
@@ -331,15 +345,19 @@ all name missing classes throws as Java would; any other marked piece is rejecte
      if it has fewer than Vineflower alone.
 
   Measured with the `parse` step (which attributes every file even when one does not parse):
-  from 186 errors in 118 files to 159 in 104, with 10 files from Vineflower without the
-  libraries and 8 from CFR, in 5 compiles. The `repair` step then puts back the unchecked casts,
+  from 186 errors in 118 files to 151 in 100, with 10 files from Vineflower without the
+  libraries, 8 from CFR and 5 from Procyon (among them `TypedDataComponent`, whose static
+  methods Vineflower writes with the record's type variable, and `DataFixers`), in 6 compiles.
+  Each of 15 of the 50 files that keep real errors after the repair has at most one error in
+  Procyon's version compiled on its own against the jars, but in the whole tree most of them
+  break the files that use them. The `repair` step then puts back the unchecked casts,
   diamond type arguments and catch variable names that javac's errors show
-  ([above](#repairing-what-the-decompiler-left-out)), which leaves 118 errors in 68 files. What is
+  ([above](#repairing-what-the-decompiler-left-out)), which leaves 100 errors in 59 files. What is
   left is mostly inference inside lambdas and method references, and annotation packages that no
   library jar has; those pieces stay rejected.
 
   The libraries without published sources go through the same two steps: `library-best-of`
-  decompiles each three ways into `decompiled/libraries/<artifact>` and puts it together into
+  decompiles each four ways into `decompiled/libraries/<artifact>` and puts it together into
   `src/libraries/<artifact>`, compiled against the other library jars, and `repair` then edits it.
   Brigadier, jtracy and logging compile as Vineflower writes them. DataFixerUpper goes from 172
   errors in 57 files to 165 with 2 files from CFR (Vineflower without the libraries and CFR's

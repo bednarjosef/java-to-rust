@@ -1,17 +1,30 @@
 // Repairs decompiled Java that javac rejects, with edits that keep the bytecode's behaviour (see
 // docs/minecraft-server.md, "Repairing what the decompiler left out").
 //
-//   java --add-exports ... scripts/RepairDecompile.java ROOT CLASSPATH ROUNDS LOG
+//   java --add-exports ... scripts/RepairDecompile.java ROOT CLASSPATH ROUNDS LOG [CLASSES]
+//
+// CLASSES is the jar that the tree was decompiled from; without it, no cast down is made.
 //
 // Compiles every .java file under ROOT with javac's tree API, reads each error's kind, position
-// and types, edits the files in place, and compiles again, up to ROUNDS times. Only three edits
+// and types, edits the files in place, and compiles again, up to ROUNDS times. Only these edits
 // are made, all of which the class files' bytecode already behaves as:
 //
 // - a cast to the type javac expects, where the found type is not convertible but its erasure is
 //   a subtype of the expected type's erasure: the cast is unchecked and javac emits no checkcast
-//   for it, which is what the original source compiled to (`(List<Component>) (List<?>) list`);
+//   for it, which is what the original source compiled to (`(List<Component>) (List<?>) list`),
+//   or a cast to the raw type where the expected type holds a captured wildcard, which source
+//   cannot write (`(EntityType) type`);
+// - a cast down to the type javac expects, where its erasure is a subtype of the found type's and
+//   the class file of the class the expression is in has a checkcast to it: the one that javac
+//   emitted for the original's generic call or field, whose type the decompiler wrote as the
+//   erased one (`(EntityHitResult) e`);
 // - type arguments for a diamond, copied from the declared type of the variable or method result
 //   it initializes or returns when that is the same class (inference only, no bytecode);
+// - a diamond for an argument `new C(..)` that makes a generic class raw, of a call whose type
+//   variables javac cannot infer (`new Info()` for the original's `new Info<>()`), tried before a
+//   cast at the same error;
+// - in a for-each loop over a raw collection whose elements the class file casts to the loop
+//   variable's class, the collection cast to `Iterable` of that class;
 // - an unresolved variable in a catch block renamed to the catch parameter that encloses every
 //   use of the name and is not used itself (the decompiler declared `e` and used `ex`).
 //
@@ -31,10 +44,15 @@ import com.sun.tools.javac.tree.TreeInfo;
 import com.sun.tools.javac.util.Context;
 import com.sun.tools.javac.util.JCDiagnostic;
 import java.io.*;
+import java.lang.classfile.ClassFile;
+import java.lang.classfile.CodeModel;
+import java.lang.classfile.Opcode;
+import java.lang.classfile.instruction.TypeCheckInstruction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.*;
+import java.util.zip.ZipFile;
 import javax.tools.*;
 
 public class RepairDecompile {
@@ -55,12 +73,16 @@ public class RepairDecompile {
     static String classpath;
     static Path root;
     static PrintWriter log;
+    // The jar of the tree's classes, and the types each class file checks casts to, by name.
+    static ZipFile classes;
+    static Map<String, Set<String>> checkcasts = new HashMap<>();
 
     public static void main(String[] args) throws Exception {
         root = Path.of(args[0]).toAbsolutePath();
         classpath = args[1];
         int rounds = Integer.parseInt(args[2]);
         log = new PrintWriter(Files.newBufferedWriter(Path.of(args[3]), StandardCharsets.UTF_8), true);
+        if (args.length > 4) classes = new ZipFile(args[4]);
         List<Path> all;
         try (Stream<Path> files = Files.walk(root)) {
             all = files.filter(p -> p.toString().endsWith(".java")).sorted().toList();
@@ -204,13 +226,17 @@ public class RepairDecompile {
             try {
                 switch (diag.getCode()) {
                     case "compiler.err.prob.found.req" -> {
-                        if (diag.getArgs()[0] instanceof JCDiagnostic detail
-                                && detail.getCode().equals("compiler.misc.inconvertible.types")) {
+                        JCDiagnostic detail = inconvertible(diag);
+                        List<Edit> diamonds = rawArguments(cu, path);
+                        if (!diamonds.isEmpty()) {
+                            edits.addAll(diamonds);
+                        } else if (detail != null) {
                             Type found = (Type) detail.getArgs()[0], expected = (Type) detail.getArgs()[1];
                             Edit edit = cast(types, cu, tree, path.getParentPath().getLeaf(), found, expected);
                             if (edit != null) edits.add(edit);
                         }
                     }
+                    case "compiler.err.cant.apply.symbol" -> edits.addAll(rawArguments(cu, path));
                     case "compiler.err.cant.apply.diamond.1" -> {
                         Edit edit = diamond(cu, path);
                         if (edit != null) edits.add(edit);
@@ -230,13 +256,52 @@ public class RepairDecompile {
 
     static class Unprintable extends Exception {}
 
+    // The `found cannot be converted to expected` detail of an error, also where it is the reason
+    // of another (`bad type in conditional expression`).
+    static JCDiagnostic inconvertible(JCDiagnostic diag) {
+        for (Object arg : diag.getArgs()) {
+            if (!(arg instanceof JCDiagnostic detail)) continue;
+            if (detail.getCode().equals("compiler.misc.inconvertible.types") && detail.getArgs().length == 2
+                    && detail.getArgs()[0] instanceof Type && detail.getArgs()[1] instanceof Type) return detail;
+            JCDiagnostic nested = inconvertible(detail);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
+
     // `(Expected) (Erased<?>) expr`, when the found type's erasure is a subtype of the expected
-    // type's: javac then emits no checkcast, as for the original's unchecked cast.
+    // type's: javac then emits no checkcast, as for the original's unchecked cast. Where the
+    // expected type cannot be written (it holds a captured wildcard), `(Erased) expr`, a cast to
+    // the raw type, which emits no checkcast either. And `(Expected) expr` where the expected
+    // type's erasure is a subtype of the found type's: the checkcast that javac emitted where the
+    // original's generic call or field gave the expected type, which the decompiler wrote as the
+    // erased one; in a for-each loop, the collection cast so that each element is.
     static Edit cast(Types types, JCTree.JCCompilationUnit cu, JCTree expr, Tree parent, Type found, Type expected)
             throws Unprintable {
         if (!(expr instanceof JCTree.JCExpression) || found == null || expected == null) return null;
-        if (!types.isSubtype(types.erasure(found), types.erasure(expected))) return null;
-        String target = print(cu, expected, false);
+        if (!types.isSubtype(types.erasure(found), types.erasure(expected))) {
+            if (!expected.hasTag(TypeTag.CLASS) || found.hasTag(TypeTag.BOT)
+                    || !types.isSubtype(types.erasure(expected), types.erasure(found))) return null;
+            JCTree.JCClassDecl owner = enclosingClass(cu, expr);
+            if (owner == null || owner.sym == null
+                    || !checksCastTo(owner.sym.flatname.toString(), ((Symbol.ClassSymbol) expected.tsym).flatname.toString()))
+                return null;
+            // In a for-each loop over a raw collection, the element is what javac checks: the
+            // collection as an `Iterable<Expected>` (through the raw type, unchecked) makes it
+            // emit the checkcast on each element that the original's typed loop had.
+            if (parent instanceof JCTree.JCEnhancedForLoop loop && loop.expr == expr) {
+                if (loop.expr.type == null || !loop.expr.type.hasTag(TypeTag.CLASS)) return null;
+                return wrap(cu, expr, "Iterable<" + writable(cu, expected) + ">) (Iterable", "loop over ");
+            }
+            return wrap(cu, expr, writable(cu, expected), "downcast to ");
+        }
+        String target;
+        try {
+            target = print(cu, expected, false);
+        } catch (Unprintable e) {
+            if (!expected.hasTag(TypeTag.CLASS)) throw e;
+            return wrap(cu, expr, printClass(cu, (Symbol.ClassSymbol) expected.tsym), "cast to raw ");
+        }
         String via = "";
         if (expected.hasTag(TypeTag.CLASS) && expected.isParameterized()) {
             if (expected.getEnclosingType().isParameterized()) throw new Unprintable();
@@ -251,17 +316,89 @@ public class RepairDecompile {
                 && written.clazz.type != null && types.isSameType(written.clazz.type, expected)) {
             return new Edit(start, start, via, "cast through " + via.trim() + ": " + oneLine(source(cu, start, end)));
         }
-        boolean primary = expr instanceof JCTree.JCIdent || expr instanceof JCTree.JCFieldAccess
+        String source = source(cu, start, end);
+        String replaced = "(" + target + ") " + via + (primary(expr) ? source : "(" + source + ")");
+        return new Edit(start, end, replaced, "cast to " + target + ": " + oneLine(source));
+    }
+
+    // The innermost class declaration around `tree`.
+    static JCTree.JCClassDecl enclosingClass(JCTree.JCCompilationUnit cu, JCTree tree) {
+        for (TreePath up = TreePath.getPath(cu, tree); up != null; up = up.getParentPath())
+            if (up.getLeaf() instanceof JCTree.JCClassDecl c) return c;
+        return null;
+    }
+
+    // Whether the class file of class `owner` (a binary name) has a checkcast to class `target`.
+    static boolean checksCastTo(String owner, String target) {
+        if (classes == null) return false;
+        Set<String> targets = checkcasts.get(owner);
+        if (targets == null) {
+            targets = new HashSet<>();
+            var entry = classes.getEntry(owner.replace('.', '/') + ".class");
+            if (entry != null) {
+                byte[] bytes;
+                try (InputStream in = classes.getInputStream(entry)) {
+                    bytes = in.readAllBytes();
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+                for (var method : ClassFile.of().parse(bytes).methods())
+                    for (var element : method.code().map(CodeModel::elementList).orElse(List.of()))
+                        if (element instanceof TypeCheckInstruction check && check.opcode() == Opcode.CHECKCAST)
+                            targets.add(check.type().asInternalName().replace('/', '.'));
+            }
+            checkcasts.put(owner, targets);
+        }
+        return targets.contains(target);
+    }
+
+    // The expected type as source writes it, or its raw class where it cannot be written.
+    static String writable(JCTree.JCCompilationUnit cu, Type expected) throws Unprintable {
+        try {
+            return print(cu, expected, false);
+        } catch (Unprintable e) {
+            return printClass(cu, (Symbol.ClassSymbol) expected.tsym);
+        }
+    }
+
+    // `(target) expr`, parenthesized where it is not a primary expression.
+    static Edit wrap(JCTree.JCCompilationUnit cu, JCTree expr, String target, String what) {
+        int start = TreeInfo.getStartPos(expr), end = TreeInfo.getEndPos(expr, cu.endPositions);
+        String source = source(cu, start, end);
+        String replaced = "(" + target + ") " + (primary(expr) ? source : "(" + source + ")");
+        return new Edit(start, end, replaced, what + target + ": " + oneLine(source));
+    }
+
+    static boolean primary(JCTree expr) {
+        return expr instanceof JCTree.JCIdent || expr instanceof JCTree.JCFieldAccess
             || expr instanceof JCTree.JCMethodInvocation || expr instanceof JCTree.JCParens
             || expr instanceof JCTree.JCNewClass || expr instanceof JCTree.JCLiteral
             || expr instanceof JCTree.JCArrayAccess;
-        String source = source(cu, start, end);
-        String replaced = "(" + target + ") " + via + (primary ? source : "(" + source + ")");
-        return new Edit(start, end, replaced, "cast to " + target + ": " + oneLine(source));
     }
 
     // `new C<>(...)` initializing a variable or returned from a method whose declared type is C<A>:
     // `new C<A>(...)`.
+    // A diamond for each argument `new C(..)` of the innermost call around the error that makes a
+    // generic class C raw, which leaves javac nothing to infer the call's type variables from:
+    // the decompiler's way of writing the original's `new C<>(..)`.
+    static List<Edit> rawArguments(JCTree.JCCompilationUnit cu, TreePath path) {
+        while (path != null && !(path.getLeaf() instanceof JCTree.JCMethodInvocation)) {
+            if (path.getLeaf() instanceof JCTree.JCStatement) return List.of();
+            path = path.getParentPath();
+        }
+        if (path == null) return List.of();
+        List<Edit> edits = new ArrayList<>();
+        for (JCTree.JCExpression argument : ((JCTree.JCMethodInvocation) path.getLeaf()).args) {
+            if (!(argument instanceof JCTree.JCNewClass created) || created.typeargs.nonEmpty()
+                    || created.clazz instanceof JCTree.JCTypeApply || created.clazz.type == null
+                    || created.clazz.type.tsym.type.getTypeArguments().isEmpty()) continue;
+            int end = TreeInfo.getEndPos(created.clazz, cu.endPositions);
+            edits.add(new Edit(end, end, "<>", "diamond in an argument: " + oneLine(source(cu,
+                TreeInfo.getStartPos(created), end)) + "<>"));
+        }
+        return edits;
+    }
+
     static Edit diamond(JCTree.JCCompilationUnit cu, TreePath path) throws Unprintable {
         while (path != null && !(path.getLeaf() instanceof JCTree.JCNewClass)) path = path.getParentPath();
         if (path == null) return null;
