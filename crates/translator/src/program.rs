@@ -10,11 +10,11 @@ mod reach;
 mod survey;
 
 pub use census::{Census, census_program};
-pub use modules::{Contents as ModuleContents, loader_name};
+pub use modules::{Contents as ModuleContents, loader_name, loader_resources};
 pub use reach::{
-    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS,
-    PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS,
-    ANNOTATION_VALUES, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES,
+    ANNOTATION_VALUES, CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup,
+    LookupKind, MODULE_CALLS, PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS,
+    TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES,
     TRANSLATED_SEGMENTS, UNSET_PROPERTIES, caller_query, charset_coder, charset_coding, class_bound,
     class_for_name, class_name, component_array, computed_for_name, created_by_name, direct_stream_call,
     field_offset_named, is_ensure_initialized, literal_class, live_branch, lookup, module_call,
@@ -321,10 +321,8 @@ fn load(
     if std::env::var_os("JAVA_TO_RUST_REACH_WHY").is_some() {
         std::process::exit(0);
     }
-    if !program.libraries.is_empty() {
-        let roots = program.sources.iter().chain(&program.libraries);
-        reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
-    }
+    let roots = program.sources.iter().chain(&program.libraries);
+    reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
     let changing: Vec<usize> = changing.iter().map(|&(index, _, _)| index).collect();
     let mut units = given.into_values();
     for index in changing {

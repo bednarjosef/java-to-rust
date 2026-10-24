@@ -111,9 +111,21 @@ program where such a lookup can happen, so they can be checked before the progra
   `load(ModuleLayer, ...)` throws.
 - **`ClassLoader`** is a type. The system and platform loaders exist, with `getName`,
   `getParent` and `getClassLoader()` of a class. `loadClass` goes through the `forName` table.
-  `getResource`, `getResources` and `getResourceAsStream` find nothing; javac does not need them
-  (its one use is `Class.getResource` of a class file behind the hidden `-XDshowClass` option,
-  which is `null` in a translation, see [natives-and-input.md](natives-and-input.md)).
+  `getResource`, `getResources`, `getResourceAsStream` and their `getSystem…` forms find what
+  Java's loaders would find among the files of the roots and the class files of their sources
+  (`program::loader_resources`, the native `holder0` in `java/Threads.java`): the bootstrap and
+  platform loaders look in the named modules that are theirs, the system loader in its named
+  modules and then the roots without a `module-info.java` (the class path), and a file in a
+  package of a named module is found only if it is a class file or the module opens the package
+  to all, as in Java. A lookup that finds nothing gives `null` or an empty enumeration, as Java
+  does; one that finds a resource throws `UnsupportedOperationException` saying "code that is
+  not in the translation cannot run", since the translation has no resources and its URL would
+  depend on how the Java program was deployed (`jar:file:…!/name` or `file:…`). A top-level class
+  declared in a file of another name has a class file that is not found. `getResources` is
+  `TranslatedModules.resources` (`MODULE_CALLS`), and `getSystemResources` its
+  `systemResources`; they are empty exactly when `getResource` is `null`, which holds for the
+  translation's loaders and for a loader of the program's own that overrides only
+  `findResource`.
   `URLClassLoader` is patched by the translator (`java/patches/java/net/URLClassLoader.java`). It
   finds what its parent finds and nothing of its own. A class or resource that is in one of its
   directories, or a class asked of it while it has a jar file among its URLs, fails loudly:

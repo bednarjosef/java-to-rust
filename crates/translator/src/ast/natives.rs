@@ -521,10 +521,12 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
                 // `LockSupport`'s, with the thread's id for `unpark` (`lower/natives.rs`).
                 | ("jdk.internal.misc.Unsafe", "park" | "unpark")
-                // What the translator read from the program's roots: its modules
-                // (`lower/modules.rs`), the providers of a service (`lower/reflection.rs`) and a
-                // processor's annotations (`lower/processors.rs`).
+                // What the translator read from the program's roots: its modules and the
+                // resources its class loaders find (`lower/modules.rs`), the providers of a
+                // service (`lower/reflection.rs`) and a processor's annotations
+                // (`lower/processors.rs`).
                 | ("java.lang.Module", "modules0" | "moduleOf0" | "declares0" | "holds0")
+                | ("java.lang.ClassLoader", "holder0")
                 | ("java.util.ServiceLoader", "providers0" | "create0")
                 | ("javax.annotation.processing.TranslatedProcessorAnnotations", "values0")
                 // The members of an annotation type (`lower/annotation_objects.rs`).

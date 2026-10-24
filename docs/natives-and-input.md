@@ -269,6 +269,11 @@ A translated program is closed: it knows all its classes. So:
   its sources. A class file, a name that certainly ends in `.class` (a literal, or a
   concatenation whose last operand is one), is `null` instead, a resource that is not there: the
   translation has no class files, since its classes were translated from their source.
+- A class loader's `getResource`, `getResources` and `getResourceAsStream` (and the
+  `getSystem…` forms) look the name up among the roots' files and their sources' class files as
+  Java's loaders would: `null` or an empty enumeration when none has it, and an
+  `UnsupportedOperationException` when one does (see
+  [reflection-and-plugins.md](reflection-and-plugins.md)).
 
 ### Strings and characters in the JDK's code
 
