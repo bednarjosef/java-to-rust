@@ -5,6 +5,11 @@
 //! javac has resolved every name, call and `new` to its declaration (the `symbol` of a node), so
 //! a method is scanned once, when it becomes reachable, and every symbol in it makes its
 //! declaration reachable in turn: a worklist that runs until nothing new is found.
+//!
+//! `JAVA_TO_RUST_REACH_WHY=prefix,prefix` writes on standard error, for each prefix of a
+//! `class.method` (`java.awt.Component.<init>`), the chain of methods, classes and fields through
+//! which reachable code first reached the first method it names whose body runs, and ends the
+//! translation after reachability.
 
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1541,6 +1546,12 @@ impl<'t> Rounds<'t> {
 
     /// What reachable code uses, over the units so far.
     pub fn finish(self) -> Reach {
+        if let Some(walk) = &self.sequential {
+            walk.explain();
+        }
+        if let Some(walk) = &self.parallel {
+            walk.explain();
+        }
         let sequential = self.sequential.map(|walk| walk.reach).unwrap_or_default();
         match self.parallel {
             Some(walk) if !self.stays_sequential => {
@@ -1642,9 +1653,49 @@ struct Walk<'t> {
     /// The providers found whose classes no unit declares yet, so that what makes them
     /// (`load_services`) is reached once a later round declares them.
     unmade: BTreeSet<String>,
+    /// With `JAVA_TO_RUST_REACH_WHY`, the item whose visit first made each item reachable.
+    why: Option<HashMap<Item, Item>>,
 }
 
 impl<'t> Walk<'t> {
+    /// Writes on standard error, for each prefix in `JAVA_TO_RUST_REACH_WHY` (comma-separated, of
+    /// `class.method`), the chain of items that made the first running method it names reachable.
+    fn explain(&self) {
+        let (Some(why), Ok(wanted)) = (&self.why, std::env::var("JAVA_TO_RUST_REACH_WHY")) else { return };
+        for want in wanted.split(',') {
+            let mut targets: Vec<&MethodKey> = self
+                .reach
+                .methods
+                .iter()
+                .filter(|m| !self.reach.dormant.contains(*m) && format!("{}.{}", m.0, m.1).starts_with(want))
+                .collect();
+            targets.sort();
+            let Some(target) = targets.first() else {
+                eprintln!("why {want}: not reached");
+                continue;
+            };
+            eprintln!("why {want}: {} matches", targets.len());
+            let mut item = Item::Method((*target).clone());
+            let mut seen = HashSet::new();
+            while seen.insert(item.clone()) {
+                let line = match &item {
+                    Item::Class(c) => format!("class {c}"),
+                    Item::Init(c) => format!("init {c}"),
+                    Item::Method(m) => {
+                        let live = if self.reach.live.contains(&m.0) { "" } else { " (class not live)" };
+                        format!("method {}.{}{}{live}", m.0, m.1, m.2)
+                    }
+                    Item::Field(f) => format!("field {}.{}", f.0, f.1),
+                };
+                eprintln!("  {line}");
+                match why.get(&item) {
+                    Some(parent) => item = parent.clone(),
+                    None => break,
+                }
+            }
+        }
+    }
+
     /// Walks from `main` over these units, with streams assumed to stay sequential or not, with
     /// `Reach::string_array_writes`, and with the service providers of the sources
     /// (`Walk::providers`), which the first walk already loads.
@@ -1658,6 +1709,7 @@ impl<'t> Walk<'t> {
     ) -> Result<Walk<'t>, String> {
         let mut walk = Walk {
             sequential,
+            why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::new()),
             locale_data: locale_data.to_vec(),
             providers: providers.to_vec(),
             ..Walk::default()
@@ -1699,6 +1751,7 @@ impl<'t> Walk<'t> {
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
             providers: std::mem::take(&mut self.providers),
+            why: self.why.as_ref().map(|_| HashMap::new()),
             ..Walk::default()
         };
         self.reach.sequential = sequential;
@@ -1830,11 +1883,19 @@ impl<'t> Walk<'t> {
     fn run(&mut self) {
         loop {
             while let Some(item) = self.work.pop() {
+                let (before, current) = (self.work.len(), self.why.as_ref().map(|_| item.clone()));
                 match item {
                     Item::Class(class) => self.class(class),
                     Item::Init(class) => self.init(class),
                     Item::Method(key) => self.method(key),
                     Item::Field(key) => self.field(key),
+                }
+                if let (Some(why), Some(current)) = (&mut self.why, current) {
+                    for pushed in &self.work[before.min(self.work.len())..] {
+                        if *pushed != current {
+                            why.entry(pushed.clone()).or_insert(current.clone());
+                        }
+                    }
                 }
             }
             // What reflection's lookups find among the classes found so far (`reflection.rs`).
