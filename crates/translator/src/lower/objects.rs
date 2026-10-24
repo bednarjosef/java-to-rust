@@ -123,6 +123,7 @@ impl<'t> Lowering<'t> {
             stubbed: Default::default(),
             notes: Default::default(),
             element_classes: Default::default(),
+            array_tests: Default::default(),
             volatile_elements: Default::default(),
             annotation_classes: Default::default(),
             nested_annotation_types: Default::default(),

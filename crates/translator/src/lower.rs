@@ -166,6 +166,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             module_labels,
             thread_statics: None,
             element_classes: lowering.element_classes.take(),
+            array_tests: lowering.array_tests.take(),
             volatile_elements: lowering.volatile_elements.take(),
             receivers: Default::default(),
         };
@@ -404,6 +405,8 @@ struct Lowering<'t> {
     notes: RefCell<Vec<crate::ast::Note>>,
     /// The classes of the covariant arrays the code makes (`Class::element_classes`).
     element_classes: RefCell<std::collections::HashMap<ExprId, Type>>,
+    /// The covariant array types that `instanceof`s and casts test (`Class::array_tests`).
+    array_tests: RefCell<std::collections::HashMap<ExprId, Type>>,
     /// The volatile element accesses (`Class::volatile_elements`).
     volatile_elements: RefCell<std::collections::HashSet<ExprId>>,
     /// The annotation types whose class literals the code has (`Class::annotation_classes`).
@@ -954,6 +957,7 @@ impl<'t> Lowering<'t> {
                 if Self::is_object(value.ty) {
                     self.object_array(node, ty)?;
                 }
+                let value = self.array_test(node, value, ty, node.java_type())?;
                 // `(T[]) objects` or `(Object[]) versions`.
                 if value.ty != ty {
                     self.meets_object_array(value.ty, ty);

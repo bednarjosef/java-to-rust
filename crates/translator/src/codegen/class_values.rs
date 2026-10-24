@@ -113,9 +113,10 @@ impl<'a> Gen<'a> {
         };
         let item = self.element_ty_name(object);
         let made = self.type_class(class);
+        let module = self.type_module(class);
         let element_class = self.runtime("ElementClass");
         Code::atom(format!(
-            "{tagged}({}, Some({element_class}::<{item}>::new(|| {made}, {}, {names})))",
+            "{tagged}({}, Some({element_class}::<{item}>::new(|| {made}, {}, {module}, {names})))",
             code.text,
             rust_string(&name)
         ))

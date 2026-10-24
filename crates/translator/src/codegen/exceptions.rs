@@ -1223,6 +1223,16 @@ impl<'a> Gen<'a> {
             }
             Some(t) => {
                 let obj = self.object(object);
+                // An `Object[]` that may carry its class (`Class::element_classes`) is named by it.
+                let object_array = Type::array(Type::class(OBJECT));
+                if self.carries_class(object_array)
+                    && self.enum_variants(t).into_iter().any(|c| self.class.array_of(c) == Some(object_array))
+                {
+                    self.need(Need::RuntimeClass(t));
+                    let class = super::class_values::method_on(&obj, "runtime_class");
+                    let name = if simple { "get_simple_name" } else { "get_name" };
+                    return Code::atom(format!("{class}.{name}()"));
+                }
                 let mut arms: Vec<String> = self
                     .enum_variants(t)
                     .into_iter()

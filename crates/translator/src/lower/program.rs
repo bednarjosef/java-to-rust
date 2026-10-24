@@ -289,6 +289,7 @@ fn lower_into<'t>(
         module_labels: module_labels(reach),
         thread_statics: None,
         element_classes: lowering.element_classes.take(),
+        array_tests: lowering.array_tests.take(),
         volatile_elements: lowering.volatile_elements.take(),
         receivers: Default::default(),
     };

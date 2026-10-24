@@ -531,6 +531,17 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The array class that `value`, held as an `Object`, is tested against where the translation
+    /// holds arrays of it as `Object[]`s (`Class::array_tests`): the code of the class, and its
+    /// name and module as a `ClassCastException` gives them.
+    fn tested_array(&mut self, value: &Expr) -> Option<(String, String)> {
+        let exact = *self.class.array_tests.get(&value.id)?;
+        let class = self.type_class(exact);
+        let name = rust_string(&self.descriptor(exact));
+        let module = self.type_module(exact);
+        Some((class, format!("({name}, {module})")))
+    }
+
     /// Whether `value` may be a class that Java lets be a `to`, one of the interfaces that
     /// `java.lang.Class` implements and the program translates as interfaces of its own, which
     /// the runtime's classes do not implement (`Constable`; `Type` and `Serializable` they do, see
@@ -578,15 +589,29 @@ impl<'a> Gen<'a> {
         self.need(Need::CastSource(s));
         let name = self.as_name(t);
         let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
-        let target = self.cast_class(t);
+        let mut target = self.cast_class(t);
+        // A cast to an array class that arrays held as `Object[]`s may not be, as `String[]`: the
+        // `Object[]`, then the class it carries.
+        let array = self.tested_array(value);
+        if let Some((_, exact)) = &array {
+            target = exact.clone();
+        }
+        let check = |g: &mut Self, call: String| match &array {
+            Some((class, exact)) if checked.is_some() => {
+                format!("{call}.and_then(|a| {}(a, {class}, {exact}))", g.runtime("try_cast_array"))
+            }
+            Some((class, exact)) => format!("{}({call}, {class}, {exact})", g.runtime("cast_array")),
+            None => call,
+        };
         let text = if self.nullable(value) {
             let option = self.object_place(value);
             let enum_name = struct_name(&self.class.types[s].name);
-            format!("{option}.as_ref().map(|o| {cast}(o, {enum_name}::{name}, {target}))")
+            let call = check(self, format!("{cast}(o, {enum_name}::{name}, {target})"));
+            format!("{option}.as_ref().map(|o| {call})")
         } else {
             let obj = self.object(value);
             let obj = super::class_values::borrow_of(&obj);
-            format!("{cast}({obj}, |o| o.{name}(), {target})")
+            check(self, format!("{cast}({obj}, |o| o.{name}(), {target})"))
         };
         self.cast_result(text, checked, self.nullable(value))
     }
@@ -650,6 +675,15 @@ impl<'a> Gen<'a> {
                 if passing.is_empty() {
                     return known(self, false);
                 }
+                if let Some((class, _)) = self.tested_array(value) {
+                    self.need(Need::Narrow(s, t));
+                    let name = self.as_name(t);
+                    let is = format!("is_some_and(|a| {}(&a, {class}))", self.runtime("array_is"));
+                    return Code::atom(match nullable {
+                        true => format!("{}.as_ref().is_some_and(|o| o.{name}().{is})", self.object_place(value)),
+                        false => format!("{}.{name}().{is}", operand(&self.object(value))),
+                    });
+                }
                 let tags = self.tags(&passing, &self.enum_variants(s));
                 let text = if nullable {
                     format!(
@@ -700,12 +734,15 @@ impl<'a> Gen<'a> {
                 }
                 self.need(Need::Narrow(s, t));
                 let name = self.as_name(t);
-                let text = if nullable {
+                let mut text = if nullable {
                     let enum_name = struct_name(&self.class.types[s].name);
                     format!("{}.as_ref().and_then({enum_name}::{name})", self.object_place(value))
                 } else {
                     format!("{}.{name}()", self.object(value))
                 };
+                if let Some((class, _)) = self.tested_array(value) {
+                    text = format!("{text}.filter(|a| {}(a, {class}))", self.runtime("array_is"));
+                }
                 self.tested(value, text)
             }
         }
@@ -1035,7 +1072,7 @@ impl<'a> Gen<'a> {
 
     /// `cast_module` of the class of the values of type `ty`; an array's is its element's, and
     /// a primitive's (in an array) `java.base`.
-    fn type_module(&mut self, ty: Type) -> String {
+    pub(super) fn type_module(&mut self, ty: Type) -> String {
         match ty {
             Type::Array(element) => self.type_module(*element),
             Type::Class(..) | Type::Enum(_) => match self.class.type_of(ty) {
