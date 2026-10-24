@@ -9,21 +9,62 @@
 //! itself under a condition (`substring` of all of it, `trim` with nothing to trim) return the
 //! same `JStr` there (`kept`, `kept_replace`, `kept_repeat`).
 
+use crate::thin::ADDRESS;
 use crate::{JString, Wtf8};
+use std::alloc::{Layout, alloc, handle_alloc_error};
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::ptr::NonNull;
+use std::sync::{Mutex, OnceLock};
 
-/// A string with an identity: clones are the same object, `same_str` compares objects. Its text
+/// A string with an identity: copies are the same object, `same_str` compares objects. Its text
 /// is WTF-8, as a `JString`'s.
-#[derive(Clone)]
-pub struct JStr(Arc<[u8]>);
+///
+/// The object is the text's length in four bytes followed by the text, in the collected heap,
+/// and a `JStr` is its address: one word, copied without a count. Its alignment of four puts it
+/// in a block that the collector does not scan for pointers. The top 16 bits of the address are
+/// ignored, as a `java::Arc`'s are, so a `java::Thin` holds a `JStr` where it lies.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct JStr(NonNull<u32>);
+
+// The text never changes once made.
+unsafe impl Send for JStr {}
+unsafe impl Sync for JStr {}
+
+// A `JStr` is one pointer, whose tag bits it ignores, and has no `Drop`.
+unsafe impl crate::Pointer for JStr {}
 
 impl JStr {
     /// A new string object with the text `text`.
     pub fn new(text: impl AsRef<Wtf8>) -> JStr {
-        JStr(Arc::from(text.as_ref().as_bytes()))
+        let bytes = text.as_ref().as_bytes();
+        let len = u32::try_from(bytes.len()).expect("a string of less than 4 GB of text");
+        let layout = Layout::from_size_align(4 + bytes.len(), 4).expect("a string's size fits");
+        // The allocation has room for the length and the text, aligned for the length.
+        unsafe {
+            let p = alloc(layout);
+            if p.is_null() {
+                handle_alloc_error(layout);
+            }
+            (p as *mut u32).write(len);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(4), bytes.len());
+            JStr(NonNull::new_unchecked(p as *mut u32))
+        }
+    }
+
+    /// The address of the object, without the tag that a `java::Thin` may have put in the top
+    /// bits.
+    fn header(&self) -> *const u32 {
+        (self.0.as_ptr() as usize & ADDRESS) as *const u32
+    }
+
+    /// The text's bytes.
+    fn bytes(&self) -> &[u8] {
+        let header = self.header();
+        // The object is the length and then that many bytes, alive while it is reachable.
+        unsafe { std::slice::from_raw_parts((header as *const u8).add(4), *header as usize) }
     }
 
     /// The text, as a new plain string.
@@ -34,7 +75,7 @@ impl JStr {
     /// The text, borrowed.
     pub fn as_wtf8(&self) -> &Wtf8 {
         // SAFETY: a `JStr` holds the bytes of a `Wtf8`.
-        unsafe { Wtf8::from_bytes_unchecked(&self.0) }
+        unsafe { Wtf8::from_bytes_unchecked(self.bytes()) }
     }
 }
 
@@ -73,7 +114,7 @@ impl From<JStr> for JString {
 // on objects is `same_str`.
 impl PartialEq for JStr {
     fn eq(&self, other: &JStr) -> bool {
-        *self.0 == *other.0
+        self.bytes() == other.bytes()
     }
 }
 
@@ -81,49 +122,49 @@ impl Eq for JStr {}
 
 impl PartialEq<str> for JStr {
     fn eq(&self, other: &str) -> bool {
-        *self.0 == *other.as_bytes()
+        self.bytes() == other.as_bytes()
     }
 }
 
 impl PartialEq<&str> for JStr {
     fn eq(&self, other: &&str) -> bool {
-        *self.0 == *other.as_bytes()
+        self.bytes() == other.as_bytes()
     }
 }
 
 impl PartialEq<Wtf8> for JStr {
     fn eq(&self, other: &Wtf8) -> bool {
-        *self.0 == *other.as_bytes()
+        self.bytes() == other.as_bytes()
     }
 }
 
 impl PartialEq<&Wtf8> for JStr {
     fn eq(&self, other: &&Wtf8) -> bool {
-        *self.0 == *other.as_bytes()
+        self.bytes() == other.as_bytes()
     }
 }
 
 impl PartialEq<JStr> for Wtf8 {
     fn eq(&self, other: &JStr) -> bool {
-        *self.as_bytes() == *other.0
+        self.as_bytes() == other.bytes()
     }
 }
 
 impl PartialEq<JStr> for &Wtf8 {
     fn eq(&self, other: &JStr) -> bool {
-        *self.as_bytes() == *other.0
+        self.as_bytes() == other.bytes()
     }
 }
 
 impl PartialEq<JString> for JStr {
     fn eq(&self, other: &JString) -> bool {
-        *self.0 == *other.as_bytes()
+        self.bytes() == other.as_bytes()
     }
 }
 
 impl PartialEq<JStr> for JString {
     fn eq(&self, other: &JStr) -> bool {
-        *self.as_bytes() == *other.0
+        self.as_bytes() == other.bytes()
     }
 }
 
@@ -135,7 +176,7 @@ impl PartialOrd for JStr {
 
 impl Ord for JStr {
     fn cmp(&self, other: &JStr) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
+        self.bytes().cmp(other.bytes())
     }
 }
 
@@ -179,7 +220,7 @@ impl fmt::Debug for JStr {
 
 impl crate::Handle for JStr {
     fn address(&self) -> *const u8 {
-        Arc::as_ptr(&self.0) as *const u8
+        self.header() as *const u8
     }
 }
 
@@ -194,21 +235,21 @@ pub fn interned(text: impl AsRef<Wtf8>) -> JStr {
     let text = text.as_ref();
     let mut table = table().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(found) = table.get(text) {
-        return found.clone();
+        return *found;
     }
     let shared = JStr::new(text);
-    table.insert(shared.clone());
+    table.insert(shared);
     shared
 }
 
 /// The interned string of a literal, looked up once per place in the code (`cell`).
 pub fn interned_literal(cell: &'static OnceLock<JStr>, text: &'static Wtf8) -> JStr {
-    cell.get_or_init(|| interned(text)).clone()
+    *cell.get_or_init(|| interned(text))
 }
 
 /// `a == b` of two strings: whether they are the same object.
 pub fn same_str(a: &JStr, b: &JStr) -> bool {
-    Arc::ptr_eq(&a.0, &b.0)
+    a.header() == b.header()
 }
 
 /// `a == b` of two strings that may be null.
@@ -226,7 +267,7 @@ pub fn same_nullable_str(a: Option<&JStr>, b: Option<&JStr>) -> bool {
 /// new string otherwise.
 pub fn kept(s: &JStr, result: impl AsRef<Wtf8>) -> JStr {
     let result = result.as_ref();
-    if *result == **s { s.clone() } else { new_or_empty(result) }
+    if *result == **s { *s } else { new_or_empty(result) }
 }
 
 /// The string that `result` is where the JDK makes it from a builder or by `substring` of
@@ -291,7 +332,7 @@ pub fn per_key(key: &str, text: impl AsRef<Wtf8>) -> JStr {
     static KEPT: OnceLock<Mutex<std::collections::HashMap<(String, JString), JStr>>> = OnceLock::new();
     let text = text.as_ref();
     let mut kept = KEPT.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    kept.entry((key.to_owned(), text.to_owned())).or_insert_with(|| JStr::new(text)).clone()
+    *kept.entry((key.to_owned(), text.to_owned())).or_insert_with(|| JStr::new(text))
 }
 
 /// `s.replace(target, replacement)` of two strings, whose text is `result`: `s` itself when the
@@ -304,14 +345,14 @@ pub fn kept_replace(s: &JStr, result: impl AsRef<Wtf8>, target: &Wtf8, replaceme
         (1, 1) => target == replacement || absent(),
         _ => absent(),
     };
-    if unchanged { s.clone() } else { JStr::new(result) }
+    if unchanged { *s } else { JStr::new(result) }
 }
 
 /// `s.repeat(count)`, whose text is `result`: `s` itself for one, the interned `""` for none or
 /// an empty `s`, a new string otherwise.
 pub fn kept_repeat(s: &JStr, result: impl AsRef<Wtf8>, count: i32) -> JStr {
     match count {
-        1 => s.clone(),
+        1 => *s,
         _ => new_or_empty(result),
     }
 }
@@ -319,7 +360,7 @@ pub fn kept_repeat(s: &JStr, result: impl AsRef<Wtf8>, count: i32) -> JStr {
 /// `s.replaceAll(regex, replacement)` and `replaceFirst`, whose text is `result`: `s` itself when
 /// the expression matches nowhere, as `Matcher.replaceAll` returns its input then.
 pub fn kept_regex(s: &JStr, result: impl AsRef<Wtf8>, regex: &Wtf8) -> JStr {
-    if crate::regex::finds(s, regex) { new_or_empty(result) } else { s.clone() }
+    if crate::regex::finds(s, regex) { new_or_empty(result) } else { *s }
 }
 
 /// `s.stripIndent()` and `s.translateEscapes()`, whose text is `result`: the interned `""` for an

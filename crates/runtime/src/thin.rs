@@ -26,12 +26,13 @@ pub const ADDRESS: usize = (1 << 48) - 1;
 #[repr(transparent)]
 pub struct Thin(NonZeroU64);
 
-/// A type that is a `java::Arc` underneath: a handle, or a `#[repr(transparent)]` struct around
-/// one (a builder).
+/// A type that is one pointer that ignores the top 16 bits: a handle, a `#[repr(transparent)]`
+/// struct around one (a builder), or a string with an identity (`java::JStr`).
 ///
 /// # Safety
 ///
-/// The type is a `java::Arc<T>` or `#[repr(transparent)]` over a type that is, and has no `Drop`.
+/// The type is a `java::Arc<T>`, `#[repr(transparent)]` over a type that is, or one pointer that
+/// masks its top 16 bits with `ADDRESS` wherever it reads through it, and it has no `Drop`.
 pub unsafe trait Pointer: Sized {}
 
 unsafe impl<T> Pointer for Arc<T> {}

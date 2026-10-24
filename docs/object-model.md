@@ -218,7 +218,8 @@ Rules:
   Each class has one number in the whole program (`class_tag`), so `to_x()` copies the bits, and
   `as_x()` and `instanceof` test the number. What is not a program object (a string, a box, a
   Java enum constant, an array, a builder) is held in the low six bytes when it fits there and
-  in a box otherwise; an array, a builder and a box with identity are their own handles. A
+  in a box otherwise; an array, a builder, a box with identity and a string with identity
+  (`java::JStr`) are their own handles. A
   number that no class of the type has is a bug the view reports (`java::bad_tag`).
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
@@ -394,8 +395,9 @@ is then:
 - by text where both sides can only be interned strings;
 - `a == null && b == null` where no string can be on both sides: one side only interned and the
   other only new, or a side that is only ever null;
-- otherwise by the objects at run time. Every string of the program is then a `java::JStr`, an
-  `Arc` of its WTF-8 bytes (see 4) compared by address (`java::same_str`), and the program-wide switch
+- otherwise by the objects at run time. Every string of the program is then a `java::JStr`, the
+  address of an object in the collected heap that holds the text's length and its WTF-8 bytes
+  (see 4), copied as one word and compared by address (`java::same_str`), and the program-wide switch
   (`Class::shared_strings`) makes each place that makes a string make the object Java makes: a
   literal is interned once (`java::interned_literal`), a new string is new, a method that may
   return its receiver returns it when Java's would (`java::kept` and its siblings, with the
@@ -741,8 +743,8 @@ normal text stays plain UTF-8 at no cost:
   byte comparisons. Text without lone surrogates is byte for byte its UTF-8.
 - **The types** (`runtime/src/wtf8.rs`). `java::Wtf8` is the unsized string slice, a `[u8]` that
   holds WTF-8, with the `str`-like methods the generator and the runtime use; `java::JString` is
-  the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one (an `Arc` of the same
-  bytes, see 1.6); both deref to `Wtf8`. `Type::String` is `java::JString` (or `java::JStr`
+  the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one (the address of its length
+  and bytes in the collected heap, `Copy`, see 1.6); both deref to `Wtf8`. `Type::String` is `java::JString` (or `java::JStr`
   where strings are shared), a borrowed string parameter is a `&java::Wtf8`, and a literal is
   `java::wtf8("..")`, a `&'static Wtf8` view of its UTF-8 made at compile time. A literal with
   a lone surrogate, which javac's tree gives as its code units, is
