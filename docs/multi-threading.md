@@ -69,7 +69,7 @@ The translation maps every Java memory action to one of:
 | read/write of a `volatile` field of a thread-shared object | its `java::SharedField`, sequentially consistent |
 | read/write of an element of an array that threads share | the element's cell (`java::SharedArray`): an acquire load or release store of a word, under a striped lock for a wider value |
 | `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on a field | one atomic action of its `java::SharedField` (5.3) |
-| `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on an element | one atomic action of the element's cell (5.3) |
+| `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on an element | one atomic action of the element's cell, sequentially consistent in the volatile mode (5.3) |
 | monitor enter/exit, `wait`, `notify` | the object's reentrant lock and its wait set (section 3) |
 | `Thread.start`, `join`, `park`/`unpark` | `std::thread` spawn, the thread record's condition variables |
 | static field access | `java::Atomic` (acquire/release) or `java::Locked` statics |
@@ -497,11 +497,15 @@ name:
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
 
-The fields and arrays themselves stay plain: an access through a handle, in any memory mode, is
-an ordinary access of the field or element, an acquire load or a release store of its cell (a
-`volatile` field's is sequentially consistent), which orders it at least as the plain, opaque,
-acquire and release modes ask. The volatile mode on a field that is not `volatile`, or on an
-element, asks for more (section 7).
+The fields and arrays themselves stay plain: an access through a handle is an ordinary access of
+the field or element, an acquire load or a release store of its cell, which orders it at least
+as the plain, opaque, acquire and release modes ask. An element's access in the volatile mode
+(`getVolatile` and `setVolatile`, which `AtomicIntegerArray.get` and `set` and their kin make,
+or `Unsafe.getIntVolatile`) is sequentially consistent, as Java's is: lowering records it
+(`Class::volatile_elements`), and the generator makes it a `SeqCst` load or store of the
+element's cell (`java::get_volatile`, `java::set_volatile`). A field's accesses are as its
+declaration makes them, sequentially consistent for a `volatile` field; the volatile mode on a
+field that is not `volatile` asks for more (section 7).
 
 ## 6. Exceptions across threads, daemon threads, exit
 
@@ -541,11 +545,11 @@ element, asks for more (section 7).
   allocation site; a class with both shared and thread-local sites would get two structs, and an
   array of a shared family that no other thread reaches would stay a `java::Array`. The escape analysis should then
   be a client of a "heap edges" interface so that only the edge provider changes.
-- **`SeqCst` volatile statics and volatile accesses through handles.** A `volatile` static
+- **`SeqCst` volatile statics and volatile-mode accesses of fields.** A `volatile` static
   should be sequentially consistent, and so should a volatile-mode access through `Unsafe` or a
-  `VarHandle` (`getVolatile`, `setVolatile`, as `AtomicIntegerArray.get` and `set` make) of a
-  field that is not `volatile` or of an array element, which lowering turns into an ordinary
-  access, acquire or release (5.3); the atomic updates are sequentially consistent already.
+  `VarHandle` (`getVolatile`, `setVolatile`) of a field that is not `volatile`, which lowering
+  turns into an ordinary access, acquire or release (5.3). The atomic updates, and the
+  volatile-mode accesses of array elements, are sequentially consistent already.
 - **The rest of `java.util.concurrent`.** The pieces exercised by the whole-program corpus are
   the atomics (`AtomicInteger`, `AtomicLong`, atomic arrays), `LockSupport`, `ConcurrentHashMap`,
   `ConcurrentSkipListMap`/`Set`, `ThreadLocal`, `ThreadLocalRandom`, `ScopedValue`,
@@ -585,9 +589,9 @@ Thread programs are tested by the same differential test as all others, so their
 not depend on scheduling. `corpus/threads/` holds programs where each thread computes into its
 own slot or object and `join` orders the output, or where the program checks its own invariant
 (every increment counted, every item consumed once) and prints the result. Programs that use the
-JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `ConcurrentCounters`,
-`ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`, `ParkWithPermit`,
-`LockAmongValues`, `VarHandleViews`, `ScopedValues`). Shape tests of the generated Rust are in
+JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `AtomicArrayDekker`,
+`ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`,
+`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
 unchanged and that a class no thread reaches has no monitor.
 

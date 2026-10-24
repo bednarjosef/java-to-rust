@@ -141,6 +141,19 @@ pub trait Elements<T> {
     /// `a[i] = v`.
     fn put(&self, i: i32, v: T);
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception>;
+    /// `a[i]` as a volatile read (`VarHandle.getVolatile`, `Unsafe.getIntVolatile`), which is
+    /// sequentially consistent with the other volatile accesses: a `SeqCst` load from a
+    /// `SharedArray`; a plain read from an `Array`, which one thread holds.
+    fn try_element_volatile(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        self.try_element(i)
+    }
+    /// `a[i] = v` as a volatile write: a `SeqCst` store into a `SharedArray`.
+    fn try_put_volatile(&self, i: i32, v: T) -> Result<(), Exception> {
+        self.try_put(i, v)
+    }
     /// `a[i] = v` in one atomic action with the read of the old element, which it returns.
     fn try_swap(&self, i: i32, v: T) -> Result<T, Exception>;
     /// The old `a[i]`, which is now `value` if it was `same` as `expected`, in one atomic action.
@@ -243,6 +256,19 @@ impl<T, A: Elements<T>> Elements<T> for &A {
     #[inline]
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
         (**self).try_put(i, v)
+    }
+
+    #[inline]
+    fn try_element_volatile(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        (**self).try_element_volatile(i)
+    }
+
+    #[inline]
+    fn try_put_volatile(&self, i: i32, v: T) -> Result<(), Exception> {
+        (**self).try_put_volatile(i, v)
     }
 
     fn try_swap(&self, i: i32, v: T) -> Result<T, Exception> {
@@ -486,6 +512,22 @@ impl<T> Elements<T> for SharedArray<T> {
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
         let cells = &self.items.0;
         cells[try_position(cells.len(), i)?].set(v);
+        Ok(())
+    }
+
+    #[inline]
+    fn try_element_volatile(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        let cells = &self.items.0;
+        Ok(cells[try_position(cells.len(), i)?].get_volatile())
+    }
+
+    #[inline]
+    fn try_put_volatile(&self, i: i32, v: T) -> Result<(), Exception> {
+        let cells = &self.items.0;
+        cells[try_position(cells.len(), i)?].set_volatile(v);
         Ok(())
     }
 
@@ -801,6 +843,47 @@ pub fn try_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
 #[inline]
 pub fn set<T>(a: &impl Elements<T>, i: i32, v: T) {
     a.put(i, v)
+}
+
+/// `a[i]` as a volatile read (`Elements::try_element_volatile`), which a volatile access through
+/// a `VarHandle` or `Unsafe` makes.
+#[inline]
+pub fn get_volatile<T: Clone>(a: &impl Elements<T>, i: i32) -> T {
+    a.try_element_volatile(i).unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `get_volatile` where the program observes the `ArrayIndexOutOfBoundsException`.
+#[inline]
+pub fn try_get_volatile<T: Clone>(a: &impl Elements<T>, i: i32) -> Result<T, Exception> {
+    a.try_element_volatile(i)
+}
+
+/// `a[i] = v` as a volatile write (`Elements::try_put_volatile`).
+#[inline]
+pub fn set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) {
+    a.try_put_volatile(i, v).unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `set_volatile` where the program observes the `ArrayIndexOutOfBoundsException`.
+#[inline]
+pub fn try_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
+    a.try_put_volatile(i, v)
+}
+
+/// `checked_set` as a volatile write.
+pub fn checked_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) {
+    if let Some(class) = a.element_class() {
+        check_store(class, a.length(), i, &v).unwrap_or_else(|e| crate::throw_exception(e));
+    }
+    set_volatile(a, i, v)
+}
+
+/// `checked_set_volatile` where the program observes the exception.
+pub fn try_checked_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
+    if let Some(class) = a.element_class() {
+        check_store(class, a.length(), i, &v)?;
+    }
+    try_set_volatile(a, i, v)
 }
 
 /// `a[i] op= ...`: `f` computes the new element from the old one. The old element is read, and
@@ -1159,5 +1242,19 @@ mod tests {
         let target = shared_filled(4, 0u16);
         crate::copy_slice(&chars, 0, &mut target.borrow_mut(), 2, 2);
         assert_eq!(target.take_items(), [0, 0, 8, 9]);
+    }
+
+    #[test]
+    fn volatile_accesses_reach_the_element_of_either_kind_of_array() {
+        let shared = shared_filled(2, 0i64);
+        let local = filled(2, 0i64);
+        set_volatile(&shared, 1, 7);
+        set_volatile(&local, 1, 7);
+        assert_eq!((get_volatile(&shared, 1), get_volatile(&local, 1)), (7, 7));
+        assert_eq!((get(&shared, 1), get(&local, 1)), (7, 7));
+        assert!(try_get_volatile(&shared, 2).is_err() && try_set_volatile(&local, -1, 1).is_err());
+        let names = shared_filled(1, None);
+        set_volatile(&names, 0, Some(JString::from("set")));
+        assert!(get_volatile(&names, 0).is_some_and(|name| name == "set"));
     }
 }
