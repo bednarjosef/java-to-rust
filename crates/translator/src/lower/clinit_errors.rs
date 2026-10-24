@@ -109,12 +109,20 @@ impl<'t> Lowering<'t> {
             set(STATE, Type::Int, int(1)),
             Stmt::Try { body: original, catches: vec![error_catch, any_catch], finally: None },
         ];
-        decl.statics.push(Field { name: STATE.to_string(), ty: Type::Int, init: None, constant: false, pos });
+        decl.statics.push(Field {
+            name: STATE.to_string(),
+            ty: Type::Int,
+            init: None,
+            constant: false,
+            volatile: false,
+            pos,
+        });
         decl.statics.push(Field {
             name: FAILURE.to_string(),
             ty: Type::String,
             init: None,
             constant: false,
+            volatile: false,
             pos,
         });
     }

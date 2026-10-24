@@ -175,10 +175,13 @@ pub struct Facts {
     pub immutable: HashSet<String>,
     /// The classes whose objects are never shared, so they are plain values, by qualified name.
     pub owned: HashSet<String>,
-    /// The classes whose objects change and are shared by one thread, by qualified name: an
-    /// object is an `Arc<C>` whose fields that change are `java::Field` cells, read and written by
-    /// value, with no `RefCell` (see `objects::celled_classes`).
+    /// The classes whose objects change and are shared, by qualified name: an object is an
+    /// `Arc<C>` whose fields are cells, read and written by value, with no `RefCell` (see
+    /// `objects::celled_classes`).
     pub celled: HashSet<String>,
+    /// The celled classes whose objects keep a monitor, because threads share them or the
+    /// program waits on them: an `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s.
+    pub monitored: HashSet<String>,
     /// For each type (index into `Class::types`), the concrete classes and enums whose values
     /// become values of that type (see `hierarchy::flows`).
     pub flows: Vec<HashSet<usize>>,
@@ -412,7 +415,7 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.not_plain = borrowing.not_plain;
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
-    facts.celled = objects::celled_classes(class, facts, &monitor_classes);
+    (facts.celled, facts.monitored) = objects::celled_classes(class, facts, &monitor_classes);
 }
 
 /// The classes with subclasses whose constructors cannot build their fields struct as a plain

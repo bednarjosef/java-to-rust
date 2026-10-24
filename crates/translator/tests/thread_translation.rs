@@ -55,11 +55,11 @@ fn a_thread_and_what_it_reaches_are_arcs() {
     assert_contains(
         &rust,
         &[
-            "enum ThreadView<'a> {\n    Worker(&'a Arc<java::Locked<AWorker>>),",
-            "fn run(this: &Arc<java::Locked<AWorker>>) {",
-            "let w = Arc::new(java::Locked::new(AWorker::new(10)));",
+            "enum ThreadView<'a> {\n    Worker(&'a Arc<java::Monitored<AWorker>>),",
+            "fn run(this: &Arc<java::Monitored<AWorker>>) {",
+            "let w = Arc::new(java::Monitored::new(AWorker::new(10)));",
             "(ThreadView::Worker(a), ThreadView::Worker(b)) => Arc::ptr_eq(a, b),",
-            "fn base(&self) -> java::Ref<'_, ThreadFields> {",
+            "fn base(&self) -> &ThreadFields {",
         ],
     );
 }
@@ -69,7 +69,7 @@ fn a_class_no_thread_reaches_is_translated_as_before() {
     // `Local` never leaves `main`, so it is a plain value, as in a program without threads.
     let rust = translate(WORKER);
     assert_contains(&rust, &["let mut l = ALocal::new();", "fn add(&mut self, k: i32) {"]);
-    assert_lacks(&rust, &["Arc<java::Locked<ALocal>>"]);
+    assert_lacks(&rust, &["Arc<java::Monitored<ALocal>>"]);
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn the_started_thread_runs_the_thread_object_it_was_given() {
         &rust,
         &[
             "{ let t = t.clone(); move || { let t = &t; java::set_current_thread(t.clone()); t.run(); } }",
-            "java::join_thread({ let value = self.base().tid; value }, 0);",
+            "java::join_thread(self.base().tid.get(), 0);",
         ],
     );
 }
@@ -147,7 +147,10 @@ fn arrays_that_another_thread_reaches_are_shared_arrays() {
             }
         }",
     );
-    assert_contains(&rust, &["out: java::SharedArray<i64>,", "java::shared_filled(4, 0i64)"]);
+    assert_contains(
+        &rust,
+        &["out: java::SharedField<java::SharedArray<i64>>,", "java::shared_filled(4, 0i64)"],
+    );
 }
 
 #[test]
@@ -173,7 +176,10 @@ fn arrays_that_no_other_thread_reaches_stay_local() {
             }
         }",
     );
-    assert_contains(&rust, &["out: java::SharedArray<i64>,", "java::filled(3, 0)", "Arc::ptr_eq("]);
+    assert_contains(
+        &rust,
+        &["out: java::SharedField<java::SharedArray<i64>>,", "java::filled(3, 0)", "Arc::ptr_eq("],
+    );
     assert_lacks(&rust, &["java::SharedArray<i32>", "java::SharedArray<u16>", "shared_filled(3"]);
 }
 
@@ -319,14 +325,14 @@ fn a_synchronized_method_of_a_shared_object_holds_its_monitor() {
     assert_contains(
         &rust,
         &[
-            "fn add(this: &Arc<java::Locked<ACounter>>) {\n        let _monitor = java::enter(this);",
-            "let _monitor = java::enter(&java::fixed!(this, lock));",
+            "fn add(this: &Arc<java::Monitored<ACounter>>) {\n        let _monitor = java::enter(this);",
+            "let _monitor = java::enter(&this.lock.get());",
             "static A__MONITOR: java::Locked<()> = java::Locked::new(());",
             "fn hit() {\n    let _monitor = java::enter_class(&A__MONITOR);",
             "java::monitor_wait(this, 0);",
             "java::monitor_notify(this, true);",
             // A lock object has a lock of its own.
-            "lock: Arc<java::Locked<PlainObject>>,",
+            "lock: java::SharedField<Arc<java::Monitored<PlainObject>>>,",
         ],
     );
 }

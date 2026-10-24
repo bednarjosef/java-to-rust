@@ -560,6 +560,9 @@ pub struct Field {
     pub init: Option<Expr>,
     /// A `static final` compile-time constant: a Rust `const`, with no cell.
     pub constant: bool,
+    /// Declared `volatile`: in an object that threads share, its accesses are sequentially
+    /// consistent.
+    pub volatile: bool,
     pub pos: Pos,
 }
 
@@ -590,6 +593,10 @@ pub struct Method {
     /// `getChars` in a class without one of its own (`lower::object`). Its class file is the
     /// JDK's, which has the names of its locals.
     pub jdk_code: bool,
+    /// The atomic update of a field of the method's class through `Unsafe` that the method makes,
+    /// a method that lowering adds (`lower::handles`): its body reads, compares and writes the
+    /// field, which the generator writes as one atomic action where the field is shared.
+    pub field_update: Option<(crate::program::FieldUpdate, String)>,
 }
 
 pub struct Param {

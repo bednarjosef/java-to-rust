@@ -78,7 +78,14 @@ impl<'t> Lowering<'t> {
             let target = Place::Static { class: index, name: name.clone() };
             let assign = ExprKind::Assign { op: None, target, value: Box::new(init) };
             creates.push(Stmt::Expr(self.synth(assign, field.pos, array)));
-            types[index].statics.push(Field { name, ty: array, init: None, constant: false, pos: field.pos });
+            types[index].statics.push(Field {
+                name,
+                ty: array,
+                init: None,
+                constant: false,
+                volatile: false,
+                pos: field.pos,
+            });
         }
         // Each field's type, a field of a constant's body's too.
         let has_fields: std::collections::HashMap<String, Type> =
@@ -117,6 +124,7 @@ impl<'t> Lowering<'t> {
                 overrides: Vec::new(),
                 type_params: Vec::new(),
                 jdk_code: false,
+                field_update: None,
             });
             methods.len() - 1
         });
@@ -235,6 +243,7 @@ impl<'t> Lowering<'t> {
                     overrides: Vec::new(),
                     type_params: Vec::new(),
                     jdk_code: false,
+                    field_update: None,
                 };
                 self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
                 methods.push(clinit);

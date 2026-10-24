@@ -297,7 +297,8 @@ impl<'t> Lowering<'t> {
                 }
             }
         };
-        Ok(Field { name: node.str("name").to_string(), ty, init, constant, pos: node.pos() })
+        let volatile = node.has_flag("VOLATILE");
+        Ok(Field { name: node.str("name").to_string(), ty, init, constant, volatile, pos: node.pos() })
     }
 
     /// The place that `node` names when it is a field: `name`, `this.name`, `object.name` or

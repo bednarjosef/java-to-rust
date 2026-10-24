@@ -1007,7 +1007,9 @@ impl<'a> Gen<'a> {
         let structure = self.struct_of(c);
         let (pointer, cell) = (self.pointer(c), self.cell(c));
         let name = &self.class.types[c].name;
-        if self.facts.immutable.contains(name) || self.celled(name) {
+        if self.celled(name) {
+            self.celled_handle(c, &structure)
+        } else if self.facts.immutable.contains(name) {
             format!("{pointer}<{structure}>")
         } else {
             format!("{pointer}<{cell}<{structure}>>")
@@ -2332,6 +2334,7 @@ impl<'a> Gen<'a> {
                 let payload = self.payload(c);
                 payload.starts_with("Arc<RefCell<")
                     || payload.starts_with("Arc<java::Locked<")
+                    || payload.starts_with("Arc<java::Monitored<")
                     || matches!(payload.as_str(), "java::StringBuilder" | "java::SharedStringBuilder")
             })
             .collect();

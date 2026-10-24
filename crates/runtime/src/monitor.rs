@@ -1,13 +1,14 @@
 //! Java's monitors: `synchronized`, `wait`, `notify`, `notifyAll` and `Thread.holdsLock`.
 //!
-//! An object that threads share is an `Arc<java::Locked<C>>`, and the reentrant lock of its
-//! `Locked` is its monitor as well as its data lock (see docs/multi-threading.md, 3.2): a
-//! `synchronized (o) { .. }` holds the lock for the block (`let _monitor = java::enter(&o);`),
-//! and the borrows of the object's fields inside the block take it once more, which a reentrant
-//! lock allows. So the lock is taken in the order the Java program takes its monitors, and a
-//! deadlock of the translation is one the Java program has.
+//! An object whose monitor is kept is an `Arc<java::Monitored<C>>`, whose reentrant lock is its
+//! monitor (see docs/multi-threading.md, 3.2); its fields are cells that take no lock. A
+//! `synchronized (o) { .. }` holds the lock for the block (`let _monitor = java::enter(&o);`). So
+//! the lock is taken in the order the Java program takes its monitors, and a deadlock of the
+//! translation is one the Java program has. A `java::Locked` (a shared builder's or array's data)
+//! is its own monitor too, which the borrows inside a region take once more, as a reentrant lock
+//! allows.
 //!
-//! An object of one thread (an `Rc`) has no lock, since no other thread can contend for it. Its
+//! A `RefCell` of one thread (a builder's) has no lock, since no other thread can contend for it. Its
 //! monitor is only the record that the thread holds it, a list of the addresses of the objects
 //! that the thread has entered, so that `wait`, `notify` and `holdsLock` answer as Java's do.
 
@@ -31,6 +32,43 @@ pub fn unkept_monitor() -> ! {
     crate::exception::die(
         "synchronizing on, waiting on or notifying a String, a boxed value or a Class held as an Object is not supported by the translation",
     )
+}
+
+/// The object of a class whose fields are cells (`java::SharedField`, or `java::Field` for one
+/// thread) and whose monitor is kept: its fields, then the reentrant lock that is its monitor.
+/// The fields come first, so the object's address is that of its fields, as `&self` of a method
+/// that borrows them sees it.
+#[repr(C)]
+pub struct Monitored<T> {
+    value: T,
+    lock: RawLock,
+}
+
+impl<T> Monitored<T> {
+    #[inline(always)]
+    pub const fn new(value: T) -> Monitored<T> {
+        Monitored { value, lock: RawLock::new() }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+}
+
+impl<T> std::ops::Deref for Monitored<T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> HasMonitor for Monitored<T> {
+    #[inline]
+    fn monitor(&self) -> MonitorOf<'_> {
+        MonitorOf::Shared(&self.lock)
+    }
 }
 
 /// A value whose object has a monitor: a handle, or the enum of a class type, which the

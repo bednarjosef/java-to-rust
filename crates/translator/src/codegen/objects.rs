@@ -23,8 +23,10 @@ enum Slot {
         plain: bool,
         /// Whether the object is a value of an enum, whose fields are borrowed with `base()`.
         on_enum: bool,
-        /// Whether the field is a `java::Field` cell, read and written by value.
+        /// Whether the field is a cell, read and written by value.
         cell: bool,
+        /// Whether the cell is a `volatile` field's, accessed in sequential consistency.
+        volatile: bool,
     },
     /// A static field: a `Cell` when `plain`, else a `RefCell`.
     Static { cell: String, plain: bool },
@@ -34,8 +36,9 @@ impl Slot {
     fn read(&self, clone: bool) -> String {
         let copy = !clone;
         match self {
-            Slot::Field { obj, field, on_enum, cell: true, .. } => {
-                format!("{obj}{}.{field}.get()", if *on_enum { ".base()" } else { "" })
+            Slot::Field { obj, field, on_enum, cell: true, volatile, .. } => {
+                let get = if *volatile { "get_volatile" } else { "get" };
+                format!("{obj}{}.{field}.{get}()", if *on_enum { ".base()" } else { "" })
             }
             Slot::Field { obj, field, plain: true, .. } => {
                 format!("{obj}.{field}{}", if copy { "" } else { ".clone()" })
@@ -53,8 +56,9 @@ impl Slot {
 
     fn write(&self, value: &str) -> String {
         match self {
-            Slot::Field { obj, field, on_enum, cell: true, .. } => {
-                format!("{obj}{}.{field}.set({value});", if *on_enum { ".base()" } else { "" })
+            Slot::Field { obj, field, on_enum, cell: true, volatile, .. } => {
+                let set = if *volatile { "set_volatile" } else { "set" };
+                format!("{obj}{}.{field}.{set}({value});", if *on_enum { ".base()" } else { "" })
             }
             Slot::Field { obj, field, plain: true, .. } => format!("{obj}.{field} = {value};"),
             Slot::Field { obj, field, plain: false, on_enum, .. } => {
@@ -498,6 +502,8 @@ impl<'a> Gen<'a> {
         let (pointer, cell) = self.handle_parts(name);
         if self.facts.owned.contains(name) {
             structure
+        } else if self.monitored(name) {
+            format!("{pointer}<java::Monitored<{structure}>>")
         } else if self.facts.immutable.contains(name) || self.celled(name) {
             format!("{pointer}<{structure}>")
         } else {
@@ -506,21 +512,96 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the objects of the class named `name` are celled (`Facts::celled`): an `Arc<C>`
-    /// whose changing fields are `java::Field`s.
+    /// whose fields are cells.
     pub(super) fn celled(&self, name: &str) -> bool {
         self.facts.celled.contains(name)
     }
 
-    /// Whether the fields of `object` are `java::Field` cells: it is an object of a celled class,
-    /// every field of whose class tree is a cell.
+    /// Whether the celled objects of the class named `name` keep a monitor (`Facts::monitored`):
+    /// an `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s.
+    pub(super) fn monitored(&self, name: &str) -> bool {
+        self.facts.monitored.contains(name)
+    }
+
+    /// The handle of a celled object of class `t` whose struct is `structure`.
+    pub(super) fn celled_handle(&self, t: usize, structure: &str) -> String {
+        let pointer = self.pointer(t);
+        if self.monitored(&self.class.types[t].name) {
+            format!("{pointer}<java::Monitored<{structure}>>")
+        } else {
+            format!("{pointer}<{structure}>")
+        }
+    }
+
+    /// A new celled object of class `t`, from its struct `value`.
+    pub(super) fn celled_new(&self, t: usize, value: &str) -> String {
+        let pointer = self.pointer(t);
+        if self.monitored(&self.class.types[t].name) {
+            format!("{pointer}::new(java::Monitored::new({value}))")
+        } else {
+            format!("{pointer}::new({value})")
+        }
+    }
+
+    /// Whether the fields of `object` are cells: it is an object of a celled class, every field
+    /// of whose class tree is a cell.
     pub(super) fn celled_object(&self, object: &Expr) -> bool {
         matches!(object.ty, Type::Class(name, _) if self.celled(self.rep_name(name)))
     }
 
-    /// The value of a field in a struct literal of class `t`: a `java::Field` cell for a celled
+    /// Whether the fields of `object` are `java::SharedField`s: it is an object of a monitored
     /// class.
+    pub(super) fn monitored_object(&self, object: &Expr) -> bool {
+        matches!(object.ty, Type::Class(name, _) if self.monitored(self.rep_name(name)))
+    }
+
+    /// Whether the field `name` of `object` is a `volatile` field's `java::SharedField`, whose
+    /// accesses are sequentially consistent (`get_volatile`, `set_volatile`).
+    pub(super) fn volatile_cell(&self, object: &Expr, name: &str) -> bool {
+        if !self.monitored_object(object) {
+            return false;
+        }
+        let owner = self.class.field_owner(object.ty, name);
+        let owner = match (owner, self.struct_class(object)) {
+            (Some(o), _) if self.class.types[o].fields.iter().any(|f| f.name == name) => Some(o),
+            (_, Some(s)) => Some(self.class.hierarchy.field_owner(s, name)),
+            (o, None) => o,
+        };
+        owner.is_some_and(|o| self.volatile_field(o, name))
+    }
+
+    /// Whether the field `name` that class `owner` declares is a `volatile` field of a monitored
+    /// class.
+    pub(super) fn volatile_field(&self, owner: usize, name: &str) -> bool {
+        let decl = &self.class.types[owner];
+        self.monitored(&decl.name) && decl.fields.iter().any(|f| f.name == name && f.volatile)
+    }
+
+    /// The accessors of the cell of field `name` of `object`: `get` and `set`, or for a
+    /// `volatile` field `get_volatile` and `set_volatile`.
+    pub(super) fn cell_accessors(&self, object: &Expr, name: &str) -> (&'static str, &'static str) {
+        if self.volatile_cell(object, name) { ("get_volatile", "set_volatile") } else { ("get", "set") }
+    }
+
+    /// The cell type of a field of class `t` whose value is of type `ty`.
+    pub(super) fn cell_type(&self, t: usize, ty: &str) -> String {
+        if self.monitored(&self.class.types[t].name) {
+            format!("java::SharedField<{ty}>")
+        } else {
+            format!("java::Field<{ty}>")
+        }
+    }
+
+    /// The value of a field in a struct literal of class `t`: a cell for a celled class.
     pub(super) fn field_cell(&self, t: usize, value: String) -> String {
-        if self.celled(&self.class.types[t].name) { format!("java::Field::new({value})") } else { value }
+        let name = &self.class.types[t].name;
+        if self.monitored(name) {
+            format!("java::SharedField::new({value})")
+        } else if self.celled(name) {
+            format!("java::Field::new({value})")
+        } else {
+            value
+        }
     }
 
     /// Whether `e` is an object whose fields are read and written without a `RefCell`: an object of
@@ -548,7 +629,7 @@ impl<'a> Gen<'a> {
         if self.facts.immutable.contains(name) {
             format!("&{structure}")
         } else if self.celled(name) {
-            format!("&{}<{structure}>", self.pointer(self.this_struct))
+            format!("&{}", self.celled_handle(self.this_struct, &structure))
         } else {
             let (pointer, cell) = (self.pointer(self.this_struct), self.cell(self.this_struct));
             format!("&{pointer}<{cell}<{structure}>>")
@@ -815,7 +896,8 @@ impl<'a> Gen<'a> {
                         Some(t) => self.enum_borrow(t, false),
                         None => "",
                     };
-                    (format!("{obj}{borrow}.{field}.get()"), false)
+                    let (get, _) = self.cell_accessors(object, name);
+                    (format!("{obj}{borrow}.{field}.{get}()"), false)
                 } else if let Some(t) = self.enum_of(object) {
                     let borrow = self.enum_borrow(t, false);
                     if self.guarded && !self.plain_enum(t) {
@@ -1272,7 +1354,8 @@ impl<'a> Gen<'a> {
                 Some(t) => self.enum_borrow(t, false),
                 None => "",
             };
-            return Code::atom(format!("{obj}{borrow}.{}.get()", self.field_path(object, name)));
+            let (get, _) = self.cell_accessors(object, name);
+            return Code::atom(format!("{obj}{borrow}.{}.{get}()", self.field_path(object, name)));
         }
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", self.field_path(object, name)));
@@ -1383,7 +1466,9 @@ impl<'a> Gen<'a> {
         let (pointer, cell) = (self.pointer(c), self.cell(c));
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
             call
-        } else if self.facts.immutable.contains(name) || self.celled(name) {
+        } else if self.celled(name) {
+            self.celled_new(c, &call)
+        } else if self.facts.immutable.contains(name) {
             format!("{pointer}::new({call})")
         } else {
             format!("{pointer}::new({cell}::new({call}))")
@@ -1567,32 +1652,33 @@ impl<'a> Gen<'a> {
                 None => "",
             };
             let place = format!("{obj}{borrow}.{field}");
+            let (get, set) = self.cell_accessors(object, name);
             let value = match how {
                 Update::Assign(value) => {
                     let value = self.field_value(value, ty, nullable);
                     // Java computes the value before a null object throws.
                     if self.nullable(object) {
                         let temp = self.temp("value");
-                        return Some(format!("{{ let {temp} = {value}; {place}.set({temp}) }}"));
+                        return Some(format!("{{ let {temp} = {value}; {place}.{set}({temp}) }}"));
                     }
                     value
                 }
                 Update::Compound(op, value) => {
                     let result = crate::types::binary_type(op, ty, value.ty.unboxed()).expect("checked");
-                    let current = Code::atom(format!("{place}.get()"));
+                    let current = Code::atom(format!("{place}.{get}()"));
                     let right = self.operand(value);
                     let code = self.binary(op, Operand { code: current, ty }, right, result, e.id);
                     self.convert(code, result, ty).text
                 }
                 Update::Step(increment) if ty.is_floating() || self.no_overflow(e.id) => {
                     let one = if ty.is_floating() { "1.0" } else { "1" };
-                    format!("{place}.get() {} {one}", if increment { "+" } else { "-" })
+                    format!("{place}.{get}() {} {one}", if increment { "+" } else { "-" })
                 }
                 Update::Step(increment) => {
-                    format!("{place}.get().wrapping_{}(1)", if increment { "add" } else { "sub" })
+                    format!("{place}.{get}().wrapping_{}(1)", if increment { "add" } else { "sub" })
                 }
             };
-            return Some(format!("{place}.set({value})"));
+            return Some(format!("{place}.{set}({value})"));
         }
         if self.is_plain(object) {
             let place = format!("{obj}.{field}");
@@ -1772,6 +1858,7 @@ impl<'a> Gen<'a> {
                     plain: true,
                     on_enum: false,
                     cell: self.celled_object(object),
+                    volatile: self.volatile_cell(object, name),
                 }
             }
             Place::Field { object, name } => {
@@ -1786,8 +1873,9 @@ impl<'a> Gen<'a> {
                     }
                     None => false,
                 };
-                let cell = self.celled_object(object);
-                Slot::Field { obj, field: self.field_path(object, name), plain: false, on_enum, cell }
+                let (cell, volatile) = (self.celled_object(object), self.volatile_cell(object, name));
+                let field = self.field_path(object, name);
+                Slot::Field { obj, field, plain: false, on_enum, cell, volatile }
             }
             Place::Static { class, name } => {
                 Slot::Static { cell: cell_name(&self.class.types[*class], name), plain: is_cell(ty) }
@@ -1900,7 +1988,7 @@ impl<'a> Gen<'a> {
         }
         for f in &decl.fields {
             let ty = self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name));
-            let ty = if self.celled(&decl.name) { format!("java::Field<{ty}>") } else { ty };
+            let ty = if self.celled(&decl.name) { self.cell_type(index, &ty) } else { ty };
             self.line(&format!("{}{}: {ty},", self.vis(), field_name(decl, &f.name)));
         }
         self.indent -= 1;
@@ -1967,8 +2055,8 @@ impl<'a> Gen<'a> {
         } else if by_value {
             self.line(&format!("fn field_inits(this: &mut {}){ret} {{", self.generic_struct(index)));
         } else if celled {
-            let pointer = self.pointer(index);
-            self.line(&format!("fn field_inits(this: &{pointer}<{}>){ret} {{", self.generic_struct(index)));
+            let handle = self.celled_handle(index, &self.generic_struct(index));
+            self.line(&format!("fn field_inits(this: &{handle}){ret} {{"));
         } else {
             let (pointer, cell) = (self.pointer(index), self.cell(index));
             self.line(&format!(
@@ -1985,7 +2073,8 @@ impl<'a> Gen<'a> {
             self.guarded = outer;
             let field = field_name(&class.types[index], &f.name);
             if celled {
-                self.line(&format!("{}.{field}.set({value});", self.this_name()));
+                let set = if self.volatile_field(index, &f.name) { "set_volatile" } else { "set" };
+                self.line(&format!("{}.{field}.{set}({value});", self.this_name()));
             } else if by_value {
                 self.line(&format!("{}.{field} = {value};", self.this_name()));
             } else {
@@ -2041,8 +2130,8 @@ impl<'a> Gen<'a> {
                     let mut_kw = if mutable { "mut " } else { "" };
                     self.line(&format!("let {mut_kw}obj = {name} {{ {fields} }};"));
                 } else if self.celled(&decl.name) {
-                    let pointer = self.pointer(m.class);
-                    self.line(&format!("let obj = {pointer}::new({name} {{ {fields} }});"));
+                    let obj = self.celled_new(m.class, &format!("{name} {{ {fields} }}"));
+                    self.line(&format!("let obj = {obj};"));
                 } else {
                     let (pointer, cell) = (self.pointer(m.class), self.cell(m.class));
                     self.line(&format!("let obj = {pointer}::new({cell}::new({name} {{ {fields} }}));"));

@@ -12,7 +12,7 @@ It builds on three other designs:
 - exceptions ([exceptions.md](exceptions.md)): a method returns `Result` exactly where a caller
   observes what escapes it, and the methods of an override group agree;
 - multi-threading ([multi-threading.md](multi-threading.md)): a class that threads may share is
-  `Arc<java::Locked<C>>`, and a closure handed to a thread must be `Send`.
+  `Arc<java::Monitored<C>>`, and a closure handed to a thread must be `Send`.
 
 The guiding rules: generated code is safe Rust that prints what Java prints; what cannot be
 proven keeps a correct general representation; lambdas become Rust closures, not hand-made
