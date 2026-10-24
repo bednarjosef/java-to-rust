@@ -678,8 +678,10 @@ pub const FALSE_CALLS: &[(&str, &str)] = &[("jdk.internal.vm.ContinuationSupport
 /// `GraphicsEnvironment.isHeadless()` and the private `getHeadlessProperty()` behind it read that
 /// property, so the branches that would open a window, find a screen or start AWT's toolkit
 /// never run, and their code (Swing, `java.awt.Component`, the X11 toolkit) is not reached.
-pub const TRUE_CALLS: &[(&str, &str)] =
-    &[("java.awt.GraphicsEnvironment", "isHeadless"), ("java.awt.GraphicsEnvironment", "getHeadlessProperty")];
+pub const TRUE_CALLS: &[(&str, &str)] = &[
+    ("java.awt.GraphicsEnvironment", "isHeadless"),
+    ("java.awt.GraphicsEnvironment", "getHeadlessProperty"),
+];
 
 /// Instance methods without parameters that return `false` in every translated program, called
 /// on a receiver that reading has no effects: there are no virtual threads, so
