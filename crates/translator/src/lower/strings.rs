@@ -580,6 +580,8 @@ impl<'t> Lowering<'t> {
             ("rotateLeft", 2) => BitsOp::RotateLeft,
             ("rotateRight", 2) => BitsOp::RotateRight,
             ("signum", 1) => BitsOp::Signum,
+            ("compress", 2) => BitsOp::Compress,
+            ("expand", 2) => BitsOp::Expand,
             ("toString", 2) => BitsOp::ToStringRadix,
             ("parseInt" | "parseLong", 2) if args[0].ty == Type::String => BitsOp::ParseRadix,
             ("parseInt" | "parseLong", 4) if args[0].ty == Type::String => BitsOp::ParseRange,

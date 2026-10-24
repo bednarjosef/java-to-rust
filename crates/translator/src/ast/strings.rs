@@ -181,6 +181,10 @@ pub enum BitsOp {
     RotateLeft,
     RotateRight,
     Signum,
+    /// `Integer.compress(i, mask)`: the bits of `i` under the mask, packed at the low end.
+    Compress,
+    /// `Integer.expand(i, mask)`: the low bits of `i` spread out to the mask's positions.
+    Expand,
     /// `Integer.toString(v, radix)`.
     ToStringRadix,
     /// `Integer.parseInt(s, radix)`.

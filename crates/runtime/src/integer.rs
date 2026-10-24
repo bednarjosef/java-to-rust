@@ -7,6 +7,32 @@ pub fn highest_one_bit(v: i64, bits: u32) -> i64 {
     if unsigned == 0 { 0 } else { (1u64 << (63 - unsigned.leading_zeros())) as i64 }
 }
 
+/// `Integer.compress` and `Long.compress`: the bits of `i` where `mask` has ones, packed
+/// together at the low end in their order.
+pub fn compress_bits(i: u64, mask: u64) -> u64 {
+    let (mut result, mut out, mut m) = (0u64, 0u32, mask);
+    while m != 0 {
+        let bit = m.trailing_zeros();
+        result |= ((i >> bit) & 1) << out;
+        out += 1;
+        m &= m - 1;
+    }
+    result
+}
+
+/// `Integer.expand` and `Long.expand`: the low bits of `i`, in order, put at the positions where
+/// `mask` has ones; every other bit is zero.
+pub fn expand_bits(i: u64, mask: u64) -> u64 {
+    let (mut result, mut from, mut m) = (0u64, 0u32, mask);
+    while m != 0 {
+        let bit = m.trailing_zeros();
+        result |= ((i >> from) & 1) << bit;
+        from += 1;
+        m &= m - 1;
+    }
+    result
+}
+
 /// `Integer.toString(v, radix)` and `Long.toString(v, radix)`: a radix outside 2 to 36 is 10,
 /// and a negative value has a `-` sign.
 pub fn to_string_radix(v: i64, radix: i32) -> String {

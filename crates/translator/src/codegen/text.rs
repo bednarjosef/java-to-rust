@@ -766,6 +766,21 @@ impl<'a> Gen<'a> {
                 let name = if op == BitsOp::RotateLeft { "rotate_left" } else { "rotate_right" };
                 Code::atom(format!("{recv}.{name}({} as u32)", distance.cast_operand()))
             }
+            // The runtime's functions work on the unsigned bits of 64; an `int`'s are its 32,
+            // zero-extended, which compress and expand alike to the 32-bit result.
+            BitsOp::Compress | BitsOp::Expand => {
+                let mask = self.value(&args[1], kind);
+                let name = if op == BitsOp::Compress { "compress_bits" } else { "expand_bits" };
+                let f = self.runtime(name);
+                let (unsigned, back) =
+                    if kind == Type::Long { ("u64", "i64") } else { ("u32 as u64", "i32") };
+                let text = format!(
+                    "{f}({} as {unsigned}, {} as {unsigned}) as {back}",
+                    v.cast_operand(),
+                    mask.cast_operand()
+                );
+                Code::new(text, AS)
+            }
             BitsOp::ToStringRadix => {
                 let radix = self.int_arg(&args[1]);
                 let f = self.runtime("to_string_radix");
