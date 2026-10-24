@@ -233,6 +233,26 @@ fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
     }
 }
 
+/// Whether the tree `v` adds an array to a string (`"a" + array`, `s += array`): the array's text
+/// is its `Object`'s, its type and identity hash (`[I@1b6d3586`), so it is converted to `Object`.
+fn concatenates_array(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => {
+            let ty = |side: &str| v[side]["javaType"].as_str().unwrap_or_default();
+            let kind = fields.get("kind").and_then(Value::as_str);
+            let is_array = |t: &str| t.ends_with("[]");
+            let text = fields.get("javaType").and_then(Value::as_str) == Some("java.lang.String");
+            (kind == Some("PLUS") && text && (is_array(ty("leftOperand")) || is_array(ty("rightOperand"))))
+                || kind == Some("PLUS_ASSIGNMENT")
+                    && ty("variable") == "java.lang.String"
+                    && is_array(ty("expression"))
+                || fields.values().any(concatenates_array)
+        }
+        Value::Array(items) => items.iter().any(concatenates_array),
+        _ => false,
+    }
+}
+
 /// The class of the objects that `new Object()` creates: a class without fields that implements
 /// `Object` like any other, so that such an object is a variant of the `Object` enum, equal only
 /// to itself, hashed and printed by its identity (`java.lang.Object@1b6d3586`, see
@@ -300,6 +320,7 @@ impl<'t> Lowering<'t> {
         let number = uses_number(decls);
         let char_sequence = uses_char_sequence(decls);
         let unrelated = decls.iter().any(|d| self.compares_unrelated(d.0));
+        let array_text = decls.iter().any(|d| concatenates_array(d.0));
         let appendable = self.type_index("java.lang.Appendable");
         let class_interface = CLASS_VALUE_INTERFACES.iter().any(|i| self.type_index(i).is_some());
         if uses_object(decls, &self.real_type_parameters())
@@ -307,6 +328,7 @@ impl<'t> Lowering<'t> {
             || number
             || char_sequence
             || unrelated
+            || array_text
             || appendable.is_some()
             || class_interface
         {

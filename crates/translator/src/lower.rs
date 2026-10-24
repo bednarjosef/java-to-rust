@@ -922,7 +922,10 @@ impl<'t> Lowering<'t> {
             }
             kind if kind.ends_with("_ASSIGNMENT") => {
                 let op = binary_op(node, kind.trim_end_matches("_ASSIGNMENT"))?;
-                let value = self.expr(node.child("expression")?)?;
+                let mut value = self.expr(node.child("expression")?)?;
+                if op == BinOp::Add && node.java_type() == "java.lang.String" {
+                    value = self.array_text(node, value)?;
+                }
                 ExprKind::Assign {
                     op: Some(op),
                     target: self.target(node.child("variable")?)?,
@@ -1030,13 +1033,11 @@ impl<'t> Lowering<'t> {
                 {
                     self.string_comparison(node, op, left, right)
                 } else {
-                    // An array's text is its type and identity hash, such as `[I@1b6d3586`.
-                    if op == BinOp::Add
-                        && (left.ty == Type::String || right.ty == Type::String)
-                        && (matches!(left.ty, Type::Array(_)) || matches!(right.ty, Type::Array(_)))
-                    {
-                        return unsupported(node, "the text of an array");
-                    }
+                    let (left, right) = if op == BinOp::Add && node.java_type() == "java.lang.String" {
+                        (self.array_text(node, left)?, self.array_text(node, right)?)
+                    } else {
+                        (left, right)
+                    };
                     let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
                         self.convert_operands(left, right)
                     } else {
@@ -1070,6 +1071,16 @@ impl<'t> Lowering<'t> {
         let expr = Expr { kind, pos: node.pos(), ty, id };
         self.note_element_class(node, &expr)?;
         Ok(expr)
+    }
+
+    /// An operand `e` of a string concatenation: an array as an `Object`, whose text is its type
+    /// and identity hash, such as `[I@1b6d3586` (`object::concatenates_array` plans `Object`).
+    fn array_text(&self, node: Node<'t>, e: Expr) -> Result<Expr, Error> {
+        if !matches!(e.ty, Type::Array(_)) {
+            return Ok(e);
+        }
+        self.object_array(node, e.ty)?;
+        Ok(self.convert(e, Type::class(OBJECT)))
     }
 
     /// `left op right`, where `right` may assign the variable that `left` reads, as in

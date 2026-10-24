@@ -448,7 +448,8 @@ Runtime variants are types of kind `TypeKind::Runtime` beside it:
 
 - strings and the eight boxes hold the plain value (`Object::String(String)`,
   `Object::Integer(i32)`); a primitive converted to `Object` becomes its box's variant;
-- an array type converted to `Object` or cast back (`lower::object::note_object_array`) gets a
+- an array type converted to `Object`, cast back or added to a string
+  (`lower::object::note_object_array`, `concatenates_array`) gets a
   runtime class named after it (`int[]`), whose variant holds the shared `java::Array`
   (`Object::IntArray(..)`), so the array keeps its identity: `==` and `equals` are `Arc::ptr_eq`,
   `hashCode` its identity hash, and it prints as Java's `[I@1b6d3586`. Arrays of a real generic's
