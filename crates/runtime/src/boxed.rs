@@ -7,7 +7,11 @@ use std::ops::Deref;
 /// A boxed value. Two boxes are `==` only when they are the same object, which `same` tests.
 /// Dereferences to the value it holds.
 #[derive(Clone, Debug)]
+#[repr(transparent)]
 pub struct Boxed<T>(Arc<T>);
+
+// A box is its handle.
+unsafe impl<T> crate::Pointer for Boxed<T> {}
 
 impl<T> Deref for Boxed<T> {
     type Target = T;

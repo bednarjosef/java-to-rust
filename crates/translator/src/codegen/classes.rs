@@ -44,9 +44,12 @@ impl<'a> Gen<'a> {
         if !self.enum_variants(t).contains(&c) {
             return self.after_object(object, if same { "false" } else { "true" });
         }
-        let (obj, variant) = (self.object(object), self.variant(t, c));
+        let (obj, tag) = (self.object(object), self.class_tag(c));
         let not = if same { "" } else { "!" };
-        Code::new(format!("{not}matches!({obj}, {variant}(_))"), if same { ATOM } else { UNARY })
+        Code::new(
+            format!("{not}matches!({}.0.tag(), {tag})", super::dispatch::operand(&obj)),
+            if same { ATOM } else { UNARY },
+        )
     }
 
     /// The name of the class of `object`, a `&str`: `"Main$Dog"`, or a `match` of its enum.

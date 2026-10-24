@@ -55,10 +55,10 @@ fn a_thread_and_what_it_reaches_are_arcs() {
     assert_contains(
         &rust,
         &[
-            "enum Thread {\n    Worker(Arc<java::Locked<AWorker>>),",
+            "enum ThreadView<'a> {\n    Worker(&'a Arc<java::Locked<AWorker>>),",
             "fn run(this: &Arc<java::Locked<AWorker>>) {",
             "let w = Arc::new(java::Locked::new(AWorker::new(10)));",
-            "(Thread::Worker(a), Thread::Worker(b)) => Arc::ptr_eq(a, b),",
+            "(ThreadView::Worker(a), ThreadView::Worker(b)) => Arc::ptr_eq(a, b),",
             "fn base(&self) -> java::Ref<'_, ThreadFields> {",
         ],
     );
@@ -201,8 +201,8 @@ fn a_string_builder_of_a_program_with_threads_is_shared() {
         &rust,
         &[
             "static A_LOG: LazyLock<java::Locked<java::SharedStringBuilder>>",
-            "StringBuilder(java::SharedStringBuilder),",
-            "Object::StringBuilder(o) => java::HasMonitor::monitor(o),",
+            "StringBuilder(&'a java::SharedStringBuilder),",
+            "ObjectView::StringBuilder(o) => java::HasMonitor::monitor(o),",
             "let _monitor = java::enter(&A_LOG",
         ],
     );

@@ -931,8 +931,10 @@ impl<'a> Gen<'a> {
         }
         let (arms, all) = self.catch_arms(catches);
         let count = all.len();
+        let mut every = false;
         for (catch, matched) in &arms {
             let (pattern, before) = self.catch_pattern(catch, matched, count);
+            every |= !pattern.contains(") if matches!(");
             self.line(&format!("Err({pattern}) => {{"));
             self.indent += 1;
             for line in before {
@@ -945,6 +947,9 @@ impl<'a> Gen<'a> {
         if arms.iter().map(|(_, m)| m.len()).sum::<usize>() < count {
             let text = self.propagate("e");
             self.line(&format!("Err(e) => {text},"));
+        } else if !every {
+            // The arms test the class of each exception, and together they catch all.
+            self.line("Err(_) => unreachable!(\"every class of exception is caught\"),");
         }
         self.indent -= 1;
         self.line("}");
@@ -995,7 +1000,10 @@ impl<'a> Gen<'a> {
     }
 
     /// The pattern of the arm of a `catch` clause that matches the variants `matched` of the enum
-    /// of `Throwable`, which has `count` variants, with the lines that bind its parameter.
+    /// of `Throwable`, which has `count` variants, with the lines that bind its parameter. Unless
+    /// the clause matches every class, the pattern binds the exception and ends in a guard that
+    /// tests its class (`java::Thin`): `caught) if matches!(caught.0.tag(), 3 | 5`, which the
+    /// arm's `Err(..)` closes.
     fn catch_pattern(&mut self, catch: &'a Catch, matched: &[usize], count: usize) -> (String, Vec<String>) {
         let t = self.class.type_index("java.lang.Throwable").expect("a program with `try` has `Throwable`");
         let mut used = false;
@@ -1004,43 +1012,37 @@ impl<'a> Gen<'a> {
         }
         let name = self.local(&catch.name);
         let mutable = if assigns_any(&catch.body, &catch.name) { "mut " } else { "" };
-        let bound = if used { format!("{mutable}{name}") } else { "_".to_string() };
         let ty = self.class.class_index(catch.ty).expect("a catch parameter has a class type");
-        let variants: Vec<String> = matched.iter().map(|&c| self.variant(t, c)).collect();
-        let alternatives = variants.iter().map(|v| format!("{v}(_)")).collect::<Vec<_>>().join(" | ");
-        // The alternatives, bound to a name when the clause uses the value.
-        let any_of = |bound: &str| match (bound, matched.len()) {
-            ("_", _) => alternatives.clone(),
-            (_, 1) => format!("{bound} @ {alternatives}"),
-            _ => format!("{bound} @ ({alternatives})"),
-        };
         let mut before = Vec::new();
-        let pattern = match self.rep(ty) {
-            // The parameter is the object of the one class it catches.
-            hierarchy::Rep::Object(_) => format!("{}({bound})", variants[0]),
-            // The parameter is a `Throwable`.
-            hierarchy::Rep::Enum(u) if u == t && matched.len() == count => bound,
-            hierarchy::Rep::Enum(u) if u == t => any_of(&bound),
-            // The parameter is a value of the enum of a class of the program.
-            hierarchy::Rep::Enum(_) if !used => any_of("_"),
-            hierarchy::Rep::Enum(u) => {
-                // The object that the arm binds, under a name that no local of the method has.
-                let caught = self.result_name("caught");
-                if let [c] = matched {
-                    before.push(format!("let {mutable}{name} = {}({caught});", self.variant(u, *c)));
-                    format!("{}({caught})", variants[0])
-                } else {
-                    let arms: Vec<String> = matched
-                        .iter()
-                        .zip(&variants)
-                        .map(|(&c, v)| format!("{v}(o) => {}(o)", self.variant(u, c)))
-                        .collect();
+        let throwable = self.rep(ty) == hierarchy::Rep::Enum(t);
+        let pattern = if matched.len() == count && throwable {
+            // The parameter is a `Throwable` that every class matches.
+            if used { format!("{mutable}{name}") } else { "_".to_string() }
+        } else {
+            // The exception, under the parameter's name or one that no local of the method has.
+            let caught =
+                if throwable && used { format!("{mutable}{name}") } else { self.result_name("caught") };
+            let tested = caught.trim_start_matches("mut ").to_string();
+            match self.rep(ty) {
+                // The parameter is the object of the one class it catches.
+                hierarchy::Rep::Object(c) if used => {
+                    let view = self.view_pattern(t, c);
                     before.push(format!(
-                        "let {mutable}{name} = match {caught} {{ {}, _ => unreachable!(\"the arm matches these\") }};",
-                        arms.join(", ")
+                        "let {mutable}{name} = match {tested}.view() {{ {view}(o) => o.clone(), _ => unreachable!(\"the arm matches its class\") }};"
                     ));
-                    any_of(&caught)
                 }
+                // The parameter is a value of the enum of a class of the program, which has the
+                // same bits.
+                hierarchy::Rep::Enum(u) if used && u != t => {
+                    let target = struct_name(&self.class.types[u].name);
+                    before.push(format!("let {mutable}{name} = {target}({tested}.0);"));
+                }
+                _ => {}
+            }
+            if matched.len() == count {
+                caught
+            } else {
+                format!("{caught}) if matches!({tested}.0.tag(), {}", self.tags(matched))
             }
         };
         if used && self.optional_var(self.method, catch.ty, &catch.name) {
@@ -1210,18 +1212,16 @@ impl<'a> Gen<'a> {
             }
             Some(t) => {
                 let obj = self.object(object);
-                let arms: Vec<String> = self
+                let mut arms: Vec<String> = self
                     .enum_variants(t)
                     .into_iter()
                     .map(|c| {
-                        format!(
-                            "{}(_) => {}",
-                            self.variant(t, c),
-                            rust_string(&self.java_class_name(c, simple))
-                        )
+                        format!("{} => {}", self.class_tag(c), rust_string(&self.java_class_name(c, simple)))
                     })
                     .collect();
-                Code::atom(format!("java::JString::from(match {obj} {{ {} }})", arms.join(", ")))
+                arms.push("tag => java::bad_tag(tag)".to_string());
+                let tag = format!("{}.0.tag()", super::dispatch::operand(&obj));
+                Code::atom(format!("java::JString::from(match {tag} {{ {} }})", arms.join(", ")))
             }
         }
     }

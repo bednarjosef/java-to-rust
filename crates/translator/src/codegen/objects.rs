@@ -1228,7 +1228,7 @@ impl<'a> Gen<'a> {
         {
             let name = struct_name(&self.class.types[t].name);
             let never = format!("<_ as std::borrow::Borrow<{name}>>::borrow(&object)");
-            return Code::atom(format!("{{ let object = {obj}; match *{never} {{}} }}"));
+            return Code::atom(format!("{{ let object = {obj}; match {never}.view() {{}} }}"));
         }
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", self.field_path(object, name)));

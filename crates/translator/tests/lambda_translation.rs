@@ -44,8 +44,8 @@ fn a_lambda_is_a_variant_of_its_interface() {
         &[
             "struct OpLambdaInMain {",
             "fn apply(&self, a: i32, b: i32) -> i32 {\n        a + b\n    }",
-            "OpLambdaInMain(Arc<OpLambdaInMain>),",
-            "AOp::OpLambdaInMain(o) => o.apply(a, b),",
+            "OpLambdaInMain(&'a Arc<OpLambdaInMain>),",
+            "AOpView::OpLambdaInMain(o) => o.apply(a, b),",
             "AOp::OpLambdaInMain(Arc::new(OpLambdaInMain::new()))",
         ],
     );

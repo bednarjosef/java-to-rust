@@ -312,7 +312,7 @@ impl<'a> Gen<'a> {
         self.need(Need::CastSource(t));
         let (source, failed) = (self.runtime("CastSource"), self.runtime("cast_failed"));
         let base = self.runtime("BASE");
-        format!("other => {failed}({source}::cast_class(&other), (\"java.lang.Enum\", {base}))")
+        format!("_ => {failed}({source}::cast_class(&value), (\"java.lang.Enum\", {base}))")
     }
 
     /// An enum's builtin on an `Enum` that is an `Object` (of the enum of type `t`): a `match`
@@ -326,10 +326,10 @@ impl<'a> Gen<'a> {
         let ordinal = |g: &mut Self, e: &'a Expr| {
             let obj = g.object(e);
             let mut arms: Vec<String> =
-                enums.iter().map(|&c| format!("{}(e) => *e as i32", g.variant(t, c))).collect();
+                enums.iter().map(|&c| format!("{}(e) => *e as i32", g.view_pattern(t, c))).collect();
             arms.push(g.not_enum_arm(t));
-            // Borrowed, the constant is a reference however the `Enum` is held.
-            format!("(match &({obj}) {{ {} }})", arms.join(", "))
+            // The view lends the constant, however the `Enum` is held.
+            format!("{{ let value = {obj}; match value.view() {{ {} }} }}", arms.join(", "))
         };
         match builtin {
             Builtin::EnumOrdinal => Code::atom(ordinal(self, &args[0])),
@@ -339,10 +339,12 @@ impl<'a> Gen<'a> {
             }
             Builtin::EnumName => {
                 let obj = self.object(&args[0]);
-                let mut arms: Vec<String> =
-                    enums.iter().map(|&c| format!("{}(e) => e.enum_name()", self.variant(t, c))).collect();
+                let mut arms: Vec<String> = enums
+                    .iter()
+                    .map(|&c| format!("{}(e) => e.enum_name()", self.view_pattern(t, c)))
+                    .collect();
                 arms.push(self.not_enum_arm(t));
-                Code::new(format!("match {obj} {{ {} }}", arms.join(", ")), LOWEST)
+                Code::atom(format!("{{ let value = {obj}; match value.view() {{ {} }} }}", arms.join(", ")))
             }
             _ => unreachable!("not a builtin of an erased enum: {builtin:?}"),
         }

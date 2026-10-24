@@ -51,7 +51,9 @@ much as is alive instead took the translated javac on the Minecraft benchmark fr
    alive back to the system (neighbouring ones in one call).
 
 The roots are scanned conservatively: any aligned word that points into a taken slot keeps that
-slot, which makes interior pointers and pointers held in registers work. The roots are:
+slot, which makes interior pointers and pointers held in registers work. The top 16 bits of a
+word are ignored, as they hold the class's number in a reference to an object of several
+possible classes (`java::Thin`, docs/object-model.md 1.2). The roots are:
 
 - the stacks of the threads, from the stack pointer each recorded when it stopped, and the
   collecting thread's own stack and registers;

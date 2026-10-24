@@ -14,11 +14,14 @@ possible classes are known and dispatch can be a `match`.
    `base:` entry of the constructor's struct literal, a method that only touches inherited
    fields is emitted once on the fields struct, and an enum needs one `base()` accessor rather
    than one per field.
-2. **A type that objects of several concrete classes can be is an enum named after the Java
-   type**, with one variant per class whose objects become values of the type, each holding
-   that class's object (`Arc<RefCell<C>>`, or `Arc<C>` when immutable). A type with one such class
-   is that class's object, with no enum. Enums are flat: every variant is a concrete class,
-   never another enum, so a call through an interface over several class trees is one `match`.
+2. **A type that objects of several concrete classes can be is an eight-byte reference named
+   after the Java type**, a `java::Thin` holding the class's number and the object's handle,
+   with a constructor per class whose objects become values of the type (`Base::Circle(o)`)
+   and a *view*: an enum with one variant per such class that lends the class's object
+   (`Arc<RefCell<C>>`, or `Arc<C>` when immutable). The code calls such a type and its view
+   "the enum" of the type. A type with one such class is that class's object, with no enum.
+   Enums are flat: every variant is a concrete class, never another enum, so a call through an
+   interface over several class trees is one `match`.
 3. **Dispatch is a `match` in a method of the enum** (a *dispatcher*). A body that a class
    inherits is emitted once: on the fields struct when it uses `this` only for fields (a
    *field-level* method), otherwise on the enum of the declaring type or in the one concrete
@@ -26,13 +29,13 @@ possible classes are known and dispatch can be a `match`.
 4. **Conversions are explicit in the tree.** Lowering inserts a `Cast` at every implicit
    reference conversion, so the analyses see every upcast, and the generator writes
    `Base::Circle(c)` (class to enum), `b.to_shape()` (enum to enum) or a checked downcast.
-5. **`instanceof` is a test of the enum's variant**, and a pattern variable is bound with a let
-   chain, `if let`, `let .. else` or `is_some_and`.
+5. **`instanceof` is a test of the class's number** (`matches!(s.0.tag(), 2 | 5)`), and a
+   pattern variable is bound with a let chain, `if let`, `let .. else` or `is_some_and`.
 6. **`Object` is an enum too**, over the program's classes whose objects become `Object`s and
    over strings, boxes, enums, arrays, builders and class values as runtime variants. Its
    `equals`, `hashCode` and `toString` dispatch to the class's own or to Java's defaults.
-7. **Identity is `PartialEq` on the enums**: pointer equality per variant, `false` across
-   variants.
+7. **Identity is `PartialEq` on the enums**: pointer equality of the objects of one class,
+   `false` across classes.
 8. **Representation (shared, immutable, owned) stays per concrete class**, with rules for
    inheritance: a class that has subclasses, is converted to a supertype or runs an inherited
    object-level method is never owned; the concrete classes of one class tree (a *family*) are
@@ -104,12 +107,13 @@ Naming:
 
 - Structs and enums use the class's struct name (`Outer.Inner` is `OuterInner`); the fields
   struct appends `Fields`.
-- A variant is named after its class's simple name (`Shape::Circle`), with the outer classes'
-  names when two variants of one enum would share one. Runtime variants are `String`,
-  `Integer`, ..., `IntArray`, `StringBuilder` and so on.
-- Accessors are `base()` and `base_mut()`; conversions `to_<type>()` and `as_<type>()`. A Java
-  method whose name would be `base`, `base_mut`, `clone` or one of the class methods above gets
-  a suffix (`base_2`, `clone_2`).
+- A variant is named after its class's simple name (`Shape::Circle`, and `ShapeView::Circle`
+  in the view), with the outer classes' names when two variants of one enum would share one.
+  Runtime variants are `String`, `Integer`, ..., `IntArray`, `StringBuilder` and so on. The
+  view is `<Name>View`, or `<Name>Variants` when the program has a class of the first name.
+- Accessors are `base()`, `base_mut()` and `view()`; conversions `to_<type>()` and
+  `as_<type>()`. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
+  the class methods above gets a suffix (`base_2`, `clone_2`).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.
@@ -158,24 +162,36 @@ impl Circle {
     fn area(&self) -> f64 { 3.0 * self.r * self.r }
 }
 
-#[repr(u16)]
-enum Base { Circle(Arc<RefCell<Circle>>), Rect(Arc<RefCell<Rect>>) }
-java::handle_variants!(Base, 2);
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct Base(java::Thin);
+enum BaseView<'a> { Circle(&'a Arc<RefCell<Circle>>), Rect(&'a Arc<RefCell<Rect>>) }
+impl Base {
+    fn Circle(o: Arc<RefCell<Circle>>) -> Base { Base(java::Thin::pointer(2, o)) }
+    fn Rect(o: Arc<RefCell<Rect>>) -> Base { Base(java::Thin::pointer(3, o)) }
+    fn view(&self) -> BaseView<'_> {
+        match self.0.tag() {
+            2 => BaseView::Circle(unsafe { self.0.as_pointer() }),
+            3 => BaseView::Rect(unsafe { self.0.as_pointer() }),
+            tag => java::bad_tag(tag),
+        }
+    }
+}
 impl Base {
     fn base(&self) -> Ref<'_, BaseFields> {
-        match self {
-            Base::Circle(o) => Ref::map(o.borrow(), |o| &o.base),
-            Base::Rect(o) => Ref::map(o.borrow(), |o| &o.base),
+        match self.view() {
+            BaseView::Circle(o) => Ref::map(o.borrow(), |o| &o.base),
+            BaseView::Rect(o) => Ref::map(o.borrow(), |o| &o.base),
         }
     }
     fn area(&self) -> f64 {
-        match self { Base::Circle(o) => o.borrow().area(), Base::Rect(o) => o.borrow().area() }
+        match self.view() { BaseView::Circle(o) => o.borrow().area(), BaseView::Rect(o) => o.borrow().area() }
     }
     fn to_string_in_base(&self) -> java::JString {
         java::concat!(self.base().name.clone(), format_args!(":{}", java::Double(self.area())))
     }
 }
-impl PartialEq for Base { /* Arc::ptr_eq per variant, false across variants */ }
+impl PartialEq for Base { /* Arc::ptr_eq of one class's objects, false across classes */ }
 impl fmt::Display for Base { /* each variant as its class shows it */ }
 ```
 
@@ -188,12 +204,15 @@ Rules:
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
   wraps the object in that type's enum (`Binary::Add(o.clone()).eval()`) rather than
   converting the whole value.
-- An object is held by a `java::Arc`, a handle with no count (docs/collector.md). An enum lists
-  the variants that hold one first and is `#[repr(u16)]`, and its `Clone` copies any of them
-  with `java::copy_handle_variant`: a copy of the enum's bits, whichever class the variant is,
-  rather than a `match` over every class (`java::handle_variants!` states the layout that this
-  relies on). The other variants (strings, boxes, Java enum constants) are copied by a `match`.
-  An enum without handles keeps `#[derive(Clone)]`.
+- An object is held by a `java::Arc`, a handle with no count (docs/collector.md). A value of an
+  enum is that handle's address with the class's number in the top 16 bits (`java::Thin`,
+  `crates/runtime/src/thin.rs`); `Arc` ignores those bits when it reads its pointer, so `view()`
+  lends the handle where it lies, and the value is `Copy` and eight bytes, `Option` of it too.
+  Each class has one number in the whole program (`class_tag`), so `to_x()` copies the bits, and
+  `as_x()` and `instanceof` test the number. What is not a program object (a string, a box, a
+  Java enum constant, an array, a builder) is held in the low six bytes when it fits there and
+  in a box otherwise; an array, a builder and a box with identity are their own handles. A
+  number that no class of the type has is a bug the view reports (`java::bad_tag`).
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.
@@ -286,7 +305,8 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
 
 ### 1.5 `instanceof`, patterns and casts
 
-- `x instanceof Circle` is `matches!` on the variant; against a type that shares no variant
+- `x instanceof Circle` is a test of the class's number, `matches!(x.0.tag(), 2)` (the numbers
+  of every class at or below `Circle`); against a type that shares no variant
   with the operand, it is `false`, and when the operand's static type is already the tested type
   or below it, it passes (an operand with effects is still evaluated).
 - A pattern variable is an owned value: the tested type's enum gets `as_circle(&self) ->

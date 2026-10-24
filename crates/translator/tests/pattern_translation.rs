@@ -198,8 +198,8 @@ fn comparing_classes_matches_the_variant_of_the_class() {
     assert_contains(
         &rust,
         &[
-            "matches!(a, AAnimal::Dog(_))",
-            "!matches!(java::non_null(o.as_ref()), Object::Money(_))",
+            "matches!(a.0.tag(), 3)",
+            "!matches!(java::non_null(o.as_ref()).0.tag(), 4)",
             "String::from(\"Dog\")",
         ],
     );

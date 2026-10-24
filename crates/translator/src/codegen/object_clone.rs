@@ -14,7 +14,7 @@ impl<'a> Gen<'a> {
             let obj = self.object(object);
             let mut arms = Vec::new();
             for c in self.enum_variants(t) {
-                let variant = self.variant(t, c);
+                let (variant, pattern) = (self.variant(t, c), self.view_pattern(t, c));
                 let arm = if self.class.types[c].cloneable {
                     let name = &self.class.types[c].name;
                     let (read, borrow) = if self.facts.immutable.contains(name) {
@@ -26,9 +26,9 @@ impl<'a> Gen<'a> {
                         let clone = if g.clones(f.ty) { ".clone()" } else { "" };
                         format!("{read}.{path}{rust}{clone}")
                     });
-                    format!("{variant}(o) => {{ {borrow}{variant}({}) }}", self.copy_handle(c, literal))
+                    format!("{pattern}(o) => {{ {borrow}{variant}({}) }}", self.copy_handle(c, literal))
                 } else {
-                    format!("{variant}(_) => {}", self.clone_refused(c, id).text)
+                    format!("{pattern}(_) => {}", self.clone_refused(c, id).text)
                 };
                 arms.push(arm);
             }

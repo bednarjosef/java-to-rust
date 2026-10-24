@@ -6,13 +6,13 @@
 
 use super::*;
 
-/// `match obj { arms }` over the variants of an enum of classes. With no arms, for an interface
-/// that no created class implements, `obj` has no value to match; Rust takes no empty `match` on
-/// a reference, so it is run and then the code is unreachable.
+/// `match obj.view() { arms }` over the variants of an enum of classes, whose arms match the
+/// view's variants (`dispatch::view_pattern`). With no arms, for an interface that no created class
+/// implements, `obj` has no value to match, so it is run and then the code is unreachable.
 pub(super) fn variant_match(obj: &str, arms: &[String]) -> String {
     match arms.is_empty() {
         true => format!("{{ let _ = {obj}; unreachable!() }}"),
-        false => format!("match {obj} {{ {} }}", arms.join(", ")),
+        false => format!("match {} {{ {} }}", method_on(obj, "view"), arms.join(", ")),
     }
 }
 
@@ -135,11 +135,18 @@ impl<'a> Gen<'a> {
         let value = if nullable { self.option_ref(x) } else { self.expr(x).at(ATOM) };
         let some = |pattern: String| if nullable { format!("Some({pattern})") } else { pattern };
         let mut arms = Vec::new();
+        let mut value = value;
         match self.enum_of(x) {
             Some(t) => {
+                // The class of a value of an enum is its tag.
+                value = if nullable {
+                    format!("{value}.map(|o| o.0.tag())")
+                } else {
+                    format!("{}.0.tag()", super::dispatch::operand(&value))
+                };
                 for c in self.enum_variants(t) {
                     if comparable(self, c) {
-                        let pattern = some(format!("{}(_)", self.variant(t, c)));
+                        let pattern = some(self.class_tag(c).to_string());
                         arms.push(format!("{pattern} => Some({})", self.decl_class(c)));
                     }
                 }

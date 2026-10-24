@@ -521,10 +521,12 @@ impl<'a> Gen<'a> {
             self.runtime("unsupported_memory")
         ));
         Code::atom(format!(
-            "{{ let ({p}, {q}, {n}, {k}) = ({}, {}, {}, {swap}); match (&{s}, &{d}) {{ {} }} }}",
+            "{{ let ({p}, {q}, {n}, {k}) = ({}, {}, {}, {swap}); match ({}, {}) {{ {} }} }}",
             longs[0],
             longs[1],
             longs[2],
+            self.object_view(&format!("&{s}")),
+            self.object_view(&format!("&{d}")),
             arms.join(" ")
         ))
     }
@@ -549,12 +551,13 @@ impl<'a> Gen<'a> {
             self.runtime("unsupported_memory")
         ));
         Code::atom(format!(
-            "{{ let ({o}, {n}, {v}) = ({offset}, {bytes}, {value}); match &{base} {{ {} }} }}",
+            "{{ let ({o}, {n}, {v}) = ({offset}, {bytes}, {value}); match {} {{ {} }} }}",
+            self.object_view(&format!("&{base}")),
             arms.join(" ")
         ))
     }
 
-    /// The variants of the `Object` enum that hold arrays of primitives.
+    /// The patterns of the variants of the view of `Object` that hold arrays of primitives.
     fn primitive_array_variants(&self) -> Vec<String> {
         let primitive = |ty: Type| {
             matches!(
@@ -568,7 +571,16 @@ impl<'a> Gen<'a> {
         let Some(t) = self.object_index() else { return Vec::new() };
         let arrays =
             self.enum_variants(t).into_iter().filter(|&c| self.class.array_of(c).is_some_and(primitive));
-        arrays.map(|c| self.variant(t, c)).collect()
+        arrays.map(|c| self.view_pattern(t, c)).collect()
+    }
+
+    /// `option`, an `&Option<Object>`, as the view of the `Object` it holds, which the arms of
+    /// `primitive_array_variants` match.
+    fn object_view(&self, option: &str) -> String {
+        match self.object_index() {
+            Some(t) => format!("({option}).as_ref().map({}::view)", struct_name(&self.class.types[t].name)),
+            None => option.to_string(),
+        }
     }
 
     /// `Builtin::RawMemory`: `Unsafe`'s read (or with `put`, write) of a `ty` at an offset of an
@@ -605,7 +617,11 @@ impl<'a> Gen<'a> {
         ));
         let bind =
             if put { format!("let ({o}, {v}) = ({offset}{value});") } else { format!("let {o} = {offset};") };
-        Code::atom(format!("{{ {bind} match &{base} {{ {} }} }}", arms.join(" ")))
+        Code::atom(format!(
+            "{{ {bind} match {} {{ {} }} }}",
+            self.object_view(&format!("&{base}")),
+            arms.join(" ")
+        ))
     }
 
     fn array_copy(&mut self, args: &'a [Expr], id: ExprId) -> Code {

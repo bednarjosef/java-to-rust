@@ -56,7 +56,8 @@ impl<'a> Gen<'a> {
         } else {
             format!("{}({failure})", self.runtime("throw_exception"))
         };
-        arms.push(format!("(src, dest) => {body},"));
+        // The arms bind the arrays; the values themselves are `src` and `dest` (`object_array_copy`).
+        arms.push(format!("_ => {body},"));
         arms
     }
 
@@ -81,7 +82,7 @@ impl<'a> Gen<'a> {
         (es, ed): (Type, Type),
         call: CopyCall,
     ) -> String {
-        let (vs, vd) = (self.variant(t, s), self.variant(t, d));
+        let (vs, vd) = (self.view_pattern(t, s), self.view_pattern(t, d));
         let (pattern, body) = if s == d {
             let copy = self.runtime(if call.checked { "try_arraycopy" } else { "arraycopy" });
             let [p, q, n] = call.names;
@@ -111,7 +112,7 @@ impl<'a> Gen<'a> {
         call: CopyCall,
     ) -> (String, String) {
         let CopyCall { pos, checked, names: [p, q, n] } = call;
-        let (vs, vd) = (self.variant(t, s), self.variant(t, d));
+        let (vs, vd) = (self.view_pattern(t, s), self.view_pattern(t, d));
         let is_object = |ty: &Type| matches!(ty, Type::Class(name, _) if *name == OBJECT);
         let string = variants.iter().copied().find(|&c| self.binary_name(c) == "java.lang.String");
         let object = struct_name(&self.class.types[t].name);
@@ -130,10 +131,10 @@ impl<'a> Gen<'a> {
             )
         } else if is_object_to_string {
             // An element is stored only if it is a `String`, which no other `Object` is.
-            let string_variant = self.variant(t, string);
+            let string_variant = self.view_pattern(t, string);
             let message = "arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String";
             format!(
-                "|e: &Option<{object}>| -> Result<Option<{text}>, &'static str> {{ match e {{ None => Ok(None), Some({string_variant}(s)) => Ok(Some(s.clone())), Some(_) => Err(\"{message}\") }} }}"
+                "|e: &Option<{object}>| -> Result<Option<{text}>, &'static str> {{ match e.as_ref().map({object}::view) {{ None => Ok(None), Some({string_variant}(s)) => Ok(Some(s.clone())), Some(_) => Err(\"{message}\") }} }}"
             )
         } else if let (Some(a), Some(b)) = (self.class_element(es), self.class_element(ed)) {
             // Arrays of two classes: each element is checked against the destination's class.

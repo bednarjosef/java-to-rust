@@ -206,7 +206,7 @@ fn an_anonymous_class_is_a_variant_of_its_interface() {
         &[
             "struct OrderInMain {\n}",
             "struct OrderInMain2 {\n}",
-            "enum AOrder {\n    OrderInMain(Arc<OrderInMain>),\n    OrderInMain2(Arc<OrderInMain2>),\n}",
+            "enum AOrderView<'a> {\n    OrderInMain(&'a Arc<OrderInMain>),\n    OrderInMain2(&'a Arc<OrderInMain2>),\n}",
             "AOrder::OrderInMain(Arc::new(OrderInMain::new()))",
         ],
     );
