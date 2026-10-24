@@ -1,6 +1,7 @@
 //! `Math.ceilDiv`, `Math.ceilMod` and `Math.ceilDivExact`: the quotient rounded toward positive
-//! infinity, its remainder, and the exact quotient, which throws where it overflows. A zero divisor
-//! throws as in a division (`crate::div`).
+//! infinity, its remainder, and the exact quotient, which throws where it overflows; and the other
+//! exact quotients, `Math.divideExact` and `Math.floorDivExact`. A zero divisor throws as in a
+//! division (`crate::div`).
 
 use crate::exact::Exact;
 use crate::{Exception, Integer, div, rem, throw};
@@ -46,6 +47,30 @@ where
     ceil_div(a, b)
 }
 
+/// `Math.divideExact` on `int` and `long`: the quotient, but throws `ArithmeticException` where it
+/// overflows.
+pub fn divide_exact<T>(a: T, b: T) -> T
+where
+    T: Integer + Exact + PartialOrd + Default + BitAnd<Output = T>,
+{
+    if overflows(a, b) {
+        throw("java.lang.ArithmeticException", T::OVERFLOW);
+    }
+    div(a, b)
+}
+
+/// `Math.floorDivExact` on `int` and `long`: `floorDiv`, but throws `ArithmeticException` where
+/// the quotient overflows.
+pub fn floor_div_exact<T>(a: T, b: T) -> T
+where
+    T: Integer + Exact + PartialOrd + Default + Sub<Output = T> + BitAnd<Output = T> + From<i8>,
+{
+    if overflows(a, b) {
+        throw("java.lang.ArithmeticException", T::OVERFLOW);
+    }
+    crate::floor_div(a, b)
+}
+
 /// `Math.ceilDiv` where the program observes the `ArithmeticException` of a zero divisor.
 pub fn try_ceil_div<T: Integer + PartialOrd + Default + Add<Output = T> + From<i8>>(
     a: T,
@@ -74,6 +99,32 @@ where
     Ok(ceil_div(a, b))
 }
 
+/// `Math.divideExact` where the program observes its `ArithmeticException`s: a zero divisor, and
+/// the overflow.
+pub fn try_divide_exact<T>(a: T, b: T) -> Result<T, Exception>
+where
+    T: Integer + Exact + PartialOrd + Default + BitAnd<Output = T>,
+{
+    crate::try_div(a, b)?;
+    if overflows(a, b) {
+        return Err(Exception::new("java.lang.ArithmeticException", T::OVERFLOW));
+    }
+    Ok(div(a, b))
+}
+
+/// `Math.floorDivExact` where the program observes its `ArithmeticException`s: a zero divisor,
+/// and the overflow.
+pub fn try_floor_div_exact<T>(a: T, b: T) -> Result<T, Exception>
+where
+    T: Integer + Exact + PartialOrd + Default + Sub<Output = T> + BitAnd<Output = T> + From<i8>,
+{
+    crate::try_div(a, b)?;
+    if overflows(a, b) {
+        return Err(Exception::new("java.lang.ArithmeticException", T::OVERFLOW));
+    }
+    Ok(crate::floor_div(a, b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +151,20 @@ mod tests {
             matches!(try_ceil_div_exact(i64::MIN, -1), Err(e) if e.message.as_deref() == Some("long overflow"))
         );
         assert!(matches!(try_ceil_div_exact(1i64, 0), Err(e) if e.message.as_deref() == Some("/ by zero")));
+    }
+
+    #[test]
+    fn divide_and_floor_div_exact_throw_on_overflow_only() {
+        // Expected values from Java's Math.divideExact and Math.floorDivExact.
+        assert_eq!((divide_exact(7, -2), floor_div_exact(7, -2)), (-3, -4));
+        assert_eq!((divide_exact(-6i64, 3), floor_div_exact(-7i64, 2)), (-2, -4));
+        assert_eq!(floor_div_exact(i32::MIN, 1), i32::MIN);
+        assert!(
+            matches!(try_floor_div_exact(i32::MIN, -1), Err(e) if e.message.as_deref() == Some("integer overflow"))
+        );
+        assert!(
+            matches!(try_divide_exact(i64::MIN, -1), Err(e) if e.message.as_deref() == Some("long overflow"))
+        );
+        assert!(matches!(try_floor_div_exact(1, 0), Err(e) if e.message.as_deref() == Some("/ by zero")));
     }
 }
