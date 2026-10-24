@@ -1411,10 +1411,13 @@ pub fn formats_in_locale(signature: &str) -> bool {
 
 /// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
 /// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
-/// units as an `int[]`. `lines()` streams its lines, an `Object[]` of strings, through an iterator,
-/// so that the stream's size is unknown, as with the JDK's own spliterator.
-pub const STRING_STREAMS: [(&str, &[JdkMethod]); 2] = [
+/// units as an `int[]`. `codePoints()` streams the code points of those units with the translator's
+/// spliterator (`java/overlay/java/lang/TranslatedStrings.java`). `lines()` streams its lines, an
+/// `Object[]` of strings, through an iterator, so that the stream's size is unknown, as with the
+/// JDK's own spliterator.
+pub const STRING_STREAMS: [(&str, &[JdkMethod]); 3] = [
     ("chars", &[("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream")]),
+    ("codePoints", &[("java.lang.TranslatedStrings", "codePoints", "(int[])java.util.stream.IntStream")]),
     (
         "lines",
         &[

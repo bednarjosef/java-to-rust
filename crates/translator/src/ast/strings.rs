@@ -41,9 +41,9 @@ pub enum StringOp {
     ToCharArray,
     /// `s.getChars(srcBegin, srcEnd, dst, dstBegin)`: the receiver, then the arguments.
     GetChars,
-    /// The UTF-16 code units of a string as an `int[]`, which `s.chars()` streams (see
-    /// `program::reach::STRING_STREAMS`).
-    CharCodes,
+    /// The UTF-16 code units of a string as an `int[]`, which `s.chars()` and `s.codePoints()`,
+    /// the method named, stream (see `program::reach::STRING_STREAMS`).
+    CharCodes(&'static str),
     /// `JavaLangAccess.join(prefix, suffix, delimiter, elements, size)`: the first `size`
     /// strings of `elements` joined by `delimiter`, between `prefix` and `suffix`.
     JoinRange,

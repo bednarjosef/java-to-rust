@@ -253,7 +253,7 @@ impl<'a> Gen<'a> {
                 let (ooffset, len) = (self.int_arg(&rest[2]), self.int_arg(&rest[3]));
                 call(self, "region_matches", vec![s, ignore_case, toffset, other, ooffset, len])
             }
-            StringOp::CharCodes => {
+            StringOp::CharCodes(_) => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
                 Code::atom(format!(
