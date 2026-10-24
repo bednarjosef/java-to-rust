@@ -3798,6 +3798,44 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public final native int getAndAddInt(Object o, long offset, int delta);
             public native long staticFieldOffset(java.lang.reflect.Field f);
             public native Object staticFieldBase(java.lang.reflect.Field f);
+            public final native boolean compareAndSetInt(Object o, long offset, int expected, int x);
+            public final native boolean weakCompareAndSetLong(Object o, long offset, long expected, long x);
+            public final native long getLongVolatile(Object o, long offset);
+            public final boolean compareAndSetFloat(Object o, long offset, float expected, float x) {
+                return compareAndSetInt(o, offset, Float.floatToRawIntBits(expected), Float.floatToRawIntBits(x));
+            }
+            public final double getAndAddDouble(Object o, long offset, double delta) {
+                long expectedBits;
+                double v;
+                do {
+                    expectedBits = getLongVolatile(o, offset);
+                    v = Double.longBitsToDouble(expectedBits);
+                } while (!weakCompareAndSetLong(o, offset, expectedBits, Double.doubleToRawLongBits(v + delta)));
+                return v;
+            }
+            public final byte compareAndExchangeByte(Object o, long offset, byte expected, byte x) {
+                long wordOffset = offset & ~3;
+                int shift = (int) (offset & 3) << 3;
+                int mask = 0xFF << shift;
+                return (byte) ((getInt(o, wordOffset) & mask) >> shift);
+            }
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Floats.java",
+        "package jdk.internal.misc;
+        public final class Floats {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            private volatile float level;
+            private byte state;
+            private final double[] sums = new double[2];
+            private static final long LEVEL = U.objectFieldOffset(Floats.class, \"level\");
+            private static final long STATE = U.objectFieldOffset(Floats.class, \"state\");
+            private static final long BASE = U.arrayBaseOffset(double[].class);
+            private static final int SCALE = U.arrayIndexScale(double[].class);
+            public boolean raise(float from, float to) { return U.compareAndSetFloat(this, LEVEL, from, to); }
+            public double add(int i, double x) { return U.getAndAddDouble(sums, BASE + (long) i * SCALE, x); }
+            public byte swap(byte from, byte to) { return U.compareAndExchangeByte(this, STATE, from, to); }
         }",
     ),
     (
@@ -4066,6 +4104,31 @@ fn offsets_computed_elsewhere_and_static_fields_are_handles_too() {
     );
     // The reflection that names the static field is left out with its handles.
     assert_lacks(&rust, &["get_declared_field", "MADE_BASE", "fn get_and_add_int"]);
+}
+
+#[test]
+fn unsafe_updates_written_over_other_kinds_are_updates_of_the_field() {
+    let rust = translate_with_natives(
+        "jdk-wrapped-updates",
+        "Floats f = new Floats();
+        System.out.println(f.raise(0.0f, 1.5f) + \" \" + f.raise(Float.NaN, 2f) + \" \" + f.add(1, 0.5) + \" \" + f.swap((byte) 0, (byte) 3));",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            // The float's compare-and-set compares raw bits, as `compareAndSetInt` of them does.
+            "fn compare_and_set_level(",
+            ".to_bits() as i32 == ",
+            "java::get_and_add_element(&self.sums, i, x, |a, b| a + b)",
+            "fn compare_and_exchange_state(",
+        ],
+    );
+    // The wrappers themselves, with their offset arithmetic, are not translated.
+    assert_lacks(
+        &rust,
+        &["fn compare_and_set_float", "fn get_and_add_double", "fn compare_and_exchange_byte"],
+    );
 }
 
 #[test]

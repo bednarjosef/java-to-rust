@@ -52,7 +52,10 @@ impl<'a> Gen<'a> {
             }
             FieldUpdate::GetAndAdd => {
                 let delta = self.value(var("delta")?, ty).text;
-                format!("{place}.get_and_update(|a| a.wrapping_add({delta}))")
+                match ty {
+                    Type::Float | Type::Double => format!("{place}.get_and_update(|a| *a + {delta})"),
+                    _ => format!("{place}.get_and_update(|a| a.wrapping_add({delta}))"),
+                }
             }
             FieldUpdate::GetAndBitwise(op) => {
                 let mask = self.value(var("delta")?, ty).text;
@@ -62,8 +65,12 @@ impl<'a> Gen<'a> {
     }
 
     /// The comparison of the compare forms of an update of a field of type `ty`: identity for a
-    /// handle, as `==` is in Java, else equality.
+    /// handle, as `==` is in Java, raw bits for a `float` or `double`, as `Unsafe` compares them,
+    /// else equality.
     fn field_identity(&mut self, ty: Type, nullable: bool) -> String {
+        if matches!(ty, Type::Float | Type::Double) {
+            return "|a, b| a.to_bits() == b.to_bits()".to_string();
+        }
         let handle = match ty {
             Type::Array(_) => true,
             Type::Class(..) => self.enum_type(ty).is_none(),

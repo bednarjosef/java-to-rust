@@ -484,6 +484,13 @@ name:
 - **`VarHandle` constants** of fields (`findVarHandle`, `ConstantBootstraps.fieldVarHandle`), of
   static fields (`findStaticVarHandle`), of array elements and of `byte[]` views as numbers
   (`byteArrayViewVarHandle`) are handles too, as is a `MethodHandle` constant of a constructor.
+- **Field updater constants** (`AtomicIntegerFieldUpdater.newUpdater(C.class, "f")`, the `long`
+  one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`) are handles of a
+  field for which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
+  accessible to the class that makes it). `get`, `set`, `lazySet`, the compare-and-set forms,
+  `getAndSet` and `getAndAdd` on `this` are the field's access or update; on another object (the
+  updater throws `ClassCastException` for null), the other methods, and an updater that is not a
+  constant are rejected.
 - **Atomic updates** (compare-and-set, compare-and-exchange, get-and-add, get-and-set,
   get-and-bitwise, every memory mode) of a field become a method that lowering adds to the
   field's class, one per field and form (`compareAndSetValue(expected, value)`), whose body
@@ -494,8 +501,13 @@ name:
   an object of one thread no other access can. Of an element, they are runtime functions
   (`java::compare_and_set_element` and its kin in `array.rs`): one borrow of an array of one
   thread, and one atomic action of the element's cell in a shared array (a compare-and-swap of a
-  word, or the striped lock for a wider element). References compare by identity. The weak forms never fail spuriously,
-  which Java allows.
+  word, or the striped lock for a wider element). References compare by identity, and `float`
+  and `double` values by their raw bits, as `Unsafe` does. The weak forms never fail spuriously,
+  which Java allows. `Unsafe`'s `float` and `double` updates and the compare forms and
+  get-and-set of `byte`, `short`, `char` and `boolean`, which the JDK writes in Java over the
+  `int` and `long` ones (a compare-and-set of the bits, or of the word that holds the byte), are
+  the same updates of the field or element, so their bodies, which compute offsets, are not
+  translated.
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
 
@@ -556,9 +568,8 @@ field that is not `volatile` asks for more (section 7).
   the atomics (`AtomicInteger`, `AtomicLong`, atomic arrays), `LockSupport`, `ConcurrentHashMap`,
   `ConcurrentSkipListMap`/`Set`, `ThreadLocal`, `ThreadLocalRandom`, `ScopedValue`,
   `ForkJoinPool` with `RecursiveTask`. Executors, `CompletableFuture`, the blocking queues and
-  the other synchronizers go through the same path but are untested. Field updaters
-  (`AtomicIntegerFieldUpdater`) use `getDeclaredField` reflectively and are not expected to
-  translate.
+  the other synchronizers go through the same path but are untested. Field updaters translate
+  only as constants (5.3).
 - **Parallel streams** should run on the translated `ForkJoinPool` and the JDK's stream code,
   not on Rayon: the JDK splits a sized source deterministically and combines in a fixed tree, so
   a floating-point `reduce` prints what Java prints on the same machine, while Rayon's splitting

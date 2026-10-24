@@ -82,6 +82,7 @@ impl<'a> Gen<'a> {
                 let op = match update {
                     FieldUpdate::GetAndBitwise(op) => format!("|a, b| a {} b", op.java()),
                     _ if elem == Type::Long => "i64::wrapping_add".to_string(),
+                    _ if matches!(elem, Type::Float | Type::Double) => "|a, b| a + b".to_string(),
                     _ => "i32::wrapping_add".to_string(),
                 };
                 ("get_and_add_element", format!("{handle}, {i}, {v}, {op}"))
@@ -134,10 +135,14 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The closure that tells whether two elements of type `elem` are the same, as Java's `==`
-    /// compares them: objects and arrays by identity (`java::same`), and numbers and enums, whose
-    /// `==` is identity, by value.
+    /// The closure that tells whether two elements of type `elem` are the same, as `Unsafe`
+    /// compares them: objects and arrays by identity (`java::same`), as Java's `==` does, a
+    /// `float` or `double` by its raw bits, and other numbers and enums, whose `==` is identity,
+    /// by value.
     fn element_identity(&mut self, elem: Type) -> String {
+        if matches!(elem, Type::Float | Type::Double) {
+            return "|a, b| a.to_bits() == b.to_bits()".to_string();
+        }
         let handle = match elem {
             Type::Array(_) => true,
             Type::Class(..) => self.enum_type(elem).is_none(),
