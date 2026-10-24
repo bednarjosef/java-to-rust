@@ -3301,6 +3301,39 @@ fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_censu
 }
 
 #[test]
+fn a_missing_class_of_an_annotation_is_ignored_as_on_the_jvm_without_going_on() {
+    let dir = write_sources(
+        "missing_class_annotation",
+        &[
+            (
+                "app/p/Main.java",
+                "package p;\nimport lib.Codec;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Codec.encode(\"x\"));\n    }\n}\n",
+            ),
+            (
+                "lib/lib/Codec.java",
+                "package lib;\nimport marks.Mark;\nimport marks.Unused;\nimport static marks.Level.HIGH;\n@Mark(level = HIGH)\npublic class Codec {\n    @Mark(level = marks.Level.LOW)\n    public static String encode(@Mark String s) {\n        @Mark String t = s + \"!\";\n        return t;\n    }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    // The annotations' classes and their imports are missing, which the JVM ignores.
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["\"!\""]);
+    // A missing class that code uses outside annotations is an error, and so is its import.
+    let codec = dir.join("lib/lib/Codec.java");
+    let java = std::fs::read_to_string(&codec).unwrap().replace("return t;", "return t + Mark.class;");
+    std::fs::write(&codec, java).unwrap();
+    let error = java_to_rust::translate_program(&program).expect_err("Mark is used as a class");
+    assert!(error.to_string().contains("does not exist"), "{error}");
+}
+
+#[test]
 fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_goes_on() {
     let dir = write_sources(
         "census_class",

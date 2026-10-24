@@ -58,6 +58,10 @@ Two kinds of error mark nothing:
 - an error in an import, since the code that uses the missing name has errors of its own;
 - an error in an annotation, since annotations are left out of the translation anyway.
 
+An error that names a missing class in an annotation, or in an import that only annotations use,
+is not even printed: the JVM ignores an annotation whose class is missing, so it is no error,
+with or without `--keep-going`.
+
 A translation with `--keep-going` does the same, so a program whose library has optional
 dependencies can be built: it stops only at a rejected piece, as any translation does.
 
@@ -172,8 +176,9 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   jars; they, authlib, jtracy and logging stay decompiled.
 
 - **Compile-only annotation libraries** (Error Prone, JSR 305, J2ObjC, JetBrains, Checker
-  Framework) are not in the bundle. With `--keep-going` this does not matter: an unresolved
-  annotation is dropped, in a census and in a translation.
+  Framework) are not in the bundle. This does not matter: as on the JVM, an annotation whose
+  class is missing is ignored, and javac's errors for it are dropped, in a census and in a
+  translation, with or without `--keep-going`.
 
 - **Optional dependencies that are not shipped** (Netty's `tcnative` and Brotli, log4j's LMAX
   Disruptor, Bouncy Castle, Conscrypt) are only in code that the server does not run. Their code

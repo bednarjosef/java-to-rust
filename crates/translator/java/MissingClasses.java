@@ -58,6 +58,11 @@ import javax.tools.JavaFileObject;
  * {@code ||}, or a field's initializer; an expression is replaced by a {@code switch} whose only
  * case throws. A piece of code with any other compile error stays rejected.
  *
+ * <p>A name of a missing class in an annotation is no error: the JVM ignores an annotation whose
+ * class is missing, so the code it marks runs as if it were not there. Nor is an import of a
+ * missing class that the unit's code uses only in annotations, or not at all ({@link #ignored}).
+ * Those errors are dropped, without {@code --keep-going} too.
+ *
  * <p>A class whose superclass or interface is missing, or that catches a missing class (whose
  * class the verifier loads), cannot be loaded at all: each of its methods and constructors
  * throws, and its initializers are left out, as they never run. Its static fields can still be
@@ -75,6 +80,8 @@ final class MissingClasses {
     enum Place {
         /** In an import, which marks nothing: the code that uses the name has errors of its own. */
         IMPORT,
+        /** In an annotation, which the JVM ignores when its class is missing ({@link #ignored}). */
+        ANNOTATION,
         /** As the type of a declaration, or a type argument: no class is loaded for it. */
         TYPE,
         /** Where code does something with the class, which the JVM resolves there. */
@@ -102,6 +109,8 @@ final class MissingClasses {
     private final Map<Symbol, String> declared = new IdentityHashMap<>();
     /** The error types javac made for the names of missing classes, by their symbols. */
     private final Map<Symbol, String> errorTypes = new IdentityHashMap<>();
+    /** The simple names that units use outside imports and annotations, once needed ({@link #ignored}). */
+    private final Map<JCCompilationUnit, Set<Name>> usedNames = new IdentityHashMap<>();
     /** {@code java.lang.NoClassDefFoundError} and its constructor of a message, once needed. */
     private ClassSymbol error;
     private MethodSymbol errorOfMessage;
@@ -137,6 +146,13 @@ final class MissingClasses {
         }
         String code = diagnostic.getCode();
         String binary = null;
+        if (code.equals("compiler.err.static.imp.only.classes.and.interfaces") && tree instanceof JCImport imp
+                && imp.qualid != null && missingClass(imp.qualid.selected)) {
+            // A static import of a missing class, whose name javac took as a package's.
+            TreePath path = TreePath.getPath(unit, tree);
+            return path == null ? null
+                    : new Missing(binaryName(TreeInfo.fullName(imp.qualid.selected).toString()), Place.IMPORT, path, null);
+        }
         if (code.equals("compiler.err.doesnt.exist") && tree instanceof JCFieldAccess select
                 && select.name != names.asterisk) {
             binary = qualified(unit, select);
@@ -166,6 +182,12 @@ final class MissingClasses {
 
     /** Where the name at {@code path} is, recording the declarations it is the type of. */
     private Missing place(TreePath path, String binary) {
+        // In an annotation's type or in its arguments (`@Support(level = Level.FULL)`).
+        for (TreePath at = path; at != null; at = at.getParentPath()) {
+            if (at.getLeaf() instanceof JCAnnotation) {
+                return new Missing(binary, Place.ANNOTATION, path, null);
+            }
+        }
         boolean argument = false;
         boolean array = false;
         for (TreePath from = path, at = path.getParentPath(); at != null; from = at, at = at.getParentPath()) {
@@ -174,10 +196,6 @@ final class MissingClasses {
             switch (parent) {
                 case JCImportBase i -> {
                     return new Missing(binary, Place.IMPORT, path, null);
-                }
-                // Annotations are left out of the translation.
-                case JCAnnotation a -> {
-                    return new Missing(binary, Place.TYPE, path, null);
                 }
                 case JCFieldAccess select -> noteType(select.type, binary);
                 case JCTypeApply apply -> argument |= apply.clazz != child;
@@ -214,6 +232,50 @@ final class MissingClasses {
             }
         }
         return new Missing(binary, Place.TYPE, path, null);
+    }
+
+    /**
+     * Whether a compile error that names a missing class is one that the JVM has no counterpart
+     * of, which is no error at all: the name is in an annotation, which the JVM ignores when the
+     * annotation's class is missing (as the compile-only annotations of a library are, such as
+     * Error Prone's), or in a single import whose name no code of the unit uses outside
+     * annotations.
+     */
+    boolean ignored(Missing m) {
+        if (m.place() == Place.ANNOTATION) {
+            return true;
+        }
+        if (m.place() != Place.IMPORT) {
+            return false;
+        }
+        TreePath at = m.path();
+        while (at != null && !(at.getLeaf() instanceof JCImport)) {
+            at = at.getParentPath();
+        }
+        if (at == null || !(at.getLeaf() instanceof JCImport imp) || imp.qualid == null
+                || imp.qualid.name == names.asterisk) {
+            return false;
+        }
+        JCCompilationUnit unit = (JCCompilationUnit) at.getCompilationUnit();
+        return !usedNames.computeIfAbsent(unit, MissingClasses::namesUsed).contains(imp.qualid.name);
+    }
+
+    /** The simple names that the code of a unit uses outside imports and annotations. */
+    private static Set<Name> namesUsed(JCCompilationUnit unit) {
+        Set<Name> used = new java.util.HashSet<>();
+        new com.sun.tools.javac.tree.TreeScanner() {
+            @Override
+            public void visitImport(JCImport tree) {}
+
+            @Override
+            public void visitAnnotation(JCAnnotation tree) {}
+
+            @Override
+            public void visitIdent(JCIdent tree) {
+                used.add(tree.name);
+            }
+        }.scan(unit);
+        return used;
     }
 
     /** The innermost class around {@code path}. */
