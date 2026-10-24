@@ -455,6 +455,20 @@ pub fn standard_stream_field(name: &str) -> Option<(&'static str, &'static str)>
     }
 }
 
+/// The field of the translator's classes that a static field of a class it does not translate
+/// reads as a value: `System.in`, `System.out` and `System.err` (`standard_stream_field`), and
+/// `String.CASE_INSENSITIVE_ORDER` (`java/overlay/java/lang/TranslatedStrings.java`), as
+/// (class, field).
+pub fn redirected_field(owner: &str, name: &str) -> Option<(&'static str, &'static str)> {
+    match (owner, name) {
+        ("java.lang.System", _) => standard_stream_field(name),
+        ("java.lang.String", "CASE_INSENSITIVE_ORDER") => {
+            Some(("java.lang.TranslatedStrings", "CASE_INSENSITIVE_ORDER"))
+        }
+        _ => None,
+    }
+}
+
 /// Whether the runtime makes the call of `PrintStream`'s method `name` on `System.out` or
 /// `System.err` (`stream`, the field's name) itself (`lower::natives` and `lower`'s `call`), so
 /// that it needs no object: printing and flushing, and `System.out.write(int)`. Any other call
@@ -2363,11 +2377,9 @@ impl<'t> Walk<'t> {
                 self.stub_method(symbol);
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }
-            // `System.in`, `System.out` or `System.err` as a value: the translator's object.
-            "FIELD"
-                if owner == "java.lang.System"
-                    && let Some((class, field)) = standard_stream_field(&name) =>
-            {
+            // `System.out`, `String.CASE_INSENSITIVE_ORDER` and the like as a value: the
+            // translator's object.
+            "FIELD" if let Some((class, field)) = redirected_field(&owner, &name) => {
                 self.work.push(Item::Field((class.into(), field.into())));
             }
             "FIELD" | "ENUM_CONSTANT" => self.work.push(Item::Field((owner, name))),
