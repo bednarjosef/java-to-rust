@@ -83,6 +83,12 @@ pub(super) fn lookup_members(name: &str) -> Vec<(String, String, String)> {
     out
 }
 
+/// The slot that the `Constructor` at `slot` of the table holds: for a constructor of an
+/// abstract class, which nothing creates, a negative one, `-1 - slot`.
+fn constructor_slot(of_abstract: bool, slot: usize) -> i32 {
+    if of_abstract { -1 - slot as i32 } else { slot as i32 }
+}
+
 /// What a lookup of a file finds by name, of one kind: `None` for every member.
 type Names = Option<HashSet<String>>;
 
@@ -358,7 +364,7 @@ impl<'t> Lowering<'t> {
                 let m = *m;
                 let info = &self.methods[m];
                 let creates = native == "newInstance0";
-                // A constructor of an abstract class has slot -1 (`table0`): nothing creates one.
+                // A constructor of an abstract class has a negative slot (`table0`): nothing creates one.
                 if creates && self.types[info.owner].node.has_flag("ABSTRACT") {
                     return Ok(None);
                 }
@@ -508,7 +514,7 @@ impl<'t> Lowering<'t> {
             let args = match &entry.member {
                 Member::Method(m) if class == CONSTRUCTOR => {
                     let owner = self.methods[*m].owner;
-                    let slot = if self.types[owner].node.has_flag("ABSTRACT") { -1 } else { slot as i32 };
+                    let slot = constructor_slot(self.types[owner].node.has_flag("ABSTRACT"), slot);
                     vec![found_on, classes(self.param_types(*m)?, 1), int(self.modifiers(*m)), int(slot)]
                 }
                 Member::Method(m) => {
@@ -535,6 +541,34 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::NewArray(vec![int(0)]));
         }
         Ok(ExprKind::ArrayLit(made))
+    }
+
+    /// The members of the table of one kind (see the module's comment), each with the slot that
+    /// its object holds, its declaration, and a name of the declaration that no other has: the
+    /// declaring class's and the member's, with its signature for a method or constructor.
+    pub(super) fn table_declarations(
+        &self,
+        node: Node<'t>,
+        kind: LookupKind,
+    ) -> Result<Vec<(i32, Node<'t>, String)>, Error> {
+        let mut out = Vec::new();
+        for (slot, entry) in self.table(node, kind)?.into_iter().enumerate() {
+            out.push(match entry.member {
+                Member::Method(m) => {
+                    let info = &self.methods[m];
+                    let owner = &self.types[info.owner];
+                    let slot = match kind {
+                        LookupKind::Constructor => constructor_slot(owner.node.has_flag("ABSTRACT"), slot),
+                        _ => slot as i32,
+                    };
+                    (slot, info.node, format!("{}#{}{}", owner.javac, info.name, info.sig))
+                }
+                Member::Field(class, decl) => {
+                    (slot as i32, decl, format!("{}#{}", self.types[class].javac, decl.str("name")))
+                }
+            });
+        }
+        Ok(out)
     }
 
     /// The members of the table of one kind, in the order of their slots (see the module's

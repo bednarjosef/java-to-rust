@@ -73,6 +73,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
+pub use annotation_values::is_member_annotation_call;
 pub(crate) use argument_order::{ARGUMENT, RECEIVER, held_local, ordered_call};
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
@@ -1182,6 +1183,9 @@ impl<'t> Lowering<'t> {
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
         if let Some(kind) = self.annotation_member(node, &symbol, receiver)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.member_annotations(node, &symbol, receiver)? {
             return Ok(kind);
         }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;

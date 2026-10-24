@@ -435,7 +435,7 @@ final class Constructor<T> {
         return true;
     }
 
-    // The slot of a constructor of an abstract class is -1: there is nothing to create.
+    // The slot of a constructor of an abstract class is negative: there is nothing to create.
     @SuppressWarnings("unchecked")
     public T newInstance(Object... initargs)
             throws InstantiationException, IllegalAccessException, InvocationTargetException {

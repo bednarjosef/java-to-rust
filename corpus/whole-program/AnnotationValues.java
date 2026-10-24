@@ -32,7 +32,7 @@ import java.lang.annotation.RetentionPolicy;
 
 // `getAnnotation` of a class: the values the declaration gives and the defaults of the rest,
 // `null` where the class does not have the annotation, and an `@Inherited` one from the
-// superclass, as gson's `Excluder` reads `@Since`; and the annotation's `toString`.
+// superclass, as gson's `Excluder` reads `@Since`; the annotation's `toString`, and its identity.
 public class AnnotationValues {
     @Since(1.5)
     @Named(value = "base", alternate = {String.class, Integer.class}, weight = 10, codes = 4)
@@ -90,5 +90,8 @@ public class AnnotationValues {
         }
         System.out.println(Base.class.getAnnotation(Since.class).equals(Derived.class.getAnnotation(Since.class)));
         System.out.println(Base.class.getAnnotation(Named.class).equals(Solo.class.getAnnotation(Named.class)));
+        // The same object on every call, also through a subclass that inherits it.
+        System.out.println(Base.class.getAnnotation(Named.class) == Base.class.getAnnotation(Named.class));
+        System.out.println(Base.class.getAnnotation(Since.class) == Derived.class.getAnnotation(Since.class));
     }
 }

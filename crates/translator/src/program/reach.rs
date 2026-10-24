@@ -1065,8 +1065,8 @@ pub const TRANSLATED_PROPERTIES: JdkMethod =
 pub const ANNOTATION_VALUES: [JdkMethod; 2] = [
     (
         "sun.reflect.annotation.TranslatedAnnotations",
-        "annotation",
-        "(java.lang.Class<? extends java.lang.annotation.Annotation>,java.lang.Object[],java.lang.Object[])java.lang.annotation.Annotation",
+        "cached",
+        "(java.lang.String,java.lang.Class<? extends java.lang.annotation.Annotation>,java.lang.Object[],java.lang.Object[])java.lang.annotation.Annotation",
     ),
     (
         "sun.reflect.annotation.TranslatedAnnotations",
@@ -2487,7 +2487,10 @@ impl<'t> Walk<'t> {
                 self.stub_type("java.lang.SecurityManager");
             }
             // The annotations that reflection finds (`ANNOTATION_VALUES`).
-            "METHOD" if name == "getAnnotation" && owner == "java.lang.Class" => {
+            "METHOD"
+                if name == "getAnnotation" && owner == "java.lang.Class"
+                    || crate::lower::is_member_annotation_call(&owner, &name) =>
+            {
                 for (class, method, signature) in ANNOTATION_VALUES {
                     self.work.push(Item::Method((class.into(), method.into(), signature.into())));
                 }

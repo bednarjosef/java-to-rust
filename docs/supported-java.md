@@ -65,9 +65,9 @@ included (docs/collector.md).
   literal of a top-level annotation type is a `Class` that `isAnnotation()`, and a value of an
   annotation type is an `Annotation` where the program has that interface; a class implementing
   one, and any other use of one, is rejected. `isAnnotationPresent(A.class)` is answered from the
-  declarations (`lower/annotation_presence.rs`), and so is a class's `getAnnotation(A.class)`,
-  an annotation whose members give the declared values and defaults
-  (`lower/annotation_values.rs`). Type annotations (`java.lang.@Nullable String`,
+  declarations (`lower/annotation_presence.rs`), and so are `getAnnotation(A.class)` of a class
+  and the annotations of reflection's methods, fields and constructors, annotations whose members
+  give the declared values and defaults (`lower/annotation_values.rs`). Type annotations (`java.lang.@Nullable String`,
   `@Flags int`) are dropped from the types javac prints (`typeText` in `java/JavaTree.java`).
 
 ## Strings, builders, characters and formatting
