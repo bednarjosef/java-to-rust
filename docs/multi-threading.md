@@ -407,7 +407,9 @@ and the members a program uses are added to it. It holds `Thread`, `Thread.Uncau
   `getName`/`setName`, `isDaemon`/`setDaemon` (`IllegalThreadStateException` after start),
   `getId`/`threadId`, `getPriority`/`setPriority` (stored, no effect), `getThreadGroup`,
   `getState`, `isVirtual` (always false), the context class loader, the uncaught-exception
-  handlers, and `toString` (`Thread[#3,main,5,main]`).
+  handlers, `toString` (`Thread[#3,main,5,main]`), and the stack without frames, as an
+  exception's (see [exceptions.md](exceptions.md)): `getStackTrace` is empty, Java's shared empty
+  array for a thread that is not alive, and `dumpStack` prints `java.lang.Exception: Stack trace`.
 - **Naming and numbering are Java's**: unnamed threads are `Thread-0`, `Thread-1`, ...; the main
   thread has id 3, as on current JDKs where the JVM's own threads take 1 and 2. The null-name
   messages are the JDK's.
@@ -426,7 +428,8 @@ and the members a program uses are added to it. It holds `Thread`, `Thread.Uncau
   `ForkJoinWorkerThread` clears; a new thread copies nothing from its parent, so
   `InheritableThreadLocal` is rejected rather than wrong.
 - **`ThreadGroup`** has a name, a parent and `maxpri` 10, prints as
-  `java.lang.ThreadGroup[name=main,maxpri=10]`, and a thread joins the group of the thread that
+  `java.lang.ThreadGroup[name=main,maxpri=10]`, answers `parentOf` by its parents and
+  `isDestroyed` with false, as Java's always does, and a thread joins the group of the thread that
   creates it (`main`, whose parent is `system`). A thread that has ended has no group and no
   handler. `Thread.group` is null for the main group, so a program that never creates a group
   only gains a field that stays null.

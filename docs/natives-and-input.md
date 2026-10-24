@@ -277,7 +277,9 @@ A translated program is closed: it knows all its classes. So:
   `MessageDigest.getInstance(String)` makes by name (`java/patches/java/security/MessageDigest.java`,
   `TranslatedDigests`); a `Provider` and the methods that name one are not. Neither are keys
   and specs, except their plain interfaces, which the program's own classes implement (see
-  [object-model.md](object-model.md) 1.9). `ResourceBundle`, `ServiceLoader` and
+  [object-model.md](object-model.md) 1.9). The security APIs' exceptions (`KeyException`,
+  `SignatureException`, `CertificateException`, `InvalidKeySpecException` and the like) are
+  translated: plain constructors, which library code throws and catches as its own. `ResourceBundle`, `ServiceLoader` and
   `Module` are translated, the last two (and `ModuleLayer`) patched (see [reflection-and-plugins.md](reflection-and-plugins.md)).
 - `Class.forName` of a name spelled out as a literal is that class's literal, after its static
   initialization when the call initializes (`program::class_for_name`, `Builtin::InitializeClass`).

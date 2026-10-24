@@ -222,10 +222,10 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// `java.lang.reflect.Array` creates arrays of a component type and measures them, which is what
 /// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
 /// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
-/// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
-/// exceptions of what they call (`java/Standard.java`). `TypeDescriptor` is the interface of
-/// descriptors that `java.lang.constant`'s `ClassDesc` and `MethodTypeDesc` implement, plain
-/// methods over the descriptor strings.
+/// reflection table (`reflection.rs`), and so are `InvocationTargetException`, which wraps the
+/// exceptions of what they call, and `UndeclaredThrowableException` (`java/Standard.java`).
+/// `TypeDescriptor` is the interface of descriptors that `java.lang.constant`'s `ClassDesc` and
+/// `MethodTypeDesc` implement, plain methods over the descriptor strings.
 pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.invoke.TypeDescriptor",
     "java.lang.invoke.TypeDescriptor.OfField",
@@ -304,8 +304,29 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // The interface of digests that take a key, which `MessageDigest`'s own `Delegate`
     // implements.
     "sun.security.util.MessageDigestSpi2",
+    // The security APIs' exceptions, which library code throws and catches as it would its own:
+    // constructors over `Exception`'s, nothing that the security code gives.
+    "java.security.InvalidAlgorithmParameterException",
+    "java.security.InvalidKeyException",
+    "java.security.InvalidParameterException",
+    "java.security.KeyException",
+    "java.security.KeyManagementException",
+    "java.security.KeyStoreException",
+    "java.security.NoSuchProviderException",
+    "java.security.SignatureException",
+    "java.security.UnrecoverableEntryException",
+    "java.security.UnrecoverableKeyException",
+    "java.security.cert.CertificateEncodingException",
+    "java.security.cert.CertificateException",
+    "java.security.cert.CertificateExpiredException",
+    "java.security.cert.CertificateNotYetValidException",
+    "java.security.cert.CertificateParsingException",
+    "java.security.cert.CRLException",
+    "java.security.spec.InvalidKeySpecException",
+    "java.security.spec.InvalidParameterSpecException",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
+    "java.lang.reflect.UndeclaredThrowableException",
     "java.lang.reflect.Modifier",
     "java.lang.reflect.Method",
     "java.lang.reflect.Field",
