@@ -606,9 +606,11 @@ pub fn runtime_stream_call(node: &Value) -> bool {
 /// `VarHandle`.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
-        // A method that makes a `VarHandle` makes a constant that lowering keeps as what it
-        // reaches, and the handle's accesses are those of the field or element (`lower/handles.rs`).
-        || signature.ends_with(")java.lang.invoke.VarHandle")
+        // A method of the JDK that makes a `VarHandle` makes a constant that lowering keeps as
+        // what it reaches, and the handle's accesses are those of the field or element
+        // (`lower/handles.rs`); another library's is translated, its handle a value
+        // (`lower/handle_values.rs`).
+        || (signature.ends_with(")java.lang.invoke.VarHandle") && in_jdk(class))
         || class == "java.lang.invoke.VarHandle"
         // A field updater constant is a handle of its field, and its accesses are the field's.
         || matches!(
@@ -623,6 +625,35 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
         || unsafe_field_access(class, name, signature).is_some()
         || unsafe_field_update(class, name, signature).is_some()
         || sun_misc_forwarded(class, name, signature).is_some()
+}
+
+/// Whether the class with qualified name `class` is one of the JDK's.
+fn in_jdk(class: &str) -> bool {
+    ["java", "javax", "jdk", "sun", "com.sun"]
+        .iter()
+        .any(|root| class.strip_prefix(root).is_some_and(|rest| rest.starts_with('.')))
+}
+
+/// The field that a call of a method that makes a `VarHandle` names with a class literal and a
+/// string literal among its arguments, when the class has a field of that name: the call may
+/// make a handle of the field at run time (`lower/handle_values.rs`), so the field is reached,
+/// though no code names it.
+fn named_field_handle(node: &Value, field_of: impl Fn(&str, &str) -> bool) -> Option<(String, String)> {
+    if text(node, "kind") != "METHOD_INVOCATION"
+        || !text(&node["symbol"], "type").ends_with(")java.lang.invoke.VarHandle")
+    {
+        return None;
+    }
+    let args = node["arguments"].as_array()?;
+    let classes: Vec<String> = args.iter().filter_map(literal_class).collect();
+    let names =
+        args.iter().filter_map(|a| a["value"].as_str().filter(|_| text(a, "kind") == "STRING_LITERAL"));
+    for name in names {
+        if let Some(class) = classes.iter().find(|c| field_of(c, name)) {
+            return Some((class.clone(), name.to_string()));
+        }
+    }
+    None
 }
 
 /// `sun.misc.Unsafe`, the class of unsafe operations that libraries use (module
@@ -2898,6 +2929,14 @@ impl<'t> Walk<'t> {
                     }
                 }
                 if let Some(field) = field_offset_named(value) {
+                    self.work.push(Item::Field(field));
+                }
+                let field_of = |class: &str, name: &str| {
+                    self.classes.get(class).is_some_and(|(decl, _)| {
+                        members(decl).any(|m| text(m, "kind") == "VARIABLE" && text(m, "name") == name)
+                    })
+                };
+                if let Some(field) = named_field_handle(value, field_of) {
                     self.work.push(Item::Field(field));
                 }
                 if let Some(field) = own_field_handle(value)

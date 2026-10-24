@@ -16,6 +16,7 @@ mod functional;
 mod generic_args;
 mod generic_types;
 mod generics;
+mod handle_values;
 mod handles;
 mod hierarchy;
 mod lambdas;
@@ -354,6 +355,12 @@ struct Lowering<'t> {
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
+    /// The calls of the program's methods, found the first time the value of a handle's
+    /// parameter is asked for (see `handle_values`).
+    handle_calls: RefCell<Option<handle_values::Calls<'t>>>,
+    /// The places of each class's code where a handle may be a value, found the first time one
+    /// is lowered (see `handle_values`).
+    handle_slots: RefCell<std::collections::HashMap<usize, std::collections::HashSet<*const Value>>>,
     /// The arrays of references that are `Object[]`s (see `covariant`).
     covariant: covariant::Covariant,
     /// Where `Object` goes, in a program that uses it (see `object`).
@@ -649,6 +656,9 @@ impl<'t> Lowering<'t> {
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
             // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
             _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
+            // A handle made at run time is a token that only says whether it is null; lowering
+            // knows which handles it can be (`handle_values`).
+            _ if handle_values::is_handle_type(name) => Ok(Type::JavaClass),
             // A value of one of the program's enums (see `enums::enum_call`).
             _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
@@ -865,6 +875,7 @@ impl<'t> Lowering<'t> {
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
         self.javac_error(node)?;
+        self.check_handle_value(node)?;
         if let Some(code) = self.reference_native(node)? {
             return Ok(code);
         }
@@ -1180,6 +1191,9 @@ impl<'t> Lowering<'t> {
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
         self.note_call(node, &symbol, select);
         if let Some(kind) = self.handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.handle_value_call(node, &symbol)? {
             return Ok(kind);
         }
         if let Some(kind) = self.var_handle_access(node, &symbol)? {

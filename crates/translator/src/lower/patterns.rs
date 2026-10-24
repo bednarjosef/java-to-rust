@@ -579,7 +579,7 @@ impl<'t> Lowering<'t> {
                 None if checks_null => {
                     let pos = value.pos;
                     self.synth(
-                        ExprKind::Builtin(Builtin::NullChecked, vec![self.copy(selector), value]),
+                        ExprKind::Builtin(Builtin::NullChecked(None), vec![self.copy(selector), value]),
                         pos,
                         ty,
                     )
@@ -608,7 +608,7 @@ impl<'t> Lowering<'t> {
     /// The selector checked for null: `NullPointerException` when it is null.
     fn null_check(&self, selector: &Expr) -> Expr {
         self.synth(
-            ExprKind::Builtin(Builtin::NullChecked, vec![self.copy(selector)]),
+            ExprKind::Builtin(Builtin::NullChecked(None), vec![self.copy(selector)]),
             selector.pos,
             selector.ty,
         )

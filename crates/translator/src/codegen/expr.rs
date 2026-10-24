@@ -887,7 +887,7 @@ impl<'a> Gen<'a> {
             Builtin::StringSame => self.string_same(args),
             Builtin::Kept(op) => self.kept(op, args),
             Builtin::ValueOf => self.value_of(args),
-            Builtin::NullChecked => self.null_checked(args, ty),
+            Builtin::NullChecked(_) => self.null_checked(args, ty),
             Builtin::Unmatched => self.unmatched(args),
             Builtin::ObjectsHashCode => self.objects_hash_code(args),
             Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),

@@ -376,7 +376,8 @@ impl<'a> Gen<'a> {
     pub(super) fn effect(&mut self, e: &'a Expr) {
         match &e.kind {
             // A pattern switch's null check of a selector that is never null does nothing.
-            ExprKind::Builtin(Builtin::NullChecked, args) if args.len() == 1 && !self.nullable(&args[0]) => {}
+            ExprKind::Builtin(Builtin::NullChecked(_), args)
+                if args.len() == 1 && !self.nullable(&args[0]) => {}
             // So does that of the receiver of a regular expression call that the JDK runs.
             ExprKind::Builtin(Builtin::String(StringOp::Receiver(..)), args) if !self.nullable(&args[0]) => {}
             // So does the initialization of a class that has nothing to run, or that has run.

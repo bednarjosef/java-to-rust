@@ -814,7 +814,7 @@ pub(super) fn runtime_failures(
                     out.push(("java.lang.CloneNotSupportedException", "this clone", true, x.id));
                 }
             }
-            Builtin::NullChecked | Builtin::Unmatched => {
+            Builtin::NullChecked(_) | Builtin::Unmatched => {
                 if null(&args[0]) {
                     out.push((NPE, "this null check", true, args[0].id));
                 }

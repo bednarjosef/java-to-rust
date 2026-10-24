@@ -1013,8 +1013,12 @@ pub enum Builtin {
     /// argument is the call `o.hashCode()` that runs when `o` is not null.
     ObjectsHashCode,
     /// `[selector, value]`: `value`, once a pattern switch has checked its selector (a variable)
-    /// for null (see `lower::patterns`); `[selector]`: the check alone.
-    NullChecked,
+    /// for null (see `lower::patterns`); `[selector]`: the check alone. With a name, the check is
+    /// that of the receiver of a call of that method of a handle (`VarHandle.set`,
+    /// `MethodHandle.invokeExact`, see `lower::handles`), whose exception has the JVM's message
+    /// for the call at the expression's position; without one it has none, as javac's
+    /// `Objects.requireNonNull`.
+    NullChecked(Option<&'static str>),
     /// `[selector]`: the end of an exhaustive pattern switch that no case matched, which only a
     /// null selector reaches: it throws `NullPointerException`.
     Unmatched,

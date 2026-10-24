@@ -128,7 +128,7 @@ impl<'a> Gen<'a> {
                     v = self.bind_first(&mut binding, v, &["value", "item", "new"]);
                 }
                 let operands = format!("{handle}, {i}, {v}, {big_endian}");
-                let call = self.may_fail(args[0].id, "byte_view_set", "", &operands);
+                let call = self.may_fail(args[0].id, "byte_view_set", &view, &operands);
                 Code::atom(Self::bound_write(binding, call.text))
             }
             _ => unreachable!("a view reads or writes an element"),

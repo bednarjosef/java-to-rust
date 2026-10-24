@@ -617,9 +617,18 @@ impl Messages<'_> {
                     Builtin::Bits(BitsOp::ParseRange, _) => {
                         out.insert(x.id, None);
                     }
+                    // The receiver of a call of a handle's method, which the class file names
+                    // as the call site's own types make it (`VarHandle.set(Main, int)`).
+                    Builtin::NullChecked(Some(name)) => {
+                        let call = match self.jdk {
+                            true => self.named_call(x, name).flatten(),
+                            false => self.call(x.pos, name),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                    }
                     // javac's `Objects.requireNonNull` of a pattern switch's selector, whose
                     // exception has no message.
-                    Builtin::NullChecked
+                    Builtin::NullChecked(None)
                     | Builtin::Unmatched
                     | Builtin::Unsigned(UnsignedOp::ParseRange, _) => {
                         out.insert(args[0].id, None);

@@ -539,6 +539,19 @@ name:
   evaluation does nothing (a literal, `this`, a local, a field of the calling class); other
   arguments, a method reference to such a method, and raw memory (`allocateMemory`, accesses at
   an address) are rejected.
+- **Handles found at run time**, as netty finds its own (`lower/handle_values.rs`): a
+  `VarHandle`, `MethodHandle`, `MethodHandles.Lookup` or `MethodType` kept in a local or a field,
+  passed to a method or returned from one, made in a `try` whose `catch` sets it to null. At run
+  time such a value only tells whether it is null; which handle it holds, lowering finds when
+  translating, following assignments, static finals, the `return`s of static, private and final
+  methods and the arguments of every call of such a method. The lookups, `methodType` of class
+  literals, the factories of field, static field, element and view handles, `findVirtual` and
+  `findStatic` of those factories, and `invokeExact` of the `MethodHandle`s that finds, are
+  followed when none of them can fail. An access through a value that holds one handle, or null,
+  is that handle's access after a null check that throws Java's `NullPointerException`, message
+  included; Java checks after evaluating the arguments, so such an access takes only arguments
+  whose evaluation does nothing. A value that may be one of several handles, a call that may
+  fail, and a handle kept anywhere else (a collection, an `Object`) are rejected.
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
 
@@ -635,7 +648,7 @@ own slot or object and `join` orders the output, or where the program checks its
 (every increment counted, every item consumed once) and prints the result. Programs that use the
 JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `AtomicArrayDekker`,
 `ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`,
-`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ByteBufferViews`, `StaticVarHandles`, `ScopedValues`). Shape tests of the generated Rust are in
+`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ByteBufferViews`, `StaticVarHandles`, `RunTimeHandles`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
 unchanged and that a class no thread reaches has no monitor.
 

@@ -871,7 +871,7 @@ impl<'a> Compiling<'a, '_> {
                 self.add(a, out);
                 self.add(b, out);
             }
-            ExprKind::Builtin(Builtin::NullChecked, args) if !args.is_empty() => {
+            ExprKind::Builtin(Builtin::NullChecked(_), args) if !args.is_empty() => {
                 self.add(&args[args.len() - 1], out)
             }
             ExprKind::Switch { cases, .. } => {
@@ -1653,7 +1653,7 @@ fn only_looks(builtin: &Builtin) -> bool {
         Builtin::GetClass
             | Builtin::ClassName { .. }
             | Builtin::SameClass { .. }
-            | Builtin::NullChecked
+            | Builtin::NullChecked(_)
             | Builtin::MemoryAccessWarning(_)
             | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash)
     )

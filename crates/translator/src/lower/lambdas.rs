@@ -277,7 +277,8 @@ impl<'t> Lowering<'t> {
                 };
                 let value = self.convert(value, local_ty);
                 let var = || self.synth(ExprKind::Var(name.to_string()), pos, local_ty);
-                let checked = self.synth(ExprKind::Builtin(Builtin::NullChecked, vec![var()]), pos, local_ty);
+                let checked =
+                    self.synth(ExprKind::Builtin(Builtin::NullChecked(None), vec![var()]), pos, local_ty);
                 let local = Stmt::Local { ty: local_ty, name: name.to_string(), init: Some(value), pos };
                 Some(vec![local, Stmt::Expr(checked)])
             }
@@ -581,7 +582,7 @@ fn names(v: &Value) -> HashSet<&str> {
 }
 
 /// The parameter types and the return type of javac's method type `(int,java.lang.String)int`.
-fn signature(ty: &str) -> (Vec<&str>, &str) {
+pub(super) fn signature(ty: &str) -> (Vec<&str>, &str) {
     let Some(close) = top_level_close(ty) else { return (Vec::new(), ty) };
     let params = &ty[1..close];
     let mut out = Vec::new();

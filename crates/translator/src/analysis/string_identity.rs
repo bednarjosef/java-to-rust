@@ -327,7 +327,7 @@ impl<'c> Graph<'c> {
                         | Builtin::ArraysCopyOf
                         | Builtin::Arrays(_)
                         | Builtin::ObjectClone
-                        | Builtin::NullChecked => Vec::new(),
+                        | Builtin::NullChecked(_) => Vec::new(),
                         _ => vec![self.unknown(format!("the elements of {builtin:?}"), x.pos)],
                     };
                     self.flow(&from, elements);
@@ -605,7 +605,7 @@ pub(crate) fn made(builtin: Builtin) -> Made {
             | StringOp::StripIndent
             | StringOp::TranslateEscapes,
         ) => Made::Kept,
-        Builtin::String(StringOp::ToString) | Builtin::NullChecked | Builtin::Kept(_) => Made::Itself,
+        Builtin::String(StringOp::ToString) | Builtin::NullChecked(_) | Builtin::Kept(_) => Made::Itself,
         Builtin::ObjectText | Builtin::ValueOf => Made::Text,
         Builtin::ElementUpdate(_) => Made::Element,
         Builtin::NoObject { .. }

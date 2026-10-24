@@ -96,8 +96,9 @@
 //! its atomic updates, and an access at a type the handle would narrow to (which Java answers with
 //! `WrongMethodTypeException`), are rejected.
 //! A static method that returns such a handle of its parameters (`ByteArray.create`) makes one
-//! too, and so does `withInvokeExactBehavior()` of one (`SHA3.asLittleEndian`). Any other use of
-//! a `VarHandle` is rejected.
+//! too, and so does `withInvokeExactBehavior()` of one (`SHA3.asLittleEndian`). A `VarHandle`
+//! that the code holds as a value, found at run time and possibly null, is `handle_values`'s; any
+//! other use of a `VarHandle` is rejected.
 //!
 //! A field updater constant (a static final whose value is `AtomicIntegerFieldUpdater`'s,
 //! `AtomicLongFieldUpdater`'s or `AtomicReferenceFieldUpdater`'s `newUpdater`) is a handle of
@@ -117,8 +118,10 @@
 //! access), and the class, the lookup and the type may each be a local of the static block
 //! (`ExtendedMapMode` makes `FileChannel.MapMode`'s so). `(C) H.invoke(args)` and
 //! `invokeExact` are `new C(args)`, of the constructor that reachability found; the locals
-//! that only make it are left out with it. Any other use of a `MethodHandle` is rejected: the
-//! translation has no method handles at run time.
+//! that only make it are left out with it. The `MethodHandle`s of the methods that make handles
+//! (`findVirtual` of `Lookup.findVarHandle`, as netty finds its handles) are values that
+//! `handle_values` follows; any other use of a `MethodHandle` is rejected: the translation has no
+//! method handles of the program's methods at run time.
 
 use super::sun_unsafe::SUN_OFFSET_OF_FIELD;
 use super::*;
@@ -190,7 +193,8 @@ const LEADING_ZEROS: (&str, &str, &str) = ("java.lang.Integer", "numberOfLeading
 
 /// The primitive types, as javac names them and as the kinds of arrays and of `Unsafe`'s
 /// accesses; every other type is a reference.
-const PRIMITIVES: [&str; 8] = ["boolean", "byte", "short", "char", "int", "long", "float", "double"];
+pub(super) const PRIMITIVES: [&str; 8] =
+    ["boolean", "byte", "short", "char", "int", "long", "float", "double"];
 
 /// `node`, or in the body of a static method that `bound` gives the arguments of the parameters
 /// of, the argument when `node` is a parameter; `None` for a parameter without one.
@@ -290,7 +294,7 @@ fn access_kind(signature: &str) -> Kind {
 }
 
 /// Calls `f` on every node of the tree under `v`.
-fn walk<'t>(v: &'t Value, f: &mut impl FnMut(Node<'t>)) {
+pub(super) fn walk<'t>(v: &'t Value, f: &mut impl FnMut(Node<'t>)) {
     match v {
         Value::Object(map) => {
             f(Node(v));
@@ -386,8 +390,8 @@ fn updater_kind(ty: &str) -> Option<Kind> {
 }
 
 /// What a `VarHandle` constant reads and writes.
-#[derive(Clone, Copy)]
-enum VarHandleOf<'t> {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum VarHandleOf<'t> {
     /// The field of a class (`findVarHandle`), by the class's index.
     Field(usize, &'t str),
     /// The static field of a class (`findStaticVarHandle`), by the class's index.
@@ -411,7 +415,7 @@ fn handles_call<'t>(node: Node<'t>) -> Option<(&'t str, Vec<Node<'t>>)> {
 }
 
 /// Whether `node` is `ByteOrder.BIG_ENDIAN` (`Some(true)`) or `ByteOrder.LITTLE_ENDIAN`.
-fn byte_order(node: Node) -> Option<bool> {
+pub(super) fn byte_order(node: Node) -> Option<bool> {
     let symbol = plain(node).symbol().filter(|s| s.owner == "java.nio.ByteOrder")?;
     match symbol.name {
         "BIG_ENDIAN" => Some(true),
@@ -575,7 +579,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// The class and declaration of the static field that `symbol` names.
-    fn static_field(&self, symbol: &Symbol) -> Option<(usize, Node<'t>)> {
+    pub(super) fn static_field(&self, symbol: &Symbol) -> Option<(usize, Node<'t>)> {
         let owner = self.type_index(symbol.owner)?;
         let member = self.types[owner]
             .node
@@ -1302,7 +1306,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// What the `VarHandle` that the static field read `node` holds reaches.
-    fn var_handle(&self, node: Node<'t>) -> Option<VarHandleOf<'t>> {
+    pub(super) fn var_handle(&self, node: Node<'t>) -> Option<VarHandleOf<'t>> {
         let symbol =
             plain(node).symbol().filter(|s| s.kind == "FIELD" && s.is_static && s.ty == VAR_HANDLE)?;
         let (owner, member) = self.static_field(&symbol)?;
@@ -1315,7 +1319,7 @@ impl<'t> Lowering<'t> {
     /// field of `owner` (the class of the lookup); a call of a static method that returns one of
     /// those of its parameters (`bound` gives their arguments), as `ByteArray.create(int[].class)`
     /// does; `withInvokeExactBehavior()` of one; or a constant whose value is one. `block` is the static block `value` is in, if any.
-    fn var_handle_value(
+    pub(super) fn var_handle_value(
         &self,
         value: Node<'t>,
         block: Option<Node<'t>>,
@@ -1447,14 +1451,38 @@ impl<'t> Lowering<'t> {
             return Ok(Some(ExprKind::Call { name: name.to_string(), args, resolved }));
         }
         let receiver = node.child("methodSelect")?.get("expression");
-        let (Some((put, update)), Some(handle)) =
-            (var_handle_method(symbol.name), receiver.and_then(|r| self.var_handle(r)))
+        let Some((put, update)) = var_handle_method(symbol.name) else {
+            return unsupported(node, &format!("`VarHandle.{}`", symbol.name));
+        };
+        if let Some(handle) = receiver.and_then(|r| self.var_handle(r)) {
+            return self.var_handle_access_of(node, symbol, handle, put, update).map(Some);
+        }
+        // A handle that the code holds as a value, which can be one handle, or null
+        // (`handle_values`).
+        let Some((receiver, (handle, nullable))) = receiver.and_then(|r| Some((r, self.held_var_handle(r)?)))
         else {
             return unsupported(
                 node,
-                &format!("`VarHandle.{}` of a handle that is not a constant", symbol.name),
+                &format!(
+                    "`VarHandle.{}` of a handle that is neither a constant nor one handle the translation follows",
+                    symbol.name
+                ),
             );
         };
+        let access = self.var_handle_access_of(node, symbol, handle, put, update)?;
+        self.through_value(node, interned_name(symbol.name), receiver, nullable, access).map(Some)
+    }
+
+    /// The access by `symbol` (of `VarHandle`), `node`, of the handle `handle`: a read or write
+    /// (`put`), or the atomic update `update`.
+    fn var_handle_access_of(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        handle: VarHandleOf<'t>,
+        put: Option<bool>,
+        update: Option<FieldUpdate>,
+    ) -> Result<ExprKind, Error> {
         let args: Vec<Node> = node.list("arguments").collect();
         let count = match handle {
             VarHandleOf::Static(..) => 0,
@@ -1473,21 +1501,19 @@ impl<'t> Lowering<'t> {
             VarHandleOf::Field(class, field) => {
                 let (object, ty) = self.handle_field(node, symbol, args[0], class, field)?;
                 let place = Place::Field { object: Box::new(object), name: field.to_string() };
-                return self.access_at(node, place, ty, class, &args[1..], update, put, false).map(Some);
+                return self.access_at(node, place, ty, class, &args[1..], update, put, false);
             }
             VarHandleOf::Static(class, field) => {
                 let ty = self.static_field_type(node, class, field)?;
                 let place = Place::Static { class, name: field.to_string() };
-                return self.access_at(node, place, ty, class, &args, update, put, false).map(Some);
+                return self.access_at(node, place, ty, class, &args, update, put, false);
             }
             VarHandleOf::Element(kind) => {
                 let (array, index, ty) =
                     self.handle_element(node, symbol, args[0], (args[1], false), kind, None)?;
                 let place = Place::Index(Box::new(array), Box::new(index));
                 let volatile = matches!(symbol.name, "getVolatile" | "setVolatile");
-                return self
-                    .access_at(node, place, ty, usize::MAX, &args[2..], update, put, volatile)
-                    .map(Some);
+                return self.access_at(node, place, ty, usize::MAX, &args[2..], update, put, volatile);
             }
             VarHandleOf::ByteView(kind, big_endian) => (kind, big_endian),
             VarHandleOf::BufferView(kind, big_endian) => {
@@ -1495,13 +1521,13 @@ impl<'t> Lowering<'t> {
                     let what = "of a view of a byte buffer";
                     return unsupported(node, &format!("`VarHandle.{}` {what}", symbol.name));
                 }
-                return self.buffer_view(node, symbol.name, &args, kind, big_endian).map(Some);
+                return self.buffer_view(node, symbol.name, &args, kind, big_endian);
             }
         };
         if update.is_some() {
             return unsupported(node, &format!("`VarHandle.{}` of a view of a byte array", symbol.name));
         }
-        self.byte_view(node, symbol, &args, kind).map(Some)
+        self.byte_view(node, symbol, &args, kind)
     }
 
     /// The read or write (`args[2]`) of the value of kind `kind.0` in the bytes of the `byte[]`

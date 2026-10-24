@@ -1478,7 +1478,7 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
             Builtin::ObjectClone
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode
-            | Builtin::NullChecked
+            | Builtin::NullChecked(_)
             | Builtin::Unmatched
             | Builtin::RawMemory { .. }
             | Builtin::ElementUpdate(_)

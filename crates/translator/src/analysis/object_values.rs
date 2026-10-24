@@ -445,7 +445,7 @@ impl ObjectValues {
                 | Builtin::NoObject { .. },
                 _,
             ) if self.dispatch => Flow::default(),
-            ExprKind::Builtin(Builtin::NullChecked | Builtin::ObjectClone, args)
+            ExprKind::Builtin(Builtin::NullChecked(_) | Builtin::ObjectClone, args)
                 if self.dispatch && matches!(args.len(), 1 | 2) =>
             {
                 self.eval(class, m, ctx, &args[args.len() - 1])
@@ -555,7 +555,7 @@ pub(super) fn hands_objects(builtin: &Builtin) -> bool {
             | Builtin::GetClass
             | Builtin::ClassName { .. }
             | Builtin::SameClass { .. }
-            | Builtin::NullChecked
+            | Builtin::NullChecked(_)
             | Builtin::NoObject { .. }
             | Builtin::InitializeClass { .. }
             | Builtin::ClassLiteral(_)

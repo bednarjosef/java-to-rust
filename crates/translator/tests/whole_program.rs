@@ -525,6 +525,56 @@ fn a_class_as_a_constable_is_rejected() {
     }
 }
 
+/// Handles held as values that lowering does not follow are rejected: an access through a handle
+/// that may be null whose arguments do something before Java's null check, a handle kept as an
+/// `Object`, and the `MethodHandle` of a method other than the handle factories.
+#[test]
+fn run_time_handles_not_followed_are_rejected() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-run-time-handle-rejections");
+    let cases = [
+        (
+            "pick(args.length == 0).set(b, next(), 1);",
+            "`VarHandle.set` of a handle that may be null, with arguments that do something",
+        ),
+        ("System.out.println(java.util.List.of(pick(true)).size());", "a `VarHandle` used as a value"),
+        (
+            "MethodHandle m = MethodHandles.lookup().findVirtual(Object.class, \"toString\", \
+             MethodType.methodType(String.class));",
+            "`Lookup.findVirtual` of a handle or arguments that the translation does not follow",
+        ),
+    ];
+    for (i, (statement, message)) in cases.iter().enumerate() {
+        let sources = work.join(i.to_string());
+        let _ = std::fs::remove_dir_all(&sources);
+        std::fs::create_dir_all(&sources).unwrap();
+        let java = format!(
+            "import java.lang.invoke.*;\nimport java.nio.*;\npublic class Main {{\n    \
+             static int next() {{ return 0; }}\n    \
+             static VarHandle pick(boolean on) {{\n        \
+             return on ? MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN) : null;\n    }}\n    \
+             public static void main(String[] args) throws Throwable {{\n        byte[] b = new byte[8];\n        \
+             {statement}\n    }}\n}}\n"
+        );
+        std::fs::write(sources.join("Main.java"), java).unwrap();
+        let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+            .args(["--main", "Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join(format!("{i}.rs")))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr);
+        assert!(!translated.status.success(), "translated:\n{statement}");
+        assert!(stderr.contains(message), "not rejected:\n{statement}\n{stderr}");
+    }
+}
+
 /// The accesses of a view handle of a `ByteBuffer` that the translation does not do: the atomic
 /// updates, and a read or write at a type the handle's would have to narrow to, for which Java
 /// throws `WrongMethodTypeException`.
