@@ -52,6 +52,7 @@ impl<'t> Lowering<'t> {
                     && !enums::is_enum_constant(m)
                     && self.keeps(m, &self.types[index].javac)
                     && !self.is_handle(index, m)
+                    && !self.is_logger_field(index, m)
             }
             _ => false,
         })
@@ -87,7 +88,8 @@ impl<'t> Lowering<'t> {
                 "VARIABLE"
                     if !Self::is_constant(member)
                         && self.keeps(member, &self.types[index].javac)
-                        && !self.is_handle(index, member) =>
+                        && !self.is_handle(index, member)
+                        && !self.is_logger_field(index, member) =>
                 {
                     let Some(init) = member.get("initializer") else { continue };
                     let ty = match self.ty(member, member.symbol().map_or("", |s| s.ty)) {

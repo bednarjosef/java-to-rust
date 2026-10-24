@@ -92,6 +92,9 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>, java: bool) {
 
 /// The program's run on Java, compiled with javac into `classes` first, or its result stored in
 /// `cache` by an earlier run with the same sources, input and Java version.
+/// The packages of `java.base` that are not exported but that the programs may use.
+const INTERNAL_EXPORTS: [&str; 2] = ["--add-exports", "java.base/sun.util.logging=ALL-UNNAMED"];
+
 fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
     let mut sources = Vec::new();
     files(&p.sources, &mut sources, true);
@@ -109,7 +112,10 @@ fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
         return stored;
     }
     let _ = std::fs::remove_dir_all(classes);
+    // A program may use the JDK's internal logger, as the JDK's own classes do; the translation,
+    // which reads `java.base` from its sources, sees all of its packages.
     let javac = Command::new("javac")
+        .args(INTERNAL_EXPORTS)
         .arg("-d")
         .arg(classes)
         .args(&sources)
@@ -122,6 +128,7 @@ fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
         std::fs::copy(resource, to).unwrap();
     }
     let mut java = Command::new("java");
+    java.args(INTERNAL_EXPORTS);
     match module_name(&p.sources) {
         // A source root with a `module-info.java` is a named module, which runs from the module path.
         Some(module) => java.arg("--module-path").arg(classes).arg("-m").arg(format!("{module}/{}", p.main)),

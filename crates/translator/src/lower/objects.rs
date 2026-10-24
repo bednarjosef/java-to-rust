@@ -265,7 +265,7 @@ impl<'t> Lowering<'t> {
         for member in node
             .list("members")
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
-            .filter(|m| !self.is_handle(index, *m))
+            .filter(|m| !self.is_handle(index, *m) && !self.is_logger_field(index, *m))
         {
             // Moved initializers run in the constructors (see `inner`), and so do those written
             // after an initializer block (see `initializers`).
