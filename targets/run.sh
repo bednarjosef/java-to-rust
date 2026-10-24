@@ -93,13 +93,15 @@ build_key=$({
 } | hash)
 
 # The key of a translated program's run: the build key, the crate (its manifest without the
-# runtime's path, which is another in each worktree), and the program's input and arguments.
+# runtime's path, which is another in each worktree, and its Cargo configuration), and the
+# program's input and arguments.
 run_key() {
   local name=$1 dir=$2 manifest
   manifest=$(cat "$dir/Cargo.toml") || return 1
   {
     echo "targets rust run $build_key $name"
     printf '%s\n' "${manifest//"$runtime"/<runtime>}" | hash
+    [ -f "$dir/.cargo/config.toml" ] && hash < "$dir/.cargo/config.toml"
     (cd "$dir" && find src -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(hash < "$f")"; done)
     echo input
     [ -f "$targets/$name.input" ] && hash < "$targets/$name.input"
@@ -202,7 +204,7 @@ for java in "${programs[@]}"; do
     key=
   else
     rm -f "$bin"
-    built=$(CARGO_TARGET_DIR="$work/cargo" timeout "$build_timeout" cargo build -q --manifest-path "$dir/Cargo.toml" 2>&1)
+    built=$(cd "$dir" && CARGO_TARGET_DIR="$work/cargo" timeout "$build_timeout" cargo build -q 2>&1)
     if [ $? -eq 124 ]; then
       timedout=$((timedout + 1))
       report "$name" "TIMED OUT" "cargo build took more than ${build_timeout}s"

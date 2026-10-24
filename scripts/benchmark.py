@@ -92,8 +92,8 @@ def benchmark(java_file, translator, runs):
         row.status = f"does not translate: {translation.stderr.strip()}"
         return row
     build = subprocess.run(
-        ["cargo", "build", "--release", "-q", "--manifest-path", str(crate / "Cargo.toml"),
-         "--target-dir", str(OUT / "target")],
+        ["cargo", "build", "--release", "-q", "--target-dir", str(OUT / "target")],
+        cwd=crate,
         capture_output=True,
         text=True,
     )
