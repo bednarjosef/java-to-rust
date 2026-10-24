@@ -385,6 +385,41 @@ fn reading_a_resource_ends_the_program() {
     }
 }
 
+/// The manifest attributes of a package of the program's unnamed module are those of the jar it
+/// is run from, or null without one, which the translation does not know: asking for them throws
+/// (`java/patches/java/lang/Package.java`), where those of the JDK's packages are null as in Java
+/// (`corpus/whole-program/PackagesOfClasses`).
+#[test]
+fn a_program_package_manifest_is_not_in_the_translation() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-package-manifest");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    let java = "public class Main {
+    public static void main(String[] args) {
+        System.out.println(Main.class.getPackage().getImplementationVersion());
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    assert!(rust.contains("the manifest attributes of package"), "no manifest's failure in the translation");
+}
+
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see
 /// `corpus/whole-program/ClassesAsReflectTypes.java`), but not `Constable`, whose
 /// `describeConstable()` would need the class's descriptor as an object: a class converted to a

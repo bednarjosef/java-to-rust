@@ -2,9 +2,9 @@
 //! answers with (`java/patches/java/lang/Module.java`): those of the program's roots and the
 //! libraries' (`program::modules::contents`, `Reach::modules`).
 //!
-//! `c.getModule()`, `c.getClassLoader()` and `loader.getUnnamedModule()` call the static methods
-//! of `java.lang.TranslatedModules` that answer them (`program::MODULE_CALLS`), with the receiver
-//! as the argument, and `Class.forName(module, name)` its `inModule` (`lower::by_name`). The
+//! `c.getModule()`, `c.getClassLoader()`, `c.getPackage()` and `loader.getUnnamedModule()` call
+//! the static methods of `java.lang.TranslatedModules` that answer them (`program::MODULE_CALLS`),
+//! with the receiver as the argument, and `Class.forName(module, name)` its `inModule` (`lower::by_name`). The
 //! natives of `Module` are what the translation knows of its modules, each a `switch` over a
 //! name:
 //!

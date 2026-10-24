@@ -1295,10 +1295,11 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
 /// (`java/overlay/java/lang/TranslatedModules.java`).
 pub const TRANSLATED_MODULES: &str = "java.lang.TranslatedModules";
 
-/// Calls of instance methods of `Class` and `ClassLoader` that give a module or a class loader,
-/// and the static methods of `TRANSLATED_MODULES` that a translation with the JDK's sources calls
-/// instead, with the receiver as the first argument (`lower/modules.rs`): a class's module is the
-/// translation's module of its package, and its class loader that module's.
+/// Calls of instance methods of `Class` and `ClassLoader` that give a module, a class loader or a
+/// package, and the static methods of `TRANSLATED_MODULES` that a translation with the JDK's
+/// sources calls instead, with the receiver as the first argument (`lower/modules.rs`): a class's
+/// module is the translation's module of its package, its class loader that module's, and its
+/// `Package` the one of its package's name.
 pub const MODULE_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.lang.Class", "getModule", "()java.lang.Module"),
@@ -1311,6 +1312,10 @@ pub const MODULE_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.lang.ClassLoader", "getUnnamedModule", "()java.lang.Module"),
         ("unnamedModule", "(java.lang.ClassLoader)java.lang.Module"),
+    ),
+    (
+        ("java.lang.Class", "getPackage", "()java.lang.Package"),
+        ("packageOf", "(java.lang.Class<?>)java.lang.Package"),
     ),
 ];
 
@@ -2459,7 +2464,7 @@ impl<'t> Walk<'t> {
         for (_, (class, method, signature)) in STANDARD_CALLS.iter().filter(|(m, _)| *m == member) {
             self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
         }
-        // The translator's methods that give a class's module and class loader (`MODULE_CALLS`).
+        // The translator's methods that give a class's module, class loader and package (`MODULE_CALLS`).
         if text(symbol, "kind") == "METHOD"
             && let Some((to, signature)) = module_call(member.0, member.1, member.2)
         {
