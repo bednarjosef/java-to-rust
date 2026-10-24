@@ -59,13 +59,22 @@ check_vineflower() {
 
 # Decompiles one jar into a directory, keeping only the Java sources (Vineflower copies the
 # jar's resources too). The flags are those haste uses: generic signatures, synthetic members
-# renamed.
+# renamed. Every other library jar is given to Vineflower as a library (-e), so that it knows the
+# generic signatures of the classes the code uses. Without them it cannot tell where a generic
+# call needs its type arguments written out (`RecordCodecBuilder.<T>mapCodec(...)`,
+# `ImmutableList.<T>builder()`) and types variables as Object, and javac then infers other types
+# than the original's. Vineflower reads options only before the first -e or --only argument.
 decompile_jar() {
   local in=$1 out=$2
   shift 2
+  local -a libs=()
+  local lib
+  while IFS= read -r lib; do
+    [ "$lib" = "$in" ] || libs+=("-e=$lib")
+  done < <(find "$cache/jar/META-INF/libraries" -name '*.jar' | LC_ALL=C sort)
   rm -rf "$out" && mkdir -p "$out"
-  "${slot[@]}" nice -n 19 "$java" -Xmx3g -jar "$vineflower" -dgs=1 -rsy=1 -log=WARN -thr=4 "$@" "$in" "$out" \
-    > "$out.log" 2>&1 || { echo "Vineflower failed on $in (see $out.log)" >&2; return 1; }
+  "${slot[@]}" nice -n 19 "$java" -Xmx3g -jar "$vineflower" -dgs=1 -rsy=1 -log=WARN -thr=4 "$@" "${libs[@]}" \
+    "$in" "$out" > "$out.log" 2>&1 || { echo "Vineflower failed on $in (see $out.log)" >&2; return 1; }
   find "$out" -type f ! -name '*.java' -delete
   find "$out" -type d -empty -delete
   echo "$(find "$out" -name '*.java' | wc -l) source files from $(basename "$in")"
