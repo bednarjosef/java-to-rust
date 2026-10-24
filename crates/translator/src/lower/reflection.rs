@@ -125,7 +125,7 @@ impl<'t> Lowering<'t> {
             }
             let local = self.fresh_name("class");
             let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
-            let assignable = self.is_assignable_from(node, of, var())?;
+            let assignable = self.literal_assignable_from(node, of, var())?;
             let assignable = self.synth(assignable, pos, Type::Boolean);
             let call = ExprKind::Call {
                 name: method.to_string(),

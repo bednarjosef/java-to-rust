@@ -1,10 +1,21 @@
 //! `java.lang.Class`, as far as a program uses it without reflection: the class of a value with
-//! its names, its superclass and its component type. Two classes are the same when their binary
-//! names are, since no two classes of a program share one; the translator writes each class it
-//! needs where it is used, so a class names its superclass and component type by a function.
+//! its names, its superclass, its component type and the binary names of the classes and
+//! interfaces above it. Two classes are the same when their binary names are, since no two
+//! classes of a program share one; the translator writes each class it needs where it is used, so
+//! a class names its superclass and component type by a function.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
+
+const OBJECT: &str = "java.lang.Object";
+const SERIAL: &str = "java.io.Serializable";
+const COMPARE: &str = "java.lang.Comparable";
+const CONSTABLE: &str = "java.lang.constant.Constable";
+const DESC: &str = "java.lang.constant.ConstantDesc";
+const NUMBER: &str = "java.lang.Number";
+
+/// The binary names of a class and of every class and interface above it, its own first.
+type Names = &'static [&'static str];
 
 /// What a class is, which its `toString` shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,27 +38,36 @@ pub struct Class {
     kind: Kind,
     superclass: Option<fn() -> Class>,
     component: Option<fn() -> Class>,
+    /// The binary names of the class and of every class and interface above it, its own first,
+    /// as `is_instance` takes them; empty for an array and a primitive type, which
+    /// `is_assignable_from` answers by their kind.
+    names: Names,
 }
 
 impl Class {
-    /// A class, with its superclass (`None` only for `Object`).
-    pub const fn new(name: &'static str, simple: &'static str, superclass: Option<fn() -> Class>) -> Class {
-        Class { name, simple, kind: Kind::Class, superclass, component: None }
+    /// A class, with its superclass (`None` only for `Object`) and the names above it (`names`).
+    pub const fn new(
+        name: &'static str,
+        simple: &'static str,
+        superclass: Option<fn() -> Class>,
+        names: Names,
+    ) -> Class {
+        Class { name, simple, kind: Kind::Class, superclass, component: None, names }
     }
 
     /// An enum, whose superclass is `Enum`.
-    pub const fn enumeration(name: &'static str, simple: &'static str) -> Class {
-        Class { name, simple, kind: Kind::Enum, superclass: Some(|| Class::ENUM), component: None }
+    pub const fn enumeration(name: &'static str, simple: &'static str, names: Names) -> Class {
+        Class { name, simple, kind: Kind::Enum, superclass: Some(|| Class::ENUM), component: None, names }
     }
 
     /// An interface, which has no superclass.
-    pub const fn interface(name: &'static str, simple: &'static str) -> Class {
-        Class { name, simple, kind: Kind::Interface, superclass: None, component: None }
+    pub const fn interface(name: &'static str, simple: &'static str, names: Names) -> Class {
+        Class { name, simple, kind: Kind::Interface, superclass: None, component: None, names }
     }
 
     /// An annotation type, an interface that `isAnnotation()`.
-    pub const fn annotation(name: &'static str, simple: &'static str) -> Class {
-        Class { name, simple, kind: Kind::Annotation, superclass: None, component: None }
+    pub const fn annotation(name: &'static str, simple: &'static str, names: Names) -> Class {
+        Class { name, simple, kind: Kind::Annotation, superclass: None, component: None, names }
     }
 
     /// An array class, `[Ljava.lang.String;`, whose superclass is `Object`.
@@ -58,33 +78,103 @@ impl Class {
             kind: Kind::Class,
             superclass: Some(|| Class::OBJECT),
             component: Some(component),
+            names: &[],
         }
     }
 
     const fn primitive(name: &'static str) -> Class {
-        Class { name, simple: name, kind: Kind::Primitive, superclass: None, component: None }
+        Class { name, simple: name, kind: Kind::Primitive, superclass: None, component: None, names: &[] }
     }
 
-    const fn standard(name: &'static str, simple: &'static str) -> Class {
-        Class::new(name, simple, Some(|| Class::OBJECT))
+    const fn standard(name: &'static str, simple: &'static str, names: Names) -> Class {
+        Class::new(name, simple, Some(|| Class::OBJECT), names)
     }
 
-    pub const OBJECT: Class = Class::new("java.lang.Object", "Object", None);
-    pub const STRING: Class = Class::standard("java.lang.String", "String");
-    pub const STRING_BUILDER: Class = Class::standard("java.lang.StringBuilder", "StringBuilder");
-    pub const CLASS: Class = Class::standard("java.lang.Class", "Class");
-    pub const ENUM: Class = Class::standard("java.lang.Enum", "Enum");
-    pub const COMPARABLE: Class = Class::interface("java.lang.Comparable", "Comparable");
-    pub const CHAR_SEQUENCE: Class = Class::interface("java.lang.CharSequence", "CharSequence");
-    pub const INTEGER: Class = Class::new("java.lang.Integer", "Integer", Some(|| Class::NUMBER));
-    pub const LONG: Class = Class::new("java.lang.Long", "Long", Some(|| Class::NUMBER));
-    pub const DOUBLE: Class = Class::new("java.lang.Double", "Double", Some(|| Class::NUMBER));
-    pub const FLOAT: Class = Class::new("java.lang.Float", "Float", Some(|| Class::NUMBER));
-    pub const SHORT: Class = Class::new("java.lang.Short", "Short", Some(|| Class::NUMBER));
-    pub const BYTE: Class = Class::new("java.lang.Byte", "Byte", Some(|| Class::NUMBER));
-    pub const CHARACTER: Class = Class::standard("java.lang.Character", "Character");
-    pub const BOOLEAN: Class = Class::standard("java.lang.Boolean", "Boolean");
-    pub const NUMBER: Class = Class::standard("java.lang.Number", "Number");
+    /// A box of a number, whose superclass is `Number`.
+    const fn number(name: &'static str, simple: &'static str, names: Names) -> Class {
+        Class::new(name, simple, Some(|| Class::NUMBER), names)
+    }
+
+    pub const OBJECT: Class = Class::new(OBJECT, "Object", None, &[OBJECT]);
+    pub const STRING: Class = Class::standard(
+        "java.lang.String",
+        "String",
+        &["java.lang.String", SERIAL, COMPARE, "java.lang.CharSequence", CONSTABLE, DESC, OBJECT],
+    );
+    pub const STRING_BUILDER: Class = Class::standard(
+        "java.lang.StringBuilder",
+        "StringBuilder",
+        &[
+            "java.lang.StringBuilder",
+            "java.lang.AbstractStringBuilder",
+            SERIAL,
+            COMPARE,
+            "java.lang.CharSequence",
+            "java.lang.Appendable",
+            OBJECT,
+        ],
+    );
+    pub const CLASS: Class = Class::standard(
+        "java.lang.Class",
+        "Class",
+        &[
+            "java.lang.Class",
+            SERIAL,
+            "java.lang.reflect.GenericDeclaration",
+            "java.lang.reflect.Type",
+            "java.lang.reflect.AnnotatedElement",
+            "java.lang.invoke.TypeDescriptor$OfField",
+            "java.lang.invoke.TypeDescriptor",
+            CONSTABLE,
+            OBJECT,
+        ],
+    );
+    pub const ENUM: Class =
+        Class::standard("java.lang.Enum", "Enum", &["java.lang.Enum", COMPARE, SERIAL, CONSTABLE, OBJECT]);
+    pub const COMPARABLE: Class = Class::interface(COMPARE, "Comparable", &[COMPARE, OBJECT]);
+    pub const CHAR_SEQUENCE: Class =
+        Class::interface("java.lang.CharSequence", "CharSequence", &["java.lang.CharSequence", OBJECT]);
+    pub const INTEGER: Class = Class::number(
+        "java.lang.Integer",
+        "Integer",
+        &["java.lang.Integer", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
+    );
+    pub const LONG: Class = Class::number(
+        "java.lang.Long",
+        "Long",
+        &["java.lang.Long", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
+    );
+    pub const DOUBLE: Class = Class::number(
+        "java.lang.Double",
+        "Double",
+        &["java.lang.Double", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
+    );
+    pub const FLOAT: Class = Class::number(
+        "java.lang.Float",
+        "Float",
+        &["java.lang.Float", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
+    );
+    pub const SHORT: Class = Class::number(
+        "java.lang.Short",
+        "Short",
+        &["java.lang.Short", NUMBER, SERIAL, COMPARE, CONSTABLE, OBJECT],
+    );
+    pub const BYTE: Class = Class::number(
+        "java.lang.Byte",
+        "Byte",
+        &["java.lang.Byte", NUMBER, SERIAL, COMPARE, CONSTABLE, OBJECT],
+    );
+    pub const CHARACTER: Class = Class::standard(
+        "java.lang.Character",
+        "Character",
+        &["java.lang.Character", SERIAL, COMPARE, CONSTABLE, OBJECT],
+    );
+    pub const BOOLEAN: Class = Class::standard(
+        "java.lang.Boolean",
+        "Boolean",
+        &["java.lang.Boolean", SERIAL, COMPARE, CONSTABLE, OBJECT],
+    );
+    pub const NUMBER: Class = Class::standard(NUMBER, "Number", &[NUMBER, SERIAL, OBJECT]);
     pub const INT: Class = Class::primitive("int");
     pub const LONG_PRIMITIVE: Class = Class::primitive("long");
     pub const DOUBLE_PRIMITIVE: Class = Class::primitive("double");
@@ -199,6 +289,27 @@ impl Class {
         names.is_some_and(|names| names.contains(&self.name))
     }
 
+    /// `isAssignableFrom(other)`: whether `other` is this class or a class or interface below it,
+    /// by the names above `other`. A primitive type is only itself; every other class is below
+    /// `Object`; an array is below `Cloneable` and `Serializable`, and below the arrays of the
+    /// classes above its component type where that is not primitive.
+    pub fn is_assignable_from(&self, other: Class) -> bool {
+        if self.name == other.name {
+            return true;
+        }
+        if self.kind == Kind::Primitive || other.kind == Kind::Primitive {
+            return false;
+        }
+        match (self.get_component_type(), other.get_component_type()) {
+            (Some(mine), Some(theirs)) => {
+                !mine.is_primitive() && !theirs.is_primitive() && mine.is_assignable_from(theirs)
+            }
+            (None, Some(_)) => matches!(self.name, OBJECT | "java.lang.Cloneable" | SERIAL),
+            (Some(_), None) => false,
+            (None, None) => self.name == OBJECT || other.names.contains(&self.name),
+        }
+    }
+
     /// The check of `cast(x)`, given the names as for `is_instance`, the class of `x` first: a
     /// `ClassCastException` unless `x` is null or an instance.
     pub fn check_cast(&self, names: Option<&[&str]>) {
@@ -254,8 +365,9 @@ mod tests {
 
     #[test]
     fn a_class_shows_and_compares_as_java_does() {
-        let point = Class::new("Main$Point", "Point", Some(|| Class::OBJECT));
-        let points = Class::array("[LMain$Point;", "Point[]", || Class::new("Main$Point", "Point", None));
+        let point = Class::new("Main$Point", "Point", Some(|| Class::OBJECT), &["Main$Point", OBJECT]);
+        let points =
+            Class::array("[LMain$Point;", "Point[]", || Class::new("Main$Point", "Point", None, &[]));
         assert_eq!(point.to_string(), "class Main$Point");
         assert_eq!(Class::COMPARABLE.to_string(), "interface java.lang.Comparable");
         assert_eq!(Class::INT.to_string(), "int");
@@ -267,13 +379,36 @@ mod tests {
     }
 
     #[test]
+    fn assignability_is_javas() {
+        let shape = Class::interface("Shape", "Shape", &["Shape", OBJECT]);
+        let point = Class::new("Point", "Point", Some(|| Class::OBJECT), &["Point", "Shape", OBJECT]);
+        let points = Class::array("[LPoint;", "Point[]", || {
+            Class::new("Point", "Point", Some(|| Class::OBJECT), &["Point", "Shape", OBJECT])
+        });
+        let shapes =
+            Class::array("[LShape;", "Shape[]", || Class::interface("Shape", "Shape", &["Shape", OBJECT]));
+        let ints = Class::array("[I", "int[]", || Class::INT);
+        let longs = Class::array("[J", "long[]", || Class::LONG_PRIMITIVE);
+        assert!(shape.is_assignable_from(point) && !point.is_assignable_from(shape));
+        assert!(Class::OBJECT.is_assignable_from(shape) && !Class::OBJECT.is_assignable_from(Class::INT));
+        assert!(shapes.is_assignable_from(points) && !points.is_assignable_from(shapes));
+        assert!(ints.is_assignable_from(ints) && !ints.is_assignable_from(longs));
+        assert!(Class::OBJECT.is_assignable_from(ints) && !shape.is_assignable_from(ints));
+        assert!(Class::INT.is_assignable_from(Class::INT) && !Class::INTEGER.is_assignable_from(Class::INT));
+        assert!(
+            Class::NUMBER.is_assignable_from(Class::INTEGER)
+                && Class::COMPARABLE.is_assignable_from(Class::STRING)
+        );
+    }
+
+    #[test]
     fn canonical_and_package_names_are_javas() {
-        let inner = Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT));
-        let local = Class::new("a.b.Outer$1Local", "Local", Some(|| Class::OBJECT));
-        let anonymous = Class::new("a.b.Outer$1", "", Some(|| Class::OBJECT));
-        let in_local = Class::new("Outer$1Local$Inner", "Inner", Some(|| Class::OBJECT));
+        let inner = Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT), &[]);
+        let local = Class::new("a.b.Outer$1Local", "Local", Some(|| Class::OBJECT), &[]);
+        let anonymous = Class::new("a.b.Outer$1", "", Some(|| Class::OBJECT), &[]);
+        let in_local = Class::new("Outer$1Local$Inner", "Inner", Some(|| Class::OBJECT), &[]);
         let inners = Class::array("[La.b.Outer$Inner;", "Inner[]", || {
-            Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT))
+            Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT), &[])
         });
         assert_eq!(inner.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner")));
         assert_eq!(inners.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner[]")));

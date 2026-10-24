@@ -1,6 +1,7 @@
 //! Classes as values (see `lower::classes`): a `java::Class`, written out where it is used with
-//! its names and a function for its superclass or component type (`java::Class::new("Main$Dog",
-//! "Dog", Some(|| ..))`), so that no class needs a declaration of its own. For a value of an enum
+//! its names, a function for its superclass or component type and the binary names of the
+//! classes and interfaces above it (`java::Class::new("Main$Dog", "Dog", Some(|| ..), &["Main$Dog",
+//! "Main$Animal", "java.lang.Object"])`), so that no class needs a declaration of its own. For a value of an enum
 //! of classes, the enum's `runtime_class()` and `runtime_type_names()` hold the `match` over its
 //! variants (`dispatch::class_value_impls`).
 
@@ -200,7 +201,11 @@ impl<'a> Gen<'a> {
             }
             Type::Class(name, _) if self.class.annotation_classes.contains(name) => {
                 let simple = name.rsplit('.').next().unwrap_or(name);
-                format!("java::Class::annotation({}, {})", rust_string(name), rust_string(simple))
+                let names = format!(
+                    "&[{}, \"java.lang.annotation.Annotation\", \"java.lang.Object\"]",
+                    rust_string(name)
+                );
+                format!("java::Class::annotation({}, {}, {names})", rust_string(name), rust_string(simple))
             }
             _ => match self.class.type_of(ty) {
                 Some(c) => self.decl_class(c),
@@ -230,21 +235,25 @@ impl<'a> Gen<'a> {
         let (kind, extends) = (decl.kind, decl.extends);
         let name = rust_string(&self.java_class_name(c, false));
         let simple = rust_string(&self.java_class_name(c, true));
+        let names = self.names_list(c);
         match kind {
-            TypeKind::Interface => format!("java::Class::interface({name}, {simple})"),
-            TypeKind::Enum => format!("java::Class::enumeration({name}, {simple})"),
+            TypeKind::Interface => format!("java::Class::interface({name}, {simple}, {names})"),
+            TypeKind::Enum => format!("java::Class::enumeration({name}, {simple}, {names})"),
             _ => {
                 let superclass = match extends {
                     Some(s) => self.decl_class(s),
                     None => "java::Class::OBJECT".to_string(),
                 };
-                format!("java::Class::new({name}, {simple}, Some(|| {superclass}))")
+                format!("java::Class::new({name}, {simple}, Some(|| {superclass}), {names})")
             }
         }
     }
 
     /// `ClassMethod(op)(class, args..)`.
     pub(super) fn class_method(&mut self, op: ClassOp, args: &'a [Expr]) -> Code {
+        if op == ClassOp::IsAssignableFrom {
+            return self.class_assignable(&args[0], &args[1]);
+        }
         let class = if self.nullable(&args[0]) {
             format!("{}({})", self.runtime("non_null"), self.expr(&args[0]).text)
         } else {
@@ -270,6 +279,7 @@ impl<'a> Gen<'a> {
             ClassOp::DesiredAssertionStatus => {
                 return Code::new(format!("{{ let _ = {class}; false }}"), LOWEST);
             }
+            ClassOp::IsAssignableFrom => unreachable!("`class_assignable` writes it"),
             ClassOp::Equals => {
                 let other = &args[1];
                 return if self.nullable(other) || matches!(other.kind, ExprKind::Null) {
@@ -282,6 +292,36 @@ impl<'a> Gen<'a> {
             }
         };
         Code::atom(format!("{class}.{method}()"))
+    }
+
+    /// `ClassMethod(IsAssignableFrom)(class, other)`: both evaluated, then a null class and then
+    /// a null `other` throw `NullPointerException`, as Java's call does, in the checked form
+    /// where a `catch` sees it (`dereference`).
+    fn class_assignable(&mut self, class: &'a Expr, other: &'a Expr) -> Code {
+        let optional = |g: &Self, e: &Expr| g.nullable(e) || matches!(e.kind, ExprKind::Null);
+        let (class_optional, other_optional) = (optional(self, class), optional(self, other));
+        if !class_optional && !other_optional {
+            let (class, other) = (self.expr(class).at(ATOM), self.expr(other).text);
+            return Code::atom(format!("{class}.is_assignable_from({other})"));
+        }
+        let mut value = |e: &'a Expr, optional: bool| match optional {
+            true => self.class_option(e),
+            false => self.expr(e).text,
+        };
+        let (class_value, other_value) = (value(class, class_optional), value(other, other_optional));
+        let checked = |g: &mut Self, e: &Expr, optional: bool, name: &str| match optional {
+            true => g.dereference(&[e.id], name),
+            false => name.to_string(),
+        };
+        let class_text = checked(self, class, class_optional, "class_");
+        let other_text = checked(self, other, other_optional, "other_");
+        Code::new(
+            format!(
+                "{{ let (class_, other_) = ({class_value}, {other_value}); {}.is_assignable_from({other_text}) }}",
+                Code::new(class_text, LOWEST).at(ATOM)
+            ),
+            LOWEST,
+        )
     }
 
     /// `ClassIsInstance(class, x)`, or with `check` the statement `ClassCheck(class, x)`: the
