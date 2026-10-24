@@ -267,8 +267,10 @@ Specific cases:
   before printing, so one whose format may fail is rejected.
 - **Number parsing of `null`**: `parseInt`/`valueOf` of `Integer`, `Long`, `Short` and `Byte`
   throw `NumberFormatException("Cannot parse null string")`. The range form
-  (`parseInt(s, begin, end, radix)`) throws `NullPointerException` from `try_parse_range`
-  (`codegen/parse_range.rs`).
+  (`parseInt(s, begin, end, radix)`) of a string throws `NullPointerException` from
+  `try_parse_range` (`codegen/parse_range.rs`); that of another `CharSequence`, which a whole
+  program parses with the JDK's sources through `TranslatedNumbers` (`program::REDIRECTED_CALLS`),
+  throws it from `Objects.requireNonNull`, as Java's does.
 - **Checked operations inside a closure of the translation** would put a `?` where it cannot
   leave the method; `codegen::exceptions::check_closures` rejects them on the generated text.
   An operation run inside `java::catching` whose own code also passes a failure on is rejected

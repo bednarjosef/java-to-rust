@@ -1263,6 +1263,25 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
     ),
+    // A number parsed from a range of a `CharSequence`, which the JDK reads with `length` and
+    // `charAt` (`java/lang/TranslatedNumbers.java`); a string's range the runtime parses instead
+    // (`lower.rs`).
+    (
+        ("java.lang.Integer", "parseInt", "(java.lang.CharSequence,int,int,int)int"),
+        ("java.lang.TranslatedNumbers", "parseInt"),
+    ),
+    (
+        ("java.lang.Long", "parseLong", "(java.lang.CharSequence,int,int,int)long"),
+        ("java.lang.TranslatedNumbers", "parseLong"),
+    ),
+    (
+        ("java.lang.Integer", "parseUnsignedInt", "(java.lang.CharSequence,int,int,int)int"),
+        ("java.lang.TranslatedNumbers", "parseUnsignedInt"),
+    ),
+    (
+        ("java.lang.Long", "parseUnsignedLong", "(java.lang.CharSequence,int,int,int)long"),
+        ("java.lang.TranslatedNumbers", "parseUnsignedLong"),
+    ),
     // The boot loader's unnamed module, classes and resources, and the JDK's class loaders, as
     // the translation's modules have them (`java/lang/TranslatedModules.java`).
     (

@@ -1228,8 +1228,12 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
-        // The translator's method in place of the JDK's (`program::REDIRECTED_CALLS`).
+        // The translator's method in place of the JDK's (`program::REDIRECTED_CALLS`), but for a
+        // number in a range of a string, which the runtime parses (`BitsOp::ParseRange`,
+        // `UnsignedOp::ParseRange`): a string's `length` and `charAt` do nothing else.
         if symbol.is_static
+            && !(matches!(symbol.owner, "java.lang.Integer" | "java.lang.Long")
+                && args.first().is_some_and(|a| a.ty == Type::String))
             && let Some((class, to)) = crate::program::redirected_call(symbol.owner, symbol.name, symbol.ty)
         {
             let resolved = self
