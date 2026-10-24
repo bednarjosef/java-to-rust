@@ -22,6 +22,16 @@ owned, and that Rust therefore never freed, is found unreachable too.
 - **Address space.** One range of 64 GB is reserved at start and used as needed, cut into
   blocks of 64 KB. A side table holds each block's kind, size and bitmaps, so objects carry no
   header.
+- **Huge pages.** The range is aligned to 2 MB and asks the system for huge pages
+  (`MADV_HUGEPAGE`; `JAVA_GC_HUGE_PAGES=0` leaves the system's default). Memory goes back to the
+  system only as whole huge pages, when all 32 blocks of one are free. Giving back each empty
+  64 KB block at every collection had the system fault that memory in and zero it again when the
+  block was reused, and split the huge page around it: the translated javac kept 84 MB of its
+  1.16 GB on huge pages, against 1.36 GB of 1.40 GB now, and runs the Minecraft benchmark in
+  12.7 s instead of 13.6 to 14.3 s. The gain is the memory kept: asking for huge pages makes no
+  measured difference on a system that gives them to every aligned range anyway. A free block
+  whose memory stays keeps what it held, so a large allocation zeroes such blocks when it takes
+  them.
 - **Small blocks** hold slots of one size: one of 40 sizes from 16 bytes to 32 KB. Allocations
   that may hold pointers and those that cannot (an alignment below 8, as in the bytes of a
   string) use blocks of their own, and the collector does not scan the second kind.
@@ -74,8 +84,8 @@ translated javac takes 14.5 s and 1.03 GB collecting after half as much as is al
 2. marks every slot reachable from the roots, with an explicit stack, so a long chain of objects
    needs no recursion;
 3. sweeps: frees the taken slots left unmarked (clears their bits), clears the marks for the next
-   collection, lists the blocks with free slots, and gives the memory of blocks with nothing
-   alive back to the system (neighbouring ones in one call).
+   collection, lists the blocks with free slots, and frees the blocks with nothing alive,
+   giving their memory back to the system where that empties a whole huge page.
 
 The roots are scanned conservatively: any aligned word that points into a taken slot keeps that
 slot, which makes interior pointers and pointers held in registers work. The top 16 bits of a
