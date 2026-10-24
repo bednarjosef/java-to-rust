@@ -155,7 +155,7 @@ impl<'t> Lowering<'t> {
     /// The method without parameters named `name` that a call on a value of type `ty` runs, as
     /// javac resolves it: declared by its class or the nearest supertype.
     fn no_arg_method(&self, ty: Type, name: &str) -> Option<usize> {
-        let Type::Class(class, _) = ty else { return None };
+        let (Type::Class(class, _) | Type::Enum(class)) = ty else { return None };
         let mut queue = VecDeque::from([self.type_index(class)?]);
         let mut seen = HashSet::new();
         while let Some(t) = queue.pop_front() {

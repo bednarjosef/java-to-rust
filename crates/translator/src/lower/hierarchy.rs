@@ -71,15 +71,18 @@ impl<'t> Lowering<'t> {
         if let Some(name) = &binding {
             self.forget_alias(name);
         }
-        // `Object` may also hold a string, a box, an array, a builder or a class, `CharSequence`
-        // a string or a builder, `Appendable` a builder, and `Number` a numeric box.
+        // `Object` may also hold a string, a box, an array, a builder or a class, `Comparable` a
+        // string or a box, `CharSequence` a string or a builder, `Appendable` a builder, and
+        // `Number` a numeric box.
         let char_sequence = matches!(value.ty, Type::Class(name, _) if name == CHAR_SEQUENCE);
+        let comparable = matches!(value.ty, Type::Class(name, _) if name == COMPARABLE);
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
             || (Self::is_object(value.ty)
                 && matches!(
                     ty,
                     Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_) | Type::JavaClass
                 ))
+            || (comparable && matches!(ty, Type::String | Type::Boxed(_)))
             || (char_sequence && matches!(ty, Type::String | Type::StringBuilder))
             || (self.is_appendable(value.ty) && ty == Type::StringBuilder)
             || Self::is_numeric_box_of(value.ty, ty);

@@ -560,7 +560,8 @@ generator writes `while it.has_next() { let x = it.next(); .. }`, propagating wh
 throw like any call. Since `hasNext` and `next` are translated code, the loop does what Java's
 does, including `ConcurrentModificationException`, `NoSuchElementException`, the quirk that
 removing the second-to-last element ends an `ArrayList` loop, and the call sequence after
-`break`. A label on the loop goes on the `while`.
+`break`. A label on the loop goes on the `while`. The collection may be an object or an enum
+constant whose enum implements `Iterable`.
 
 - javac's tree does not show the calls, so reachability adds `Iterable.iterator`,
   `Iterator.hasNext` and `Iterator.next` at every for-each over a non-array

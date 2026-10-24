@@ -525,7 +525,8 @@ the program's classes implement:
   program's enums and its classes that implement `Comparable`. Its abstract
   `compareTo(Comparable)` has an arm per runtime type and enum (`codegen::dispatch::compare_arm`),
   which throws `ClassCastException` for an argument of another class. A class's own
-  `compareTo(C)` implements it through a bridge (1.11).
+  `compareTo(C)` implements it through a bridge (1.11). `instanceof` on a `Comparable` tests
+  for a string or a box as for any of its classes.
 - `NUMBER` (`T extends Number`, `List<? extends Number>`): the six numeric boxes, whose
   `byteValue()` to `doubleValue()` convert with `as` (`number_arm`), and the program's classes
   that extend `Number` (the JDK's `AtomicInteger`, `AtomicLong`, `Striped64`, `BigInteger`,
