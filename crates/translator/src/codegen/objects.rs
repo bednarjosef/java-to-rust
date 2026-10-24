@@ -1479,10 +1479,37 @@ impl<'a> Gen<'a> {
             }
             None => object,
         };
+        let object = if self.captures_nothing(ctor) {
+            // A lambda that captures nothing is one object per place it is written, made the
+            // first time that place runs (per thread), as Java's runtime hands out one instance.
+            let ty = self.object_type(name);
+            format!(
+                "{{ thread_local! {{ static LAMBDA: std::cell::OnceCell<{ty}> = const {{ std::cell::OnceCell::new() }}; }} \
+                 LAMBDA.with(|lambda| lambda.get_or_init(|| {object}).clone()) }}"
+            )
+        } else {
+            object
+        };
         Code::atom(match rep {
             Some(t) => format!("{}({object})", self.variant(t, c)),
             None => object,
         })
+    }
+
+    /// Whether `ctor` makes the object of a lambda or method reference that captures nothing: a
+    /// class of no fields and no type parameters, whose constructor takes nothing and cannot throw,
+    /// held as a handle.
+    fn captures_nothing(&self, ctor: usize) -> bool {
+        let m = &self.class.methods[ctor];
+        let decl = &self.class.types[m.class];
+        matches!(decl.origin, Origin::Lambda { .. })
+            && m.params.is_empty()
+            && decl.fields.is_empty()
+            && decl.type_params.is_empty()
+            && !self.facts.throwing.contains(&ctor)
+            && !self.facts.owned.contains(&decl.name)
+            && self.builds_plain(&decl.name)
+            && !matches!(self.rep(m.class), hierarchy::Rep::Enum(_))
     }
 
     /// `receiver.name(args)`, a call of an instance method. A method that borrows its object is

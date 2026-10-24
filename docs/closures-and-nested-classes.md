@@ -530,9 +530,12 @@ on each call, and an instance field set to a lambda capturing `this` makes a cyc
 closure's `Rc`, which is never freed.
 
 Closure-typed values are never compared (4.2, condition 4). A lambda in enum form is an object
-like any other: compared by identity, and printed as `Main$$Lambda@<hash>`. Two evaluations of
-one lambda expression are two objects (the JLS leaves this open; HotSpot caches non-capturing
-lambdas, which a test program must not depend on).
+like any other: compared by identity, and printed as `Main$$Lambda@<hash>`. A lambda or method
+reference that captures nothing is one object per place it is written, as HotSpot makes it (the
+JLS leaves this open): the place keeps it in a thread-local `OnceCell`, made the first time the
+place runs on a thread (`captures_nothing` in `codegen/objects.rs`), which also saves an
+allocation each time it runs. A lambda that captures something is a new object at each
+evaluation.
 
 ### 4.9 Threads
 
@@ -622,7 +625,7 @@ Plans, each a refinement of a correct form that exists:
 Corpus programs: `corpus/features/` (`LocalClasses`, `CapturedLocals`, `LocalMemberClasses`,
 `InnerClasses`, `InnerClassTrees`, `InnerIterators`, `InnerSuperclassesWithExplicitOuters`,
 `AnonymousClasses`, `AnonymousSubclasses`, `ForEachIterable`, `IteratorRemove`, `LambdaObjects`,
-`LambdaCaptures`, `MethodReferences`, `MethodReferenceReceivers`, `SuperInLambdas`,
+`LambdaMadeOnce`, `LambdaCaptures`, `MethodReferences`, `MethodReferenceReceivers`, `SuperInLambdas`,
 `ClosureForms`, `LocalClosures`, `ClosureDefaultMethods`, `GenericClosures`), and in
 `corpus/whole-program/` (`FunctionChains`, `Comparators`, `ReverseOrder`,
 `LambdasInConstantBodies`), which run only with the JDK's sources.
