@@ -1,8 +1,8 @@
 import java.util.Arrays;
 
-// Constant regular expressions that the runtime does not support (boundaries, lookaround,
-// properties, flags, possessive quantifiers, named groups) run on the JDK's own `Pattern`, as
-// computed ones do; those it supports stay the runtime's.
+// Constant regular expressions that the runtime does not support (properties, flags, lookbehind,
+// named groups) run on the JDK's own `Pattern`, as computed ones do; those it supports (here
+// boundaries, lookahead and possessive quantifiers) stay the runtime's.
 public class UnsupportedConstantPatterns {
     static final String ZEROS = "((?:(?:^|:)0+\\b){2,8}):?(?!\\S*\\b\\1:0+\\b)(\\S*)";
 
