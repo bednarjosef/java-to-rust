@@ -387,7 +387,7 @@ These are plans. Work on several of them is under way but not merged yet.
      handles Netty builds at run time, byte array and byte buffer view handles, and field
      updaters' `getAndUpdate`/`accumulateAndGet` loops;
    - logging: JDK logging at the levels it prints (the console handler's header line has the date
-     and the caller), `System.Logger` values, and `PlatformLogger` translated from its source;
+     and the caller);
    - natives: library natives (Netty's epoll, JNA, jtracy) should throw `UnsatisfiedLinkError`
      as on a JVM where the library is not loaded, so Netty falls back to NIO; and
      `NetworkInterface`'s natives;

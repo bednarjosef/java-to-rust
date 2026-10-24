@@ -183,10 +183,13 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// the same, as they are plain code over the JDK's other classes: `Runtime.Version`, a version
 /// string parsed and compared (`JarFile`'s and `ModulePath`'s release), with the pattern it
 /// parses with; and the decoder and encoder of each standard charset, which the translator's
-/// `newDecoder` and `newEncoder` make (`CHARSET_CODERS`).
+/// `newDecoder` and `newEncoder` make (`CHARSET_CODERS`); and `System.Logger` with its levels,
+/// whose loggers the translator's `System.getLogger` makes (`REDIRECTED_CALLS`).
 pub const TRANSLATED_NESTED: &[&str] = &[
     "java.lang.Runtime.Version",
     "java.lang.Runtime.VersionPattern",
+    "java.lang.System.Logger",
+    "java.lang.System.Logger.Level",
     "sun.nio.cs.ISO_8859_1.Decoder",
     "sun.nio.cs.ISO_8859_1.Encoder",
     "sun.nio.cs.US_ASCII.Decoder",
@@ -1318,6 +1321,12 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
         ("java.lang.TranslatedRuntime", "version"),
+    ),
+    // A logger of the default backend, where nothing configures logging
+    // (`java/lang/TranslatedSystemLogger.java`).
+    (
+        ("java.lang.System", "getLogger", "(java.lang.String)java.lang.System.Logger"),
+        ("java.lang.TranslatedSystemLogger", "getLogger"),
     ),
     // Whether a class is a proxy's, and a proxy's handler: a translation makes no proxies but its
     // annotations, which are their own handlers (`java/lang/TranslatedProxies.java`).

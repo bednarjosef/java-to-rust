@@ -183,13 +183,15 @@ impl<'t> Lowering<'t> {
         Ok(Some(Builtin::Native(native)))
     }
 
-    /// `System.getLogger(name).log(System.Logger.Level.L, message)`, as `LocaleServiceProviderPool`
-    /// reports a provider that returned null. The JDK's default logger, without `java.logging`,
-    /// prints the messages of level `INFO` and above to `System.err`, after a line with the time
-    /// and the caller; the translation prints `L: message`, without that line, which a translated
-    /// program has no stack to find the caller in. `None` for any other call; it runs before the
-    /// arguments are lowered, as the level is a constant of `System`'s nested enum, which is the
-    /// runtime's.
+    /// `System.getLogger(name).log(System.Logger.Level.L, message)` in a translation without the
+    /// JDK's sources, where `System.Logger` is not translated (with them, a logger is an object of
+    /// `java/lang/TranslatedSystemLogger.java`). The default logger of `java Main`, backed by
+    /// `java.util.logging`, prints the messages of level `INFO` and above, and `OFF`, to
+    /// `System.err` with the names of `java.util.logging`'s levels (`ERROR` is `SEVERE`), after a
+    /// line with the time and the caller; the translation prints `LEVEL: message`, without that
+    /// line, which a translated program has no stack to find the caller in. `None` for any other
+    /// call; it runs before the arguments are lowered, as the level is a constant of `System`'s
+    /// nested enum, which is the runtime's.
     pub(super) fn system_log(
         &self,
         node: Node<'t>,
@@ -198,6 +200,7 @@ impl<'t> Lowering<'t> {
     ) -> Result<Option<ExprKind>, Error> {
         if (symbol.owner, symbol.name, symbol.ty)
             != ("java.lang.System.Logger", "log", "(java.lang.System.Logger.Level,java.lang.String)void")
+            || self.type_index("java.lang.System.Logger").is_some()
         {
             return Ok(None);
         }
@@ -215,8 +218,9 @@ impl<'t> Lowering<'t> {
         };
         let level = (level.kind() == "MEMBER_SELECT").then(|| level.str("identifier"));
         let shown = match level {
-            Some("INFO" | "WARNING" | "ERROR") => true,
-            Some("ALL" | "TRACE" | "DEBUG" | "OFF") => false,
+            Some("INFO" | "WARNING" | "OFF") => level,
+            Some("ERROR") => Some("SEVERE"),
+            Some("ALL" | "TRACE" | "DEBUG") => None,
             _ => return unsupported(node, "`System.Logger.log` of a level that is not a constant"),
         };
         let pos = node.pos();
@@ -233,10 +237,7 @@ impl<'t> Lowering<'t> {
             return unsupported(node, "a `System.getLogger` name that does more than name the logger");
         }
         let message = self.expr(message)?;
-        let level = level.expect("a constant level");
-        if !shown {
-            return Ok(Some(message.kind));
-        }
+        let Some(level) = shown else { return Ok(Some(message.kind)) };
         let prefix = self.synth(ExprKind::Str(format!("{level}: ")), pos, Type::String);
         let text = ExprKind::Binary(BinOp::Add, Box::new(prefix), Box::new(self.as_text(message)));
         let text = self.synth(text, pos, Type::String);

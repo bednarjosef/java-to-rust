@@ -370,8 +370,18 @@ A translated program is closed: it knows all its classes. So:
 - `String.format` given an `Object[]` of arguments formats each element by its `toString`
   (`java::format_objects`), so only `%s`, `%S`, `%n` and `%%` work; any other conversion fails
   loudly.
-- `System.getLogger(name).log(level, message)` prints `LEVEL: message` on standard error from
-  `INFO` up, as the JDK's default logger does, without its line of time and caller.
+- `System.getLogger(name)` gives a logger that behaves as the one of a plain `java Main`, which
+  `java.util.logging` backs where nothing configures logging: from `INFO` up, and at `OFF`, a
+  message prints `LEVEL: message` on standard error with `java.util.logging`'s name of the level
+  (`ERROR` is `SEVERE`), without Java's line of time and caller; the lower levels print nothing.
+  With the JDK's sources, `System.Logger` and its levels are translated from them and the logger
+  is a `TranslatedSystemLogger` (`java/overlay/java/lang`), an object like any other: it can be
+  held in any field, passed and compared, and all of `System.Logger`'s methods work, with
+  suppliers, `Throwable`s (their stack trace and an empty line), `MessageFormat` parameters where
+  a `{` is followed by a digit, and resource bundles, as Java's `java.util.logging` wrapper does.
+  Each call gives a new logger, equal to the others of its name, as in Java. Without the JDK's
+  sources, only `System.getLogger(name).log(Level.L, message)` with a constant level is
+  translated. `System.getLogger(name, bundle)` is not translated yet.
 - The JDK's internal `sun.util.logging.PlatformLogger` logs the same way. It is translated from
   the JDK's source, patched (see [jdk-overlays.md](jdk-overlays.md)) so that every logger's
   backend is `TranslatedConsoleLogger` (`java/overlay/sun/util/logging`), which behaves as Java's
