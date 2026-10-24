@@ -157,7 +157,7 @@ fn class_file_names(program: &Program) -> Result<javac::BytecodeNames, ProgramEr
 /// body that never runs; the first piece of code that lowering rejected and that can run, or
 /// else the first call that lowering left unresolved and that can run, if there is one.
 fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> Result<(), lower::Rejected> {
-    let (running, unresolved) = narrow(class, rejected);
+    let (running, unresolved) = narrow(class, rejected, None);
     let unresolved = unresolved.into_iter().map(|error| lower::Rejected {
         unit: None,
         anchor: None,
@@ -172,12 +172,14 @@ fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> R
 /// the calls that lowering left unresolved that can run; the methods that cannot run get a body
 /// that never runs (`analysis::live_methods::prune`). When the methods that can run are not
 /// known, every rejection can run and nothing changes (and the unresolved calls are not looked
-/// for).
+/// for). `found` are the methods that can run when lowering found them already (`Lowered::live`),
+/// before `stamp_units`: the positions of their unresolved calls have no unit.
 fn narrow(
     class: &mut crate::ast::Class,
     rejected: Vec<lower::Rejected>,
+    found: Option<analysis::live_methods::LiveMethods>,
 ) -> (Vec<lower::Rejected>, Vec<Error>) {
-    let live = match analysis::live_methods::live_methods(class) {
+    let live = match found.map_or_else(|| analysis::live_methods::live_methods(class), Ok) {
         Ok(live) => live,
         Err(unknown) => {
             if crate::timings::enabled() {

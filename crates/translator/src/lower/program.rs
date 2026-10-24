@@ -53,6 +53,9 @@ pub struct Lowered {
     pub rejected: Vec<Rejected>,
     /// The unit of each type of the lowered program, `None` for those that lowering provides.
     pub units: Vec<Option<usize>>,
+    /// The methods of the lowered program that can run, when lowering found them (to know
+    /// whether its Rust generics stay, see `lower_with`).
+    pub live: Option<crate::analysis::live_methods::LiveMethods>,
 }
 
 /// An error in a piece of code that lowering rejected and went on past: the unit of the code,
@@ -103,16 +106,18 @@ fn lower_going_on<'t>(
     main: &str,
     census_of: Option<bool>,
 ) -> Lowered {
-    let census = RefCell::new((Vec::new(), Vec::new()));
+    let census = RefCell::new((Vec::new(), Vec::new(), None));
     let class = super::real_generics::retry(|real, covariant| {
         lower_with(units, program_units, reach, main, real, covariant, Some((&census, census_of)))
     });
-    let (rejected, units) = census.into_inner();
-    Lowered { class, rejected, units }
+    let (rejected, units, live) = census.into_inner();
+    Lowered { class, rejected, units, live }
 }
 
-/// What a census's lowering hands back on each attempt: the rejections, and the unit of each type.
-type CensusSink = RefCell<(Vec<Rejected>, Vec<Option<usize>>)>;
+/// What a census's lowering hands back on each attempt: the rejections, the unit of each type,
+/// and the methods that can run, when it found them.
+type CensusSink =
+    RefCell<(Vec<Rejected>, Vec<Option<usize>>, Option<crate::analysis::live_methods::LiveMethods>)>;
 
 /// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`, and
 /// the arrays `covariant`.
@@ -143,17 +148,27 @@ fn lower_with<'t>(
         .collect();
     // As without a census, an error with Rust generics is retried with all of them erased, but
     // only an error in code that can run (`analysis::live_methods`): the others leave the
-    // program as it is, and the Rust generics may stay.
-    let retried = !lowering.real.is_empty()
-        && !rejected.is_empty()
-        && lowered.as_ref().is_ok_and(|(class, ..)| {
-            match crate::analysis::live_methods::live_methods(class) {
-                Ok(live) => rejected.iter().any(|r| live.runs(r.ty, r.method)),
-                Err(_) => true,
-            }
-        });
+    // program as it is, and the Rust generics may stay. A lowering that noted covariant arrays
+    // is lowered again whatever it found (`real_generics::retry`), so its methods that can run
+    // are not looked for. Those found are handed on with the program, which a census narrows to
+    // them (`program::narrow`).
+    let live = match &lowered {
+        Ok((class, ..))
+            if !lowering.real.is_empty()
+                && lowering.covariant.noted.borrow().is_empty()
+                && !rejected.is_empty() =>
+        {
+            Some(crate::analysis::live_methods::live_methods(class))
+        }
+        _ => None,
+    };
+    let retried = live.as_ref().is_some_and(|live| match live {
+        Ok(live) => rejected.iter().any(|r| live.runs(r.ty, r.method)),
+        Err(_) => true,
+    });
+    let live = live.and_then(Result::ok);
     let first = rejected.first().map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
-    *census.borrow_mut() = (rejected, (0..lowering.types.len()).map(unit).collect());
+    *census.borrow_mut() = (rejected, (0..lowering.types.len()).map(unit).collect(), live);
     match first {
         Some(error) if retried => Err((None, error)),
         _ => lowered,

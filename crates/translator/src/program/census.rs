@@ -93,6 +93,7 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
             class: Err((None, Error { pos: Pos::default(), message })),
             rejected: Vec::new(),
             units: Vec::new(),
+            live: None,
         }
     });
     let rejection = |r: lower::Rejected| Rejection { unit: r.unit, anchor: r.anchor, error: r.error };
@@ -106,7 +107,8 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
         // below, where they are stubbed).
         Ok(mut class) => {
             super::stamp_units(&mut class, &lowered.units);
-            let (running, _) = phase("live methods", || super::narrow(&mut class, lowered.rejected));
+            let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live);
+            let (running, _) = phase("live methods", narrow);
             rejections.extend(running.into_iter().map(rejection));
             (Some(class), None)
         }
