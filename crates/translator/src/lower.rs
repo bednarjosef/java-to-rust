@@ -69,6 +69,7 @@ mod prologues;
 mod recreate;
 mod reflection;
 mod regex;
+mod sun_unsafe;
 mod switch;
 mod sync;
 mod system;
@@ -177,6 +178,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
 struct Node<'t>(&'t Value);
 
 /// The declaration a name, call or declaration refers to.
+#[derive(Clone, Copy)]
 struct Symbol<'t> {
     kind: &'t str,
     name: &'t str,
@@ -766,7 +768,10 @@ impl<'t> Lowering<'t> {
                 return Ok(());
             }
             // The value of a field handle is no field's (see `handles`).
-            "EXPRESSION_STATEMENT" if self.handle_definition(node) => return Ok(()),
+            "EXPRESSION_STATEMENT" if let Some((owner, member)) = self.handle_definition(node) => {
+                out.extend(self.handle_warning(owner, member)?.map(Stmt::Expr));
+                return Ok(());
+            }
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),

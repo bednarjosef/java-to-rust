@@ -598,6 +598,14 @@ impl Messages<'_> {
                         let failure = "Cannot invoke \"String.length()\"";
                         out.insert(args[0].id, Some(format!("{failure} because \"str\" is null")));
                     }
+                    // A method of `sun.misc.Unsafe` called on a null (`lower::sun_unsafe`).
+                    Builtin::MemoryAccessWarning(method) => {
+                        let call = match self.jdk {
+                            true => self.named_call(x, method).flatten(),
+                            false => self.call(x.pos, method),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
+                    }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {
                         add(&args[0], Some("Cannot enter synchronized block".to_string()))

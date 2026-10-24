@@ -1456,6 +1456,7 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
         // the `Thread` that a thread is given or starts with.
         ExprKind::Builtin(
             Builtin::MonitorEnter
+            | Builtin::MemoryAccessWarning(_)
             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. } | Native::HoldsLock)
             | Builtin::Native(Native::SetCurrentThread | Native::ThreadStart)
             | Builtin::GetClass

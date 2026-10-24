@@ -323,6 +323,8 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.reflect.Field)long"),
     ("jdk.internal.misc.Unsafe", "staticFieldOffset", "(java.lang.reflect.Field)long"),
     ("jdk.internal.misc.Unsafe", "staticFieldBase", "(java.lang.reflect.Field)java.lang.Object"),
+    // `sun.misc.Unsafe`'s, which forwards to the one above after its warning (`lower/sun_unsafe.rs`).
+    (SUN_MISC_UNSAFE, "objectFieldOffset", "(java.lang.reflect.Field)long"),
     ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     // A saved property is a property (`lower/system.rs`).
@@ -428,9 +430,11 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
         let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
         return Some((class_named(&node["methodSelect"]["expression"])?, field.to_string()));
     }
-    if text(symbol, "owner") != "jdk.internal.misc.Unsafe"
-        || !matches!(text(symbol, "name"), "objectFieldOffset" | "staticFieldOffset")
-    {
+    if !matches!(
+        (text(symbol, "owner"), text(symbol, "name")),
+        ("jdk.internal.misc.Unsafe", "objectFieldOffset" | "staticFieldOffset")
+            | (SUN_MISC_UNSAFE, "objectFieldOffset")
+    ) {
         return None;
     }
     let (class, field) = match &args[..] {
@@ -558,6 +562,34 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
         || (class == "java.lang.Character" && crate::lower::runtime_character_method(name, signature))
         || unsafe_field_access(class, name, signature).is_some()
         || unsafe_field_update(class, name, signature).is_some()
+        || sun_misc_forwarded(class, name, signature).is_some()
+}
+
+/// `sun.misc.Unsafe`, the class of unsafe operations that libraries use (module
+/// `jdk.unsupported`), whose methods forward to `jdk.internal.misc.Unsafe`'s.
+pub const SUN_MISC_UNSAFE: &str = "sun.misc.Unsafe";
+
+/// The method of `jdk.internal.misc.Unsafe` that the method of `sun.misc.Unsafe` with this name
+/// and signature forwards to, after its warning (`beforeMemoryAccess()`, see
+/// `lower/sun_unsafe.rs`), when it is a read, write or atomic update at an offset: the same name
+/// and signature, but `Reference` for `Object` (`getObjectVolatile` is `getReferenceVolatile`),
+/// `compareAndSet` for `compareAndSwap`, and `put<Kind>Release` for `putOrdered<Kind>`.
+pub fn sun_misc_forwarded(class: &str, name: &str, signature: &str) -> Option<String> {
+    if class != SUN_MISC_UNSAFE {
+        return None;
+    }
+    let internal = if let Some(kind) = name.strip_prefix("compareAndSwap") {
+        format!("compareAndSet{kind}")
+    } else if let Some(kind) = name.strip_prefix("putOrdered") {
+        format!("put{kind}Release")
+    } else {
+        name.to_string()
+    };
+    let internal = internal.replacen("Object", "Reference", 1);
+    let unsafe_ = "jdk.internal.misc.Unsafe";
+    let at_offset = unsafe_field_access(unsafe_, &internal, signature).is_some()
+        || unsafe_field_update(unsafe_, &internal, signature).is_some();
+    at_offset.then_some(internal)
 }
 
 /// One of `Unsafe`'s atomic updates of a field at an offset (see `unsafe_field_update`).

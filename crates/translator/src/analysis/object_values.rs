@@ -548,6 +548,7 @@ pub(super) fn hands_objects(builtin: &Builtin) -> bool {
     !matches!(
         builtin,
         Builtin::MonitorEnter
+            | Builtin::MemoryAccessWarning(_)
             | Builtin::GetClass
             | Builtin::ClassName { .. }
             | Builtin::SameClass { .. }

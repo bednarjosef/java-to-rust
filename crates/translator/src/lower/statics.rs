@@ -51,7 +51,7 @@ impl<'t> Lowering<'t> {
                     && !Self::is_constant(m)
                     && !enums::is_enum_constant(m)
                     && self.keeps(m, &self.types[index].javac)
-                    && !self.is_handle(index, m)
+                    && (!self.is_handle(index, m) || self.made_by_sun_unsafe(index, m))
                     && !self.is_logger_field(index, m)
             }
             _ => false,
@@ -84,6 +84,24 @@ impl<'t> Lowering<'t> {
                         self.reject(index, e)?
                     }
                 },
+                // A field handle's initializer is left out, but for the warning of `sun.misc.Unsafe`
+                // that makes it (`sun_unsafe.rs`).
+                "VARIABLE"
+                    if member.get("initializer").is_some()
+                        && self.keeps(member, &self.types[index].javac)
+                        && self.is_handle(index, member) =>
+                {
+                    match self.handle_warning(index, member) {
+                        Ok(warning) => body.extend(warning.map(Stmt::Expr)),
+                        Err(e) => {
+                            body.extend(
+                                self.rejected_initializer(index, &e, member.pos(), Type::Void)
+                                    .map(Stmt::Expr),
+                            );
+                            self.reject(index, e)?
+                        }
+                    }
+                }
                 // A field that nothing reads, whose initializer does nothing else, is not kept.
                 "VARIABLE"
                     if !Self::is_constant(member)

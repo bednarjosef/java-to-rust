@@ -159,7 +159,7 @@ impl Type {
 }
 
 /// A class or enum name, leaked once so that types stay `Copy`.
-fn interned_name(name: &str) -> &'static str {
+pub(crate) fn interned_name(name: &str) -> &'static str {
     static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
     let mut names = NAMES.lock().unwrap();
     match names.get(name) {
@@ -876,6 +876,12 @@ pub enum Builtin {
     InitializeClass {
         class: usize,
     },
+    /// `[unsafe, caller]`, a statement: what a method of `sun.misc.Unsafe` that reaches memory does
+    /// before it does (`beforeMemoryAccess()`, see `lower::sun_unsafe`). A null `unsafe` throws
+    /// the `NullPointerException` of calling the method named here on it; then the first such
+    /// call of the program prints the JDK's warning that the method was called by `caller`, a
+    /// class literal.
+    MemoryAccessWarning(&'static str),
     /// The lock of a `synchronized` block, the statement before the block: evaluated, and a
     /// `NullPointerException` when it is null. Where the program can tell (`codegen::sync`), the
     /// block holds the lock's monitor.
@@ -1269,6 +1275,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::NoObject { .. }
                         | Builtin::UnknownClass
                         | Builtin::MissingResource
+                        | Builtin::MemoryAccessWarning(_)
                         | Builtin::InitializeClass { .. }
                         | Builtin::Native(_),
                     _

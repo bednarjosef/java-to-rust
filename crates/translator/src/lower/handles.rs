@@ -107,6 +107,7 @@
 //! that only make it are left out with it. Any other use of a `MethodHandle` is rejected: the
 //! translation has no method handles at run time.
 
+use super::sun_unsafe::SUN_OFFSET_OF_FIELD;
 use super::*;
 use crate::program::FieldUpdate;
 use std::collections::HashMap;
@@ -175,7 +176,7 @@ fn bind<'t>(node: Node<'t>, bound: &[(&'t str, Node<'t>)]) -> Option<Node<'t>> {
 type Kind = &'static str;
 
 /// `node` without the parentheses around it.
-fn plain(mut node: Node) -> Node {
+pub(super) fn plain(mut node: Node) -> Node {
     while node.kind() == "PARENTHESIZED"
         && let Some(inner) = node.get("expression")
     {
@@ -379,7 +380,11 @@ impl<'t> Lowering<'t> {
     /// The value of the static final field `member` of class `owner`: its initializer, or the
     /// one assignment to it in the class's static blocks when that is a statement of its own,
     /// with that block, whose locals the value may read.
-    fn static_value(&self, owner: usize, member: Node<'t>) -> Option<(Node<'t>, Option<Node<'t>>)> {
+    pub(super) fn static_value(
+        &self,
+        owner: usize,
+        member: Node<'t>,
+    ) -> Option<(Node<'t>, Option<Node<'t>>)> {
         if member.kind() != "VARIABLE" || !member.has_flag("STATIC") || !member.has_flag("FINAL") {
             return None;
         }
@@ -405,15 +410,13 @@ impl<'t> Lowering<'t> {
         found.filter(|_| writes == 1)
     }
 
-    /// Whether the statement `node` is the assignment in a static block that gives a field
-    /// handle its value (see `static_value`), which is left out.
-    pub(super) fn handle_definition(&self, node: Node<'t>) -> bool {
-        let Some(e) = node.get("expression").filter(|_| node.kind() == "EXPRESSION_STATEMENT") else {
-            return false;
-        };
+    /// The class and declaration of the field handle whose value the statement `node` gives it,
+    /// when it is that assignment in a static block (see `static_value`), which is left out.
+    pub(super) fn handle_definition(&self, node: Node<'t>) -> Option<(usize, Node<'t>)> {
+        let e = node.get("expression").filter(|_| node.kind() == "EXPRESSION_STATEMENT")?;
         let symbol = e.get("variable").filter(|_| e.kind() == "ASSIGNMENT").and_then(|v| plain(v).symbol());
-        let Some(symbol) = symbol.filter(|s| s.kind == "FIELD" && s.is_static) else { return false };
-        self.static_field(&symbol).is_some_and(|(owner, member)| self.is_handle(owner, member))
+        let symbol = symbol.filter(|s| s.kind == "FIELD" && s.is_static)?;
+        self.static_field(&symbol).filter(|&(owner, member)| self.is_handle(owner, member))
     }
 
     /// Whether `stmt`, a statement of `block`, declares a local that the block uses only to make
@@ -438,7 +441,7 @@ impl<'t> Lowering<'t> {
                 }
                 walk(block.0, &mut |n| {
                     uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
-                    let handle = [STATIC_OFFSET_OF, STATIC_BASE_OF, OFFSET_OF_FIELD]
+                    let handle = [STATIC_OFFSET_OF, STATIC_BASE_OF, OFFSET_OF_FIELD, SUN_OFFSET_OF_FIELD]
                         .into_iter()
                         .find_map(|m| call_of(n, m));
                     in_handles +=
@@ -486,7 +489,8 @@ impl<'t> Lowering<'t> {
     /// block it is in, if any.
     fn field_offset(&self, value: Node<'t>, block: Option<Node<'t>>) -> Option<(usize, &'t str)> {
         let Some(args) = call_of(value, OFFSET_OF) else {
-            return self.declared_field(*call_of(value, OFFSET_OF_FIELD)?.first()?, block);
+            let field = call_of(value, OFFSET_OF_FIELD).or_else(|| call_of(value, SUN_OFFSET_OF_FIELD))?;
+            return self.declared_field(*field.first()?, block);
         };
         let field = plain(*args.get(1)?);
         let name = field.0["value"].as_str().filter(|_| field.kind() == "STRING_LITERAL")?;
@@ -1304,9 +1308,19 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol<'t>,
     ) -> Result<Option<ExprKind>, Error> {
         let key = (symbol.owner, symbol.name, symbol.ty);
-        if key == OFFSET_OF || key == OFFSET_OF_FIELD {
+        if key == OFFSET_OF || key == OFFSET_OF_FIELD || key == SUN_OFFSET_OF_FIELD {
             return unsupported(node, "a field offset used as a value");
         }
+        // A method of `sun.misc.Unsafe` that forwards to one of `jdk.internal.misc.Unsafe`'s is
+        // that one's access, after its warning (`sun_unsafe.rs`).
+        let forwarded =
+            crate::program::sun_misc_forwarded(symbol.owner, symbol.name, symbol.ty).map(|internal| Symbol {
+                owner: "jdk.internal.misc.Unsafe",
+                name: interned_name(&internal),
+                ..*symbol
+            });
+        let warned = forwarded.as_ref().map(|_| symbol.name);
+        let symbol = forwarded.as_ref().unwrap_or(symbol);
         let update = crate::program::unsafe_field_update(symbol.owner, symbol.name, symbol.ty);
         let put = crate::program::unsafe_field_access(symbol.owner, symbol.name, symbol.ty);
         if update.is_none() && put.is_none() {
@@ -1357,7 +1371,11 @@ impl<'t> Lowering<'t> {
         // `get<Kind>Volatile` and `put<Kind>Volatile`, which matter at an element offset (a
         // field's accesses are as its declaration makes them).
         let volatile = symbol.name.ends_with("Volatile");
-        self.access_at(node, place, ty, class, &args[2..], update, put, volatile).map(Some)
+        let access = self.access_at(node, place, ty, class, &args[2..], update, put, volatile)?;
+        match warned {
+            Some(method) => self.after_memory_access_warning(node, method, access).map(Some),
+            None => Ok(Some(access)),
+        }
     }
 
     /// `U.get<Kind>(base, offset)` or `U.put<Kind>(base, offset, x)` of a primitive of kind `kind`
