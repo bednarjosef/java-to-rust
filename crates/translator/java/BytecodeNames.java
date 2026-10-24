@@ -84,6 +84,17 @@ public class BytecodeNames {
         };
         // `-g` adds the tables of the locals, which do not change their slots.
         List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-nowarn", "-g"));
+        // The translation reads `java.base` from its sources, where the program sees all its
+        // packages, as the JDK's internal `sun.util.logging`: here they are exported to it too.
+        java.lang.module.ModuleFinder.ofSystem().find("java.base").ifPresent(base -> {
+            Set<String> exported = new HashSet<>();
+            base.descriptor().exports().stream().filter(e -> !e.isQualified()).forEach(e -> exported.add(e.source()));
+            for (String p : new TreeSet<>(base.descriptor().packages())) {
+                if (!exported.contains(p)) {
+                    options.addAll(List.of("--add-exports", "java.base/" + p + "=ALL-UNNAMED"));
+                }
+            }
+        });
         List<File> files = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--patch-module") && i + 1 < args.length) {

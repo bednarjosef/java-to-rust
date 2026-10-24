@@ -177,7 +177,6 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "sun.nio.cs.UTF_16BE",
     "sun.nio.cs.UTF_16LE",
     "sun.nio.cs.UTF_8",
-    "sun.util.logging.PlatformLogger",
 ];
 
 /// Classes nested in one of the `RUNTIME_CLASSES` that are translated from the JDK's sources all

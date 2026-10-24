@@ -177,6 +177,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own |
 | `sun/security/util/Debug.java` | translated although `sun.security` is not; writing a message, which names the caller's frame, fails loudly |
+| `sun/util/logging/PlatformLogger.java` | every logger's backend is `TranslatedConsoleLogger`, Java's default one; levels without their `System.Logger.Level`; loggers cached strongly; `setLevel` a native the translation does not have |
 
 ## Checks
 
