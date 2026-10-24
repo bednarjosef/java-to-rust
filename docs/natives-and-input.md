@@ -222,6 +222,16 @@ of the accessor (mapped memory, continuations).
   with a body that never runs (`Builtin::NoObject`), and what its body uses is not reached. It
   wakes up when its class becomes live. Interfaces are left out, as the runtime's strings and
   boxes are `CharSequence`s and `Comparable`s that no constructor shows.
+- **Branches that test for a class without objects** (`Reach::without_objects`): the `then`
+  branch of `if (x instanceof C)` (or `x instanceof C c`, alone or as an operand of `&&`) cannot
+  run while no reachable constructor creates objects of the class `C` or of a subclass. It is
+  not reached, and lowering writes it as an empty block, with the condition still evaluated; it
+  wakes up when `C` becomes live, as dormant methods do. Interfaces, exceptions, the standard
+  classes (whose objects the runtime makes too), classes with supertypes no unit declares,
+  array types, record patterns, and an `if` with an `else` whose pattern variable could be in
+  scope after it are left out. Example: msal4j makes an interactive login supplier, which opens
+  a browser through `java.awt.Desktop`, only for an `InteractiveRequest`, which a server never
+  creates.
 - **Stubs for untranslated types** (`program/reach/stubs.rs`, `lower/stubs.rs`): a variable whose
   type is a class that is not translated (`UNTRANSLATED`) is only ever null, since no translated
   code can create one. The class is declared as a stub without constructors or fields, with the

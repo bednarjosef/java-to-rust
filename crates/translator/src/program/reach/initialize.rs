@@ -74,7 +74,7 @@ impl Walk<'_> {
     }
 
     /// The position of the parameter `name` of the method `method`.
-    fn parameter_index(&self, method: &MethodKey, name: &str) -> Option<usize> {
+    pub(super) fn parameter_index(&self, method: &MethodKey, name: &str) -> Option<usize> {
         let node = self.methods.get(method)?;
         node["parameters"].as_array()?.iter().position(|p| text(p, "name") == name)
     }

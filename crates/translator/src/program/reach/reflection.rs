@@ -19,11 +19,20 @@
 //! sources declare (`modules::service_providers`): they are reachable, with what makes each (a
 //! module's provider by its public static `provider()` if it has one, as Java makes it),
 //! and noted in `Reach::services`, which lowering makes `ServiceLoader`'s natives of. A load of
-//! a `Class` value loads any service whose class literal reachable code has.
+//! a method's `Class` parameter loads the services that reachable calls of the method pass it, as
+//! class literals or as their own such parameters (`JSSecurityManager.getProviders(c)`, which
+//! `JDK13Services.getProviders(c)` calls, which `AudioSystem` calls with `MixerProvider.class`),
+//! when only those calls give the parameter its values: the method is static, private or a
+//! constructor, which no other method overrides, no method reference names it and reflection
+//! finds it not, and its code never assigns the parameter. A load of any other `Class` value
+//! loads any service whose class literal reachable code has.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::{Item, MethodKey, Walk, by_name::class_bound, by_name::class_for_name, literal_class, text};
+use super::{
+    Item, MethodKey, Walk, by_name::class_bound, by_name::class_for_name, has_flag, literal_class,
+    strip_arguments, text,
+};
 use crate::value::Value;
 
 /// What a lookup looks for.
@@ -86,9 +95,20 @@ pub fn lookup(node: &Value) -> Option<Lookup> {
     })
 }
 
-/// The service that the call `node` loads, if it is `ServiceLoader.load` or `loadInstalled`:
-/// `Some` of the class of a class literal, `Some(None)` for a `Class` value.
-fn service_load(node: &Value) -> Option<Option<String>> {
+/// A `Class` value of reachable code that it loads a service of or passes to a method.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub(super) enum ClassValue {
+    /// A class literal, of this class.
+    Literal(String),
+    /// The parameter, by method and position, of the method whose code it is.
+    Parameter(MethodKey, usize),
+    /// Any other, which may be any class.
+    Other,
+}
+
+/// The `Class` argument of the call `node` that loads a service, if it is `ServiceLoader.load`
+/// or `loadInstalled`.
+fn service_load(node: &Value) -> Option<&Value> {
     let symbol = &node["symbol"];
     let loads = text(node, "kind") == "METHOD_INVOCATION"
         && text(symbol, "owner") == "java.util.ServiceLoader"
@@ -96,9 +116,31 @@ fn service_load(node: &Value) -> Option<Option<String>> {
     if !loads {
         return None;
     }
-    let service =
-        node["arguments"].as_array()?.iter().find(|a| text(a, "javaType").starts_with("java.lang.Class"))?;
-    Some(literal_class(service))
+    node["arguments"].as_array()?.iter().find(|a| is_class_value(a))
+}
+
+/// Whether the expression `node` is a `Class` value.
+fn is_class_value(node: &Value) -> bool {
+    let ty = text(node, "javaType");
+    ty == "java.lang.Class" || ty.starts_with("java.lang.Class<")
+}
+
+/// Whether the code `node` assigns the variable `name`.
+fn assigns(node: &Value, name: &str) -> bool {
+    match node {
+        Value::Object(map) => {
+            let kind = text(node, "kind");
+            let target = if kind == "ASSIGNMENT" || kind.ends_with("_ASSIGNMENT") {
+                &node["variable"]
+            } else {
+                &Value::Null
+            };
+            (text(target, "kind") == "IDENTIFIER" && text(target, "name") == name)
+                || map.values().any(|child| assigns(child, name))
+        }
+        Value::Array(items) => items.iter().any(|item| assigns(item, name)),
+        _ => false,
+    }
 }
 
 impl<'t> Walk<'t> {
@@ -109,7 +151,34 @@ impl<'t> Walk<'t> {
             self.lookups.insert(lookup);
         }
         if let Some(service) = service_load(node) {
+            let service = self.class_value(service);
             self.service_loads.insert(service);
+        }
+        match text(node, "kind") {
+            "METHOD_INVOCATION" | "NEW_CLASS" => {
+                let symbol = &node["symbol"];
+                let callee: MethodKey = (
+                    strip_arguments(text(symbol, "owner")),
+                    text(symbol, "name").into(),
+                    text(symbol, "type").into(),
+                );
+                for (index, argument) in node["arguments"].as_array().into_iter().flatten().enumerate() {
+                    if is_class_value(argument) {
+                        let value = self.class_value(argument);
+                        self.class_values.entry((callee.clone(), index)).or_default().insert(value);
+                    }
+                }
+            }
+            "MEMBER_REFERENCE" => {
+                let symbol = &node["symbol"];
+                let key = (
+                    strip_arguments(text(symbol, "owner")),
+                    text(symbol, "name").into(),
+                    text(symbol, "type").into(),
+                );
+                self.referenced.insert(key);
+            }
+            _ => {}
         }
         if text(node, "kind") == "STRING_LITERAL"
             && let Some(literal) = node["value"].as_str()
@@ -133,6 +202,11 @@ impl<'t> Walk<'t> {
             return loaded;
         }
         let (found, work) = self.reflected_members();
+        for item in &work {
+            if let Item::Method(key) = item {
+                self.reflected_methods.insert(key.clone());
+            }
+        }
         for (class, name, key, declared) in &found {
             self.reflected_keys.insert(key.clone());
             if *declared {
@@ -249,6 +323,56 @@ impl<'t> Walk<'t> {
         (found, work)
     }
 
+    /// What the `Class` value `node` of the code being scanned is.
+    fn class_value(&self, node: &Value) -> ClassValue {
+        if let Some(class) = literal_class(node) {
+            return ClassValue::Literal(class);
+        }
+        if text(node, "kind") == "IDENTIFIER"
+            && text(&node["symbol"], "kind") == "PARAMETER"
+            && let Some(method) = self.scanning.clone()
+            && let Some(index) = self.parameter_index(&method, text(node, "name"))
+        {
+            return ClassValue::Parameter(method, index);
+        }
+        ClassValue::Other
+    }
+
+    /// Adds the services that the `Class` value `value` can be to `out`, and whether it can only
+    /// be those (see the module's comment); `seen` holds the parameters already followed.
+    fn services_of(
+        &self,
+        value: &ClassValue,
+        seen: &mut HashSet<(MethodKey, usize)>,
+        out: &mut BTreeSet<String>,
+    ) -> bool {
+        let (method, index) = match value {
+            ClassValue::Literal(class) => {
+                out.insert(class.clone());
+                return true;
+            }
+            ClassValue::Other => return false,
+            ClassValue::Parameter(method, index) => (method, *index),
+        };
+        if !seen.insert((method.clone(), index)) {
+            return true;
+        }
+        let Some(&node) = self.methods.get(method) else { return false };
+        let direct = method.1 == "<init>"
+            || node["symbol"]["static"].as_bool() == Some(true)
+            || has_flag(node, "PRIVATE");
+        let name = text(&node["parameters"][index], "name");
+        if !direct
+            || self.referenced.contains(method)
+            || self.reflected_methods.contains(method)
+            || assigns(&node["body"], name)
+        {
+            return false;
+        }
+        let passed = self.class_values.get(&(method.clone(), index)).cloned().unwrap_or_default();
+        passed.iter().all(|value| self.services_of(value, seen, out))
+    }
+
     /// Makes reachable the providers of the services that reachable code loads, each with what
     /// `ServiceLoader` makes it with: its public static `provider()`, or its constructor without
     /// parameters; and whether there was a new one. A provider whose class no unit declares yet
@@ -257,11 +381,13 @@ impl<'t> Walk<'t> {
         if self.service_loads.is_empty() {
             return false;
         }
-        let any = self.service_loads.contains(&None);
+        let (mut services, mut seen, mut any) = (BTreeSet::new(), HashSet::new(), false);
+        for value in &self.service_loads {
+            any |= !self.services_of(value, &mut seen, &mut services);
+        }
         let mut new = false;
         for (service, provider, modular) in self.providers.clone() {
-            let loaded = self.service_loads.contains(&Some(service.clone()))
-                || any && self.class_literals.contains(&service);
+            let loaded = services.contains(&service) || any && self.class_literals.contains(&service);
             if !loaded {
                 continue;
             }

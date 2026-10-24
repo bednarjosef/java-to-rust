@@ -785,6 +785,16 @@ impl<'t> Lowering<'t> {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
+            // Reachability did not take the `then` branch, as the class that the condition tests
+            // for has no objects (`Reach::objectless_branch`).
+            "IF" if self.reach.is_some_and(|r| r.objectless_branch(node.0)) => self.if_stmt(
+                self.expr(node.child("condition")?)?,
+                Stmt::Block(Vec::new()),
+                match node.get("elseStatement") {
+                    Some(n) => Some(self.single_stmt(n)?),
+                    None => None,
+                },
+            ),
             "IF" => self.if_stmt(
                 self.expr(node.child("condition")?)?,
                 self.single_stmt(node.child("thenStatement")?)?,

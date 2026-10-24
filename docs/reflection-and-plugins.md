@@ -107,7 +107,13 @@ program where such a lookup can happen, so they can be checked before the progra
   `service_providers`; kept in `Reach::services`). A provider is made lazily, by its public
   static `provider()` if it is a module's and has one, otherwise by its constructor, and is
   kept by the loader's iterators, as in Java. `loadInstalled` works the same way;
-  `load(ModuleLayer, ...)` throws.
+  `load(ModuleLayer, ...)` throws. Reachability loads the providers of the services that
+  reachable code loads: of a class literal, that service; of a `Class` parameter of a method
+  that only its calls give values (static, private or a constructor, never named by a method
+  reference nor found by reflection, the parameter never assigned), the services that the
+  reachable calls pass it, following parameters that pass it on (`javax.sound`'s
+  `JDK13Services.getProviders(c)`); of any other `Class` value, every service whose class
+  literal reachable code has (`program/reach/reflection.rs`).
 - **`ClassLoader`** is a type. The system and platform loaders exist, with `getName`,
   `getParent` and `getClassLoader()` of a class. `loadClass` goes through the `forName` table.
   `getResource`, `getResources` and `getResourceAsStream` find nothing; javac does not need them

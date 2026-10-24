@@ -20,8 +20,8 @@
 use super::Program;
 use super::reach::{
     CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, component_array, created_by_name, has_flag,
-    live_branch, members, outside, provided, replaced, runtime_arrays_call, runtime_stream_call,
-    strip_arguments, symbol_type, text, untranslated,
+    instanceof_guard, live_branch, members, outside, provided, replaced, runtime_arrays_call,
+    runtime_stream_call, strip_arguments, symbol_type, text, untranslated,
 };
 use crate::ast::{Pos, runtime_native};
 use crate::value::{Value, json};
@@ -172,6 +172,8 @@ struct Scan<'a> {
     stream_calls: BTreeSet<MethodKey>,
     /// Whether the program's streams stay sequential (`Reach::sequential`).
     sequential: bool,
+    /// The classes without objects that `instanceof`s test for (`Reach::without_objects`).
+    without_objects: &'a HashSet<String>,
 }
 
 impl Scan<'_> {
@@ -279,6 +281,7 @@ impl Census {
                 refs: BTreeSet::new(),
                 stream_calls: BTreeSet::new(),
                 sequential: reach.sequential,
+                without_objects: &reach.without_objects,
             };
             self.body(member, &mut scan);
             self.stream_calls.append(&mut scan.stream_calls);
@@ -308,6 +311,13 @@ impl Census {
             Value::Object(_) if let Some(branch) = live_branch(node, scan.sequential) => {
                 self.body(&node["condition"], scan);
                 self.body(branch, scan);
+            }
+            // So is the `then` branch of an `if` that tests for a class without objects.
+            Value::Object(_)
+                if instanceof_guard(node).is_some_and(|class| scan.without_objects.contains(&class)) =>
+            {
+                self.body(&node["condition"], scan);
+                self.body(&node["elseStatement"], scan);
             }
             // An object created from a class name translates (`reach::by_name`): only the name is
             // code.
