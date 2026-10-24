@@ -154,6 +154,13 @@ impl ClassInit {
         self.start_slow()
     }
 
+    /// Whether the initialization is done: a test without side effects, for the fast path of a
+    /// class's `init` function.
+    #[inline]
+    pub fn done(&self) -> bool {
+        self.state.load(Ordering::Acquire) == DONE
+    }
+
     #[cold]
     fn start_slow(&self) -> bool {
         let me = crate::locked::thread_token();
