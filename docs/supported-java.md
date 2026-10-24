@@ -297,6 +297,13 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests.
   A class held as an `Object` is `Object`'s `Class` variant, and one held as a
   `java.lang.reflect.Type` is `Type`'s.
+- `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
+  type arguments, each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,
+  `WildcardTypeImpl` and `GenericArrayTypeImpl` (`lower/generic_types.rs`), so a type token
+  (`new TypeToken<List<String>>() {}`) reads its type argument as in Java. A type variable is not
+  supported yet: making a type that mentions one throws `UnsupportedOperationException`.
+  `getGenericInterfaces`, `getTypeParameters` and the generic types of methods and fields are
+  still rejected.
 - `Class.forName` of a constant name is that class; of a computed name, a `switch` over the
   classes code can find by name. An unknown name throws `ClassNotFoundException`.
 - Reflection over the program's classes (`getMethod`, `getField`, `Method.invoke`,

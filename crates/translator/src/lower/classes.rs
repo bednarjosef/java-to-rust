@@ -139,6 +139,7 @@ impl<'t> Lowering<'t> {
             ("getAnnotation", [annotation]) => {
                 return Ok(Some(self.annotation_of(node, receiver, *annotation)?));
             }
+            ("getGenericSuperclass", []) => return Ok(Some(self.generic_superclass(node, receiver)?)),
             ("getEnumConstants", []) => {
                 let class = self.expr(receiver)?;
                 return Ok(Some(self.class_enum_constants(node, class)?));
@@ -500,7 +501,7 @@ impl<'t> Lowering<'t> {
 }
 
 /// Whether `node` is the call `o.getClass()`.
-fn is_get_class(node: Node) -> bool {
+pub(super) fn is_get_class(node: Node) -> bool {
     node.kind() == "METHOD_INVOCATION"
         && node.symbol().is_some_and(|s| s.owner == "java.lang.Object" && s.name == "getClass")
 }

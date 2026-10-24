@@ -1144,6 +1144,32 @@ pub const ANNOTATION_VALUES: [JdkMethod; 2] = [
     ),
 ];
 
+/// The translator's methods that make the generic types that reflection answers
+/// (`java/overlay/sun/reflect/generics/reflectiveObjects/TranslatedTypes.java`, see
+/// `lower::generic_types`).
+pub const GENERIC_TYPES: [JdkMethod; 4] = [
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "parameterized",
+        "(java.lang.Class<?>,java.lang.reflect.Type[],java.lang.reflect.Type)java.lang.reflect.Type",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "wildcard",
+        "(java.lang.reflect.Type[],java.lang.reflect.Type[])java.lang.reflect.Type",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "array",
+        "(java.lang.reflect.Type)java.lang.reflect.Type",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "typeVariable",
+        "(java.lang.String)java.lang.reflect.Type",
+    ),
+];
+
 /// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
 /// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
 /// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
@@ -2711,6 +2737,12 @@ impl<'t> Walk<'t> {
             // The annotations that reflection finds (`ANNOTATION_VALUES`).
             "METHOD" if name == "getAnnotation" && owner == "java.lang.Class" => {
                 for (class, method, signature) in ANNOTATION_VALUES {
+                    self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+                }
+            }
+            // The generic types that reflection answers (`GENERIC_TYPES`).
+            "METHOD" if name == "getGenericSuperclass" && owner == "java.lang.Class" => {
+                for (class, method, signature) in GENERIC_TYPES {
                     self.work.push(Item::Method((class.into(), method.into(), signature.into())));
                 }
             }

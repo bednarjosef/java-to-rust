@@ -1449,7 +1449,10 @@ impl<'a> Gen<'a> {
                     && self
                         .enum_variants(t)
                         .into_iter()
-                        .all(|c| h.implementation(resolved, c).is_some() || !h.is_subtype(c, declared)) =>
+                        .all(|c| h.implementation(resolved, c).is_some() || !h.is_subtype(c, declared))
+                    // A class answers `Type`'s `getTypeName()` itself (see `dispatcher`).
+                    && !(self.is_type_name_method(resolved)
+                        && self.enum_variants(t).into_iter().any(|c| self.runtime_of(c) == Some(Type::JavaClass))) =>
             {
                 Some(only)
             }
