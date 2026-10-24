@@ -295,8 +295,9 @@ Labeler()` passes them from the scope. A local class that uses the enclosing ins
 other local classes of the same block; they are concrete classes like any other.
 
 Local records, enums and interfaces are implicitly static: they capture nothing and move to the
-top level (`lower/local_types.rs`), named by package and simple name, with the method appended on
-a clash (`app.PointInRun`).
+top level (`javac/records.rs`, `lower/local_types.rs`), named by package and simple name, with
+the method appended on a clash (`app.PointInRun`). One declared in an initializer block is not
+moved, and is rejected.
 
 Rejected: creating a local class at a place where a local hides one of its captures.
 

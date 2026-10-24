@@ -71,20 +71,23 @@ pub(super) fn completed_records(unit: &Value, survey: &Survey) -> Vec<Value> {
     records.into_iter().map(complete).collect()
 }
 
-/// Whether `complete_unit` may change the compilation unit: it has no package (and so may have
-/// local types to hoist), or it declares a record.
+/// Whether `complete_unit` may change the compilation unit: it has no package, it declares a
+/// record, or it declares a local enum or interface (`in_body` once inside a method), which is
+/// hoisted.
 pub(super) fn changes(unit: &Value) -> bool {
-    fn has_record(v: &Value) -> bool {
+    fn has_record_or_local(v: &Value, in_body: bool) -> bool {
         match v {
             Value::Object(fields) => {
-                fields.get("kind").and_then(Value::as_str) == Some("RECORD")
-                    || fields.values().any(has_record)
+                let kind = fields.get("kind").and_then(Value::as_str);
+                kind == Some("RECORD")
+                    || in_body && matches!(kind, Some("ENUM" | "INTERFACE"))
+                    || fields.values().any(|x| has_record_or_local(x, in_body || kind == Some("METHOD")))
             }
-            Value::Array(items) => items.iter().any(has_record),
+            Value::Array(items) => items.iter().any(|x| has_record_or_local(x, in_body)),
             _ => false,
         }
     }
-    unit["packageName"].is_null() || has_record(unit)
+    unit["packageName"].is_null() || has_record_or_local(unit, false)
 }
 
 /// An interface: the names and types of its methods without parameters, and the interfaces it
