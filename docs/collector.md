@@ -110,14 +110,17 @@ The collector needs nothing for them:
   scanned as a heap slot, or freed.
 - **Nothing reaches them once the frame is gone.** The analysis proves that no handle to the
   object is stored in a field, an array element, a static or a closure, returned, thrown, or
-  passed to a call that may keep it; anything it does not model counts as kept. The object is
-  then held only by the method's variables.
+  passed to a call that may keep it; anything it does not model counts as kept. The one field
+  it may be stored in is one of another object of the same frame that only that object's own
+  methods read (a lambda's capture, an iterator's list), when that object is kept no longer.
+  The object is then held only by the method's variables and its other objects.
 - **A slot in a loop** is filled again on every iteration, so the object of the previous one
   must be unreachable by then: every variable that may hold the object must be declared inside
   the body of the innermost loop around the `new`, which makes it a new variable on each
-  iteration that Java does not let the next iteration read before assigning it. A factory's
-  object is made outside every loop of the factory, once per call, and the caller's slot then
-  follows the caller's loops by the same rule.
+  iteration that Java does not let the next iteration read before assigning it, and every
+  object of the frame that holds it must be made in that loop and follow the same rule. A
+  factory's object is made outside every loop of the factory, once per call, and the caller's
+  slot then follows the caller's loops by the same rule.
 - **Identity.** The identity hash is the address, unique while the object lives; two objects of
   one slot in a loop, never alive at once, may share it, which Java allows. A `synchronized`
   block, `wait` or `notify` on an object counts as an escape; a `synchronized` method called on

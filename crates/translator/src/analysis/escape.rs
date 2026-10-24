@@ -2,11 +2,11 @@
 //! the object can live in a slot on that method's stack instead of the collected heap
 //! (`java::Slot`, docs/collector.md, "Objects on the stack").
 //!
-//! An object escapes its method when it is stored into a field, an array element or a static,
-//! returned, thrown, captured by a lambda or a local class (whose constructor stores it into a
-//! field), handed to the runtime (a builtin, a string concatenation, which calls its
-//! `toString`), or passed to a call whose callee lets that parameter escape, or to a call that
-//! is not known. Anything the analysis does not model escapes.
+//! An object escapes its method when it is stored into a field (but see **Contents**), an array
+//! element or a static, returned, thrown, handed to the runtime (a builtin, a string
+//! concatenation, which calls its `toString`), or passed to a call whose callee lets that
+//! parameter escape, or to a call that is not known. Anything the analysis does not model
+//! escapes.
 //!
 //! Each method gets a summary of its parameters, `this` first: whether each may escape, and
 //! whether each may be what the method returns (`ListBuffer.append` returns `this`), so that a
@@ -26,9 +26,24 @@
 //! object of the method's own, whose class is known, those conditions are checked; a method
 //! that is being checked already counts as not letting it escape (the others decide).
 //!
-//! `JAVA_TO_RUST_ESCAPE_WHY=name,name` writes on standard error, for every object made in a
-//! method whose name contains one of the names, whether it stays, and if not, the chain of calls
-//! that lets it escape.
+//! **Contents.** A lambda or an anonymous class keeps what it captures in fields of its own, and
+//! a list's iterator keeps the list. A field that the program reads only on `this` (`this.f` or
+//! `f`, never `x.f`: `own_fields`) is read only by its object's own methods, so what is stored
+//! in it need not escape: it is held by that object. Each method's summary says which
+//! parameters it stores in which such fields of `this` (a constructor its captures), and what it
+//! does with what `this` holds in each (`Summary::contents`, always or via methods, like a
+//! parameter); fields are kept apart, so a lambda that leaks one capture keeps the others. In a
+//! method, a load of such a field of `this` is one more source, and what a `new` stores in its
+//! object, or `this(..)` and `super(..)` in `this`, is held by that object (what a method called
+//! on any other object stores escapes). What an object holds escapes when it escapes or is
+//! returned, or as what its class runs for the methods called on it lets it. A held object in a
+//! loop is unreachable by the next iteration only if the objects holding it are made in that
+//! loop and are too. A method's summary then depends on the summaries of the methods its
+//! objects' classes run, which are solved first again when they change.
+//!
+//! `JAVA_TO_RUST_ESCAPE_WHY=name,name` writes on standard error, for every method whose name
+//! contains one of the names, its summary, and for every object it makes whether it stays, and
+//! if not, what holds it and the chain of calls that lets it escape.
 //!
 //! Within a method the analysis is flow-insensitive: each variable (by name) holds the set of
 //! parameters and `new`s that any assignment in the method gives it, and every use of the
@@ -39,7 +54,7 @@
 //! their arguments, and what escapes or is returned. Solving a method again when a callee's
 //! summary changes then only unions bitsets, and a call's targets are one shared list whose
 //! combined summary is kept until one of them changes (a call on an `Object` may run thousands of
-//! methods). On javac the analysis takes about half a second.
+//! methods). On javac the analysis takes about a second.
 //!
 //! **Loops.** The translation gives each `new` one slot, which a `new` in a loop reuses on every
 //! iteration. That is sound only if the object of the previous iteration can no longer be reached
@@ -93,7 +108,9 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let n = class.methods.len();
     let mut lists = Lists::default();
     let field_inits = field_inits(class);
-    let code: Vec<Compiled> = (0..n).map(|m| compile(class, m, &field_inits, &mut lists)).collect();
+    let own_fields = own_fields(class);
+    let code: Vec<Compiled> =
+        (0..n).map(|m| compile(class, m, &field_inits, &own_fields, &mut lists)).collect();
     lists.combined = vec![None; lists.targets.len()];
     let mut analysis = Analysis {
         hierarchy: &class.hierarchy,
@@ -117,11 +134,17 @@ pub fn stack_objects(class: &Class) -> StackObjects {
             callers[t].push(m);
         }
     }
+    let mut edges: HashSet<(usize, usize)> = HashSet::new();
     let mut queued = vec![true; n];
     let mut work: Vec<usize> = (0..n).rev().collect();
     while let Some(m) = work.pop() {
         queued[m] = false;
-        let summary = analysis.solve(m).summary;
+        let MethodFacts { summary, read, .. } = analysis.solve(m);
+        for t in read {
+            if edges.insert((t, m)) {
+                callers[t].push(m);
+            }
+        }
         if summary != analysis.summaries[m] {
             analysis.set_summary(m, summary);
             for &caller in &callers[m] {
@@ -218,11 +241,21 @@ fn arity(m: &Method) -> usize {
 struct Summary {
     escapes: Vec<Escape>,
     returned: Vec<bool>,
+    /// The fields of `this` that only its own methods read (see `Contents`) that each parameter
+    /// may be stored in.
+    stored: Vec<Vec<FieldKey>>,
+    /// What the method does with what `this` holds in each of those fields, by field.
+    contents: Vec<(FieldKey, Escape)>,
 }
 
 impl Summary {
     fn empty(arity: usize) -> Summary {
-        Summary { escapes: vec![Escape::default(); arity], returned: vec![false; arity] }
+        Summary {
+            escapes: vec![Escape::default(); arity],
+            returned: vec![false; arity],
+            stored: vec![Vec::new(); arity],
+            contents: Vec::new(),
+        }
     }
 }
 
@@ -233,6 +266,16 @@ struct Escape {
     always: bool,
     /// Sorted.
     via: Vec<usize>,
+}
+
+/// Adds what `other` lets escape of each field to `into`, both by field.
+fn add_fields(into: &mut Vec<(FieldKey, Escape)>, other: &[(FieldKey, Escape)]) {
+    for (f, e) in other {
+        match into.binary_search_by_key(f, |&(g, _)| g) {
+            Ok(at) => into[at].1.add(e),
+            Err(at) => into.insert(at, (*f, e.clone())),
+        }
+    }
 }
 
 impl Escape {
@@ -255,6 +298,8 @@ struct MethodFacts {
     /// What makes the one object of its own that the method returns, and the object's class,
     /// when the method is a factory.
     product: Option<Product>,
+    /// The methods outside its calls' targets whose summaries decided it.
+    read: Vec<usize>,
 }
 
 /// A set of the sources of one method's values: its parameters, then its `new`s and its calls
@@ -272,6 +317,23 @@ impl Sources {
 
     fn contains(&self, i: usize) -> bool {
         self.0.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(|&w| w == 0)
+    }
+
+    fn of(i: usize) -> Sources {
+        let mut s = Sources::default();
+        s.insert(i);
+        s
+    }
+
+    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0
+            .iter()
+            .enumerate()
+            .flat_map(|(w, &bits)| (0..64).filter(move |b| bits & (1 << b) != 0).map(move |b| w * 64 + b))
     }
 
     /// Adds `other`; whether that added anything.
@@ -354,11 +416,18 @@ impl Lists {
             if all.escapes.len() < s.escapes.len() {
                 all.escapes.resize(s.escapes.len(), Escape::default());
                 all.returned.resize(s.returned.len(), false);
+                all.stored.resize(s.stored.len(), Vec::new());
             }
             for k in 0..s.escapes.len() {
                 all.escapes[k].add(&s.escapes[k]);
                 all.returned[k] |= s.returned[k];
+                for f in &s.stored[k] {
+                    if let Err(at) = all.stored[k].binary_search(f) {
+                        all.stored[k].insert(at, *f);
+                    }
+                }
             }
+            add_fields(&mut all.contents, &s.contents);
         }
         let all = Rc::new(all);
         self.combined[l as usize] = Some(all.clone());
@@ -400,6 +469,11 @@ struct Call {
     method: Option<usize>,
     /// Whether it runs what the class of its receiver (its first argument) runs for `method`.
     dispatched: bool,
+    /// Whether its first argument is the receiver.
+    has_receiver: bool,
+    /// Whether the receiver is exactly the object it names: a `new`'s own, or `this` for
+    /// `this(..)` and `super(..)`, so that what the callee stores in its `this` is stored there.
+    exact_receiver: bool,
 }
 
 /// A source of a method's own: a `new`, or a call of one method that may be a factory.
@@ -441,10 +515,71 @@ struct Compiled {
     labels: Vec<&'static str>,
     returns: Vec<Value>,
     sites: Vec<Site>,
+    /// What is stored in each field of `this` that only its own methods read (`own_fields`).
+    stores: Vec<(FieldKey, Value)>,
+    /// The fields of `this` that only its own methods read that the method reads: what each
+    /// holds is a source, after the sites.
+    held: Vec<FieldKey>,
 }
 
-fn field_inits(class: &Class) -> Vec<Vec<&Expr>> {
-    class.types.iter().map(|t| t.fields.iter().filter_map(|f| f.init.as_ref()).collect()).collect()
+/// The initializers of each class's instance fields, with the fields' places.
+fn field_inits(class: &Class) -> Vec<Vec<(usize, &Expr)>> {
+    class
+        .types
+        .iter()
+        .map(|t| t.fields.iter().enumerate().filter_map(|(i, f)| Some((i, f.init.as_ref()?))).collect())
+        .collect()
+}
+
+/// An instance field: the class that declares it and its place among that class's fields.
+type FieldKey = (usize, usize);
+
+/// The instance field `name` of the objects of class `t`: declared in it or a superclass.
+fn field_of(class: &Class, t: usize, name: &str) -> Option<FieldKey> {
+    let mut at = Some(t);
+    while let Some(c) = at {
+        if let Some(i) = class.types[c].fields.iter().position(|f| f.name == name) {
+            return Some((c, i));
+        }
+        at = class.types[c].extends;
+    }
+    None
+}
+
+/// The instance fields that the program reads only on `this` (`this.f`, or `f` alone): what an
+/// object holds in them is read only by its own methods (see `Contents`). A read on another
+/// object whose class is not known counts for every field of its name.
+fn own_fields(class: &Class) -> HashSet<FieldKey> {
+    let mut fields: HashSet<FieldKey> = class
+        .types
+        .iter()
+        .enumerate()
+        .flat_map(|(t, decl)| (0..decl.fields.len()).map(move |i| (t, i)))
+        .collect();
+    let mut on_others = |x: &Expr| match &x.kind {
+        ExprKind::Field { object, name }
+        | ExprKind::Assign { op: Some(_), target: Place::Field { object, name }, .. }
+        | ExprKind::IncDec { target: Place::Field { object, name }, .. }
+            if !matches!(object.kind, ExprKind::This) =>
+        {
+            match class.class_index(object.ty).and_then(|t| field_of(class, t, name)) {
+                Some(key) => _ = fields.remove(&key),
+                None => fields.retain(|&(t, i)| class.types[t].fields[i].name != *name),
+            }
+        }
+        _ => {}
+    };
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut on_others), &mut |_| {});
+        }
+    }
+    for t in &class.types {
+        for init in t.fields.iter().chain(&t.statics).filter_map(|f| f.init.as_ref()) {
+            visit_expr(init, &mut on_others);
+        }
+    }
+    fields
 }
 
 /// The state of compiling one method.
@@ -457,21 +592,25 @@ struct Compiling<'a, 'l> {
     order: Vec<&'a str>,
     site_of: FastMap<ExprId, u32>,
     call_of: FastMap<ExprId, u32>,
+    own_fields: &'a HashSet<FieldKey>,
+    /// The method being compiled.
+    method: usize,
 }
 
 /// Reduces method `m` to its flows (`Compiled`).
-fn compile(class: &Class, m: usize, field_inits: &[Vec<&Expr>], lists: &mut Lists) -> Compiled {
+fn compile<'a>(
+    class: &'a Class,
+    m: usize,
+    field_inits: &[Vec<(usize, &'a Expr)>],
+    own_fields: &'a HashSet<FieldKey>,
+    lists: &mut Lists,
+) -> Compiled {
     let method = &class.methods[m];
     if method.is_abstract {
         return Compiled { is_abstract: true, arity: arity(method), ..Compiled::default() };
     }
     let has_this = !method.is_static;
-    let code = Compiled {
-        is_ctor: method.is_ctor,
-        arity: arity(method),
-        has_this,
-        ..Compiled::default()
-    };
+    let code = Compiled { is_ctor: method.is_ctor, arity: arity(method), has_this, ..Compiled::default() };
     let mut cx = Compiling {
         class,
         lists,
@@ -480,6 +619,8 @@ fn compile(class: &Class, m: usize, field_inits: &[Vec<&Expr>], lists: &mut List
         order: Vec::new(),
         site_of: FastMap::default(),
         call_of: FastMap::default(),
+        own_fields,
+        method: m,
     };
     for (i, p) in method.params.iter().enumerate() {
         cx.var(&p.name);
@@ -530,8 +671,15 @@ fn compile(class: &Class, m: usize, field_inits: &[Vec<&Expr>], lists: &mut List
         visit_stmt(s, &mut |e| visit_expr(e, &mut |x| exprs.push(x)), &mut |_| {});
     }
     if method.is_ctor && !delegates(&method.body) {
-        for init in &field_inits[method.class] {
+        for &(i, init) in &field_inits[method.class] {
             visit_expr(init, &mut |x| exprs.push(x));
+            let value = cx.value(init);
+            if own_fields.contains(&(method.class, i)) {
+                cx.code.stores.push(((method.class, i), value));
+            } else {
+                cx.code.escapes.push(value);
+                cx.code.labels.push("stored in a field, a static or an array");
+            }
         }
     }
     for x in exprs {
@@ -546,6 +694,16 @@ fn compile(class: &Class, m: usize, field_inits: &[Vec<&Expr>], lists: &mut List
         }
         let mut escaping = Value::default();
         let label = match &x.kind {
+            ExprKind::Assign { op: None, target: Place::Field { object, name }, value }
+                if has_this
+                    && matches!(object.kind, ExprKind::This)
+                    && let Some(key) = field_of(class, method.class, name)
+                    && own_fields.contains(&key) =>
+            {
+                let value = cx.value(value);
+                cx.code.stores.push((key, value));
+                ""
+            }
             ExprKind::Assign {
                 target: Place::Field { .. } | Place::Static { .. } | Place::Index(..),
                 value,
@@ -693,6 +851,21 @@ impl<'a> Compiling<'a, '_> {
                 out.vars.push(v);
             }
             ExprKind::This if self.code.has_this => out.sources.push(0),
+            ExprKind::Field { object, name }
+                if self.code.has_this
+                    && matches!(object.kind, ExprKind::This)
+                    && let Some(key) = field_of(self.class, self.class.methods[self.method].class, name)
+                    && self.own_fields.contains(&key) =>
+            {
+                let j = match self.code.held.iter().position(|&k| k == key) {
+                    Some(j) => j,
+                    None => {
+                        self.code.held.push(key);
+                        self.code.held.len() - 1
+                    }
+                };
+                out.sources.push((self.code.arity + self.code.sites.len() + j) as u32)
+            }
             ExprKind::Cast(_, value) | ExprKind::Assign { op: None, value, .. } => self.add(value, out),
             ExprKind::Conditional(_, a, b) => {
                 self.add(a, out);
@@ -803,7 +976,22 @@ impl<'a> Compiling<'a, '_> {
         };
         let dispatched = matches!(&x.kind, ExprKind::MethodCall { is_super: false, resolved: Some(r), .. }
             if !class.methods[*r].is_static);
-        self.code.calls.push(Call { targets, fits, args: all, unknown, result, site, method, dispatched });
+        let exact_receiver = matches!(
+            x.kind,
+            ExprKind::New { ctor: Some(_), .. } | ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. }
+        ) && start == 1;
+        self.code.calls.push(Call {
+            targets,
+            fits,
+            args: all,
+            unknown,
+            result,
+            site,
+            method,
+            dispatched,
+            has_receiver: start == 1,
+            exact_receiver,
+        });
         self.call_of.insert(x.id, c);
         c
     }
@@ -838,15 +1026,44 @@ impl Analysis<'_> {
 
     /// Whether what an object of class `c` runs for method `r` (called on it) lets its `this`
     /// escape, with the summaries known so far; `seen` holds the methods already being followed,
-    /// which add nothing.
-    fn this_escapes(&self, r: usize, c: usize, seen: &mut Vec<usize>) -> bool {
+    /// which add nothing. The methods whose summaries it reads are added to `read`.
+    fn this_escapes(&self, r: usize, c: usize, seen: &mut Vec<usize>, read: &mut Vec<usize>) -> bool {
         let Some(t) = self.hierarchy.implementation(r, c) else { return true };
         if seen.contains(&t) {
             return false;
         }
         seen.push(t);
+        read.push(t);
         let Some(e) = self.summaries[t].escapes.first() else { return true };
-        e.always || e.via.iter().any(|&r| self.this_escapes(r, c, seen))
+        e.always || e.via.iter().any(|&r| self.this_escapes(r, c, seen, read))
+    }
+
+    /// What what an object of class `c` runs for method `r` (called on it) does with what the
+    /// object holds in each of its own fields (see `Contents`), by field, with the summaries
+    /// known so far; `None` when it lets all of it escape.
+    fn contents_escape(
+        &self,
+        r: usize,
+        c: usize,
+        seen: &mut Vec<usize>,
+        read: &mut Vec<usize>,
+    ) -> Option<Vec<(FieldKey, Escape)>> {
+        let t = self.hierarchy.implementation(r, c)?;
+        if seen.contains(&t) {
+            return Some(Vec::new());
+        }
+        seen.push(t);
+        read.push(t);
+        let summary = &self.summaries[t];
+        let this = summary.escapes.first()?;
+        if this.always {
+            return None;
+        }
+        let mut all = summary.contents.clone();
+        for &r in &this.via {
+            add_fields(&mut all, &self.contents_escape(r, c, seen, read)?);
+        }
+        Some(all)
     }
 
     /// Whether site `s` of method `m` is a source: a `new`, or a call of a factory.
@@ -854,8 +1071,9 @@ impl Analysis<'_> {
         site.call.is_none_or(|t| self.factories.contains_key(&t))
     }
 
-    /// The sources that each variable of method `m` holds, what escapes and what is returned,
-    /// with the summaries and factories known so far.
+    /// The sources that each variable of method `m` holds, what each of its objects and `this`
+    /// hold in their own fields, what escapes and what is returned, with the summaries and
+    /// factories known so far.
     fn flows(&mut self, m: usize) -> Flows {
         let code = &self.code[m];
         let combined: Vec<Option<Rc<Summary>>> = code
@@ -865,8 +1083,14 @@ impl Analysis<'_> {
                 c.fits.then(|| self.lists.combined(c.targets.expect("a followed call"), &self.summaries))
             })
             .collect();
+        let code = &self.code[m];
         let active: Vec<bool> = code.sites.iter().map(|s| self.active(s)).collect();
         let first = code.arity;
+        let sites = first..first + code.sites.len();
+        // What `this` holds in each of its own fields that the method reads, as sources of its
+        // own.
+        let held = sites.end;
+        let n = held + code.held.len();
         let mut vars: Vec<Sources> = vec![Sources::default(); code.vars];
         for named in &code.named {
             if let Some(i) = named.param {
@@ -909,46 +1133,166 @@ impl Analysis<'_> {
         for value in &code.returns {
             returned.union(&eval(&vars, value));
         }
-        let mut via: Vec<Vec<usize>> = vec![Vec::new(); first + code.sites.len()];
-        let mut add_via = |sources: &Sources, rs: &[usize]| {
-            if rs.is_empty() {
-                return;
+        // What each source holds in its own fields: `this` what the method and the constructors
+        // it delegates to store, a `new`'s object what its constructor stores. What a method
+        // called on any other object stores in it escapes.
+        let mut by_field: Vec<Vec<(FieldKey, Sources)>> = vec![Vec::new(); n];
+        if code.has_this {
+            for (f, value) in &code.stores {
+                field(&mut by_field[0], *f).union(&eval(&vars, value));
             }
-            for (i, at) in via.iter_mut().enumerate() {
-                if sources.contains(i) {
-                    at.extend(rs);
+        }
+        for (call, combined) in code.calls.iter().zip(&combined) {
+            let Some(combined) = combined else { continue };
+            if !call.has_receiver {
+                continue;
+            }
+            for (k, arg) in call.args.iter().enumerate().skip(1) {
+                let Some(fields) = combined.stored.get(k).filter(|fields| !fields.is_empty()) else {
+                    continue;
+                };
+                let stored = eval(&vars, arg);
+                if call.exact_receiver {
+                    for x in eval(&vars, &call.args[0]).iter() {
+                        for &f in fields {
+                            field(&mut by_field[x], f).union(&stored);
+                        }
+                    }
+                } else {
+                    escaping.union(&stored);
                 }
             }
+        }
+        let contents: Vec<Sources> = by_field
+            .iter()
+            .map(|fields| {
+                let mut all = Sources::default();
+                for (_, s) in fields {
+                    all.union(s);
+                }
+                all
+            })
+            .collect();
+        // What the method's own fields of `this` hold cannot be returned (a call's result is
+        // not followed into them); the objects of its own stored in `this` outlive it; what
+        // other objects hold is not followed; what a returned object holds is not either.
+        for j in held..n {
+            if returned.contains(j) {
+                escaping.insert(j);
+            }
+        }
+        for (x, held_by) in contents.iter().enumerate() {
+            let own = sites.contains(&x) || (code.has_this && x == 0);
+            if !own || (sites.contains(&x) && returned.contains(x)) {
+                escaping.union(held_by);
+            }
+        }
+        if code.has_this {
+            for x in contents[0].iter() {
+                if sites.contains(&x) {
+                    escaping.insert(x);
+                }
+            }
+        }
+        // The sources that the fields of each of `sources` hold (of `this`, what the method
+        // reads of them), all of them or those of field `f`.
+        let holds = |sources: &Sources, f: Option<FieldKey>| {
+            let mut out = Sources::default();
+            for x in sources.iter() {
+                if code.has_this && x == 0 {
+                    for (j, &g) in code.held.iter().enumerate() {
+                        if f.is_none_or(|f| f == g) {
+                            out.insert(held + j);
+                        }
+                    }
+                } else if sites.contains(&x) {
+                    match f {
+                        None => _ = out.union(&contents[x]),
+                        Some(f) => {
+                            if let Some((_, s)) = by_field[x].iter().find(|&&(g, _)| g == f) {
+                                out.union(s);
+                            }
+                        }
+                    }
+                }
+            }
+            out
         };
+        let mut via: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (call, combined) in code.calls.iter().zip(&combined) {
             match combined {
                 Some(combined) => {
                     for (k, arg) in call.args.iter().enumerate() {
                         // The receiver of a dispatched call escapes as what its class runs lets
-                        // its `this` escape.
+                        // its `this` and what it holds escape.
                         if k == 0 && call.dispatched {
-                            add_via(
-                                &eval(&vars, arg),
-                                &[call.method.expect("a dispatched call names its method")],
-                            );
+                            let method = call.method.expect("a dispatched call names its method");
+                            add_via(&mut via, &eval(&vars, arg), &[method]);
                             continue;
                         }
                         let Some(e) = combined.escapes.get(k) else { continue };
-                        if e.always {
-                            escaping.union(&eval(&vars, arg));
-                        } else if !e.via.is_empty() {
-                            add_via(&eval(&vars, arg), &e.via);
+                        apply(e, &eval(&vars, arg), &mut escaping, &mut via);
+                    }
+                    if call.has_receiver && !call.dispatched {
+                        let receivers = eval(&vars, &call.args[0]);
+                        for (f, e) in &combined.contents {
+                            apply(e, &holds(&receivers, Some(*f)), &mut escaping, &mut via);
                         }
                     }
                 }
                 None => _ = escaping.union(&eval(&vars, &call.unknown)),
             }
         }
-        for at in &mut via {
-            at.sort_unstable();
-            at.dedup();
+        // An object of the method's own is of a known class, so what its methods do with their
+        // `this` and its fields decides whether it and what it holds escape when methods are
+        // called on it. What an object that escapes holds escapes with it.
+        let mut read = Vec::new();
+        let mut resolved = vec![0; n];
+        loop {
+            let mut grew = false;
+            for x in 0..held {
+                if escaping.contains(x) {
+                    grew |= escaping.union(&holds(&Sources::of(x), None));
+                }
+            }
+            for (i, site) in code.sites.iter().enumerate() {
+                let s = first + i;
+                if !active[i] || escaping.contains(s) || via[s].len() == resolved[s] {
+                    continue;
+                }
+                resolved[s] = via[s].len();
+                let c = self.site_class(site);
+                if via[s].iter().any(|&r| self.this_escapes(r, c, &mut Vec::new(), &mut read)) {
+                    escaping.insert(s);
+                    grew = true;
+                    continue;
+                }
+                if contents[s].is_empty() {
+                    continue;
+                }
+                let mut all = Some(Vec::new());
+                for &r in &via[s] {
+                    all = all.and_then(|mut all| {
+                        add_fields(&mut all, &self.contents_escape(r, c, &mut Vec::new(), &mut read)?);
+                        Some(all)
+                    });
+                }
+                match all {
+                    None => grew |= escaping.union(&contents[s]),
+                    Some(all) => {
+                        for (f, e) in &all {
+                            grew |= apply(e, &holds(&Sources::of(s), Some(*f)), &mut escaping, &mut via);
+                        }
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
         }
-        Flows { vars, combined, active, escaping, returned, via }
+        read.sort_unstable();
+        read.dedup();
+        Flows { vars, combined, active, escaping, returned, via, contents, by_field, read }
     }
 
     /// Solves method `m` with the summaries and factories known so far: its summary, the
@@ -959,27 +1303,32 @@ impl Analysis<'_> {
                 summary: Summary::empty(self.code[m].arity),
                 staying: Vec::new(),
                 product: None,
+                read: Vec::new(),
             };
         }
-        let Flows { vars, active, mut escaping, returned, via, .. } = self.flows(m);
-        let first = self.code[m].arity;
+        let Flows { vars, escaping, returned, via, contents, by_field, read, active, .. } = self.flows(m);
+        let code = &self.code[m];
+        let first = code.arity;
+        let held = first + code.sites.len();
         let mut summary = Summary::empty(first);
         for (i, at) in via.iter().enumerate().take(first) {
             summary.escapes[i] = Escape { always: escaping.contains(i), via: at.clone() };
             summary.returned[i] = returned.contains(i);
-        }
-        // An object of the method's own is of a known class, so what its methods do with their
-        // `this` decides whether it escapes as a receiver.
-        for i in 0..self.code[m].sites.len() {
-            let s = first + i;
-            if active[i] && !escaping.contains(s) && !via[s].is_empty() {
-                let c = self.site_class(&self.code[m].sites[i]);
-                if via[s].iter().any(|&r| self.this_escapes(r, c, &mut Vec::new())) {
-                    escaping.insert(s);
-                }
+            if code.has_this && i > 0 {
+                let mut fields: Vec<FieldKey> =
+                    by_field[0].iter().filter(|(_, s)| s.contains(i)).map(|&(f, _)| f).collect();
+                fields.sort_unstable();
+                summary.stored[i] = fields;
             }
         }
-        let code = &self.code[m];
+        let mut held_escapes: Vec<(FieldKey, Escape)> = code
+            .held
+            .iter()
+            .enumerate()
+            .map(|(j, &f)| (f, Escape { always: escaping.contains(held + j), via: via[held + j].clone() }))
+            .collect();
+        held_escapes.sort_unstable_by_key(|&(f, _)| f);
+        summary.contents = held_escapes;
         let mut staying = Vec::new();
         let mut returned_sites = Vec::new();
         for (i, site) in code.sites.iter().enumerate() {
@@ -989,7 +1338,9 @@ impl Analysis<'_> {
             }
             if returned.contains(s) {
                 returned_sites.push((i, s));
-            } else if !escaping.contains(s) && dead_by_next_iteration(code, &vars, site, s) {
+            } else if !escaping.contains(s)
+                && dead_by_next_iteration(code, &vars, &contents, s, &mut Vec::new())
+            {
                 staying.push((site.id, site.call));
             }
         }
@@ -1004,7 +1355,7 @@ impl Analysis<'_> {
             let site = &code.sites[i];
             product = Some(Product { made: site.id, class: self.site_class(site), call: site.call });
         }
-        MethodFacts { summary, staying, product }
+        MethodFacts { summary, staying, product, read }
     }
 
     /// Writes on standard error why each object made in the methods whose names contain one of
@@ -1018,6 +1369,20 @@ impl Analysis<'_> {
             }
             let flows = self.flows(m);
             let first = self.code[m].arity;
+            let summary = &self.summaries[m];
+            let show = |e: &Escape| {
+                let via: Vec<String> = e.via.iter().map(|&r| method_name(class, r)).collect();
+                if e.always { "always".to_string() } else { format!("via {via:?}") }
+            };
+            let params: Vec<String> = summary.escapes.iter().map(show).collect();
+            let field_name = |&(t, i): &FieldKey| class.types[t].fields[i].name.clone();
+            let stored: Vec<Vec<String>> =
+                summary.stored.iter().map(|fs| fs.iter().map(field_name).collect()).collect();
+            let held: Vec<String> =
+                summary.contents.iter().map(|(f, e)| format!("{} {}", field_name(f), show(e))).collect();
+            eprintln!(
+                "[escape] {name}: parameters {params:?}, stored in {stored:?}, fields of `this` {held:?}"
+            );
             for i in 0..self.code[m].sites.len() {
                 if !flows.active[i] {
                     continue;
@@ -1030,17 +1395,33 @@ impl Analysis<'_> {
                     None => format!("new {}", class.types[c].name),
                 };
                 let mut out = format!("[escape] {name}: {made} (id {})", site.id);
-                let escapes = flows.escaping.contains(s)
-                    || flows.via[s].iter().any(|&r| self.this_escapes(r, c, &mut Vec::new()));
+                let escapes = flows.escaping.contains(s);
                 if flows.returned.contains(s) {
                     out.push_str(" is returned");
                 }
                 if escapes {
                     out.push_str(" escapes:\n");
+                    let holders: Vec<usize> = (0..first + self.code[m].sites.len())
+                        .filter(|&t| t != s && flows.contents[t].contains(s))
+                        .collect();
+                    if !holders.is_empty() {
+                        out.push_str(&format!(
+                            "  held by sources {holders:?} (parameters first, `this` 0)\n"
+                        ));
+                    }
+                    let mut seen = Vec::new();
+                    if let Some(path) = flows.via[s].iter().find_map(|&r| self.escape_path(r, c, &mut seen)) {
+                        let names: Vec<String> = path.iter().map(|&t| method_name(class, t)).collect();
+                        out.push_str(&format!("  as the receiver of {}:\n", names.join(" -> ")));
+                        let last = *path.last().expect("a path has a method");
+                        let mut seen = HashSet::new();
+                        self.explain(class, last, 0, Some(c), 2, &mut seen, &mut out);
+                    }
                     let mut seen = HashSet::new();
                     self.explain(class, m, s, Some(c), 1, &mut seen, &mut out);
                 } else if !flows.returned.contains(s) {
-                    if dead_by_next_iteration(&self.code[m], &flows.vars, site, s) {
+                    if dead_by_next_iteration(&self.code[m], &flows.vars, &flows.contents, s, &mut Vec::new())
+                    {
                         out.push_str(" stays");
                     } else {
                         out.push_str(" is held past its loop's iteration");
@@ -1051,11 +1432,31 @@ impl Analysis<'_> {
         }
     }
 
+    /// The methods that an object of class `c` runs from method `r` (called on it) to one that
+    /// lets its `this` escape always, if there is one.
+    fn escape_path(&self, r: usize, c: usize, seen: &mut Vec<usize>) -> Option<Vec<usize>> {
+        let Some(t) = self.hierarchy.implementation(r, c) else { return Some(vec![r]) };
+        if seen.contains(&t) {
+            return None;
+        }
+        seen.push(t);
+        let e = self.summaries[t].escapes.first()?;
+        if e.always {
+            return Some(vec![t]);
+        }
+        e.via.iter().find_map(|&r| self.escape_path(r, c, seen)).map(|mut path| {
+            path.insert(0, t);
+            path
+        })
+    }
+
     /// Whether a parameter with `e` escapes for an object of class `c`, if known.
     fn escapes_as(&self, e: &Escape, c: Option<usize>) -> bool {
         match c {
             None => e.always || !e.via.is_empty(),
-            Some(c) => e.always || e.via.iter().any(|&r| self.this_escapes(r, c, &mut Vec::new())),
+            Some(c) => {
+                e.always || e.via.iter().any(|&r| self.this_escapes(r, c, &mut Vec::new(), &mut Vec::new()))
+            }
         }
     }
 
@@ -1099,7 +1500,7 @@ impl Analysis<'_> {
                         if k == 0 && call.dispatched {
                             let r = call.method.expect("a dispatched call names its method");
                             match c {
-                                Some(c) if self.this_escapes(r, c, &mut Vec::new()) => {
+                                Some(c) if self.this_escapes(r, c, &mut Vec::new(), &mut Vec::new()) => {
                                     let t = self.hierarchy.implementation(r, c);
                                     out.push_str(&format!("{indent}the receiver of a call of {called}\n"));
                                     next.extend(t.map(|t| (t, 0)));
@@ -1159,6 +1560,43 @@ struct Flows {
     /// For each source, the methods called on it as the receiver (or that callees call on it):
     /// it escapes if what its class runs for one of them lets its `this` escape.
     via: Vec<Vec<usize>>,
+    /// What each source holds in its own fields (see `Contents`), in all of them and by field;
+    /// the last sources are what `this` holds in the fields the method reads.
+    contents: Vec<Sources>,
+    by_field: Vec<Vec<(FieldKey, Sources)>>,
+    /// The methods outside the calls' targets whose summaries were read.
+    read: Vec<usize>,
+}
+
+/// What `fields` holds in field `f`.
+fn field(fields: &mut Vec<(FieldKey, Sources)>, f: FieldKey) -> &mut Sources {
+    let at = match fields.iter().position(|&(g, _)| g == f) {
+        Some(at) => at,
+        None => {
+            fields.push((f, Sources::default()));
+            fields.len() - 1
+        }
+    };
+    &mut fields[at].1
+}
+
+/// Adds the methods `rs` to the `via` of each of `sources`; whether that added any.
+fn add_via(via: &mut [Vec<usize>], sources: &Sources, rs: &[usize]) -> bool {
+    let mut grew = false;
+    for i in sources.iter() {
+        for &r in rs {
+            if let Err(at) = via[i].binary_search(&r) {
+                via[i].insert(at, r);
+                grew = true;
+            }
+        }
+    }
+    grew
+}
+
+/// Lets `sources` escape as `e` says; whether that added anything.
+fn apply(e: &Escape, sources: &Sources, escaping: &mut Sources, via: &mut [Vec<usize>]) -> bool {
+    if e.always { escaping.union(sources) } else { add_via(via, sources, &e.via) }
 }
 
 /// The sources that `value` may be, with the variables holding `vars`.
@@ -1182,10 +1620,28 @@ fn method_name(class: &Class, m: usize) -> String {
 /// Whether the object of `site` (source `s`), if it is in a loop, can no longer be reached when
 /// the next iteration makes the next one: every variable that may hold it is declared inside the
 /// body of the innermost loop around it. (The results of calls are not kept across iterations.)
-fn dead_by_next_iteration(code: &Compiled, vars: &[Sources], site: &Site, s: usize) -> bool {
+/// An object held in the fields of another of the method's objects is held as long as that one:
+/// the other must be made in the same loop and be unreachable too by the next iteration.
+/// `seen` holds the sources being checked, which count as not.
+fn dead_by_next_iteration(
+    code: &Compiled,
+    vars: &[Sources],
+    contents: &[Sources],
+    s: usize,
+    seen: &mut Vec<usize>,
+) -> bool {
+    let first = code.arity;
+    let site = &code.sites[s - first];
     let Some(&innermost) = site.loops.as_ref().and_then(|loops| loops.last()) else { return true };
+    if seen.contains(&s) {
+        return false;
+    }
+    seen.push(s);
     code.named.iter().filter(|named| vars[named.var as usize].contains(s)).all(|named| {
         named.param.is_none() && named.loops.as_ref().is_some_and(|loops| loops.contains(&innermost))
+    }) && (first..first + code.sites.len()).filter(|&t| t != s && contents[t].contains(s)).all(|t| {
+        code.sites[t - first].loops.as_ref().is_some_and(|loops| loops.contains(&innermost))
+            && dead_by_next_iteration(code, vars, contents, t, seen)
     })
 }
 
