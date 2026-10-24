@@ -24,7 +24,8 @@ alone at a load of 2.9.
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
 - Rust: rustc 1.99.0 (b940084d7 2026-09-28); the crates the translator writes build in release
-  with fat LTO
+  with fat LTO, for processors with AVX2 (`target-cpu=x86-64-v3`, in the crate's
+  `.cargo/config.toml`)
 
 | program        | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
 |----------------|--------:|--------:|----------:|------------:|------------:|-------------:|
@@ -96,7 +97,7 @@ sites (class, and the method the `new` is in) that made the most objects, on sta
   `#[inline(never)]` throwing function (runtime `array.rs`). Interpreter's stack and locals are
   plain `Vec<i32>` with the same checks, since its indexes come from the program it interprets.
   `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`.
-- **MatrixMultiply (1.5x, kernel 2.2x).** The matrices are plain
+- **MatrixMultiply (0.6x, kernel 0.6x).** The matrices are plain
   `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
   and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
   is assigned. `create`'s store `m[i][j] = (x >>> 16) % 100` stays a plain store: Java computes a
@@ -105,8 +106,9 @@ sites (class, and the method the `new` is in) that made the most objects, on sta
   (`lower/argument_order.rs`); a remainder by a nonzero constant cannot throw. When `k` is a row
   of `b` and `n` is at most the lengths of `b[k]` and `c[i]`, the inner loop runs over the slices
   `&b[k][..n]` and `&mut c[i][..n]` without a check, and vectorizes (`analysis/arrays/slices.rs`);
-  otherwise it runs with every check. The remaining gap against the JIT is not profiled; the
-  loop computes with `wrapping_add` and `wrapping_mul` on `i32`.
+  otherwise it runs with every check. Built for x86-64 without AVX2, the vectorized loop has no
+  4-lane 32-bit multiply (SSE2 has none) and the kernel took twice Java's time; for
+  `x86-64-v3` it multiplies eight lanes at once (`vpmulld`), as the JIT does on this processor.
 - **Statics (1.0x).** In a program that starts no thread, a primitive static is a
   `java::Global<Cell<_>>`, a plain `static`, read with `get` and written with `set`; the
   histogram, an `int[]`, is a `java::LazyGlobal<RefCell<_>>`. The compiler keeps the
@@ -243,7 +245,9 @@ before 64 MB have been allocated (docs/collector.md).
 
 The crate is one of about 537,000 lines, built with all 16 cores. Fat LTO makes the binary 22%
 smaller (72 MB against 92 MB), and the crates the translator writes use it for their release
-builds (`lto = "fat"`). PGO (profile-guided optimization) is three steps, which
+builds (`lto = "fat"`). They build for AVX2 processors (`.cargo/config.toml`, which Cargo reads
+in the crate's directory); flags that a build adds go in `CARGO_BUILD_RUSTFLAGS`, which adds to
+them, not `RUSTFLAGS`, which replaces them. PGO (profile-guided optimization) is three steps, which
 `scripts/pgo-build.sh CRATE TRAIN_COMMAND` runs for any translated crate: a build with
 `-Cprofile-generate`, a run of it over inputs that are not the timed ones (`corpus/threads` and
 `corpus/whole-program` together, each project of `corpus/projects`, and the javac-check cases
