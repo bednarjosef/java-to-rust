@@ -72,7 +72,11 @@ impl BuilderCell for Arc<Locked<Vec<u16>>> {
 
 /// A builder whose code units are in the cell `C`.
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct Builder<C>(C);
+
+// A builder is its handle.
+unsafe impl<C: crate::Pointer> crate::Pointer for Builder<C> {}
 
 /// The builder of a program without threads.
 pub type StringBuilder = Builder<Arc<RefCell<Vec<u16>>>>;

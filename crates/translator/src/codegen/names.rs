@@ -100,13 +100,15 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     // Each class has its own `impl`, so names only need to be unique within their class tree.
     // `base` and `base_mut` are taken in each: the enum of a class tree has methods of those
     // names, the fields of the object's class (`dispatch.rs`), beside a method of the JDK's own
-    // `base` (`ByteBuffer.base()`, then `base_2`). So is `clone`, `Clone`'s, which copies a
+    // `base` (`ByteBuffer.base()`, then `base_2`). So is `view`, which lends what a value of the
+    // enum holds. So is `clone`, `Clone`'s, which copies a
     // handle: a Java `clone()` (`CalendarDate.clone()`) is `clone_2`.
     // The methods that answer for an object's class on an enum (`dispatch::class_value_impls`)
     // are taken too.
     let taken = [
         "base",
         "base_mut",
+        "view",
         "clone",
         "runtime_class",
         "runtime_class_name",

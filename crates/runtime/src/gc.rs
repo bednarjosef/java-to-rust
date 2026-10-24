@@ -1113,6 +1113,8 @@ impl Marker {
     /// Marks the slot that `word` points into, if it is a taken slot.
     #[inline(always)]
     fn candidate(&mut self, word: usize) {
+        // A `java::Thin` keeps its class number in the top bits of a handle.
+        let word = word & crate::thin::ADDRESS;
         if word.wrapping_sub(self.base) >= self.end - self.base {
             return;
         }

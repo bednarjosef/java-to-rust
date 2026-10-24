@@ -80,8 +80,16 @@ impl<'a> Gen<'a> {
             arms.insert(0, "None => Ok(None), ".to_string());
         }
         let fallthrough = if subtype { String::new() } else { format!("_ => Err(\"{message}\"), ") };
+        // The arms of an enum's elements match its view.
+        let scrutinee = match self.rep(s) {
+            hierarchy::Rep::Enum(t) if src_nullable => {
+                format!("e.as_ref().map({}::view)", struct_name(&self.class.types[t].name))
+            }
+            hierarchy::Rep::Enum(_) => "e.view()".to_string(),
+            hierarchy::Rep::Object(_) => "e".to_string(),
+        };
         format!(
-            "|e: &{src_ty}| -> Result<{dst_ty}, &'static str> {{ match e {{ {}{fallthrough}}} }}",
+            "|e: &{src_ty}| -> Result<{dst_ty}, &'static str> {{ match {scrutinee} {{ {}{fallthrough}}} }}",
             arms.concat()
         )
     }
@@ -100,9 +108,11 @@ impl<'a> Gen<'a> {
     ) -> Vec<String> {
         let cases: Vec<(String, usize)> = match self.rep(s) {
             hierarchy::Rep::Object(c) => vec![("x".to_string(), c)],
-            hierarchy::Rep::Enum(t) => {
-                self.enum_variants(t).into_iter().map(|c| (format!("{}(x)", self.variant(t, c)), c)).collect()
-            }
+            hierarchy::Rep::Enum(t) => self
+                .enum_variants(t)
+                .into_iter()
+                .map(|c| (format!("{}(x)", self.view_pattern(t, c)), c))
+                .collect(),
         };
         let missing = self.runtime("not_translated");
         cases

@@ -142,9 +142,10 @@ included (docs/collector.md).
 Design: [object-model.md](object-model.md).
 
 - **Class trees**: a class with subclasses keeps its fields in a struct (`ShapeFields`) that
-  each subclass embeds as `base`. A type that objects of several classes can be is a Rust `enum`
-  with a variant per class (`Shape::Circle(Arc<RefCell<Circle>>)`); a virtual call is a method of
-  the enum that matches the variant (`codegen/dispatch.rs`). Where every value of a type is one
+  each subclass embeds as `base`. A type that objects of several classes can be is an eight-byte
+  reference holding the class's number and the object's handle, read through a Rust `enum` with
+  a variant per class (`ShapeView::Circle(&Arc<RefCell<Circle>>)`); a virtual call is a method of
+  the type that matches the class (`codegen/dispatch.rs`). Where every value of a type is one
   concrete class, the value is that class's object and an upcast is free.
 - A constructor that uses `this` as a value or calls an overridable method switches its tree to
   Java's construction order (`analysis/whole_objects.rs`): the object is allocated zeroed and each

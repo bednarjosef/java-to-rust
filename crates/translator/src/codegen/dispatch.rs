@@ -60,6 +60,14 @@ pub(super) enum Need {
     CopyKind(usize),
 }
 
+/// `text` as the operand of a method call or field access: in parentheses unless it is a path,
+/// a call or a field.
+pub(super) fn operand(text: &str) -> String {
+    let plain =
+        text.chars().all(|ch| ch.is_alphanumeric() || "_:.()&".contains(ch)) && !text.starts_with(['&', '*']);
+    if plain { text.to_string() } else { format!("({text})") }
+}
+
 /// How a value of one class type becomes a value of another, in a cast or an `instanceof`.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Narrowing {
@@ -149,6 +157,91 @@ impl<'a> Gen<'a> {
             None => self.variant_name(&self.variants(t), c),
         };
         format!("{}::{name}", struct_name(&self.class.types[t].name))
+    }
+
+    /// The path of the variant of class `c` in the view of the enum of `t` (see `thin_impl`), as
+    /// a pattern matches it: `ShapeView::Circle`.
+    pub(super) fn view_pattern(&self, t: usize, c: usize) -> String {
+        let variant = self.variant(t, c);
+        let short = variant.rsplit("::").next().unwrap_or_default();
+        format!("{}::{short}", self.view_name(t))
+    }
+
+    /// The name of the view of the enum of `t`: its name and `View`, or `Variants` where the
+    /// program has a class of that name in the package.
+    pub(super) fn view_name(&self, t: usize) -> String {
+        let java = &self.class.types[t].name;
+        let taken = [format!("{java}View"), format!("{java}.View")]
+            .iter()
+            .any(|n| self.class.type_index(n).is_some());
+        let name = struct_name(java);
+        if taken { name + "Variants" } else { name + "View" }
+    }
+
+    /// The number of class `c` in a `java::Thin`: the same in the enum of every type, so that a
+    /// value keeps its bits as a value of a supertype.
+    pub(super) fn class_tag(&self, c: usize) -> u16 {
+        u16::try_from(c + 1).ok().filter(|&tag| tag != u16::MAX).expect("fewer than 65535 classes")
+    }
+
+    /// Whether the variant of class `c` holds a handle (`java::Thin::pointer`), else a value
+    /// (`java::Thin::value`): an object, an array, a builder or a box that keeps its identity.
+    pub(super) fn thin_pointer(&self, c: usize) -> bool {
+        match self.runtime_of(c) {
+            Some(Type::Array(_) | Type::StringBuilder) => true,
+            Some(ty @ Type::Boxed(_)) => self.faithful_box(ty),
+            Some(_) => false,
+            None => !self.holds_value(c),
+        }
+    }
+
+    /// The class numbers of `classes` as the pattern of a `match` on a value's tag: `3 | 5`.
+    pub(super) fn tags(&self, classes: &[usize]) -> String {
+        let tags: Vec<String> = classes.iter().map(|&c| self.class_tag(c).to_string()).collect();
+        tags.join(" | ")
+    }
+
+    /// The constructor of each variant (`Shape::Circle(handle)`, an associated function named as
+    /// the variant was) and `view()`, which lends what the value holds as the view's variant
+    /// (`java::Thin`).
+    fn thin_impl(&mut self, name: &str, view: &str, variants: &[usize], shorts: &[String]) {
+        let vis = self.vis();
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        for (&c, short) in variants.iter().zip(shorts) {
+            let payload = self.payload(c);
+            let (tag, make) = (self.class_tag(c), if self.thin_pointer(c) { "pointer" } else { "value" });
+            self.line("#[allow(non_snake_case)]");
+            self.line("#[inline]");
+            self.line(&format!("{vis}fn {short}(o: {payload}) -> {name} {{"));
+            self.line(&format!("    {name}(java::Thin::{make}({tag}, o))"));
+            self.line("}");
+        }
+        self.line("#[inline]");
+        if variants.is_empty() {
+            self.line(&format!("{vis}fn view(&self) -> {view} {{"));
+            self.line("    java::bad_tag(self.0.tag())");
+            self.line("}");
+        } else {
+            self.line(&format!("{vis}fn view(&self) -> {view}<'_> {{"));
+            self.indent += 1;
+            self.line("match self.0.tag() {");
+            self.indent += 1;
+            for (&c, short) in variants.iter().zip(shorts) {
+                let (tag, lend) =
+                    (self.class_tag(c), if self.thin_pointer(c) { "as_pointer" } else { "as_value" });
+                // The class number is the one its constructor gives.
+                self.line(&format!("{tag} => {view}::{short}(unsafe {{ self.0.{lend}() }}),"));
+            }
+            self.line("tag => java::bad_tag(tag),");
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// `hierarchy::rep`, worked out once for each type.
@@ -439,13 +532,14 @@ impl<'a> Gen<'a> {
                 if passing.is_empty() {
                     return known(self, false);
                 }
-                let patterns: Vec<String> =
-                    passing.iter().map(|&c| format!("{}(_)", self.variant(s, c))).collect();
-                let patterns = patterns.join(" | ");
+                let tags = self.tags(&passing);
                 let text = if nullable {
-                    format!("matches!({}, Some({patterns}))", self.object_place(value))
+                    format!(
+                        "{}.as_ref().is_some_and(|o| matches!(o.0.tag(), {tags}))",
+                        self.object_place(value)
+                    )
                 } else {
-                    format!("matches!({}, {patterns})", self.object(value))
+                    format!("matches!({}.0.tag(), {tags})", operand(&self.object(value)))
                 };
                 Code::atom(text)
             }
@@ -575,7 +669,7 @@ impl<'a> Gen<'a> {
             None => vec!["_ => unreachable!(),".to_string()],
         };
         let code = Code::atom(format!(
-            "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
+            "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ (src, dest) => match (src.view(), dest.view()) {{ {} }} }} }}",
             ints[0],
             ints[1],
             ints[2],
@@ -587,13 +681,14 @@ impl<'a> Gen<'a> {
         Code::atom(self.passed_on(code))
     }
 
-    /// The arrays that become `Object`s: the variant of `Object` of each, with its type.
-    fn object_arrays(&self) -> Vec<(String, Type)> {
+    /// The arrays that become `Object`s: the variant of `Object` of each and its pattern, with
+    /// its type.
+    fn object_arrays(&self) -> Vec<(String, String, Type)> {
         let Some(t) = self.object_index() else { return Vec::new() };
         let mut out = Vec::new();
         for c in self.enum_variants(t) {
             if let Some(array) = self.class.array_of(c) {
-                out.push((self.variant(t, c), array));
+                out.push((self.variant(t, c), self.view_pattern(t, c), array));
             }
         }
         out
@@ -630,7 +725,7 @@ impl<'a> Gen<'a> {
         let object = self.ty_name(Type::class(OBJECT));
         let [c, n] = ["component", "length"].map(|base| self.temp(base));
         let mut arms = Vec::new();
-        for (variant, array) in self.object_arrays() {
+        for (variant, _, array) in self.object_arrays() {
             let element = array.element();
             let name = rust_string(&self.type_class_name(element));
             let zero = self.element_zero(element);
@@ -657,18 +752,19 @@ impl<'a> Gen<'a> {
         let array_text = self.owned_option(array);
         let exception = self.runtime("Exception");
         let non_null = self.runtime("try_non_null");
+        let object = self.ty_name(Type::class(OBJECT));
         let len = self.runtime("len");
         let a = self.temp("array");
         let mut arms: Vec<String> = self
             .object_arrays()
             .into_iter()
-            .map(|(variant, _)| format!("{variant}(a) => Ok({len}(a)),"))
+            .map(|(_, pattern, _)| format!("{pattern}(a) => Ok({len}(a)),"))
             .collect();
         arms.push(format!(
             "_ => Err({exception}::new(\"java.lang.IllegalArgumentException\", \"Argument is not an array\")),"
         ));
         let code = Code::atom(format!(
-            "{{ let {a} = {array_text}; (|| -> Result<i32, {exception}> {{ match {non_null}({a}.as_ref())? {{ {} }} }})() }}",
+            "{{ let {a} = {array_text}; (|| -> Result<i32, {exception}> {{ match {object}::view({non_null}({a}.as_ref())?) {{ {} }} }})() }}",
             arms.join(" ")
         ));
         self.reflect_result(code, id)
@@ -685,6 +781,7 @@ impl<'a> Gen<'a> {
         let value_text = self.owned_option(value);
         let exception = self.runtime("Exception");
         let non_null = self.runtime("try_non_null");
+        let object_type = self.ty_name(Type::class(OBJECT));
         let (len, set) = (self.runtime("len"), self.runtime("try_set"));
         let [a, i, v] = ["array", "index", "value"].map(|base| self.temp(base));
         let fail = |message: &str| match message {
@@ -698,14 +795,15 @@ impl<'a> Gen<'a> {
         );
         let object = self.object_index();
         let mut arms = Vec::new();
-        for (variant, array) in self.object_arrays() {
+        for (_, pattern, array) in self.object_arrays() {
             let element = array.element();
             let stored = if element.is_numeric() || element == Type::Boolean {
                 let mut sources = Vec::new();
                 for &source in widening_sources(element) {
                     let boxed = Type::boxed(source);
                     let Some(c) = self.class.type_of(boxed) else { continue };
-                    let Some(source_variant) = object.and_then(|o| self.variant_of(o, c)) else { continue };
+                    let Some(o) = object.filter(|&o| self.enum_variants(o).contains(&c)) else { continue };
+                    let source_variant = self.view_pattern(o, c);
                     let read = if self.faithful_box(boxed) { "**b" } else { "*b" };
                     let read = if source == element {
                         read.to_string()
@@ -716,7 +814,7 @@ impl<'a> Gen<'a> {
                 }
                 sources.push(format!("_ => {},", fail("argument type mismatch")));
                 format!(
-                    "{{ let Some(given) = {v}.as_ref() else {{ {} }}; {bounds} match given {{ {} }} }}",
+                    "{{ let Some(given) = {v}.as_ref() else {{ {} }}; {bounds} match {object_type}::view(given) {{ {} }} }}",
                     fail(""),
                     sources.join(" ")
                 )
@@ -749,12 +847,12 @@ impl<'a> Gen<'a> {
                 };
                 format!("{{ {bounds} {reference} }}")
             };
-            arms.push(format!("{variant}(a) => {{ let element = {stored}; {set}(a, {i}, element) }}"));
+            arms.push(format!("{pattern}(a) => {{ let element = {stored}; {set}(a, {i}, element) }}"));
         }
         arms.push(format!("_ => {{ {}; }}", fail("Argument is not an array")));
         let code = Code::atom(format!(
             "{{ let ({a}, {i}, {v}) = ({array_text}, {index}, {value_text}); (|| -> Result<(), {exception}> {{ \
-             match {non_null}({a}.as_ref())? {{ {} }} }})() }}",
+             match {object_type}::view({non_null}({a}.as_ref())?) {{ {} }} }})() }}",
             arms.join(" ")
         ));
         self.reflect_result(code, id)
@@ -910,45 +1008,6 @@ impl<'a> Gen<'a> {
         } else {
             format!("{pointer}<{cell}<{structure}>>")
         }
-    }
-
-    /// Whether the variant of class `c` holds a `java::Arc` of the class's object.
-    fn handle_variant(&self, c: usize) -> bool {
-        self.runtime_of(c).is_none() && !self.holds_value(c) && self.pointer(c) == "Arc"
-    }
-
-    /// The `Clone` of an enum whose first `handles` variants hold a `java::Arc` each: those are
-    /// copied by `java::copy_handle_variant`, the others by a `match`.
-    fn handle_variants_clone(&mut self, name: &str, shorts: &[String], handles: usize) {
-        self.line(&format!("java::handle_variants!({name}, {handles});"));
-        self.gap();
-        self.line(&format!("impl Clone for {name} {{"));
-        self.indent += 1;
-        self.line("#[inline]");
-        self.line(&format!("fn clone(&self) -> {name} {{"));
-        self.indent += 1;
-        if handles == shorts.len() {
-            self.line("match java::copy_handle_variant(self) {");
-            self.indent += 1;
-            self.line("Some(copy) => copy,");
-            self.line("None => unreachable!(\"every variant holds a handle\"),");
-        } else {
-            self.line("if let Some(copy) = java::copy_handle_variant(self) {");
-            self.line("    return copy;");
-            self.line("}");
-            self.line("match self {");
-            self.indent += 1;
-            for short in &shorts[handles..] {
-                self.line(&format!("{name}::{short}(o) => {name}::{short}(o.clone()),"));
-            }
-            self.line("_ => unreachable!(\"a handle's variant is copied above\"),");
-        }
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
     }
 
     /// Whether the objects of the enum of `t` are immutable: a family is immutable together.
@@ -1334,28 +1393,31 @@ impl<'a> Gen<'a> {
             return self.closure_alias(t);
         }
         let name = struct_name(&self.class.types[t].name);
-        let mut variants = self.enum_variants(t);
-        // The variants that hold a `java::Arc` come first, so that a copy of one is a copy of
-        // the enum's bits without a `match` over the classes (`java::copy_handle_variant`).
-        variants.sort_by_key(|&c| !self.handle_variant(c));
-        let handles = variants.iter().filter(|&&c| self.handle_variant(c)).count();
+        let view = self.view_name(t);
+        let variants = self.enum_variants(t);
         let shorts: Vec<String> = variants
             .iter()
             .map(|&c| self.variant(t, c).rsplit("::").next().unwrap_or_default().to_string())
             .collect();
+        let vis = self.vis();
         self.gap();
-        self.line(if handles == 0 { "#[derive(Clone)]" } else { "#[repr(u16)]" });
-        self.line(&format!("{}enum {name} {{", self.vis()));
-        self.indent += 1;
-        for (&c, short) in variants.iter().zip(&shorts) {
-            let payload = self.payload(c);
-            self.line(&format!("{short}({payload}),"));
+        self.line("#[derive(Clone, Copy)]");
+        self.line("#[repr(transparent)]");
+        self.line(&format!("{vis}struct {name}({vis}java::Thin);"));
+        self.gap();
+        if variants.is_empty() {
+            self.line(&format!("{vis}enum {view} {{}}"));
+        } else {
+            self.line(&format!("{vis}enum {view}<'a> {{"));
+            self.indent += 1;
+            for (&c, short) in variants.iter().zip(&shorts) {
+                let payload = self.payload(c);
+                self.line(&format!("{short}(&'a {payload}),"));
+            }
+            self.indent -= 1;
+            self.line("}");
         }
-        self.indent -= 1;
-        self.line("}");
-        if handles > 0 {
-            self.handle_variants_clone(&name, &shorts, handles);
-        }
+        self.thin_impl(&name, &view, &variants, &shorts);
         let wanted: Vec<Need> = self.wanted.iter().copied().collect();
         let mark = self.out.len();
         self.gap();
@@ -1366,7 +1428,7 @@ impl<'a> Gen<'a> {
             match *need {
                 Need::Base(s) if s == t => self.base_fn(t, false),
                 Need::BaseMut(s) if s == t => self.base_fn(t, true),
-                Need::Convert(s, to) if s == t => self.convert_fn(t, to),
+                Need::Convert(s, to) if s == t => self.convert_fn(to),
                 Need::Narrow(s, to) if s == t => self.narrow_fn(t, to),
                 Need::Dispatch(s, group) if s == t => self.dispatcher(t, group),
                 Need::Body(i) if self.homes[i] == Home::Enum(t) => {
@@ -1405,14 +1467,14 @@ impl<'a> Gen<'a> {
     /// a `match` with no arms for an enum without variants.
     fn match_arms(&mut self, t: usize, variants: &[usize], arm: &dyn Fn(&mut Self, usize) -> (String, bool)) {
         if variants.is_empty() {
-            self.line("match *self {}");
+            self.line("match self.view() {}");
             return;
         }
         let arms: Vec<(String, String, bool)> = variants
             .iter()
             .map(|&c| {
                 let (text, uses) = arm(self, c);
-                (self.variant(t, c), text, uses)
+                (self.view_pattern(t, c), text, uses)
             })
             .collect();
         // The same call for every variant needs no `match`.
@@ -1420,7 +1482,7 @@ impl<'a> Gen<'a> {
             self.line(&arms[0].1);
             return;
         }
-        self.line("match self {");
+        self.line("match self.view() {");
         self.indent += 1;
         for (variant, text, uses) in arms {
             let binding = if uses { "o" } else { "_" };
@@ -1466,23 +1528,13 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
-    /// `to_<to>()`: the same object as a value of the enum of a supertype.
-    fn convert_fn(&mut self, t: usize, to: usize) {
-        let variants = self.enum_variants(t);
+    /// `to_<to>()`: the same object as a value of the enum of a supertype, which has the same
+    /// bits: a class has one number in every enum (`class_tag`).
+    fn convert_fn(&mut self, to: usize) {
         self.gap();
         let target = struct_name(&self.class.types[to].name);
         self.line(&format!("{}fn {}(&self) -> {target} {{", self.vis(), self.to_name(to)));
-        self.indent += 1;
-        // The flows of the analysis may keep a class's objects from ever becoming values of `to`
-        // (`hierarchy::flows`); that arm never runs.
-        self.match_arms(t, &variants, &|g: &mut Self, c| match g.variant_of(to, c) {
-            Some(variant) => (format!("{variant}({})", g.held(c)), true),
-            None => {
-                let (from, to) = (&g.class.types[c].name, &g.class.types[to].name);
-                (format!("unreachable!(\"an object of {from} never becomes a value of {to}\")"), true)
-            }
-        });
-        self.indent -= 1;
+        self.line(&format!("    {target}(self.0)"));
         self.line("}");
     }
 
@@ -1498,15 +1550,25 @@ impl<'a> Gen<'a> {
         let passing = self.passing(t, to);
         if passing.is_empty() {
             self.line("None");
+        } else if let Some(e) = rep {
+            // A value of another enum has the same bits.
+            let tags: Vec<String> = passing.iter().map(|&c| self.class_tag(c).to_string()).collect();
+            let target = struct_name(&self.class.types[e].name);
+            if passing.len() == variants.len() {
+                self.line(&format!("Some({target}(self.0))"));
+            } else {
+                self.line("match self.0.tag() {");
+                self.indent += 1;
+                self.line(&format!("{} => Some({target}(self.0)),", tags.join(" | ")));
+                self.line("_ => None,");
+                self.indent -= 1;
+                self.line("}");
+            }
         } else {
-            self.line("match self {");
+            self.line("match self.view() {");
             self.indent += 1;
             for &c in &passing {
-                let value = match rep {
-                    Some(e) => format!("{}({})", self.variant(e, c), self.held(c)),
-                    None => self.held(c).to_string(),
-                };
-                self.line(&format!("{}(o) => Some({value}),", self.variant(t, c)));
+                self.line(&format!("{}(o) => Some({}),", self.view_pattern(t, c), self.held(c)));
             }
             if passing.len() < variants.len() {
                 self.line("_ => None,");
@@ -1816,10 +1878,17 @@ impl<'a> Gen<'a> {
                 return failed(self, from);
             }
         };
-        let variant = self.variant(e, c);
+        let variant = self.view_pattern(e, c);
+        let name = struct_name(&self.class.types[e].name);
+        // The argument is a parameter, read again where it is not of the class.
+        let viewed = if optional {
+            format!("{}.as_ref().map({name}::view)", operand(&place))
+        } else {
+            format!("{}.view()", operand(&place))
+        };
         let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
         if !optional && self.enum_variants(e).len() == 1 {
-            return format!("{{ let {pattern} = {place}; {compare} }}");
+            return format!("{{ let {pattern} = {viewed}; {compare} }}");
         }
         // Any other object fails the cast to `c` that `compareTo` makes; null fails first.
         self.need(Need::CastSource(e));
@@ -1848,9 +1917,11 @@ impl<'a> Gen<'a> {
                     format!("{{ let Some(b) = b.as_ref() else {{ {throw} }}; {fail} }}")
                 }
             };
-            return format!("match {place} {{ {pattern} => {compare}, b => {other} }}");
+            return format!(
+                "match {viewed} {{ {pattern} => {compare}, _ => {{ let b = {place}; {other} }} }}"
+            );
         }
-        format!("match {place} {{ {pattern} => {compare}, b => {fail} }}")
+        format!("match {viewed} {{ {pattern} => {compare}, _ => {{ let b = {place}; {fail} }} }}")
     }
 
     /// `Object`'s `equals` or `hashCode` (method `r`) for a value of class `c` bound to `o`
@@ -1895,9 +1966,12 @@ impl<'a> Gen<'a> {
         if !self.enum_variants(e).contains(&c) {
             return "false".to_string();
         }
-        let variant = self.variant(e, c);
-        let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
-        format!("matches!({place}, {pattern} if {same})")
+        let variant = self.view_pattern(e, c);
+        if optional {
+            format!("{}.as_ref().is_some_and(|b| matches!(b.view(), {variant}(b) if {same}))", operand(place))
+        } else {
+            format!("matches!({}.view(), {variant}(b) if {same})", operand(place))
+        }
     }
 
     /// The address of the object of class `c` that `handle`, a `&Rc<..>`, refers to, which is
@@ -2094,12 +2168,12 @@ impl<'a> Gen<'a> {
         self.line(&format!("fn eq(&self, other: &{name}) -> bool {{"));
         self.indent += 1;
         if variants.is_empty() {
-            self.line("match *self {}");
+            self.line("match self.view() {}");
         } else {
-            self.line("match (self, other) {");
+            self.line("match (self.view(), other.view()) {");
             self.indent += 1;
             for &c in variants {
-                let v = self.variant(t, c);
+                let v = self.view_pattern(t, c);
                 let same = self.same_variant(c);
                 self.line(&format!("({v}(a), {v}(b)) => {same},"));
             }
@@ -2155,12 +2229,12 @@ impl<'a> Gen<'a> {
         self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
         self.indent += 1;
         if variants.is_empty() {
-            self.line("match *self {}");
+            self.line("match self.view() {}");
         } else {
-            self.line("match (self, other) {");
+            self.line("match (self.view(), other.view()) {");
             self.indent += 1;
             for &c in variants {
-                let v = self.variant(t, c);
+                let v = self.view_pattern(t, c);
                 let mut same = self.same_variant(c);
                 // A `Boolean` or a `Byte` is one of `valueOf`'s cached objects, the same object
                 // exactly when the values are equal (see `analysis::boxing`). Shared strings are
@@ -2215,7 +2289,7 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
             self.indent += 1;
-            self.line("match *self {}");
+            self.line("match self.view() {}");
             self.indent -= 1;
             self.line("}");
             self.indent -= 1;
@@ -2240,11 +2314,11 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
         self.indent += 1;
-        self.line("match self {");
+        self.line("match self.view() {");
         self.indent += 1;
         let unkept = self.runtime("unkept_monitor");
         for (&c, handle) in variants.iter().zip(handles) {
-            let v = self.variant(t, c);
+            let v = self.view_pattern(t, c);
             if handle {
                 self.line(&format!("{v}(o) => {has}::monitor(o),"));
             } else {

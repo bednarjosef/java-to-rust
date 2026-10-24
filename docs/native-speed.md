@@ -112,10 +112,12 @@ at each collection, and marking in parallel. Planned beyond it:
 
 ### 1.4 Types, dispatch and values
 
-- A reference to an interface, an abstract class or `Object` is one `u32`, not an enum of
-  handles. Its class is read from its block.
-- Calls on it dispatch through the class: a `match` on the class number at first (a jump table),
-  then per-class function tables where that is smaller.
+- Built: a reference to an interface, an abstract class or `Object` is eight bytes, not an enum
+  of handles: the class's number in the top 16 bits and the handle below (`java::Thin`,
+  docs/object-model.md 1.2). Planned: with `u32` references the number moves into the object's
+  block.
+- Calls on it dispatch through the class: a `match` on the class number (built; a jump table),
+  then per-class function tables where that is smaller (planned).
 - `Integer`, `Character`, `Short`, `Byte` and `Boolean` values held as `Object` or in generic
   collections are stored in the reference itself, with one tag bit, so boxing allocates nothing.
   Their identity is preserved where Java defines it: the cached range of `valueOf`.
@@ -136,8 +138,8 @@ Each part lands on its own and passes the gate (all checks and the 28 targets):
    handles for objects, with the enums and cells unchanged. This removed the counting and
    freeing code, which is where the measured third was. The collector scans conservatively.
 2. Header-free class blocks and `u32` references, with tracing from generated reference maps.
-3. Thin references for multi-class types, replacing the enums of handles, with dispatch on the
-   class number.
+3. Built: thin references for multi-class types, replacing the enums of handles, with dispatch
+   on the class number.
 4. Fields as cells, monitors and identity hashes in side tables, removing `RefCell` and
    `Locked`.
 5. Strings and arrays in the heap; boxed values in references.

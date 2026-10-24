@@ -11,11 +11,13 @@
 //! made from one of a sized type anyway (that needs the unstable `CoerceUnsized`), so closures of
 //! functional interfaces that threads share stay `std::sync::Arc<dyn Fn ..>`.
 
+use crate::thin::ADDRESS;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
 /// A reference to a `T` in the collected heap. See the module comment.
+#[repr(transparent)]
 pub struct Arc<T> {
     ptr: NonNull<T>,
     owns: PhantomData<T>,
@@ -51,13 +53,14 @@ impl<T> Arc<T> {
     /// Whether `a` and `b` are handles of the same object (Java's `==`).
     #[inline]
     pub fn ptr_eq(a: &Arc<T>, b: &Arc<T>) -> bool {
-        std::ptr::addr_eq(a.ptr.as_ptr(), b.ptr.as_ptr())
+        std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
     }
 
-    /// The address of the value, which identifies the object while it lives.
-    #[inline]
+    /// The address of the value, which identifies the object while it lives: the pointer without
+    /// the class number that a handle lent by a `java::Thin` carries in its top bits.
+    #[inline(always)]
     pub fn as_ptr(this: &Arc<T>) -> *const T {
-        this.ptr.as_ptr()
+        (this.ptr.as_ptr() as usize & ADDRESS) as *const T
     }
 
     /// How many handles there may be of the object: handles are not counted, so always more than
@@ -87,54 +90,13 @@ impl<T> Clone for Arc<T> {
     }
 }
 
-/// An enum of handles whose first `HANDLES` variants each hold one `Arc` (of any `T`): the enum
-/// of a class or interface of the translation, with the variants of its classes first. A copy of
-/// one of those variants is a copy of the handle, whichever class it is, so `copy_handle_variant`
-/// makes it with no `match` over the classes.
-///
-/// # Safety
-///
-/// The enum is `#[repr(u16)]`, so each variant is laid out as a `#[repr(C)]` struct of its
-/// discriminant and its field, and its discriminants are those of the declaration order (no
-/// explicit ones). Each of its first `HANDLES` variants has exactly one field, an `Arc` of a sized
-/// type.
-pub unsafe trait HandleVariants: Sized {
-    const HANDLES: u16;
-}
-
-/// `handle_variants!(Enum, n)`: the enum's first `n` variants hold one `Arc` each, as
-/// `HandleVariants` requires. The generated code declares it with the enum.
-#[macro_export]
-macro_rules! handle_variants {
-    ($enum:ty, $handles:expr) => {
-        // The translator writes the enum `#[repr(u16)]` with the handles' variants first.
-        unsafe impl $crate::HandleVariants for $enum {
-            const HANDLES: u16 = $handles;
-        }
-    };
-}
-
-/// A copy of `e` when it is one of the variants that hold an `Arc`: the enum's bits copied, which
-/// copies the handle. `None` for any other variant, which the enum's `Clone` copies by its `match`.
-#[inline(always)]
-pub fn copy_handle_variant<E: HandleVariants>(e: &E) -> Option<E> {
-    let at = e as *const E as *const u8;
-    // A `#[repr(u16)]` enum starts with its discriminant.
-    let tag = unsafe { *(at as *const u16) };
-    if tag >= E::HANDLES {
-        return None;
-    }
-    // The variant holds one handle, which is a pointer with no count.
-    Some(unsafe { std::ptr::read(e) })
-}
-
 impl<T> Deref for Arc<T> {
     type Target = T;
 
     #[inline]
     fn deref(&self) -> &T {
         // The collector keeps the value while a handle of it is reachable.
-        unsafe { self.ptr.as_ref() }
+        unsafe { &*Arc::as_ptr(self) }
     }
 }
 
@@ -147,30 +109,6 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Arc<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[repr(u16)]
-    enum Value {
-        Small(Arc<u8>),
-        Text(Arc<String>),
-        Plain(u8),
-    }
-
-    crate::handle_variants!(Value, 2);
-
-    #[test]
-    fn a_handle_variant_is_copied_as_its_handle() {
-        let text = Arc::new("t".to_string());
-        let value = Value::Text(text.clone());
-        let Some(Value::Text(copy)) = copy_handle_variant(&value) else { panic!("a copy of the handle") };
-        assert!(Arc::ptr_eq(&copy, &text));
-        let small = Value::Small(Arc::new(7));
-        let Some(Value::Small(copy)) = copy_handle_variant(&small) else { panic!("a copy of the handle") };
-        assert_eq!(*copy, 7);
-        let plain = Value::Plain(1);
-        assert!(copy_handle_variant(&plain).is_none());
-        let Value::Plain(n) = plain else { panic!("the same variant") };
-        assert_eq!(n, 1);
-    }
 
     #[test]
     fn objects_of_no_size_have_addresses_of_their_own() {
