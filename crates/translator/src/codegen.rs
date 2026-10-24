@@ -176,6 +176,7 @@ fn generate_with(
         variant_lists: Default::default(),
         checked_value_ofs: Default::default(),
         group_names,
+        receiver_sets: class.receivers.values().map(|s| (dispatch::receiver_key(s), s.clone())).collect(),
         shared_names: HashSet::new(),
         live: live.clone(),
         class_tags: dispatch::class_numbers(class),
@@ -313,6 +314,8 @@ struct Gen<'a> {
     checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: HashMap<usize, String>,
+    /// The sets of classes in `Class::receivers`, by their key (`receiver_key`).
+    receiver_sets: HashMap<u64, Vec<usize>>,
     /// The simple names of types, and those names with the outer classes, that more than one
     /// type has: the conversions to such a type's enum are named with more (`as_name`).
     shared_names: HashSet<String>,

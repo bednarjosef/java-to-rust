@@ -321,6 +321,11 @@ pub struct Class {
     /// (`lower::handles`). In an array that threads share, they are `SeqCst` loads and stores of
     /// the element's cell.
     pub volatile_elements: HashSet<ExprId>,
+    /// The classes whose objects the receiver of each instance call in code that can run may be,
+    /// by the receiver's id, from the points-to facts of `analysis::live_methods` (a whole
+    /// program's); sorted. A call that is not here may be on an object of any class its type
+    /// allows.
+    pub receivers: HashMap<ExprId, Vec<usize>>,
 }
 
 impl Class {
