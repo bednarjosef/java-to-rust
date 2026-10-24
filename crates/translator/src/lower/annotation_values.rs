@@ -275,7 +275,9 @@ impl<'t> Lowering<'t> {
                     .into_iter()
                     .map(|i| self.element_value(i, element_ty))
                     .collect::<Result<_, Error>>()?;
-                self.synth(ExprKind::ArrayLit(items), value.pos(), ty)
+                let made = self.synth(ExprKind::ArrayLit(items), value.pos(), ty);
+                self.note_made_array_class(method, java, &made)?;
+                made
             }
             _ => self.element_value(value, ty)?,
         };

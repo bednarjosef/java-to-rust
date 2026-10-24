@@ -206,6 +206,24 @@ impl<'t> Lowering<'t> {
         Ok(())
     }
 
+    /// Notes the class of an array that lowering makes itself where Java makes one of the class
+    /// `java` (`java.lang.Class<?>[]`), as `note_element_class` does for one the source makes: an
+    /// annotation's array member, which the JDK's `memberValueToString` tells by its class.
+    pub(super) fn note_made_array_class(&self, node: Node<'t>, java: &str, made: &Expr) -> Result<(), Error> {
+        if self.covariant.known.is_empty() {
+            return Ok(());
+        }
+        let Some(element) = java.strip_suffix("[]") else { return Ok(()) };
+        if element.ends_with("[]") || !Self::is_object_array(made.ty) {
+            return Ok(());
+        }
+        let exact = Type::array(self.ty(node, element)?);
+        if Self::of_objects(exact.element()) && exact != made.ty {
+            self.element_classes.borrow_mut().insert(made.id, exact);
+        }
+        Ok(())
+    }
+
     /// Whether `ty` is `Object[]`.
     fn is_object_array(ty: Type) -> bool {
         matches!(ty, Type::Array(element) if Self::is_object(*element))
