@@ -1,5 +1,9 @@
 //! Code generation for static initialization. A `static final` compile-time constant is a Rust
-//! `const`, read without a cell. Other static fields are thread-local cells. A class whose static
+//! `const`, read without a cell. In a program that starts no thread, every other static field is
+//! a `java::Global` (or `java::LazyGlobal`, when its initializer is not a constant): a plain
+//! `static` that holds a `Cell` or a `RefCell` and is read and written with the text of a
+//! thread-local cell, which the compiler can keep in a register through a loop (see the runtime's
+//! `statics.rs`). A class whose static
 //! initialization must run eagerly (see `analysis::statics`) has an `init` function that runs its
 //! `<clinit>` once, and every static method, constructor and access from another class calls it
 //! first, as Java initializes a class on first use. The `init` function is inlined and only tests
@@ -11,7 +15,7 @@
 //! anything else a `java::Locked` (`X.with_borrow(..)`, `X.with_borrow_mut(..)`), inside a
 //! `LazyLock` when its initializer is not a constant; such an eager class's flag is a
 //! `java::ClassInit`, which makes another thread wait while one runs the initialization. The other
-//! classes' statics stay thread-local cells, which only the main thread uses.
+//! classes' statics are thread-local cells, which only the main thread uses.
 
 use super::*;
 
@@ -85,6 +89,10 @@ impl<'a> Gen<'a> {
         let (process_eager, eager): (Vec<usize>, Vec<usize>) = eager.into_iter().partition(process);
         let (process_cells, cells): (Vec<_>, Vec<_>) = cells.into_iter().partition(|(t, _)| process(t));
         self.process_statics(&process_eager, process_cells);
+        if !self.facts.threaded {
+            self.globals(&eager, cells);
+            return;
+        }
         let mut items = Vec::new();
         for &t in &eager {
             items.push(format!(
@@ -113,6 +121,32 @@ impl<'a> Gen<'a> {
             }
             self.indent -= 1;
             self.line("}");
+        }
+    }
+
+    /// The statics of a program that starts no thread, each a `java::Global` (see the module's
+    /// documentation): the flags of the eager classes `eager`, then the static fields `cells`.
+    fn globals(&mut self, eager: &[usize], cells: Vec<(usize, &'a Field)>) {
+        let (global, lazy) = (self.runtime("Global"), self.runtime("LazyGlobal"));
+        let vis = self.vis();
+        for &t in eager {
+            let flag = flag(&self.class.types[t].name);
+            self.line(&format!(
+                "{vis}static {flag}: {global}<Cell<bool>> = {global}::new(Cell::new(false));"
+            ));
+        }
+        for (t, f) in cells {
+            let (cell, ty, init, constant) = self.static_cell(t, f);
+            let kind = if is_cell(f.ty) { "Cell" } else { "RefCell" };
+            if constant {
+                self.line(&format!(
+                    "{vis}static {cell}: {global}<{kind}<{ty}>> = {global}::new({kind}::new({init}));"
+                ));
+            } else {
+                self.line(&format!(
+                    "{vis}static {cell}: {lazy}<{kind}<{ty}>> = {lazy}::new(|| {kind}::new({init}));"
+                ));
+            }
         }
     }
 

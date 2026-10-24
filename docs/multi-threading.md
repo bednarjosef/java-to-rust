@@ -17,8 +17,8 @@ hand-written itself.
 1. **A program is multi-threaded exactly when it can start a thread**: some reachable method
    calls the native behind `Thread.start()` (`analysis/threads.rs`, `threaded`). Every other way
    of running code on another thread (executors, `ForkJoinPool`) ends there. A program that
-   cannot start a thread is translated exactly as without this work: `RefCell`,
-   thread-local statics, `synchronized` as a null check. It pays nothing.
+   cannot start a thread is translated exactly as without this work: `RefCell`, statics as
+   plain `java::Global` cells, `synchronized` as a null check. It pays nothing.
 2. **Stronger synchronization than Java's is always allowed, and it is all the translation
    uses.** Every access to memory that another thread can reach goes through a lock or an atomic
    with at least acquire/release ordering, never `Relaxed`. Every execution of the Rust program

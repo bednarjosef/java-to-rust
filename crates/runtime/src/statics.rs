@@ -1,5 +1,10 @@
-//! The static fields of a program whose threads share them. A single-threaded program keeps its
-//! statics in thread-local cells; with threads, each is a process-wide `static`:
+//! The static fields of a program. A program that starts no thread keeps each in a `Global`: a
+//! plain `static` holding a `Cell` (a primitive) or a `RefCell`, read and written with the text of
+//! a thread-local cell, inside a `LazyGlobal` when its initializer is not a constant. Unlike a
+//! thread-local, it is an address the compiler knows, which it can keep in a register through a
+//! loop that writes only arrays and objects. With threads, the statics that threads share are
+//! process-wide and synchronized, and the others stay thread-local cells, which only the main
+//! thread uses:
 //!
 //! - a primitive is a `java::Atomic<T>`, read with `get()` (acquire) and written with `set(v)`
 //!   (release), the same text as a thread-local `Cell`'s; on x86-64 both are plain moves;
@@ -8,12 +13,84 @@
 //! - the flag that a class's static initialization has run is a `java::ClassInit`, which runs it
 //!   once for the whole process, as JLS 12.4.2 describes.
 
-use std::cell::UnsafeCell;
+use std::cell::{OnceCell, RefCell, UnsafeCell};
+use std::ops::Deref;
 use std::sync::atomic::{
     AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize,
     Ordering,
 };
 use std::sync::{Condvar, Mutex};
+
+/// A static field of a program that starts no thread: a `Cell` or a `RefCell` (`C`), which
+/// `Deref` reaches. `with_borrow`, `with_borrow_mut` and `set` of a `RefCell` are those of a
+/// thread-local one.
+pub struct Global<C>(C);
+
+// Only the program's one thread runs Java code. The collector reads statics while that thread
+// waits for it.
+unsafe impl<C> Sync for Global<C> {}
+
+impl<C> Global<C> {
+    pub const fn new(cell: C) -> Global<C> {
+        Global(cell)
+    }
+}
+
+impl<C> Deref for Global<C> {
+    type Target = C;
+
+    #[inline(always)]
+    fn deref(&self) -> &C {
+        &self.0
+    }
+}
+
+/// A `Global` whose value is computed on first use, by `init`.
+pub struct LazyGlobal<C> {
+    cell: OnceCell<C>,
+    init: fn() -> C,
+}
+
+// As for `Global`.
+unsafe impl<C> Sync for LazyGlobal<C> {}
+
+impl<C> LazyGlobal<C> {
+    pub const fn new(init: fn() -> C) -> LazyGlobal<C> {
+        LazyGlobal { cell: OnceCell::new(), init }
+    }
+}
+
+impl<C> Deref for LazyGlobal<C> {
+    type Target = C;
+
+    #[inline(always)]
+    fn deref(&self) -> &C {
+        self.cell.get_or_init(self.init)
+    }
+}
+
+macro_rules! like_thread_local {
+    ($($global:ident),*) => {$(
+        impl<T> $global<RefCell<T>> {
+            #[inline(always)]
+            pub fn with_borrow<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+                f(&(**self).borrow())
+            }
+
+            #[inline(always)]
+            pub fn with_borrow_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+                f(&mut (**self).borrow_mut())
+            }
+
+            #[inline(always)]
+            pub fn set(&self, value: T) {
+                drop((**self).replace(value));
+            }
+        }
+    )*};
+}
+
+like_thread_local!(Global, LazyGlobal);
 
 /// A primitive static field shared by threads: every read acquires and every write releases, so
 /// a thread that sees a value sees everything the writing thread did before it. The value is
