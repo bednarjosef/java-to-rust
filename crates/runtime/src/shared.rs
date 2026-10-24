@@ -7,6 +7,10 @@
 //! The value is never dropped, as a Java object is never destroyed: memory it owned that Rust
 //! would have freed in its drop is found unreachable by the collector too.
 //!
+//! An object that never leaves the method that creates it may live in a `Slot` on that method's
+//! stack instead (`Slot::put`): its handle is the same `Arc`, so the code that uses it does not
+//! change.
+//!
 //! There are no weak references, and the value is sized: a handle of a `dyn` type could not be
 //! made from one of a sized type anyway (that needs the unstable `CoerceUnsized`), so closures of
 //! functional interfaces that threads share stay `std::sync::Arc<dyn Fn ..>`.
@@ -83,6 +87,51 @@ impl<T> Arc<T> {
     }
 }
 
+/// A place on the stack of a method for one object that never leaves the method (docs/collector.md,
+/// "Objects on the stack"). The translation declares one at the start of the method for each
+/// `new` whose object stays in it, and `put` makes the object there.
+///
+/// The collector scans the stack word by word, so the objects in the heap that the object's
+/// fields name stay alive while the slot does. The collector itself ignores the address, which is
+/// outside its heap, and nothing in the heap can name the object, because the analysis that
+/// chose the slot proved that no reference to it is stored anywhere but in the method's
+/// variables, nor kept past the method's end.
+///
+/// The slot has at least one byte, so that two slots of objects without fields have addresses of
+/// their own, which Java's `==` tells apart.
+#[repr(C)]
+pub struct Slot<T> {
+    value: std::cell::UnsafeCell<std::mem::MaybeUninit<T>>,
+    _byte: u8,
+}
+
+impl<T> Slot<T> {
+    #[inline(always)]
+    pub const fn new() -> Slot<T> {
+        Slot { value: std::cell::UnsafeCell::new(std::mem::MaybeUninit::uninit()), _byte: 0 }
+    }
+
+    /// Makes `value` the object in the slot, and returns its handle. An object put there before
+    /// is overwritten without being dropped, as a Java object is never destroyed: the
+    /// translation puts a new object in a slot again (in a loop) only when the one before can no
+    /// longer be reached.
+    #[inline(always)]
+    pub fn put(&self, value: T) -> Arc<T> {
+        let place = self.value.get();
+        // The slot is borrowed shared, and no reference to its value is lent out (`Arc` reads
+        // through a raw pointer), so writing through the cell's pointer aliases nothing.
+        unsafe { (*place).write(value) };
+        let ptr = unsafe { NonNull::new_unchecked(place as *mut T) };
+        Arc { ptr, owns: PhantomData }
+    }
+}
+
+impl<T> Default for Slot<T> {
+    fn default() -> Slot<T> {
+        Slot::new()
+    }
+}
+
 impl<T> Clone for Arc<T> {
     #[inline(always)]
     fn clone(&self) -> Arc<T> {
@@ -115,6 +164,19 @@ mod tests {
         let (a, b) = (Arc::new(()), Arc::new(()));
         assert!(!Arc::ptr_eq(&a, &b));
         assert!(Arc::ptr_eq(&a, &a.clone()));
+    }
+
+    #[test]
+    fn objects_in_slots_are_reached_through_their_handles() {
+        let slot = Slot::new();
+        let a = slot.put(std::cell::Cell::new(3));
+        a.set(4);
+        assert_eq!(a.get(), 4);
+        let b = slot.put(std::cell::Cell::new(5));
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(b.get(), 5);
+        let (x, y) = (Slot::new(), Slot::new());
+        assert!(!Arc::ptr_eq(&x.put(()), &y.put(())));
     }
 
     #[test]
