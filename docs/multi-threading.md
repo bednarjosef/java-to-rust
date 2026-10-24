@@ -498,12 +498,16 @@ name:
   accessible to the class that makes it). `get`, `set`, `lazySet`, the compare-and-set forms,
   `getAndSet` and `getAndAdd` are the field's access or update; `getAndIncrement`,
   `incrementAndGet`, `addAndGet` and their kin are its `getAndAdd`, with the new value computed
-  from the old as the JDK's updater does. The updater throws `ClassCastException` without a
-  message for a null object, where the field's access would throw `NullPointerException`: an
-  object other than `this` is tested first (`Builtin::UpdaterRefused`), so it must be a local or
-  an enclosing instance, and the other arguments constants or locals, which the test may come
-  before. `getAndUpdate`, `updateAndGet`, `getAndAccumulate` and `accumulateAndGet`, other
-  objects and arguments, and an updater that is not a constant are rejected.
+  from the old as the JDK's updater does. `getAndUpdate`, `updateAndGet`, `getAndAccumulate`
+  and `accumulateAndGet` are a method that lowering adds to the field's class, one per field and
+  form (`getAndUpdateCount(function)`), whose body is the JDK's loop: read the field, apply the
+  function (`applyAsInt`, `applyAsLong` or `apply`, which reachability keeps for the call),
+  and repeat until the field's compare-and-set succeeds. The updater throws
+  `ClassCastException` without a message for a null object, where the field's access would
+  throw `NullPointerException`: an object other than `this` is tested first
+  (`Builtin::UpdaterRefused`), so it must be a local or an enclosing instance, and the other
+  arguments constants, locals, lambdas or references to static methods, which the test may come
+  before. Other objects and arguments, and an updater that is not a constant, are rejected.
 - **Atomic updates** (compare-and-set, compare-and-exchange, get-and-add, get-and-set,
   get-and-bitwise, every memory mode) of a field become a method that lowering adds to the
   field's class, one per field and form (`compareAndSetValue(expected, value)`), whose body

@@ -97,8 +97,12 @@
 //! its field when `newUpdater` would succeed for it (`updater_declaration`); its `get`, `set`,
 //! `lazySet`, compare-and-set forms, `getAndSet` and `getAndAdd` are `Unsafe`'s at the field's
 //! offset, which the updater's methods make, and its increments and `addAndGet` its `getAndAdd`.
-//! An object other than `this` is tested for null first, which throws the updater's
-//! `ClassCastException` (`updater_access`). Any other use of an updater is rejected.
+//! Its `getAndUpdate`, `updateAndGet`, `getAndAccumulate` and `accumulateAndGet` are a method
+//! that lowering adds to the field's class, one per field and form, which loops as the JDK's
+//! updater does: it reads the field, applies the function and compares and sets until nothing
+//! wrote the field between the read and the write (`update_method`). An object other than
+//! `this` is tested for null first, which throws the updater's `ClassCastException`
+//! (`updater_access`). Any other use of an updater is rejected.
 //!
 //! A `MethodHandle` constant of a constructor is a handle too, resolved when translating:
 //! `lookup.findConstructor(C.class, MethodType.methodType(void.class, P.class, ..))`, where the
@@ -125,6 +129,24 @@ pub(super) struct FieldUpdateMethod {
     /// The method's name, unique among those added, which its calls are found by until it has
     /// an index.
     name: String,
+    /// For a loop of `update`, a compare-and-set, the function that the loop applies.
+    looped: Option<UpdateLoop>,
+}
+
+/// A loop of compare-and-set that applies a function to a field's value until no other write
+/// came between its read and its write, as the JDK's field updaters write `getAndUpdate`,
+/// `updateAndGet`, `getAndAccumulate` and `accumulateAndGet`.
+#[derive(Clone, PartialEq)]
+pub(super) struct UpdateLoop {
+    /// Whether the function takes the method's argument `x` after the value (`accumulate`).
+    accumulates: bool,
+    /// Whether the method gives the new value rather than the old.
+    gives_new: bool,
+    /// The type of the function, the method's last parameter.
+    function: Type,
+    /// The function's method (`applyAsInt`, `applyAsLong` or `apply`), its name, the types of
+    /// its parameters and the type it returns.
+    apply: (usize, &'static str, Vec<Type>, Type),
 }
 
 /// `Unsafe.objectFieldOffset(Class, String)`.
@@ -307,6 +329,12 @@ fn quiet(n: Node) -> bool {
                     )
                 })
         }
+        // Making a lambda, or a reference to a static method or one that takes its object,
+        // evaluates nothing.
+        "LAMBDA_EXPRESSION" => true,
+        "MEMBER_REFERENCE" => plain(Node(&n.0["qualifierExpression"]))
+            .symbol()
+            .is_some_and(|s| matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD")),
         kind => kind.ends_with("_LITERAL"),
     }
 }
@@ -1058,7 +1086,8 @@ impl<'t> Lowering<'t> {
     /// the other accesses of a field updater constant `U` that take their operands as they are:
     /// those of `Unsafe` at the field's offset, which the updater's methods make. Its
     /// `getAndIncrement`, `incrementAndGet`, `addAndGet` and their kin are its `getAndAdd`, the
-    /// new value computed from the old as the JDK's updater computes it. The updater checks its
+    /// new value computed from the old as the JDK's updater computes it, and its `getAndUpdate`,
+    /// `accumulateAndGet` and their kin a call of a loop (`update_loop`). The updater checks its
     /// object first, and throws `ClassCastException` without a message for a null one, where the
     /// field's access would throw `NullPointerException`: an object other than `this` is tested
     /// (`Builtin::UpdaterRefused`), so it must be one that a second read gives again. `None` for
@@ -1079,6 +1108,7 @@ impl<'t> Lowering<'t> {
                 &format!("`{owner}.{}` of an updater that is not a constant", symbol.name),
             );
         };
+        let looped = crate::program::updater_function(symbol.owner, symbol.name);
         // The delta of `getAndAdd` that the methods of `int` and `long` updaters add, and whether
         // they give the new value rather than the old (`None` for a delta that is their argument).
         let (put, update, added) = match symbol.name {
@@ -1095,6 +1125,7 @@ impl<'t> Lowering<'t> {
             "incrementAndGet" => (None, None, Some((Some(1), true))),
             "decrementAndGet" => (None, None, Some((Some(-1), true))),
             "addAndGet" => (None, None, Some((None, true))),
+            _ if looped.is_some() => (None, None, None),
             name => return unsupported(node, &format!("`{owner}.{name}` of an updater")),
         };
         let args: Vec<Node> = node.list("arguments").collect();
@@ -1111,7 +1142,10 @@ impl<'t> Lowering<'t> {
         if checked && !args[1..].iter().all(|a| quiet(*a)) {
             return unsupported(
                 node,
-                &format!("`{owner}.{}` of an argument that is not a constant or a local", symbol.name),
+                &format!(
+                    "`{owner}.{}` of an argument that is not a constant, a local or a lambda",
+                    symbol.name
+                ),
             );
         }
         let test = checked.then(|| {
@@ -1121,6 +1155,10 @@ impl<'t> Lowering<'t> {
         });
         let ret = self.ty(node, node.java_type())?;
         let value = match added {
+            _ if let Some(function) = looped => {
+                let looped = self.update_loop(node, object, class, field, ty, &args[1..], function)?;
+                self.convert(looped, ret)
+            }
             Some((delta, new)) => {
                 let delta = match delta {
                     Some(d) => {
@@ -1154,6 +1192,50 @@ impl<'t> Lowering<'t> {
         let Some(test) = test else { return Ok(Some(value.kind)) };
         let refused = self.synth(ExprKind::Builtin(Builtin::UpdaterRefused, Vec::new()), node.pos(), ret);
         Ok(Some(ExprKind::Conditional(Box::new(test), Box::new(refused), Box::new(value))))
+    }
+
+    /// `U.getAndUpdate(o, f)`, `U.accumulateAndGet(o, x, f)` and their kin, of the field `field`
+    /// of class `class`, of type `ty`, whose function's method is `function` (the function's
+    /// interface, the interface that declares the method, its name and its signature): a call of
+    /// the method of the field's class that loops as the JDK's updater does (`update_method`),
+    /// with `args` (`f`, or `x, f`) as its arguments.
+    #[allow(clippy::too_many_arguments)]
+    fn update_loop(
+        &self,
+        node: Node<'t>,
+        object: Expr,
+        class: usize,
+        field: &str,
+        ty: Type,
+        args: &[Node<'t>],
+        (interface, declarer, name, sig): (&str, &str, &'static str, &str),
+    ) -> Result<Expr, Error> {
+        let apply = self
+            .methods
+            .iter()
+            .position(|m| self.types[m.owner].javac == declarer && m.name == name && m.sig == sig);
+        let Some(apply) = apply else {
+            return unsupported(node, &format!("a field updater's loop without `{declarer}.{name}`"));
+        };
+        let function = self.ty(node, interface)?;
+        let apply = (apply, name, self.param_types(apply)?, self.return_type(node, apply)?);
+        let accumulates = args.len() == 2;
+        let mut operands = Vec::new();
+        if accumulates {
+            operands.push(self.stored(self.expr(args[0])?, ty));
+        }
+        operands.push(self.convert(self.expr(args[args.len() - 1])?, function));
+        let gives_new = node.symbol().is_some_and(|s| s.name.ends_with("AndGet"));
+        let looped = UpdateLoop { accumulates, gives_new, function, apply };
+        let name = self.update_method_name(class, field, ty, FieldUpdate::CompareAndSet, false, Some(looped));
+        let call = ExprKind::MethodCall {
+            receiver: Box::new(object),
+            name,
+            args: operands,
+            resolved: None,
+            is_super: false,
+        };
+        Ok(self.synth(call, node.pos(), ty))
     }
 
     /// Another read of `e`, an expression that `is_reread` accepts.
@@ -1589,7 +1671,7 @@ impl<'t> Lowering<'t> {
         update: FieldUpdate,
         operands: Vec<Expr>,
     ) -> ExprKind {
-        let name = self.update_method_name(class, field, ty, update, object.is_none());
+        let name = self.update_method_name(class, field, ty, update, object.is_none(), None);
         match object {
             Some(object) => ExprKind::MethodCall {
                 receiver: Box::new(object),
@@ -1759,7 +1841,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// The name of the method that makes the atomic update `update` of the field `field` of
-    /// class `class`, of type `ty`, which `field_update_methods` adds.
+    /// class `class`, of type `ty`, or the loop `looped` of it, which `field_update_methods` adds.
     fn update_method_name(
         &self,
         class: usize,
@@ -1767,12 +1849,26 @@ impl<'t> Lowering<'t> {
         ty: Type,
         update: FieldUpdate,
         is_static: bool,
+        looped: Option<UpdateLoop>,
     ) -> String {
+        // A loop calls the compare-and-set that it loops on.
+        if looped.is_some() {
+            self.update_method_name(class, field, ty, update, is_static, None);
+        }
         let mut updates = self.field_updates.borrow_mut();
-        if let Some(u) = updates.iter().find(|u| u.class == class && u.field == field && u.update == update) {
+        if let Some(u) = updates
+            .iter()
+            .find(|u| u.class == class && u.field == field && u.update == update && u.looped == looped)
+        {
             return u.name.clone();
         }
         let verb = match update {
+            _ if let Some(l) = &looped => match (l.accumulates, l.gives_new) {
+                (false, false) => "getAndUpdate",
+                (false, true) => "updateAndGet",
+                (true, false) => "getAndAccumulate",
+                (true, true) => "accumulateAndGet",
+            },
             FieldUpdate::GetAndAdd => "getAndAdd",
             FieldUpdate::GetAndSet => "getAndSet",
             FieldUpdate::CompareAndSet => "compareAndSet",
@@ -1796,6 +1892,7 @@ impl<'t> Lowering<'t> {
             update,
             is_static,
             name: name.clone(),
+            looped,
         });
         name
     }
@@ -1810,6 +1907,8 @@ impl<'t> Lowering<'t> {
         let first = methods.len();
         let index: HashMap<String, usize> =
             updates.iter().enumerate().map(|(i, u)| (u.name.clone(), first + i)).collect();
+        // A loop's body calls its compare-and-set.
+        methods.extend(updates.iter().map(|u| self.update_method(u, &updates)));
         for m in methods.iter_mut() {
             for s in &mut m.body {
                 rewrite_stmt(s, &mut |e| {
@@ -1822,11 +1921,11 @@ impl<'t> Lowering<'t> {
                 });
             }
         }
-        methods.extend(updates.iter().map(|u| self.update_method(u)));
     }
 
-    /// The method that makes the update `u`: the field read, compared and written in its body.
-    fn update_method(&self, u: &FieldUpdateMethod) -> Method {
+    /// The method that makes the update `u`, one of `updates`: the field read, compared and
+    /// written in its body.
+    fn update_method(&self, u: &FieldUpdateMethod, updates: &[FieldUpdateMethod]) -> Method {
         let pos = Pos::default();
         let ty = u.ty;
         let field = || {
@@ -1861,6 +1960,7 @@ impl<'t> Lowering<'t> {
         };
         let boolean = |b: bool| self.synth(ExprKind::Bool(b), pos, Type::Boolean);
         let (params, result, body) = match u.update {
+            _ if let Some(l) = &u.looped => self.loop_body(u, l, updates),
             FieldUpdate::GetAndAdd | FieldUpdate::GetAndBitwise(_) => {
                 let op = if let FieldUpdate::GetAndBitwise(op) = u.update { op } else { BinOp::Add };
                 let sum = ExprKind::Binary(op, Box::new(var("old")), Box::new(var("delta")));
@@ -1901,7 +2001,67 @@ impl<'t> Lowering<'t> {
             overrides: Vec::new(),
             type_params: Vec::new(),
             jdk_code: false,
-            field_update: Some((u.update, u.field.clone())),
+            // A loop is code like any other, which calls the update that it loops on.
+            field_update: u.looped.is_none().then(|| (u.update, u.field.clone())),
         }
+    }
+
+    /// The parameters, the type and the body of the loop `l` that the method `u`, one of
+    /// `updates`, makes. As the JDK's updater does, it reads the field, applies the function
+    /// and compares and sets, `do { prev = get(obj); next = f.apply(prev); } while
+    /// (!compareAndSet(obj, prev, next)); return prev;`, so that a write between the read and the
+    /// compare makes it apply the function again.
+    fn loop_body(
+        &self,
+        u: &FieldUpdateMethod,
+        l: &UpdateLoop,
+        updates: &[FieldUpdateMethod],
+    ) -> (Vec<Param>, Type, Vec<Stmt>) {
+        let (pos, ty) = (Pos::default(), u.ty);
+        let var = |name: &str| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let this = || self.synth(ExprKind::This, pos, self.self_type(u.class));
+        let field = Place::Field { object: Box::new(this()), name: u.field.clone() };
+        let read = self.synth(objects::read(field), pos, ty);
+        let (apply, name, ref takes, gives) = l.apply;
+        let mut operands = vec![var("prev")];
+        if l.accumulates {
+            operands.push(var("x"));
+        }
+        let operands = operands.into_iter().zip(takes).map(|(e, &t)| self.convert(e, t)).collect();
+        let function = self.synth(ExprKind::Var("function".to_string()), pos, l.function);
+        let applied = ExprKind::MethodCall {
+            receiver: Box::new(function),
+            name: name.to_string(),
+            args: operands,
+            resolved: Some(apply),
+            is_super: false,
+        };
+        let applied = self.stored(self.synth(applied, pos, gives), ty);
+        let compare = updates
+            .iter()
+            .find(|c| c.class == u.class && c.field == u.field && c.update == u.update && c.looped.is_none())
+            .expect("a loop's compare-and-set is added with it");
+        let compare = compare.name.clone();
+        let compared = ExprKind::MethodCall {
+            receiver: Box::new(this()),
+            name: compare,
+            args: vec![var("prev"), var("next")],
+            resolved: None,
+            is_super: false,
+        };
+        let compared = self.synth(compared, pos, Type::Boolean);
+        let given = Stmt::Return(Some(var(if l.gives_new { "next" } else { "prev" })), pos);
+        let body = vec![
+            Stmt::Local { ty, name: "prev".to_string(), init: Some(read), pos },
+            Stmt::Local { ty, name: "next".to_string(), init: Some(applied), pos },
+            Stmt::If { cond: compared, then: Box::new(given), otherwise: None },
+        ];
+        let forever = Stmt::While {
+            cond: self.synth(ExprKind::Bool(true), pos, Type::Boolean),
+            body: Box::new(Stmt::Block(body)),
+        };
+        let mut params = if l.accumulates { vec![Param { name: "x".to_string(), ty }] } else { Vec::new() };
+        params.push(Param { name: "function".to_string(), ty: l.function });
+        (params, ty, vec![forever])
     }
 }

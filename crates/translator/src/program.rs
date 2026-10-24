@@ -21,7 +21,7 @@ pub use reach::{
     field_offset_named, is_ensure_initialized, literal_class, live_branch, lookup, module_call,
     module_for_name, provided, recreated_exception, redirected_call, redirected_field, release_query,
     segment_access, standard_stream_field, stream_of_call, sun_misc_forwarded, unsafe_field_access,
-    unsafe_field_update, unset_property_ifs, untranslated, writes_string_array,
+    unsafe_field_update, unset_property_ifs, untranslated, updater_function, writes_string_array,
 };
 pub use survey::Survey;
 

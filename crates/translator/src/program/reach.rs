@@ -645,6 +645,53 @@ pub fn sun_misc_forwarded(class: &str, name: &str, signature: &str) -> Option<St
     at_offset.then_some(internal)
 }
 
+/// The function that a field updater's `getAndUpdate`, `updateAndGet`, `getAndAccumulate` or
+/// `accumulateAndGet` (`name`, of updater class `class`) applies in its loop, as the JDK's
+/// updaters do (`lower::handles`): the function's interface, and the interface, name and
+/// signature of the method it calls.
+pub fn updater_function(
+    class: &str,
+    name: &str,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    let accumulates = match name {
+        "getAndUpdate" | "updateAndGet" => false,
+        "getAndAccumulate" | "accumulateAndGet" => true,
+        _ => return None,
+    };
+    let (int, long) = ("applyAsInt", "applyAsLong");
+    Some(match (class.strip_prefix("java.util.concurrent.atomic.")?, accumulates) {
+        ("AtomicIntegerFieldUpdater", false) => {
+            ("java.util.function.IntUnaryOperator", "java.util.function.IntUnaryOperator", int, "(int)int")
+        }
+        ("AtomicIntegerFieldUpdater", true) => (
+            "java.util.function.IntBinaryOperator",
+            "java.util.function.IntBinaryOperator",
+            int,
+            "(int,int)int",
+        ),
+        ("AtomicLongFieldUpdater", false) => (
+            "java.util.function.LongUnaryOperator",
+            "java.util.function.LongUnaryOperator",
+            long,
+            "(long)long",
+        ),
+        ("AtomicLongFieldUpdater", true) => (
+            "java.util.function.LongBinaryOperator",
+            "java.util.function.LongBinaryOperator",
+            long,
+            "(long,long)long",
+        ),
+        // `UnaryOperator` and `BinaryOperator` inherit `apply` from `Function` and `BiFunction`.
+        ("AtomicReferenceFieldUpdater", false) => {
+            ("java.util.function.UnaryOperator", "java.util.function.Function", "apply", "(T)R")
+        }
+        ("AtomicReferenceFieldUpdater", true) => {
+            ("java.util.function.BinaryOperator", "java.util.function.BiFunction", "apply", "(T,U)R")
+        }
+        _ => return None,
+    })
+}
+
 /// One of `Unsafe`'s atomic updates of a field at an offset (see `unsafe_field_update`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FieldUpdate {
@@ -2411,6 +2458,12 @@ impl<'t> Walk<'t> {
                 // writes it (`lower::object`).
                 if key.0 == "java.lang.CharSequence" && key.1 == "isEmpty" {
                     self.work.push(Item::Method((key.0.clone(), "length".into(), "()int".into())));
+                }
+                // A field updater's `getAndUpdate` and its kin apply their function, in the loop
+                // that lowering adds to the field's class (`lower::handles`).
+                if let Some((interface, declarer, name, signature)) = updater_function(&key.0, &key.1) {
+                    self.work.push(Item::Class(interface.into()));
+                    self.work.push(Item::Method((declarer.into(), name.into(), signature.into())));
                 }
             }
             return;
