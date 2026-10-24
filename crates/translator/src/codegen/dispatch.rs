@@ -21,6 +21,38 @@ use super::*;
 use crate::analysis::{ENUM_COMPARE_NULL, compare_null_message};
 use std::collections::BTreeSet;
 
+/// The number of each type in a `java::Thin` (`Gen::class_tag`), by its index in `Class::types`:
+/// the class trees in depth-first preorder, each class before its subclasses, then the types that
+/// no class tree holds (interfaces). The classes at or below a class then have the numbers from
+/// its own to its last subclass's, so a test of "is a `C`" is one range (`Gen::tags`). Numbers
+/// start at 1, as a `Thin` is never 0, and are the same in every pass of the generation.
+pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
+    let h = &class.hierarchy;
+    let count = class.types.len();
+    let tree = |t: usize| !matches!(class.types[t].kind, TypeKind::Interface | TypeKind::Param);
+    let mut order = Vec::with_capacity(count);
+    let mut stack = Vec::new();
+    for root in (0..count).filter(|&t| tree(t) && h.superclass(t).is_none()) {
+        stack.push(root);
+        while let Some(t) = stack.pop() {
+            order.push(t);
+            // The direct subclasses, pushed last first so that they come out in index order.
+            stack.extend(h.subtypes[t].iter().rev().copied().filter(|&s| h.superclass(s) == Some(t)));
+        }
+    }
+    let mut numbered = vec![false; count];
+    for &t in &order {
+        numbered[t] = true;
+    }
+    order.extend((0..count).filter(|&t| !numbered[t]));
+    let mut numbers = vec![0u16; count];
+    for (at, &t) in order.iter().enumerate() {
+        numbers[t] =
+            u16::try_from(at + 1).ok().filter(|&tag| tag != u16::MAX).expect("fewer than 65535 classes");
+    }
+    numbers
+}
+
 /// An item of the enum of a type that the code being generated uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Need {
@@ -179,9 +211,9 @@ impl<'a> Gen<'a> {
     }
 
     /// The number of class `c` in a `java::Thin`: the same in the enum of every type, so that a
-    /// value keeps its bits as a value of a supertype.
+    /// value keeps its bits as a value of a supertype (see `class_numbers`).
     pub(super) fn class_tag(&self, c: usize) -> u16 {
-        u16::try_from(c + 1).ok().filter(|&tag| tag != u16::MAX).expect("fewer than 65535 classes")
+        self.class_tags[c]
     }
 
     /// Whether the variant of class `c` holds a handle (`java::Thin::pointer`), else a value
@@ -198,10 +230,34 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The class numbers of `classes` as the pattern of a `match` on a value's tag: `3 | 5`.
-    pub(super) fn tags(&self, classes: &[usize]) -> String {
-        let tags: Vec<String> = classes.iter().map(|&c| self.class_tag(c).to_string()).collect();
-        tags.join(" | ")
+    /// The class numbers of `classes` as the pattern of a `match` on the tag of a value whose
+    /// class is one of `among` (which holds `classes`): ranges, `3..=7 | 9`. No value has a number
+    /// that no class of `among` has, so a range spans each run of `classes` that no other class of
+    /// `among` breaks. The classes at or below a class are one run (`class_numbers`), and so are
+    /// those of an interface that happen to be numbered together: a range is one subtract and one
+    /// compare, where a list is a compare per number or a table.
+    pub(super) fn tags(&self, classes: &[usize], among: &[usize]) -> String {
+        let mut numbers: Vec<(u16, bool)> =
+            among.iter().map(|&c| (self.class_tag(c), classes.contains(&c))).collect();
+        numbers.extend(classes.iter().map(|&c| (self.class_tag(c), true)));
+        // A class of both lists has the same entry in each.
+        numbers.sort_unstable();
+        numbers.dedup();
+        let mut runs: Vec<(u16, u16)> = Vec::new();
+        let mut open = false;
+        for (tag, passes) in numbers {
+            match runs.last_mut() {
+                Some(run) if open && passes => run.1 = tag,
+                _ if passes => runs.push((tag, tag)),
+                _ => {}
+            }
+            open = passes;
+        }
+        let patterns: Vec<String> = runs
+            .into_iter()
+            .map(|(first, last)| if first == last { first.to_string() } else { format!("{first}..={last}") })
+            .collect();
+        patterns.join(" | ")
     }
 
     /// The constructor of each variant (`Shape::Circle(handle)`, an associated function named as
@@ -535,7 +591,7 @@ impl<'a> Gen<'a> {
                 if passing.is_empty() {
                     return known(self, false);
                 }
-                let tags = self.tags(&passing);
+                let tags = self.tags(&passing, &self.enum_variants(s));
                 let text = if nullable {
                     format!(
                         "{}.as_ref().is_some_and(|o| matches!(o.0.tag(), {tags}))",
@@ -1576,14 +1632,13 @@ impl<'a> Gen<'a> {
             self.line("None");
         } else if let Some(e) = rep {
             // A value of another enum has the same bits.
-            let tags: Vec<String> = passing.iter().map(|&c| self.class_tag(c).to_string()).collect();
             let target = struct_name(&self.class.types[e].name);
             if passing.len() == variants.len() {
                 self.line(&format!("Some({target}(self.0))"));
             } else {
                 self.line("match self.0.tag() {");
                 self.indent += 1;
-                self.line(&format!("{} => Some({target}(self.0)),", tags.join(" | ")));
+                self.line(&format!("{} => Some({target}(self.0)),", self.tags(&passing, &variants)));
                 self.line("_ => None,");
                 self.indent -= 1;
                 self.line("}");

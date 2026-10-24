@@ -29,7 +29,8 @@ possible classes are known and dispatch can be a `match`.
 4. **Conversions are explicit in the tree.** Lowering inserts a `Cast` at every implicit
    reference conversion, so the analyses see every upcast, and the generator writes
    `Base::Circle(c)` (class to enum), `b.to_shape()` (enum to enum) or a checked downcast.
-5. **`instanceof` is a test of the class's number** (`matches!(s.0.tag(), 2 | 5)`), and a
+5. **`instanceof` is a test of the class's number** (`matches!(s.0.tag(), 2..=5)`): classes
+   are numbered each before its subclasses, so the classes at or below a class are one range. A
    pattern variable is bound with a let chain, `if let`, `let .. else` or `is_some_and`.
 6. **`Object` is an enum too**, over the program's classes whose objects become `Object`s and
    over strings, boxes, enums, arrays, builders and class values as runtime variants. Its
@@ -216,11 +217,18 @@ Rules:
   `crates/runtime/src/thin.rs`); `Arc` ignores those bits when it reads its pointer, so `view()`
   lends the handle where it lies, and the value is `Copy` and eight bytes, `Option` of it too.
   Each class has one number in the whole program (`class_tag`), so `to_x()` copies the bits, and
-  `as_x()` and `instanceof` test the number. What is not a program object (a string, a box, a
-  Java enum constant, an array, a builder) is held in the low six bytes when it fits there and
-  in a box otherwise; an array, a builder, a box with identity and a string with identity
-  (`java::JStr`) are their own handles. A
-  number that no class of the type has is a bug the view reports (`java::bad_tag`).
+  `as_x()` and `instanceof` test the number. The numbers go through each class tree depth first,
+  a class before its subclasses (`dispatch::class_numbers`; the runtime's strings, boxes, arrays
+  and builders are trees of one class, and interfaces, which have no objects, come last), so the
+  classes at or below a class have the numbers from its own to its last subclass's: a test of
+  "is a `C`" is `matches!(tag, 4..=9)`, one subtract and one compare. A test spans each run of
+  the classes it accepts that no other class of the enum breaks (`Gen::tags`; a `catch` clause
+  also spans the classes that earlier clauses took), so an interface whose classes happen to be
+  numbered together is one range too, and the others are a few. What is not a program object (a
+  string, a box, a Java enum constant, an array, a builder) is held in the low six bytes when it
+  fits there and in a box otherwise; an array, a builder, a box with identity and a string with
+  identity (`java::JStr`) are their own handles. A number that no class of the type has is a bug
+  the view reports (`java::bad_tag`).
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.
@@ -313,8 +321,8 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
 
 ### 1.5 `instanceof`, patterns and casts
 
-- `x instanceof Circle` is a test of the class's number, `matches!(x.0.tag(), 2)` (the numbers
-  of every class at or below `Circle`); against a type that shares no variant
+- `x instanceof Circle` is a test of the class's number, `matches!(x.0.tag(), 2)` (the range of
+  numbers of the classes at or below `Circle`, 1.2); against a type that shares no variant
   with the operand, it is `false`, and when the operand's static type is already the tested type
   or below it, it passes (an operand with effects is still evaluated).
 - A pattern variable is an owned value: the tested type's enum gets `as_circle(&self) ->

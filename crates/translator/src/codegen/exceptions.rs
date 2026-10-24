@@ -932,8 +932,8 @@ impl<'a> Gen<'a> {
         let (arms, all) = self.catch_arms(catches);
         let count = all.len();
         let mut every = false;
-        for (catch, matched) in &arms {
-            let (pattern, before) = self.catch_pattern(catch, matched, count);
+        for (catch, matched, reaching) in &arms {
+            let (pattern, before) = self.catch_pattern(catch, matched, reaching, count);
             every |= !pattern.contains(") if matches!(");
             self.line(&format!("Err({pattern}) => {{"));
             self.indent += 1;
@@ -944,7 +944,7 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}");
         }
-        if arms.iter().map(|(_, m)| m.len()).sum::<usize>() < count {
+        if arms.iter().map(|(_, m, _)| m.len()).sum::<usize>() < count {
             let text = self.propagate("e");
             self.line(&format!("Err(e) => {text},"));
         } else if !every {
@@ -970,8 +970,10 @@ impl<'a> Gen<'a> {
     }
 
     /// The `catch` clauses that match something, each with the variants of the enum of
-    /// `Throwable` it matches that no earlier clause matched; and all the variants.
-    fn catch_arms(&mut self, catches: &'a [Catch]) -> (Vec<(&'a Catch, Vec<usize>)>, Vec<usize>) {
+    /// `Throwable` it matches that no earlier clause matched and the variants that no earlier
+    /// clause matched (which reach its arm); and all the variants.
+    #[allow(clippy::type_complexity)]
+    fn catch_arms(&mut self, catches: &'a [Catch]) -> (Vec<(&'a Catch, Vec<usize>, Vec<usize>)>, Vec<usize>) {
         if catches.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -980,6 +982,7 @@ impl<'a> Gen<'a> {
         let mut covered: Vec<usize> = Vec::new();
         let mut arms = Vec::new();
         for catch in catches {
+            let reaching: Vec<usize> = all.iter().copied().filter(|c| !covered.contains(c)).collect();
             let matched: Vec<usize> = all
                 .iter()
                 .copied()
@@ -993,7 +996,7 @@ impl<'a> Gen<'a> {
                 self.not_written(&catch.body);
             } else {
                 covered.extend(&matched);
-                arms.push((catch, matched));
+                arms.push((catch, matched, reaching));
             }
         }
         (arms, all)
@@ -1002,9 +1005,16 @@ impl<'a> Gen<'a> {
     /// The pattern of the arm of a `catch` clause that matches the variants `matched` of the enum
     /// of `Throwable`, which has `count` variants, with the lines that bind its parameter. Unless
     /// the clause matches every class, the pattern binds the exception and ends in a guard that
-    /// tests its class (`java::Thin`): `caught) if matches!(caught.0.tag(), 3 | 5`, which the
-    /// arm's `Err(..)` closes.
-    fn catch_pattern(&mut self, catch: &'a Catch, matched: &[usize], count: usize) -> (String, Vec<String>) {
+    /// tests its class (`java::Thin`): `caught) if matches!(caught.0.tag(), 3..=5 | 9`, which the
+    /// arm's `Err(..)` closes. An exception that reaches the arm is of a class of `reaching`, as
+    /// the arms before it took the others, so the guard's ranges may span those.
+    fn catch_pattern(
+        &mut self,
+        catch: &'a Catch,
+        matched: &[usize],
+        reaching: &[usize],
+        count: usize,
+    ) -> (String, Vec<String>) {
         let t = self.class.type_index("java.lang.Throwable").expect("a program with `try` has `Throwable`");
         let mut used = false;
         for s in &catch.body {
@@ -1042,7 +1052,7 @@ impl<'a> Gen<'a> {
             if matched.len() == count {
                 caught
             } else {
-                format!("{caught}) if matches!({tested}.0.tag(), {}", self.tags(matched))
+                format!("{caught}) if matches!({tested}.0.tag(), {}", self.tags(matched, reaching))
             }
         };
         if used && self.optional_var(self.method, catch.ty, &catch.name) {
@@ -1100,8 +1110,8 @@ impl<'a> Gen<'a> {
             self.line(&format!("let {last} = match {result} {{"));
             self.indent += 1;
             let count = all.len();
-            for (catch, matched) in &arms {
-                let (pattern, before) = self.catch_pattern(catch, matched, count);
+            for (catch, matched, reaching) in &arms {
+                let (pattern, before) = self.catch_pattern(catch, matched, reaching, count);
                 let thrown = self.thrown(completion, &pattern);
                 self.line(&format!("{thrown} => {{"));
                 let handler = self.attempt_label("handler");
