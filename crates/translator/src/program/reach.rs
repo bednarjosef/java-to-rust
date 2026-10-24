@@ -1461,6 +1461,12 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.lang.System", "mapLibraryName", "(java.lang.String)java.lang.String"),
         ("java.lang.TranslatedLibraries", "mapLibraryName"),
     ),
+    // The class of a primitive type by its name, which the JDK writes as a switch over class
+    // literals in `Class`, the runtime's class (`java/lang/TranslatedClasses.java`).
+    (
+        ("java.lang.Class", "forPrimitiveName", "(java.lang.String)java.lang.Class<?>"),
+        ("java.lang.TranslatedClasses", "forPrimitiveName"),
+    ),
 ];
 
 /// The restricted methods among `REDIRECTED_CALLS`, which Java lets code of a module without
@@ -1623,10 +1629,13 @@ pub fn formats_in_locale(signature: &str) -> bool {
 
 /// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
 /// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
-/// units as an `int[]`. `lines()` streams its lines, an `Object[]` of strings, through an iterator,
-/// so that the stream's size is unknown, as with the JDK's own spliterator.
-pub const STRING_STREAMS: [(&str, &[JdkMethod]); 2] = [
+/// units as an `int[]`. `codePoints()` streams the code points of those units with the translator's
+/// spliterator (`java/overlay/java/lang/TranslatedStrings.java`). `lines()` streams its lines, an
+/// `Object[]` of strings, through an iterator, so that the stream's size is unknown, as with the
+/// JDK's own spliterator.
+pub const STRING_STREAMS: [(&str, &[JdkMethod]); 3] = [
     ("chars", &[("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream")]),
+    ("codePoints", &[("java.lang.TranslatedStrings", "codePoints", "(int[])java.util.stream.IntStream")]),
     (
         "lines",
         &[

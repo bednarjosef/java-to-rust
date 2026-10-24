@@ -317,6 +317,10 @@ A translated program is closed: it knows all its classes. So:
   `ClassNotFoundException` that says so (`Builtin::UnknownClass`). A computed
   `Class.forName(module, name)` finds the locale data classes of the root locale, `en` and
   `en_US` (`Reach::found_by_name`), and `null` for any other name, as for a bundle the JDK lacks.
+- `Class.forPrimitiveName(name)` is the translator's `TranslatedClasses.forPrimitiveName`
+  (`REDIRECTED_CALLS`), a `switch` from the names of the primitive types and `void` to their
+  class literals, as the JDK's is; `Class` is the runtime's, so the JDK's method is not
+  translated.
 - `MethodHandles.lookup().ensureInitialized(c)` initializes `c`'s class. Reachability takes as
   initialized the classes whose literals reachable code passes to it, directly or through one
   method's parameter (`program/reach/initialize.rs`, `Reach::ensured`).
@@ -335,9 +339,13 @@ A translated program is closed: it knows all its classes. So:
 ### Strings and characters in the JDK's code
 
 - `String` is the runtime's, so the JDK's `String` methods are not translated. `chars()` is the
-  JDK's `Arrays.stream(int[])` over the string's UTF-16 units, and `lines()` streams an
-  `Object[]` of the lines through an iterator of unknown size, as the JDK's `LinesSpliterator`
-  has no size, so `count()` still runs the pipeline's lambdas (`STRING_STREAMS`).
+  JDK's `Arrays.stream(int[])` over the string's UTF-16 units. `codePoints()` is the
+  translator's `TranslatedStrings.codePoints` over the same units: `Arrays.stream` for a string
+  whose units are all Latin-1, as the JDK streams a Latin-1 string, and otherwise a spliterator
+  like the JDK's `CodePointsSpliterator`, which pairs surrogates, is not `SIZED` and never splits
+  a pair. `lines()` streams an `Object[]` of the lines through an iterator of unknown size, as the
+  JDK's `LinesSpliterator` has no size, so `count()` still runs the pipeline's lambdas
+  (`STRING_STREAMS`).
 - `String.CASE_INSENSITIVE_ORDER` reads `TranslatedStrings.CASE_INSENSITIVE_ORDER`
   (`crates/translator/java/overlay/java/lang`, `program::redirected_field`): one comparator that
   compares as `compareToIgnoreCase`, as the JDK's does, and throws the JVM's message for a null

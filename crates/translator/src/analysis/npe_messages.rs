@@ -1611,7 +1611,7 @@ pub(crate) fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'stati
         (StringOp::GetBytes, []) => fixed("getBytes", ""),
         (StringOp::GetBytes, [Type::Charset]) => fixed("getBytes", "java.nio.charset.Charset"),
         (StringOp::GetBytes, [Type::String]) => fixed("getBytes", "String"),
-        (StringOp::CharCodes, []) => fixed("chars", ""),
+        (StringOp::CharCodes(name), []) => fixed(name, ""),
         (StringOp::Lines, []) => fixed("lines", ""),
         (StringOp::HashCode, []) => fixed("hashCode", ""),
         (StringOp::ToString, []) => fixed("toString", ""),

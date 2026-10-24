@@ -49,10 +49,12 @@ impl<'t> Lowering<'t> {
         self.synth(ExprKind::Builtin(Builtin::ValueOf, vec![text]), pos, Type::String)
     }
 
-    /// `s.chars()` and `s.lines()`: the JDK's methods over an array the runtime makes, of the
-    /// string's UTF-16 code units or of its lines, which stream the same values with the same
-    /// characteristics as the JDK's own spliterators. `chars()` is `Arrays.stream(units)`, which is
-    /// `SIZED` as the JDK's is; `lines()` is not, so it is
+    /// `s.chars()`, `s.codePoints()` and `s.lines()`: the JDK's methods over an array the runtime
+    /// makes, of the string's UTF-16 code units or of its lines, which stream the same values with
+    /// the same characteristics as the JDK's own spliterators. `chars()` is `Arrays.stream(units)`,
+    /// which is `SIZED` as the JDK's is; `codePoints()` is the translator's
+    /// `TranslatedStrings.codePoints(units)`, which is that where every unit is Latin-1, as the
+    /// JDK's is for a Latin-1 string; `lines()` is not `SIZED`, so it is
     ///
     /// ```text
     /// StreamSupport.stream(Spliterators.spliteratorUnknownSize(
@@ -88,7 +90,8 @@ impl<'t> Lowering<'t> {
         let receiver = self.expr(receiver.expect("an instance method has a receiver"))?;
         let pos = receiver.pos;
         let (op, ty) = match method {
-            "chars" => (StringOp::CharCodes, Type::array(Type::Int)),
+            "chars" => (StringOp::CharCodes("chars"), Type::array(Type::Int)),
+            "codePoints" => (StringOp::CharCodes("codePoints"), Type::array(Type::Int)),
             _ => (StringOp::Lines, Type::array(Type::class(OBJECT))),
         };
         let mut value = self.synth(ExprKind::Builtin(Builtin::String(op), vec![receiver]), pos, ty);
@@ -212,7 +215,9 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 return self.as_char_sequence(node, Builtin::String(StringOp::Substring), args);
             }
-            "chars" | "lines" if args.is_empty() => return self.string_stream(node, name, receiver),
+            "chars" | "codePoints" | "lines" if args.is_empty() => {
+                return self.string_stream(node, name, receiver);
+            }
             "hashCode" => StringOp::HashCode,
             "toString" => StringOp::ToString,
             "intern" => StringOp::Intern,
@@ -580,6 +585,8 @@ impl<'t> Lowering<'t> {
             ("rotateLeft", 2) => BitsOp::RotateLeft,
             ("rotateRight", 2) => BitsOp::RotateRight,
             ("signum", 1) => BitsOp::Signum,
+            ("compress", 2) => BitsOp::Compress,
+            ("expand", 2) => BitsOp::Expand,
             ("toString", 2) => BitsOp::ToStringRadix,
             ("parseInt" | "parseLong", 2) if args[0].ty == Type::String => BitsOp::ParseRadix,
             ("parseInt" | "parseLong", 4) if args[0].ty == Type::String => BitsOp::ParseRange,
