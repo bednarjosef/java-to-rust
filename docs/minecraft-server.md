@@ -18,11 +18,11 @@ the machine running out of memory.
 | step | what it does | time |
 |---|---|---|
 | `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required | seconds |
-| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Also Vineflower without the libraries, and CFR on the files that have errors. Since 26.1 the jar is not obfuscated, so the names are Mojang's |
-| `best-of` | `src/server` from the three decompiles, taking each file from Vineflower with the libraries except where another setup's file gives the whole server fewer javac errors ([below](#2-decompiled-sources-that-do-not-compile)) | 5 compiles of the server, about 1.5 min each | 3 min 12 s on a busy machine (34 s without the libraries on a quiet one) |
+| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Also Vineflower without the libraries, and CFR on the files that have errors. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 3 min 12 s for Vineflower with the libraries on a busy machine (34 s without them on a quiet one) |
+| `best-of` | `src/server` from the three decompiles, taking each file from Vineflower with the libraries except where another setup's file gives the whole server fewer javac errors ([below](#2-decompiled-sources-that-do-not-compile)) | 5 compiles of the server, about 1.5 min each |
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
-| `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`: `java.base` plus 14 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events) and `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) | seconds |
+| `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`, [below](#the-jdk-modules): `java.base` plus 30 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events), `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) and `jdk.httpserver` (the HTTP server of an authentication library) | under a minute |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
 | `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
 | `summary` | splits the census by origin, into the server, each library and the JDK (`scripts/census-by-origin.py`), and compares it with the previous one (`scripts/census-compare.py`, below) | seconds |
@@ -51,6 +51,29 @@ The `summary` step runs it with the roots of `census-by-origin.py`, against `cen
 (or `PREVIOUS_CENSUS`, such as a census kept by hand under another name), and writes the result
 to `census/compare.txt` as well. Only one previous census is kept: each `census` step deletes
 the one before last.
+
+### The JDK modules
+
+javac compiles the program with every root as part of one module (`program/modules.rs`), so a
+package of a JDK module whose sources are not a root is "not visible", and the code that uses it
+is cut off as a compile error. `jdk-sources` therefore unpacks every module that the code may use,
+which `scripts/jdk-modules.py` finds from the server's and the libraries' sources and the
+`module-info.java` files in `src.zip`:
+
+- each module with a package that the code names, in an import, a qualified name or a string
+  (`Class.forName`), but not in a comment;
+- the modules that those require, transitively;
+- the modules that provide a service that one of them uses, as the JVM binds services when it
+  starts: `ManagementFactory` (`java.management`) finds the platform beans of `jdk.management`,
+  and `java.compiler`'s `ToolProvider` finds javac in `jdk.compiler`. `java.base`'s own services
+  are left out, as their providers are in most of the JDK (its tools, the locale data, charsets,
+  security providers); a module that provides one is there only when the code names it or a
+  module requires it, and `ServiceLoader` does not find the others.
+
+It writes the list to `modules.txt` in `JDK_SOURCES`, and `census` gives each of them as a
+`--library`. For 26.3 that is 31 modules, among them `jdk.httpserver` (msal4j's sign-in
+listener) and the compiler's modules (log4j's annotation processor names `java.compiler`, whose
+`JavaCompiler` service `jdk.compiler` provides).
 
 ### Decompiling with the libraries
 
@@ -181,8 +204,8 @@ text. An earlier run without a cap passed 8.7 GB, still growing, before it was s
 
 Grouped by kind, about 340 of them are "package does not exist" for annotation packages: Error
 Prone, `javax.annotation`, J2ObjC, JetBrains. Many of the 1,300 "cannot find symbol" are the same
-annotations used by name. Their uses in annotations are now ignored. Before `jdk.jfr`,
-`java.datatransfer` and `java.prefs` were added, 147 more errors were "package is not visible".
+annotations used by name. Their uses in annotations are now ignored. None is "package is not
+visible": `jdk-sources` unpacks every JDK module that the code names ([above](#the-jdk-modules)).
 
 ## Blockers, by kind
 
