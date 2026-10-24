@@ -667,6 +667,13 @@ pub(super) fn runtime_failures(
             out.push((NPE, "this unboxing", false, x.id))
         }
         ExprKind::Builtin(builtin, args) => match builtin {
+            // A null class, or a null argument, is dereferenced with the checked form
+            // (`Gen::class_method`).
+            Builtin::ClassMethod(ClassOp::IsAssignableFrom) => {
+                for arg in args.iter().filter(|a| null(a)) {
+                    out.push((NPE, "this call", true, arg.id));
+                }
+            }
             Builtin::Println
             | Builtin::Print
             | Builtin::MathAbs

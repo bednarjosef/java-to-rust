@@ -7,7 +7,8 @@
 //! (`Builtin::GetClass`), a class literal (`Builtin::ClassLiteral`), and the methods of `Class`
 //! that need no reflection (`Builtin::ClassMethod`). `isInstance` and `cast` of any class value
 //! test the binary names of the classes and interfaces of the object's class, which the generator
-//! writes out per class (`Builtin::ClassIsInstance`, `Builtin::ClassCheck`).
+//! writes out per class (`Builtin::ClassIsInstance`, `Builtin::ClassCheck`); `isAssignableFrom`
+//! tests those that each class value carries (`ClassOp::IsAssignableFrom`).
 
 use super::*;
 
@@ -124,10 +125,6 @@ impl<'t> Lowering<'t> {
             // `CharacterName`'s `uniName.dat` or `Currency`'s `currency.data`, which are generated
             // when the JDK is built and are not in its source: the program ends when it reads one
             // (`Builtin::MissingResource`).
-            ("isAssignableFrom", [class]) if is_literal(receiver) => {
-                let class = self.expr(*class)?;
-                return Ok(Some(self.is_assignable_from(node, receiver, class)?));
-            }
             ("isInstance", [x]) => {
                 let (class, x) = (self.expr(receiver)?, self.expr(*x)?);
                 return Ok(Some(self.class_is_instance(class, x)));
@@ -189,6 +186,7 @@ impl<'t> Lowering<'t> {
             ("descriptorString", 0) => ClassOp::DescriptorString,
             ("isAnnotation", 0) => ClassOp::IsAnnotation,
             ("equals", 1) => ClassOp::Equals,
+            ("isAssignableFrom", 1) => ClassOp::IsAssignableFrom,
             _ => return unsupported(node, &format!("`Class.{}` (reflection)", symbol.name)),
         };
         let mut values = vec![self.expr(receiver)?];
@@ -200,6 +198,18 @@ impl<'t> Lowering<'t> {
             values.push(value);
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassMethod(op), values)))
+    }
+
+    /// `X.class.isAssignableFrom(c)` of the class literal `literal`, which the runtime's class
+    /// answers from the names of the classes and interfaces above `c` (`ClassOp::IsAssignableFrom`).
+    pub(super) fn literal_assignable_from(
+        &self,
+        node: Node<'t>,
+        literal: Node<'t>,
+        class: Expr,
+    ) -> Result<ExprKind, Error> {
+        let literal = self.synth(self.class_literal(literal)?, node.pos(), Type::JavaClass);
+        Ok(ExprKind::Builtin(Builtin::ClassMethod(ClassOp::IsAssignableFrom), vec![literal, class]))
     }
 
     /// The class that the type of `receiver`, a `Class<T>`, names, as text: `T`, which a missing

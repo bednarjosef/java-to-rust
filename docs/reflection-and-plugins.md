@@ -76,9 +76,10 @@ program where such a lookup can happen, so they can be checked before the progra
 
 - **Constant names** are resolved when translating. `Class.forName("com.foo.Bar")` is that
   class, and `getName`, `getSimpleName`, `getCanonicalName`, `getPackageName`, `getSuperclass`,
-  `getInterfaces`, `isAssignableFrom` and `getEnumConstants` of a class literal are worked out
-  then too. A computed name becomes a `switch` over the binary names of the classes that code
-  can find by name.
+  `getInterfaces` and `getEnumConstants` of a class literal are worked out then too.
+  `isAssignableFrom` of any two classes tests the names of the classes and interfaces above the
+  second, which each class value carries. A computed name becomes a `switch` over the binary
+  names of the classes that code can find by name.
 - **The reflection table.** `getMethod`, `getDeclaredMethod`, `getField`, `getConstructor`,
   `newInstance` and the rest look members up in a table that the translation builds in. The
   table holds only what lookups of reachable code can find. The classes are those named by

@@ -18,8 +18,6 @@
 //! is a `switch` over the locale data that reachability found (`Reach::found_by_name`), with
 //! `null` for any other name, and `Class.forName(name)` over the classes named
 //! (`Reach::named`), each initialized, with a `ClassNotFoundException` for any other name.
-//! `X.class.isAssignableFrom(c)` is a chain of `c.equals(Y.class)` over the program's classes
-//! that are or extend `X`.
 
 use super::*;
 
@@ -361,48 +359,6 @@ impl<'t> Lowering<'t> {
             Some(outer) => Some(format!("{}${}", self.binary_name(outer)?, info.node.str("simpleName"))),
             None => Some(info.javac.clone()),
         }
-    }
-
-    /// `X.class.isAssignableFrom(c)` of a class or interface `X` of the program that no class of
-    /// the runtime extends or implements: whether `c` is one of the program's classes that are or
-    /// extend or implement `X`. A class such as `Number` that the runtime's boxes extend is not
-    /// supported.
-    pub(super) fn is_assignable_from(
-        &self,
-        node: Node<'t>,
-        literal: Node<'t>,
-        class: Expr,
-    ) -> Result<ExprKind, Error> {
-        let named = literal.child("expression")?;
-        let target = match self.ty(named, named.java_type())? {
-            Type::Class(name, _) => self.type_index(name),
-            _ => None,
-        };
-        let supported = |t: &usize| {
-            matches!(self.types[*t].node.kind(), "CLASS" | "INTERFACE")
-                && self.types[*t].javac != "java.lang.Number"
-        };
-        let Some(target) = target.filter(supported) else {
-            return unsupported(node, "`isAssignableFrom` of this class");
-        };
-        let pos = node.pos();
-        let local = self.fresh_name("class");
-        let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
-        let mut chain = self.synth(ExprKind::Bool(false), pos, Type::Boolean);
-        for t in (0..self.types.len()).rev().filter(|&t| self.is_subclass(t, target)) {
-            let test = self.class_equals(node, var(), t)?;
-            let yes = self.synth(ExprKind::Bool(true), pos, Type::Boolean);
-            let conditional = ExprKind::Conditional(Box::new(test), Box::new(yes), Box::new(chain));
-            chain = self.synth(conditional, pos, Type::Boolean);
-        }
-        let body = vec![
-            Stmt::Local { ty: Type::JavaClass, name: local.clone(), init: Some(class), pos },
-            Stmt::Yield(chain),
-        ];
-        Ok(ExprKind::Switch {
-            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
-            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
-        })
     }
 
     /// `String class_name = given != null ? given : throw new NullPointerException(message);`,

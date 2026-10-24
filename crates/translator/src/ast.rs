@@ -1060,6 +1060,8 @@ pub enum ClassOp {
     HashCode,
     /// `[class, other]`: `equals`, of two classes.
     Equals,
+    /// `[class, other]`: `isAssignableFrom`, from the names above `other` (`java::Class`).
+    IsAssignableFrom,
     /// `desiredAssertionStatus()`: assertions are off, as in a JVM started without `-ea`.
     DesiredAssertionStatus,
     /// `getCanonicalName()`, `null` for a local or anonymous class.
