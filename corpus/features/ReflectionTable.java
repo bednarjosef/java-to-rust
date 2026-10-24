@@ -148,6 +148,18 @@ public class ReflectionTable {
             System.out.println("not a shape");
         }
         System.out.println(Class.forName("ReflectionTable$Square").asSubclass(Shape.class).getSimpleName());
+        Class<?> shape = Class.forName("ReflectionTable$Shape");
+        System.out.println(Class.forName("ReflectionTable$Square").asSubclass(shape).getSimpleName());
+        try {
+            Class.forName("ReflectionTable$Greeter").asSubclass(shape);
+        } catch (ClassCastException e) {
+            System.out.println("not a shape: " + e.getMessage());
+        }
+        try {
+            Class.forName("ReflectionTable$Square").asSubclass(null);
+        } catch (NullPointerException e) {
+            System.out.println("null superclass");
+        }
 
         Method fail = c.getMethod("fail", int.class);
         for (int x : new int[] {3, 0}) {

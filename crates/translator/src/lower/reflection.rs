@@ -126,12 +126,18 @@ impl<'t> Lowering<'t> {
         let value = self.expr(receiver)?;
         if name == "asSubclass" {
             let [of] = args[..] else { return unsupported(node, "this `asSubclass`") };
-            if !super::classes::is_literal(of) {
-                return unsupported(node, "`asSubclass` of a class other than a class literal's");
-            }
             let local = self.fresh_name("class");
             let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
-            let assignable = self.literal_assignable_from(node, of, var())?;
+            // `of.isAssignableFrom(c)`, with `c` in its local, so evaluated first, as in Java.
+            let assignable = if super::classes::is_literal(of) {
+                self.literal_assignable_from(node, of, var())?
+            } else {
+                let of = self.expr(of)?;
+                if !matches!(of.ty, Type::JavaClass | Type::Null) {
+                    return unsupported(node, "`asSubclass` of anything but a class");
+                }
+                ExprKind::Builtin(Builtin::ClassMethod(ClassOp::IsAssignableFrom), vec![of, var()])
+            };
             let assignable = self.synth(assignable, pos, Type::Boolean);
             let call = ExprKind::Call {
                 name: method.to_string(),
@@ -680,7 +686,7 @@ impl<'t> Lowering<'t> {
 
     /// The type that method `m` returns, read where `m` is declared: the `E` of the anonymous
     /// iterator that `Collections.singletonIterator` returns is the method's type variable.
-    fn return_type(&self, node: Node<'t>, m: usize) -> Result<Type, Error> {
+    pub(super) fn return_type(&self, node: Node<'t>, m: usize) -> Result<Type, Error> {
         let sig = self.methods[m].sig;
         self.declared_type(node, sig.rsplit(')').next().unwrap_or_default(), self.methods[m].owner, Some(m))
     }
