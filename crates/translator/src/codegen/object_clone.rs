@@ -17,13 +17,20 @@ impl<'a> Gen<'a> {
                 let (variant, pattern) = (self.variant(t, c), self.view_pattern(t, c));
                 let arm = if self.class.types[c].cloneable {
                     let name = &self.class.types[c].name;
-                    let (read, borrow) = if self.facts.immutable.contains(name) {
+                    let celled = self.celled(name);
+                    let (read, borrow) = if self.facts.immutable.contains(name) || celled {
                         ("o", "")
                     } else {
                         ("o", "let o = o.borrow(); ")
                     };
                     let literal = self.copy_literal(c, &|g, path, f, rust| {
-                        let clone = if g.clones(f.ty) { ".clone()" } else { "" };
+                        let clone = if celled {
+                            ".get()"
+                        } else if g.clones(f.ty) {
+                            ".clone()"
+                        } else {
+                            ""
+                        };
                         format!("{read}.{path}{rust}{clone}")
                     });
                     format!("{pattern}(o) => {{ {borrow}{variant}({}) }}", self.copy_handle(c, literal))
@@ -67,7 +74,7 @@ impl<'a> Gen<'a> {
         let decl = &self.class.types[k];
         for f in &decl.fields {
             let rust = field_name(decl, &f.name);
-            parts.push(format!("{rust}: {}", read(self, path, f, &rust)));
+            parts.push(format!("{rust}: {}", self.field_cell(k, read(self, path, f, &rust))));
         }
         format!("{} {{ {} }}", self.struct_of(k), parts.join(", "))
     }
@@ -89,7 +96,7 @@ impl<'a> Gen<'a> {
         let pointer = self.pointer(c);
         if self.facts.owned.contains(name) {
             literal
-        } else if self.facts.immutable.contains(name) {
+        } else if self.facts.immutable.contains(name) || self.celled(name) {
             format!("{pointer}::new({literal})")
         } else {
             format!("{pointer}::new({}::new({literal}))", self.cell(c))

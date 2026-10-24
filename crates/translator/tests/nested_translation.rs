@@ -84,10 +84,10 @@ fn a_method_whose_this_is_captured_keeps_the_handle() {
     assert_contains(
         &rust,
         &[
-            "outer: Arc<RefCell<A>>,",
-            "fn scaled(this: &Arc<RefCell<A>>, v: i32) -> java::JString {",
+            "outer: Arc<A>,",
+            "fn scaled(this: &Arc<A>, v: i32) -> java::JString {",
             "AScaler::new(this.clone(), v)",
-            "self.outer.borrow().factor",
+            "self.outer.factor.get()",
         ],
     );
     assert_lacks(&rust, &["fn scaled(&self"]);
@@ -115,11 +115,11 @@ fn an_inner_class_holds_the_outer_handle() {
     assert_contains(
         &rust,
         &[
-            "struct ACursor {\n    outer: Arc<RefCell<A>>,\n    next: i32,\n}",
-            "fn new(outer: Arc<RefCell<A>>) -> ACursor {",
+            "struct ACursor {\n    outer: Arc<A>,\n    next: i32,\n}",
+            "fn new(outer: Arc<A>) -> ACursor {",
             "ACursor::new(this.clone())",
             "ACursor::new(list.clone())",
-            "self.next < self.outer.borrow().size",
+            "self.next < self.outer.size.get()",
         ],
     );
 }
@@ -142,10 +142,7 @@ fn outer_this_is_the_outer_field_chain() {
             }
         }",
     );
-    assert_contains(
-        &rust,
-        &["java::fixed!(self.outer, width).wrapping_add(java::fixed!(self.outer, outer).width)"],
-    );
+    assert_contains(&rust, &["self.outer.width.get().wrapping_add(self.outer.outer.get().width)"]);
 }
 
 #[test]
@@ -273,8 +270,8 @@ fn for_each_over_an_iterable_is_the_iterator_loop() {
         &rust,
         &[
             "let it = A::iterator(&a);",
-            "'outer: while it.borrow().has_next() {",
-            "let s = java::cast(&(({ let value = it.borrow_mut().next(); value })), |o| o.as_string(), (\"java.lang.String\", java::BASE));",
+            "'outer: while it.has_next() {",
+            "let s = java::cast(&it.next(), |o| o.as_string(), (\"java.lang.String\", java::BASE));",
             "continue 'outer;",
         ],
     );
@@ -414,7 +411,7 @@ fn an_inner_superclass_whose_constructor_calls_an_override_gets_its_enclosing_in
         &[
             "fn new(outer: Arc<A>) -> ABaseFields {",
             "ADerived { base: ABaseFields::new(outer.clone()) }",
-            "java::concat!(format_args!(\"derived {}\", self.base.outer.total))",
+            "java::concat!(format_args!(\"derived {}\", self.base.outer.get().total))",
         ],
     );
 }

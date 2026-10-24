@@ -116,7 +116,7 @@ fn a_single_threaded_program_is_unchanged() {
             }
         }",
     );
-    assert_contains(&rust, &["thread_local! {", "Arc<RefCell<ANode>>"]);
+    assert_contains(&rust, &["thread_local! {", "Arc<ANode>"]);
     assert_lacks(&rust, &["java::Locked", "java::Atomic", "main_thread"]);
 }
 
@@ -347,7 +347,7 @@ fn synchronized_without_threads_or_wait_is_the_null_check_it_was() {
         }",
     );
     assert_lacks(&rust, &["java::enter", "_monitor"]);
-    assert_contains(&rust, &["fn add(&mut self) {"]);
+    assert_contains(&rust, &["fn add(&self) {"]);
 }
 
 #[test]

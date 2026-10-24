@@ -232,6 +232,7 @@ impl<'a> Gen<'a> {
                         }
                         (None, None) => self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name)),
                     };
+                    let value = self.field_cell(m.class, value);
                     if value == field { field } else { format!("{field}: {value}") }
                 })
                 .collect::<Vec<String>>(),

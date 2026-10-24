@@ -30,6 +30,7 @@ mod exact;
 mod exception;
 mod fd;
 pub mod fdlibm;
+mod field;
 mod file_channel;
 mod file_channels;
 mod file_copy;
@@ -93,6 +94,7 @@ pub use deflate::{
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
+pub use field::Field;
 pub use file_channel::*;
 pub use file_channels::*;
 pub use file_copy::*;

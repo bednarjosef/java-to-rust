@@ -611,8 +611,11 @@ fn borrows_are_scoped_only_beside_a_mutable_borrow() {
         class A {
             static void share(P q) {}
             static int f(int v) { return v + 1; }
-            public static void main(String[] a) {
+            public static void main(String[] a) throws Exception {
                 P p = new P();
+                Thread t = new Thread(() -> share(p));
+                t.start();
+                t.join();
                 System.out.println(p.x);
                 System.out.println(f(p.x) + p.bump());
             }
@@ -634,7 +637,15 @@ fn arguments_that_read_the_receiver_run_before_it_is_borrowed() {
         "class P { int x; void add(int n) { x += n; } int get() { return x; } }
         class A {
             static void share(P q) {}
-            public static void main(String[] a) { P p = new P(); P q = p; q.add(p.get()); q.add(2); }
+            public static void main(String[] a) throws Exception {
+                P p = new P();
+                Thread t = new Thread(() -> share(p));
+                t.start();
+                t.join();
+                P q = p;
+                q.add(p.get());
+                q.add(2);
+            }
         }",
     );
     assert_contains(
@@ -721,8 +732,8 @@ fn superclass_fields_are_embedded() {
     assert_contains(
         &rust,
         &[
-            "struct ShapeFields {\n    name: java::JString,\n    moves: i32,\n}",
-            "struct Circle {\n    base: ShapeFields,\n    radius: f64,\n}",
+            "struct ShapeFields {\n    name: java::Field<java::JString>,\n    moves: java::Field<i32>,\n}",
+            "struct Circle {\n    base: ShapeFields,\n    radius: java::Field<f64>,\n}",
         ],
     );
     // A value of the superclass's type is the one class's object that it can be.
@@ -735,12 +746,7 @@ fn inherited_field_methods_live_on_the_fields_struct() {
     let rust = translate(SHAPES);
     assert_contains(
         &rust,
-        &[
-            "impl ShapeFields {",
-            "fn name(&self) -> java::JString {",
-            "fn move_(&mut self) {",
-            "s.borrow_mut().base.move_();",
-        ],
+        &["impl ShapeFields {", "fn name(&self) -> java::JString {", "fn move_(&self) {", "s.base.move_();"],
     );
     // `describe` calls `area`, which a subclass implements, so it runs on the subclass's object.
     assert_contains(
@@ -762,7 +768,7 @@ fn a_subclass_constructor_initializes_the_superclass_first() {
         &rust,
         &[
             "fn new(name: &java::Wtf8) -> ShapeFields {",
-            "Circle { base: ShapeFields::new(java::wtf8(\"circle\")), radius }",
+            "Circle { base: ShapeFields::new(java::wtf8(\"circle\")), radius: java::Field::new(radius) }",
         ],
     );
 }
@@ -795,7 +801,7 @@ fn super_calls_are_non_virtual() {
         &rust,
         &[
             "let done = self.withdraw_in_account(amount);",
-            "fn withdraw_in_account(&mut self, amount: i64) -> bool {",
+            "fn withdraw_in_account(&self, amount: i64) -> bool {",
             "self.base.deposit(amount.wrapping_add(1));",
         ],
     );
@@ -815,8 +821,8 @@ fn a_superclass_constructor_that_calls_an_override_runs_on_the_whole_object() {
         &[
             "let mut this = Impl { base: BaseFields::new() };",
             "this.construct_base();",
-            "fn construct_base(&mut self) {",
-            "self.base.x = self.size();",
+            "fn construct_base(&self) {",
+            "self.base.x.set(self.size());",
         ],
     );
 }
@@ -876,18 +882,12 @@ fn a_type_with_several_concrete_classes_is_an_enum() {
     assert_contains(
         &rust,
         &[
-            "enum BaseView<'a> {\n    Circle(&'a Arc<RefCell<Circle>>),\n    Rect(&'a Arc<RefCell<Rect>>),\n}",
-            "    fn area(&self) -> f64 {
-        match self.0.tag() {
-            2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
-            3 => { let o: &Arc<RefCell<Rect>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
-            tag => java::bad_tag(tag),
-        }
-    }",
-            "fn base(&self) -> Ref<'_, BaseFields> {",
-            "2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; Ref::map(o.borrow(), |o| &o.base) }",
+            "enum BaseView<'a> {\n    Circle(&'a Arc<Circle>),\n    Rect(&'a Arc<Rect>),\n}",
+            "    fn area(&self) -> f64 {\n        match self.0.tag() {\n            2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.area() }\n            3 => { let o: &Arc<Rect> = unsafe { self.0.as_pointer() }; o.area() }\n            tag => java::bad_tag(tag),\n        }\n    }",
+            "fn base(&self) -> &BaseFields {",
+            "2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; &o.base }",
             // A method that only touches the fields runs on the fields struct of each object.
-            "2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; o.borrow_mut().base.get_name() }",
+            "2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.base.get_name() }",
             "b.base().name",
         ],
     );
@@ -902,7 +902,7 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
         &[
             "impl Base {",
             "fn to_string_in_base(&self) -> java::JString {",
-            "java::concat!(self.base().name.clone(), format_args!(\":{}\", java::Double(self.area())))",
+            "java::concat!(self.base().name.get(), format_args!(\":{}\", java::Double(self.area())))",
             // `super.toString()` wraps the subclass's object in the enum to call the body there.
             "Base::Circle(this.clone()).to_string_in_base()",
             "impl fmt::Display for Base {",
@@ -916,10 +916,7 @@ fn upcasts_wrap_the_handle() {
     let rust = translate(TREE);
     assert_contains(
         &rust,
-        &[
-            "let b = Base::Circle(c.clone());",
-            "let r = Base::Rect(Arc::new(RefCell::new(Rect::new(2.0, 3.0))));",
-        ],
+        &["let b = Base::Circle(c.clone());", "let r = Base::Rect(Arc::new(Rect::new(2.0, 3.0)));"],
     );
     // The last use of `c` moves it into the enum.
     assert_contains(&rust, &["let last = Base::Circle(c);"]);
@@ -1044,12 +1041,12 @@ fn methods_borrow_their_shared_object() {
     assert_contains(
         &rust,
         &[
-            "fn new(x: i32) -> P {\n        P { x }\n    }",
-            "fn set(&mut self, v: i32) {\n        self.x = v;\n    }",
+            "fn new(x: i32) -> P {\n        P { x: java::Field::new(x) }\n    }",
+            "fn set(&self, v: i32) {\n        self.x.set(v);\n    }",
             "fn get(&self) -> i32 {",
-            "let p = Arc::new(RefCell::new(P::new(1)));",
-            "p.borrow_mut().set(2);",
-            "java::println!(\"{}\", p.borrow().get());",
+            "let p = Arc::new(P::new(1));",
+            "p.set(2);",
+            "java::println!(\"{}\", p.get());",
         ],
     );
 }
@@ -1070,9 +1067,9 @@ fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
     assert_contains(
         &rust,
         &[
-            "fn register(this: &Arc<RefCell<P>>) {\n        share(this);",
+            "fn register(this: &Arc<P>) {\n        share(this);",
             // `o` may be `this`, which the method then must not hold borrowed.
-            "fn copy(this: &Arc<RefCell<P>>, o: &Arc<RefCell<P>>) {\n        this.borrow_mut().x = { let value = o.borrow().x; value };",
+            "fn copy(this: &Arc<P>, o: &Arc<P>) {\n        this.x.set(o.x.get());",
             "P::register(&p);",
             "P::copy(&q, &p);",
         ],
@@ -1575,7 +1572,7 @@ fn unreachable_code_is_not_translated() {
 #[test]
 fn anonymous_classes_are_reached_through_their_creation_and_calls() {
     let rust = translate_project("anonymous", "app.Main");
-    assert_contains(&rust, &["fn run(", "fn area(", "java::concat!(\"task \", self.name)"]);
+    assert_contains(&rust, &["fn run(", "fn area(", "java::concat!(\"task \", self.name.get())"]);
     // `audit` and `describe` are never called, nor is `never`, whose anonymous class uses `extra`.
     assert_lacks(&rust, &["extra", "Audit", "audit", "describe", "fn never", "\"never\""]);
 }
@@ -2795,10 +2792,7 @@ fn object_parameters_used_only_through_are_borrowed() {
         }",
     );
     // `keep` returns its parameter, so it takes the handle itself.
-    assert_contains(
-        &rust,
-        &["fn twice(b: &Arc<RefCell<Box_>>) {", "twice(&x);", "fn keep(b: Arc<RefCell<Box_>>)"],
-    );
+    assert_contains(&rust, &["fn twice(b: &Arc<Box_>) {", "twice(&x);", "fn keep(b: Arc<Box_>)"]);
 }
 
 #[test]
@@ -4848,11 +4842,11 @@ fn type_variables_erase_to_object() {
     assert_contains(
         &rust,
         &[
-            "struct Box_ {\n    value: Object,\n}",
+            "struct Box_ {\n    value: java::Field<Object>,\n}",
             "fn get(&self) -> Object {",
-            "fn set(&mut self, v: Object) {",
+            "fn set(&self, v: Object) {",
             "Box_::new(Object::Integer(3))",
-            "b.borrow_mut().set(Object::Integer(x));",
+            "b.set(Object::Integer(x));",
         ],
     );
 }
@@ -4865,7 +4859,7 @@ fn use_sites_check_cast() {
     assert_contains(
         &rust,
         &[
-            "let x = java::cast(&b.borrow().get(), |o| o.as_integer(), (\"java.lang.Integer\", java::BASE)).wrapping_add(1);",
+            "let x = java::cast(&b.get(), |o| o.as_integer(), (\"java.lang.Integer\", java::BASE)).wrapping_add(1);",
         ],
     );
 }
@@ -5148,8 +5142,8 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
     assert_contains(
         &rust,
         &[
-            "fn next_integer(&mut self) -> i32 {",
-            "fn next(&mut self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
+            "fn next_integer(&self) -> i32 {",
+            "fn next(&self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
             "fn compare_to_point(&self, o: &Arc<Point>) -> i32 {",
             "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(&other, |o| o.as_point(), (\"Point\", java::APP)))\n    }",
         ],
@@ -5162,7 +5156,7 @@ fn wildcards_and_raw_types_erase() {
     // `? extends Shape` is `Shape`, and a raw `Box` is the class itself.
     assert_contains(
         &rust,
-        &["java::cast(&b.borrow().get(), |o| o.as_shape(), (\"Shape\", java::APP)).sides()", "let raw = b;"],
+        &["java::cast(&b.get(), |o| o.as_shape(), (\"Shape\", java::APP)).sides()", "let raw = b;"],
     );
 }
 
@@ -5292,11 +5286,9 @@ fn a_field_assigned_from_a_borrow_of_itself_ends_the_borrow_first() {
         class M { public static void main(String[] x) { Chain c = new Chain(); c.add(1); c.add(2);
             System.out.println(c.pop() + c.pop()); } }",
     );
-    // The `Ref` of the old head must end before the field is written.
-    assert_contains(
-        &rust,
-        &["self.head = { let value = java::non_null(self.head.as_ref()).borrow().next.clone(); value };"],
-    );
+    // The old head's `next` is copied out of its cell, so nothing borrowed outlives the read
+    // when the field is written.
+    assert_contains(&rust, &["self.head = java::non_null(self.head.as_ref()).next.get();"]);
 }
 
 #[test]
@@ -5364,7 +5356,7 @@ fn clone_in_a_class_tree_copies_each_runtime_class() {
         &rust,
         &[
             "AShapeView::Shape(_) => java::try_clone_refused(\"A$Shape\")?",
-            "AShapeView::Circle(o) => { let o = o.borrow(); AShape::Circle(Arc::new(RefCell::new(ACircle { base: AShapeFields { x: o.base.x }, r: o.r }))) }",
+            "AShapeView::Circle(o) => { AShape::Circle(Arc::new(ACircle { base: AShapeFields { x: java::Field::new(o.base.x.get()) }, r: java::Field::new(o.r.get()) })) }",
         ],
     );
 }
@@ -5750,12 +5742,13 @@ fn a_copy_between_unrelated_classes_names_the_type_mismatch() {
 
 #[test]
 fn a_range_loop_bound_that_reads_a_shared_field_is_bound_before_the_loop() {
-    // The start reads `this`'s field through a borrow; Rust keeps that borrow for the whole loop,
-    // so the bound is read into a local first, as Java reads it once before the loop.
+    // The start reads `this`'s field through a borrow (the object is shared with a thread, so it
+    // is locked); Rust keeps that borrow for the whole loop, so the bound is read into a local
+    // first, as Java reads it once before the loop.
     let rust = translate(
-        "public class Main {\n    static Main last;\n    int next = 2;\n    void end(int i) {\n        next++;\n        last = this;\n    }\n    void ends(int limit) {\n        for (int i = next; i < limit; i++) end(i);\n    }\n    public static void main(String[] a) {\n        new Main().ends(6);\n    }\n}\n",
+        "public class Main {\n    static Main last;\n    int next = 2;\n    void end(int i) {\n        next++;\n        last = this;\n    }\n    void ends(int limit) {\n        for (int i = next; i < limit; i++) end(i);\n    }\n    public static void main(String[] a) throws Exception {\n        Main m = new Main();\n        Thread t = new Thread(() -> m.ends(6));\n        t.start();\n        t.join();\n    }\n}\n",
     );
-    assert_contains(&rust, &["let start = this.borrow().next;", "for i in start..limit {"]);
+    assert_contains(&rust, &["let start_2 = this.borrow().next;", "for i in start_2..limit {"]);
     assert_lacks(&rust, &["for i in this.borrow()"]);
 }
 
@@ -5766,6 +5759,6 @@ fn a_for_loop_whose_bound_is_a_field_the_body_writes_stays_a_while_loop() {
     let rust = translate(
         "public class Main {\n    int count = 2;\n    void grow() {\n        count++;\n    }\n    int run() {\n        int seen = 0;\n        for (int i = 0; i < count; i++) {\n            if (count < 5) grow();\n            seen++;\n        }\n        return seen;\n    }\n    public static void main(String[] a) {\n        new Main().run();\n    }\n}\n",
     );
-    assert_contains(&rust, &["while i < self.count {"]);
+    assert_contains(&rust, &["while i < self.count.get() {"]);
     assert_lacks(&rust, &["for i in"]);
 }
