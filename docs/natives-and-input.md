@@ -270,6 +270,10 @@ A translated program is closed: it knows all its classes. So:
   JDK's `Arrays.stream(int[])` over the string's UTF-16 units, and `lines()` streams an
   `Object[]` of the lines through an iterator of unknown size, as the JDK's `LinesSpliterator`
   has no size, so `count()` still runs the pipeline's lambdas (`STRING_STREAMS`).
+- `String.CASE_INSENSITIVE_ORDER` reads `TranslatedStrings.CASE_INSENSITIVE_ORDER`
+  (`crates/translator/java/overlay/java/lang`, `program::redirected_field`): one comparator that
+  compares as `compareToIgnoreCase`, as the JDK's does, and throws the JVM's message for a null
+  string. Its class is the translator's, so its `getClass().getName()` is not the JDK's.
 - `JavaLangAccess.join`, which `StringJoiner` calls, is the runtime's `join_range`; the
   `JavaLangAccess` methods in `TRANSLATED_LANG_ACCESS` are the translator's own static methods,
   since `SharedSecrets.getJavaLangAccess()` is null in a translation.

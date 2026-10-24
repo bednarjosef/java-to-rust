@@ -295,8 +295,9 @@ Labeler()` passes them from the scope. A local class that uses the enclosing ins
 other local classes of the same block; they are concrete classes like any other.
 
 Local records, enums and interfaces are implicitly static: they capture nothing and move to the
-top level (`lower/local_types.rs`), named by package and simple name, with the method appended on
-a clash (`app.PointInRun`).
+top level (`javac/records.rs`, `lower/local_types.rs`), named by package and simple name, with
+the method appended on a clash (`app.PointInRun`). One declared in an initializer block is not
+moved, and is rejected.
 
 Rejected: creating a local class at a place where a local hides one of its captures.
 
@@ -560,7 +561,8 @@ generator writes `while it.has_next() { let x = it.next(); .. }`, propagating wh
 throw like any call. Since `hasNext` and `next` are translated code, the loop does what Java's
 does, including `ConcurrentModificationException`, `NoSuchElementException`, the quirk that
 removing the second-to-last element ends an `ArrayList` loop, and the call sequence after
-`break`. A label on the loop goes on the `while`.
+`break`. A label on the loop goes on the `while`. The collection may be an object or an enum
+constant whose enum implements `Iterable`.
 
 - javac's tree does not show the calls, so reachability adds `Iterable.iterator`,
   `Iterator.hasNext` and `Iterator.next` at every for-each over a non-array

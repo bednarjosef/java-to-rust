@@ -329,10 +329,10 @@ impl<'t> Lowering<'t> {
     /// `Class.name`. `None` for anything else, including fields of library classes.
     pub(super) fn field_place(&self, node: Node<'t>) -> Result<Option<Place>, Error> {
         let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD") else { return Ok(None) };
-        // `System.in`, `System.out` and `System.err` as values: the translator's objects, which
-        // a translation with the JDK's sources has (`program::standard_stream_field`).
-        if symbol.owner == "java.lang.System"
-            && let Some((holder, field)) = crate::program::standard_stream_field(symbol.name)
+        // `System.in`, `System.out`, `System.err` and `String.CASE_INSENSITIVE_ORDER` as values:
+        // the translator's objects, which a translation with the JDK's sources has
+        // (`program::redirected_field`).
+        if let Some((holder, field)) = crate::program::redirected_field(symbol.owner, symbol.name)
             && let Some(class) = self.type_index(holder)
         {
             return Ok(Some(Place::Static { class, name: field.to_string() }));

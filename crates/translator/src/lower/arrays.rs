@@ -46,8 +46,8 @@ impl<'t> Lowering<'t> {
         let variable = node.child("variable")?;
         let ty = self.ty(variable, variable.symbol().map_or("", |s| s.ty))?;
         let array = self.expr(node.child("expression")?)?;
-        // Over an object, the loop calls its iterator (see `foreach`).
-        if matches!(array.ty, Type::Class(..)) {
+        // Over an object or an enum constant, the loop calls its iterator (see `foreach`).
+        if matches!(array.ty, Type::Class(..) | Type::Enum(_)) {
             return self.for_each_iterable(node, array, label);
         }
         if !matches!(array.ty, Type::Array(_)) {

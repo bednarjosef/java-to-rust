@@ -18,9 +18,9 @@ pub use reach::{
     TRANSLATED_SEGMENTS, UNSET_PROPERTIES, caller_query, charset_coder, charset_coding, class_bound,
     class_for_name, class_name, component_array, computed_for_name, created_by_name, direct_stream_call,
     field_offset_named, is_ensure_initialized, literal_class, live_branch, lookup, module_call,
-    module_for_name, provided, recreated_exception, redirected_call, release_query, segment_access,
-    standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update, unset_property_ifs,
-    untranslated, writes_string_array,
+    module_for_name, provided, recreated_exception, redirected_call, redirected_field, release_query,
+    segment_access, standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update,
+    unset_property_ifs, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 

@@ -3342,8 +3342,9 @@ fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_go
 
 #[test]
 fn the_census_rejects_a_class_with_a_member_it_cannot_declare_and_goes_on() {
-    // `Shapes.area` declares a local enum, which the translator does not declare yet: its
-    // class is rejected with all of its code, and the census goes on to `main` and `Other`.
+    // `Shapes` declares a local enum in an initializer block, which the translator does not
+    // declare yet: its class is rejected with all of its code, and the census goes on to `main`
+    // and `Other`.
     let dir = write_sources(
         "census_member",
         &[
@@ -3353,7 +3354,7 @@ fn the_census_rejects_a_class_with_a_member_it_cannot_declare_and_goes_on() {
             ),
             (
                 "p/Shapes.java",
-                "package p;\nclass Shapes {\n    static int area(int side) {\n        enum Kind { SQUARE, CUBE }\n        return Kind.CUBE.ordinal() * side;\n    }\n}\n",
+                "package p;\nclass Shapes {\n    static int sides;\n    static {\n        enum Kind { SQUARE, CUBE }\n        sides = Kind.CUBE.ordinal();\n    }\n    static int area(int side) {\n        return sides * side;\n    }\n}\n",
             ),
             ("p/Other.java", "package p;\nclass Other {\n    static int fine() { return 4; }\n}\n"),
         ],
