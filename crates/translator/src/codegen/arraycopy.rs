@@ -1,9 +1,11 @@
-//! `System.arraycopy` between two `Object`s, pair by pair. A pair of arrays of one type is a plain
-//! copy. A pair of arrays of other types is what Java does for it, or the `ArrayStoreException`
-//! that HotSpot throws, with HotSpot's message, which a program may print. Between arrays of two
-//! classes or of strings each element is checked against the destination's class as it is stored
-//! (`arraycopy_classes.rs`), and so between arrays of `String` and of `Object`; a pair of arrays of
-//! other element types, such as arrays of arrays, is rejected.
+//! `System.arraycopy` between two `Object`s. A pair of arrays of one type is a plain copy. Between
+//! arrays of two classes or of strings each element is checked against the destination's class as
+//! it is stored (`arraycopy_classes.rs`), and so between arrays of `String` and of `Object`; a pair
+//! of arrays of other reference types, such as arrays of arrays, is rejected. Every other pair (a
+//! source or destination that is not an array, or a primitive element type on either side and
+//! different types) fails with the `ArrayStoreException` that HotSpot throws, with HotSpot's
+//! message, which a program may print: one arm makes it from what each side is
+//! (`array_copy_kind`), so the arms grow with the pairs of array types, not of all classes.
 
 use super::*;
 
@@ -33,31 +35,41 @@ fn primitive_name(ty: Type) -> Option<&'static str> {
 
 impl<'a> Gen<'a> {
     /// The arms of `match (&src, &dest)` for `System.arraycopy`, over the runtime classes
-    /// `variants` of the enum of `t`. They cover every pair of classes, each in one arm: a
-    /// non-array source, then a non-array destination, then a pair of arrays.
+    /// `variants` of the enum of `t`: a pair of arrays of one class, a pair of arrays of two
+    /// reference types, and last every pair that fails.
     pub(super) fn object_copy_arms(&mut self, t: usize, variants: &[usize], call: CopyCall) -> Vec<String> {
         let arrays: Vec<(usize, Type)> =
             variants.iter().filter_map(|&c| self.element_of(c).map(|element| (c, element))).collect();
-        let others: Vec<usize> = variants.iter().copied().filter(|&c| self.element_of(c).is_none()).collect();
         let mut arms = Vec::new();
-        for &s in &others {
-            let message = format!("arraycopy: source type {} is not an array", self.binary_name(s));
-            let body = self.mismatch(call.checked, &message);
-            arms.push(format!("({}(_), _) => {body},", self.variant(t, s)));
-        }
-        for &(s, _) in &arrays {
-            for &d in &others {
-                let message = format!("arraycopy: destination type {} is not an array", self.binary_name(d));
-                let body = self.mismatch(call.checked, &message);
-                arms.push(format!("({}(_), {}(_)) => {body},", self.variant(t, s), self.variant(t, d)));
-            }
-        }
         for &(s, es) in &arrays {
             for &(d, ed) in &arrays {
-                arms.push(self.array_pair_arm(t, variants, (s, d), (es, ed), call));
+                if s == d || (primitive_name(es).is_none() && primitive_name(ed).is_none()) {
+                    arms.push(self.array_pair_arm(t, variants, (s, d), (es, ed), call));
+                }
             }
         }
+        self.need(Need::CopyKind(t));
+        let failure =
+            format!("{}(src.array_copy_kind(), dest.array_copy_kind())", self.runtime("arraycopy_mismatch"));
+        let body = if call.checked {
+            format!("Err({failure})")
+        } else {
+            format!("{}({failure})", self.runtime("throw_exception"))
+        };
+        arms.push(format!("(src, dest) => {body},"));
         arms
+    }
+
+    /// What an object of class `c` is to `System.arraycopy` (`java::CopyKind`).
+    pub(super) fn copy_kind(&mut self, c: usize) -> String {
+        let kind = self.runtime("CopyKind");
+        match self.element_of(c) {
+            None => format!("{kind}::NotArray({})", rust_string(&self.binary_name(c))),
+            Some(element) => match primitive_name(element) {
+                Some(name) => format!("{kind}::Primitive(\"{name}\")"),
+                None => format!("{kind}::References"),
+            },
+        }
     }
 
     /// The arm for a source array of class `s` and a destination array of class `d`.
@@ -88,7 +100,7 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A copy between arrays of two different types: the pattern of its arm and its body. The
+    /// A copy between arrays of two different reference types: the pattern of its arm and its body. The
     /// pattern binds `src` and `dest` only where the body reads them.
     fn object_copy_between(
         &mut self,
@@ -100,16 +112,6 @@ impl<'a> Gen<'a> {
     ) -> (String, String) {
         let CopyCall { pos, checked, names: [p, q, n] } = call;
         let (vs, vd) = (self.variant(t, s), self.variant(t, d));
-        let mismatch = "arraycopy: type mismatch: can not copy";
-        let message = match (primitive_name(es), primitive_name(ed)) {
-            (Some(a), Some(b)) => Some(format!("{mismatch} {a}[] into {b}[]")),
-            (Some(a), None) => Some(format!("{mismatch} {a}[] into object array[]")),
-            (None, Some(b)) => Some(format!("{mismatch} object array[] into {b}[]")),
-            (None, None) => None,
-        };
-        if let Some(message) = message {
-            return (format!("({vs}(_), {vd}(_))"), self.mismatch(checked, &message));
-        }
         let is_object = |ty: &Type| matches!(ty, Type::Class(name, _) if *name == OBJECT);
         let string = variants.iter().copied().find(|&c| self.binary_name(c) == "java.lang.String");
         let object = struct_name(&self.class.types[t].name);
@@ -154,19 +156,6 @@ impl<'a> Gen<'a> {
         match element {
             Type::Class(..) | Type::String => self.type_of(element),
             _ => None,
-        }
-    }
-
-    /// The `ArrayStoreException` that HotSpot throws with `message`: the copy's `Err` when it is
-    /// checked, and a throw otherwise.
-    fn mismatch(&mut self, checked: bool, message: &str) -> String {
-        if checked {
-            format!(
-                "Err({}(\"java.lang.ArrayStoreException\", \"{message}\"))",
-                self.runtime("Exception::new")
-            )
-        } else {
-            format!("{}(\"java.lang.ArrayStoreException\", \"{message}\")", self.runtime("throw"))
         }
     }
 }

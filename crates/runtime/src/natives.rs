@@ -189,6 +189,32 @@ pub fn try_arraycopy_with<T: Clone, U: Clone, S: Elements<T>, D: Elements<U>>(
     }
 }
 
+/// What an `Object` is to `System.arraycopy`: not an array (with its class's binary name), an
+/// array of a primitive type (with the type's name), or an array of references.
+#[derive(Clone, Copy)]
+pub enum CopyKind {
+    NotArray(&'static str),
+    Primitive(&'static str),
+    References,
+}
+
+/// The `ArrayStoreException` that HotSpot throws for `System.arraycopy` between objects of kinds
+/// `src` and `dest` that cannot be copied: one is not an array, or the element types differ and
+/// one of them is primitive.
+pub fn arraycopy_mismatch(src: CopyKind, dest: CopyKind) -> Exception {
+    use CopyKind::*;
+    let mismatch = "arraycopy: type mismatch: can not copy";
+    let message = match (src, dest) {
+        (NotArray(name), _) => format!("arraycopy: source type {name} is not an array"),
+        (_, NotArray(name)) => format!("arraycopy: destination type {name} is not an array"),
+        (Primitive(a), Primitive(b)) => format!("{mismatch} {a}[] into {b}[]"),
+        (Primitive(a), References) => format!("{mismatch} {a}[] into object array[]"),
+        (References, Primitive(b)) => format!("{mismatch} object array[] into {b}[]"),
+        (References, References) => format!("{mismatch} object array[] into object array[]"),
+    };
+    Exception::new("java.lang.ArrayStoreException", message)
+}
+
 /// `copy_slice`, where the program observes the exception (see `try_arraycopy`).
 pub fn try_copy_slice<T: Clone>(
     src: &[T],

@@ -1,7 +1,8 @@
-# Native speed (planned)
+# Native speed
 
 The plan for making translated programs much faster and smaller than the same programs on the
-JVM, for any Java program, with no input beyond its sources. The translated javac is the main
+JVM, for any Java program, with no input beyond its sources, and how far it has got: the
+collected heap of step 1 is built (docs/collector.md); the rest is planned. The translated javac is the main
 benchmark. The object model it replaces is described in docs/object-model.md. The idiom side of
 the whole-program mode (designs a person would write, relaxations) stays in docs/thorough-mode.md.
 
@@ -18,14 +19,14 @@ Rules that hold for every step:
   cannot prove is either left general or made true by a cheap check with a general fallback, so
   a wrong guess costs speed, never correctness.
 
-## Why: what the current model costs
+## Why: what reference counting cost
 
 Measured on 2026-10-24 with quick builds of the translated javac (the same code with two
 experimental runtimes), on the 540 corpus features:
 
 | runtime | time | binary | peak memory |
 |---|---:|---:|---:|
-| reference counting (today) | 3.93 s | 160 MB | 257 MB |
+| reference counting (before the collector) | 3.93 s | 160 MB | 257 MB |
 | counts kept, nothing freed | 3.86 s | 81 MB | 1,875 MB |
 | no counting, nothing freed | 2.57 s | 52 MB | 1,855 MB |
 
@@ -80,6 +81,10 @@ value, through the object's address, the way Java does it:
 
 ### 1.3 The collector
 
+Built so far (docs/collector.md): a collector that is the global allocator, with uncounted
+handles, conservative scanning of the roots and of every slot that may hold pointers, sweeping
+at each collection, and marking in parallel. Planned beyond it:
+
 - **Marking** follows each class's reference map (the offsets of its reference fields), one
   table per class, read by a single marking loop with an explicit stack. No per-class tracing
   code is generated.
@@ -104,7 +109,6 @@ value, through the object's address, the way Java does it:
   generation (sticky mark bits: young objects are collected often without tracing the old ones)
   is added, with card marking on reference stores into old objects. Analysis removes the barrier
   where the stored-into object is known to be young (constructors).
-- **Parallel marking**: in a program with a single thread, the idle cores mark in parallel.
 
 ### 1.4 Types, dispatch and values
 
@@ -128,16 +132,16 @@ value, through the object's address, the way Java does it:
 
 Each part lands on its own and passes the gate (all checks and the 28 targets):
 
-1. `java::Gc` handles in a collected heap, replacing `Rc` and `java::Arc` for objects, with the
-   enums and cells unchanged. This removes counting and freeing code, which is where the measured
-   third is. The heap's tracing comes from generated reference maps.
-2. Header-free class blocks and `u32` references.
+1. Built: uncounted `java::Arc` handles in a collected heap, replacing `Rc` and the counted
+   handles for objects, with the enums and cells unchanged. This removed the counting and
+   freeing code, which is where the measured third was. The collector scans conservatively.
+2. Header-free class blocks and `u32` references, with tracing from generated reference maps.
 3. Thin references for multi-class types, replacing the enums of handles, with dispatch on the
    class number.
 4. Fields as cells, monitors and identity hashes in side tables, removing `RefCell` and
    `Locked`.
 5. Strings and arrays in the heap; boxed values in references.
-6. Young generation, parallel marking, huge pages, field order.
+6. Young generation, huge pages, field order.
 
 ## Step 2: whole-program analysis
 

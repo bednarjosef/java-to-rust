@@ -12,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 
 mod boxing;
 mod ceil_div;
-mod chains;
 mod channels;
 mod char_sequence;
 mod character;
@@ -233,10 +232,8 @@ fn generate_with(
         written: HashSet::new(),
         rejected: Vec::new(),
         closures: Vec::new(),
-        chains: chains::Chains::default(),
     };
     g.shared_names = g.shared_names();
-    g.chains = g.find_chains();
     let header = match modules {
         Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         None => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
@@ -300,8 +297,6 @@ enum Part {
 
 struct Gen<'a> {
     class: &'a Class,
-    /// The structs and enums that take part in long chains of objects (see `chains`).
-    chains: chains::Chains,
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,

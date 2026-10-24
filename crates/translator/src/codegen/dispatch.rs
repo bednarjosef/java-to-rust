@@ -56,6 +56,8 @@ pub(super) enum Need {
     IdentityHash(usize),
     /// `java::CastSource`: the object's class as a `ClassCastException` names it.
     CastSource(usize),
+    /// `array_copy_kind()`: what the object is to `System.arraycopy` (`java::CopyKind`).
+    CopyKind(usize),
 }
 
 /// How a value of one class type becomes a value of another, in a cast or an `instanceof`.
@@ -82,7 +84,8 @@ impl<'a> Gen<'a> {
             | Need::RuntimeClassName(t)
             | Need::RuntimeTypeNames(t)
             | Need::IdentityHash(t)
-            | Need::CastSource(t) => {
+            | Need::CastSource(t)
+            | Need::CopyKind(t) => {
                 needs.insert(Need::Enum(t));
             }
             Need::NullableText(t) | Need::JavaString(t) => {
@@ -910,32 +913,32 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the variant of class `c` holds a `java::Arc` of the class's object.
-    fn counted_variant(&self, c: usize) -> bool {
+    fn handle_variant(&self, c: usize) -> bool {
         self.runtime_of(c).is_none() && !self.holds_value(c) && self.pointer(c) == "Arc"
     }
 
-    /// The `Clone` of an enum whose first `counted` variants hold a `java::Arc` each: those are
-    /// copied by `java::clone_counted`, the others by a `match`.
-    fn counted_clone(&mut self, name: &str, shorts: &[String], counted: usize) {
-        self.line(&format!("java::counted_handles!({name}, {counted});"));
+    /// The `Clone` of an enum whose first `handles` variants hold a `java::Arc` each: those are
+    /// copied by `java::copy_handle_variant`, the others by a `match`.
+    fn handle_variants_clone(&mut self, name: &str, shorts: &[String], handles: usize) {
+        self.line(&format!("java::handle_variants!({name}, {handles});"));
         self.gap();
         self.line(&format!("impl Clone for {name} {{"));
         self.indent += 1;
         self.line("#[inline]");
         self.line(&format!("fn clone(&self) -> {name} {{"));
         self.indent += 1;
-        if counted == shorts.len() {
-            self.line("match java::clone_counted(self) {");
+        if handles == shorts.len() {
+            self.line("match java::copy_handle_variant(self) {");
             self.indent += 1;
             self.line("Some(copy) => copy,");
             self.line("None => unreachable!(\"every variant holds a handle\"),");
         } else {
-            self.line("if let Some(copy) = java::clone_counted(self) {");
+            self.line("if let Some(copy) = java::copy_handle_variant(self) {");
             self.line("    return copy;");
             self.line("}");
             self.line("match self {");
             self.indent += 1;
-            for short in &shorts[counted..] {
+            for short in &shorts[handles..] {
                 self.line(&format!("{name}::{short}(o) => {name}::{short}(o.clone()),"));
             }
             self.line("_ => unreachable!(\"a handle's variant is copied above\"),");
@@ -1332,16 +1335,16 @@ impl<'a> Gen<'a> {
         }
         let name = struct_name(&self.class.types[t].name);
         let mut variants = self.enum_variants(t);
-        // The variants that hold a `java::Arc` come first, so that a copy of one is a count
-        // change without a `match` over the classes (`java::clone_counted`).
-        variants.sort_by_key(|&c| !self.counted_variant(c));
-        let counted = variants.iter().filter(|&&c| self.counted_variant(c)).count();
+        // The variants that hold a `java::Arc` come first, so that a copy of one is a copy of
+        // the enum's bits without a `match` over the classes (`java::copy_handle_variant`).
+        variants.sort_by_key(|&c| !self.handle_variant(c));
+        let handles = variants.iter().filter(|&&c| self.handle_variant(c)).count();
         let shorts: Vec<String> = variants
             .iter()
             .map(|&c| self.variant(t, c).rsplit("::").next().unwrap_or_default().to_string())
             .collect();
         self.gap();
-        self.line(if counted == 0 { "#[derive(Clone)]" } else { "#[repr(u16)]" });
+        self.line(if handles == 0 { "#[derive(Clone)]" } else { "#[repr(u16)]" });
         self.line(&format!("{}enum {name} {{", self.vis()));
         self.indent += 1;
         for (&c, short) in variants.iter().zip(&shorts) {
@@ -1350,8 +1353,8 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("}");
-        if counted > 0 {
-            self.counted_clone(&name, &shorts, counted);
+        if handles > 0 {
+            self.handle_variants_clone(&name, &shorts, handles);
         }
         let wanted: Vec<Need> = self.wanted.iter().copied().collect();
         let mark = self.out.len();
@@ -1396,7 +1399,6 @@ impl<'a> Gen<'a> {
         }
         self.class_value_impls(t, &variants);
         self.raised_impl(t);
-        self.chain_enum_items(t, &variants);
     }
 
     /// The arms of a `match self` over the variants, each made by `arm` from the variant's class;
@@ -1451,7 +1453,7 @@ impl<'a> Gen<'a> {
             let path = hierarchy::base_path(g.facts, g.class, c, root);
             let path = path.trim_end_matches('.');
             let text = match (mutable, immutable, path.is_empty()) {
-                (false, true, true) => "o.as_ref()".to_string(),
+                (false, true, true) => "&**o".to_string(),
                 (false, true, false) => format!("&o.{path}"),
                 (false, false, true) => "o.borrow()".to_string(),
                 (false, false, false) => format!("{java}Ref::map(o.borrow(), |o| &o.{path})"),
@@ -1865,15 +1867,12 @@ impl<'a> Gen<'a> {
         let place = if self.lends(r) { other } else { format!("&{other}") };
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
-            // A `java::SharedArray` is an `Arc`, as `array_identity` compares them.
-            Some(ty @ Type::Array(_)) if self.shared_array_type(ty) => "Arc::ptr_eq(o, b)",
-            Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
+            Some(Type::Array(_)) => "Arc::ptr_eq(o, b)",
             Some(Type::StringBuilder) => "o.same(b)",
             // A box whose identity is kept (`java::Boxed`) compares the values it holds.
             _ if self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty)) => "**o == **b",
             _ if self.holds_value(c) => "o == b",
-            _ if self.facts.thread_shared.contains(&c) => "Arc::ptr_eq(o, b)",
-            _ => "Rc::ptr_eq(o, b)",
+            _ => "Arc::ptr_eq(o, b)",
         };
         self.equals_test(c, &place, optional, same)
     }
@@ -2136,12 +2135,7 @@ impl<'a> Gen<'a> {
                 format!("{}(f64::from(*a), f64::from(*b))", self.runtime("double_equals"))
             }
             _ if self.holds_value(c) && !array => "a == b".to_string(),
-            _ if self.facts.thread_shared.contains(&c)
-                || array && self.runtime_of(c).is_some_and(|ty| self.shared_array_type(ty)) =>
-            {
-                "Arc::ptr_eq(a, b)".to_string()
-            }
-            _ => "Rc::ptr_eq(a, b)".to_string(),
+            _ => "Arc::ptr_eq(a, b)".to_string(),
         }
     }
 
@@ -2233,7 +2227,7 @@ impl<'a> Gen<'a> {
             .iter()
             .map(|&c| {
                 let payload = self.payload(c);
-                payload.starts_with("Rc<")
+                payload.starts_with("Arc<RefCell<")
                     || payload.starts_with("Arc<java::Locked<")
                     || matches!(payload.as_str(), "java::StringBuilder" | "java::SharedStringBuilder")
             })
@@ -2483,6 +2477,7 @@ impl<'a> Gen<'a> {
             (Need::RuntimeClassName(t), "runtime_class_name", "&'static str"),
             (Need::RuntimeTypeNames(t), "runtime_type_names", "&'static [&'static str]"),
             (Need::IdentityHash(t), "object_identity_hash", "i32"),
+            (Need::CopyKind(t), "array_copy_kind", "java::CopyKind"),
         ];
         let methods: Vec<_> = methods.into_iter().filter(|&(need, ..)| wanted(need)).collect();
         let name = struct_name(&self.class.types[t].name);
@@ -2516,6 +2511,7 @@ impl<'a> Gen<'a> {
                 Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
                 Need::RuntimeTypeNames(_) => (g.names_list(c), false),
+                Need::CopyKind(_) => (g.copy_kind(c), false),
                 _ => (g.value_hash(c, "o"), true),
             });
             self.indent -= 1;

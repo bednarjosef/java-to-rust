@@ -109,7 +109,7 @@ The natives of the runtime's own classes (`System.arraycopy`, `Object.hashCode`,
 `System.identityHashCode`, the bit conversions of `Double` and `Float`, the clocks,
 `availableProcessors`, `String.intern`) are in `runtime/src/natives.rs`; the checked copy between
 arrays of two classes, when one side is a plain `Vec`, is `try_copy_refs` in
-`runtime/src/copy_refs.rs`. The identity hash is derived from the object's address, which an `Rc` never changes: stable for the object's life and
+`runtime/src/copy_refs.rs`. The identity hash is derived from the object's address, which the collector never changes: stable for the object's life and
 different on every run, as in Java. `String.intern()` is the string itself where strings are
 values, and the interned object of its text where the program compares strings by reference
 (see [object-model.md](object-model.md), section 1.6).

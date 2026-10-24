@@ -84,8 +84,8 @@ fn a_method_whose_this_is_captured_keeps_the_handle() {
     assert_contains(
         &rust,
         &[
-            "outer: Rc<RefCell<A>>,",
-            "fn scaled(this: &Rc<RefCell<A>>, v: i32) -> java::JString {",
+            "outer: Arc<RefCell<A>>,",
+            "fn scaled(this: &Arc<RefCell<A>>, v: i32) -> java::JString {",
             "AScaler::new(this.clone(), v)",
             "self.outer.borrow().factor",
         ],
@@ -115,8 +115,8 @@ fn an_inner_class_holds_the_outer_handle() {
     assert_contains(
         &rust,
         &[
-            "struct ACursor {\n    outer: Rc<RefCell<A>>,\n    next: i32,\n}",
-            "fn new(outer: Rc<RefCell<A>>) -> ACursor {",
+            "struct ACursor {\n    outer: Arc<RefCell<A>>,\n    next: i32,\n}",
+            "fn new(outer: Arc<RefCell<A>>) -> ACursor {",
             "ACursor::new(this.clone())",
             "ACursor::new(list.clone())",
             "self.next < self.outer.borrow().size",
@@ -172,7 +172,7 @@ fn inner_subclasses_share_one_outer_field() {
     assert_contains(
         &rust,
         &[
-            "struct AOpFields {\n    outer: Rc<A>,\n}",
+            "struct AOpFields {\n    outer: Arc<A>,\n}",
             "struct ATwice {\n    base: AOpFields,\n}",
             "ATwice { base: AOpFields::new(outer) }",
         ],
@@ -206,8 +206,8 @@ fn an_anonymous_class_is_a_variant_of_its_interface() {
         &[
             "struct OrderInMain {\n}",
             "struct OrderInMain2 {\n}",
-            "enum AOrder {\n    OrderInMain(Rc<OrderInMain>),\n    OrderInMain2(Rc<OrderInMain2>),\n}",
-            "AOrder::OrderInMain(Rc::new(OrderInMain::new()))",
+            "enum AOrder {\n    OrderInMain(Arc<OrderInMain>),\n    OrderInMain2(Arc<OrderInMain2>),\n}",
+            "AOrder::OrderInMain(Arc::new(OrderInMain::new()))",
         ],
     );
 }
@@ -360,7 +360,7 @@ fn an_inner_subclass_of_another_outers_inner_class_holds_both_outers() {
     assert_contains(
         &rust,
         &[
-            "struct ABatchRepeated {\n    base: AStepFields,\n    outer_: Rc<ABatch>,\n}",
+            "struct ABatchRepeated {\n    base: AStepFields,\n    outer_: Arc<ABatch>,\n}",
             "ABatchRepeated { base: AStepFields::new(outer.outer.clone(), by.wrapping_mul(outer.times)), outer_: outer }",
         ],
     );
@@ -412,7 +412,7 @@ fn an_inner_superclass_whose_constructor_calls_an_override_gets_its_enclosing_in
     assert_contains(
         &rust,
         &[
-            "fn new(outer: Rc<A>) -> ABaseFields {",
+            "fn new(outer: Arc<A>) -> ABaseFields {",
             "ADerived { base: ABaseFields::new(outer.clone()) }",
             "java::concat!(format_args!(\"derived {}\", self.base.outer.total))",
         ],

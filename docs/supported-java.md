@@ -35,20 +35,20 @@ plainer form only where it proves the meaning is the same:
 
 | Java | Faithful form | Plainer forms, where an analysis allows |
 |---|---|---|
-| object | `Rc<RefCell<C>>` | `Rc<C>` when objects never change after construction (`analysis/objects.rs`); a plain struct with `&self`/`&mut self` methods when objects are never shared (`analysis/owned.rs`, `analysis/borrowing.rs`) |
+| object | `Arc<RefCell<C>>` | `Arc<C>` when objects never change after construction (`analysis/objects.rs`); a plain struct with `&self`/`&mut self` methods when objects are never shared (`analysis/owned.rs`, `analysis/borrowing.rs`) |
 | reference that may be null | `Option<..>` | the plain value where nullness analysis proves it is never null (`analysis/nullness.rs`) |
 | `int` arithmetic | `wrapping_add`, `java::rem`, ... | `+ - * / %` where range analysis proves no overflow and a nonzero divisor (`analysis/ranges.rs`) |
 | array | `java::Array<T>`, a shared cell | `Vec<T>` (or `Vec<Vec<T>>`) when no other name can see it (`analysis/arrays.rs`) |
 | string | `java::JString`, WTF-8 bytes | `&java::Wtf8` for a parameter never assigned; byte indexing for strings proven ASCII |
-| object in a threaded program | `Arc<java::Locked<C>>` | `Arc<C>` when immutable; `Rc<RefCell<C>>` when no other thread can reach it |
+| object in a threaded program | `Arc<java::Locked<C>>` | `Arc<C>` when immutable; `Arc<RefCell<C>>` when no other thread can reach it |
 
 Nullness analysis treats a field as not null when every constructor sets it to a non-null value
 before anything can read it. A static read while its own class's initialization is still under
 way, before the initializer sets it, may be null wherever its value goes
 (`analysis/early_reads.rs`).
 
-Objects are freed by reference counting, not by a garbage collector, so a cycle of objects is
-never freed.
+`Arc` is `java::Arc`, a handle with no count. Objects are freed by a garbage collector, cycles
+included (docs/collector.md).
 
 ## Primitives, statements and operators
 
@@ -125,11 +125,11 @@ never freed.
   blocks, static fields, constructors (with `this(...)` and `super(...)`), and a user `toString`
   in printing and concatenation. A `toString` is a method returning the string.
 - Constructors build a plain value, starting from a struct literal of the leading field
-  assignments (`P { x, y }`), and `new` shares it (`Rc::new(RefCell::new(P::new(1, 2)))`).
+  assignments (`P { x, y }`), and `new` shares it (`Arc::new(RefCell::new(P::new(1, 2)))`).
 - An object parameter that a method only uses (fields, calls, comparison, printing, a copy into a
-  local) is a borrowed `&Rc<..>`, or `&Option<Rc<..>>` where it may be null. Methods of shared classes borrow their object
+  local) is a borrowed `&Arc<..>`, or `&Option<Arc<..>>` where it may be null. Methods of shared classes borrow their object
   (`p.borrow_mut().set(2)`) when nothing they run can reach the object another way.
-- `==` on objects is identity: `Rc::ptr_eq`, or `java::same` where either side may be null. Two
+- `==` on objects is identity: `Arc::ptr_eq`, or `java::same` where either side may be null. Two
   `Object`s that may both be strings or boxes are compared at run time, and equal ones end the
   program, as the translation does not keep their identity.
 - `super.clone()` of `Object` is a shallow copy of the runtime class, a `match` on the variant in
@@ -143,7 +143,7 @@ Design: [object-model.md](object-model.md).
 
 - **Class trees**: a class with subclasses keeps its fields in a struct (`ShapeFields`) that
   each subclass embeds as `base`. A type that objects of several classes can be is a Rust `enum`
-  with a variant per class (`Shape::Circle(Rc<RefCell<Circle>>)`); a virtual call is a method of
+  with a variant per class (`Shape::Circle(Arc<RefCell<Circle>>)`); a virtual call is a method of
   the enum that matches the variant (`codegen/dispatch.rs`). Where every value of a type is one
   concrete class, the value is that class's object and an upcast is free.
 - A constructor that uses `this` as a value or calls an overridable method switches its tree to

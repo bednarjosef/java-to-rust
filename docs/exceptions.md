@@ -78,7 +78,7 @@ program class named like a standard class the program uses is rejected.
 
 | Java type of the value | Rust |
 | --- | --- |
-| a class with one concrete class under it | that class's object, `Rc<C>` (or `Rc<RefCell<C>>` when the family is mutable) |
+| a class with one concrete class under it | that class's object, `Arc<C>` (or `Arc<RefCell<C>>` when the family is mutable) |
 | `Throwable`, and a standard class with several concrete classes under it | `Throwable` |
 | a program class with several concrete classes under it | the enum of that class, as for any class tree |
 
@@ -109,7 +109,7 @@ static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty");
 ```rust
 fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
     if s.is_empty() {
-        return Err(Throwable::Bad(Rc::new(Bad::new(java::wtf8("empty")))));
+        return Err(Throwable::Bad(Arc::new(Bad::new(java::wtf8("empty")))));
     }
     Ok(java::try_parse_radix::<i32>(Some(s), 10)?)   // checked only if a caller observes it
 }

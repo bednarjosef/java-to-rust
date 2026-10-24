@@ -16,7 +16,7 @@ possible classes are known and dispatch can be a `match`.
    than one per field.
 2. **A type that objects of several concrete classes can be is an enum named after the Java
    type**, with one variant per class whose objects become values of the type, each holding
-   that class's object (`Rc<RefCell<C>>`, or `Rc<C>` when immutable). A type with one such class
+   that class's object (`Arc<RefCell<C>>`, or `Arc<C>` when immutable). A type with one such class
    is that class's object, with no enum. Enums are flat: every variant is a concrete class,
    never another enum, so a call through an interface over several class trees is one `match`.
 3. **Dispatch is a `match` in a method of the enum** (a *dispatcher*). A body that a class
@@ -158,8 +158,9 @@ impl Circle {
     fn area(&self) -> f64 { 3.0 * self.r * self.r }
 }
 
-#[derive(Clone)]
-enum Base { Circle(Rc<RefCell<Circle>>), Rect(Rc<RefCell<Rect>>) }
+#[repr(u16)]
+enum Base { Circle(Arc<RefCell<Circle>>), Rect(Arc<RefCell<Rect>>) }
+java::handle_variants!(Base, 2);
 impl Base {
     fn base(&self) -> Ref<'_, BaseFields> {
         match self {
@@ -174,7 +175,7 @@ impl Base {
         java::concat!(self.base().name.clone(), format_args!(":{}", java::Double(self.area())))
     }
 }
-impl PartialEq for Base { /* Rc::ptr_eq per variant, false across variants */ }
+impl PartialEq for Base { /* Arc::ptr_eq per variant, false across variants */ }
 impl fmt::Display for Base { /* each variant as its class shows it */ }
 ```
 
@@ -187,12 +188,12 @@ Rules:
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
   wraps the object in that type's enum (`Binary::Add(o.clone()).eval()`) rather than
   converting the whole value.
-- An enum with variants that hold a `java::Arc` (the classes that threads share,
-  docs/multi-threading.md) lists them first and is `#[repr(u16)]`, and its `Clone` copies any of
-  them with `java::clone_counted`: one more count on the handle and a copy of the enum's bits,
-  whichever class the variant is, rather than a `match` over every class
-  (`java::counted_handles!` states the layout that this relies on). The other variants are
-  copied by a `match`. An enum of `Rc` handles keeps `#[derive(Clone)]`.
+- An object is held by a `java::Arc`, a handle with no count (docs/collector.md). An enum lists
+  the variants that hold one first and is `#[repr(u16)]`, and its `Clone` copies any of them
+  with `java::copy_handle_variant`: a copy of the enum's bits, whichever class the variant is,
+  rather than a `match` over every class (`java::handle_variants!` states the layout that this
+  relies on). The other variants (strings, boxes, Java enum constants) are copied by a `match`.
+  An enum without handles keeps `#[derive(Clone)]`.
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.
@@ -232,7 +233,7 @@ locals first where the literal's field order would reorder them.
   uses `this` only for the struct being built and calls on `this` only methods that borrow that
   struct, and so do its class's field initializers.
 - A class whose own constructors use `this` as a value (and that has no subclasses) allocates
-  the object first, `Rc::new(RefCell::new(Circle { base: .., r: 0.0 }))`, then runs the field
+  the object first, `Arc::new(RefCell::new(Circle { base: .., r: 0.0 }))`, then runs the field
   initializers and the body on `this`.
 - `this(...)` delegates as Java does.
 
@@ -289,7 +290,7 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
   with the operand, it is `false`, and when the operand's static type is already the tested type
   or below it, it passes (an operand with effects is still evaluated).
 - A pattern variable is an owned value: the tested type's enum gets `as_circle(&self) ->
-  Option<Rc<..>>` (`Need::Narrow`), and `x instanceof Circle c` binds `c` from it (an `Rc` clone
+  Option<Arc<..>>` (`Need::Narrow`), and `x instanceof Circle c` binds `c` from it (a handle copy
   per successful test). One form covers a binding to a class and to a type with an enum of its
   own.
 - Where a pattern variable is bound (`analysis/patterns.rs`): an operand of an `&&` chain (a let
@@ -320,10 +321,10 @@ Record patterns and patterns in `switch` are `if let` chains over the selector's
 
 ### 1.6 Identity and null
 
-`impl PartialEq` for an enum is identity: `Rc::ptr_eq` per variant, `==` for a Java enum's
+`impl PartialEq` for an enum is identity: `Arc::ptr_eq` per variant, `==` for a Java enum's
 constant (constants are singletons), `false` across variants. `==` on enum values is `&a ==
 &b`, and with a value that may be null `a.as_ref() == Some(&b)`. Plain handles keep
-`Rc::ptr_eq` and `java::same`.
+`Arc::ptr_eq` and `java::same`.
 
 A string or a box inside `Object` is a plain value whose identity the translation does not
 keep, so `==` between two `Object`s where both sides may be strings or boxes is
@@ -392,7 +393,7 @@ Runtime variants are types of kind `TypeKind::Runtime` beside it:
   `Object::Integer(i32)`); a primitive converted to `Object` becomes its box's variant;
 - an array type converted to `Object` or cast back (`lower::object::note_object_array`) gets a
   runtime class named after it (`int[]`), whose variant holds the shared `java::Array`
-  (`Object::IntArray(..)`), so the array keeps its identity: `==` and `equals` are `Rc::ptr_eq`,
+  (`Object::IntArray(..)`), so the array keeps its identity: `==` and `equals` are `Arc::ptr_eq`,
   `hashCode` its identity hash, and it prints as Java's `[I@1b6d3586`. Arrays of a real generic's
   instantiation have no runtime class and are rejected;
 - a `StringBuilder` held as an `Object` holds the shared `java::StringBuilder` (a
@@ -405,7 +406,7 @@ Runtime variants are types of kind `TypeKind::Runtime` beside it:
 
 `equals(Object)` and `hashCode()` are two abstract methods of `Object`, which the program's
 own `equals(Object)` and `hashCode()` override. A variant whose class overrides neither gets an
-arm in the dispatcher: identity (`Rc::ptr_eq`, `java::address_hash`) for an object; value
+arm in the dispatcher: identity (`Arc::ptr_eq`, `java::address_hash`) for an object; value
 equality and Java's hash for a string or a box (`Double` and `Float` compare `to_bits`, as
 `Double.equals` does); `==` and the ordinal for an enum constant (Java's hash there is an identity
 hash, which no program can depend on). The same call on a single class without an enum is the
@@ -416,8 +417,7 @@ that declares `equals` or `hashCode` again (`Comparator`) dispatches a class wit
 `toString` and makes the text of the classes without one.
 
 The identity hash is the address of the class's struct (`java::address_hash` of
-`RefCell::as_ptr`, `Rc::as_ptr` or `ptr::from_ref`), not of the `Rc`, so a method that borrows the
-object hashes the same as code holding its handle. `System.identityHashCode` uses it too. A class
+`RefCell::as_ptr`, `Arc::as_ptr` or `ptr::from_ref`), so a method that borrows the object hashes the same as code holding its handle. `System.identityHashCode` uses it too. A class
 without `toString` prints as `java::default_text(name, hash)`: its binary name
 (package-qualified, `$` between nested classes), `@` and the hash in hexadecimal, using the
 class's own `hashCode` when it has one. The hash differs from Java's, as Java's differs from run
@@ -429,11 +429,11 @@ to run.
   ever converted to a supertype, a class whose objects run an inherited method that is not
   field-level or a `super.m()` of one (`runs_inherited_object_code`), or a class used as a type
   argument (a generic holds its values as `T: Clone`).
-- **Immutable** (`Rc<C>`, `analysis/objects.rs::immutable_classes`): decided on the whole object
+- **Immutable** (`Arc<C>`, `analysis/objects.rs::immutable_classes`): decided on the whole object
   (a write of an inherited field by any method makes the family mutable), then unified per
   family, so `base()` has one type for the whole enum: `Ref<'_, XFields>` for a mutable family,
-  `&XFields` for an immutable one. The cost is that a leaf loses `Rc<C>` when a sibling is
-  mutable. Interface enums and `Object` may mix `Rc<C>` and `Rc<RefCell<C>>` variants.
+  `&XFields` for an immutable one. The cost is that a leaf loses `Arc<C>` when a sibling is
+  mutable. Interface enums and `Object` may mix `Arc<C>` and `Arc<RefCell<C>>` variants.
 - **Fixed fields** (`analysis/fixed_fields.rs`): a field of a mutable class that only
   constructors write, through `this` (a `final` field, or one written the same way), keeps its
   value once the object is built. Its read on a concrete receiver is `java::fixed!(c, base.name)`
@@ -643,48 +643,12 @@ sites keep javac's substituted types, with no cast.
 - A parameter that a body never mentions is named `_x`, so a default meant to be overridden has
   no unused-variable warning.
 
-### 1.13 Dropping long chains
+### 1.13 Freeing objects
 
-Objects are freed by reference counting, and Rust frees an object's fields when it frees the
-object. Left alone, freeing the head of a linked list of a million nodes would free its `next`,
-which frees its `next`, a million frames deep, and overflow the 8 MB main stack. Java's
-collector has no such limit, so the translation must not either. The rule (`codegen/chains.rs`,
-runtime `chains.rs`):
-
-- **Which classes.** The *held classes* of a field type are the concrete classes whose objects a
-  value of it holds directly: the class an object type stands for, the variants of a class
-  type's enum (program classes only, not strings, boxes or Java enums), and for an array the held
-  classes of its element type. A type variable of a real Rust generic holds none. Class `c` has
-  an edge to each held class of each of its fields, its own and those of the fields structs it
-  embeds. A field is a *link* when one of its held classes is the class or can reach it by
-  edges: it can lead back to an object of the same class, directly (`Node next`) or through a
-  cycle of classes (`Outer.inner` and `Inner.outer`).
-- **What they get.** A struct with links gets `impl java::Unlink`, whose `unlink` calls
-  `java::Link::unlink_in(&mut self.f, chain)` for each link (and unlinks its embedded `base` when
-  that has links), and `impl Drop` calling `java::drop_links(self)`. A struct without links of
-  its own whose fields struct has them gets only the `Unlink`. The enum of a class type that is
-  the type (or element type) of a link gets `impl java::Link`, matching the variants whose
-  structs unlink.
-- **How it frees.** `drop_links` moves the links out of the dying object onto a `java::Chain`, a
-  heap stack of objects, and frees them one at a time, unlinking each before it is freed, so the
-  drop depth stays constant. The runtime implements `Link` for `Option` (taken out), an object's
-  `Rc` (pushed onto the chain), `Vec` and `java::Array` (elements drained onto the chain), and
-  the generated enums. An object goes on the chain only while the chain holds its last
-  reference, so a structure still reachable from elsewhere is not touched. A link that cannot be
-  null cannot be taken out; when nothing else holds its object, the object is unlinked in place,
-  at most one class cycle deep (a cycle of non-null links is a reference cycle and never freed).
-- **Shallow structures stay recursive.** Rust's recursive drop is the fastest way to free a
-  structure, and most are shallow. A thread-local holds the highest stack address any
-  `drop_links` on the thread has run at. A `drop_links` less than 128 KB of stack below it does
-  nothing and Rust drops the fields recursively; one deeper moves the links onto a chain. So the
-  drops of a structure use at most 128 KB of stack below the shallowest drop of the thread, plus
-  constant space.
-- **What it costs.** Only classes on cycles of field types change. Near the top of the stack a
-  dying object costs one thread-local read and a compare. The binary trees benchmark is the
-  worst case; its numbers are in docs/performance.md.
-- **Not covered.** A chain through a field whose type is a type variable of a real Rust generic
-  (`Box<T>` holding `Box<Box<..>>`), or through objects captured by a lambda. Reference cycles
-  are never freed.
+Objects live in the collected heap (docs/collector.md). A handle is a pointer with no count, and
+an object is never dropped: the collector frees whatever no handle, field or array element
+reaches, cycles included, as Java's does. Freeing never recurses through fields, so a linked
+list of a million nodes needs nothing special (`corpus/features/LongChainsDrop.java`).
 
 ### 1.14 `Object.clone`
 

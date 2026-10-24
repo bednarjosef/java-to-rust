@@ -20,7 +20,6 @@ use crate::{JString, Wtf8};
 use std::cell::RefCell;
 use std::fmt::{self, Write};
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 
 /// The shared cell of a builder's code units.
 pub trait BuilderCell: Clone {
@@ -37,11 +36,11 @@ pub trait BuilderCell: Clone {
     fn address(&self) -> *const u8;
 }
 
-impl BuilderCell for Rc<RefCell<Vec<u16>>> {
+impl BuilderCell for Arc<RefCell<Vec<u16>>> {
     type Units<'a> = std::cell::Ref<'a, Vec<u16>>;
     type UnitsMut<'a> = std::cell::RefMut<'a, Vec<u16>>;
     fn new(units: Vec<u16>) -> Self {
-        Rc::new(RefCell::new(units))
+        Arc::new(RefCell::new(units))
     }
     fn units(&self) -> Self::Units<'_> {
         self.borrow()
@@ -50,7 +49,7 @@ impl BuilderCell for Rc<RefCell<Vec<u16>>> {
         self.borrow_mut()
     }
     fn address(&self) -> *const u8 {
-        Rc::as_ptr(self) as *const u8
+        Arc::as_ptr(self) as *const u8
     }
 }
 
@@ -76,7 +75,7 @@ impl BuilderCell for Arc<Locked<Vec<u16>>> {
 pub struct Builder<C>(C);
 
 /// The builder of a program without threads.
-pub type StringBuilder = Builder<Rc<RefCell<Vec<u16>>>>;
+pub type StringBuilder = Builder<Arc<RefCell<Vec<u16>>>>;
 
 /// The builder of a program with threads.
 pub type SharedStringBuilder = Builder<Arc<Locked<Vec<u16>>>>;

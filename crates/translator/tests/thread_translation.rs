@@ -116,8 +116,8 @@ fn a_single_threaded_program_is_unchanged() {
             }
         }",
     );
-    assert_contains(&rust, &["thread_local! {", "Rc<RefCell<ANode>>"]);
-    assert_lacks(&rust, &["Arc", "java::Locked", "java::Atomic", "main_thread"]);
+    assert_contains(&rust, &["thread_local! {", "Arc<RefCell<ANode>>"]);
+    assert_lacks(&rust, &["java::Locked", "java::Atomic", "main_thread"]);
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn arrays_that_no_other_thread_reaches_stay_local() {
             }
         }",
     );
-    assert_contains(&rust, &["out: java::SharedArray<i64>,", "java::filled(3, 0)", "Rc::ptr_eq("]);
+    assert_contains(&rust, &["out: java::SharedArray<i64>,", "java::filled(3, 0)", "Arc::ptr_eq("]);
     assert_lacks(&rust, &["java::SharedArray<i32>", "java::SharedArray<u16>", "shared_filled(3"]);
 }
 

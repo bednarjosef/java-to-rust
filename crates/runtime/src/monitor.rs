@@ -60,6 +60,22 @@ impl<H: HasMonitor + ?Sized> HasMonitor for &H {
     }
 }
 
+/// The cell of an object of one thread: its monitor is kept by address.
+impl<T: ?Sized> HasMonitor for std::cell::RefCell<T> {
+    #[inline]
+    fn monitor(&self) -> MonitorOf<'_> {
+        MonitorOf::Local(self.as_ptr() as *const u8 as usize)
+    }
+}
+
+/// An array's monitor is its cell's.
+impl<C: HasMonitor, T> HasMonitor for crate::ArrayData<C, T> {
+    #[inline]
+    fn monitor(&self) -> MonitorOf<'_> {
+        (**self).monitor()
+    }
+}
+
 impl<T: ?Sized> HasMonitor for Rc<T> {
     #[inline]
     fn monitor(&self) -> MonitorOf<'_> {

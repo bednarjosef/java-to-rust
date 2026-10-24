@@ -335,14 +335,10 @@ network, mostly one thread, pure computation, and its output (class files, or th
 
 ### Why less memory is a matter of a smarter translator
 
-Translating javac as the translator works today would not use less memory, and would likely use
-more:
-
-- **javac's data is full of cycles.** A class symbol points to its members and each member back
-  to its owner; types point to symbols and symbols to types. The JVM's garbage collector frees
-  cycles; the translation's reference counting (`Rc`) does not, so cycles leak.
-- **Every object carries a counter and often a `RefCell`**, and every reference to a class tree
-  is an enum around an `Rc`.
+Translating javac as the translator works today does not use less memory: every object often
+carries a `RefCell`, and every reference to a class tree is an enum around an 8-byte handle,
+16 bytes against the JVM's compressed 4. docs/native-speed.md plans the object model that
+removes both.
 
 The rule is that every improvement is a general analysis in the translator, never a special case
 for javac, so that every program gains from it and javac is the benchmark that shows it. The
@@ -351,12 +347,12 @@ analyses that get there are mostly the ones planned in [thorough-mode.md](thorou
 
 - **Lifetimes, and arenas.** Most of javac's symbols, types and trees live until the compilation
   ends. Objects proven to live as long as a phase or the whole run go into an arena that is freed
-  in one step: no counter per object, no cycle problem, no garbage collector.
+  in one step, with nothing for the collector to trace.
 - **Freeing early.** A tree that is provably not used after a phase is dropped when the phase
   ends, instead of staying reachable as it does in javac.
 - **Compact layout.** No per-object header, as the JVM has. Small enums stored inline, and
   references into an arena as 32-bit indices instead of 64-bit pointers.
-- **Ownership.** An object with a single owner is stored inline in it, without `Rc` or `RefCell`.
+- **Ownership.** An object with a single owner is stored inline in it, without a handle or `RefCell`.
 
 ### Measuring
 

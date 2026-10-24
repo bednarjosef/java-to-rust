@@ -1,4 +1,4 @@
-//! The plain path of `java::Locked` and `java::Arc` while one thread runs, and the moment that
+//! The plain path of `java::Locked` while one thread runs, and the moment that
 //! thread starts a second: the locks it took alone stay its own, and the new thread waits for
 //! them. In a process of its own, as the unit tests run on many threads that the runtime never
 //! started.
@@ -51,5 +51,4 @@ fn locks_taken_alone_are_still_held_once_a_thread_starts() {
     java::join_thread(tid, 0);
     assert_eq!(*shared.borrow(), 11);
     assert!(!java::holds_lock(&shared));
-    assert_eq!(java::Arc::strong_count(&shared), 1);
 }

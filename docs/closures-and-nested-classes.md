@@ -97,7 +97,7 @@ local and anonymous classes by their binary names in types and owners, since jav
 | --- | --- |
 | primitive, Java enum | a field of that type, copied |
 | `String` | a `java::JString` field, cloned |
-| object, enum value, `Option<..>` | the handle, cloned (`Rc::clone`) |
+| object, enum value, `Option<..>` | the handle, cloned (`Arc::clone`) |
 | object that threads may share | the `Arc`, cloned; a closure holding it is then `Send` |
 | array | the array is shared (`java::Array<T>`): the capture is a second name for it |
 | `this` | the field `outer`, of the enclosing class's representation |
@@ -111,7 +111,7 @@ it (4.3).
 
 Capturing `this` uses `this` as a value, which the object model already tracks: a method that
 creates an inner, local or anonymous object reading the enclosing object's fields passes `this`,
-so the method takes the handle form (`fn iterator(this: &Rc<RefCell<Names>>)`) rather than
+so the method takes the handle form (`fn iterator(this: &Arc<RefCell<Names>>)`) rather than
 `&self`, and the enclosing class is never an owned plain value.
 
 A call of a functional value runs every lambda of the interface's group, so their captures
@@ -124,8 +124,8 @@ cancels its own subscription) a re-entrant Java call rather than a `RefCell` pan
 With captures as fields of a synthetic class, the thread-escape analysis (`analysis/threads.rs`)
 needs nothing special: `Thread` stores its `Runnable` in a field that threads share, so the
 lambda's class is shared and so are the classes of its fields. rustc then checks `Send`: an `Rc`
-left behind is a compile error, never a miscompilation. A closure that stays on one thread keeps
-`Rc`.
+or `RefCell` left behind is a compile error, never a miscompilation. A closure that stays on one
+thread keeps `Rc`.
 
 ### 1.5 Captures in constructors and initializers
 
@@ -162,13 +162,13 @@ The shape of the Rust (details depend on the other analyses):
 
 ```rust
 struct NamesCursor {
-    outer: Rc<RefCell<Names>>,
+    outer: Arc<RefCell<Names>>,
     next: i32,
 }
 
 impl Names {
-    fn iterator(this: &Rc<RefCell<Names>>) -> Rc<RefCell<NamesCursor>> {
-        Rc::new(RefCell::new(NamesCursor::new(this.clone())))
+    fn iterator(this: &Arc<RefCell<Names>>) -> Arc<RefCell<NamesCursor>> {
+        Arc::new(RefCell::new(NamesCursor::new(this.clone())))
     }
 }
 
@@ -185,10 +185,8 @@ impl NamesCursor {
   outer's module.
 - An inner class is shared, immutable or owned by the usual per-class decision, but `outer` is a
   handle, so in practice it is rarely a plain value.
-- An inner object kept in a field of its outer object is a reference cycle (the outer holds the
-  inner, which holds `outer`), which `Rc` never frees where Java's collector would; a `HashMap`
-  that caches its `keySet()` view leaks with it. Output is the same; memory is the cost, as with
-  any cycle of objects in the translation.
+- An inner object kept in a field of its outer object is a cycle of objects (the outer holds the
+  inner, which holds `outer`), which the collector frees like any other.
 
 ### 2.2 Construction
 
@@ -203,8 +201,8 @@ impl NamesCursor {
 
 `Outer.this` and an unqualified name that javac resolves to a member of an enclosing class are
 a chain of `outer` reads from the current class to that class (`self.outer`,
-`java::fixed!(self.outer, outer)`), each in the outer's form (`borrow()` for `Rc<RefCell<..>>`,
-nothing for `Rc<C>`, a lock for a shared one), except that `outer`, which only the constructor
+`java::fixed!(self.outer, outer)`), each in the outer's form (`borrow()` for `Arc<RefCell<..>>`,
+nothing for `Arc<C>`, a lock for a shared one), except that `outer`, which only the constructor
 writes, is read with `java::fixed!` (docs/object-model.md, 1.8). javac resolves shadowing: `name` is `self.name`,
 `Ring.this.name` is `self.outer.borrow().name`. `Outer.super.m()` calls the superclass's method
 on the enclosing object (`super_receiver` in `lower/hierarchy.rs`).
@@ -274,7 +272,7 @@ class), the JVM's name without its varying suffix.
 Inner classes of generic classes translate erased, like their outer
 (`corpus/features/GenericInnerClassOfGenericClass.java`,
 `InnerSubclassesOfGenericClasses.java`). Not done: a Rust generic inner class that repeats the
-outer's type parameters (`struct RingRingIterator<T> { outer: Rc<RefCell<Ring<T>>>, .. }`).
+outer's type parameters (`struct RingRingIterator<T> { outer: Arc<RefCell<Ring<T>>>, .. }`).
 
 ## 3. Local and anonymous classes
 
@@ -528,8 +526,8 @@ is the object model's rule for overrides.
 
 A lambda cannot capture itself through a local (not effectively final). Through a field it
 reads the field at call time, so a static `FIB = n -> .. FIB.apply(n - 1) ..` reads the static
-on each call, and an instance field set to a lambda capturing `this` makes an `Rc` cycle, which
-the `Rc` design accepts.
+on each call, and an instance field set to a lambda capturing `this` makes a cycle through the
+closure's `Rc`, which is never freed.
 
 Closure-typed values are never compared (4.2, condition 4). A lambda in enum form is an object
 like any other: compared by identity, and printed as `Main$$Lambda@<hash>`. Two evaluations of
@@ -587,7 +585,7 @@ Plans, each a refinement of a correct form that exists:
   erased per interface.
 - **Type aliases per signature** rather than per interface.
 - **Closure types seen as objects**: identity, `equals`, printing or storing in a collection
-  through `Object` (a variant `Object::<Interface>(Rc<dyn Fn ..>)` compared by `Rc::ptr_eq`).
+  through `Object` (a variant `Object::<Interface>(Rc<dyn Fn ..>)` compared by `Arc::ptr_eq`).
   Today any such use makes the interface an enum.
 - **Anonymous classes as closures**, those without fields of their own and created directly in
   a conversion to a functional interface; with fields they would need a `RefCell` inside the
