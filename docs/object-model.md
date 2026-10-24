@@ -457,7 +457,9 @@ to run.
 - **Owned** (a plain value, `analysis/owned.rs`): never a class with subclasses, a class that is
   ever converted to a supertype, a class whose objects run an inherited method that is not
   field-level or a `super.m()` of one (`runs_inherited_object_code`), or a class used as a type
-  argument (a generic holds its values as `T: Clone`).
+  argument (a generic holds its values as `T: Clone`), and never a class that no `new` creates:
+  it has no values to hold, and as an owned class it would keep its whole tree from being
+  celled.
 - **Immutable** (`Arc<C>`, `analysis/objects.rs::immutable_classes`): decided on the whole object
   (a write of an inherited field by any method makes the family mutable), then unified per
   family, so `base()` has one type for the whole enum: `Ref<'_, XFields>` for a family behind
@@ -465,8 +467,7 @@ to run.
   when a sibling is mutable. Interface enums and `Object` may mix `Arc<C>` and `Arc<RefCell<C>>`
   variants.
 - **Celled** (`Arc<C>` whose fields are `java::Field` cells, `analysis/objects.rs::celled_classes`):
-  a mutable family none of whose classes is owned, reachable by a second thread, or locked
-  (a kept monitor). Every field of the family is a cell: a read copies the value out
+  a mutable family none of whose classes is owned or a Java enum. Every field of the family is a cell: a read copies the value out
   (`o.count.get()`), a write puts a new one in (`o.count.set(v)`), so no borrow is held and
   none can conflict, and there is no borrow flag. Methods take `&self`, and `base()` lends the
   fields struct as `&XFields`. A field assignment whose object may be null computes the value

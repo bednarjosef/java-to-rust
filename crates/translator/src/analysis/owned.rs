@@ -7,16 +7,20 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 /// Finds the owned classes among those that are not immutable (immutable objects are shared), by
-/// qualified name.
+/// qualified name. A class whose objects are never `created` is not owned: it has no objects to
+/// hold as values, and its class tree keeps the representation of the others (see
+/// `objects::celled_classes`).
 pub fn owned_classes(
     class: &Class,
     immutable: &HashSet<String>,
     field_level: &HashSet<usize>,
+    created: &[bool],
 ) -> HashSet<String> {
     let uses = Uses::scan(class);
     (0..class.types.len())
         .filter(|&t| {
-            !immutable.contains(&class.types[t].name)
+            created[t]
+                && !immutable.contains(&class.types[t].name)
                 && !class.hierarchy.has_subtypes(t)
                 && !runs_inherited_object_code(class, &uses, t, field_level)
                 && is_owned(class, &uses, t)

@@ -166,7 +166,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
 /// the superclasses whose fields struct they embed. A class with only static members is plain
 /// functions.
 pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
-    let mut live = instantiated(class);
+    let mut live = crate::analysis::instantiated(class);
     // The runtime creates the exceptions it raises where the program sees them.
     for &c in &facts.raised_classes {
         live[c] = true;
@@ -195,7 +195,7 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
 /// or that the runtime raises, and of its superclasses. A class of the program that is neither
 /// still has its methods emitted, as its type may be named, but nothing calls them.
 pub(super) fn running_types(class: &Class, facts: &Facts) -> Vec<bool> {
-    let mut created = instantiated(class);
+    let mut created = crate::analysis::instantiated(class);
     for &c in &facts.raised_classes {
         created[c] = true;
     }
@@ -268,27 +268,6 @@ fn mentioned(class: &Class) -> HashSet<usize> {
         types.into_iter().chain(locals).for_each(&mut note);
     }
     out
-}
-
-/// Which classes are ever instantiated with `new`.
-fn instantiated(class: &Class) -> Vec<bool> {
-    let mut live = vec![false; class.types.len()];
-    let mut note = |e: &Expr| {
-        if let ExprKind::New { class: c, .. } = &e.kind {
-            live[*c] = true;
-        }
-    };
-    for m in &class.methods {
-        for s in &m.body {
-            visit_stmt(s, &mut |e| visit_expr(e, &mut note), &mut |_| {});
-        }
-    }
-    for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
-        if let Some(init) = &f.init {
-            visit_expr(init, &mut note);
-        }
-    }
-    live
 }
 
 /// The expressions that a statement evaluates itself; the expressions of nested statements are

@@ -33,6 +33,7 @@ pub(crate) mod npe_messages;
 mod nullness;
 mod object_values;
 mod objects;
+pub(crate) use objects::instantiated;
 mod owned;
 mod patterns;
 mod ranges;
@@ -379,6 +380,7 @@ fn representation(class: &Class, facts: &mut Facts) {
     let (monitor_classes, monitor_methods) = monitors::kept(class, facts);
     facts.long_methods.extend(monitor_methods);
     let reach = borrowing::reach(class);
+    let created = objects::instantiated(class);
     facts.immutable = objects::immutable_classes(class);
     // An object whose monitor is kept has a lock, or an address that stays; so does every other
     // object of its class tree, which is immutable together or not at all.
@@ -391,7 +393,7 @@ fn representation(class: &Class, facts: &mut Facts) {
             &facts.fields_structs,
             &facts.long_methods,
         );
-        facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
+        facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level, &created);
         facts.owned.retain(|c| !monitor_classes.contains(c));
         facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
         let handled = objects::calls_needing_handles(class, facts);

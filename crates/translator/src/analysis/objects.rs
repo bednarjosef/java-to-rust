@@ -70,6 +70,27 @@ pub fn celled_classes(
     )
 }
 
+/// Which classes are ever instantiated with `new`.
+pub fn instantiated(class: &Class) -> Vec<bool> {
+    let mut live = vec![false; class.types.len()];
+    let mut note = |e: &Expr| {
+        if let ExprKind::New { class: c, .. } = &e.kind {
+            live[*c] = true;
+        }
+    };
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut note), &mut |_| {});
+        }
+    }
+    for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
+        if let Some(init) = &f.init {
+            visit_expr(init, &mut note);
+        }
+    }
+    live
+}
+
 /// The immutable concrete classes with a method that calls on `this` a body living on the enum of
 /// a type: that call needs the object's handle to make the enum's value, which a method that
 /// borrows the object as `&self` does not have. Their class trees cannot be immutable.
