@@ -21,6 +21,9 @@ use super::*;
 use crate::analysis::{ENUM_COMPARE_NULL, compare_null_message};
 use std::collections::BTreeSet;
 
+/// How `same_variant` compares two objects of a variant that is equal only to itself.
+const IDENTITY: &str = "Arc::ptr_eq(a, b)";
+
 /// The number of each type in a `java::Thin` (`Gen::class_tag`), by its index in `Class::types`:
 /// the class trees in depth-first preorder, each class before its subclasses, then the types that
 /// no class tree holds (interfaces). The classes at or below a class then have the numbers from
@@ -2304,7 +2307,10 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Identity: two values are equal when they are the same object.
+    /// Identity: two values are equal when they are the same object. Two values with the same
+    /// bits (class number and address, or the value held in the low bits) are always equal; a
+    /// variant compared by identity is equal only then, so only the variants compared by value
+    /// (`same_variant`) look further, through the view.
     fn identity_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
         self.gap();
@@ -2312,19 +2318,27 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn eq(&self, other: &{name}) -> bool {{"));
         self.indent += 1;
+        let by_value: Vec<(usize, String)> = variants
+            .iter()
+            .map(|&c| (c, self.same_variant(c)))
+            .filter(|(_, same)| same != IDENTITY)
+            .collect();
         if variants.is_empty() {
             self.line("match self.view() {}");
+        } else if by_value.is_empty() {
+            self.line("self.0 == other.0");
         } else {
-            self.line("match (self.view(), other.view()) {");
+            let tags: Vec<String> = by_value.iter().map(|&(c, _)| self.class_tag(c).to_string()).collect();
+            self.line(&format!(
+                "self.0 == other.0 || self.0.tag() == other.0.tag() && matches!(self.0.tag(), {}) && match (self.view(), other.view()) {{",
+                tags.join(" | ")
+            ));
             self.indent += 1;
-            for &c in variants {
+            for (c, same) in by_value {
                 let v = self.view_pattern(t, c);
-                let same = self.same_variant(c);
                 self.line(&format!("({v}(a), {v}(b)) => {same},"));
             }
-            if variants.len() > 1 {
-                self.line("_ => false,");
-            }
+            self.line("_ => false,");
             self.indent -= 1;
             self.line("}");
         }
@@ -2354,7 +2368,7 @@ impl<'a> Gen<'a> {
                 format!("{}(f64::from(*a), f64::from(*b))", self.runtime("double_equals"))
             }
             _ if self.holds_value(c) && !array => "a == b".to_string(),
-            _ => "Arc::ptr_eq(a, b)".to_string(),
+            _ => IDENTITY.to_string(),
         }
     }
 

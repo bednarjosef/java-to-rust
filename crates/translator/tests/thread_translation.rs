@@ -58,7 +58,7 @@ fn a_thread_and_what_it_reaches_are_arcs() {
             "enum ThreadView<'a> {\n    Worker(&'a Arc<java::Monitored<AWorker>>),",
             "fn run(this: &Arc<java::Monitored<AWorker>>) {",
             "let w = Arc::new(java::Monitored::new(AWorker::new(10)));",
-            "(ThreadView::Worker(a), ThreadView::Worker(b)) => Arc::ptr_eq(a, b),",
+            "impl PartialEq for Thread {\n    fn eq(&self, other: &Thread) -> bool {\n        self.0 == other.0",
             "fn base(&self) -> &ThreadFields {",
         ],
     );

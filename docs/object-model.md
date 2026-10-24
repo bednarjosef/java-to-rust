@@ -198,7 +198,7 @@ impl Base {
         java::concat!(self.base().name.clone(), format_args!(":{}", java::Double(self.area())))
     }
 }
-impl PartialEq for Base { /* Arc::ptr_eq of one class's objects, false across classes */ }
+impl PartialEq for Base { /* the same bits: the same class and address */ }
 impl fmt::Display for Base { /* each variant as its class shows it */ }
 ```
 
@@ -370,9 +370,13 @@ Record patterns and patterns in `switch` are `if let` chains over the selector's
 ### 1.6 Identity and null
 
 `impl PartialEq` for an enum is identity: `Arc::ptr_eq` per variant, `==` for a Java enum's
-constant (constants are singletons), `false` across variants. `==` on enum values is `&a ==
-&b`, and with a value that may be null `a.as_ref() == Some(&b)`. Plain handles keep
-`Arc::ptr_eq` and `java::same`.
+constant (constants are singletons), `false` across variants. Two values with the same bits
+(class number and address, or a value held in the low bits) are always equal, and a variant
+compared by identity is equal only then, so the `eq` of an enum whose variants are all compared
+by identity is `self.0 == other.0`; one with variants compared by value (a string or a box held
+as a value) compares the bits first and looks through the view only for those. `==` on enum
+values is `&a == &b`, and with a value that may be null `a.as_ref() == Some(&b)`. Plain handles
+keep `Arc::ptr_eq` and `java::same`.
 
 A string or a box inside `Object` is a plain value whose identity the translation does not
 keep, so `==` between two `Object`s where both sides may be strings or boxes is
