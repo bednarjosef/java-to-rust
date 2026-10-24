@@ -558,12 +558,15 @@ the program's classes implement:
   any interface of the program (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their
   objects in the JDK (`Proxy`, a provider's keys, `getGenericSuperclass`) stays untranslated.
   `Class` implements `Type` in Java, and so does the runtime's class where the program has
-  `Type` (and `Serializable`, `CLASS_VALUE_INTERFACES` in `ast.rs`): a class held as a `Type` is
-  the variant of the runtime's `java.lang.Class` in `Type`'s enum, found again by `instanceof
-  Class` and a cast, compared and hashed as a class, and its `getTypeName()` is `Class`'s own
-  (`int[]`, `java.lang.String`; `type_name_arm`), not the interface's default `toString()`.
-  `Class`'s other interfaces describe the class (`Constable`) or need reflection
-  (`GenericDeclaration`, `AnnotatedElement`): a class converted to one, and a cast or an
+  `Type` (and `TypeDescriptor` and `Serializable`, `CLASS_VALUE_INTERFACES` in `ast.rs`): a class
+  held as a `Type` is the variant of the runtime's `java.lang.Class` in `Type`'s enum, found again
+  by `instanceof Class` and a cast, compared and hashed as a class, and its `getTypeName()` is
+  `Class`'s own (`int[]`, `java.lang.String`), not the interface's default `toString()`; as a
+  `TypeDescriptor` (beside `java.lang.constant`'s `ClassDesc`), its `descriptorString()` is
+  `Class`'s (`[J`, `Ljava/lang/String;`; `class_answer` in `codegen/dispatch.rs`).
+  `Class`'s other interfaces need objects that describe the class (`Constable`'s `ClassDesc`,
+  `TypeDescriptor.OfField`'s component and array types) or reflection (`GenericDeclaration`,
+  `AnnotatedElement`, which are not translated): a class converted to one, and a cast or an
   `instanceof` of one on a value that may be a class, are rejected
   (`codegen::dispatch::rejects_class_as`).
 

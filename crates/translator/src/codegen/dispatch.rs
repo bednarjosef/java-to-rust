@@ -544,8 +544,9 @@ impl<'a> Gen<'a> {
 
     /// Whether `value` may be a class that Java lets be a `to`, one of the interfaces that
     /// `java.lang.Class` implements and the program translates as interfaces of its own, which
-    /// the runtime's classes do not implement (`Constable`; `Type` and `Serializable` they do, see
-    /// `CLASS_VALUE_INTERFACES`): the cast or the test is rejected.
+    /// the runtime's classes do not implement (`Constable`, `TypeDescriptor.OfField`; `Type`,
+    /// `TypeDescriptor` and `Serializable` they do, see `CLASS_VALUE_INTERFACES`): the cast or the
+    /// test is rejected.
     fn rejects_class_as(&mut self, value: &Expr, to: Type) -> bool {
         let Type::Class(name, _) = to else { return false };
         if !CLASS_INTERFACES.contains(&name) || CLASS_VALUE_INTERFACES.contains(&name) {
@@ -1515,8 +1516,9 @@ impl<'a> Gen<'a> {
                         .enum_variants(t)
                         .into_iter()
                         .all(|c| h.implementation(resolved, c).is_some() || !h.is_subtype(c, declared))
-                    // A class answers `Type`'s `getTypeName()` itself (see `dispatcher`).
-                    && !(self.is_type_name_method(resolved)
+                    // A class answers `Type`'s `getTypeName()` and `TypeDescriptor`'s
+                    // `descriptorString()` itself (see `class_answer`).
+                    && !(self.class_answer(resolved).is_some()
                         && self.enum_variants(t).into_iter().any(|c| self.runtime_of(c) == Some(Type::JavaClass))) =>
             {
                 Some(only)
@@ -1933,10 +1935,10 @@ impl<'a> Gen<'a> {
             .hierarchy
             .implementation(r, c)
         {
-            // A class answers `Type`'s `getTypeName()` itself, where the interface's default
-            // would give its `toString()`.
-            _ if g.is_type_name_method(r) && g.runtime_of(c) == Some(Type::JavaClass) => {
-                (g.type_name_arm(r), true)
+            // A class answers `Type`'s `getTypeName()` and `TypeDescriptor`'s
+            // `descriptorString()` itself (see `class_answer`).
+            _ if g.runtime_of(c) == Some(Type::JavaClass) && g.class_answer(r).is_some() => {
+                (g.class_answer_arm(r), true)
             }
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, &args);
@@ -2111,22 +2113,32 @@ impl<'a> Gen<'a> {
         if self.facts.nullable_returns.contains(&r) { format!("Some({value})") } else { value }
     }
 
-    /// Whether method `r` is `java.lang.reflect.Type`'s `getTypeName()` or overrides it.
-    fn is_type_name_method(&self, r: usize) -> bool {
-        self.class.hierarchy.group(r).into_iter().any(|g| {
+    /// The method of `CLASS_VALUE_INTERFACES` that method `r` is or overrides, by name, when a
+    /// class answers it with its own: `Type`'s `getTypeName()`, where the interface's default
+    /// would give the class's `toString()`, and `TypeDescriptor`'s abstract `descriptorString()`.
+    fn class_answer(&self, r: usize) -> Option<&'static str> {
+        self.class.hierarchy.group(r).into_iter().find_map(|g| {
             let m = &self.class.methods[g];
-            m.name == "getTypeName"
-                && m.params.is_empty()
-                && self.class.types[m.class].name == "java.lang.reflect.Type"
+            match (self.class.types[m.class].name.as_str(), m.name.as_str()) {
+                _ if !m.params.is_empty() => None,
+                ("java.lang.reflect.Type", "getTypeName") => Some("getTypeName"),
+                ("java.lang.invoke.TypeDescriptor", "descriptorString") => Some("descriptorString"),
+                _ => None,
+            }
         })
     }
 
-    /// `getTypeName()` (method `r`) for a class bound to `o`: `Class`'s own, as the JDK makes it.
-    fn type_name_arm(&mut self, r: usize) -> String {
-        let name = if super::shared_strings() { "o.shared_type_name()" } else { "o.get_type_name()" };
-        let name =
-            if self.facts.nullable_returns.contains(&r) { format!("Some({name})") } else { name.to_string() };
-        if self.facts.throwing.contains(&r) { format!("Ok({name})") } else { name }
+    /// Method `r` (see `class_answer`) for a class bound to `o`: `Class`'s own, as the JDK makes
+    /// it.
+    fn class_answer_arm(&mut self, r: usize) -> String {
+        let text = match self.class_answer(r) {
+            Some("getTypeName") if super::shared_strings() => "o.shared_type_name()".to_string(),
+            Some("getTypeName") => "o.get_type_name()".to_string(),
+            _ if super::shared_strings() => format!("{}(o.descriptor_string())", self.runtime("JStr::new")),
+            _ => "o.descriptor_string()".to_string(),
+        };
+        let text = if self.facts.nullable_returns.contains(&r) { format!("Some({text})") } else { text };
+        if self.facts.throwing.contains(&r) { format!("Ok({text})") } else { text }
     }
 
     /// Whether method `r` is one of the JDK's `Appendable`'s own `append` methods, which a builder
