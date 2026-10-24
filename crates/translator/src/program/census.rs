@@ -109,6 +109,15 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
             super::stamp_units(&mut class, &lowered.units);
             let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live);
             let (running, _) = phase("live methods", narrow);
+            // The census is taken again with the writes of `String` arrays (`census_program`):
+            // analysing this program would change nothing.
+            if !string_array_writes
+                && running.iter().any(|r| r.error.message.starts_with(lower::STRING_ARRAY_WRITE))
+            {
+                std::panic::set_hook(hook);
+                let census = Census { report: String::new(), json: serde_json::Value::Null, modules: None };
+                return Ok((census, true));
+            }
             rejections.extend(running.into_iter().map(rejection));
             (Some(class), None)
         }
