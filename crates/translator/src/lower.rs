@@ -799,15 +799,16 @@ impl<'t> Lowering<'t> {
                 None => Stmt::Block(Vec::new()),
             },
             // Reachability did not take the `then` branch, as the class that the condition tests
-            // for has no objects (`Reach::objectless_branch`).
-            "IF" if self.reach.is_some_and(|r| r.objectless_branch(node.0)) => self.if_stmt(
-                self.expr(node.child("condition")?)?,
-                Stmt::Block(Vec::new()),
+            // for has no objects (`Reach::objectless_branch`): the condition is false, so it runs
+            // for what it does and the `else` branch follows. An empty `then` branch would leave
+            // a variable that only the branches assign unassigned on its path, for Rust.
+            "IF" if self.reach.is_some_and(|r| r.objectless_branch(node.0)) => {
+                let condition = Stmt::Expr(self.expr(node.child("condition")?)?);
                 match node.get("elseStatement") {
-                    Some(n) => Some(self.single_stmt(n)?),
-                    None => None,
-                },
-            ),
+                    Some(n) => Stmt::Block(vec![condition, self.single_stmt(n)?]),
+                    None => condition,
+                }
+            }
             "IF" => self.if_stmt(
                 self.expr(node.child("condition")?)?,
                 self.single_stmt(node.child("thenStatement")?)?,
