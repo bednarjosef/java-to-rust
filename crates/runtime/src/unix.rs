@@ -421,23 +421,27 @@ pub fn unix_sync(fd: i32, metadata: bool) {
 /// `statvfs(path)` into `out`: `f_frsize`, `f_blocks`, `f_bfree` and `f_bavail`, the four fields
 /// `UnixFileStoreAttributes` keeps.
 pub fn unix_statvfs(p: &[i8], out: &mut [i64]) {
-    let path = CString::new(p.iter().map(|&b| b as u8).collect::<Vec<u8>>()).unwrap_or_default();
-    // `struct statvfs` on 64-bit Linux (glibc and musl): eleven words, then six spare ints. Its
-    // fields are `f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, ...`, read by index.
-    let mut buf = [0u64; 14];
-    let result = match unsafe { statvfs(path.as_ptr(), &mut buf) } {
-        0 => Ok(()),
-        _ => Err(errno()),
-    };
+    let path: Vec<u8> = p.iter().map(|&b| b as u8).collect();
     record(
-        result.map(|()| {
-            let fields = [buf[1], buf[2], buf[3], buf[4]];
+        file_system_space(&path).map(|fields| {
             for (slot, field) in out.iter_mut().zip(fields) {
                 *slot = field as i64;
             }
         }),
         (),
     );
+}
+
+/// `statvfs(path)`'s `f_frsize`, `f_blocks`, `f_bfree` and `f_bavail`.
+pub(crate) fn file_system_space(path: &[u8]) -> io::Result<[u64; 4]> {
+    let path = CString::new(path).unwrap_or_default();
+    // `struct statvfs` on 64-bit Linux (glibc and musl): eleven words, then six spare ints. Its
+    // fields are `f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, ...`, read by index.
+    let mut buf = [0u64; 14];
+    match unsafe { statvfs(path.as_ptr(), &mut buf) } {
+        0 => Ok([buf[1], buf[2], buf[3], buf[4]]),
+        _ => Err(errno()),
+    }
 }
 
 unsafe extern "C" {

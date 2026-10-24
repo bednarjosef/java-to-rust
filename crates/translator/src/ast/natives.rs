@@ -247,6 +247,16 @@ pub enum Native {
     /// `Reference.hasReferencePendingList()`: a translated program has no garbage collector that
     /// discovers references, so no reference is ever pending.
     NoPendingReferences,
+    /// `Reference.waitForReferencePendingList()`: waits for ever, as no reference becomes pending.
+    WaitForPendingReferences,
+    /// `Unsafe.getLoadAverage0(loadavg, nelems)`.
+    LoadAverage,
+    /// A native of `com.sun.management.internal.OperatingSystemImpl` without arguments, by the
+    /// runtime's function that answers it (`os_total_memory`, ...).
+    OperatingSystem(&'static str),
+    /// `MappedMemoryUtils.isLoaded0(address, length, pageCount)`: a mapping is a block of memory
+    /// of the process holding the file's bytes, so it is loaded.
+    MappingLoaded,
     /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
     SecureSeed,
     /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes` and its buffer
@@ -485,6 +495,33 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
             Native::DeflateSetDictionaryBuffer
         }
         ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
+        ("java.lang.ref.Reference", "waitForReferencePendingList", "()void") => {
+            Native::WaitForPendingReferences
+        }
+        ("jdk.internal.misc.Unsafe", "getLoadAverage0", "(double[],int)int") => Native::LoadAverage,
+        // The memory, swap, processor time and descriptors of the process and the machine, as the
+        // JDK's `libmanagement_ext` reads them on Linux (`java_runtime::os_total_memory`, ...).
+        // `initialize0` only reads the page size, which each answer reads itself.
+        ("com.sun.management.internal.OperatingSystemImpl", "initialize0", "()void") => Native::Nothing,
+        ("com.sun.management.internal.OperatingSystemImpl", name, "()long" | "()int") => {
+            Native::OperatingSystem(match name {
+                "getTotalMemorySize0" => "os_total_memory",
+                "getFreeMemorySize0" => "os_free_memory",
+                "getTotalSwapSpaceSize0" => "os_total_swap",
+                "getFreeSwapSpaceSize0" => "os_free_swap",
+                "getCommittedVirtualMemorySize0" => "os_committed_virtual_memory",
+                "getProcessCpuTime0" => "os_process_cpu_time",
+                "getOpenFileDescriptorCount0" => "os_open_file_descriptors",
+                "getMaxFileDescriptorCount0" => "os_max_file_descriptors",
+                "getHostOnlineCpuCount0" => "os_online_processors",
+                _ => return None,
+            })
+        }
+        // A mapping is the file's bytes in memory of the process (`MapFile`): loading it has
+        // nothing to read, and unloading it nothing to give back that the file holds, as dropping
+        // the pages of a copy would lose them.
+        ("java.nio.MappedMemoryUtils", "isLoaded0", "(long,long,long)boolean") => Native::MappingLoaded,
+        ("java.nio.MappedMemoryUtils", "load0" | "unload0", "(long,long)void") => Native::Nothing,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
         ("java.lang.Thread", "nextThreadId", "()long") => Native::ThreadId,
         ("java.lang.Thread", "mainId0", "()long") => Native::MainThreadId,
@@ -539,6 +576,8 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 // Lowered as code on the referent (`lower::references`).
                 | ("java.lang.ref.Reference", "get0" | "refersTo0" | "clear0")
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
+                // No reference is pending (`lower/natives.rs`).
+                | ("java.lang.ref.Reference", "getAndClearReferencePendingList")
                 // `LockSupport`'s, with the thread's id for `unpark` (`lower/natives.rs`).
                 | ("jdk.internal.misc.Unsafe", "park" | "unpark")
                 // What the translator read from the program's roots: its modules
@@ -553,7 +592,6 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
 }
 
 /// The natives of `java.io.UnixFileSystem` that the runtime implements (`Native::FileSystem`).
-/// `getSpace0`, which needs `statvfs`, is not one of them.
 pub const FILE_SYSTEM: &[&str] = &[
     "getBooleanAttributes0",
     "checkAccess0",
@@ -569,6 +607,7 @@ pub const FILE_SYSTEM: &[&str] = &[
     "setReadOnly0",
     "canonicalize0",
     "getNameMax0",
+    "getSpace0",
 ];
 
 /// The translator's class of the system calls of `java.nio.file`.

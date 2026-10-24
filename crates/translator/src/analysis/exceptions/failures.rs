@@ -394,6 +394,10 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::DeflateReset
             | Native::DeflateEnd
             | Native::NoPendingReferences
+            | Native::WaitForPendingReferences
+            | Native::LoadAverage
+            | Native::OperatingSystem(_)
+            | Native::MappingLoaded
             | Native::TransferUnsupported
             | Native::DirectCopy
             | Native::BufferedCopy

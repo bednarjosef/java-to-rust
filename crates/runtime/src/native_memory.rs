@@ -36,10 +36,10 @@ fn outside(what: &'static str) -> ! {
 }
 
 impl Blocks {
-    fn allocate(&mut self, bytes: i64) -> i64 {
+    /// A new block, aligned to 16 bytes as `malloc` aligns, or to `align`, a larger power of two.
+    fn allocate(&mut self, bytes: i64, align: i64) -> i64 {
         let Ok(size) = usize::try_from(bytes) else { outside("an allocation of a negative size") };
-        let address = self.next;
-        // Aligned to 16 bytes, as `malloc` aligns.
+        let address = (self.next + align - 1) & !(align - 1);
         self.next = (address + bytes + GAP + 15) & !15;
         self.blocks.insert(address, vec![0; size]);
         address
@@ -79,7 +79,14 @@ pub fn page_size() -> i32 {
 /// `Unsafe.allocateMemory0(bytes)`: a new block of `bytes` zero bytes (the JVM's are not
 /// cleared, and what reads them writes them first).
 pub fn allocate_native(bytes: i64) -> i64 {
-    memory().allocate(bytes)
+    memory().allocate(bytes, 16)
+}
+
+/// A new block of `bytes` zero bytes at the start of a page, as `mmap` gives a mapping: the JDK
+/// reads a mapped buffer's memory from the start of the page that holds its address
+/// (`MappedMemoryUtils.load`).
+pub(crate) fn allocate_pages(bytes: i64) -> i64 {
+    memory().allocate(bytes, page_size() as i64)
 }
 
 /// `Unsafe.reallocateMemory0(address, bytes)`: a new block with the old one's bytes, as many as
@@ -89,7 +96,7 @@ pub fn reallocate_native(address: i64, bytes: i64) -> i64 {
     let Some(old) = memory.blocks.remove(&address) else {
         outside("a reallocation of memory that was not allocated")
     };
-    let new = memory.allocate(bytes);
+    let new = memory.allocate(bytes, 16);
     let block = memory.blocks.get_mut(&new).expect("the new block");
     let kept = old.len().min(block.len());
     block[..kept].copy_from_slice(&old[..kept]);

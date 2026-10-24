@@ -329,6 +329,14 @@ impl<'a> Gen<'a> {
             | Native::DeflateSetDictionary
             | Native::DeflateSetDictionaryBuffer => self.deflate_native(native, args, id),
             Native::NoPendingReferences => Code::atom("false"),
+            Native::WaitForPendingReferences => call(self, "wait_for_pending_references", vec![]),
+            Native::LoadAverage => {
+                let n = self.value(&args[1], Type::Int).text;
+                let la = self.array_arg(&args[0], true);
+                call(self, "load_average", vec![la, n])
+            }
+            Native::OperatingSystem(f) => call(self, f, vec![]),
+            Native::MappingLoaded => Code::atom("true"),
             Native::SecureSeed => {
                 let num_bytes = self.value(&args[0], Type::Int).text;
                 let call = Code::atom(format!("{}({num_bytes})", self.runtime("try_secure_seed")));

@@ -417,6 +417,15 @@ impl<'t> Lowering<'t> {
         }))
     }
 
+    /// `Reference.getAndClearReferencePendingList()`, a native of the JVM that is null in a
+    /// translation, as no reference is ever pending without a collector that discovers them.
+    /// `None` for any other method.
+    pub(super) fn vm_code_call(&self, symbol: &Symbol<'t>) -> Option<ExprKind> {
+        let pending =
+            (symbol.owner, symbol.name) == ("java.lang.ref.Reference", "getAndClearReferencePendingList");
+        (symbol.native && pending).then_some(ExprKind::Null)
+    }
+
     /// A native of `java.io.UnixFileSystem` (`ast::FILE_SYSTEM`), whose `File` arguments become
     /// the paths they hold, the `path` field that `File.getPath()` returns. `None` for any other
     /// method; a native of the class that the runtime does not implement is rejected.

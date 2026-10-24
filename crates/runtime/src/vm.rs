@@ -206,6 +206,132 @@ fn boot_time_ms() -> i64 {
     btime.unwrap_or(0) * 1000
 }
 
+/// `Unsafe.getLoadAverage0(loadavg, nelems)`: the system's load averages over the last 1, 5 and
+/// 15 minutes, the first `nelems` of them (`Unsafe` has checked 1 to 3, and the array's length)
+/// into `loadavg`, from the C library's `getloadavg`; the number written, or -1 where the system
+/// does not tell.
+pub fn load_average(loadavg: &mut [f64], nelems: i32) -> i32 {
+    let mut la = [0f64; 3];
+    // Safety: `la` has room for the three samples that `getloadavg` writes at most.
+    let n = unsafe { getloadavg(la.as_mut_ptr(), nelems.clamp(0, 3)) };
+    for (slot, sample) in loadavg.iter_mut().zip(la).take(n.max(0) as usize) {
+        *slot = sample;
+    }
+    n
+}
+
+/// `Reference.waitForReferencePendingList()`, which the reference handler thread calls before it
+/// takes the references that the collector discovered: a translated program has no collector
+/// that discovers any, so it waits for ever, as on a JVM whose collector never runs.
+pub fn wait_for_pending_references() {
+    loop {
+        std::thread::park();
+    }
+}
+
+/// `OperatingSystemImpl.getTotalMemorySize0()` and `getFreeMemorySize0()`: the machine's memory
+/// and its free memory, `sysconf`'s pages times the page size, as the JDK reads them on Linux.
+pub fn os_total_memory() -> i64 {
+    sysconf_value(SC_PHYS_PAGES) * sysconf_value(SC_PAGESIZE)
+}
+
+pub fn os_free_memory() -> i64 {
+    sysconf_value(SC_AVPHYS_PAGES) * sysconf_value(SC_PAGESIZE)
+}
+
+/// `OperatingSystemImpl.getTotalSwapSpaceSize0()` and `getFreeSwapSpaceSize0()`: `sysinfo`'s
+/// swap in bytes; 0 where it fails.
+pub fn os_total_swap() -> i64 {
+    system_info().map_or(0, |(total, _)| total)
+}
+
+pub fn os_free_swap() -> i64 {
+    system_info().map_or(0, |(_, free)| free)
+}
+
+/// `OperatingSystemImpl.getCommittedVirtualMemorySize0()`: the process's virtual memory, the
+/// `vsize` of `/proc/self/stat` (its 23rd field); -1 where it cannot be read.
+pub fn os_committed_virtual_memory() -> i64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    // The fields after the command, which is between parentheses and may hold anything; the
+    // state is the 3rd field.
+    let fields = stat.rfind(')').map_or("", |close| &stat[close + 1..]);
+    fields.split_ascii_whitespace().nth(20).and_then(|v| v.parse::<u64>().ok()).map_or(-1, |v| v as i64)
+}
+
+/// `OperatingSystemImpl.getProcessCpuTime0()`: the processor time of the process, its user and
+/// system time from `times()`, in nanoseconds counted in whole clock ticks, as the JDK has it.
+pub fn os_process_cpu_time() -> i64 {
+    let mut tms = [0i64; 4];
+    // Safety: `tms` is a `struct tms`, four `clock_t`s.
+    unsafe { times(&mut tms) };
+    let per_tick = 1_000_000_000 / sysconf_value(SC_CLK_TCK).max(1);
+    (tms[0] + tms[1]) * per_tick
+}
+
+/// `OperatingSystemImpl.getOpenFileDescriptorCount0()`: the descriptors the process has open,
+/// the entries of `/proc/self/fd` but the one that reads it; -1 where it cannot be read.
+pub fn os_open_file_descriptors() -> i64 {
+    let Ok(dir) = std::fs::read_dir("/proc/self/fd") else { return -1 };
+    let numbered =
+        dir.filter_map(Result::ok).filter(|e| e.file_name().as_encoded_bytes()[0].is_ascii_digit());
+    numbered.count() as i64 - 1
+}
+
+/// `OperatingSystemImpl.getMaxFileDescriptorCount0()`: the most descriptors the process may have
+/// open, `getrlimit(RLIMIT_NOFILE)`. HotSpot raises its soft limit to the hard one when it starts
+/// (`-XX:+MaxFDLimit`, the default on Linux), so this is the hard limit; -1 for none.
+pub fn os_max_file_descriptors() -> i64 {
+    const RLIMIT_NOFILE: i32 = 7;
+    let mut limit = [0u64; 2];
+    // Safety: `limit` is a `struct rlimit`, its soft and hard limits.
+    match unsafe { getrlimit(RLIMIT_NOFILE, &mut limit) } {
+        0 => limit[1] as i64,
+        _ => -1,
+    }
+}
+
+/// `OperatingSystemImpl.getHostOnlineCpuCount0()`: the processors online,
+/// `sysconf(_SC_NPROCESSORS_ONLN)`, and 1 where it does not tell.
+pub fn os_online_processors() -> i32 {
+    (sysconf_value(SC_NPROCESSORS_ONLN) as i32).max(1)
+}
+
+/// Linux's names of the values of `sysconf`.
+const SC_CLK_TCK: i32 = 2;
+const SC_PAGESIZE: i32 = 30;
+const SC_NPROCESSORS_ONLN: i32 = 84;
+const SC_PHYS_PAGES: i32 = 85;
+const SC_AVPHYS_PAGES: i32 = 86;
+
+fn sysconf_value(name: i32) -> i64 {
+    // Safety: `sysconf` reads a value of the system and has no other effect.
+    #[allow(clippy::useless_conversion)]
+    i64::from(unsafe { sysconf(name) })
+}
+
+/// `sysinfo`'s total and free swap, in bytes.
+fn system_info() -> Option<(i64, i64)> {
+    // `struct sysinfo` on 64-bit Linux: the uptime, three loads, six sizes (the total and free
+    // swap 9th and 10th words), the processes, two more sizes, then the unit of the sizes, an
+    // `int` at byte 104; 112 bytes in all.
+    let mut buf = [0u64; 16];
+    // Safety: `buf` is larger than a `struct sysinfo`.
+    if unsafe { sysinfo(buf.as_mut_ptr().cast()) } != 0 {
+        return None;
+    }
+    let unit = u32::from_ne_bytes(buf[13].to_ne_bytes()[..4].try_into().expect("four bytes")).max(1) as u64;
+    Some((buf[8].wrapping_mul(unit) as i64, buf[9].wrapping_mul(unit) as i64))
+}
+
+unsafe extern "C" {
+    fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32;
+    fn sysconf(name: i32) -> std::ffi::c_long;
+    fn sysinfo(info: *mut u8) -> i32;
+    fn times(buf: *mut [i64; 4]) -> std::ffi::c_long;
+    fn getrlimit(resource: i32, limit: *mut [u64; 2]) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +423,20 @@ mod tests {
         // Started in the last day, and not after now (the boot time has whole seconds).
         assert!((now - 86_400_000..=now + 1000).contains(&started), "{started} {now}");
         assert_eq!(process_start_time(-5), -1);
+    }
+
+    #[test]
+    fn the_system_answers_its_counts() {
+        let mut la = [-1.0; 3];
+        assert_eq!(load_average(&mut la[..2], 2), 2);
+        assert!(la[0] >= 0.0 && la[1] >= 0.0 && la[2] == -1.0, "{la:?}");
+        assert!(os_total_memory() > os_free_memory() && os_free_memory() > 0);
+        assert!(os_total_swap() >= os_free_swap() && os_free_swap() >= 0);
+        assert!(os_committed_virtual_memory() > 0);
+        assert!(os_process_cpu_time() >= 0);
+        // Standard input, output and error at least.
+        assert!(os_open_file_descriptors() >= 3);
+        assert!(os_max_file_descriptors() >= os_open_file_descriptors() || os_max_file_descriptors() == -1);
+        assert!(os_online_processors() >= 1);
     }
 }

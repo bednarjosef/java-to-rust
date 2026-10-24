@@ -5,7 +5,7 @@
 //! file's bytes, copied when the mapping is made.
 
 use crate::fd::{Failure, last_error, with_file};
-use crate::native_memory::{allocate_native, free_native, page_size, write_native};
+use crate::native_memory::{allocate_pages, free_native, page_size, write_native};
 use crate::natives::unsupported_memory;
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt;
@@ -23,10 +23,11 @@ pub fn transfer_unsupported() -> i64 {
     UNSUPPORTED_CASE
 }
 
-/// `UnixFileDispatcherImpl.map0`: a block outside the heap that holds the bytes of the file from
-/// `position`, for `length` bytes. Past the end of the file the bytes are zeros, as a file that is
-/// extended reads. The block is a copy, so a later change to the file is not seen through it, and
-/// a change through the buffer does not reach the file. A read-write mapping, whose changes must
+/// `UnixFileDispatcherImpl.map0`: a block outside the heap, at the start of a page as a mapping
+/// is, that holds the bytes of the file from `position`, for `length` bytes. Past the end of the
+/// file the bytes are zeros, as a file that is extended reads. The block is a copy, so a later
+/// change to the file is not seen through it, and a change through the buffer does not reach the
+/// file. A read-write mapping, whose changes must
 /// reach the file, and a synchronous one end the program.
 pub fn map_file(fd: i32, prot: i32, position: i64, length: i64, is_sync: bool) -> Result<i64, Failure> {
     if prot == MAP_RW || is_sync {
@@ -46,7 +47,7 @@ pub fn map_file(fd: i32, prot: i32, position: i64, length: i64, is_sync: bool) -
         Ok::<(), io::Error>(())
     })
     .map_err(last_error)?;
-    let address = allocate_native(length);
+    let address = allocate_pages(length);
     write_native(address, &bytes);
     Ok(address)
 }

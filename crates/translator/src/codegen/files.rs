@@ -110,6 +110,7 @@ impl<'a> Gen<'a> {
             "setLastModifiedTime0" => "fs_set_modified",
             "setReadOnly0" => "fs_set_read_only",
             "getNameMax0" => "fs_name_max",
+            "getSpace0" => "fs_space",
             _ => unreachable!("not a native of `UnixFileSystem` the runtime implements: {name}"),
         };
         Code::atom(format!("{}({})", self.runtime(f), values.join(", ")))
