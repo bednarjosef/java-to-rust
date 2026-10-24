@@ -18,8 +18,8 @@ the machine running out of memory.
 | step | what it does | time |
 |---|---|---|
 | `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required | seconds |
-| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`: 5,037 files, 547,614 lines. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 34 s |
-| `libraries` | each library jar decompiled the same way, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s |
+| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 3 min 12 s on a busy machine (34 s without the libraries on a quiet one) |
+| `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`: `java.base` plus 14 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events) and `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) | seconds |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
@@ -31,6 +31,30 @@ The census gives the translator only `Main.java` as a source file. The rest of t
 sources where `library-sources` has them, and its decompiled code otherwise. This way javac reads and
 attributes only the classes that the code reachable from `main` uses, not all 5,037 server files
 and 2,411 fastutil files. fastutil is then only the few dozen classes the server reaches.
+
+### Decompiling with the libraries
+
+A class file keeps the generic signatures of the classes, fields and methods it declares, but not
+the type arguments of the calls in its code, nor the types of its local variables beyond what
+the local variable table records. Vineflower puts them back from the signatures of the methods
+called. Without the library jars it does not have those signatures for library classes such as
+DataFixerUpper's `RecordCodecBuilder` or Guava's `ImmutableList`. It then writes
+`RecordCodecBuilder.mapCodec(i -> ...).validate(...)` where the original had
+`RecordCodecBuilder.<RangeInfo>mapCodec(...)`, and javac, with nothing to infer `RangeInfo` from,
+infers `Object`: one error for the call and one "cannot find symbol" for each field the lambdas
+read. With every library jar given as `-e`, Vineflower writes the type arguments where javac
+needs them, and types local variables (`Pair<RecipeCategory, String>`, `Tag`) instead of leaving
+them `Object`.
+
+Measured by the `parse` step (javac on all of the server against the library jars), this takes
+the server from 579 errors in 282 files to 185 errors in 117 files. 172 files compile that did
+not; 7 that compiled have an error now (a lambda parameter or a method reference that javac
+cannot infer with the type arguments written out). The other Vineflower settings tried do not
+help. Compared on the files that had errors: `--explicit-generics`, which writes the type
+arguments of every generic call, gives more errors, with the libraries (296 against 181) or
+without them (642 against 585); `--verify-merges`, `--verify-pre-post-merges` and
+`--simplify-stack=false` change the count by at most one; `--old-try-dedup` writes `switch`
+code that does not parse. 1.12.0 is the latest Vineflower release.
 
 ### Going on past compile errors
 
@@ -65,20 +89,20 @@ dependencies can be built: it stops only at a rejected piece, as any translation
 
 ### Parsing (javac on all of the decompiled code)
 
-- **The server:** 579 errors in 282 of its 5,037 files, compiled against the original library
-  jars. The largest kinds:
+- **The server:** 185 errors in 117 of its 5,037 files, compiled against the original library
+  jars (579 in 282 when decompiled without the libraries). The largest kinds:
 
   | errors | kind |
   |---:|---|
-  | 153 | cannot find symbol |
-  | 156 | incompatible types (a type cannot be converted to another) |
-  | 24 | invalid method reference |
-  | 15 | a type variable used in a static context |
-  | about 50 | inference failing (`cannot infer type-variable(s)`, incompatible bounds) |
-  | 13 | `org.jetbrains.annotations` missing |
+  | 30 | a type cannot be converted to another (`List<MutableComponent>` to `List<Component>`) |
+  | 27 | a captured wildcard cannot be converted (`return super.getBrain()` without the original's cast to `Brain<Hoglin>`) |
+  | 29 | inference failing (`cannot infer type-variable(s)`) |
+  | 29 | other incompatible types: lambdas for interfaces that are not functional, method references, conditional expressions, incompatible bounds |
+  | 34 | cannot find symbol: 24 annotations (`@Contract`, `@Immutable`, `@CheckReturnValue`); the rest are mostly a catch variable that the decompiler declares as `e` and uses as `ex`, and temporaries of record patterns used outside the `try` that declares them |
+  | 18 | annotation packages missing (`org.jetbrains.annotations`, `javax.annotation`) |
 
-  Almost all are the decompiler losing generic type arguments (`ImmutableMap<Object, Object>`
-  where the original had `ImmutableMap<String, String>`). The rest are compile-only annotation
+  Most are type arguments or casts that the original source had and the class file does not
+  keep, where Vineflower does not see that javac needs them. The annotations are compile-only
   libraries that the bundler does not ship.
 
 - **The libraries,** each one compiled on its own:
@@ -183,12 +207,15 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   per missing class. A class whose superclass is missing, or that catches a missing exception
   class, cannot be loaded at all, as on the JVM: log4j's `AsyncLoggerDisruptor` is one.
 
-- **The server's own decompiled code:** 372 errors in 195 files, mostly generics that the
-  decompiler lost. They cannot be fixed by hand under this target's rules. The options are:
-  - another decompiler or other Vineflower settings, compared by error count;
-  - a pass that copies the generic signatures from the class files back into the source, which
-    is what javac would need;
-  - leaving those pieces rejected, which is about 4% of the server's files.
+- **The server's own decompiled code:** 185 errors in 117 files (about 2% of them), now that
+  Vineflower decompiles with the library jars ([above](#decompiling-with-the-libraries)). They
+  cannot be fixed by hand under this target's rules. Most are type arguments and casts that the
+  class files do not record at all, so no pass over the class files can bring them back; what is
+  left to try is:
+  - another decompiler (CFR, Procyon), compared by error count with the `parse` step;
+  - for each file, the decompile (with or without the libraries) that compiles: 7 files
+    compile only without them;
+  - leaving those pieces rejected.
 
 ### 3. What the translator itself rejects
 
