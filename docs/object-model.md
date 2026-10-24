@@ -616,11 +616,18 @@ existed:
   a string) that a single file lacks.
 - A cast to an intersection is javac's erasure of it (`TransTypes.visitTypeCast`,
   `generics::intersection_cast`): a checked cast to each bound in order but the erasure and the
-  type that the place converts the value to, then to the erasure, and the place's conversion
-  last, so that the `ClassCastException` names the same bound as Java's. `JavaTree` writes that
-  type as the cast's `expected`, for an initializer, an assignment, an argument (but a varargs
-  one), a `return` from a method, a cast or a receiver; an intersection cast anywhere else is
-  rejected ("a cast to an intersection type in this place").
+  type that the place converts the value to (javac's `pt`), then to the erasure, then to that
+  type when it is a bound, so that the `ClassCastException` names the same bound as Java's.
+  `JavaTree` writes that type as the cast's `expected`, as `TransTypes` gives it: the erased type
+  of an initialized or assigned variable, of an argument's parameter as the call instantiates it
+  (`Object` for a method's that is a type variable or an intersection) or of the varargs element,
+  of an operator's operand (`Object` for `==`, a `boolean` or `int` for the others), of a
+  method's or a lambda's result, of an array initializer's element, of a `?:`'s value, of an
+  enclosing cast or a receiver, a `boolean` for a condition and an `int` for an index; the
+  cast's own erasure for a `synchronized` lock, a thrown value, a switch's selector or result,
+  a for-each's iterable and an assert's detail. The value of an `instanceof` has no such type
+  (javac's erasure fails on it): a cast there is rejected ("a cast to an intersection type in
+  this place").
 - A varargs parameter `T...` is an array of the erasure.
 - Generic constructors, explicit type arguments, raw types and diamonds need nothing of their
   own.

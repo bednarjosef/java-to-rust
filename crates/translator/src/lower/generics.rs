@@ -209,10 +209,11 @@ impl<'t> Lowering<'t> {
 
     /// A cast to an intersection type, `(Base & Named) o`, as javac erases it (`TransTypes`): a
     /// checked cast to each bound in turn but the erasure and the type that the place converts
-    /// the value to (`expected`, from `JavaTree`), then to the erasure, so that the first bound
-    /// the value is not of is the one a `ClassCastException` names. `None` for a lambda or a
-    /// method reference, whose cast is the one interface of the intersection with methods.
-    pub(super) fn intersection_cast(&self, node: Node<'t>) -> Result<Option<ExprKind>, Error> {
+    /// the value to (`expected`, from `JavaTree`), then to the erasure, then to that type when it
+    /// is a bound, so that the first bound the value is not of is the one a `ClassCastException`
+    /// names. `None` for a lambda or a method reference, whose cast is the one interface of the
+    /// intersection with methods.
+    pub(super) fn intersection_cast(&self, node: Node<'t>) -> Result<Option<Expr>, Error> {
         let Some(bounds) = node.get("type").filter(|t| t.kind() == "INTERSECTION_TYPE") else {
             return Ok(None);
         };
@@ -234,15 +235,26 @@ impl<'t> Lowering<'t> {
         let expected = self.ty(node, expected).ok();
         let erasure = self.ty(node, node.java_type())?;
         let mut value = self.expr(node.child("expression")?)?;
+        // The bound that is the place's type, whose check is the place's conversion.
+        let mut last = None;
         for bound in bounds.list("bounds") {
             let ty = self.ty(bound, bound.java_type())?;
             // At the bound's position: a cast at its value's is one that cannot fail
             // (`failures::raising`).
-            if ty != erasure && Some(ty) != expected && ty != value.ty {
+            if ty != erasure && Some(ty) == expected {
+                last = Some((ty, bound.pos()));
+            } else if ty != erasure && ty != value.ty {
                 value = self.synth(ExprKind::Cast(ty, Box::new(value)), bound.pos(), ty);
             }
         }
-        Ok(Some(ExprKind::Cast(erasure, Box::new(value))))
+        let erased = self.synth(ExprKind::Cast(erasure, Box::new(value)), node.pos(), erasure);
+        // The place's conversion is at the value's position, where a cast cannot fail, so the
+        // check of the bound that is the place's type is made here, last, at the bound's; the
+        // value is then of that type.
+        Ok(Some(match last {
+            Some((ty, pos)) => self.synth(ExprKind::Cast(ty, Box::new(erased)), pos, ty),
+            None => erased,
+        }))
     }
 
     /// The erasure of the type variable `name`, if one is in scope.

@@ -49,6 +49,7 @@ public class JavaTree {
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         JavacTask task = (JavacTask) compiler.getTask(null, null, diagnostics,
                 List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"), null, List.of(file));
+        context = ((JavacTaskImpl) task).getContext();
         elements = task.getElements();
         types = task.getTypes();
         Iterable<? extends CompilationUnitTree> units = task.parse();
@@ -368,7 +369,7 @@ public class JavaTree {
 
     private static Elements elements;
     private static Types types;
-    /** javac's context, in whole-program mode. */
+    /** javac's context. */
     private static com.sun.tools.javac.util.Context context;
 
     private final Trees trees;
@@ -736,11 +737,16 @@ public class JavaTree {
     }
 
     /**
-     * The type that javac's erasure ({@code TransTypes}) translates a cast in {@code path} for: the
-     * erasure of the variable it initializes or is assigned to, of the parameter it is an
-     * argument for, of the method it returns from, or of the cast or the receiver it is in.
-     * javac casts a value to an intersection's bounds but that one, then to its erasure, and
-     * the place converts it to that one last; {@code null} for other places.
+     * The type that javac's erasure ({@code TransTypes}) translates a cast in {@code path} for, its
+     * {@code pt}: the erasure of the variable it initializes or is assigned to, of the parameter
+     * it is an argument for (as the call instantiates it, or the varargs element), of the
+     * operand of the operator it is an operand of, of the method or lambda it returns from, of
+     * the element of the array it initializes, of the {@code ?:} it is a branch of, or of the
+     * cast or the receiver it is in; its own erasure where it is a {@code synchronized} lock, a
+     * thrown value, a switch's selector or result, a for-each's iterable or an assert's detail.
+     * javac casts a value to an intersection's bounds but that one, then to its erasure, and the
+     * place converts it to that one last. {@code null} for other places: javac itself fails on a
+     * cast to an intersection that is an {@code instanceof}'s value or a {@code void} lambda's.
      */
     private TypeMirror expected(TreePath path) {
         TreePath inner = path;
@@ -749,33 +755,91 @@ public class JavaTree {
         }
         Tree child = inner.getLeaf();
         TreePath parent = inner.getParentPath();
+        TypeMirror own = trees.getTypeMirror(path);
         TypeMirror type = switch (parent.getLeaf()) {
             case VariableTree v when v.getInitializer() == child -> trees.getTypeMirror(parent);
             case AssignmentTree a when a.getExpression() == child -> trees.getTypeMirror(new TreePath(parent, a.getVariable()));
+            case CompoundAssignmentTree a when a.getExpression() == child -> operand(a, 1);
+            case BinaryTree b -> operand(b, b.getLeftOperand() == child ? 0 : 1);
+            case UnaryTree u -> operand(u, 0);
+            case ConditionalExpressionTree c when c.getCondition() != child -> trees.getTypeMirror(parent);
+            case ConditionalExpressionTree c -> types.getPrimitiveType(TypeKind.BOOLEAN);
+            case IfTree i -> types.getPrimitiveType(TypeKind.BOOLEAN);
+            case WhileLoopTree w -> types.getPrimitiveType(TypeKind.BOOLEAN);
+            case DoWhileLoopTree d when d.getCondition() == child -> types.getPrimitiveType(TypeKind.BOOLEAN);
+            case ForLoopTree f when f.getCondition() == child -> types.getPrimitiveType(TypeKind.BOOLEAN);
+            case AssertTree a when a.getCondition() == child -> types.getPrimitiveType(TypeKind.BOOLEAN);
+            case ArrayAccessTree a when a.getIndex() == child -> types.getPrimitiveType(TypeKind.INT);
             case TypeCastTree c -> trees.getTypeMirror(parent);
-            case MemberSelectTree s -> trees.getTypeMirror(path);
-            case MethodInvocationTree m -> parameter(trees.getElement(parent), m.getArguments().indexOf(child));
-            case NewClassTree n -> parameter(trees.getElement(parent), n.getArguments().indexOf(child));
+            case MemberSelectTree s -> own;
+            case SynchronizedTree s -> own;
+            case ThrowTree t -> own;
+            case YieldTree y -> own;
+            case SwitchTree s -> own;
+            case SwitchExpressionTree s -> own;
+            // A rule's expression in a switch expression is the value it yields.
+            case CaseTree c when c.getBody() == child -> own;
+            case EnhancedForLoopTree f when f.getExpression() == child -> own;
+            case AssertTree a when a.getDetail() == child -> own;
+            case NewArrayTree n when n.getInitializers() != null && n.getInitializers().contains(child) ->
+                    trees.getTypeMirror(parent) instanceof ArrayType array ? array.getComponentType() : null;
+            case MethodInvocationTree m -> {
+                var call = (com.sun.tools.javac.tree.JCTree.JCMethodInvocation) m;
+                yield argument(call.meth.type, call.varargsElement, m.getArguments().indexOf(child), false);
+            }
+            case NewClassTree n -> {
+                var call = (com.sun.tools.javac.tree.JCTree.JCNewClass) n;
+                yield argument(call.constructorType, call.varargsElement, n.getArguments().indexOf(child), true);
+            }
             case ReturnTree r -> {
                 TreePath at = parent;
                 while (at != null && !(at.getLeaf() instanceof MethodTree) && !(at.getLeaf() instanceof LambdaExpressionTree)) {
                     at = at.getParentPath();
                 }
-                yield at != null && at.getLeaf() instanceof MethodTree
-                        && trees.getElement(at) instanceof ExecutableElement method ? method.getReturnType() : null;
+                if (at != null && at.getLeaf() instanceof LambdaExpressionTree lambda) {
+                    yield lambdaReturn(lambda);
+                }
+                yield at != null && trees.getElement(at) instanceof ExecutableElement method ? method.getReturnType() : null;
             }
+            case LambdaExpressionTree l when l.getBody() == child -> lambdaReturn(l);
             default -> null;
         };
         return type == null ? null : types.erasure(type);
     }
 
-    /** The declared type of parameter {@code index} of a method, but of its varargs parameter. */
-    private static TypeMirror parameter(Element method, int index) {
-        if (!(method instanceof ExecutableElement m) || index < 0) {
+    /** The type of operand {@code index} of the operator that javac chose for an operation. */
+    private static TypeMirror operand(Tree operation, int index) {
+        var operator = ((com.sun.tools.javac.tree.JCTree.JCOperatorExpression) operation).operator;
+        return operator == null ? null : operator.type.getParameterTypes().get(index);
+    }
+
+    /**
+     * The type that javac converts argument {@code index} of a call to: the parameter's type as
+     * the call instantiates it ({@code method}), or the varargs element ({@code varargs}) for the
+     * arguments that a varargs call packs. A method's parameter that is an intersection or a
+     * type variable is no bound's type, so it is {@code Object} here; a constructor's is erased.
+     */
+    private static TypeMirror argument(com.sun.tools.javac.code.Type method, com.sun.tools.javac.code.Type varargs,
+            int index, boolean constructor) {
+        if (method == null || index < 0) {
             return null;
         }
-        int last = m.getParameters().size() - 1;
-        return index > last || m.isVarArgs() && index == last ? null : m.getParameters().get(index).asType();
+        var params = method.getParameterTypes();
+        com.sun.tools.javac.code.Type param = varargs != null && index >= params.size() - 1 ? varargs
+                : index < params.size() ? params.get(index) : null;
+        if (param != null && !constructor
+                && (param.isIntersection() || param.hasTag(com.sun.tools.javac.code.TypeTag.TYPEVAR))) {
+            return elements.getTypeElement("java.lang.Object").asType();
+        }
+        return param;
+    }
+
+    /** The return type of a lambda's function, erased; {@code null} for a {@code void} one. */
+    private static TypeMirror lambdaReturn(LambdaExpressionTree lambda) {
+        var javacTypes = com.sun.tools.javac.code.Types.instance(context);
+        var descriptor = ((com.sun.tools.javac.tree.JCTree.JCLambda) lambda).getDescriptorType(javacTypes);
+        TypeMirror result = javacTypes.erasure(descriptor).getReturnType();
+        return result.getKind() == TypeKind.VOID ? null : result;
     }
 
     /** Interfaces that declare no methods, which an intersection type adds nothing with. */

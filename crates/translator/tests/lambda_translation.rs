@@ -164,14 +164,15 @@ fn a_lambda_cast_to_an_intersection_with_another_of_the_programs_interfaces_is_r
 
 #[test]
 fn an_intersection_cast_whose_place_is_not_known_is_rejected() {
-    // javac casts to the type the place wants last, so the order of the checks is not known.
+    // An `instanceof`'s value has no type for javac's erasure to convert it to, and javac's
+    // erasure fails on it, so the order of the checks is not known.
     let error = rejected(
         "class A {
             interface Named { String name(); }
             static class Base {}
             public static void main(String[] args) {
                 Object o = new Base();
-                System.out.println(((Base & Named) o) == null);
+                System.out.println(((Base & Named) o) instanceof Runnable);
             }
         }",
     );
