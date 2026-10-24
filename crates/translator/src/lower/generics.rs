@@ -28,6 +28,26 @@ pub(super) fn split_args(args: &str) -> Vec<&str> {
     out
 }
 
+/// The bounds of an intersection type as `JavaTree` writes it, its erasure first
+/// (`Main.Base & Main.Named`), split at the `&`s outside `<>`; `None` for any other type.
+pub(super) fn intersection_bounds(name: &str) -> Option<Vec<&str>> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (i, c) in name.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            '&' if depth == 0 => {
+                out.push(name[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(name[start..].trim());
+    (out.len() > 1).then_some(out)
+}
+
 impl<'t> Lowering<'t> {
     /// The declaration of the type variable `name` in scope: the method's being lowered (or the
     /// one `scope` names), then its class's and those of the code it is nested in. One of the
@@ -99,7 +119,7 @@ impl<'t> Lowering<'t> {
         let mut types = Vec::new();
         for arg in split_args(args) {
             // A wildcard or a primitive (which javac never writes) has no Rust type argument.
-            if arg.starts_with('?') || arg.starts_with("capture#") {
+            if arg.starts_with('?') || arg.starts_with("capture#") || intersection_bounds(arg).is_some() {
                 self.fail(Owner::Class(t));
                 return Some(Ok(Type::class(raw)));
             }
@@ -131,14 +151,16 @@ impl<'t> Lowering<'t> {
     /// The erasure of a type that javac writes with type arguments, a wildcard, a capture or a
     /// type variable; `None` for any other type.
     pub(super) fn erased(&self, node: Node, name: &str) -> Option<Result<Type, Error>> {
+        // An intersection's values are of its erasure, as on the JVM; a call of a later bound's
+        // method casts the receiver to that bound (`receiver`).
+        if let Some(bounds) = intersection_bounds(name) {
+            return Some(self.ty(node, bounds[0]));
+        }
         let without_outer = without_outer_args(name);
         if !without_outer.contains('<') && without_outer != name {
             return Some(self.ty(node, &without_outer));
         }
         let name = without_outer.as_str();
-        if name.contains(" & ") {
-            return Some(unsupported(node, "intersection types"));
-        }
         // `capture#1 of ? extends Shape`, the type of a value read through a wildcard.
         if let Some(rest) = name.strip_prefix("capture#") {
             let bound = rest.split_once(" of ").map_or("?", |(_, b)| b);
@@ -166,21 +188,61 @@ impl<'t> Lowering<'t> {
     }
 
     /// The receiver of a call of a method that class `owner` declares. A type variable with
-    /// several bounds (`T extends Object & Comparable<? super T>`) erases to its first, so a value
-    /// of it calling a method of a later one is cast to that bound, as javac casts it.
+    /// several bounds (`T extends Object & Comparable<? super T>`) erases to its first, and an
+    /// intersection type (`(Base & Named) o`) to its erasure, so a value of it calling a method
+    /// of a later bound is cast to that bound, as javac casts it.
     pub(super) fn receiver(&self, receiver: Node<'t>, owner: &str) -> Result<Expr, Error> {
         let value = self.expr(receiver)?;
         let ty = receiver.java_type();
         let var = ty
             .strip_prefix("capture#")
             .map_or(ty, |rest| rest.split_once(" of ? extends ").map_or("", |(_, bound)| bound));
-        let several = !var.contains(['.', '<', '[', ' ', '?'])
-            && self.type_var(var).is_some_and(|(param, _)| param.list("bounds").nth(1).is_some());
+        let several = intersection_bounds(var).is_some()
+            || !var.contains(['.', '<', '[', ' ', '?'])
+                && self.type_var(var).is_some_and(|(param, _)| param.list("bounds").nth(1).is_some());
         if !several {
             return Ok(value);
         }
         let bound = self.ty(receiver, owner)?;
         Ok(self.convert(value, bound))
+    }
+
+    /// A cast to an intersection type, `(Base & Named) o`, as javac erases it (`TransTypes`): a
+    /// checked cast to each bound in turn but the erasure and the type that the place converts
+    /// the value to (`expected`, from `JavaTree`), then to the erasure, so that the first bound
+    /// the value is not of is the one a `ClassCastException` names. `None` for a lambda or a
+    /// method reference, whose cast is the one interface of the intersection with methods.
+    pub(super) fn intersection_cast(&self, node: Node<'t>) -> Result<Option<ExprKind>, Error> {
+        let Some(bounds) = node.get("type").filter(|t| t.kind() == "INTERSECTION_TYPE") else {
+            return Ok(None);
+        };
+        let mut expression = node.child("expression")?;
+        while expression.kind() == "PARENTHESIZED" {
+            expression = expression.child("expression")?;
+        }
+        if matches!(expression.kind(), "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE") {
+            if intersection_bounds(node.java_type()).is_some() {
+                return unsupported(node, "a lambda of an intersection of interfaces");
+            }
+            return Ok(None);
+        }
+        // Where the place is not one `JavaTree` knows, the order of the casts is not known.
+        let expected = node.str("expected");
+        if expected.is_empty() {
+            return unsupported(node, "a cast to an intersection type in this place");
+        }
+        let expected = self.ty(node, expected).ok();
+        let erasure = self.ty(node, node.java_type())?;
+        let mut value = self.expr(node.child("expression")?)?;
+        for bound in bounds.list("bounds") {
+            let ty = self.ty(bound, bound.java_type())?;
+            // At the bound's position: a cast at its value's is one that cannot fail
+            // (`failures::raising`).
+            if ty != erasure && Some(ty) != expected && ty != value.ty {
+                value = self.synth(ExprKind::Cast(ty, Box::new(value)), bound.pos(), ty);
+            }
+        }
+        Ok(Some(ExprKind::Cast(erasure, Box::new(value))))
     }
 
     /// The erasure of the type variable `name`, if one is in scope.

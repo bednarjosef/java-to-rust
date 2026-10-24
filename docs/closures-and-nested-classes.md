@@ -389,8 +389,10 @@ Marker interfaces (`Serializable`, `Cloneable`, `RandomAccess`) declare nothing:
 JDK's sources, which declare them, lowering drops them where a class implements them
 (`lower/functional.rs`); with those sources they are interfaces like any other, so that a
 `ZoneRules` returned as a `Serializable` is one. `JavaTree` drops them and
-`Object` from intersection casts, so `(Comparator<T> & Serializable)` is `Comparator<T>`. A cast
-to two interfaces that are not markers is rejected.
+`Object` from the type of a lambda or method reference cast to an intersection, so
+`(Comparator<T> & Serializable)` is `Comparator<T>`. A lambda cast to two interfaces that are not
+markers (`(Runnable & Tagged)`, with an empty `Tagged` of the program's) is rejected: the closure
+would not be a `Tagged`. Other intersection casts are in the object model's generics.
 
 ### 4.2 Which functional interfaces are closure types
 
@@ -609,7 +611,7 @@ Plans, each a refinement of a correct form that exists:
 
 | File | What |
 | --- | --- |
-| `crates/translator/java/JavaTree.java` | the `descriptor` of lambdas and method references; binary names of local and anonymous classes; marker interfaces dropped from intersection casts |
+| `crates/translator/java/JavaTree.java` | the `descriptor` of lambdas and method references; binary names of local and anonymous classes; marker interfaces dropped from the intersection a lambda is cast to |
 | `crates/translator/java/Functional.java` | the JDK's functional interfaces, `Iterable` and `Iterator`, abstract methods only, for single files |
 | `lower/captures.rs` | what each nested class captures and which enclosing instances it needs |
 | `lower/inner.rs` | declaring, naming and desugaring inner, local and anonymous classes |

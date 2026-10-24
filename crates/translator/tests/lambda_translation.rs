@@ -148,6 +148,37 @@ fn a_marker_interface_is_dropped_from_an_intersection_cast() {
 }
 
 #[test]
+fn a_lambda_cast_to_an_intersection_with_another_of_the_programs_interfaces_is_rejected() {
+    // The closure is not a `Tagged`, which `instanceof` would see.
+    let error = rejected(
+        "class A {
+            interface Tagged {}
+            public static void main(String[] args) {
+                Runnable r = (Runnable & Tagged) () -> System.out.println(1);
+                r.run();
+            }
+        }",
+    );
+    assert!(error.ends_with("a lambda of an intersection of interfaces not supported yet"), "{error}");
+}
+
+#[test]
+fn an_intersection_cast_whose_place_is_not_known_is_rejected() {
+    // javac casts to the type the place wants last, so the order of the checks is not known.
+    let error = rejected(
+        "class A {
+            interface Named { String name(); }
+            static class Base {}
+            public static void main(String[] args) {
+                Object o = new Base();
+                System.out.println(((Base & Named) o) == null);
+            }
+        }",
+    );
+    assert!(error.ends_with("a cast to an intersection type in this place not supported yet"), "{error}");
+}
+
+#[test]
 fn a_lambda_moves_the_locals_it_captures_into_its_closure() {
     let rust = translate(
         "class A {
