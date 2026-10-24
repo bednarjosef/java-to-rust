@@ -4,7 +4,8 @@
 #
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
-# Steps: extract, decompile, best-of, repair, libraries, library-sources, jdk-sources, parse, census, summary.
+# Steps: extract, decompile, best-of, repair, libraries, library-sources, library-best-of, jdk-sources,
+# parse, census, summary.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -129,34 +130,70 @@ javac_errors() {
 
 # The number of javac errors in each file of a javac log, as "count<TAB>file", sorted by file.
 error_counts() {
-  grep ': error: ' "$1" | cut -d: -f1 | LC_ALL=C sort | uniq -c | awk '{print $1 "\t" $2}'
+  { grep ': error: ' "$1" || true; } | cut -d: -f1 | LC_ALL=C sort | uniq -c | awk '{print $1 "\t" $2}'
 }
 
-# The server: net.minecraft and com.mojang, decompiled three ways into decompiled/<setup>:
-# Vineflower with the library jars, Vineflower without them, and CFR. CFR, which takes 25
-# minutes on the whole server, only decompiles the classes of the files that have javac errors
-# with the first (compiled all together against the library jars, as the parse step does).
-decompile() {
-  check_vineflower
-  fetch_tool org/benf/cfr/0.152/cfr-0.152.jar "$cfr_sha1" "$cfr"
-  local server dir=$cache/decompiled
-  server=$(find "$cache/jar/META-INF/versions" -name 'server-*.jar' | head -n 1)
-  decompile_jar "$server" "$dir/vineflower" yes --only=net/minecraft --only=com/mojang
-  decompile_jar "$server" "$dir/vineflower-nolibs" no --only=net/minecraft --only=com/mojang
+# The library jars that library-sources found no published sources for, except the native-only
+# ones (a single class that loads the native library): those stay decompiled. None before the
+# library-sources step has run.
+unpublished_jars() {
+  local lib name
+  [ -d "$cache/src/library-sources" ] || { echo "no src/library-sources (run the library-sources step)" >&2; return 0; }
+  library_jars | while IFS= read -r lib; do
+    name=$(basename "$lib" .jar)
+    case $name in *-linux-* | *-osx-* | *-windows-*) continue ;; esac
+    [ -d "$cache/src/library-sources/$name" ] || echo "$lib"
+  done
+}
+
+# The library jars other than JAR, as a class path.
+other_jars() {
+  library_jars | grep -vxF "$1" | paste -sd:
+}
+
+# Decompiles a jar three ways into DIR/<setup>: Vineflower with the library jars, Vineflower
+# without them, and CFR; the rest of the arguments go to Vineflower. CFR, which takes 25 minutes on
+# the whole server, only decompiles the classes of the files that have javac errors with the first
+# (compiled all together against the other library jars, as the parse step does), and is not run
+# where there are none.
+decompile_setups() {
+  local in=$1 dir=$2
+  shift 2
+  decompile_jar "$in" "$dir/vineflower" yes "$@"
+  decompile_jar "$in" "$dir/vineflower-nolibs" no "$@"
   (cd "$dir/vineflower" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) > "$dir/all-files.txt"
-  javac_errors "$dir/vineflower" "$dir/all-files.txt" "$(library_jars | paste -sd:)" "$dir/vineflower-javac.txt"
+  javac_errors "$dir/vineflower" "$dir/all-files.txt" "$(other_jars "$in")" "$dir/vineflower-javac.txt"
   error_counts "$dir/vineflower-javac.txt" > "$dir/vineflower-errors.txt"
+  rm -rf "$dir/cfr"
+  [ -s "$dir/vineflower-errors.txt" ] || return 0
   # The top-level classes of those files, and their nested classes.
-  decompile_cfr "$server" "$dir/cfr" "^($(cut -f2 "$dir/vineflower-errors.txt" | sed -E 's|\.java$||; s|/|\\.|g' \
+  decompile_cfr "$in" "$dir/cfr" "^($(cut -f2 "$dir/vineflower-errors.txt" | sed -E 's|\.java$||; s|/|\\.|g' \
     | paste -sd'|'))(\\$.*)?\$"
 }
 
-# src/server from the three decompiles, file by file: Vineflower with the libraries, except
-# where another setup's file gives the whole tree fewer javac errors (decompile-best-of.py), in at
-# most 8 compiles of the whole server.
+# OUT from the three decompiles of a jar in DIR, file by file: Vineflower with the libraries,
+# except where another setup's file gives the whole tree fewer javac errors
+# (decompile-best-of.py), in at most 8 compiles of the whole tree.
+best_of_setups() {
+  local in=$1 dir=$2 out=$3
+  python3 -I "$root/scripts/decompile-best-of.py" "$dir" "$out" "$(other_jars "$in")" 8 \
+    vineflower vineflower-nolibs cfr -- "${slot[@]}"
+}
+
+server_jar() {
+  find "$cache/jar/META-INF/versions" -name 'server-*.jar' | head -n 1
+}
+
+# The server: net.minecraft and com.mojang, decompiled three ways into decompiled/<setup>.
+decompile() {
+  check_vineflower
+  fetch_tool org/benf/cfr/0.152/cfr-0.152.jar "$cfr_sha1" "$cfr"
+  decompile_setups "$(server_jar)" "$cache/decompiled" --only=net/minecraft --only=com/mojang
+}
+
+# src/server from the server's three decompiles.
 best-of() {
-  python3 -I "$root/scripts/decompile-best-of.py" "$cache/decompiled" "$cache/src/server" \
-    "$(library_jars | paste -sd:)" 8 vineflower vineflower-nolibs cfr -- "${slot[@]}"
+  best_of_setups "$(server_jar)" "$cache/decompiled" "$cache/src/server"
 }
 
 # Edits the decompiled server where javac rejects it, with edits that keep the bytecode's
@@ -208,6 +245,21 @@ library-sources() {
     rm -rf "$out" && mkdir -p "$out"
     unzip -q "$jar" '*.java' -d "$out"
     echo "$(find "$out" -name '*.java' | wc -l) source files from $(basename "$jar")"
+  done
+}
+
+# Each library that has no published sources, decompiled three ways into
+# decompiled/libraries/<artifact>/<setup> and put together into src/libraries/<artifact> as the
+# server is, compiled against the other library jars.
+library-best-of() {
+  check_vineflower
+  fetch_tool org/benf/cfr/0.152/cfr-0.152.jar "$cfr_sha1" "$cfr"
+  unpublished_jars | while IFS= read -r lib; do
+    local name
+    name=$(basename "$lib" .jar)
+    echo "$name:"
+    decompile_setups "$lib" "$cache/decompiled/libraries/$name" < /dev/null
+    best_of_setups "$lib" "$cache/decompiled/libraries/$name" "$cache/src/libraries/$name" < /dev/null
   done
 }
 
@@ -352,11 +404,14 @@ summary() {
 }
 
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of repair libraries library-sources jdk-sources parse census summary)
+[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of repair libraries library-sources library-best-of jdk-sources
+  parse census summary)
 for step in "${steps[@]}"; do
   case $step in
-    extract | decompile | best-of | repair | libraries | library-sources | jdk-sources | parse | census | summary) "$step" ;;
-    *) echo "unknown step $step (extract, decompile, best-of, repair, libraries, library-sources, jdk-sources, parse, census, summary)" >&2
+    extract | decompile | best-of | repair | libraries | library-sources | library-best-of | jdk-sources | parse \
+      | census | summary) "$step" ;;
+    *) echo "unknown step $step (extract, decompile, best-of, repair, libraries, library-sources, library-best-of," \
+      "jdk-sources, parse, census, summary)" >&2
       exit 2 ;;
   esac
 done

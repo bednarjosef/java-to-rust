@@ -23,6 +23,7 @@ the machine running out of memory.
 | `repair` | edits `src/server` where javac rejects it, with edits that keep the bytecode's behaviour ([below](#repairing-what-the-decompiler-left-out)), up to `REPAIR_ROUNDS` (4) rounds; every edit is listed in `repair-log.txt` | about 5 min |
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
+| `library-best-of` | each library without published sources decompiled the three ways of `decompile` into `decompiled/libraries/<artifact>`, and put together into `src/libraries/<artifact>` as `best-of` does for the server, compiled against the other library jars | 3 min |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`, [below](#the-jdk-modules): `java.base` plus 30 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events), `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) and `jdk.httpserver` (the HTTP server of an authentication library) | under a minute |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
 | `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
@@ -204,6 +205,7 @@ dependencies can be built: it stops only at a rejected piece, as any translation
   | Guava | 2,023 errors in 320 of its 608 files |
   | netty-handler | 526 errors in 28 files |
   | netty-common | 140 errors in 28 files |
+  | DataFixerUpper | 172 errors in 57 of its 164 files (165 after the `library-best-of` step) |
   | authlib, Gson | 107 errors each |
   | netty-codec-compression | 101 errors |
   | most others | a few |
@@ -335,6 +337,16 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   left is mostly inference inside lambdas and method references, and annotation packages that no
   library jar has; those pieces stay rejected.
 
+  The libraries without published sources go through the same choice: `library-best-of`
+  decompiles each three ways into `decompiled/libraries/<artifact>` and puts it together into
+  `src/libraries/<artifact>`, compiled against the other library jars. Brigadier, jtracy and
+  logging compile as Vineflower writes them. DataFixerUpper goes from 172 errors in 57 files to
+  165 with 2 files from CFR (Vineflower without the libraries and CFR's whole set are both
+  worse); 73 of them are imports and uses of `javax.annotation`. All 107 of authlib's are
+  `javax.annotation`, so the choice does not change them. What DataFixerUpper keeps is its heavy
+  generics: type variables used from a static context, and inference over its `App<Mu, ...>`
+  encodings that fails.
+
 ### 3. What the translator itself rejects
 
 This is not measured yet, because the census does not get past loading. Expected from what the
@@ -357,11 +369,13 @@ needs the server's census first.
 These are plans. Work on several of them is under way but not merged yet.
 
 1. Run the census again with the fixes since the last one: the survey's `jdk-sources` step once
-   (it writes `jdk-src/modules.txt`), then the decompile, best-of and repair steps, then the census. Then
-   compare its rejections with the last census's and with javac's, and list the new kinds.
+   (it writes `jdk-src/modules.txt`), then the decompile, best-of, repair and library-best-of
+   steps, then the census. Then compare its rejections with the last census's and with javac's,
+   and list the new kinds.
 2. The decompiled code javac still rejects: 118 errors in the server after the best-of and repair
-   steps, mostly inference inside lambdas and method references. Planned: the same per-file
-   best-of choice and repair for the libraries without published sources.
+   steps, and 92 in DataFixerUpper (outside its missing annotations) after the library-best-of
+   step, mostly inference inside lambdas and method references. Planned: the repair step for the
+   libraries without published sources too.
 3. The census's speed: the last one lowered the whole program five times, about 370 s each,
    because a failed try with Rust generics starts lowering over. Planned: cheaper retries.
 4. The translator's refusals still open from the last census, by kind:
