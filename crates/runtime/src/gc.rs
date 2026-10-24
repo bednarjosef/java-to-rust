@@ -981,6 +981,9 @@ static MARK_STACK: AtomicPtr<(usize, usize)> = AtomicPtr::new(ptr::null_mut());
 /// back on the stack first, where another marker can take it.
 const SCAN_CHUNK: usize = 64 << 10;
 
+/// The slots a marker holds while their memory is fetched (see `Marker::drain`).
+const PREFETCH: usize = 8;
+
 /// The markers of a collection are the collecting thread and up to this many helper threads.
 const MAX_HELPERS: usize = 15;
 
@@ -1171,9 +1174,26 @@ impl Marker {
     }
 
     /// Scans everything on this marker's stack, offering work to idle markers now and then.
+    ///
+    /// A slot taken off the stack waits in a ring of `PREFETCH` slots while its memory is fetched
+    /// (a prefetch as it goes in), and is scanned as it comes out: the misses of reading many
+    /// slots overlap instead of following one another.
     fn drain(&mut self) {
         let mut scanned = 0u32;
-        while let Some((start, mut len)) = self.stack.pop() {
+        let mut ring = [(0usize, 0usize); PREFETCH];
+        let (mut first, mut held) = (0usize, 0usize);
+        loop {
+            let Some((start, mut len)) = self.stack.pop() else {
+                if held == 0 {
+                    return;
+                }
+                // Scanning what is held may push more.
+                let (start, len) = ring[first];
+                first = (first + 1) % PREFETCH;
+                held -= 1;
+                self.range(start, start + len);
+                continue;
+            };
             if len > SCAN_CHUNK {
                 // The other pieces go on the stack at once, where other markers can take them.
                 let mut at = start + len.div_ceil(SCAN_CHUNK) * SCAN_CHUNK;
@@ -1183,7 +1203,17 @@ impl Marker {
                 }
                 len = SCAN_CHUNK;
             }
-            self.range(start, start + len);
+            unsafe {
+                std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(start as *const i8)
+            };
+            if held == PREFETCH {
+                let (start, len) = ring[first];
+                first = (first + 1) % PREFETCH;
+                held -= 1;
+                self.range(start, start + len);
+            }
+            ring[(first + held) % PREFETCH] = (start, len);
+            held += 1;
             scanned += 1;
             if self.shares && scanned.is_multiple_of(64) {
                 self.offer();
