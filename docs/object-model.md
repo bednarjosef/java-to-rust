@@ -179,13 +179,18 @@ impl Base {
 }
 impl Base {
     fn base(&self) -> Ref<'_, BaseFields> {
-        match self.view() {
-            BaseView::Circle(o) => Ref::map(o.borrow(), |o| &o.base),
-            BaseView::Rect(o) => Ref::map(o.borrow(), |o| &o.base),
+        match self.0.tag() {
+            2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; Ref::map(o.borrow(), |o| &o.base) }
+            3 => { let o: &Arc<RefCell<Rect>> = unsafe { self.0.as_pointer() }; Ref::map(o.borrow(), |o| &o.base) }
+            tag => java::bad_tag(tag),
         }
     }
     fn area(&self) -> f64 {
-        match self.view() { BaseView::Circle(o) => o.borrow().area(), BaseView::Rect(o) => o.borrow().area() }
+        match self.0.tag() {
+            2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
+            3 => { let o: &Arc<RefCell<Rect>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
+            tag => java::bad_tag(tag),
+        }
     }
     fn to_string_in_base(&self) -> java::JString {
         java::concat!(self.base().name.clone(), format_args!(":{}", java::Double(self.area())))
@@ -198,7 +203,9 @@ impl fmt::Display for Base { /* each variant as its class shows it */ }
 Rules:
 
 - A dispatcher exists on an enum for each method the program calls on a receiver of that type.
-  An arm calls what the variant's class runs, in the form that class uses (`o.borrow().m()`,
+  It matches on the class number, and each arm lends the class's object where it lies, as
+  `view()` would, so a call is one jump to the class's code. An arm calls what the variant's
+  class runs, in the form that class uses (`o.borrow().m()`,
   `o.borrow_mut().m()`, `C::m(o, ..)`, `o.m()` for an immutable class). When every variant runs
   the same body emitted on the enum, the call names that body and no dispatcher is written. A
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
