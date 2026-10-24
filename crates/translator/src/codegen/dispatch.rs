@@ -888,6 +888,9 @@ impl<'a> Gen<'a> {
         let object = self.ty_name(Type::class(OBJECT));
         let [c, n] = ["component", "length"].map(|base| self.temp(base));
         let mut arms = Vec::new();
+        let mut names = Vec::new();
+        let object_array = Type::array(Type::class(OBJECT));
+        let mut objects = None;
         for (variant, _, array) in self.object_arrays() {
             let element = array.element();
             let name = rust_string(&self.type_class_name(element));
@@ -895,6 +898,29 @@ impl<'a> Gen<'a> {
             let filled =
                 self.runtime(if self.shared_array_type(array) { "try_shared_filled" } else { "try_filled" });
             arms.push(format!("{name} => {filled}({n}, {zero}).map({variant}),"));
+            if array == object_array {
+                objects = Some((variant, filled, zero));
+            }
+            names.push(name);
+        }
+        // An array of a narrower class that the translation holds as an `Object[]` carrying its
+        // class (`lower::covariant`), of the classes the code makes or tests arrays of.
+        if let Some((variant, filled, zero)) = objects {
+            let mut covariant: Vec<Type> = Vec::new();
+            for &class in self.class.element_classes.values().chain(self.class.array_tests.values()) {
+                if class != object_array && !covariant.contains(&class) {
+                    covariant.push(class);
+                }
+            }
+            for class in covariant {
+                let name = rust_string(&self.type_class_name(class.element()));
+                if names.contains(&name) {
+                    continue;
+                }
+                let tagged = self.with_element_class(class, Code::atom("a".to_string())).text;
+                arms.push(format!("{name} => {filled}({n}, {zero}).map(|a| {variant}({tagged})),"));
+                names.push(name);
+            }
         }
         arms.push(format!("\"void\" => Err({exception}::bare(\"java.lang.IllegalArgumentException\")),"));
         let missing = self.runtime("not_translated");
