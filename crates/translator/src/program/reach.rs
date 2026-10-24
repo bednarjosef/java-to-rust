@@ -94,7 +94,7 @@ pub struct Reach {
     /// The members that reflection looks up by name, as (the class it looks in, the member's
     /// name), `<init>` for constructors (`reflection.rs`).
     pub reflected: BTreeSet<(String, String)>,
-    /// The modules of a program with libraries, which its `java.lang.Module` answers with
+    /// The modules of the program's roots, which its `java.lang.Module` and `ClassLoader` answer with
     /// (`modules::contents`, `lower/modules.rs`); set after reachability.
     pub modules: Vec<super::modules::Contents>,
 }
@@ -1383,6 +1383,14 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         (TRANSLATED_MODULES, "bootResource"),
     ),
     (
+        (
+            "java.lang.ClassLoader",
+            "getSystemResources",
+            "(java.lang.String)java.util.Enumeration<java.net.URL>",
+        ),
+        (TRANSLATED_MODULES, "systemResources"),
+    ),
+    (
         ("jdk.internal.loader.ClassLoaders", "appClassLoader", "()java.lang.ClassLoader"),
         (TRANSLATED_MODULES, "appClassLoader"),
     ),
@@ -1483,6 +1491,12 @@ pub const MODULE_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.lang.Class", "getPackage", "()java.lang.Package"),
         ("packageOf", "(java.lang.Class<?>)java.lang.Package"),
+    ),
+    // Not a module, but an `Enumeration` of the JDK, which the runtime's `ClassLoader` cannot
+    // make (`java/Threads.java`).
+    (
+        ("java.lang.ClassLoader", "getResources", "(java.lang.String)java.util.Enumeration<java.net.URL>"),
+        ("resources", "(java.lang.ClassLoader,java.lang.String)java.util.Enumeration<java.net.URL>"),
     ),
 ];
 

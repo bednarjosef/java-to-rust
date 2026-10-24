@@ -1,6 +1,9 @@
 package java.lang;
 
+import java.io.IOException;
 import java.net.URL;
+import java.util.Collections;
+import java.util.Enumeration;
 import java.util.LinkedHashMap;
 
 /**
@@ -97,6 +100,27 @@ public final class TranslatedModules {
                     + ": code that is not in the translation cannot run");
         }
         return null;
+    }
+
+    /**
+     * {@code loader.getResources(name)}: nothing when the loader finds no resource of that name,
+     * as in Java. The translation's loaders find a resource exactly when {@code getResource} does,
+     * and throw then, as no resource is in the translation; a loader of the program's own that
+     * gives a URL throws here too, as its enumeration would need the URLs of the loaders
+     * between.
+     */
+    public static Enumeration<URL> resources(ClassLoader loader, String name) throws IOException {
+        URL url = loader.getResource(name);
+        if (url != null) {
+            throw new UnsupportedOperationException("the resources " + name + " that " + loader
+                    + " finds, with " + url + ": code that is not in the translation cannot run");
+        }
+        return Collections.emptyEnumeration();
+    }
+
+    /** {@code ClassLoader.getSystemResources(name)}. */
+    public static Enumeration<URL> systemResources(String name) throws IOException {
+        return resources(ClassLoader.getSystemClassLoader(), name);
     }
 
     /** {@code ClassLoaders.appClassLoader()}. */

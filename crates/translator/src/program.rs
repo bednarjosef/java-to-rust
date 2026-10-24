@@ -10,7 +10,7 @@ mod reach;
 mod survey;
 
 pub use census::{Census, census_program};
-pub use modules::{Contents as ModuleContents, loader_name};
+pub use modules::{Contents as ModuleContents, loader_name, loader_resources};
 pub use reach::{
     ANNOTATION_VALUES, CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, GENERIC_TYPES, IN_MODULE, LOCALE_LANGUAGE,
     Lookup, LookupKind, MODULE_CALLS, NATIVE_ACCESS_CALLS, NATIVE_ACCESS_MODULES, PRINT_FORMATTED,
@@ -323,10 +323,8 @@ fn load(
     if std::env::var_os("JAVA_TO_RUST_REACH_WHY").is_some() {
         std::process::exit(0);
     }
-    if !program.libraries.is_empty() {
-        let roots = program.sources.iter().chain(&program.libraries);
-        reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
-    }
+    let roots = program.sources.iter().chain(&program.libraries);
+    reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
     let changing: Vec<usize> = changing.iter().map(|&(index, _, _)| index).collect();
     let mut units = given.into_values();
     for index in changing {

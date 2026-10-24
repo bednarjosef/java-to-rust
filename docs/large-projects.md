@@ -75,7 +75,9 @@ None of this exists yet.
   and translating what it produces covers them, because the translator reads javac's own
   attributed trees. Processors that are loaded at run time are a different matter (see limits).
 - **Resources.** Files on the class path (configuration, templates, data, images) read with
-  `getResourceAsStream` end the program today (a class file is `null`: the translation has none). A project needs them embedded into the binary
+  `Class.getResourceAsStream` end the program today (a class file is `null`: the translation
+  has none), and a class loader's lookup that finds one in a root throws (one that finds none is
+  `null` or empty, as in Java). A project needs them embedded into the binary
   (`include_bytes!`) or installed next to it, chosen per project.
 - **Several entry points.** A project with several `main` classes becomes one binary each,
   sharing the crates. A library without a `main` needs its public API as the starting points

@@ -13,16 +13,21 @@
 //! - `declares0(name)`: what the named module declares and holds, a line of words each, as the
 //!   comment of `declares0` says;
 //! - `holds0(module, name)`: whether the root of the module (`""` the unnamed one) has the file.
+//!
+//! The translator's `ClassLoader` (`java/Threads.java`) has one such native, `holder0(loader,
+//! name)`: the module that holds the resource `name` that the loader (`bootstrap`, `platform` or
+//! `app`) finds, as `module m` or `the class path`, or null (`program::loader_resources`).
 
 use super::*;
 use crate::program::ModuleContents as Contents;
 
 const MODULE: &str = "java.lang.Module";
+const CLASS_LOADER: &str = "java.lang.ClassLoader";
 
 impl<'t> Lowering<'t> {
     /// A call of `MODULE_CALLS`, as a call of the translator's method with the receiver as its
-    /// argument, when the translation has that method; `None` for any other call, and in a
-    /// translation without the JDK's sources.
+    /// first argument, before the call's, when the translation has that method; `None` for any
+    /// other call, and in a translation without the JDK's sources.
     pub(super) fn module_call(
         &self,
         node: Node<'t>,
@@ -36,8 +41,11 @@ impl<'t> Lowering<'t> {
             return Ok(None);
         };
         let Some(resolved) = self.translated_modules(to, signature) else { return Ok(None) };
-        let receiver = self.expr(select.child("expression")?)?;
-        let args = self.convert_generic_args(node, Some(resolved), vec![receiver])?;
+        let mut args = vec![self.expr(select.child("expression")?)?];
+        for arg in node.list("arguments") {
+            args.push(self.expr(arg)?);
+        }
+        let args = self.convert_generic_args(node, Some(resolved), args)?;
         Ok(Some(ExprKind::Call { name: to.to_string(), args, resolved: Some(resolved) }))
     }
 
@@ -72,11 +80,12 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol,
         args: &mut Vec<Expr>,
     ) -> Result<Option<ExprKind>, Error> {
-        if symbol.owner != MODULE || !symbol.native {
+        if (symbol.owner != MODULE && symbol.owner != CLASS_LOADER) || !symbol.native {
             return Ok(None);
         }
         let Some(reach) = self.reach else {
-            return unsupported(node, "`Module` outside a whole program");
+            let class = symbol.owner.rsplit('.').next().unwrap_or_default();
+            return unsupported(node, &format!("`{class}` outside a whole program"));
         };
         let pos = node.pos();
         let args = std::mem::take(args);
@@ -150,7 +159,28 @@ impl<'t> Lowering<'t> {
                     .collect();
                 switch(var(0), cases, boolean(false))
             }
-            _ => return unsupported(node, &format!("`Module.{}`", symbol.name)),
+            ("holder0", 2) if symbol.owner == CLASS_LOADER => {
+                let null = || self.synth(ExprKind::Null, pos, Type::Null);
+                let cases = ["bootstrap", "platform", "app"]
+                    .into_iter()
+                    .map(|loader| {
+                        let mut holders: Vec<(String, Vec<String>)> = Vec::new();
+                        for (name, holder) in crate::program::loader_resources(&reach.modules, loader) {
+                            match holders.iter_mut().find(|(h, _)| *h == holder) {
+                                Some((_, names)) => names.push(name),
+                                None => holders.push((holder, vec![name])),
+                            }
+                        }
+                        let cases = holders.into_iter().map(|(h, names)| (names, string(&h))).collect();
+                        (vec![loader.to_string()], switch(var(1), cases, null()))
+                    })
+                    .collect();
+                switch(var(0), cases, null())
+            }
+            _ => {
+                let class = symbol.owner.rsplit('.').next().unwrap_or_default();
+                return unsupported(node, &format!("`{class}.{}`", symbol.name));
+            }
         };
         let mut body: Vec<Stmt> = names
             .iter()
@@ -208,6 +238,7 @@ mod tests {
             uses: vec!["p.S".into()],
             packages: vec!["".into(), "p".into()],
             resources: vec![],
+            classes: vec![],
         };
         assert_eq!(
             declared_lines(&m),

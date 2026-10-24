@@ -178,6 +178,8 @@ pub struct Contents {
     pub packages: Vec<String>,
     /// The files of its root that are not Java sources, by their path from the root with `/`.
     pub resources: Vec<String>,
+    /// The class files that Java would have of its sources: `a/b/C.class` for `a/b/C.java`.
+    pub classes: Vec<String>,
 }
 
 /// The contents of the modules among `roots`, in their order, then of the unnamed module if a
@@ -190,17 +192,19 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
     for root in roots {
         let source = std::fs::read_to_string(root.join("module-info.java")).ok();
         let declared = source.as_deref().and_then(full_declaration);
-        let (packages, resources) = root_contents(root);
+        let (packages, resources, classes) = root_contents(root);
         match declared {
             Some(mut module) => {
                 module.packages = packages;
                 module.resources = resources;
+                module.classes = classes;
                 named.push(module);
             }
             None => {
                 any_unnamed = true;
                 unnamed.packages.extend(packages);
                 unnamed.resources.extend(resources);
+                unnamed.classes.extend(classes);
             }
         }
     }
@@ -217,10 +221,55 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
     named
 }
 
+/// The files that `ClassLoader.getResource` of the class loader `loader` (`bootstrap`,
+/// `platform` or `app`, see `loader_name`) finds, each with the module that holds it: `module m`,
+/// or `the class path` for the unnamed module, which only `app` has. As in Java's
+/// `BuiltinClassLoader`, a file in a package of one of the loader's named modules is found only
+/// in that module, and only if it is a class file or the module opens the package to all, and
+/// one in a package of another loader's module is not found in a named module; any other file
+/// of a named module is found in the first one that holds it. The class path comes after the
+/// named modules.
+pub fn loader_resources(modules: &[Contents], loader: &str) -> Vec<(String, String)> {
+    let named: Vec<&Contents> = modules.iter().filter(|m| !m.name.is_empty()).collect();
+    // The named module, of any loader, with the package of the file `name`.
+    let package_module = |name: &str| {
+        let package = name.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.replace('/', "."));
+        named.iter().position(|m| m.packages.contains(&package)).map(|i| (i, package))
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    for (index, m) in named.iter().enumerate().filter(|(_, m)| loader_name(&m.name) == loader) {
+        for name in m.classes.iter().chain(&m.resources) {
+            let visible = match package_module(name) {
+                Some((owner, package)) => {
+                    owner == index
+                        && (name.ends_with(".class")
+                            || m.open
+                            || m.opens.iter().any(|(p, to)| *p == package && to.is_empty()))
+                }
+                None => true,
+            };
+            if visible && seen.insert(name.clone()) {
+                found.push((name.clone(), format!("module {}", m.name)));
+            }
+        }
+    }
+    if loader == "app" {
+        for m in modules.iter().filter(|m| m.name.is_empty()) {
+            for name in m.classes.iter().chain(&m.resources) {
+                if seen.insert(name.clone()) {
+                    found.push((name.clone(), "the class path".to_string()));
+                }
+            }
+        }
+    }
+    found
+}
+
 /// The packages of the root `root` (each directory with a Java source, the root itself being the
-/// unnamed package `""`) and its other files, sorted.
-fn root_contents(root: &Path) -> (Vec<String>, Vec<String>) {
-    let (mut packages, mut resources) = (Vec::new(), Vec::new());
+/// unnamed package `""`), its other files, and the class files of its sources, sorted.
+fn root_contents(root: &Path) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (mut packages, mut resources, mut classes) = (Vec::new(), Vec::new(), Vec::new());
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -231,8 +280,11 @@ fn root_contents(root: &Path) -> (Vec<String>, Vec<String>) {
             let relative = relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
             if path.is_dir() {
                 dirs.push(path);
-            } else if relative.ends_with(".java") {
+            } else if let Some(stem) = relative.strip_suffix(".java") {
                 has_source |= relative != "module-info.java";
+                if !stem.ends_with("module-info") && !stem.ends_with("package-info") {
+                    classes.push(format!("{stem}.class"));
+                }
             } else {
                 resources.push(relative);
             }
@@ -244,7 +296,8 @@ fn root_contents(root: &Path) -> (Vec<String>, Vec<String>) {
     }
     packages.sort();
     resources.sort();
-    (packages, resources)
+    classes.sort();
+    (packages, resources, classes)
 }
 
 /// What `source` declares: the module's name, whether it is open, and its `requires`,
@@ -400,7 +453,7 @@ fn system_modules() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{contents, declaration, full_declaration, service_providers};
+    use super::{Contents, contents, declaration, full_declaration, loader_resources, service_providers};
 
     #[test]
     fn providers_come_from_provides_then_service_files() {
@@ -459,6 +512,45 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].packages, ["a.b"]);
         assert_eq!(found[0].resources, ["a/b/data.txt"]);
+        assert_eq!(found[0].classes, ["a/b/C.class"]);
+    }
+
+    #[test]
+    fn a_loader_finds_the_files_of_its_modules_that_are_not_encapsulated() {
+        let strings = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let module = |name: &str, packages: &[&str], resources: &[&str], classes: &[&str]| Contents {
+            name: name.into(),
+            packages: strings(packages),
+            resources: strings(resources),
+            classes: strings(classes),
+            ..Contents::default()
+        };
+        let mut app = module(
+            "app",
+            &["a", "b"],
+            &["a/x.txt", "b/y.txt", "META-INF/z", "java/lang/q.txt"],
+            &["a/A.class"],
+        );
+        app.opens = vec![("b".into(), vec![]), ("a".into(), vec!["other".into()])];
+        let base = module("java.base", &["java.lang"], &["java/lang/d.dat"], &["java/lang/Object.class"]);
+        let path = module("", &["c"], &["a/x.txt", "c/w.txt"], &["c/C.class"]);
+        let modules = [base, app, path];
+        let held = |loader| -> Vec<String> {
+            loader_resources(&modules, loader).into_iter().map(|(n, m)| format!("{n} in {m}")).collect()
+        };
+        assert_eq!(held("bootstrap"), ["java/lang/Object.class in module java.base"]);
+        assert_eq!(held("platform"), Vec::<String>::new());
+        assert_eq!(
+            held("app"),
+            [
+                "a/A.class in module app",
+                "b/y.txt in module app",
+                "META-INF/z in module app",
+                "c/C.class in the class path",
+                "a/x.txt in the class path",
+                "c/w.txt in the class path"
+            ]
+        );
     }
 
     #[test]

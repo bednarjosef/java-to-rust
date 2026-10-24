@@ -413,7 +413,9 @@ class Thread {
 // overrides it: defining a class from bytes is code that is not in the translation, and is not
 // here. `getClassLoader()` of a class is `of(c)`: null for the JDK's base classes, as Java's
 // bootstrap loader is, the platform's for the APIs of `java.compiler`, the application's for
-// any other. Resources are not in the translation either: a loader finds none.
+// any other. Resources are not in the translation either: the bootstrap, platform and
+// application loaders find the files and class files that the roots hold as Java's would, and a
+// lookup that finds one throws, while one that finds none answers null or nothing, as in Java.
 class ClassLoader {
     private static final ClassLoader PLATFORM = new ClassLoader("platform", null, false);
     private static final ClassLoader SYSTEM = new ClassLoader("app", PLATFORM, true);
@@ -483,21 +485,56 @@ class ClassLoader {
         throw new ClassNotFoundException(name);
     }
 
+    // Java's asks its parent, or with none the bootstrap loader, then `findResource`.
+    // `getResources` and `getSystemResources`, which give an `Enumeration` of the JDK, are
+    // `TranslatedModules`' (`MODULE_CALLS`, `REDIRECTED_CALLS`).
     public java.net.URL getResource(String name) {
-        return null;
+        if (name == null) {
+            // Java's fails so, in `Objects.requireNonNull`.
+            throw new NullPointerException();
+        }
+        java.net.URL url = parent != null ? parent.getResource(name) : held("bootstrap", name);
+        return url != null ? url : findResource(name);
     }
 
+    protected java.net.URL findResource(String name) {
+        return this == SYSTEM || this == PLATFORM ? held(this.name, name) : null;
+    }
+
+    // Java opens the stream of the URL that `getResource` finds; only a loader of the program
+    // that overrides `getResource` or `findResource` can give one, whose stream the translation
+    // does not have.
     public java.io.InputStream getResourceAsStream(String name) {
+        java.net.URL url = getResource(name);
+        if (url != null) {
+            throw new UnsupportedOperationException("the stream of " + url
+                    + ": code that is not in the translation cannot run");
+        }
         return null;
     }
 
     public static java.net.URL getSystemResource(String name) {
-        return null;
+        return SYSTEM.getResource(name);
     }
 
     public static java.io.InputStream getSystemResourceAsStream(String name) {
+        return SYSTEM.getResourceAsStream(name);
+    }
+
+    // The resource `name` that the loader `loader` (`bootstrap`, `platform` or `app`) finds, which
+    // is not in the translation and throws; null for a name that it does not find, as in Java.
+    private static java.net.URL held(String loader, String name) {
+        String holder = holder0(loader, name);
+        if (holder != null) {
+            throw new UnsupportedOperationException("the resource " + name + " of " + holder
+                    + ": code that is not in the translation cannot run");
+        }
         return null;
     }
+
+    // The module that holds the resource `name` that the loader `loader` finds, as `module m` or
+    // `the class path`, or null (see `lower/modules.rs`).
+    private static native String holder0(String loader, String name);
 
     public String toString() {
         return name == null ? "java.lang.ClassLoader" : "java.lang.ClassLoader[" + name + "]";
