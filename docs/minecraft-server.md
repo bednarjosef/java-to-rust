@@ -124,6 +124,11 @@ bytecode the class file already has:
 - **A loop over a raw collection** (`for (EntityHitResult hit : (Collection) hits)`), where the
   class file casts each element to the loop variable's class: the collection is cast to
   `Iterable` of that class, through the raw type, so that javac emits that cast on each element.
+- **A lambda for an interface that is not functional** (`return () -> codec;` for an
+  `EntityDataSerializer<T>`, which has two abstract methods): cast to the one interface that
+  extends it and that the class file's lambdas are made for (`(EntityDataSerializer.ForValueType<T>)
+  () -> codec`), read from the `invokedynamic` instructions of the class. That is what the
+  original's lambda was for; its default methods leave one abstract method.
 - **A diamond in an argument** `new C(..)` of a generic class C, written raw, of a call whose
   type variables javac then cannot infer (`register(registry, "resource", ..., new
   ResourceArgument.Info())`): `new C<>(..)`, tried before a cast at the same error.

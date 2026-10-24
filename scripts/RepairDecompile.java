@@ -25,6 +25,8 @@
 //   cast at the same error;
 // - in a for-each loop over a raw collection whose elements the class file casts to the loop
 //   variable's class, the collection cast to `Iterable` of that class;
+// - a lambda or method reference for an interface that is not functional, cast to the one
+//   interface extending it that the class file makes lambdas for (`(ForValueType<T>) () -> codec`);
 // - an unresolved variable in a catch block renamed to the catch parameter that encloses every
 //   use of the name and is not used itself (the decompiler declared `e` and used `ex`).
 //
@@ -47,6 +49,7 @@ import java.io.*;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.CodeModel;
 import java.lang.classfile.Opcode;
+import java.lang.classfile.instruction.InvokeDynamicInstruction;
 import java.lang.classfile.instruction.TypeCheckInstruction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -75,7 +78,7 @@ public class RepairDecompile {
     static PrintWriter log;
     // The jar of the tree's classes, and the types each class file checks casts to, by name.
     static ZipFile classes;
-    static Map<String, Set<String>> checkcasts = new HashMap<>();
+    static Map<String, ClassCode> classCodes = new HashMap<>();
 
     public static void main(String[] args) throws Exception {
         root = Path.of(args[0]).toAbsolutePath();
@@ -213,6 +216,9 @@ public class RepairDecompile {
     static List<Edit> repairs(JavacTask task, CompilationUnitTree unit, List<Error> errors) {
         Context context = ((JavacTaskImpl) task).getContext();
         Types types = Types.instance(context);
+        var elements = com.sun.tools.javac.model.JavacElements.instance(context);
+        java.util.function.Function<String, Symbol.ClassSymbol> named =
+            binary -> (Symbol.ClassSymbol) elements.getTypeElement(binary.replace('$', '.'));
         JCTree.JCCompilationUnit cu = (JCTree.JCCompilationUnit) unit;
         List<Edit> edits = new ArrayList<>();
         Set<Integer> renamed = new HashSet<>();
@@ -228,7 +234,11 @@ public class RepairDecompile {
                     case "compiler.err.prob.found.req" -> {
                         JCDiagnostic detail = inconvertible(diag);
                         List<Edit> diamonds = rawArguments(cu, path);
-                        if (!diamonds.isEmpty()) {
+                        JCDiagnostic notFunctional = detail("compiler.misc.not.a.functional.intf", diag);
+                        if (notFunctional != null && notFunctional.getArgs()[0] instanceof Symbol.ClassSymbol written) {
+                            Edit edit = functionalCast(types, cu, tree, targetOf(path, written, types), named);
+                            if (edit != null) edits.add(edit);
+                        } else if (!diamonds.isEmpty()) {
                             edits.addAll(diamonds);
                         } else if (detail != null) {
                             Type found = (Type) detail.getArgs()[0], expected = (Type) detail.getArgs()[1];
@@ -255,6 +265,37 @@ public class RepairDecompile {
     }
 
     static class Unprintable extends Exception {}
+
+    // The type of class `written` that the expression at `path` is for: the declared type of the
+    // variable it initializes or of the method result it returns, where that is of the class, and
+    // the raw class otherwise.
+    static Type targetOf(TreePath path, Symbol.ClassSymbol written, Types types) {
+        Tree leaf = path.getLeaf(), parent = path.getParentPath().getLeaf();
+        Type declared = null;
+        if (parent instanceof JCTree.JCVariableDecl variable && variable.init == leaf && variable.vartype != null) {
+            declared = variable.vartype.type;
+        } else if (parent instanceof JCTree.JCReturn) {
+            for (TreePath up = path.getParentPath(); up != null; up = up.getParentPath()) {
+                if (up.getLeaf() instanceof LambdaExpressionTree) break;
+                if (up.getLeaf() instanceof JCTree.JCMethodDecl method) {
+                    declared = method.restype == null ? null : method.restype.type;
+                    break;
+                }
+            }
+        }
+        return declared != null && declared.tsym == written ? declared : types.erasure(written.type);
+    }
+
+    // The detail of an error whose code is `code` or starts with it and a dot, at any depth.
+    static JCDiagnostic detail(String code, JCDiagnostic diag) {
+        for (Object arg : diag.getArgs()) {
+            if (!(arg instanceof JCDiagnostic detail)) continue;
+            if (detail.getCode().equals(code) || detail.getCode().startsWith(code + ".")) return detail;
+            JCDiagnostic nested = detail(code, detail);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
 
     // The `found cannot be converted to expected` detail of an error, also where it is the reason
     // of another (`bad type in conditional expression`).
@@ -328,13 +369,17 @@ public class RepairDecompile {
         return null;
     }
 
-    // Whether the class file of class `owner` (a binary name) has a checkcast to class `target`.
-    static boolean checksCastTo(String owner, String target) {
-        if (classes == null) return false;
-        Set<String> targets = checkcasts.get(owner);
-        if (targets == null) {
-            targets = new HashSet<>();
-            var entry = classes.getEntry(owner.replace('.', '/') + ".class");
+    // What the class file of a class holds that the repair checks against: the classes its
+    // checkcasts cast to, and the interfaces its lambdas and method references make (the type of
+    // each invokedynamic of LambdaMetafactory), as binary names.
+    record ClassCode(Set<String> checkcasts, Set<String> lambdas) {}
+
+    // The class file of class `owner` (a binary name), read once.
+    static ClassCode classCode(String owner) {
+        if (classes == null) return new ClassCode(Set.of(), Set.of());
+        return classCodes.computeIfAbsent(owner, o -> {
+            Set<String> checks = new HashSet<>(), lambdas = new HashSet<>();
+            var entry = classes.getEntry(o.replace('.', '/') + ".class");
             if (entry != null) {
                 byte[] bytes;
                 try (InputStream in = classes.getInputStream(entry)) {
@@ -343,13 +388,57 @@ public class RepairDecompile {
                     throw new UncheckedIOException(e);
                 }
                 for (var method : ClassFile.of().parse(bytes).methods())
-                    for (var element : method.code().map(CodeModel::elementList).orElse(List.of()))
+                    for (var element : method.code().map(CodeModel::elementList).orElse(List.of())) {
                         if (element instanceof TypeCheckInstruction check && check.opcode() == Opcode.CHECKCAST)
-                            targets.add(check.type().asInternalName().replace('/', '.'));
+                            checks.add(check.type().asInternalName().replace('/', '.'));
+                        if (element instanceof InvokeDynamicInstruction indy
+                                && indy.bootstrapMethod().owner().descriptorString()
+                                    .equals("Ljava/lang/invoke/LambdaMetafactory;")) {
+                            String made = indy.typeSymbol().returnType().descriptorString();
+                            lambdas.add(made.substring(1, made.length() - 1).replace('/', '.'));
+                        }
+                    }
             }
-            checkcasts.put(owner, targets);
+            return new ClassCode(checks, lambdas);
+        });
+    }
+
+    // Whether the class file of class `owner` (a binary name) has a checkcast to class `target`.
+    static boolean checksCastTo(String owner, String target) {
+        return classCode(owner).checkcasts().contains(target);
+    }
+
+    // A lambda or method reference (`expr`) for an interface that is not functional
+    // (`EntityDataSerializer<T>`), where the class file makes exactly one interface for lambdas
+    // that extends it (`EntityDataSerializer.ForValueType`, whose default methods leave one
+    // abstract method): the original's cast to that interface, which is what javac makes the
+    // lambda for. The sub-interface gets the expected type's arguments where it passes its own
+    // type variables on in order, no arguments where it has none, and is raw otherwise.
+    static Edit functionalCast(Types types, JCTree.JCCompilationUnit cu, JCTree expr, Type expected,
+            java.util.function.Function<String, Symbol.ClassSymbol> named) throws Unprintable {
+        if (!(expr instanceof JCTree.JCLambda || expr instanceof JCTree.JCMemberReference) || expected == null
+                || !expected.hasTag(TypeTag.CLASS)) return null;
+        JCTree.JCClassDecl owner = enclosingClass(cu, expr);
+        if (owner == null || owner.sym == null) return null;
+        List<Symbol.ClassSymbol> candidates = new ArrayList<>();
+        for (String made : classCode(owner.sym.flatname.toString()).lambdas()) {
+            Symbol.ClassSymbol sub = named.apply(made);
+            if (sub != null && sub != expected.tsym && types.isSubtype(types.erasure(sub.type), types.erasure(expected)))
+                candidates.add(sub);
         }
-        return targets.contains(target);
+        if (candidates.size() != 1) return null;
+        Symbol.ClassSymbol sub = candidates.get(0);
+        String target = printClass(cu, sub);
+        com.sun.tools.javac.util.List<Type> own = sub.type.getTypeArguments();
+        if (!own.isEmpty()) {
+            Type up = types.asSuper(sub.type, expected.tsym);
+            if (up != null && types.isSameTypes(up.getTypeArguments(), own) && expected.isParameterized()) {
+                List<String> arguments = new ArrayList<>();
+                for (Type argument : expected.getTypeArguments()) arguments.add(print(cu, argument, false));
+                target += "<" + String.join(", ", arguments) + ">";
+            }
+        }
+        return wrap(cu, expr, target, "lambda for ");
     }
 
     // The expected type as source writes it, or its raw class where it cannot be written.
