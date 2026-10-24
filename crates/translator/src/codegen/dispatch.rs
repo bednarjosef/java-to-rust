@@ -21,6 +21,38 @@ use super::*;
 use crate::analysis::{ENUM_COMPARE_NULL, compare_null_message};
 use std::collections::BTreeSet;
 
+/// The number of each type in a `java::Thin` (`Gen::class_tag`), by its index in `Class::types`:
+/// the class trees in depth-first preorder, each class before its subclasses, then the types that
+/// no class tree holds (interfaces). The classes at or below a class then have the numbers from
+/// its own to its last subclass's, so a test of "is a `C`" is one range (`Gen::tags`). Numbers
+/// start at 1, as a `Thin` is never 0, and are the same in every pass of the generation.
+pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
+    let h = &class.hierarchy;
+    let count = class.types.len();
+    let tree = |t: usize| !matches!(class.types[t].kind, TypeKind::Interface | TypeKind::Param);
+    let mut order = Vec::with_capacity(count);
+    let mut stack = Vec::new();
+    for root in (0..count).filter(|&t| tree(t) && h.superclass(t).is_none()) {
+        stack.push(root);
+        while let Some(t) = stack.pop() {
+            order.push(t);
+            // The direct subclasses, pushed last first so that they come out in index order.
+            stack.extend(h.subtypes[t].iter().rev().copied().filter(|&s| h.superclass(s) == Some(t)));
+        }
+    }
+    let mut numbered = vec![false; count];
+    for &t in &order {
+        numbered[t] = true;
+    }
+    order.extend((0..count).filter(|&t| !numbered[t]));
+    let mut numbers = vec![0u16; count];
+    for (at, &t) in order.iter().enumerate() {
+        numbers[t] =
+            u16::try_from(at + 1).ok().filter(|&tag| tag != u16::MAX).expect("fewer than 65535 classes");
+    }
+    numbers
+}
+
 /// An item of the enum of a type that the code being generated uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Need {
@@ -179,9 +211,9 @@ impl<'a> Gen<'a> {
     }
 
     /// The number of class `c` in a `java::Thin`: the same in the enum of every type, so that a
-    /// value keeps its bits as a value of a supertype.
+    /// value keeps its bits as a value of a supertype (see `class_numbers`).
     pub(super) fn class_tag(&self, c: usize) -> u16 {
-        u16::try_from(c + 1).ok().filter(|&tag| tag != u16::MAX).expect("fewer than 65535 classes")
+        self.class_tags[c]
     }
 
     /// Whether the variant of class `c` holds a handle (`java::Thin::pointer`), else a value
@@ -198,10 +230,34 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The class numbers of `classes` as the pattern of a `match` on a value's tag: `3 | 5`.
-    pub(super) fn tags(&self, classes: &[usize]) -> String {
-        let tags: Vec<String> = classes.iter().map(|&c| self.class_tag(c).to_string()).collect();
-        tags.join(" | ")
+    /// The class numbers of `classes` as the pattern of a `match` on the tag of a value whose
+    /// class is one of `among` (which holds `classes`): ranges, `3..=7 | 9`. No value has a number
+    /// that no class of `among` has, so a range spans each run of `classes` that no other class of
+    /// `among` breaks. The classes at or below a class are one run (`class_numbers`), and so are
+    /// those of an interface that happen to be numbered together: a range is one subtract and one
+    /// compare, where a list is a compare per number or a table.
+    pub(super) fn tags(&self, classes: &[usize], among: &[usize]) -> String {
+        let mut numbers: Vec<(u16, bool)> =
+            among.iter().map(|&c| (self.class_tag(c), classes.contains(&c))).collect();
+        numbers.extend(classes.iter().map(|&c| (self.class_tag(c), true)));
+        // A class of both lists has the same entry in each.
+        numbers.sort_unstable();
+        numbers.dedup();
+        let mut runs: Vec<(u16, u16)> = Vec::new();
+        let mut open = false;
+        for (tag, passes) in numbers {
+            match runs.last_mut() {
+                Some(run) if open && passes => run.1 = tag,
+                _ if passes => runs.push((tag, tag)),
+                _ => {}
+            }
+            open = passes;
+        }
+        let patterns: Vec<String> = runs
+            .into_iter()
+            .map(|(first, last)| if first == last { first.to_string() } else { format!("{first}..={last}") })
+            .collect();
+        patterns.join(" | ")
     }
 
     /// The constructor of each variant (`Shape::Circle(handle)`, an associated function named as
@@ -535,7 +591,7 @@ impl<'a> Gen<'a> {
                 if passing.is_empty() {
                     return known(self, false);
                 }
-                let tags = self.tags(&passing);
+                let tags = self.tags(&passing, &self.enum_variants(s));
                 let text = if nullable {
                     format!(
                         "{}.as_ref().is_some_and(|o| matches!(o.0.tag(), {tags}))",
@@ -600,6 +656,12 @@ impl<'a> Gen<'a> {
     /// constant of an enum that implements the type, or a string or a box in an `Object`.
     pub(super) fn holds_value(&self, c: usize) -> bool {
         matches!(self.class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
+    }
+
+    /// Whether the variant of `c` holds the handle of an object of the program (see `payload`),
+    /// which `java::Thin::as_prefix` may read.
+    fn object_variant(&self, c: usize) -> bool {
+        self.runtime_of(c).is_none() && !self.holds_value(c)
     }
 
     /// The string `s` (a `String`) as an `Object`.
@@ -1535,6 +1597,33 @@ impl<'a> Gen<'a> {
             _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
         });
         self.indent += 1;
+        if immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c)) {
+            // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the
+            // root's fields struct is at the start of every object, which is a `java::Monitored`
+            // only around it, fields first: one read, whatever the class. rustc checks the offsets.
+            let checks: Vec<String> = variants
+                .iter()
+                .filter_map(|&c| {
+                    let path = hierarchy::base_path(self.facts, self.class, c, root);
+                    let path = path.trim_end_matches('.');
+                    let object = self.struct_of(c);
+                    (!path.is_empty())
+                        .then(|| format!("assert!(std::mem::offset_of!({object}, {path}) == 0);"))
+                })
+                .collect();
+            if !checks.is_empty() {
+                self.line("const {");
+                for check in checks {
+                    self.line(&format!("    {check}"));
+                }
+                self.line("}");
+            }
+            self.line("// Every variant is an object that starts with the fields struct (above).");
+            self.line("unsafe { self.0.as_prefix() }");
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         self.match_arms(&variants, &|g: &mut Self, c| {
             let path = hierarchy::base_path(g.facts, g.class, c, root);
             let path = path.trim_end_matches('.');
@@ -1576,14 +1665,13 @@ impl<'a> Gen<'a> {
             self.line("None");
         } else if let Some(e) = rep {
             // A value of another enum has the same bits.
-            let tags: Vec<String> = passing.iter().map(|&c| self.class_tag(c).to_string()).collect();
             let target = struct_name(&self.class.types[e].name);
             if passing.len() == variants.len() {
                 self.line(&format!("Some({target}(self.0))"));
             } else {
                 self.line("match self.0.tag() {");
                 self.indent += 1;
-                self.line(&format!("{} => Some({target}(self.0)),", tags.join(" | ")));
+                self.line(&format!("{} => Some({target}(self.0)),", self.tags(&passing, &variants)));
                 self.line("_ => None,");
                 self.indent -= 1;
                 self.line("}");
@@ -1641,6 +1729,12 @@ impl<'a> Gen<'a> {
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
+        if let Some(call) = self.fields_call(t, r, &variants, &args) {
+            self.line(&call);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         self.match_arms(&variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, &args);
@@ -1653,6 +1747,26 @@ impl<'a> Gen<'a> {
         });
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// The call of method `r` on the enum of `t` when every variant runs one body emitted on a
+    /// fields struct at or above the one `base()` lends, and `base()` reads that with no `match`
+    /// (`base_fn`): `self.base().base.get_name()`, one call whatever the object's class.
+    fn fields_call(&mut self, t: usize, r: usize, variants: &[usize], args: &str) -> Option<String> {
+        let h = &self.class.hierarchy;
+        let i = h.implementation(r, *variants.first()?)?;
+        let Home::Fields(d) = self.homes[i] else { return None };
+        let root = self.fields_root(t)?;
+        let direct = self.plain_enum(t)
+            && h.is_subtype(root, d)
+            && variants.iter().all(|&c| h.implementation(r, c) == Some(i) && self.object_variant(c));
+        if !direct {
+            return None;
+        }
+        self.need(Need::Base(t));
+        let path = hierarchy::base_path(self.facts, self.class, root, d);
+        let call = format!("self.base().{path}{}({args})", self.fn_names[i]);
+        Some(self.covariant_ret(i, r, call))
     }
 
     /// The arm for a value of class `c` bound to `o` that runs no method of the program for

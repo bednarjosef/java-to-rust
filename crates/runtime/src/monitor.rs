@@ -37,7 +37,7 @@ pub fn unkept_monitor() -> ! {
 /// The object of a class whose fields are cells (`java::SharedField`, or `java::Field` for one
 /// thread) and whose monitor is kept: its fields, then the reentrant lock that is its monitor.
 /// The fields come first, so the object's address is that of its fields, as `&self` of a method
-/// that borrows them sees it.
+/// that borrows them sees it and an enum's `base()` reads them (`Thin::as_prefix`).
 #[repr(C)]
 pub struct Monitored<T> {
     value: T,

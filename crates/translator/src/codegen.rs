@@ -178,6 +178,7 @@ fn generate_with(
         group_names,
         shared_names: HashSet::new(),
         live: live.clone(),
+        class_tags: dispatch::class_numbers(class),
         runs: running_types(class, facts),
         wanted: wanted.clone(),
         needs: std::cell::RefCell::new(Needs::new()),
@@ -317,6 +318,8 @@ struct Gen<'a> {
     shared_names: HashSet<String>,
     /// Which classes have a struct (see `live_types`).
     live: Vec<bool>,
+    /// The number of each type in a `java::Thin` (see `dispatch::class_numbers`).
+    class_tags: Vec<u16>,
     /// Which classes' instance methods can run (see `running_types`).
     runs: Vec<bool>,
     /// The enum items to write, which an earlier pass found used (see `generate`).
