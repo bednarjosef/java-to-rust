@@ -2422,8 +2422,9 @@ impl<'t> Walk<'t> {
 
     /// The class that the `if` statement `node` tests for (`instanceof_guard`), when it has no
     /// objects yet and its objects can only come from its constructors, which reachability sees:
-    /// `has_objects`, and neither an exception nor a standard class, which the runtime makes
-    /// objects of, nor one whose supertypes are not all declared.
+    /// `has_objects`, and neither an exception, a standard class nor a class whose values an
+    /// `Object` holds (a boxed value made by boxing, a string, a builder or a class), which the
+    /// runtime makes objects of, nor one whose supertypes are not all declared.
     fn objectless(&self, node: &Value) -> Option<String> {
         let class = instanceof_guard(node)?;
         if self.reach.live.contains(&class) || !self.has_objects(&class) {
@@ -2431,7 +2432,11 @@ impl<'t> Walk<'t> {
         }
         let mut work = vec![class.clone()];
         while let Some(c) = work.pop() {
-            if c == "java.lang.Throwable" || crate::lower::is_standard(&c) {
+            if c == "java.lang.Throwable"
+                || crate::lower::is_standard(&c)
+                || [crate::ast::STRING_BUILDER, crate::ast::CLASS_VALUE].contains(&c.as_str())
+                || crate::ast::runtime_values().iter().any(|(name, _)| *name == c)
+            {
                 return None;
             }
             match self.supertypes.get(&c) {
