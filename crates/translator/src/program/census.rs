@@ -567,6 +567,25 @@ impl Tally {
         rows
     }
 
+    /// The pieces of one part that translate into code that throws `NoClassDefFoundError` where
+    /// Java would, for a class that is missing (`Piece::missing_class`): each class, the number of
+    /// pieces, and up to `EXAMPLES` of their places, the classes of the most pieces first.
+    fn missing_classes<'a>(&self, pieces: &'a [Piece], part: Part) -> Vec<(&'a str, usize, Vec<&'a str>)> {
+        let mut rows: BTreeMap<&str, (usize, Vec<&str>)> = BTreeMap::new();
+        for (piece, _) in pieces.iter().zip(&self.errors).filter(|(p, e)| p.part == part && e.is_empty()) {
+            if let Some(class) = &piece.missing_class {
+                let row = rows.entry(class).or_default();
+                row.0 += 1;
+                if row.1.len() < EXAMPLES {
+                    row.1.push(&piece.location);
+                }
+            }
+        }
+        let mut rows: Vec<_> = rows.into_iter().map(|(class, (n, examples))| (class, n, examples)).collect();
+        rows.sort_by_key(|&(class, n, _)| (Reverse(n), class));
+        rows
+    }
+
     fn report(&self, scan: &survey::Census, main: &str) -> String {
         let pieces = &scan.pieces;
         let mut out = String::new();
@@ -604,6 +623,22 @@ impl Tally {
                     }
                 }
                 _ = writeln!(out, "          at {}", row.examples.join(", "));
+            }
+            let missing = self.missing_classes(pieces, part);
+            if !missing.is_empty() {
+                _ = writeln!(
+                    out,
+                    "\n{} code: pieces that translate, where a class is missing, into code that throws",
+                    part.title()
+                );
+                for (class, n, examples) in missing {
+                    _ = writeln!(
+                        out,
+                        "  throws NoClassDefFoundError like Java: missing class {class}, {n} piece{}",
+                        if n == 1 { "" } else { "s" }
+                    );
+                    _ = writeln!(out, "          at {}", examples.join(", "));
+                }
             }
         }
         if !self.elsewhere.is_empty() {
@@ -658,18 +693,28 @@ impl Tally {
                 })
             })
             .collect();
+        let missing_classes: Vec<Value> = Part::ALL
+            .iter()
+            .flat_map(|&part| {
+                self.missing_classes(pieces, part).into_iter().map(move |(class, n, examples)| {
+                    json!({"source": part.name(), "class": class, "pieces": n, "examples": examples})
+                })
+            })
+            .collect();
         json!({
             "main": main,
             "complete": self.fatal.is_none(),
             "fatal": self.fatal.as_ref().map(|(message, place)| json!({"message": message, "place": place})),
             "totals": totals,
             "rejections": rejections,
+            "missingClasses": missing_classes,
             "pieces": pieces.iter().zip(&self.errors).map(|(p, errors)| json!({
                 "source": p.part.name(),
                 "class": p.class,
                 "kind": p.kind,
                 "name": p.name,
                 "location": p.location,
+                "missingClass": p.missing_class,
                 "errors": errors.iter().map(|(message, place)| json!({"message": message, "place": place}))
                     .collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),

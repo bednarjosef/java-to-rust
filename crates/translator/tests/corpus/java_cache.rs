@@ -67,10 +67,14 @@ fn key(p: &Program) -> Option<String> {
         Some(main) => {
             fingerprint.field(b"project");
             fingerprint.field(main.as_bytes());
+            // The project's roots, `src/` and any `lib/` and `optional/`, are in its directory,
+            // so the paths from there tell their files apart.
             let mut files = Vec::new();
-            java_files(&p.java, &mut files);
+            for root in [Some(&p.java), p.library.as_ref(), p.optional.as_ref()].into_iter().flatten() {
+                java_files(root, &mut files);
+            }
             files.sort();
-            (p.java.as_path(), files)
+            (p.java.parent()?, files)
         }
     };
     for arg in JVM_ARGS {

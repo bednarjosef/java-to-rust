@@ -133,11 +133,17 @@ public class JavaTree {
                 options, null, fileManager.getJavaFileObjectsFromFiles(files));
         // Units that javac loads from the source path are attributed too, but only reported here.
         Set<CompilationUnitTree> analyzed = new LinkedHashSet<>();
+        if (keepGoing) {
+            context = ((JavacTaskImpl) task).getContext();
+            missing = new MissingClasses(context, task.getElements());
+        }
         task.addTaskListener(new TaskListener() {
             @Override
             public void finished(TaskEvent e) {
                 if (e.getKind() == TaskEvent.Kind.ANALYZE) {
                     analyzed.add(e.getCompilationUnit());
+                } else if (e.getKind() == TaskEvent.Kind.PARSE && missing != null) {
+                    missing.parsed(e.getCompilationUnit());
                 }
             }
         });
@@ -314,7 +320,8 @@ public class JavaTree {
     /**
      * Prints the compile errors that javac reported since the last call, as
      * {@code javac error: FILE:LINE:COLUMN: CODE: message}, and keeps those with a place in a file
-     * for when the file's unit is printed ({@link #markErrors}). An error of a unit is reported
+     * for when the file's unit is printed ({@link #markErrors}), each with the missing class it
+     * names, if it names one ({@link MissingClasses#classify}). An error of a unit is reported
      * when javac parses or attributes it, before it is printed.
      */
     private static void takeErrors(DiagnosticCollector<JavaFileObject> diagnostics) {
@@ -329,7 +336,7 @@ public class JavaTree {
             System.err.println("javac error: " + file + ":" + d.getLineNumber() + ":" + d.getColumnNumber() + ": "
                     + d.getCode() + ": " + message);
             if (d.getSource() != null && d.getPosition() != Diagnostic.NOPOS) {
-                errors.computeIfAbsent(d.getSource().toUri(), f -> new ArrayList<>()).add(d);
+                errors.computeIfAbsent(d.getSource().toUri(), f -> new ArrayList<>()).add(new Found(d, missing.classify(d)));
             }
         }
         System.err.flush();
@@ -337,19 +344,27 @@ public class JavaTree {
 
     /** {@code --keep-going}: compile errors are marked in the trees instead of stopping the run. */
     private static boolean keepGoing;
+    /** With {@code --keep-going}: the code that names missing classes, which throws as the JVM would. */
+    private static MissingClasses missing;
     /** How many of the diagnostics {@link #takeErrors} has seen. */
     private static int errorsTaken;
+    /** A compile error, with the missing class it names, if it names one. */
+    private record Found(Diagnostic<? extends JavaFileObject> diagnostic, MissingClasses.Missing missing) {}
     /** The compile errors of the units not printed yet, by file. */
-    private static final Map<URI, List<Diagnostic<? extends JavaFileObject>>> errors = new HashMap<>();
+    private static final Map<URI, List<Found>> errors = new HashMap<>();
 
     private static Elements elements;
     private static Types types;
+    /** javac's context, with {@code --keep-going}. */
+    private static com.sun.tools.javac.util.Context context;
 
     private final Trees trees;
     private final CompilationUnitTree unit;
     private final SourcePositions positions;
     /** The pieces of code that compile errors are in, with the code of the first error of each. */
     private final Map<Tree, String> broken = new IdentityHashMap<>();
+    /** The pieces of code that throw {@code NoClassDefFoundError}, with the missing class each names first. */
+    private Map<Tree, String> missingPieces = Map.of();
 
     private JavaTree(Trees trees, CompilationUnitTree unit) {
         this.trees = trees;
@@ -366,10 +381,37 @@ public class JavaTree {
      * {@code compiler.err.cant.resolve.location}). An error outside every class, such as one of an
      * import, marks nothing: the code that uses what it names has errors of its own. Nor does an
      * error in an annotation, such as one whose class is missing (a decompiled library's
-     * compile-only annotations, which the translation leaves out anyway).
+     * compile-only annotations, which the translation leaves out anyway). Nor does an error that
+     * names a missing class, or that only missing classes cause: the code that does something
+     * with the class is rewritten instead ({@link MissingClasses}).
      */
-    private void markErrors(List<Diagnostic<? extends JavaFileObject>> errors) {
-        if (errors == null) {
+    private void markErrors(List<Found> found) {
+        List<Diagnostic<? extends JavaFileObject>> errors = new ArrayList<>();
+        MissingClasses.Plan plan = null;
+        if (missing != null) {
+            List<MissingClasses.Missing> missingErrors = new ArrayList<>();
+            for (Found f : found == null ? List.<Found>of() : found) {
+                if (f.missing() != null) {
+                    missingErrors.add(f.missing());
+                }
+            }
+            plan = missing.plan((com.sun.tools.javac.tree.JCTree.JCCompilationUnit) unit, missingErrors);
+        }
+        for (Found f : found == null ? List.<Found>of() : found) {
+            if (f.missing() == null && (plan == null
+                    || !missing.explains(plan, f.diagnostic(), (com.sun.tools.javac.tree.JCTree.JCCompilationUnit) unit))) {
+                errors.add(f.diagnostic());
+            }
+        }
+        markBroken(errors);
+        if (plan != null) {
+            missingPieces = missing.rewrite(plan, broken.keySet());
+        }
+    }
+
+    /** Marks the pieces of code that {@code errors} are in, in {@link #broken}. */
+    private void markBroken(List<Diagnostic<? extends JavaFileObject>> errors) {
+        if (errors.isEmpty()) {
             return;
         }
         List<Tree> pieces = new ArrayList<>();
@@ -492,8 +534,13 @@ public class JavaTree {
             out.append(",\"javacError\":");
             string(error, out);
         }
+        String missingClass = missingPieces.get(tree);
+        if (missingClass != null) {
+            out.append(",\"missingClass\":");
+            string(missingClass, out);
+        }
         if (tree instanceof ExpressionTree) {
-            TypeMirror type = trees.getTypeMirror(path);
+            TypeMirror type = recovered(tree, trees.getTypeMirror(path));
             if (type != null) {
                 out.append(",\"javaType\":");
                 string(typeName(type), out);
@@ -602,6 +649,70 @@ public class JavaTree {
             string(c instanceof Character ch ? Integer.toString(ch) : c.toString(), out);
         }
         out.append('}');
+    }
+
+    /**
+     * The type of an expression that javac left as an error type, with {@code --keep-going}, though
+     * its value is not of a missing class ({@link MissingClasses}): the erasure of the class that
+     * {@code new} creates or that a parameterized type names, or of the result of the method
+     * called, when inferring type arguments from a missing class failed ({@code new Box<>()} for a
+     * {@code Box<Missing>}); {@code boolean} for a comparison or a logical operator, and
+     * {@code String} for a {@code +} on a string, with an operand of a missing class.
+     */
+    private static TypeMirror recovered(Tree tree, TypeMirror type) {
+        if (!keepGoing || type == null || type.getKind() != TypeKind.ERROR) {
+            return type;
+        }
+        com.sun.tools.javac.code.Type found = recovered((com.sun.tools.javac.tree.JCTree) tree);
+        return found == null ? type : found;
+    }
+
+    private static com.sun.tools.javac.code.Type recovered(com.sun.tools.javac.tree.JCTree tree) {
+        com.sun.tools.javac.code.Type type = tree.type;
+        if (type != null && !type.hasTag(com.sun.tools.javac.code.TypeTag.ERROR)) {
+            return type;
+        }
+        com.sun.tools.javac.code.Symtab syms = com.sun.tools.javac.code.Symtab.instance(context);
+        com.sun.tools.javac.code.Symbol named = null;
+        switch (tree) {
+            case com.sun.tools.javac.tree.JCTree.JCNewClass n -> named = com.sun.tools.javac.tree.TreeInfo.symbol(n.clazz);
+            case com.sun.tools.javac.tree.JCTree.JCTypeApply a -> named = com.sun.tools.javac.tree.TreeInfo.symbol(a.clazz);
+            case com.sun.tools.javac.tree.JCTree.JCMethodInvocation m -> named = com.sun.tools.javac.tree.TreeInfo.symbol(m.meth);
+            case com.sun.tools.javac.tree.JCTree.JCParens p -> {
+                return recovered(p.expr);
+            }
+            case com.sun.tools.javac.tree.JCTree.JCInstanceOf i -> {
+                return syms.booleanType;
+            }
+            case com.sun.tools.javac.tree.JCTree.JCUnary u when u.hasTag(com.sun.tools.javac.tree.JCTree.Tag.NOT) -> {
+                return syms.booleanType;
+            }
+            case com.sun.tools.javac.tree.JCTree.JCBinary b -> {
+                switch (b.getTag()) {
+                    case EQ, NE, LT, GT, LE, GE, AND, OR -> {
+                        return syms.booleanType;
+                    }
+                    case PLUS -> {
+                        com.sun.tools.javac.code.Type left = recovered(b.lhs);
+                        com.sun.tools.javac.code.Type right = recovered(b.rhs);
+                        boolean text = left != null && left.tsym == syms.stringType.tsym
+                                || right != null && right.tsym == syms.stringType.tsym;
+                        return text ? syms.stringType : null;
+                    }
+                    default -> {
+                        return null;
+                    }
+                }
+            }
+            default -> {}
+        }
+        if (named instanceof com.sun.tools.javac.code.Symbol.ClassSymbol c && !c.type.isErroneous()) {
+            return (com.sun.tools.javac.code.Type) types.erasure(c.type);
+        }
+        if (named instanceof com.sun.tools.javac.code.Symbol.MethodSymbol m && !m.getReturnType().isErroneous()) {
+            return (com.sun.tools.javac.code.Type) types.erasure(m.getReturnType());
+        }
+        return null;
     }
 
     /** Interfaces that declare no methods, which an intersection type adds nothing with. */
@@ -855,10 +966,17 @@ public class JavaTree {
         return false;
     }
 
-    /** A type as javac prints it, with local and anonymous classes named by {@link #className}. */
+    /**
+     * A type as javac prints it, with local and anonymous classes named by {@link #className}, and
+     * a class that javac could not find (with {@code --keep-going}, see {@link MissingClasses}) as
+     * {@code java.lang.Object}: only {@code null} is of such a type.
+     */
     private static String typeText(TypeMirror t) {
-        if (!mentionsLocal(t)) {
+        boolean erroneous = keepGoing && ((com.sun.tools.javac.code.Type) t).isErroneous();
+        if (!erroneous && !mentionsLocal(t)) {
             return t.toString();
+        } else if (t.getKind() == TypeKind.ERROR) {
+            return "java.lang.Object";
         } else if (t instanceof ArrayType a) {
             return typeText(a.getComponentType()) + "[]";
         } else if (t instanceof DeclaredType d) {

@@ -51,7 +51,9 @@ cargo run -p java-to-rust -- --survey --main Main --source src/ --library jdk-sr
   syntactic view of what the reachable code needs.
 - `--modules-json FILE` writes the module tree and what each item names
   ([docs/several-crates.md](docs/several-crates.md)).
-- `--keep-going` lets javac go on past compile errors; `--timings` prints the time of each phase.
+- `--keep-going` lets javac go on past compile errors: code that names a class missing from the
+  roots throws `NoClassDefFoundError` as on the JVM, and other code with an error is rejected
+  ([docs/exceptions.md](docs/exceptions.md)). `--timings` prints the time of each phase.
 
 ## Testing
 
@@ -63,7 +65,9 @@ exactly. The Java run is the expected result, so no expectations are written by 
   Java holds no copy of the JDK's ([docs/jdk-overlays.md](docs/jdk-overlays.md)).
 - `corpus/` holds the test programs: `features` (one or more per language feature), `programs`
   (larger realistic programs), `threads`, and `projects` (multi-file programs, each with a source
-  root `src/` and a file `main` naming the main class). A file `Name.args` gives a program its
+  root `src/` and a file `main` naming the main class, and optionally a library root `lib/` and
+  a root `optional/` of classes that Java compiles against but runs without, which the
+  translator never sees). A file `Name.args` gives a program its
   command-line arguments and `Name.input` its standard input. The corpus test
   (`cargo test --test corpus`) builds the translations with overflow checks on, so a wrong
   "cannot overflow" fact panics. `CORPUS_FILTER=text` runs only the programs whose name contains

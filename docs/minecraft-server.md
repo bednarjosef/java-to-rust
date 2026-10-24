@@ -39,18 +39,27 @@ The first census attempt stopped at the first error. The decompiler had written
 `(Function<Object, >)` in DataFixerUpper's `RecordCodecBuilder`.
 
 So a census now takes `--keep-going`. With it, javac prints each compile error instead of
-stopping. It marks the piece of code that the error is in with javac's error code: the innermost
-method, lambda, field initializer, initializer block, or the class when the error is in its
-declaration. The census rejects each marked piece with the message
-`javac reports a compile error (compiler.err.…)`, the same way it rejects any other piece. The
-rest is still counted.
+stopping, and each error is handled in one of two ways:
+
+- **An error that names a class missing from the roots** (an optional dependency that is not
+  shipped) does not reject anything. The code that would use the class throws
+  `NoClassDefFoundError` with its binary name, as the JVM does when the class is missing at run
+  time ([exceptions.md](exceptions.md#classes-missing-from-the-roots)). The census counts such
+  pieces as translating and lists them in their own section, per missing class:
+  `throws NoClassDefFoundError like Java: missing class io/netty/internal/tcnative/SSL, N pieces`.
+- **Any other error** marks the piece of code that it is in with javac's error code: the
+  innermost method, lambda, field initializer, initializer block, or the class when the error is
+  in its declaration. The census rejects each marked piece with the message
+  `javac reports a compile error (compiler.err.…)`, the same way it rejects any other piece. The
+  rest is still counted.
 
 Two kinds of error mark nothing:
 
 - an error in an import, since the code that uses the missing name has errors of its own;
 - an error in an annotation, since annotations are left out of the translation anyway.
 
-A translation (not a census) still stops at the first error.
+A translation with `--keep-going` does the same, so a program whose library has optional
+dependencies can be built: it stops only at a rejected piece, as any translation does.
 
 ## Numbers
 
@@ -150,8 +159,8 @@ memory. The script only needs `MEMORY_CAP` raised.
 
 ### 2. Decompiled sources that do not compile
 
-These do not stop a census any more, but they would stop a translation, and every marked piece
-is rejected.
+These do not stop a census or a translation with `--keep-going` any more. A piece whose errors
+all name missing classes throws as Java would; any other marked piece is rejected.
 
 - **Libraries with published sources use their sources, not decompiled code.** Guava, Gson,
   Netty, log4j, fastutil, commons-io, commons-lang3, JNA, OSHI, JOML, jopt-simple, lz4-java, slf4j
@@ -163,13 +172,16 @@ is rejected.
   jars; they, authlib, jtracy and logging stay decompiled.
 
 - **Compile-only annotation libraries** (Error Prone, JSR 305, J2ObjC, JetBrains, Checker
-  Framework) are not in the bundle. For a census this no longer matters. A translation needs
-  either their sources (all small and open source) or the same rule: an unresolved annotation is
-  dropped.
+  Framework) are not in the bundle. With `--keep-going` this does not matter: an unresolved
+  annotation is dropped, in a census and in a translation.
 
 - **Optional dependencies that are not shipped** (Netty's `tcnative` and Brotli, log4j's LMAX
-  Disruptor, Bouncy Castle) are only in code that the server does not run. Pruning reach by what
-  can run would avoid them. Otherwise their pieces stay rejected.
+  Disruptor, Bouncy Castle, Conscrypt) are only in code that the server does not run. Their code
+  translates into code that throws `NoClassDefFoundError` where it would use the missing class,
+  as on the JVM, so the libraries' own checks (a static initializer that catches the error and
+  records the dependency as unavailable) work as they do in Java. The census lists these pieces
+  per missing class. A class whose superclass is missing, or that catches a missing exception
+  class, cannot be loaded at all, as on the JVM: log4j's `AsyncLoggerDisruptor` is one.
 
 - **The server's own decompiled code:** 372 errors in 195 files, mostly generics that the
   decompiler lost. They cannot be fixed by hand under this target's rules. The options are:

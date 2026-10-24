@@ -153,6 +153,9 @@ pub(super) struct Piece {
     /// its code, local and anonymous classes and lambdas included, is between them.
     pub(super) unit: usize,
     pub(super) span: (Pos, Pos),
+    /// The binary name of the missing class that the piece's code throws `NoClassDefFoundError`
+    /// for, as Java would, where it uses one (javac's `missingClass`, with `--keep-going`).
+    pub(super) missing_class: Option<String>,
     /// Each feature the piece uses, with the place where it first does.
     features: BTreeMap<&'static str, String>,
 }
@@ -292,6 +295,7 @@ impl Census {
                 location: place(&origin.file, member),
                 unit,
                 span: span(member),
+                missing_class: member["missingClass"].as_str().map(str::to_string),
                 features: scan.features,
             });
         }

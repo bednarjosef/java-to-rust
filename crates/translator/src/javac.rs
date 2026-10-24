@@ -193,9 +193,10 @@ pub struct Session {
 impl Session {
     /// Starts javac on the program's files, with `sourcepath`, `module_info` and `patches` as in
     /// `program_tree`, and returns their units, in the order given. A compile error is returned
-    /// with the file it is in; with `keep_going` (for a census), javac goes on past compile errors
-    /// instead, which it prints to standard error, and marks the piece of code that each is in
-    /// with `"javacError"` (see `JavaTree.markErrors`).
+    /// with the file it is in; with `keep_going`, javac goes on past compile errors instead, which
+    /// it prints to standard error: it rewrites the code that names a missing class to throw
+    /// `NoClassDefFoundError`, marking the piece with `"missingClass"`, and marks the piece of code
+    /// that each other error is in with `"javacError"` (see `JavaTree.markErrors`).
     pub fn start(
         files: &[PathBuf],
         sourcepath: &[PathBuf],

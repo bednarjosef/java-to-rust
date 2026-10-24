@@ -41,7 +41,11 @@ done
 for dir in corpus/projects/*/; do
     name="projects-$(basename "$dir")"
     main=$(tr -d '[:space:]' < "$dir/main")
-    if ! "$translator" --main "$main" --source "$dir/src" > "$work/src/bin/$name.rs" 2> "$work/sources/$name.err"; then
+    # A library root, and optional classes the translator does not see (as corpus/tests does).
+    extra=()
+    [ ! -d "$dir/lib" ] || extra+=(--library "$dir/lib")
+    [ ! -d "$dir/optional" ] || extra+=(--keep-going)
+    if ! "$translator" --main "$main" --source "$dir/src" "${extra[@]}" > "$work/src/bin/$name.rs" 2> "$work/sources/$name.err"; then
         untranslated+=("$name")
         rm -f "$work/src/bin/$name.rs"
     fi

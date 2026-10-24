@@ -318,6 +318,56 @@ A static block or static field initializer that throws is wrapped in
   around a use of its class are not looked for in its own code. A `catch` inside a rewritten JDK
   initializer does not count as reading a `NullPointerException`'s message.
 
+## Classes missing from the roots
+
+A library often refers to an optional dependency that the program does not ship: Netty's native
+`tcnative`, log4j's LMAX Disruptor. Java compiles such a library against the dependency, and at
+run time the JVM resolves each class lazily, so the library runs without it until code that uses
+the class runs. That code throws `NoClassDefFoundError` with the class's binary name
+(`io/netty/internal/tcnative/SSL`), which libraries catch to find out what is installed.
+
+The translator has only the sources of its roots, so javac reports each name of such a class as
+a compile error. With `--keep-going` (in a census and in a translation),
+`crates/translator/java/MissingClasses.java` takes those errors and rewrites the trees before
+they are printed, so that the code fails where the JVM fails:
+
+- **A name of the class as a type** (of a variable, a parameter, a method's result, a field, a
+  type argument) loads nothing: the declaration stays, typed `java.lang.Object`, since only `null`
+  can be a value of it.
+- **Code that does something with the class or with a value of it** (calls one of its methods,
+  reads or writes one of its fields, creates one of its objects, casts to it, tests `instanceof`
+  it, makes a lambda of it) is replaced by `throw new NoClassDefFoundError("binary/name")`. What
+  is replaced is the innermost piece that runs or not as a whole: the statement (with the rest of
+  its block, which cannot run), the body of an `if`, a loop or a `case`, the body of an expression
+  lambda, a branch of `?:`, the right side of `&&` or `||`, or a field's initializer. So a
+  branch that does not run costs nothing, and one that does throws as the JVM would.
+- **A class whose superclass or an interface is missing, or that catches a missing exception
+  class**, cannot be loaded (the verifier loads the classes of its `catch` clauses): each of its
+  methods and constructors throws, naming the missing class.
+- **Any other compile error** rejects the piece of code that it is in, as before.
+
+The binary name is the qualified name with `/` between the packages and `$` before each nested
+class; the package is the names before the first one that starts with an upper-case letter. The
+census counts these pieces as translating and lists them per missing class ("throws
+NoClassDefFoundError like Java: missing class X, N pieces"; `missingClasses` and each piece's
+`missingClass` in the JSON). `corpus/projects/missing_class_unused` and `missing_class_used` run
+libraries whose optional classes Java compiles against but runs without.
+
+Deliberate differences from the JVM:
+
+- The code throws at the start of the piece, not at the instruction that uses the class, so
+  what the piece would do before that use is not done.
+- A cast or `instanceof` of `null` to a missing class throws; the JVM passes it without loading
+  the class.
+- A constant of a missing class throws, where javac would have copied its value.
+- A class that cannot be loaded leaves out its initializers, and its static fields can still be
+  read and written; a method reference to one of its methods is made without throwing. On the
+  JVM each of these throws.
+- The binary name is a guess for a class nested in a package whose names start with an
+  upper-case letter.
+- A missing class in a name that no import binds (one of the unit's own package) is not taken as
+  missing: the piece is rejected.
+
 ## The text of an object: `toString` and `hashCode` that throw
 
 Making an object's text runs its `toString`. Where the generator makes the text (`"" + o`,
