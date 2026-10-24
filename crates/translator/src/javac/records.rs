@@ -72,8 +72,8 @@ pub(super) fn completed_records(unit: &Value, survey: &Survey) -> Vec<Value> {
 }
 
 /// Whether `complete_unit` may change the compilation unit: it has no package, it declares a
-/// record, or it declares a local enum or interface (`in_body` once inside a method), which is
-/// hoisted.
+/// record, or it declares a local enum or interface (`in_body` once inside a method or a block),
+/// which is hoisted.
 pub(super) fn changes(unit: &Value) -> bool {
     fn has_record_or_local(v: &Value, in_body: bool) -> bool {
         match v {
@@ -81,7 +81,9 @@ pub(super) fn changes(unit: &Value) -> bool {
                 let kind = fields.get("kind").and_then(Value::as_str);
                 kind == Some("RECORD")
                     || in_body && matches!(kind, Some("ENUM" | "INTERFACE"))
-                    || fields.values().any(|x| has_record_or_local(x, in_body || kind == Some("METHOD")))
+                    || fields
+                        .values()
+                        .any(|x| has_record_or_local(x, in_body || matches!(kind, Some("METHOD" | "BLOCK"))))
             }
             Value::Array(items) => items.iter().any(|x| has_record_or_local(x, in_body)),
             _ => false,
@@ -277,10 +279,10 @@ fn components(record: &Value) -> Vec<Component> {
         .collect()
 }
 
-/// Moves the records, enums and interfaces declared in method bodies to the top level of their
-/// unit. They are static, so they see nothing of the method, and they capture nothing. Lowering
-/// names them after their package and simple name, and after the method where another top-level
-/// type has that name (`lower::inner`'s `name_hoisted`).
+/// Moves the records, enums and interfaces declared in method bodies and initializer blocks to the
+/// top level of their unit. They are static, so they see nothing of the method, and they capture
+/// nothing. Lowering names them after their package and simple name, and after the method where
+/// another top-level type has that name (`lower::inner`'s `name_hoisted`).
 fn hoist_local_types(unit: &mut Value) {
     let mut local = Vec::new();
     for decl in unit["typeDecls"].as_array_mut().into_iter().flatten() {
@@ -292,11 +294,13 @@ fn hoist_local_types(unit: &mut Value) {
 }
 
 /// Takes the local records, enums and interfaces out of the statement lists in `v` (`in_body`
-/// once inside a method), with the ones declared inside them.
+/// once inside a method or a block: outside a method, a block is an initializer), with the ones
+/// declared inside them.
 fn take_local_types(v: &mut Value, in_body: bool, out: &mut Vec<Value>) {
     match v {
         Value::Object(fields) => {
-            let in_body = in_body || fields.get("kind").and_then(Value::as_str) == Some("METHOD");
+            let in_body =
+                in_body || matches!(fields.get("kind").and_then(Value::as_str), Some("METHOD" | "BLOCK"));
             if in_body && let Some(Value::Array(statements)) = fields.get_mut("statements") {
                 let local = |s: &Value| matches!(text(s, "kind"), "RECORD" | "ENUM" | "INTERFACE");
                 let (taken, rest): (Vec<Value>, Vec<Value>) = statements.drain(..).partition(local);

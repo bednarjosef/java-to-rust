@@ -1,8 +1,8 @@
-//! Records, enums and interfaces declared in a method body. `javac::records` moves them to the top
-//! level of their unit, where they capture nothing, so they are ordinary classes named by their
-//! package and simple name (`app.Point`). Two of them can share that name, or a top-level type
-//! can have it, so one that clashes is named after its method as well (`app.PointInRun`), as a
-//! local class is (see `inner`).
+//! Records, enums and interfaces declared in a method body or an initializer block.
+//! `javac::records` moves them to the top level of their unit, where they capture nothing, so they
+//! are ordinary classes named by their package and simple name (`app.Point`). Two of them can
+//! share that name, or a top-level type can have it, so one that clashes is named after its method
+//! as well (`app.PointInRun`, `app.PointInInit` for a block), as a local class is (see `inner`).
 
 use super::*;
 
@@ -38,17 +38,24 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// Whether class `t` is a record, enum or interface that was declared in a method body. Its
-    /// symbol's owner is that method's signature (`run(int)`), where a member's is a class.
+    /// Whether class `t` is a record, enum or interface that was declared in a method body or an
+    /// initializer block. Its symbol's owner is that method's signature (`run(int)`), or `{}` or
+    /// `static {}` for a block, where a member's is a class.
     pub(super) fn is_hoisted(&self, t: usize) -> bool {
-        self.types[t].nested.is_none() && self.types[t].node.symbol().is_some_and(|s| s.owner.contains('('))
+        self.types[t].nested.is_none()
+            && self.types[t].node.symbol().is_some_and(|s| s.owner.contains('(') || s.owner.ends_with("{}"))
     }
 
     /// The method a hoisted class is declared in, capitalized as in `place_name`.
     fn hoisted_method(&self, t: usize) -> String {
         let owner = self.types[t].node.symbol().map_or("", |s| s.owner);
         let name = owner.split('(').next().unwrap_or_default();
-        let name = if name == "<init>" { "new" } else { name };
+        let name = match name {
+            "<init>" => "new",
+            // An initializer block, as `place_name` names it.
+            _ if name.ends_with("{}") => "init",
+            _ => name,
+        };
         let mut chars = name.chars();
         chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
     }

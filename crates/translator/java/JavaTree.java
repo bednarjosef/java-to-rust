@@ -639,7 +639,12 @@ public class JavaTree {
         Element owner = e.getEnclosingElement();
         if (owner != null) {
             out.append(",\"owner\":");
-            string(owner instanceof TypeElement t ? className(t) : owner.toString(), out);
+            // javac names an initializer block after its class; a type declared in one is owned
+            // by `{}`, or `static {}`.
+            boolean block = owner.getKind() == ElementKind.INSTANCE_INIT || owner.getKind() == ElementKind.STATIC_INIT;
+            string(owner instanceof TypeElement t ? className(t)
+                    : block && e instanceof TypeElement ? (owner.getKind() == ElementKind.STATIC_INIT ? "static {}" : "{}")
+                    : owner.toString(), out);
         }
         out.append(",\"static\":").append(e.getModifiers().contains(Modifier.STATIC));
         // javac prints a varargs parameter's type as an array, so only this says it is varargs.

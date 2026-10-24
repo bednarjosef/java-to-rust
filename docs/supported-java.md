@@ -201,8 +201,8 @@ Design: [object-model.md](object-model.md).
   `default`. Rejected: a generic record in a record pattern. An accessor written in the record
   runs at each use of a pattern variable, not once. `java.lang.Record` is a type like `Object`: a
   value of it holds any of the program's records.
-- Local records, enums and interfaces declared in a method move to the top level. Rejected:
-  one declared in an initializer block.
+- Local records, enums and interfaces declared in a method or an initializer block move to the
+  top level.
 
 ## Nested classes, lambdas and closures
 
