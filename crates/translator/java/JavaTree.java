@@ -133,16 +133,14 @@ public class JavaTree {
                 options, null, fileManager.getJavaFileObjectsFromFiles(files));
         // Units that javac loads from the source path are attributed too, but only reported here.
         Set<CompilationUnitTree> analyzed = new LinkedHashSet<>();
-        if (keepGoing) {
-            context = ((JavacTaskImpl) task).getContext();
-            missing = new MissingClasses(context, task.getElements());
-        }
+        context = ((JavacTaskImpl) task).getContext();
+        missing = new MissingClasses(context, task.getElements());
         task.addTaskListener(new TaskListener() {
             @Override
             public void finished(TaskEvent e) {
                 if (e.getKind() == TaskEvent.Kind.ANALYZE) {
                     analyzed.add(e.getCompilationUnit());
-                } else if (e.getKind() == TaskEvent.Kind.PARSE && missing != null) {
+                } else if (e.getKind() == TaskEvent.Kind.PARSE) {
                     missing.parsed(e.getCompilationUnit());
                 }
             }
@@ -302,11 +300,19 @@ public class JavaTree {
         }.scan(unit, null);
     }
 
-    /** Prints the compile errors as {@code FILE:LINE:COLUMN: message} and exits, if there are any. */
+    /**
+     * Prints the compile errors that javac reported since the last call as
+     * {@code FILE:LINE:COLUMN: message} and exits, if there are any, except those that name a
+     * missing class where the JVM has no counterpart of the error ({@link MissingClasses#ignored}).
+     * Each is classified when it is reported, while its unit's code is all there.
+     */
     private static void failOnErrors(DiagnosticCollector<JavaFileObject> diagnostics) {
         boolean failed = false;
-        for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
-            if (d.getKind() == Diagnostic.Kind.ERROR) {
+        List<Diagnostic<? extends JavaFileObject>> all = diagnostics.getDiagnostics();
+        for (; errorsTaken < all.size(); errorsTaken++) {
+            Diagnostic<? extends JavaFileObject> d = all.get(errorsTaken);
+            MissingClasses.Missing named = d.getKind() == Diagnostic.Kind.ERROR ? missing.classify(d) : null;
+            if (d.getKind() == Diagnostic.Kind.ERROR && (named == null || !missing.ignored(named))) {
                 String file = d.getSource() == null ? "" : d.getSource().getName();
                 System.err.println(file + ":" + d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(Locale.ROOT));
                 failed = true;
@@ -331,12 +337,16 @@ public class JavaTree {
             if (d.getKind() != Diagnostic.Kind.ERROR) {
                 continue;
             }
+            MissingClasses.Missing named = missing.classify(d);
+            if (named != null && missing.ignored(named)) {
+                continue;
+            }
             String file = d.getSource() == null ? "" : d.getSource().getName();
             String message = d.getMessage(Locale.ROOT).lines().findFirst().orElse("");
             System.err.println("javac error: " + file + ":" + d.getLineNumber() + ":" + d.getColumnNumber() + ": "
                     + d.getCode() + ": " + message);
             if (d.getSource() != null && d.getPosition() != Diagnostic.NOPOS) {
-                errors.computeIfAbsent(d.getSource().toUri(), f -> new ArrayList<>()).add(new Found(d, missing.classify(d)));
+                errors.computeIfAbsent(d.getSource().toUri(), f -> new ArrayList<>()).add(new Found(d, named));
             }
         }
         System.err.flush();
@@ -344,9 +354,12 @@ public class JavaTree {
 
     /** {@code --keep-going}: compile errors are marked in the trees instead of stopping the run. */
     private static boolean keepGoing;
-    /** With {@code --keep-going}: the code that names missing classes, which throws as the JVM would. */
+    /**
+     * The compile errors that name missing classes: those that the JVM has no counterpart of are
+     * dropped, and with {@code --keep-going} the code that names one throws as the JVM would.
+     */
     private static MissingClasses missing;
-    /** How many of the diagnostics {@link #takeErrors} has seen. */
+    /** How many of the diagnostics {@link #takeErrors} or {@link #failOnErrors} has seen. */
     private static int errorsTaken;
     /** A compile error, with the missing class it names, if it names one. */
     private record Found(Diagnostic<? extends JavaFileObject> diagnostic, MissingClasses.Missing missing) {}
@@ -355,7 +368,7 @@ public class JavaTree {
 
     private static Elements elements;
     private static Types types;
-    /** javac's context, with {@code --keep-going}. */
+    /** javac's context, in whole-program mode. */
     private static com.sun.tools.javac.util.Context context;
 
     private final Trees trees;
@@ -388,7 +401,7 @@ public class JavaTree {
     private void markErrors(List<Found> found) {
         List<Diagnostic<? extends JavaFileObject>> errors = new ArrayList<>();
         MissingClasses.Plan plan = null;
-        if (missing != null) {
+        if (keepGoing) {
             List<MissingClasses.Missing> missingErrors = new ArrayList<>();
             for (Found f : found == null ? List.<Found>of() : found) {
                 if (f.missing() != null) {

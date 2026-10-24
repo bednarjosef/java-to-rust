@@ -346,6 +346,16 @@ they are printed, so that the code fails where the JVM fails:
   methods and constructors throws, naming the missing class.
 - **Any other compile error** rejects the piece of code that it is in, as before.
 
+**A missing class in an annotation** is no error at all, with or without `--keep-going`. The JVM
+ignores an annotation whose class is missing, and a library's compile-only annotations (Error
+Prone's `@CanIgnoreReturnValue`, J2ObjC's `@Weak`, the Checker Framework's) are never shipped, so
+the code they mark translates as if they were not there. javac's errors for the annotation's
+name, for a missing class in its arguments (`@ReflectionSupport(Level.FULL)`), and for an import
+that only annotations use, or nothing, are dropped and not printed. An import of a missing class
+that code uses outside annotations is still reported, with that code.
+`corpus/projects/missing_annotation` runs a library whose annotations Java compiles it with but
+runs without.
+
 The binary name is the qualified name with `/` between the packages and `$` before each nested
 class; the package is the names before the first one that starts with an upper-case letter. The
 census counts these pieces as translating and lists them per missing class ("throws
@@ -366,7 +376,8 @@ Deliberate differences from the JVM:
 - The binary name is a guess for a class nested in a package whose names start with an
   upper-case letter.
 - A missing class in a name that no import binds (one of the unit's own package) is not taken as
-  missing: the piece is rejected.
+  missing: the piece is rejected, and without `--keep-going` such a name in an annotation stops
+  the translation.
 
 ## The text of an object: `toString` and `hashCode` that throw
 
