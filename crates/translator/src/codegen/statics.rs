@@ -2,7 +2,8 @@
 //! `const`, read without a cell. Other static fields are thread-local cells. A class whose static
 //! initialization must run eagerly (see `analysis::statics`) has an `init` function that runs its
 //! `<clinit>` once, and every static method, constructor and access from another class calls it
-//! first, as Java initializes a class on first use.
+//! first, as Java initializes a class on first use. The `init` function is inlined and only tests
+//! whether initialization has started; `init_..._slow`, out of line, runs it.
 //!
 //! In a program that starts threads, the statics that the started threads' code may touch
 //! (`Facts::process_statics`, by class) have one copy for the process, read and written with the
@@ -173,6 +174,34 @@ impl<'a> Gen<'a> {
         self.line("    return;");
         self.line("}");
         self.line(&format!("{}.set(true);", flag(class)));
+    }
+
+    /// The `init` function of class `t`, named `name`, returning `ret`: inlined where it is called,
+    /// it returns at once when the class's initialization has started (for the process's statics,
+    /// when it is done), and otherwise calls `{name}_slow`, which runs the `<clinit>` and is kept
+    /// out of line. A class is used far more often than it is initialized.
+    pub(super) fn init_fast_path(&mut self, t: usize, name: &str, ret: &str) {
+        let decl = &self.class.types[t];
+        let started = if crate::lower::rewritten_clinit(decl) {
+            format!("{}.get() == 1", cell_name(decl, crate::lower::STATE))
+        } else if self.facts.process_statics(t) {
+            format!("{}.done()", flag(&decl.name))
+        } else {
+            format!("{}.get()", flag(&decl.name))
+        };
+        let done = if ret.is_empty() { "return;" } else { "return Ok(());" };
+        let local = name.rsplit("::").next().unwrap_or(name);
+        let vis = self.vis();
+        self.line("#[inline]");
+        self.line(&format!("{vis}fn {local}(){ret} {{"));
+        self.line(&format!("    if {started} {{"));
+        self.line(&format!("        {done}"));
+        self.line("    }");
+        self.line(&format!("    {local}_slow()"));
+        self.line("}");
+        self.gap();
+        self.line("#[cold]");
+        self.line("#[inline(never)]");
     }
 
     /// At the end of the `init` function of a class whose statics are the process's: the

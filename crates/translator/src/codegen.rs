@@ -711,8 +711,13 @@ impl<'a> Gen<'a> {
         if never_runs {
             self.line("#[allow(unused_variables)]");
         }
-        let fn_name =
-            if m.name == "<clinit>" { statics::init_name(name) } else { self.fn_names[index].clone() };
+        let fn_name = if m.name == "<clinit>" {
+            let init = statics::init_name(name);
+            self.init_fast_path(m.class, &init, &ret);
+            format!("{init}_slow")
+        } else {
+            self.fn_names[index].clone()
+        };
         let generics = self.type_params(&m.type_params).0;
         self.line(&format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")));
         self.indent += 1;
