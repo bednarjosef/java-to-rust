@@ -18,7 +18,8 @@ the machine running out of memory.
 | step | what it does | time |
 |---|---|---|
 | `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required | seconds |
-| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 3 min 12 s on a busy machine (34 s without the libraries on a quiet one) |
+| `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Also Vineflower without the libraries, and CFR on the files that have errors. Since 26.1 the jar is not obfuscated, so the names are Mojang's |
+| `best-of` | `src/server` from the three decompiles, taking each file from Vineflower with the libraries except where another setup's file gives the whole server fewer javac errors ([below](#2-decompiled-sources-that-do-not-compile)) | 5 compiles of the server, about 1.5 min each | 3 min 12 s on a busy machine (34 s without the libraries on a quiet one) |
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`: `java.base` plus 14 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events) and `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) | seconds |
@@ -89,8 +90,10 @@ dependencies can be built: it stops only at a rejected piece, as any translation
 
 ### Parsing (javac on all of the decompiled code)
 
-- **The server:** 185 errors in 117 of its 5,037 files, compiled against the original library
-  jars (579 in 282 when decompiled without the libraries). The largest kinds:
+- **The server:** 185 errors in 117 of its 5,037 files with Vineflower and the libraries alone,
+  compiled against the original library jars (579 in 282 when decompiled without the libraries;
+  159 in 104 with the files chosen from the three setups by the `best-of` step, see
+  [below](#2-decompiled-sources-that-do-not-compile)). The largest kinds, with Vineflower alone:
 
   | errors | kind |
   |---:|---|
@@ -193,7 +196,12 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   reached code: all of Guava's, fastutil's and Gson's.
 
   Brigadier and DataFixerUpper are published by Mojang on GitHub under MIT, but not as source
-  jars; they, authlib, jtracy and logging stay decompiled.
+  jars; they, authlib, jtracy and logging stay decompiled. Their GitHub sources cannot be matched
+  to the bundled versions reliably. The tags stop at 1.0.18 and 1.0.20. A version is the
+  `majorMinor` of `gradle.properties` and a build number, which the published history does not
+  record: DataFixerUpper's 10.0 line is a single commit before the bump to 11.0, and Brigadier's
+  1.3 line has three. Compiled with javac and compared instruction by instruction with
+  `brigadier-1.3.11.jar`, even the closest commit differs in 7 of its 54 classes.
 
 - **Compile-only annotation libraries** (Error Prone, JSR 305, J2ObjC, JetBrains, Checker
   Framework) are not in the bundle. With `--keep-going` this does not matter: an unresolved
@@ -207,15 +215,32 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   per missing class. A class whose superclass is missing, or that catches a missing exception
   class, cannot be loaded at all, as on the JVM: log4j's `AsyncLoggerDisruptor` is one.
 
-- **The server's own decompiled code:** 185 errors in 117 files (about 2% of them), now that
+- **The server's own decompiled code:** 185 errors in 117 files (about 2% of them) when
   Vineflower decompiles with the library jars ([above](#decompiling-with-the-libraries)). They
   cannot be fixed by hand under this target's rules. Most are type arguments and casts that the
-  class files do not record at all, so no pass over the class files can bring them back; what is
-  left to try is:
-  - another decompiler (CFR, Procyon), compared by error count with the `parse` step;
-  - for each file, the decompile (with or without the libraries) that compiles: 7 files
-    compile only without them;
-  - leaving those pieces rejected.
+  class files do not record at all, so no pass over the class files can bring them back.
+
+  So the server is decompiled three ways and put together file by file. The `decompile` step
+  writes three trees into `decompiled/`: Vineflower with the libraries, Vineflower without them,
+  and CFR 0.152. CFR is fetched from Maven Central like Vineflower, and runs only on the classes
+  of the files that have errors, since it takes about 25 minutes on the whole server. Procyon is
+  not on Maven Central as a runnable jar. The `best-of` step (`scripts/decompile-best-of.py`)
+  then builds `src/server` from the Vineflower-with-libraries tree, taking a file from another
+  tree only where the whole tree then has fewer errors. A file's own errors are not enough to
+  judge: a file from CFR often declares its classes differently enough that the files using
+  them stop compiling. It works in whole-server compiles, at most 8:
+  1. for each other setup, the Vineflower tree with that setup's version of every file that has
+     errors; a file whose own errors drop becomes a candidate, from the setup where they drop
+     most;
+  2. the Vineflower tree with all candidates, again each round: a round drops the candidates
+     that no longer have fewer errors, and those whose class is named in a file that is not
+     swapped and has gained errors. The round with the fewest errors in the whole tree is kept,
+     if it has fewer than Vineflower alone.
+
+  Measured with the `parse` step (which attributes every file even when one does not parse):
+  from 186 errors in 118 files to 159 in 104, with 10 files from Vineflower without the
+  libraries and 8 from CFR, in 5 compiles. What is left is mostly type arguments and casts that
+  none of the decompilers writes; those pieces stay rejected.
 
 ### 3. What the translator itself rejects
 
