@@ -194,6 +194,7 @@ Design: [object-model.md](object-model.md).
   nested records) is an `if let` chain, exhaustive over a sealed hierarchy or enum without
   `default`. Rejected: a record with an array component and a generic record in a record
   pattern. An accessor written in the record runs at each use of a pattern variable, not once.
+  `java.lang.Record` is a type like `Object`: a value of it holds any of the program's records.
 - Local records, enums and interfaces declared in a method move to the top level. Rejected:
   one declared in an initializer block.
 

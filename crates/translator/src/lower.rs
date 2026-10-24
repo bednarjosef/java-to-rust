@@ -694,6 +694,9 @@ impl<'t> Lowering<'t> {
             "java.lang.CharSequence" if self.object.is_some_and(|at| at.char_sequence.is_some()) => {
                 Ok(Type::class(CHAR_SEQUENCE))
             }
+            "java.lang.Record" if self.object.is_some_and(|at| at.record.is_some()) => {
+                Ok(Type::class(RECORD))
+            }
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
@@ -1199,7 +1202,8 @@ impl<'t> Lowering<'t> {
         if symbol.owner == "java.lang.Object" && symbol.name == "clone" {
             return self.object_clone(node, receiver);
         }
-        if symbol.owner == "java.lang.Object" && self.object.is_some() {
+        // `Record` declares `Object`'s `equals`, `hashCode` and `toString` again, abstract.
+        if matches!(symbol.owner, "java.lang.Object" | "java.lang.Record") && self.object.is_some() {
             return self.object_call(node, &symbol, receiver, args);
         }
         if symbol.owner == "java.lang.Comparable" && symbol.name == "compareTo" {

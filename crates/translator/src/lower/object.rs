@@ -33,7 +33,10 @@
 //! that a class held as a `Type` (gson's and guava's type tokens) is one.
 //! `java.lang.Enum`, when the program uses it as a type, is a type of the same kind, `ENUM`, with
 //! no methods of its own: the program's enums implement it, and `lower::enums` lowers the calls
-//! of `Enum`'s methods on its values.
+//! of `Enum`'s methods on its values. `java.lang.Record`, when the program uses it as a type (an
+//! intersection `Record & Shape` erases to it), is another, `RECORD`, without methods either: the
+//! program's records implement it, and its `equals`, `hashCode` and `toString` are `Object`'s,
+//! which each record overrides.
 
 use super::*;
 use std::collections::HashSet;
@@ -52,6 +55,8 @@ pub(super) struct ObjectIndexes {
     pub(super) char_sequence: Option<NumberIndexes>,
     /// The index of `Enum`'s type, after `Number`'s, when the program uses it.
     pub(super) enumeration: Option<usize>,
+    /// The index of `Record`'s type, after `CharSequence`'s, when the program uses it.
+    pub(super) record: Option<usize>,
     /// The index of the JDK's `Appendable`, a type of the program, when the program has it: the
     /// runtime's builders implement it.
     pub(super) appendable: Option<usize>,
@@ -117,6 +122,29 @@ fn mentions_char_sequence(v: &Value) -> bool {
             _ => mentions_char_sequence(value),
         }),
         Value::Array(items) => items.iter().any(mentions_char_sequence),
+        _ => false,
+    }
+}
+
+/// Whether the declarations use `java.lang.Record` as the type of a value, as `uses_number` tells
+/// for `Number`, or as the erasure of an intersection (`java.lang.Record & Main.Shape`).
+pub(super) fn uses_record(decls: &[Node]) -> bool {
+    decls.iter().any(|d| mentions_record(d.0))
+}
+
+fn mentions_record(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => fields.iter().any(|(key, value)| match key.as_str() {
+            "symbol" => false,
+            "javaType" => value.as_str().is_some_and(|t| {
+                let t = t.trim_end_matches("[]");
+                t == "java.lang.Record"
+                    || t.ends_with("? extends java.lang.Record")
+                    || super::generics::intersection_bounds(t).is_some_and(|b| b[0] == "java.lang.Record")
+            }),
+            _ => mentions_record(value),
+        }),
+        Value::Array(items) => items.iter().any(mentions_record),
         _ => false,
     }
 }
@@ -299,6 +327,7 @@ impl<'t> Lowering<'t> {
         let comparable = uses_comparable(decls);
         let number = uses_number(decls);
         let char_sequence = uses_char_sequence(decls);
+        let record = uses_record(decls);
         let unrelated = decls.iter().any(|d| self.compares_unrelated(d.0));
         let appendable = self.type_index("java.lang.Appendable");
         let class_interface = CLASS_VALUE_INTERFACES.iter().any(|i| self.type_index(i).is_some());
@@ -306,6 +335,7 @@ impl<'t> Lowering<'t> {
             || comparable
             || number
             || char_sequence
+            || record
             || unrelated
             || appendable.is_some()
             || class_interface
@@ -326,6 +356,13 @@ impl<'t> Lowering<'t> {
                 decl: runtime + after + usize::from(number.is_some()) + usize::from(enumeration.is_some()),
                 methods: equals + 2 + after + if number.is_some() { NUMBER_METHODS.len() } else { 0 },
             });
+            let record = record.then_some(
+                runtime
+                    + after
+                    + usize::from(number.is_some())
+                    + usize::from(enumeration.is_some())
+                    + usize::from(char_sequence.is_some()),
+            );
             self.object = Some(ObjectIndexes {
                 decl,
                 equals,
@@ -333,6 +370,7 @@ impl<'t> Lowering<'t> {
                 comparable,
                 number,
                 enumeration,
+                record,
                 char_sequence,
                 appendable,
             });
@@ -746,6 +784,15 @@ impl<'t> Lowering<'t> {
         if let Some(s) = at.char_sequence {
             debug_assert_eq!(types.len(), s.decl);
             types.push(decl(CHAR_SEQUENCE, "", TypeKind::Interface, vec![at.decl]));
+        }
+        if let Some(r) = at.record {
+            for (t, decl) in types[..at.decl].iter_mut().enumerate() {
+                if self.types[t].node.kind() == "RECORD" {
+                    decl.implements.push(r);
+                }
+            }
+            debug_assert_eq!(types.len(), r);
+            types.push(decl(RECORD, "", TypeKind::Interface, vec![at.decl]));
         }
         // The arrays that become `Object`s, each named after its type (`int[]`), the
         // `StringBuilder`s and the classes.

@@ -1000,13 +1000,13 @@ impl<'a> Gen<'a> {
     }
 
     /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
-    /// module, `("Main$Dog", java::APP)`. The `Comparable` that the translation keeps under its
-    /// own name is `java.lang.Comparable` to HotSpot.
+    /// module, `("Main$Dog", java::APP)`. The `Comparable` and `Record` that the translation keeps
+    /// under their own names are `java.lang.Comparable` and `java.lang.Record` to HotSpot.
     pub(super) fn cast_class(&mut self, c: usize) -> String {
-        let binary = if self.class.types[c].name == COMPARABLE {
-            "java.lang.Comparable".to_string()
-        } else {
-            self.binary_name(c)
+        let binary = match self.class.types[c].name.as_str() {
+            COMPARABLE => "java.lang.Comparable".to_string(),
+            RECORD => "java.lang.Record".to_string(),
+            _ => self.binary_name(c),
         };
         let name = rust_string(&binary);
         let module = self.cast_module(c);
@@ -1022,7 +1022,7 @@ impl<'a> Gen<'a> {
             return self.type_module(ty);
         }
         let decl = &self.class.types[c];
-        let jdk = matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE);
+        let jdk = matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD);
         if jdk || decl.origin == Origin::Object {
             return self.runtime("BASE");
         }
