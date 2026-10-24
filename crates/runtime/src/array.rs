@@ -2,7 +2,11 @@
 //! name for the same array, as in Java, and every access is bounds-checked the way Java checks it.
 //!
 //! An array of a program without threads, or of a family that no two threads reach (`Array`),
-//! keeps its elements in a `RefCell<Vec<T>>`, which an access borrows. An array that threads
+//! keeps its elements in a `RefCell<Vec<T>>`. A bulk access (a sort, a copy, a runtime function
+//! lent the elements) borrows it. A single element's read or write, and the length, go around the
+//! borrow flag (`ArrayData::raw`): they hold nothing while other code runs, and a Java array's
+//! length never changes, so the flag would only cost a store and a reload on every access, which
+//! in a loop over an array chain one iteration to the next through memory. An array that threads
 //! share (`SharedArray`) keeps each element in a cell of its own (`SharedElements`, a slice of
 //! `java::SharedField`s), as a thread-shared object keeps its fields: a read or write of an
 //! element is one atomic action, which takes no lock and checks no borrow flag. An element of
@@ -341,10 +345,20 @@ impl<T, A: Elements<T>> Elements<T> for &A {
     }
 }
 
+impl<T> ArrayData<RefCell<Vec<T>>, T> {
+    /// The start and the number of the elements, reached without the borrow flag, for an access
+    /// of one element that holds nothing while other code runs (see the module's documentation).
+    #[inline(always)]
+    fn raw(&self) -> (*mut T, usize) {
+        let items = self.items.as_ptr();
+        unsafe { ((*items).as_mut_ptr(), (*items).len()) }
+    }
+}
+
 impl<T> Elements<T> for Array<T> {
     #[inline]
     fn length(&self) -> usize {
-        self.borrow().len()
+        self.raw().1
     }
 
     #[inline]
@@ -352,8 +366,8 @@ impl<T> Elements<T> for Array<T> {
     where
         T: Clone,
     {
-        let items = self.borrow();
-        items[position(items.len(), i)].clone()
+        let (items, n) = self.raw();
+        unsafe { (*items.add(position(n, i))).clone() }
     }
 
     #[inline]
@@ -361,22 +375,20 @@ impl<T> Elements<T> for Array<T> {
     where
         T: Clone,
     {
-        let items = self.borrow();
-        Ok(items[try_position(items.len(), i)?].clone())
+        let (items, n) = self.raw();
+        Ok(unsafe { (*items.add(try_position(n, i)?)).clone() })
     }
 
     #[inline]
     fn put(&self, i: i32, v: T) {
-        let mut items = self.borrow_mut();
-        let i = position(items.len(), i);
-        items[i] = v;
+        let (items, n) = self.raw();
+        unsafe { *items.add(position(n, i)) = v }
     }
 
     #[inline]
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
-        let mut items = self.borrow_mut();
-        let i = try_position(items.len(), i)?;
-        items[i] = v;
+        let (items, n) = self.raw();
+        unsafe { *items.add(try_position(n, i)?) = v }
         Ok(())
     }
 
