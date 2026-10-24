@@ -3,7 +3,8 @@
 The plan for making translated programs much faster and smaller than the same programs on the
 JVM, for any Java program, with no input beyond its sources, and how far it has got: of step 1,
 the collected heap (docs/collector.md), thin references and fields as cells are built (1.6 lists
-what is built and what is planned); steps 2 and 3 are planned. The translated javac is the main
+what is built and what is planned); of steps 2 and 3, escape within a method and objects on the
+stack are built, the rest is planned. The translated javac is the main
 benchmark. The object model it replaces is described in docs/object-model.md. The idiom side of
 the whole-program mode (designs a person would write, relaxations) stays in docs/thorough-mode.md.
 
@@ -167,6 +168,9 @@ the translation.
    allocation site, the standard precision for Java. Everything below depends on it.
 2. **Call graph** from points-to: the methods each call can reach.
 3. **Escape**: whether an object can leave its method, its parent object, or its thread.
+   Built for methods (`analysis/escape.rs`): the `new`s whose objects never leave their method,
+   and the methods that return a new object of their own, with a summary of each method's
+   parameters over the calls of `Class::callees` rather than points-to.
 4. **Uniqueness and ownership**: fields that hold the only reference to their object, and the
    parent each object is reachable through.
 5. **Immutability**: objects, and whole classes, never written after their constructor ends,
@@ -189,7 +193,10 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
 - **Scalar replacement**: an object that never leaves its method becomes local variables. No
   allocation at all.
 - **Stack and method regions**: objects that do not outlive their method, but are too big or
-  too many to become locals, go in a region freed when the method returns.
+  too many to become locals, go in a region freed when the method returns. Built for single
+  objects: an object that never leaves its method, or that a factory returns to a caller that
+  keeps it, is made in a slot in the caller's frame (docs/collector.md, "Objects on the
+  stack"). Regions for objects made in a loop and kept across its iterations are planned.
 - **Inline objects**: a child that is created with its parent, never re-pointed and never
   compared by identity is stored inside the parent. A list that owns objects of one class becomes
   a `Vec` of structs side by side.

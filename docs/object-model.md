@@ -282,7 +282,9 @@ locals first where the literal's field order would reorder them.
   struct, and so do its class's field initializers.
 - A class whose own constructors use `this` as a value (and that has no subclasses) allocates
   the object first, `Arc::new(RefCell::new(Circle { base: .., r: 0.0 }))`, then runs the field
-  initializers and the body on `this`.
+  initializers and the body on `this`. When a `new` of it puts the object on the stack (1.13),
+  the constructor has a second form, `new_on_stack(slot, ..)`, that allocates it in the slot it
+  is given instead, as do the constructors it delegates to with `this(..)`.
 - `this(...)` delegates as Java does.
 
 **The whole-object form** (`analysis/whole_objects.rs`, run before the analyses). A
@@ -710,12 +712,21 @@ sites keep javac's substituted types, with no cast.
 - A parameter that a body never mentions is named `_x`, so a default meant to be overridden has
   no unused-variable warning.
 
-### 1.13 Freeing objects
+### 1.13 Where objects live and how they are freed
 
 Objects live in the collected heap (docs/collector.md). A handle is a pointer with no count, and
 an object is never dropped: the collector frees whatever no handle, field or array element
 reaches, cycles included, as Java's does. Freeing never recurses through fields, so a linked
 list of a million nodes needs nothing special (`corpus/features/LongChainsDrop.java`).
+
+An object that never leaves the method that makes it lives in a `java::Slot` in that method's
+frame instead, with the same handle type (docs/collector.md, "Objects on the stack";
+`analysis/escape.rs`, `codegen/stack_objects.rs`): `let p = slot_1.put(P::new(3));` for a plain
+constructor, `P::new_on_stack(&slot_1, 3)` for one that allocates its object itself (1.4). A
+method that returns a new object of its own (a factory, such as an `iterator()`) gets a form
+that takes a slot after its receiver, `List::iterator_on_stack(this, &slot_2)`, which a caller
+that keeps the object uses (`corpus/features/StackObjects.java`, `StackFactories.java`,
+`StackObjectsInLists.java`).
 
 ### 1.14 `Object.clone`
 

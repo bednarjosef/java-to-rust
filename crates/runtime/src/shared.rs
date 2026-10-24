@@ -89,7 +89,8 @@ impl<T> Arc<T> {
 
 /// A place on the stack of a method for one object that never leaves the method (docs/collector.md,
 /// "Objects on the stack"). The translation declares one at the start of the method for each
-/// `new` whose object stays in it, and `put` makes the object there.
+/// `new`, or call of a method that returns a new object, whose object stays in it, and `put`
+/// makes the object there (the called method is given the slot to do so).
 ///
 /// The collector scans the stack word by word, so the objects in the heap that the object's
 /// fields name stay alive while the slot does. The collector itself ignores the address, which is
