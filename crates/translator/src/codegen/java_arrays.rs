@@ -148,17 +148,15 @@ impl<'a> Gen<'a> {
         format!("Some({})", self.handle(e))
     }
 
-    /// `a == b` and `a != b` on arrays: whether they are the same array. Arrays are shared
-    /// `Rc`s, and `Rc`'s `==` compares contents, so identity is `Rc::ptr_eq`, or `java::same`
-    /// where either side may be null.
+    /// `a == b` and `a != b` on arrays: whether they are the same array, `Arc::ptr_eq` on their
+    /// handles, or `java::same` where either side may be null.
     pub(super) fn array_identity(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
         let same = if self.nullable(l) || self.nullable(r) {
             let (a, b) = (self.optional_handle(l), self.optional_handle(r));
             format!("{}({a}, {b})", self.runtime("same"))
         } else {
             let (a, b) = (self.handle(l), self.handle(r));
-            let pointer = if self.shared_array_type(l.ty) { "Arc" } else { "Rc" };
-            format!("{pointer}::ptr_eq({a}, {b})")
+            format!("Arc::ptr_eq({a}, {b})")
         };
         if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) }
     }

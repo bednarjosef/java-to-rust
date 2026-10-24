@@ -30,8 +30,7 @@ version of the alias analysis for arrays only.
    the JDK is done in production by GraalVM's native image, so the scale is known to work.
 2. **Shape analysis.** Whether a structure is a tree, a DAG or cyclic. A tree becomes
    `Option<Box<Node>>`, a list that holds its elements becomes `Vec<Node>`, and a cyclic graph
-   becomes an arena (`Vec<Node>` plus indices), which also ends the leak that reference counting
-   has on cycles.
+   becomes an arena (`Vec<Node>` plus indices).
 3. **Effects across calls.** Which methods read and which write, and what. This decides `&self`
    or `&mut self` everywhere and removes most `RefCell`s and clones.
 4. **What the program observes.** Whether iteration order, a hash value, identity or an exception
@@ -100,14 +99,6 @@ comes back in: as a stated assumption, not a guess hidden in the code.
 
 ## Build order
 
-0. A count of the objects still alive when a program ends, by class (planned). The translated
-   javac compiling the decompiled Minecraft server (5,037 files) peaks at 7.4 GB, where the real
-   javac peaks at 3.6 GB. Its memory grows by about 1.45 MB per file, against Java's 0.44 MB.
-   Part of the gap is per object: 48 bytes of reference counts, lock and borrow flag, against
-   HotSpot's 12-byte header, and 8-byte pointers against compressed 4-byte ones. The rest may be
-   objects on reference cycles that nothing uses any more, which reference counting never
-   frees. A per-class counter of objects made and freed, printed at exit, tells the two apart.
-   It also names the classes that leak, which then go first in shape analysis (5).
 1. Whole-program points-to analysis.
 2. rustc-checked ownership speculation: large payoff for little work once (1) exists.
 3. Observation analysis and library substitution: `HashMap`, `ArrayList`, streams.

@@ -20,12 +20,12 @@ them in a table keyed by expression id (`analysis.rs`); and the generator (`code
 the plain form of a construct only where a fact allows it, and the faithful form otherwise. A
 better analysis therefore improves the output without touching the generator.
 
-Every value starts at a safe default: an object is `Rc<RefCell<C>>`, a reference that may be
+Every value starts at a safe default: an object is `Arc<RefCell<C>>`, a reference that may be
 null an `Option`, an array a shared `java::Array<T>`, arithmetic wrapping. Analyses move values
-to plainer forms (`Rc<C>`, plain structs, `Vec`, plain `+`) where they prove it changes nothing.
+to plainer forms (`Arc<C>`, plain structs, `Vec`, plain `+`) where they prove it changes nothing.
 The runtime crate (`crates/runtime`) supplies what Rust lacks: Java's number semantics and
 printing, strings and builders, `String.format`, regular expressions, charsets, threads and
-monitors, and the native methods of the JDK.
+monitors, the native methods of the JDK, and the garbage collector that frees objects.
 
 Two modes: a **single file** uses only the program's classes and what the runtime supplies; a
 **whole program** is translated together with the JDK's own sources (`java.base`), so
@@ -137,7 +137,9 @@ What the translator does:
   local and anonymous classes, lambdas, method references, for-each over `Iterable`.
 - [docs/exceptions.md](docs/exceptions.md): exceptions as values, `try`/`catch`/`finally`, stack
   traces and `NullPointerException` messages.
-- [docs/multi-threading.md](docs/multi-threading.md): real threads, shared objects as `Arc` and
+- [docs/collector.md](docs/collector.md): the garbage collector that frees objects, and handles
+  without counts.
+- [docs/multi-threading.md](docs/multi-threading.md): real threads, shared objects behind
   `java::Locked`, monitors.
 - [docs/natives-and-input.md](docs/natives-and-input.md): the hand-written native layer and the
   standard streams.

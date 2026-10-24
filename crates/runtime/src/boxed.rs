@@ -1,13 +1,13 @@
 //! Boxed values (`Integer`, `Double` and the rest) and the methods of their classes: the shared
 //! objects that `==` compares, the `valueOf` cache, Java's parsing rules and hash codes.
 
+use crate::Arc;
 use std::ops::Deref;
-use std::rc::Rc;
 
 /// A boxed value. Two boxes are `==` only when they are the same object, which `same` tests.
 /// Dereferences to the value it holds.
 #[derive(Clone, Debug)]
-pub struct Boxed<T>(Rc<T>);
+pub struct Boxed<T>(Arc<T>);
 
 impl<T> Deref for Boxed<T> {
     type Target = T;
@@ -19,7 +19,7 @@ impl<T> Deref for Boxed<T> {
 
 /// Java's `a == b` on two boxed values: the same object.
 pub fn same<T>(a: &Boxed<T>, b: &Boxed<T>) -> bool {
-    Rc::ptr_eq(&a.0, &b.0)
+    Arc::ptr_eq(&a.0, &b.0)
 }
 
 /// Java's `a == b` on two boxed values that may be null: both null, or the same object.
@@ -33,7 +33,7 @@ pub fn same_optional<T>(a: Option<&Boxed<T>>, b: Option<&Boxed<T>>) -> bool {
 
 /// A box that is not cached: `Double.valueOf` and the like make a new object every time.
 pub fn box_new<T>(v: T) -> Boxed<T> {
-    Boxed(Rc::new(v))
+    Boxed(Arc::new(v))
 }
 
 /// Defines `$name`, which boxes a value in `$low..=$high` as a shared object from a cache, as
@@ -41,7 +41,7 @@ pub fn box_new<T>(v: T) -> Boxed<T> {
 macro_rules! cached {
     ($name:ident, $cache:ident, $t:ty, $low:expr, $high:expr) => {
         thread_local! {
-            static $cache: Vec<Boxed<$t>> = ($low..=$high).map(|v| Boxed(Rc::new(v))).collect();
+            static $cache: Vec<Boxed<$t>> = ($low..=$high).map(|v| Boxed(Arc::new(v))).collect();
         }
 
         pub fn $name(v: $t) -> Boxed<$t> {
@@ -61,7 +61,7 @@ cached!(box_byte, BYTES, i8, -128, 127);
 cached!(box_char, CHARS, u16, 0, 127);
 
 thread_local! {
-    static BOOLEANS: [Boxed<bool>; 2] = [Boxed(Rc::new(false)), Boxed(Rc::new(true))];
+    static BOOLEANS: [Boxed<bool>; 2] = [Boxed(Arc::new(false)), Boxed(Arc::new(true))];
 }
 
 /// `Boolean.valueOf`: `TRUE` and `FALSE` are always the same two objects.

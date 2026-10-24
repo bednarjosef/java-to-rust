@@ -414,10 +414,10 @@ impl<'a> Gen<'a> {
         if self.facts.fields_structs.contains(&t) { name + "Fields" } else { name }
     }
 
-    /// The pointer of an object of class `t`: an `Rc`, or an `Arc` for a class whose objects
-    /// threads share (see `analysis::threads`).
-    pub(super) fn pointer(&self, t: usize) -> &'static str {
-        if self.facts.thread_shared.contains(&t) { "Arc" } else { "Rc" }
+    /// The pointer of an object of class `t`: the runtime's `Arc`, a handle in the collected heap
+    /// (`gc.rs`), whether or not threads share its objects.
+    pub(super) fn pointer(&self, _t: usize) -> &'static str {
+        "Arc"
     }
 
     /// The cell of a mutable object of class `t`: a `RefCell`, or for a class whose objects
@@ -430,7 +430,7 @@ impl<'a> Gen<'a> {
     fn handle_parts(&self, name: &str) -> (&'static str, &'static str) {
         match self.class.type_index(name) {
             Some(t) => (self.pointer(t), self.cell(t)),
-            None => ("Rc", "RefCell"),
+            None => ("Arc", "RefCell"),
         }
     }
 
@@ -890,7 +890,7 @@ impl<'a> Gen<'a> {
             let (a, b) = (self.object_option(l), self.object_option(r));
             format!("{}({a}, {b})", self.runtime("same"))
         } else {
-            let pointer = self.struct_class(l).map_or("Rc", |c| self.pointer(c));
+            let pointer = self.struct_class(l).map_or("Arc", |c| self.pointer(c));
             let (a, b) = (self.object_ref(l), self.object_ref(r));
             format!("{pointer}::ptr_eq({a}, {b})")
         };
@@ -1838,7 +1838,6 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("}");
-        self.chain_items(index);
     }
 
     /// Whether method `i` is emitted in the `impl` of the struct of class `t`: it lives there, and
@@ -1973,8 +1972,7 @@ impl<'a> Gen<'a> {
         }
         let result = match () {
             _ if !immutable => "obj",
-            _ if self.facts.thread_shared.contains(&m.class) => "Arc::new(obj)",
-            _ => "Rc::new(obj)",
+            _ => "Arc::new(obj)",
         };
         self.ctor_result = Some(result);
         self.stmts(without_final_return(rest), false);

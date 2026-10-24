@@ -41,7 +41,7 @@ takes the safe one, and the safe one is the noisy one:
 | Java does not say… | so the translator assumes… | and writes |
 |---|---|---|
 | whether a reference can be null | it might be | `Option<T>`, `java::non_null(..)` at each use |
-| who owns an object | anyone might share it | `Rc<..>`, `Rc<RefCell<..>>` |
+| who owns an object | anyone might share it | `Arc<..>`, `Arc<RefCell<..>>` |
 | what a `List<Shape>` holds once generics are erased | any object | `Object` and a cast on every read |
 | whether a call can throw | it might | `Result` and `unwrap_or_else(java::uncaught)` |
 | whether `x + 1` can overflow | it might | `wrapping_add` |
@@ -73,7 +73,7 @@ clever. Lost precision costs looks, never behaviour.
 2. **References that are never null** become plain values, with no `Option`. Most objects are
    created with `new` and never set to null; following that across fields, parameters, return
    values and collection elements removes most of the noise.
-3. **Ownership.** An object that is never shared is stored directly, without `Rc`, and passed as
+3. **Ownership.** An object that is never shared is stored directly, without a handle, and passed as
    `&T` or `&mut T`. This is the points-to work of thorough mode, including rustc as the checker
    for guessed ownership.
 4. **Collections, loops and generics.**
@@ -97,7 +97,7 @@ The pass count says whether output is right; a second report says how natural it
 program and in total:
 
 - the share of references typed `Option<..>`;
-- the share of objects behind `Rc` and behind `RefCell`;
+- the share of objects behind a handle and behind `RefCell`;
 - the share of arithmetic that is `wrapping_*`;
 - casts from `Object`;
 - Rust lines per Java line, counting the program's own code separately from the JDK crate.

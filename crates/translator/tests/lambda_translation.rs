@@ -44,9 +44,9 @@ fn a_lambda_is_a_variant_of_its_interface() {
         &[
             "struct OpLambdaInMain {",
             "fn apply(&self, a: i32, b: i32) -> i32 {\n        a + b\n    }",
-            "OpLambdaInMain(Rc<OpLambdaInMain>),",
+            "OpLambdaInMain(Arc<OpLambdaInMain>),",
             "AOp::OpLambdaInMain(o) => o.apply(a, b),",
-            "AOp::OpLambdaInMain(Rc::new(OpLambdaInMain::new()))",
+            "AOp::OpLambdaInMain(Arc::new(OpLambdaInMain::new()))",
         ],
     );
 }
@@ -72,7 +72,7 @@ fn a_method_reference_is_a_closure_of_the_call_it_makes() {
         &[
             "let length = |a: &java::Wtf8| -> i32 { a.len() as i32 };",
             "let doubled = |a: &java::Wtf8| -> i32 { twice(a) };",
-            "let make = |a: i32| -> Rc<APoint> { Rc::new(APoint::new(a)) };",
+            "let make = |a: i32| -> Arc<APoint> { Arc::new(APoint::new(a)) };",
             "length(java::wtf8(\"abc\"))",
         ],
     );
@@ -213,7 +213,7 @@ fn a_lambda_reaches_the_enclosing_object_through_outer() {
     assert_contains(
         &rust,
         &[
-            "fn adder(this: &Rc<RefCell<A>>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(java::fixed!(outer, base)) })\n    }",
+            "fn adder(this: &Arc<RefCell<A>>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(java::fixed!(outer, base)) })\n    }",
             "let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { outer.borrow().scaled(a) })\n",
             "A::adder(&o)(1)",
         ],

@@ -3,7 +3,7 @@
 How a Java program that starts threads is translated: which objects become thread-shared, how
 monitors, statics, interrupts and uncaught exceptions work, and why the result is a legal
 execution of the Java program. It builds on the object model (`docs/object-model.md`: class
-trees as enums, objects as `Rc<RefCell<C>>`, `Rc<C>` when immutable, plain values when owned) and
+trees as enums, objects as `Arc<RefCell<C>>`, `Arc<C>` when immutable, plain values when owned) and
 on the exceptions design (`docs/exceptions.md`: exceptions are `Result`, `?` propagates).
 
 The user's requirements: programs are normally multi-threaded, so real threads must work and the
@@ -17,7 +17,7 @@ hand-written itself.
 1. **A program is multi-threaded exactly when it can start a thread**: some reachable method
    calls the native behind `Thread.start()` (`analysis/threads.rs`, `threaded`). Every other way
    of running code on another thread (executors, `ForkJoinPool`) ends there. A program that
-   cannot start a thread is translated exactly as without this work: `Rc`, `RefCell`,
+   cannot start a thread is translated exactly as without this work: `RefCell`,
    thread-local statics, `synchronized` as a null check. It pays nothing.
 2. **Stronger synchronization than Java's is always allowed, and it is all the translation
    uses.** Every access to memory that another thread can reach goes through a lock or an atomic
@@ -25,9 +25,9 @@ hand-written itself.
    is then a sequentially consistent interleaving of the Java program's actions, which Java
    allows (section 1). A lock the translation adds is never held while the thread waits for
    anything else, so it cannot add a deadlock (1.3).
-3. **Thread-shared objects swap `Rc` for `Arc` and `RefCell` for `java::Locked<C>`**, the value
-   behind a reentrant lock with `RefCell`'s API, whose borrow flag is kept in the lock's own word. `Arc` is `java::Arc` (`shared.rs`), whose count
-   changes are plain until the first thread starts. The generated text is the same as for a
+3. **Thread-shared objects swap `RefCell` for `java::Locked<C>`**, the value behind a reentrant
+   lock with `RefCell`'s API, whose borrow flag is kept in the lock's own word. Every object is
+   held by a `java::Arc` (`shared.rs`, docs/collector.md), thread-shared or not. The generated text is the same as for a
    thread-local object; only the type names differ. An immutable shared class is `Arc<C>`, read
    without a lock. Which classes are shared is decided per class, by type (section 4).
 4. **An object's monitor is its data lock.** `synchronized` holds the reentrant lock of the
@@ -136,13 +136,13 @@ monitor is reentrant and so is ours; `wait` releases all recursion levels and ta
 
 ### 2.1 Thread-shared classes
 
-Besides shared (`Rc<RefCell<C>>`), immutable (`Rc<C>`) and owned (a plain value), a class may be
+Besides shared (`Arc<RefCell<C>>`), immutable (`Arc<C>`) and owned (a plain value), a class may be
 *thread-shared*: some object of it may be reached by two threads (section 4).
 
 | | thread-local | thread-shared |
 | --- | --- | --- |
-| mutable | `Rc<RefCell<C>>` | `Arc<java::Locked<C>>` |
-| immutable (no field written after construction) | `Rc<C>` | `Arc<C>` |
+| mutable | `Arc<RefCell<C>>` | `Arc<java::Locked<C>>` |
+| immutable (no field written after construction) | `Arc<C>` | `Arc<C>` |
 | owned | plain value | plain value, moved into the thread |
 | closure type (`docs/closures-and-nested-classes.md` 4.2) | `Rc<dyn Fn(..) -> R>` | `std::sync::Arc<dyn Fn(..) -> R + Send + Sync>` |
 
@@ -189,7 +189,7 @@ whose monitor is that lock) when two threads may reach builders: a static holds 
 or capture of a shared class does (in an array or as a type argument too), or a builder becomes a
 shared `Object` or `CharSequence` (`analysis/threads.rs`, `shares_builders`). Otherwise every
 builder stays a `java::StringBuilder`, even in a threaded program, and its monitor is the address
-of its `Rc`.
+of its cell.
 
 ### 2.3 Statics
 
@@ -262,7 +262,7 @@ Everywhere else `synchronized` is the null check of its lock, so a program witho
 thread has the object yet.
 
 Rejected, by name: `synchronized` on a string, a box, an array, a Java enum's constant, or the
-class of a value (`o.getClass()`) where the monitor would be kept (they are values or `Rc`s
+class of a value (`o.getClass()`) where the monitor would be kept (they are values or handles
 without a lock), and `wait`, `notify` or `holdsLock` on a string, box or array anywhere;
 `wait(millis, nanos)`. A string, box or `Class` held as an `Object` has no monitor either, since
 the translation keeps them as values; where a locked `Object` may hold one of them as well as the
@@ -283,7 +283,7 @@ separate monitor type and no per-class choice.
   takes the handle rather than `&self`, so a synchronized method calling another, or `wait`
   inside one, holds no borrow across the call. `wait` asserts that the thread holds no borrow of
   the object, which would let another thread in while it lasts.
-- **The monitor of a thread-local object** (an `Rc`, in a program that observes monitors) is a
+- **The monitor of a thread-local object** (an `Arc<RefCell<C>>`, in a program that observes monitors) is a
   thread-local list of the addresses the thread has entered. `holdsLock` and the
   `IllegalMonitorStateException` of `wait` and `notify` answer from it, `notify` wakes nobody,
   and `wait` lasts its timeout, or for ever without one, as in Java where no other thread can
@@ -343,20 +343,20 @@ Java enums are never shared: their values are plain Rust values, which any threa
 closure type that a thread may reach (through a capture, a field or a static) becomes
 `Arc<dyn Fn .. + Send + Sync>`, and its captures are of shared types by the same walk.
 
-The cost of overestimating is `Arc` and a lock where `Rc` and `RefCell` would do: speed, not
+The cost of overestimating is a lock where a `RefCell` would do: speed, not
 correctness. A type-based closure makes, for example, every `Node` of every list shared when one
 list is handed to a thread. Per allocation site, with the points-to analysis of thorough mode,
 is the planned refinement (section 7).
 
-Rejected (`check`): a box compared by identity (an `Rc`) in a static or in a field of a shared
+Rejected (`check`): a box compared by identity (a `java::Boxed`) in a static or in a field of a shared
 class, which has no shared form yet: "a box compared by identity that threads may share not
 supported yet".
 
 ### 4.3 rustc as the verifier
 
-The analysis over-approximates, and rustc checks it: an `Rc`, `RefCell` or `Cell` inside an
-`Arc`'s payload or a spawn closure is a compile error (`Rc<..> cannot be sent between threads
-safely`), never a miscompilation. A bug in the analysis therefore shows in the corpus build as an
+The analysis over-approximates, and rustc checks it: an `Rc`, `RefCell` or `Cell` inside a
+thread-shared `Arc`'s payload or a spawn closure is a compile error (`RefCell<..> cannot be shared
+between threads safely`), never a miscompilation. A bug in the analysis therefore shows in the corpus build as an
 error naming the type, and the fix belongs in the analysis, never in a silent fallback.
 Speculating and letting rustc reject (as thorough mode does elsewhere) does not apply to sharing:
 the general form must be chosen up front.
@@ -560,7 +560,7 @@ JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `Conc
 `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`, `ParkWithPermit`,
 `LockAmongValues`, `VarHandleViews`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
-unchanged and that a class no thread reaches keeps `Rc`.
+unchanged and that a class no thread reaches keeps `RefCell`.
 
 ## 9. Cost
 
@@ -568,15 +568,15 @@ unchanged and that a class no thread reaches keeps `Rc`.
 - **A thread-shared mutable object** costs an uncontended lock and unlock per field access or
   short method call: a compare-and-swap to take the data lock and a sequentially consistent
   store to give it back, with a look at the parking bucket's waiters, against a flag check for a
-  `RefCell` borrow; and an atomic increment per handle clone. Until the program starts its first
-  thread, taking the lock and giving it back are a plain increment and decrement of the lock's
-  word, and handles are counted with plain stores (`locked.rs`, `RawLock` and `THREADS`;
-  `shared.rs`): a program whose threads start late, or never (javac's), pays no atomic operation
+  `RefCell` borrow. Until the program starts its first thread, taking the lock and giving it back
+  are a plain increment and decrement of the lock's word (`locked.rs`, `RawLock` and `THREADS`):
+  a program whose threads start late, or never (javac's), pays no atomic operation
   until then. The lock's word holds the holder's number and the count of its holds together, and
   the thread that ran alone is holder 0, so the locks it holds when it starts a thread are its
-  own without being recorded. An immutable shared object costs nothing on reads beyond the `Arc` count.
+  own without being recorded. An immutable shared object costs nothing on reads, and copying a
+  handle is copying a pointer, shared or not.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock.
 - **Primitive statics** are plain loads and stores on x86-64 (acquire/release); object statics
   cost a lock per access.
-- The common case stays fast because classes no thread reaches keep `Rc`/`RefCell`, immutable
+- The common case stays fast because classes no thread reaches keep `RefCell`, immutable
   classes have no lock, and a `Vec` or plain value moved into a thread is not shared at all.

@@ -82,7 +82,7 @@ about 2,000; about 11% of the lines are doc comments; clippy runs with warnings 
 ### 1. A representation plan between the analyses and the generator
 
 Today the generator decides on the spot. About 150 places in `codegen` read a fact and choose:
-proven, so the simple form; not proven, so the general form (`Option` or not, `Rc` or owned,
+proven, so the simple form; not proven, so the general form (`Option` or not, a handle or owned,
 `wrapping_add` or `+`, `Result` or not). Every new mode or relaxation would have to be added at
 each of those places.
 

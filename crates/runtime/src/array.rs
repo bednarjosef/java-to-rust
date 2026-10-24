@@ -14,9 +14,8 @@ use crate::Arc;
 use crate::{Class, Exception, Locked, throw};
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 
-pub type Array<T> = Rc<ArrayData<RefCell<Vec<T>>, T>>;
+pub type Array<T> = Arc<ArrayData<RefCell<Vec<T>>, T>>;
 
 /// An array of a program with threads.
 pub type SharedArray<T> = Arc<ArrayData<Locked<Vec<T>>, T>>;
@@ -34,13 +33,6 @@ impl<C, T> Deref for ArrayData<C, T> {
     #[inline]
     fn deref(&self) -> &C {
         &self.items
-    }
-}
-
-impl<C, T> ArrayData<C, T> {
-    /// The cell of an array that nothing else holds (a dying one).
-    pub(crate) fn items_mut_unique(&mut self) -> &mut C {
-        &mut self.items
     }
 }
 
@@ -150,7 +142,7 @@ impl<T> Elements<T> for Array<T> {
     }
 
     fn address(&self) -> *const u8 {
-        Rc::as_ptr(self) as *const u8
+        Arc::as_ptr(self) as *const u8
     }
 
     #[inline]
@@ -161,7 +153,7 @@ impl<T> Elements<T> for Array<T> {
 
 impl<T> MadeElements<T> for Array<T> {
     fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> Array<T> {
-        Rc::new(ArrayData { items: RefCell::new(items), class: class.map(Box::new) })
+        Arc::new(ArrayData { items: RefCell::new(items), class: class.map(Box::new) })
     }
 }
 
@@ -206,7 +198,8 @@ pub fn shared_from_vec<T>(items: Vec<T>) -> SharedArray<T> {
 /// functions made (`String.getBytes`, `Character.toChars`).
 pub fn to_shared<T: Clone>(a: Array<T>) -> SharedArray<T> {
     let class = a.element_class().cloned();
-    let items = Rc::try_unwrap(a).map_or_else(|a| a.borrow().clone(), |a| a.items.into_inner());
+    // Nothing else holds an array the runtime just made, so its elements can be taken.
+    let items = std::mem::take(&mut *a.borrow_mut());
     SharedArray::made_as(items, class)
 }
 

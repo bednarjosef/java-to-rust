@@ -707,7 +707,7 @@ fn superclass_fields_are_embedded() {
         ],
     );
     // A value of the superclass's type is the one class's object that it can be.
-    assert_contains(&rust, &["let s = c.clone();", "Rc::ptr_eq(&s, &c)"]);
+    assert_contains(&rust, &["let s = c.clone();", "Arc::ptr_eq(&s, &c)"]);
     assert_lacks(&rust, &["struct Shape {", "dyn "]);
 }
 
@@ -857,7 +857,7 @@ fn a_type_with_several_concrete_classes_is_an_enum() {
     assert_contains(
         &rust,
         &[
-            "#[derive(Clone)]\nenum Base {\n    Circle(Rc<RefCell<Circle>>),\n    Rect(Rc<RefCell<Rect>>),\n}",
+            "#[repr(u16)]\nenum Base {\n    Circle(Arc<RefCell<Circle>>),\n    Rect(Arc<RefCell<Rect>>),\n}",
             "    fn area(&self) -> f64 {
         match self {
             Base::Circle(o) => o.borrow().area(),
@@ -898,7 +898,7 @@ fn upcasts_wrap_the_handle() {
         &rust,
         &[
             "let b = Base::Circle(c.clone());",
-            "let r = Base::Rect(Rc::new(RefCell::new(Rect::new(2.0, 3.0))));",
+            "let r = Base::Rect(Arc::new(RefCell::new(Rect::new(2.0, 3.0))));",
         ],
     );
     // The last use of `c` moves it into the enum.
@@ -912,7 +912,7 @@ fn enum_identity_is_pointer_equality() {
         &rust,
         &[
             "impl PartialEq for Base {",
-            "(Base::Circle(a), Base::Circle(b)) => Rc::ptr_eq(a, b),",
+            "(Base::Circle(a), Base::Circle(b)) => Arc::ptr_eq(a, b),",
             "_ => false,",
             "&b == &r",
             "&b == &Base::Circle(c.clone())",
@@ -934,7 +934,7 @@ fn an_immutable_family_has_no_refcell() {
     assert_contains(
         &rust,
         &[
-            "enum N {\n    Leaf(Rc<Leaf>),\n    Twice(Rc<Twice>),\n}",
+            "enum N {\n    Leaf(Arc<Leaf>),\n    Twice(Arc<Twice>),\n}",
             "fn base(&self) -> &NFields {",
             "N::Leaf(o) => o.eval(),",
             "self.inner.base().v",
@@ -959,7 +959,7 @@ fn a_class_that_is_never_upcast_stays_a_plain_value_beside_its_siblings() {
     // `Tri` is only ever a `Tri`, so it is an owned value; only `Square` is a `Shape`.
     assert_contains(&rust, &["let mut t = Tri::new();", "t.base.move_();", "t.base.moves"]);
     // With one class left, the type is that class: no enum.
-    assert_contains(&rust, &["let s = Rc::new(RefCell::new(Square::new()));"]);
+    assert_contains(&rust, &["let s = Arc::new(RefCell::new(Square::new()));"]);
     assert_lacks(&rust, &["enum Shape"]);
 }
 
@@ -981,8 +981,8 @@ fn a_class_that_is_upcast_is_shared() {
     assert_contains(
         &rust,
         &[
-            "enum Shape {\n    Square(Rc<Square>),\n    Tri(Rc<Tri>),\n}",
-            "let s = Rc::new(Square::new());",
+            "enum Shape {\n    Square(Arc<Square>),\n    Tri(Arc<Tri>),\n}",
+            "let s = Arc::new(Square::new());",
             "total(&Shape::Square(s.clone()), &Shape::Tri(t))",
         ],
     );
@@ -1005,7 +1005,7 @@ fn immutable_objects_are_shared_without_a_refcell() {
             "this.field_inits();",
             "this.x = x;",
             "fn sum(&self) -> i32 {",
-            "let p = Rc::new(P::new(3));",
+            "let p = Arc::new(P::new(3));",
             "p.sum().wrapping_add(p.x)",
         ],
     );
@@ -1027,7 +1027,7 @@ fn methods_borrow_their_shared_object() {
             "fn new(x: i32) -> P {\n        P { x }\n    }",
             "fn set(&mut self, v: i32) {\n        self.x = v;\n    }",
             "fn get(&self) -> i32 {",
-            "let p = Rc::new(RefCell::new(P::new(1)));",
+            "let p = Arc::new(RefCell::new(P::new(1)));",
             "p.borrow_mut().set(2);",
             "java::println!(\"{}\", p.borrow().get());",
         ],
@@ -1050,9 +1050,9 @@ fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
     assert_contains(
         &rust,
         &[
-            "fn register(this: &Rc<RefCell<P>>) {\n        share(this);",
+            "fn register(this: &Arc<RefCell<P>>) {\n        share(this);",
             // `o` may be `this`, which the method then must not hold borrowed.
-            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { let value = o.borrow().x; value };",
+            "fn copy(this: &Arc<RefCell<P>>, o: &Arc<RefCell<P>>) {\n        this.borrow_mut().x = { let value = o.borrow().x; value };",
             "P::register(&p);",
             "P::copy(&q, &p);",
         ],
@@ -1598,7 +1598,7 @@ fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
         &rust,
         &[
             "\"app.Circle\" => {",
-            "Rc::new(Circle::new());",
+            "Arc::new(Circle::new());",
             "java::throw(\"java.lang.ClassNotFoundException\", &format!(\"{}, which is not in the translation\"",
         ],
     );
@@ -1996,7 +1996,7 @@ fn system_natives_go_through_the_runtime() {
             "java::nano_time()",
             "java::current_time_millis()",
             "java::eprintln!(\"t {t}{}\", java::line_separator());",
-            "java::address_hash(Rc::as_ptr(&x)) == java::address_hash(Rc::as_ptr(&x))",
+            "java::address_hash(Arc::as_ptr(&x)) == java::address_hash(Arc::as_ptr(&x))",
             "java::write_byte(65);",
             "java::flush();",
             "java::available_processors()",
@@ -2203,7 +2203,7 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_catches_it(
         &rust,
         &[
             "fn to_string(&self) -> Result<java::JString, Throwable> {",
-            "java::println!(\"item {}\", java::or_break!(Rc::new(AItem::new()).to_string(), 'attempt));",
+            "java::println!(\"item {}\", java::or_break!(Arc::new(AItem::new()).to_string(), 'attempt));",
         ],
     );
 }
@@ -2277,7 +2277,7 @@ fn a_hash_code_that_the_default_text_of_an_object_shows_passes_its_exception_on(
     );
     assert_contains(
         &rust,
-        &["java::default_text(\"A$Item\", java::or_break!(Rc::new(AItem::new()).hash_code(), 'attempt))"],
+        &["java::default_text(\"A$Item\", java::or_break!(Arc::new(AItem::new()).hash_code(), 'attempt))"],
     );
 }
 
@@ -2327,9 +2327,9 @@ fn a_catch_on_the_way_to_the_text_of_an_object_whose_to_string_throws_catches_it
     assert_contains(
         &rust,
         &[
-            "fn show(item: &Rc<AItem>) -> Result<(), Throwable> {",
+            "fn show(item: &Arc<AItem>) -> Result<(), Throwable> {",
             "java::println!(\"item {}\", item.to_string()?);",
-            "java::or_break!(show(&Rc::new(AItem::new())), 'attempt);",
+            "java::or_break!(show(&Arc::new(AItem::new())), 'attempt);",
         ],
     );
 }
@@ -2649,13 +2649,13 @@ fn object_fields_that_may_be_null_are_options() {
     assert_contains(
         &rust,
         &[
-            "next: Option<Rc<Node>>,",
+            "next: Option<Arc<Node>>,",
             "while n.is_some() {",
             "s = s.wrapping_add(java::non_null(n.as_ref()).value);",
             "n = java::non_null(n.as_ref()).next.clone();",
-            "fn sum(head: &Rc<Node>) -> i32 {",
-            "let mut n: Option<Rc<Node>> = Some(head.clone());",
-            "sum(&Rc::new(Node::new(1, Some(Rc::new(Node::new(2, None))))))",
+            "fn sum(head: &Arc<Node>) -> i32 {",
+            "let mut n: Option<Arc<Node>> = Some(head.clone());",
+            "sum(&Arc::new(Node::new(1, Some(Arc::new(Node::new(2, None))))))",
         ],
     );
 }
@@ -2676,7 +2676,7 @@ fn fields_that_every_constructor_sets_are_not_options() {
             }
         }",
     );
-    assert_contains(&rust, &["from: Rc<Node>,", "to: Rc<Node>,", "Edge { from, to }"]);
+    assert_contains(&rust, &["from: Arc<Node>,", "to: Arc<Node>,", "Edge { from, to }"]);
     assert_lacks(&rust, &["Option", "non_null"]);
 }
 
@@ -2699,7 +2699,7 @@ fn objects_compare_by_identity() {
     assert_contains(
         &rust,
         &[
-            "java::println!(\"{}\", Rc::ptr_eq(&p, &q));",
+            "java::println!(\"{}\", Arc::ptr_eq(&p, &q));",
             "java::println!(\"{}\", !java::same(Some(&p), r.as_ref()));",
         ],
     );
@@ -2777,7 +2777,7 @@ fn object_parameters_used_only_through_are_borrowed() {
     // `keep` returns its parameter, so it takes the handle itself.
     assert_contains(
         &rust,
-        &["fn twice(b: &Rc<RefCell<Box_>>) {", "twice(&x);", "fn keep(b: Rc<RefCell<Box_>>)"],
+        &["fn twice(b: &Arc<RefCell<Box_>>) {", "twice(&x);", "fn keep(b: Arc<RefCell<Box_>>)"],
     );
 }
 
@@ -3184,7 +3184,7 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
             "java::println!(\"fine\")",
         ],
     );
-    assert_lacks(&rust, &["unreachable!"]);
+    assert_lacks(&rust, &["unreachable!()"]);
 }
 
 #[test]
@@ -3982,9 +3982,9 @@ fn an_interface_is_an_enum_over_its_implementors() {
     assert_contains(
         &rust,
         &[
-            "#[derive(Clone)]\nenum Shape {\n    Circle(Rc<Circle>),\n    Rect(Rc<RectFields>),\n    Square(Rc<Square>),\n    Color(Color),\n}",
+            "#[repr(u16)]\nenum Shape {\n    Circle(Arc<Circle>),\n    Rect(Arc<RectFields>),\n    Square(Arc<Square>),\n    Color(Color),\n}",
             "            Shape::Square(o) => o.base.area(),\n            Shape::Color(o) => (*o).area(),",
-            "Shape::Circle(Rc::new(Circle::new(1.0))), Shape::Rect(r.clone())",
+            "Shape::Circle(Arc::new(Circle::new(1.0))), Shape::Rect(r.clone())",
             "&s == &Shape::Rect(r.clone())",
         ],
     );
@@ -4036,7 +4036,7 @@ fn an_interface_with_one_implementor_is_that_class() {
     // body ignores.
     assert_contains(
         &rust,
-        &["let n = Rc::new(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
+        &["let n = Arc::new(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
     );
     assert_lacks(&rust, &["enum Named"]);
 }
@@ -4045,7 +4045,7 @@ fn an_interface_with_one_implementor_is_that_class() {
 fn a_class_whose_subclasses_never_become_its_values_is_not_an_enum() {
     let rust = translate(INTERFACES);
     // A `Square` is a `Shape` but never a `Rect`, so a `Rect` is always a `Rect` object.
-    assert_contains(&rust, &["let r = Rc::new(RectFields::new(2.0, 3.0));", "java::Double(r.area())"]);
+    assert_contains(&rust, &["let r = Arc::new(RectFields::new(2.0, 3.0));", "java::Double(r.area())"]);
     assert_lacks(&rust, &["enum Rect"]);
 }
 
@@ -4065,7 +4065,7 @@ fn interfaces_outside_the_program_are_rejected_except_comparable() {
         }
         class A { public static void main(String[] a) { System.out.println(new V(1).compareTo(new V(2))); } }",
     );
-    assert_contains(&rust, &["fn compare_to(&self, o: &Rc<V>) -> i32 {"]);
+    assert_contains(&rust, &["fn compare_to(&self, o: &Arc<V>) -> i32 {"]);
 }
 
 #[test]
@@ -4093,7 +4093,7 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
         &rust,
         &[
             "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
-            "Err(Throwable::Missing(Rc::new(",
+            "Err(Throwable::Missing(Arc::new(",
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "find(xs, x)?",
             "let attempt: Result<(), Throwable> = 'attempt: {",
@@ -4377,8 +4377,8 @@ fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
     assert_contains(
         &rust,
         &[
-            "static A_EMPTY_INSTANCE: RefCell<Option<Rc<AEmpty>>> = const { RefCell::new(None) };",
-            "A_EMPTY_INSTANCE.set(Some(Rc::new(AEmpty::new())));",
+            "static A_EMPTY_INSTANCE: RefCell<Option<Arc<AEmpty>>> = const { RefCell::new(None) };",
+            "A_EMPTY_INSTANCE.set(Some(Arc::new(AEmpty::new())));",
             "java::non_null(A_EMPTY_INSTANCE.with_borrow(|v| v.clone()))",
         ],
     );
@@ -4597,7 +4597,7 @@ fn a_pattern_binds_the_object_with_if_let() {
     assert_contains(
         &rust,
         &[
-            "    fn as_rect(&self) -> Option<Rc<Rect>> {\n        match self {\n            Shape::Rect(o) => Some(o.clone()),\n            _ => None,\n        }\n    }",
+            "    fn as_rect(&self) -> Option<Arc<Rect>> {\n        match self {\n            Shape::Rect(o) => Some(o.clone()),\n            _ => None,\n        }\n    }",
             "    if let Some(c) = s.as_circle() {\n",
             "    } else if let Some(r) = s.as_rect() && r.w == r.h {\n",
             "    s.as_rect().is_some_and(|r| r.w > r.h)",
@@ -4697,7 +4697,7 @@ fn object_values_are_an_enum() {
     assert_contains(
         &rust,
         &[
-            "enum Object {\n    Key(Rc<Key>),\n    Plain(Rc<Plain>),\n    String(java::JString),\n    Integer(i32),\n}",
+            "enum Object {\n    Key(Arc<Key>),\n    Plain(Arc<Plain>),\n    String(java::JString),\n    Integer(i32),\n}",
             "let s = Object::String(java::JString::from(\"text\"));",
             "let n = Object::Integer(5);",
             "let back = java::cast(&n, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE));",
@@ -4715,10 +4715,10 @@ fn equals_takes_the_object_enum() {
         &rust,
         &[
             "fn equals(&self, o: &Object) -> bool {",
-            "fn equals(&self, other: &Object) -> bool {\n        match self {\n            Object::Key(o) => o.equals(other),\n            Object::Plain(o) => matches!(other, Object::Plain(b) if Rc::ptr_eq(o, b)),\n            Object::String(o) => matches!(other, Object::String(b) if o == b),",
-            "Object::Plain(o) => java::address_hash(Rc::as_ptr(o)),",
+            "fn equals(&self, other: &Object) -> bool {\n        match self {\n            Object::Key(o) => o.equals(other),\n            Object::Plain(o) => matches!(other, Object::Plain(b) if Arc::ptr_eq(o, b)),\n            Object::String(o) => matches!(other, Object::String(b) if o == b),",
+            "Object::Plain(o) => java::address_hash(Arc::as_ptr(o)),",
             "Object::String(o) => java::string_hash(o),",
-            "Object::Plain(o) => fmt::Display::fmt(&java::default_text(\"Plain\", java::address_hash(Rc::as_ptr(o))), f),",
+            "Object::Plain(o) => fmt::Display::fmt(&java::default_text(\"Plain\", java::address_hash(Arc::as_ptr(o))), f),",
         ],
     );
 }
@@ -4857,7 +4857,7 @@ fn bounded_type_variables_erase_to_the_bound() {
         &rust,
         &[
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
-            "enum Comparable {\n    Point(Rc<Point>),\n    String(java::JString),\n}",
+            "enum Comparable {\n    Point(Arc<Point>),\n    String(java::JString),\n}",
             "Comparable::Point(o) => o.compare_to(other),",
             "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), b => java::cast_failed(java::CastSource::cast_class(&b), (\"java.lang.String\", java::BASE)) },",
         ],
@@ -4917,7 +4917,7 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
             "IntArray(java::Array<i32>),",
             "let held = Object::IntArray(cell.clone());",
             "java::cast(&held, |o| o.as_int_array(), (\"[I\", java::BASE))",
-            "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
+            "(Object::IntArray(a), Object::IntArray(b)) => Arc::ptr_eq(a, b),",
             "Object::IntArray(o) => java::identity_hash(o),",
         ],
     );
@@ -4943,7 +4943,7 @@ fn a_type_variables_array_passed_for_an_erased_array_erases_only_its_generic() {
     assert_contains(
         &rust,
         &[
-            "fn fixed(a: java::Array<Object>) -> Rc<MainFixed> {",
+            "fn fixed(a: java::Array<Object>) -> Arc<MainFixed> {",
             "fn either<T: Clone>(first: bool, a: T, b: T) -> T {",
         ],
     );
@@ -5082,9 +5082,12 @@ fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
             "let (src_pos, dest_pos, length_2) = (0, 0, length); match (&src, &dest) {",
             "(Object::IntArray(src), Object::IntArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
             "(Object::LongArray(src), Object::LongArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
-            "(Object::IntArray(_), Object::LongArray(_)) => java::throw(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch: can not copy int[] into long[]\"),",
+            "(src, dest) => java::throw_exception(java::arraycopy_mismatch(src.array_copy_kind(), dest.array_copy_kind())),",
+            "Object::IntArray(_) => java::CopyKind::Primitive(\"int\"),",
         ],
     );
+    // One arm takes every pair that fails, so the arms grow with the pairs of array types only.
+    assert_lacks(&rust, &["(Object::IntArray(_), Object::LongArray(_))"]);
 }
 
 #[test]
@@ -5105,7 +5108,7 @@ fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
         &rust,
         &[
             "fn count(xs: &[Object]) -> i32 {",
-            "let vs: Vec<Object> = vec![Object::V(Rc::new(V::new(1)))];",
+            "let vs: Vec<Object> = vec![Object::V(Arc::new(V::new(1)))];",
             "count(&vs)",
             "java::cast(&vs[0], |o| o.as_v(), (\"V\", java::APP)).n",
         ],
@@ -5122,7 +5125,7 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
         &[
             "fn next_integer(&mut self) -> i32 {",
             "fn next(&mut self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
-            "fn compare_to_point(&self, o: &Rc<Point>) -> i32 {",
+            "fn compare_to_point(&self, o: &Arc<Point>) -> i32 {",
             "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(&other, |o| o.as_point(), (\"Point\", java::APP)))\n    }",
         ],
     );
@@ -5163,7 +5166,7 @@ fn a_type_variable_hides_a_class_of_its_name() {
         class Holder<T> { T held; Holder(T held) { this.held = held; } T get() { return held; } }",
     );
     // The type variable is the Rust type parameter, and `T` the class only outside `Holder`.
-    assert_contains(&rust, &["struct Holder<T> {\n    held: T,\n}", "Holder::new(Rc::new(T::new()))"]);
+    assert_contains(&rust, &["struct Holder<T> {\n    held: T,\n}", "Holder::new(Arc::new(T::new()))"]);
 }
 
 const REAL_GENERICS: &str = "
@@ -5207,12 +5210,12 @@ fn a_simple_container_is_a_rust_generic() {
     assert_contains(
         &rust,
         &[
-            "struct Stack<T> {\n    head: Option<Rc<Node<T>>>,\n}",
+            "struct Stack<T> {\n    head: Option<Arc<Node<T>>>,\n}",
             "impl<T: Clone> Stack<T> {",
             "fn push(&mut self, value: T) {",
             "fn pop(&mut self) -> T {",
             "struct Pair<A, B> {\n    first: A,\n    second: B,\n}",
-            "fn swap(&self) -> Rc<Pair<B, A>> {",
+            "fn swap(&self) -> Arc<Pair<B, A>> {",
             "words.push(java::JString::from(\"a\"));",
         ],
     );
@@ -5284,13 +5287,13 @@ fn new_object_creates_a_plain_object_with_its_identity() {
     );
     assert_contains(
         &rust,
-        &["struct PlainObject {", "let o = Rc::new(PlainObject::new());", "java.lang.Object"],
+        &["struct PlainObject {", "let o = Arc::new(PlainObject::new());", "java.lang.Object"],
     );
 }
 
 #[test]
 fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
-    // `start` uses `this` as a value, so it takes the element's `&Rc<..>`, which the null check
+    // `start` uses `this` as a value, so it takes the element's `&Arc<..>`, which the null check
     // already gives.
     let rust = translate(
         "class P {
@@ -5336,7 +5339,7 @@ fn clone_in_a_class_tree_copies_each_runtime_class() {
         &rust,
         &[
             "AShape::Shape(_) => java::try_clone_refused(\"A$Shape\")?",
-            "AShape::Circle(o) => { let o = o.borrow(); AShape::Circle(Rc::new(RefCell::new(ACircle { base: AShapeFields { x: o.base.x }, r: o.r }))) }",
+            "AShape::Circle(o) => { let o = o.borrow(); AShape::Circle(Arc::new(RefCell::new(ACircle { base: AShapeFields { x: o.base.x }, r: o.r }))) }",
         ],
     );
 }
@@ -5637,7 +5640,7 @@ fn a_copy_from_a_subclass_array_into_an_object_array_stores_each_element_as_it_i
     assert_contains(
         &rust,
         &[
-            "java::try_copy_refs(&boxes, src_pos, &mut objects, dest_pos, length, |e: &Rc<MainBox>| -> Result<Option<Rc<MainBox>>, &'static str> { match e { x => Ok(Some(x.clone())), } })",
+            "java::try_copy_refs(&boxes, src_pos, &mut objects, dest_pos, length, |e: &Arc<MainBox>| -> Result<Option<Arc<MainBox>>, &'static str> { match e { x => Ok(Some(x.clone())), } })",
         ],
     );
     assert!(!rust.contains("arraycopy: type mismatch"), "{rust}");
@@ -5689,8 +5692,8 @@ fn a_null_copied_into_an_array_of_another_class_is_stored_there() {
     assert_contains(
         &rust,
         &[
-            "let mut filled: Vec<Option<Rc<MainPlain>>>",
-            "|e: &Option<Rc<MainBox>>| -> Result<Option<Rc<MainPlain>>, &'static str> { match e { None => Ok(None), _ => Err(",
+            "let mut filled: Vec<Option<Arc<MainPlain>>>",
+            "|e: &Option<Arc<MainBox>>| -> Result<Option<Arc<MainPlain>>, &'static str> { match e { None => Ok(None), _ => Err(",
         ],
     );
 }

@@ -19,7 +19,7 @@ are what make the output good:
 - **Class hierarchies become Rust enums.** A virtual call is a `match` over the known subclasses
   ([object-model.md](object-model.md)).
 - **The analyses hold for the whole program**: a value that is never null needs no `Option`, an
-  object with one owner needs no `Rc`, a method that never throws needs no `Result`, arithmetic
+  object with one owner needs no handle, a method that never throws needs no `Result`, arithmetic
   that cannot overflow needs no wrapping ([thorough-mode.md](thorough-mode.md),
   [natural-rust.md](natural-rust.md)).
 - **Unreachable code is left out**, so a program that uses a `HashMap` does not carry the JDK.

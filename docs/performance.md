@@ -15,333 +15,99 @@ median of the runs, wall clock. Java runs with its default flags, so JVM start-u
 program that warms up prints `kernel-ms N` on standard error; that is the time of the timed loop
 measured inside the program, and it is reported in the two kernel columns.
 
-## Results of 2026-10-21
+## Results
 
-Three runs of `python3 scripts/benchmark.py` on the `benchmarks-rerun` branch, which starts from
-main at `877411b`, after the object model, exceptions, nested classes and lambdas landed. Each
-run is five runs per side, medians. Each column below is the median of the three runs, and
-Rust/Java is the ratio of those two medians. Times in milliseconds.
+One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
+milliseconds) at a load average of 2.5 on 16 cores.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
-- Rust: rustc 1.99.0 (b940084d7 2026-09-28), release profile without LTO (the crates the translator writes now build in release with fat LTO)
-- Load average at the start of each run: 20.8, 7.1 and 10.8 (on 16 cores); run 3 ended at 22.6.
-  Run 1 started at 20.8, just above the threshold of 20 for starting a run.
+- Rust: rustc 1.99.0 (b940084d7 2026-09-28); the crates the translator writes build in release
+  with fat LTO
 
 | program        | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
 |----------------|--------:|--------:|----------:|------------:|------------:|-------------:|
-| BinaryTrees    |     774 |    7444 |      9.62 |           - |           - |            - |
-| Collatz        |    1217 |     604 |      0.50 |           - |           - |            - |
-| Interpreter    |    1121 |    1141 |      1.02 |         358 |         378 |         1.06 |
-| Mandelbrot     |    3496 |    1218 |      0.35 |        1152 |        1216 |         1.06 |
-| MatrixMultiply |     356 |     356 |      1.00 |          62 |          96 |         1.55 |
-| NBody          |    1853 |    1889 |      1.02 |         616 |         630 |         1.02 |
-| NodeList       |       - |       - |         - |           - |           - |            - |
-| Sieve          |    1219 |    1059 |      0.87 |           - |           - |            - |
-| SortMillion    |    1765 |    1799 |      1.02 |         541 |         598 |         1.11 |
-| Statics        |    1331 |    2190 |      1.65 |           - |           - |            - |
-| StringBuild    |      30 |       1 |      0.03 |           - |           - |            - |
+| BinaryTrees    |     686 |    1879 |      2.74 |           - |           - |            - |
+| Collatz        |    1131 |     567 |      0.50 |           - |           - |            - |
+| Interpreter    |    1086 |    1152 |      1.06 |         335 |         382 |         1.14 |
+| Mandelbrot     |    3359 |    1111 |      0.33 |        1114 |        1109 |         1.00 |
+| MatrixMultiply |     121 |    1878 |     15.56 |          27 |         625 |        23.15 |
+| NBody          |    1776 |    1846 |      1.04 |         588 |         599 |         1.02 |
+| NodeList       |     207 |     148 |      0.72 |           - |           - |            - |
+| ParticleArray  |    1392 |    1019 |      0.73 |           - |           - |            - |
+| Sieve          |    1166 |     951 |      0.82 |           - |           - |            - |
+| SortMillion    |    1679 |    1753 |      1.04 |         519 |         581 |         1.12 |
+| Statics        |    1248 |    2632 |      2.11 |           - |           - |            - |
+| StringBuild    |      26 |       1 |      0.05 |           - |           - |            - |
+| TokenScanner   |     958 |    1624 |      1.70 |           - |           - |            - |
 
-NodeList compiles and runs, but it does not finish: its Rust binary aborts with a stack overflow
-(exit -6), so no time is reported. See the NodeList section below.
+Differences of 20% or less between two runs are often noise or the placement of code and data
+(see Statics below); the large ratios are not.
 
-The spread between runs is wide, so only the large differences are meaningful. Rust times of the
-same program ranged from 5811 to 11902 ms for BinaryTrees, 1885 to 4171 ms for NBody (its kernel
-was 625 to 630 ms in two runs and 1315 ms in the third), and 1155 to 1715 ms for Mandelbrot.
+## What the times come from
 
-### Comparison with the earlier table
+Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`, and from
+profiles taken with `perf`.
 
-Earlier table: the array-ownership branch (`fd9bace`), a single run at load 72, shown below.
-
-| program        | earlier Rust/Java | now Rust/Java | change  | Rust ms, earlier → now |
-|----------------|------------------:|--------------:|--------:|-----------------------:|
-| BinaryTrees    |              3.32 |          9.62 |   +190% |        5770 → 7444     |
-| Collatz        |              0.38 |          0.50 |    +32% |         601 → 604     |
-| Interpreter    |              1.04 |          1.02 |     -2% |        1321 → 1141    |
-| Mandelbrot     |              0.33 |          0.35 |     +6% |        1179 → 1218    |
-| MatrixMultiply |              1.47 |          1.00 |    -32% |         214 → 356     |
-| NBody          |              1.02 |          1.02 |      0% |        1858 → 1889    |
-| NodeList       |   does not compile |   stack overflow |       - |               - → -   |
-| Sieve          |              0.71 |          0.87 |    +23% |        1060 → 1059    |
-| SortMillion    |              0.72 |          1.02 |    +42% |        5658 → 1799    |
-| Statics        |              0.98 |          1.65 |    +68% |        1763 → 2190    |
-| StringBuild    |              0.05 |          0.03 |       - |           2 → 1        |
-
-Causes of the changes:
-
-- **Statics (+68%) is a real slowdown, but the hot loop does no extra work.** The generated Rust
-  is the same as the earlier translator's. Counted with `perf_event_open` (`perf` is not installed
-  here, so the count is read directly from the kernel), both runtimes retire the same instructions:
-  47,531,803,862 for `fd9bace` and 47,531,804,122 for HEAD, in the per-commit bisect builds. The
-  `statics::main` code is identical in both binaries apart from two string addresses. The cycle
-  counts differ: in interleaved runs at load 15, `fd9bace` took 8.7 to 9.0 billion cycles and HEAD
-  took 10.6 to 10.9 billion.
-  - The hot loop starts at a different offset in the two binaries (`0x17540` and `0x173e0`), so
-    the difference looks like code placement. Building the same HEAD crate with
-    `-C llvm-args=-align-all-functions=6` brought it back to 8.5 to 8.9 billion cycles. That is a
-    build setting, not a runtime change, and it was not applied: it affects every benchmark.
-  - The throw path and the accessors are already `#[cold]`/`#[inline(never)]` (throw) and
-    `#[inline]` (`position`, `get`, `set`), since before `fd9bace`, and no call into them is in
-    the hot loop. So there was no throw or accessor change to fix.
-  - Across the runtime commits since `fd9bace`, the instruction count is 47.5 billion from
-    `3f5f715` on. Cycles for those same commits range from 7.6 to 13.5 billion on the loaded
-    machine, with no commit that stands out. No commit is named as the cause.
-  - The earlier split (about 170 ms for `throw`, 370 ms for `array.rs`) came from wall-clock runs.
-    The instruction counts do not support it, so it should not be read as a measured cause.
-  - Not done: the per-benchmark instruction comparison of the other programs in
-    `scripts/benchmark.py`. No runtime change was made, so nothing could have become slower.
-- **SortMillion (+42%), Collatz (+32%), Sieve (+23%), BinaryTrees (+190%) did not get slower in
-  Rust.** The generated Rust is the same as the earlier translator's, except for Collatz
-  (`n = n / 2` is now `n /= 2`, the same operation). BinaryTrees ran at 5.8 s on both translators
-  in back-to-back runs. Their Rust times are the same or lower than before: SortMillion went from
-  5658 to 1799 ms. What moved the ratio is the Java side, which was 1.5 to 4.5 times faster than in
-  the earlier run at load 72 (BinaryTrees 1736 to 774 ms, SortMillion 7860 to 1765 ms).
-- **MatrixMultiply (-32%)** is noise: the Rust side ranged from 182 to 467 ms across the three
-  runs, and the generated Rust is the same.
-- **Mandelbrot (+6%), Interpreter (-2%), NBody (0%), StringBuild** are within the noise. StringBuild
-  runs in 1 ms on Rust, below the resolution of the script's rounding.
-
-## Allocation and strings (runtime-performance branch)
-
-Third-party programs that allocate many objects or build strings ran far slower than Java: Are We
-Fast Yet's Json took 18 s against Java's 0.12 s, and binary trees about 5.5 times Java. They were
-translated and timed outside the repository, and their output was compared with Java's. The
-programs are not in the repository; `benchmarks/TokenScanner.java` and
-`benchmarks/ParticleArray.java` are written for it and show the same two patterns as Json and
-n-body.
-
-Times are the median of interleaved wall-clock runs, on the same machine as above, at a load
-average of 6 to 19 on 16 cores, so differences under about 20% are noise. "Before" is the
-translator at the start of the branch (`0de7106`), "after" is this branch.
-
-| program            | Java s | before s | after s | before/Java | after/Java |
-|--------------------|-------:|---------:|--------:|------------:|-----------:|
-| AWFY Json          |  0.133 |   16.356 |   0.057 |       123   |       0.43 |
-| binarytrees-2      |  0.624 |    2.684 |   1.856 |        4.3  |        3.0 |
-| binarytrees-3      |  0.282 |    1.388 |   0.895 |        4.9  |        3.2 |
-| binarytrees-6      |  0.322 |    1.531 |   0.952 |        4.8  |        3.0 |
-| AWFY List          |  0.232 |    0.685 |   0.651 |        3.0  |        2.8 |
-| AWFY Permute       |  0.182 |    0.300 |   0.271 |        1.6  |        1.5 |
-| AWFY Towers        |  0.219 |    0.595 |   0.557 |        2.7  |        2.5 |
-| nbody-2            |  0.301 |    0.648 |   0.328 |        2.2  |        1.09 |
-| nbody-3            |  0.288 |    0.579 |   0.300 |        2.0  |        1.04 |
-| nbody-4            |  0.302 |    0.264 |   0.276 |        0.87 |        0.91 |
-
-Medians of five interleaved runs at load 10 to 19. binarytrees-2's run was the noisiest: its
-fastest runs were 1.42 s before, 0.90 s after and 0.21 s for Java. With the machine quieter (load
-6), all three binary trees took 1.29 s before and 0.85 s after, against 0.23 s for Java.
-
-### What was fixed
-
-- **Strings read from a field (Json: 16.4 s to 0.06 s; TokenScanner: over 120 s to 1.8 s).**
-  Json's parser reads its 30 KB input one character at a time with `input.substring(index, index + 1)` and checks
-  `index < input.length()`. Each read did three walks of the whole input: `length()` counted it
-  with `encode_utf16`, and the field `input` of the parser was cloned to be borrowed, twice per
-  statement. That is quadratic.
+- **Allocation (BinaryTrees 2.7x, NodeList 0.7x).** Objects live in the runtime's garbage
+  collected heap (docs/collector.md): an allocation takes a slot from a per-thread list, and a
+  handle is copied without a count. BinaryTrees keeps a tree of about 89 MB alive while it builds
+  and drops millions of short-lived ones; the collector marks that long-lived tree again at each
+  of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads), which is
+  most of the remaining gap. A young generation, planned in docs/native-speed.md, would collect
+  the short-lived trees without marking the old one. NodeList walks and rebuilds a linked list of
+  about 667,000 nodes; its nodes are taken from blocks in address order, so the walk follows
+  memory.
+- **Strings read from a field (TokenScanner 1.7x).** A parser that reads its input one character
+  at a time with `input.substring(index, index + 1)` and checks `index < input.length()` runs in
+  linear time:
   - `java::string_length` counts ASCII text by its byte length, and other text from its bytes
     without decoding it.
   - A string field of a plain object (an owned or immutable object, or `this` in its methods) is
     borrowed where it is when the statement neither assigns that field, nor passes the object on,
-    nor calls a `&mut self` method of it (`codegen/strings.rs`, `Steady`). Before, only fields of
-    immutable classes were.
+    nor calls a `&mut self` method of it (`codegen/strings.rs`, `Steady`).
   - The ASCII analysis follows `String` fields (instance and static, by name, only where every
     field of that name is a `String`), the overrides of a method, enum constants, and the
     exceptions the runtime raises. On a string proved ASCII, `length()` is the byte length and
-    `substring` is `java::ascii_substring`, a byte slice with Java's bounds check.
-  - A call of a method that returns a type variable was taken for ASCII before; it no longer is.
-- **A memory allocator for small objects (binary trees: about 1.3 s to 0.85 s).** Every Java
-  object is a `Box` or an `Rc` in Rust, so a program that makes and drops millions of tree nodes
-  spends most of its time in glibc's `malloc` and `free`. A JVM allocates by bumping a pointer and
-  frees young objects in bulk. The runtime now has a global allocator
-  (`runtime/src/allocator.rs`), which every translated program installs. It keeps freed blocks of
-  up to 136 bytes per size and per thread, and the next allocation of that size on that thread
-  takes one back. Every block is still a block of the system allocator, of the size of the glibc
-  chunk the request would get anyway, so a block freed on another thread is correct and no memory
-  is wasted. A thread keeps at most 64 MB in all sizes together, and all threads together at
-  most 256 MB, counting the arrays that list the blocks; past either budget a freed block goes
-  back to glibc. A thread takes its share of the process's budget in grants of 1 MB, so keeping a
-  block rarely touches the shared count. A thread started by `Thread.start` gives its blocks and
-  its grants back when it ends.
-  - The first version allowed 64 MB per size and per thread, with no limit across threads: in
-    the worst case about 585 MB per live thread (eight sizes, and the arrays). The budgets cost
-    little: binarytrees-2 went from 0.93 to 0.99 s (fastest of nine interleaved runs), -3 from
-    0.96 to 1.00 s, -6 from 0.91 to 0.96 s, and NodeList's twelve rounds from 0.42 to 0.43 s
-    (glibc 0.54 s), at load 12 to 21.
-  - The first version kept the blocks on a list threaded through them, last freed first taken.
-    It made `NodeList` ten times slower (540 ms to 5.8 s): the list's nodes, freed in list order
-    and taken back in reverse, were spread more widely over memory every round, and walking the
-    list missed the processor's cache at every node: each round took about 45 ms with glibc,
-    and with the list grew from 56 ms to 650 ms by the twelfth. glibc's own lists did not show
-    this; how it keeps the order was not investigated.
-  - So the blocks are kept in an array per size, and when at least 65536 blocks were freed since
-    the last sort and they are at least half the array, the next allocation sorts the array by
-    address. The next structure then gets its nodes in order of address, as from fresh memory.
-    NodeList's twelve rounds now take 0.39 s, against 0.47 s with glibc. The sort costs binary
-    trees about 3% against never sorting; a radix sort on the addresses was slower than the
-    comparison sort, because the addresses span four passes' worth of bits and the comparison
-    sort profits from runs already in the data. Taking a block from an array instead of a list
-    also no longer reads the block's memory, which was a cache miss.
-- **Elements of an object array read again (nbody-2: 0.65 s to 0.33 s, nbody-3: 0.58 s to
-  0.30 s, ParticleArray: 3.75 s to 1.30 s).** `bodies[i].x` copies
-  the element's handle out of the shared array (a borrow of the array and a reference count
-  increment and decrement) at every read, and n-body reads `bodies[i]` and `bodies[j]` a dozen
-  times per step. Consecutive statements that read the same element, with an array that is a
-  local, a field of `this` or a static and an index that is a local or a constant, now read it
-  once into a local, when none of those statements assigns the array, the index, or an element of
-  any object array, and none of them calls a method (`lower/element_reads.rs`). The local is
-  declared without `mut` when it is assigned once.
-
-### Found but not fixed
-
-- **Binary trees (still about 3x).** binarytrees-3 and -6 build each node first and set `left`
-  and `right` afterwards, so the nodes are mutated after construction and are `Rc<RefCell<..>>`,
-  not plain boxes. Profiled with a sampling profiler (binarytrees-3, after): 18% of the samples
-  are writing the new nodes (`Box::new`: the memory is not in the cache), about 23% sorting the
-  allocator's array, 8% dropping `Rc`s, and the rest reference counts, `RefCell` borrow flags and
-  the depth check of the iterative drop (`drop_links`, 4 to 6%). The sort pays for itself: never
-  sorting was only 3% faster here and made NodeList ten times slower. `checkTree(node.left)`
-  passes a nullable object by value, which clones the field (a count increment and decrement).
-  Closing the rest of the gap needs either passing a nullable object parameter as a borrow when
-  the callee does not keep it, or an arena for objects that do not escape a method; both are
-  larger changes to the object model. A JVM's young-generation allocation and collection is
-  hard to match with `malloc` and reference counts.
-- **List and Towers (about 3x).** The time is in reference counting and `RefCell` borrow flags:
-  in Towers, `Rc` increments are 18% of the samples, `RefCell` borrows 15%, `Rc` drops 8%, and
-  `java::get`/`set` on the shared array of stacks the rest. Java pays none of these. This is the
-  cost of the `Rc<RefCell<..>>` model for objects that are shared and mutated; there is no local
-  fix in the translator.
-- **Permute (1.5x).** Its field `v` is an `int[]` that is swapped in place, so it is a shared
-  `java::Array` with a `RefCell` borrow at every access. Making it a plain `Vec` needs ownership
-  analysis of array fields, which the array analysis does only for locals and parameters today.
-- **The iterative `Drop` for classes on a cycle of field types** (see "NodeList" below) costs 4
-  to 8% on binary trees, against a recursive drop. It is needed so that freeing a long list does
-  not overflow the stack, so it stays.
-
-### The repository's benchmarks
-
-`python3 scripts/benchmark.py`, five runs per side, before (on `0de7106`, load 12 at the start)
-and after (this branch, load 15.5 at the start). Rust milliseconds:
-
-| program        | Java ms before | Rust ms before | Java ms after | Rust ms after | Rust/Java before | Rust/Java after |
-|----------------|------:|------:|------:|------:|------:|------:|
-| BinaryTrees    |   909 |  7143 |   864 |  3464 |  7.86 |  4.01 |
-| Collatz        |  1284 |   623 |  1271 |   635 |  0.48 |  0.50 |
-| Interpreter    |  1261 |   896 |  1154 |   869 |  0.71 |  0.75 |
-| Mandelbrot     |  3554 |  1194 |  3543 |  1328 |  0.34 |  0.37 |
-| MatrixMultiply |   164 |   202 |   161 |   228 |  1.23 |  1.42 |
-| NBody          |  2156 |  2211 |  2011 |  2074 |  1.03 |  1.03 |
-| NodeList       |   269 |   540 |   262 |   393 |  2.01 |  1.50 |
-| ParticleArray  |  1474 | 3752* |  1562 |  1295 |  2.5* |  0.83 |
-| Sieve          |  1453 |  2262 |  1303 |   997 |  1.56 |  0.76 |
-| SortMillion    |  1872 |  1969 |  1906 |  1953 |  1.05 |  1.02 |
-| Statics        |  1398 |  2055 |  1379 |  2440 |  1.47 |  1.77 |
-| StringBuild    |    39 |     1 |    44 |     2 |  0.04 |  0.05 |
-| TokenScanner   |     - |  >120 s* |  1364 |  1768 |     - |  1.30 |
-
-\* ParticleArray and TokenScanner were added on this branch; their "before" is the base
-translator's build of them, timed separately (ParticleArray: interleaved with the after build at
-load 9; TokenScanner: stopped after 120 s at 1500 rounds, a third of the final size, since
-`length()` and `substring` walked the 40 KB text at every character).
-
-Apart from BinaryTrees, NodeList, ParticleArray and TokenScanner, the generated Rust is the same
-before and after except for the two lines that install the allocator, and the differences are
-noise or placement:
-
-- **Mandelbrot** took 1179 and 1196 ms in interleaved runs before and after.
-- **Statics** was 30% slower in interleaved runs (1.86 s before, 2.15 s after, load 7). Its hot
-  loop allocates nothing, and its machine code is the same apart from register names. Aligning
-  every function to 64 bytes did not change it. What changed is where its data lies: the
-  allocator's thread-local cache sits between `Statics`' own thread-locals. A build without the
-  allocator whose only change moves the histogram array on the heap by 32 bytes is just as slow
-  (2.20 s against 1.94 s). Like the code-placement effect described above, it is a property of
-  the machine and the layout, not work the program does.
-- **MatrixMultiply and Sieve** moved by less than the spread between runs shown in the tables
-  above (182 to 467 ms for MatrixMultiply).
-
-## Earlier results: array-ownership branch
-
-One run of `python3 scripts/benchmark.py` on the `array-ownership` branch (five runs per side,
-medians, load average 72 at start). Times in milliseconds.
-
-| program        | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
-|----------------|--------:|--------:|----------:|------------:|------------:|-------------:|
-| BinaryTrees    |    1736 |    5770 |      3.32 |           - |           - |            - |
-| Collatz        |    1565 |     601 |      0.38 |           - |           - |            - |
-| Interpreter    |    1274 |    1321 |      1.04 |         390 |         430 |         1.10 |
-| Mandelbrot     |    3571 |    1179 |      0.33 |        1193 |        1177 |         0.99 |
-| MatrixMultiply |     146 |     214 |      1.47 |          31 |          66 |         2.13 |
-| NBody          |    1820 |    1858 |      1.02 |         605 |         618 |         1.02 |
-| NodeList       |       - |       - |         - |           - |           - |            - |
-| Sieve          |    1484 |    1060 |      0.71 |           - |           - |            - |
-| SortMillion    |    7860 |    5658 |      0.72 |        2843 |        1319 |         0.46 |
-| Statics        |    1800 |    1763 |      0.98 |           - |           - |            - |
-| StringBuild    |      33 |       2 |      0.05 |           - |           - |            - |
-
-NodeList did not compile on that branch; it compiles now and runs since the drop of long chains
-was made iterative. See below.
-
-The four programs that use arrays most, before (main at `18ab2fb`) and after the array
-ownership work, run back to back in the same minutes:
-
-| program        | before Rust/Java | before kernel ratio | after Rust/Java | after kernel ratio |
-|----------------|-----------------:|--------------------:|----------------:|-------------------:|
-| Interpreter    |             3.74 |                1.23 |            1.06 |               1.18 |
-| MatrixMultiply |            34.92 |               76.64 |            1.41 |               2.07 |
-| Sieve          |             2.10 |                   - |            0.81 |                  - |
-| SortMillion    |             5.55 |                6.65 |            0.89 |               0.86 |
-
-An earlier pair of runs, at load 74 before and 27 after, gave MatrixMultiply kernel ratios of
-99.15 before and 8.68 after with the plain arrays alone (before the sliced loops below), and
-Sieve 0.74 before and 0.49 after.
-
-## Causes of the slow cases (earlier run)
-
-Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`.
-
-- **MatrixMultiply (was 85x; kernel 140x; now 1.5x, kernel 2.1x).** Element access `c[i][j]`
-  was `java::get(&java::get(&c, i), j)`: the outer `get` cloned the row's handle (an `Rc`), and
-  each access borrowed a `RefCell` and checked the bounds. The matrices are now plain
-  `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
-  and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
-  is assigned. `c = new int[n][n]` with `n = a.length` puts `c[i][j]` in bounds, so it is
-  `c[i as usize][j as usize]`. The rows of `b` have unknown lengths, so `b[k][j]` keeps Java's
-  check, but the inner loop checks it once before it starts: when `k` is a row of `b` and `n`
-  is at most the lengths of `b[k]` and `c[i]`, the loop runs over the slices
-  `&b[k][..n]` and `&mut c[i][..n]`, without a check, and vectorizes; otherwise it runs with
-  every check (see `analysis/arrays/slices.rs`). The remaining 2x against the JIT is not
-  profiled; the loop still computes with `wrapping_add` and `wrapping_mul` on `i32`.
-- **StringBuild (31x before the ASCII fix).** Before the fix, `s.charAt(i)` became
-  `java::char_at`, which calls `encode_utf16().nth(i)`, so each access walked the string. The
-  loop condition `i < s.length()` called `java::string_length`, `encode_utf16().count()`, so each
-  iteration walked it again: the scan was quadratic. The range analysis now records each
-  `(char)` cast whose value stays in `0..=0x7f` (`analysis/ranges.rs`). A string made only of
-  such casts is ASCII, so `charAt` is `s.as_bytes()[i] as u16` and `length()` is `s.len()`. A
-  string that may hold a non-ASCII unit keeps the UTF-16 walk, which is still linear per access.
-- **Statics (3.2x before the fix).** Each static field was a `thread_local!` `RefCell`, reached
-  through `with_borrow` and `with_borrow_mut`. A primitive static is now a `Cell`, read with
-  `get` and written with `set`, which needs no borrow flag. Other statics stay `RefCell`.
-- **BinaryTrees (3.3x here, 8x on a busier run).** `count(node: Option<Rc<..>>)` clones the
-  `left` and `right` handles on every call (a refcount increment and decrement each), and checks
-  for `null` at every access. Allocation goes through `Rc`. Not profiled; these are read from
-  the code.
-- **Interpreter (was 1.9x to 3.7x; now 1.0x, kernel 1.1x).** The stack and locals were already
-  plain `Vec<i32>`, but every access went through `java::at` and `java::put`, with the code
-  that builds the exception next to each access. The indexes come from the program being interpreted, so
-  they cannot be proven in range; the checks stay, but the check is now an inlined compare and
-  a branch to a `#[cold]`, `#[inline(never)]` throwing function (runtime `array.rs`), and
-  `java::at`, `put` and `modify` are `#[inline]`.
-- **Sieve (was 1.6x to 2.1x; now 0.7x to 0.8x).** `composite` is `new boolean[limit + 1]`, and
-  the bounds analysis proves both loops in range: `i * i <= limit` with `i >= 2` gives
-  `i <= limit`, `j <= limit` bounds the inner loop, and the size `limit + 1` is longer than any
-  of them. Every access is `composite[i as usize]` with no check.
-- **SortMillion (was 1.6x to 5.6x; now 0.7x to 0.9x).** `randomInts` returns a plain `Vec`,
-  and `quickSort` borrows it as `&mut [i32]`. Its indexes (`i`, `j`, the pivot) cannot be proven
-  in range, so they keep their checks, on the cheaper path. `library` is given to
-  `Arrays.sort`, so it stays a shared `java::Array`; the library helpers do not take plain
-  arrays yet.
-
-Mandelbrot (0.33x, kernel 0.99x), Collatz (0.38x) and NBody (1.02x) are at or faster than Java
-and need no change.
+    `substring` is `java::ascii_substring`, a byte slice with Java's bounds check. A call of a
+    method that returns a type variable is not taken for ASCII.
+  - What remains is a stall: the new one-letter string comes back from `ascii_substring` written
+    as 8-byte stores and is copied into the field with a 16-byte load, which the processor cannot
+    forward from those stores. `perf stat` counts about one blocked forward per character
+    (`ls_bad_status2.stli_other`, 1.09 billion), about a quarter of the run's cycles. Which copy
+    instruction rustc picks there depends on the build.
+- **Elements of an object array read again (NBody 1.0x, ParticleArray 0.7x).** Consecutive
+  statements that read the same element, with an array that is a local, a field of `this` or a
+  static and an index that is a local or a constant, read it once into a local, when none of
+  those statements assigns the array, the index, or an element of any object array, and none of
+  them calls a method (`lower/element_reads.rs`). The local is declared without `mut` when it is
+  assigned once.
+- **Plain arrays (Sieve 0.8x, SortMillion 1.0x, Interpreter 1.1x).** An array that is not
+  shared is a `Vec`, borrowed as a slice by the methods it is passed to. Sieve's indexes are
+  proven in range, so every access is `composite[i as usize]` with no check: `i * i <= limit`
+  with `i >= 2` gives `i <= limit`, and the size `limit + 1` is longer than any of them.
+  SortMillion's `quickSort` borrows its `Vec` as `&mut [i32]`; its indexes cannot be proven in
+  range, so they keep Java's check, an inlined compare and a branch to a `#[cold]`,
+  `#[inline(never)]` throwing function (runtime `array.rs`). Interpreter's stack and locals are
+  plain `Vec<i32>` with the same checks, since its indexes come from the program it interprets.
+  `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`.
+- **MatrixMultiply (15.6x, kernel 23x).** `multiply(a, b)` takes its matrices as shared
+  `java::Array<java::Array<i32>>` by value, and `run` passes `b.clone()` since it reads `b`
+  afterwards (`a = b`). So the inner loop reads `b[k][j]` with two `java::get` calls, each a
+  borrow and a bounds check, and does not vectorize. Borrowing both matrices as `&[Vec<i32>]`, as
+  `c` already is in `multiply`, gives the sliced inner loop of `analysis/arrays/slices.rs`
+  (`&b[k][..n]` and `&mut c[i][..n]` without checks, once `n` is checked against both rows),
+  which ran within 1.5 times Java's kernel; the array analysis no longer finds that the parameters can be
+  borrowed here.
+- **Statics (2.1x).** A primitive static is a `thread_local!` `Cell`, read with `get` and
+  written with `set`; the histogram, an `int[]`, is a `thread_local!` `RefCell`. The hot loop
+  does no allocation and no extra work, but 59% of its samples sit on a single store into a
+  thread-local that the next iteration reads back: the cost moves with where the thread-locals
+  and the loop land in the binary, and has ranged from 1.0x to 2.1x Java with the same generated
+  code.
+- **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
+  from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
+  casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
 
 ## Translating whole programs
 
@@ -443,104 +209,55 @@ Further speed-ups, not done:
 ## The translated javac
 
 javac translated as a whole program with `--census` (`scripts/javac-check.sh` checks its output
-against the real javac's), timed against the real javac on three inputs:
+against the real javac's), timed against the real javac on four inputs:
 `scripts/javac-check/hello` (one class), `corpus/programs` compiled together (47 files, 121 class
-files) and the files of `corpus/features` at 21d7678e that javac compiles together (540 files,
-1,509 class files; the 13 left out declare a public class under another file's name or one that another file
-declares too). Wall clock, the best of three rounds, each round running every build once on each
-input, so that a passing load hits them alike. Every run gives the same class files and the same
-standard error as the real javac, and the PGO build passes the whole `--corpus` check.
+files), the files of `corpus/features` at 21d7678e that javac compiles together (540 files,
+1,509 class files; the 13 left out declare a public class under another file's name or one that
+another file declares too), and a large server code base outside the repository (about 4,700
+files). Wall clock, the best of three rounds for the first three; peak memory is the resident
+set of the process. Every run gives the same class files and the same standard error as the real
+javac.
 
-| build | build peak | build time | hello | 47 programs | 540 features |
-|---|---:|---:|---:|---:|---:|
-| real javac (JDK 26) | | | 0.19 s | 0.61 s | 1.90 s |
-| `opt-level = 3`, 256 codegen units | 13.9 GB | 5.4 min | 0.056 s | 1.02 s | 7.24 s |
-| the same with `lto = "thin"` | 13.8 GB | 5.3 min | 0.053 s | 0.98 s | 6.96 s |
-| `lto = "fat"`, 16 codegen units | 13.6 GB | 9.4 min | 0.050 s | 0.91 s | 6.47 s |
-| `lto = "fat"` and PGO | 16.3 GB | 25 min | 0.040 s | 0.65 s | 4.31 s |
-| the same, at 7ebdc33c (below) | about 21 GB | 30 min | 0.023 s | 0.38 s | 2.68 s |
+| build | hello | 47 programs | 540 features | large code base |
+|---|---:|---:|---:|---:|
+| real javac (JDK 26) | 0.19 s | 0.63 s, 210 MB | 1.85 s, 430 MB | 11.3 s, 4.1 GB |
+| reference counts, `lto = "fat"` and PGO | 0.022 s | 0.36 s | 2.43 s | 60.2 s, 6.2 GB |
+| reference counts, quick build | 0.035 s | 0.55 s, 86 MB | 3.93 s, 257 MB | 93.7 s, 6.2 GB |
+| collector, quick build | 0.023 s | 0.34 s, 172 MB | 2.40 s, 301 MB | 59.7 s, 4.1 GB |
 
-The crate is one of about 537,000 lines, built with all 16 cores; the peak is the memory of the
-whole build (cargo and rustc). Fat LTO also makes the binary 22% smaller (72 MB against 92 MB),
-and the crates the translator writes use it for their release builds (`lto = "fat"`). PGO (profile-guided optimization) is three steps, which `scripts/pgo-build.sh CRATE TRAIN_COMMAND`
-runs for any translated crate: a build with `-Cprofile-generate`, a run of it
-over inputs that are not the timed ones (`corpus/threads` and `corpus/whole-program` together,
-each project of `corpus/projects`, and the javac-check cases other than hello; 5 s), and a build
-with `-Cprofile-use` of the merged profile (`llvm-profdata` from rustup's `llvm-tools`). Its
-build time is the two builds together, and its peak is the instrumented build's. PGO takes a
-third off the time of fat LTO alone.
+The quick build is `opt-level = 3` with 256 codegen units and no LTO: it builds in under three
+minutes with a peak of 11 GB, and ranks changes, but runs about 1.6 times slower than a fat LTO
+build with PGO. Under the collector the quick build already matches the reference-counted fat
+LTO and PGO build, and on the large code base uses as much memory as the real javac. On the 47
+programs the collector holds more than reference counting did because it does not collect
+before 64 MB have been allocated (docs/collector.md).
 
-The last row is the same build of javac as translated at 7ebdc33c, after the changes below; the
-real javac took 0.19 s, 0.60 s and 1.89 s in the same rounds. Hello is 8 times faster than the
-real javac, which pays the JVM's start-up, and the 47 programs 1.6 times faster. On the 540
-features the translation is still 1.4 times slower than the real javac, whose JIT has warmed up
-by then.
+The crate is one of about 537,000 lines, built with all 16 cores. Fat LTO makes the binary 22%
+smaller (72 MB against 92 MB), and the crates the translator writes use it for their release
+builds (`lto = "fat"`). PGO (profile-guided optimization) is three steps, which
+`scripts/pgo-build.sh CRATE TRAIN_COMMAND` runs for any translated crate: a build with
+`-Cprofile-generate`, a run of it over inputs that are not the timed ones (`corpus/threads` and
+`corpus/whole-program` together, each project of `corpus/projects`, and the javac-check cases
+other than hello; 5 s), and a build with `-Cprofile-use` of the merged profile (`llvm-profdata`
+from rustup's `llvm-tools`). It takes a third off the time of fat LTO alone, and the fat LTO
+build with PGO takes about 30 minutes.
 
 javac starts one thread, the file manager's deferred close, which a normal run never starts, but
 its reachable `Thread.start()` makes the program threaded and most of its classes
-`Arc<java::Locked<..>>` (docs/multi-threading.md, section 4). A build that took no locks at all
-showed that locking was about a third of the time. Until a second thread starts, the translation
-now pays for being threaded with plain loads and stores only: the reference counts of
-`java::Arc` (`shared.rs`), taking and giving back a lock, and the borrow flag, which is kept in
-the lock's own word (`locked.rs`). Measured at `opt-level = 3` with 256 codegen units (which
-ranks changes in a third of the time of a fat-LTO build but runs about half as slow again), the
-540 features went from 7.00 s with plain locks to 5.16 to 5.51 s with the borrow flag in the
-lock's word, and to 5.29 to 5.32 s once object parameters that may be null are borrowed
-(`&Option<Rc<..>>`, docs/supported-java.md) rather than copied. `charAt` and `String.hashCode`
-read a string's leading ASCII bytes as they are; decoding every character had been 3% of the
-time. The build's peak grew from 13.6 GB to about 21 GB with the plain reference counts, which
-are inlined wherever a handle is copied or dropped.
+`java::Arc<java::Locked<..>>` (docs/multi-threading.md, section 4). Until a second thread
+starts, the translation pays for being threaded with plain loads and stores only: taking and
+giving back a lock, and the borrow flag, which is kept in the lock's own word (`locked.rs`).
+Object parameters that may be null are borrowed (`&Option<java::Arc<..>>`,
+docs/supported-java.md) rather than copied. `charAt` and `String.hashCode` read a string's
+leading ASCII bytes as they are.
 
-## NodeList: stack overflow when the list is freed (fixed)
+## Measuring
 
-`benchmarks/NodeList.java` builds a linked list of about 667,000 nodes. It compiled once the
-assignment from a field read was fixed on main, but the binary aborted with SIGABRT: when the
-list went out of scope, Rust's drop of `next` recursed once per node and overflowed the 8 MB
-main stack. With `ulimit -s unlimited` it printed Java's checksum.
-
-A class whose fields can lead back to objects of the same class now gets a `Drop` that frees
-deep chains iteratively (docs/object-model.md, "1.13 Dropping long chains"). Near the top of the
-stack the `Drop` only compares the stack address with a thread-local and leaves the fields to
-Rust's recursive drop; 128 KB of stack deeper it moves the links onto a heap stack. Only
-classes on a cycle of field types change: both benchmarks here have one.
-
-`python3 scripts/benchmark.py BinaryTrees NodeList`, five runs per side, medians in ms:
-
-| run                                   | load | BinaryTrees Java | BinaryTrees Rust | NodeList Java | NodeList Rust |
-|---------------------------------------|-----:|-----------------:|-----------------:|--------------:|--------------:|
-| main at `45ad1c1`                     |   46 |             1873 |            11428 |             - | aborts (exit -6) |
-| heap stack for every drop             |   19 |             1337 |             9610 |           230 |           481 |
-| recursion counter, heap stack below 200 levels | 12 |       763 |             6977 |           234 |           466 |
-
-The machine's load moved the Java and Rust times by up to a factor of two between these runs, so
-the cost of the `Drop` was measured separately: the generated crate of each benchmark built
-twice, once as generated and once with the `Unlink` and `Drop` impls removed (NodeList then run
-with an unlimited stack), the two binaries run alternately, median of the runs in ms:
-
-| version of the runtime                           | runs | BinaryTrees with / without | ratio | NodeList with / without | ratio |
-|--------------------------------------------------|-----:|---------------------------:|------:|------------------------:|------:|
-| heap stack for every drop                        |    7 |                6769 / 5739 |  1.18 |               471 / 480 |  0.98 |
-| recursion counter, heap stack below 200 levels   |    9 |                6413 / 6059 |  1.06 |               470 / 500 |  0.94 |
-| stack address test, heap stack below 128 KB      |   10 |                6745 / 6255 |  1.08 |               471 / 474 |  0.99 |
-| the same, committed (deep path out of line)      |   10 |                6773 / 6539 |  1.04 |               495 / 544 |  0.91 |
-
-BinaryTrees frees about 300 million nodes, so it is the worst case: every node runs the `Drop`.
-In the last version that is eight instructions and one call more than Rust's own drop of a
-node (a thread-local load, a compare, and a call into the node's drop glue that is no longer
-inlined into `Rc::drop_slow`), about 1 to 1.5 ns per node, 4 to 8 percent of its run time
-across the A/B runs at loads 5 to 15. NodeList is unchanged within the noise: its chain is freed on the
-heap stack, which costs no more than recursion. Programs without a cycle of field types are
-not touched.
-
-## Deviations from the plan
-
-- MatrixMultiply (Java about 0.85 s here, 0.2 s quieter) and StringBuild (Java about 0.23 s) are
-  under the 1 to 5 second range asked for. Their Rust sides are super-linear in the input (the
-  matrix work, and the quadratic `charAt` and `length`), so larger sizes would make the script
-  take many minutes per run. They are kept small on purpose.
+- MatrixMultiply (Java about 0.12 s) and StringBuild (Java about 0.03 s) run for less than a
+  second. Larger sizes would make the script take many minutes on a slow translation, so they
+  are kept small.
 - The Java times are whole-process, so programs that are short on Java include JVM start-up.
   Kernel columns exist only where a program has a warm-up loop.
-- The earlier table is a single run on a loaded machine. The 2026-10-21 table is three runs
-  whose medians are shown; the spread between them is in its section. Re-run them on an idle machine before drawing
-  conclusions about small differences; the large changes (MatrixMultiply, Sieve, SortMillion)
-  are far outside the noise.
+- `scripts/benchmark.py` prints the load average at its start. On a loaded machine the same
+  Rust binary has taken twice as long from one run to the next, so compare runs made at a low
+  load.
