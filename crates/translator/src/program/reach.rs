@@ -302,6 +302,27 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // The interface of digests that take a key, which `MessageDigest`'s own `Delegate`
     // implements.
     "sun.security.util.MessageDigestSpi2",
+    // The exceptions of security code, which library code also throws of its own (a reader of
+    // PEM files, its `KeyException`): plain subclasses of `GeneralSecurityException` (and of
+    // `IllegalArgumentException`) with `Throwable`'s constructors and nothing else.
+    "java.security.InvalidAlgorithmParameterException",
+    "java.security.InvalidKeyException",
+    "java.security.InvalidParameterException",
+    "java.security.KeyException",
+    "java.security.KeyManagementException",
+    "java.security.KeyStoreException",
+    "java.security.NoSuchProviderException",
+    "java.security.SignatureException",
+    "java.security.UnrecoverableEntryException",
+    "java.security.UnrecoverableKeyException",
+    "java.security.cert.CRLException",
+    "java.security.cert.CertificateEncodingException",
+    "java.security.cert.CertificateException",
+    "java.security.cert.CertificateExpiredException",
+    "java.security.cert.CertificateNotYetValidException",
+    "java.security.cert.CertificateParsingException",
+    "java.security.spec.InvalidKeySpecException",
+    "java.security.spec.InvalidParameterSpecException",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",
