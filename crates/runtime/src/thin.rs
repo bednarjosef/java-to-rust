@@ -63,6 +63,23 @@ impl Thin {
         unsafe { &*(self as *const Thin as *const P) }
     }
 
+    /// The start of the object whose handle the value holds, read as a `T` and lent while the
+    /// value is borrowed: the fields struct of a class tree, which every class of the tree keeps
+    /// at offset 0 of its object, so an enum's `base()` reads it with no `match` on the class.
+    ///
+    /// # Safety
+    ///
+    /// The value was made by `pointer` with a `java::Arc<O>`, whose `O` holds a `T` at offset 0
+    /// that `&O` lends as `&T` (a `#[repr(C)]` struct whose first field is the `T` or holds it at
+    /// offset 0, or a `java::Monitored` of one).
+    #[inline(always)]
+    pub unsafe fn as_prefix<T>(&self) -> &T {
+        // The handle's pointer is these bits without the tag, as `Arc`'s `Deref` reads it, and
+        // the `T` lies where the `O` does, borrowed as `Deref` would lend the `O` for as long as
+        // the handle is.
+        unsafe { &*((self.0.get() as usize & ADDRESS) as *const T) }
+    }
+
     /// The value `v` of class `tag`: in the low bytes when it fits in six, else in a box.
     #[inline(always)]
     pub fn value<T>(tag: u16, v: T) -> Thin {
@@ -124,6 +141,34 @@ mod tests {
         let lent: &Arc<String> = unsafe { thin.as_pointer() };
         assert!(Arc::ptr_eq(lent, &text));
         assert_eq!(lent.as_str(), "t");
+    }
+
+    #[test]
+    fn the_start_of_an_object_is_read_where_it_lies() {
+        struct Root {
+            name: &'static str,
+        }
+        #[repr(C)]
+        struct Middle {
+            base: Root,
+            flag: bool,
+        }
+        #[repr(C)]
+        struct Leaf {
+            base: Middle,
+            count: u64,
+        }
+        let leaf = Arc::new(Leaf { base: Middle { base: Root { name: "leaf" }, flag: true }, count: 3 });
+        let thin = Thin::pointer(9, leaf.clone());
+        let root: &Root = unsafe { thin.as_prefix() };
+        assert_eq!(root.name, "leaf");
+        assert!(std::ptr::eq(root, &leaf.base.base));
+        let monitored =
+            Arc::new(crate::Monitored::new(Middle { base: Root { name: "middle" }, flag: false }));
+        let thin = Thin::pointer(10, monitored.clone());
+        let root: &Root = unsafe { thin.as_prefix() };
+        assert!(std::ptr::eq(root, &monitored.base));
+        assert!(!monitored.flag && leaf.base.flag && leaf.count == 3);
     }
 
     #[test]

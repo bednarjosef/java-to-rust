@@ -658,6 +658,12 @@ impl<'a> Gen<'a> {
         matches!(self.class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
     }
 
+    /// Whether the variant of `c` holds the handle of an object of the program (see `payload`),
+    /// which `java::Thin::as_prefix` may read.
+    fn object_variant(&self, c: usize) -> bool {
+        self.runtime_of(c).is_none() && !self.holds_value(c)
+    }
+
     /// The string `s` (a `String`) as an `Object`.
     pub(super) fn string_as_object(&mut self, s: &str) -> String {
         let object = self.object_index().expect("an `Object[]` in a program that uses `Object`");
@@ -1591,6 +1597,33 @@ impl<'a> Gen<'a> {
             _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
         });
         self.indent += 1;
+        if immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c)) {
+            // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the
+            // root's fields struct is at the start of every object, which is a `java::Monitored`
+            // only around it, fields first: one read, whatever the class. rustc checks the offsets.
+            let checks: Vec<String> = variants
+                .iter()
+                .filter_map(|&c| {
+                    let path = hierarchy::base_path(self.facts, self.class, c, root);
+                    let path = path.trim_end_matches('.');
+                    let object = self.struct_of(c);
+                    (!path.is_empty())
+                        .then(|| format!("assert!(std::mem::offset_of!({object}, {path}) == 0);"))
+                })
+                .collect();
+            if !checks.is_empty() {
+                self.line("const {");
+                for check in checks {
+                    self.line(&format!("    {check}"));
+                }
+                self.line("}");
+            }
+            self.line("// Every variant is an object that starts with the fields struct (above).");
+            self.line("unsafe { self.0.as_prefix() }");
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         self.match_arms(&variants, &|g: &mut Self, c| {
             let path = hierarchy::base_path(g.facts, g.class, c, root);
             let path = path.trim_end_matches('.');
@@ -1696,6 +1729,12 @@ impl<'a> Gen<'a> {
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
+        if let Some(call) = self.fields_call(t, r, &variants, &args) {
+            self.line(&call);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         self.match_arms(&variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, &args);
@@ -1708,6 +1747,26 @@ impl<'a> Gen<'a> {
         });
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// The call of method `r` on the enum of `t` when every variant runs one body emitted on a
+    /// fields struct at or above the one `base()` lends, and `base()` reads that with no `match`
+    /// (`base_fn`): `self.base().base.get_name()`, one call whatever the object's class.
+    fn fields_call(&mut self, t: usize, r: usize, variants: &[usize], args: &str) -> Option<String> {
+        let h = &self.class.hierarchy;
+        let i = h.implementation(r, *variants.first()?)?;
+        let Home::Fields(d) = self.homes[i] else { return None };
+        let root = self.fields_root(t)?;
+        let direct = self.plain_enum(t)
+            && h.is_subtype(root, d)
+            && variants.iter().all(|&c| h.implementation(r, c) == Some(i) && self.object_variant(c));
+        if !direct {
+            return None;
+        }
+        self.need(Need::Base(t));
+        let path = hierarchy::base_path(self.facts, self.class, root, d);
+        let call = format!("self.base().{path}{}({args})", self.fn_names[i]);
+        Some(self.covariant_ret(i, r, call))
     }
 
     /// The arm for a value of class `c` bound to `o` that runs no method of the program for

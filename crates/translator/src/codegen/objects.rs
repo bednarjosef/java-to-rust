@@ -162,6 +162,18 @@ pub(super) fn default_value(ty: Type) -> &'static str {
     }
 }
 
+/// Where a field of type `ty` goes in a `#[repr(C)]` struct, the most aligned first: a primitive
+/// by its size, anything else (a handle, a string, an `Option`, a Java enum) as a word.
+fn alignment_rank(ty: Type) -> u8 {
+    match ty {
+        Type::Long | Type::Double => 0,
+        Type::Int | Type::Float => 1,
+        Type::Short | Type::Char => 2,
+        Type::Byte | Type::Boolean => 3,
+        _ => 0,
+    }
+}
+
 /// Which classes get a struct and instance methods: the classes that are ever instantiated, and
 /// the superclasses whose fields struct they embed. A class with only static members is plain
 /// functions.
@@ -1959,13 +1971,23 @@ impl<'a> Gen<'a> {
         let decl = &class.types[index];
         let (params, args) = self.type_params(&decl.type_params);
         let name = self.struct_of(index);
+        let base = hierarchy::embedded(self.facts, class, index);
         self.gap();
+        // The struct's `base` is at its start, and so, struct by struct, is the fields struct of
+        // the root of the class tree: an enum's `base()` reads it there whatever the object's
+        // class (`dispatch::base_fn`). Its own fields follow, the most aligned first, so that
+        // `#[repr(C)]`, which keeps them in this order, pads them no more than rustc would.
+        let mut fields: Vec<&Field> = decl.fields.iter().collect();
+        if base.is_some() {
+            self.line("#[repr(C)]");
+            fields.sort_by_key(|f| alignment_rank(f.ty));
+        }
         self.line(&format!("{}struct {name}{args} {{", self.vis()));
         self.indent += 1;
-        if let Some(base) = hierarchy::embedded(self.facts, class, index) {
+        if let Some(base) = base {
             self.line(&format!("{}base: {},", self.vis(), self.struct_of(base)));
         }
-        for f in &decl.fields {
+        for f in fields {
             let ty = self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name));
             let ty = if self.celled(&decl.name) { self.cell_type(index, &ty) } else { ty };
             self.line(&format!("{}{}: {ty},", self.vis(), field_name(decl, &f.name)));

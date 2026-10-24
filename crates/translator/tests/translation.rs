@@ -878,10 +878,13 @@ fn a_type_with_several_concrete_classes_is_an_enum() {
         &[
             "enum BaseView<'a> {\n    Circle(&'a Arc<Circle>),\n    Rect(&'a Arc<Rect>),\n}",
             "    fn area(&self) -> f64 {\n        match self.0.tag() {\n            2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.area() }\n            3 => { let o: &Arc<Rect> = unsafe { self.0.as_pointer() }; o.area() }\n            tag => java::bad_tag(tag),\n        }\n    }",
-            "fn base(&self) -> &BaseFields {",
-            "2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; &o.base }",
-            // A method that only touches the fields runs on the fields struct of each object.
-            "2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.base.get_name() }",
+            // Every class keeps the fields struct at the start of its object, where `base()`
+            // reads it whatever the class.
+            "#[repr(C)]\nstruct Circle {\n    base: BaseFields,",
+            "#[repr(C)]\nstruct Rect {\n    base: BaseFields,",
+            "    fn base(&self) -> &BaseFields {\n        const {\n            assert!(std::mem::offset_of!(Circle, base) == 0);\n            assert!(std::mem::offset_of!(Rect, base) == 0);\n        }\n        // Every variant is an object that starts with the fields struct (above).\n        unsafe { self.0.as_prefix() }\n    }",
+            // A method that only touches the fields runs on the fields struct that `base()` lends.
+            "    fn get_name(&self) -> java::JString {\n        self.base().get_name()\n    }",
             "b.base().name",
         ],
     );

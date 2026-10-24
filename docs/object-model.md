@@ -157,6 +157,7 @@ impl BaseFields {
     fn get_name(&mut self) -> java::JString { self.uses = self.uses.wrapping_add(1); self.name.clone() }
 }
 
+#[repr(C)]
 struct Circle { base: BaseFields, r: f64 }
 impl Circle {
     fn new(r: f64) -> Circle { Circle { base: BaseFields::new(java::wtf8("circle")), r } }
@@ -232,6 +233,17 @@ Rules:
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.
+- A struct that embeds a `base` is `#[repr(C)]` with `base` first (its own fields follow, the
+  most aligned first, so they pad no more than rustc's order would), so the fields struct of
+  the root of a class tree is at offset 0 of every object of the tree, and a
+  `java::Monitored` keeps the object first too. For an immutable or celled family, `base()` is
+  then one read with no `match`: `unsafe { self.0.as_prefix() }` (`java::Thin::as_prefix`)
+  lends the start of the object as the `&XFields`, after a `const` block that asserts each
+  variant's offset is 0. A dispatcher whose every variant runs one field-level body at or above
+  that fields struct calls it there, `self.base().get_name()`. A family behind `RefCell`s or
+  `java::Locked`s keeps the `match` above, whose `Ref::map` takes the borrow of the class's
+  cell (std's `RefCell` gives no fixed place to its borrow flag), as does an enum with a Java
+  enum's constant among its variants, held as a value rather than a handle.
 - `super.m(args)` is a `MethodCall` with `is_super` set and a synthesized `this` of the
   superclass's type as receiver, so analyses that handle calls on `this` see it unchanged. It
   calls the body declared above non-virtually. `X.super.m()` is a `super` call of interface
