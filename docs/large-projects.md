@@ -35,11 +35,12 @@ than ten times longer.
 
 ## 2. The shape of the output
 
-Today a whole program is one crate with a file per package. For a large project rustc becomes
-the bottleneck: one crate of millions of lines takes an hour or more and a lot of memory to
-build, and the files do not change that (rustc builds a crate as a whole, whatever its files).
-How far a split into crates can go is in [several-crates.md](several-crates.md): the enums of the
-class hierarchies and Java's package cycles keep most of a program in one crate.
+A whole program is one crate with a file per package, or, with `--crates N`, a header crate of
+its declarations, `N` crates of its code and the binary ([several-crates.md](several-crates.md)).
+For a large project rustc is the bottleneck: one crate of millions of lines takes an hour or more
+and a lot of memory to build, and the files do not change that (rustc builds a crate as a whole,
+whatever its files). Split along classes, the enums of the class hierarchies and Java's package
+cycles would keep most of a program in one crate, so the split separates declarations from code.
 
 - **The translated JDK as its own crate** (also step 1 of [natural-rust.md](natural-rust.md)).
   It cannot simply be built once and reused: the translation sees the whole program, so the JDK's
@@ -48,9 +49,9 @@ class hierarchies and Java's package cycles keep most of a program in one crate.
   about JDK methods depend on what the program passes them). It is reused between translations
   of the same program, and between programs only when what it depends on is the same, or where
   the dispatch at the boundary goes through a table of functions that the program fills in.
-- **One crate per library and per group of packages**, so rustc builds them in parallel and a
-  change rebuilds only the crates it touches. The cut follows the dependency graph between
-  packages; cycles between packages are common in Java and must stay inside one crate.
+- **Crates that build in parallel** (done: the body crates of `--crates`). A change still
+  rebuilds the header and every body crate when it changes a declaration; a change inside a
+  function's code rebuilds its body crate alone.
 - **One file per package inside each crate** (done for the one crate), so the output is
   readable and editors cope; a file per class for very large packages is a different layout.
 - **Fewer copies of generic code**: real Rust generics are copied for every type they are used
@@ -179,7 +180,8 @@ this project already does.
 ## Order
 
 1. Measure time and memory per phase.
-2. Output in several crates, with the JDK as its own crate (several files: done).
+2. Output in several crates (several files and the header and body crates: done), with the JDK as
+   its own crate.
 3. Summaries instead of bodies, and the compact transfer format.
 4. Every core; reaching less.
 5. Reading a project: build tool, source jars, generated sources, resources, several entry points.

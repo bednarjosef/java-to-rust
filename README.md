@@ -45,7 +45,9 @@ cargo run -p java-to-rust -- --census --main Main --source src/ --library jdk-sr
 cargo run -p java-to-rust -- --survey --main Main --source src/ --library jdk-src/java.base
 ```
 
-- `--crate DIR` writes a Cargo project with a file per package; `-o FILE` writes one file.
+- `--crate DIR` writes a Cargo project with a file per package; `-o FILE` writes one file. With
+  `--crates N`, `--crate DIR` writes a workspace of a header crate, `N` body crates and the binary
+  instead, for programs too large to build as one crate ([docs/several-crates.md](docs/several-crates.md)).
 - `--census` translates past every rejection and reports what is rejected and why;
   `--census-json FILE` writes it as JSON. `--survey` (and `--survey-json FILE`) is a quicker
   syntactic view of what the reachable code needs.

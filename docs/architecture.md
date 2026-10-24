@@ -130,8 +130,8 @@ What is left: the resolver is still held in a thread-local for the duration of `
 because the functions that make names (`struct_name`, `cell_name`, `init_name`) are called from
 about 40 places in 10 files; passing the resolver to them is mechanical and was left for a time
 when fewer branches edit the generator. Natural names plug in at the resolver (it decides every
-path and could decide the names); a split into crates is one more layout plus a rule that puts each
-module in a crate, with the resolver writing `other_crate::path` and `pub` across crates (see
+path and could decide the names). The split into crates (`--crates`, `split.rs`) works on the
+finished module tree, separating declarations from code, so it needs nothing of the resolver (see
 [several-crates.md](several-crates.md)).
 
 ### 3. Snapshot tests instead of strings in one file

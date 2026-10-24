@@ -180,17 +180,20 @@ fn input_field(p: &Program, fingerprint: &mut Fingerprint) -> Option<()> {
 /// The program's run translated with the JDK's sources, or why it does not get that far. A
 /// translation that is the same as in an earlier run that matched Java, with the same runtime,
 /// toolchain and input (`build`, the hash of all but the translation), is not built and run
-/// again: its run is taken from `cache`. A fresh run comes with the key to store it under.
+/// again: its run is taken from `cache`. A fresh run comes with the key to store it under. With
+/// `crates`, the translation is a workspace split into that many body crates (`--crates`).
 fn run_rust(
     p: &Program,
     library: &Path,
     work: &Path,
     cache: &Path,
     build: Option<&str>,
+    crates: Option<usize>,
 ) -> (Result<Run, String>, Option<String>) {
     let dir = work.join(&p.name).join("crate");
     let _ = std::fs::remove_dir_all(&dir);
     let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(crates.into_iter().flat_map(|n| ["--crates".to_string(), n.to_string()]))
         .args(["--main", &p.main])
         .arg("--source")
         .arg(&p.sources)
@@ -266,7 +269,7 @@ fn whole_programs_match_java() {
     let results = parallel(selected.len(), |i| {
         let p = selected[i];
         let java = run_java(p, &work.join(&p.name).join("classes"), &java_cache);
-        let (rust, key) = run_rust(p, &library, &work, &rust_cache, build.as_deref());
+        let (rust, key) = run_rust(p, &library, &work, &rust_cache, build.as_deref(), None);
         match rust {
             Ok(rust) if rust == java => {
                 if let (Some(key), Some(code)) = (key, rust.code) {
@@ -289,6 +292,26 @@ fn whole_programs_match_java() {
         failures.extend(failure);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A program split into a header crate and three body crates (`--crates`, `split.rs`) builds and
+/// prints what Java prints. Its comparators are trait objects whose methods, with the JDK's
+/// default methods, move into the body crates.
+#[test]
+fn a_program_split_into_crates_matches_java() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/whole-program");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-split");
+    std::fs::create_dir_all(&work).unwrap();
+    let programs = programs(&root, &work);
+    let p = programs.iter().find(|p| p.name == "comparators").expect("corpus/whole-program/Comparators.java");
+    let cache = check_cache::test_root().join("whole-program-java");
+    let java = run_java(p, &work.join(&p.name).join("classes"), &cache);
+    let (rust, _) = run_rust(p, &library, &work, &work.join("unused"), None, Some(3));
+    assert_eq!(rust, Ok(java));
 }
 
 /// A program that uses the JDK's collections, boxing and a lambda, as

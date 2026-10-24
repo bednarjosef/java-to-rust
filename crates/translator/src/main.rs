@@ -9,7 +9,8 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [--keep-going]
-                    [<File.java>]... [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]
+                    [<File.java>]... [-o <output.rs> | --crate <directory> [--crates <n>]
+                     | --survey [--survey-json <file>]
                      | --census [--census-json <file>] [-o <output.rs> | --crate <directory>]]
                     [--modules-json <file>]";
 
@@ -98,6 +99,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
     let mut census = false;
     let mut census_json = None;
     let mut modules_json = None;
+    let mut crates = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -114,6 +116,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
             "--census" => census = true,
             "--keep-going" => program.keep_going = true,
             "--modules-json" => modules_json = Some(value()?),
+            "--crates" => crates = Some(value()?.parse::<usize>().map_err(|e| format!("--crates: {e}"))?),
             "--census-json" => {
                 census = true;
                 census_json = Some(value()?);
@@ -158,6 +161,10 @@ fn run_program(args: &[String]) -> Result<(), String> {
         write_dependencies(&path, &tree)?;
     }
     let name = crate_name(&program.main);
+    if let (Some(crates), Some(("--crate", dir))) = (crates, output.as_ref().map(|(f, d)| (*f, d.as_str()))) {
+        let workspace = java_to_rust::split::split(&tree, crates)?;
+        return workspace.write(Path::new(dir), &name).map_err(|e| format!("{dir}: {e}"));
+    }
     let layout = output.as_ref().map_or(Layout::OneFile, |(flag, _)| layout(flag));
     emit(output.as_ref().map(|(flag, path)| (*flag, path.as_str())), &name, &tree.files(layout))
 }

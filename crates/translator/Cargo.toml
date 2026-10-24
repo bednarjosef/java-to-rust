@@ -9,3 +9,5 @@ description = "Translates Java source code into Rust source code"
 serde = "1"
 serde_json = { version = "1", features = ["unbounded_depth"] }
 java-runtime = { path = "../runtime" }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing"] }

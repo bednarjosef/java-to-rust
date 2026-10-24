@@ -10,6 +10,7 @@ pub mod javac;
 pub mod lower;
 pub mod output;
 pub mod program;
+pub mod split;
 pub mod timings;
 pub mod types;
 pub mod value;

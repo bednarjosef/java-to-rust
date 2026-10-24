@@ -1,9 +1,10 @@
-# Several crates (planned)
+# Several crates
 
-A whole program is one Rust crate today, with a file per Java package. This note is about
-splitting it into several crates: what stops it, how to find what can be split off, and what a
-split would buy for javac. It is a design; nothing here is built except the data it needs
-(`--modules-json`) and the script that reads it (`scripts/crate-groups.py`).
+A whole program is one Rust crate by default, with a file per Java package. With
+`--crate DIR --crates N` it is a Cargo workspace instead: a header crate, `N` body crates and the
+program's binary (`crates/translator/src/split.rs`). This note says why a large program needs that,
+how the split works, and what splitting along classes would give instead, which is what ruled that
+out.
 
 ## Why split at all
 
@@ -27,7 +28,7 @@ The differences are within the noise of a machine that other builds share. For a
 of javac, which will be hundreds of thousands of lines, the build time and memory of one crate are
 what a split would cut.
 
-## What keeps code in one crate
+## What keeps code in one crate, split along classes
 
 Crates cannot depend on each other in a loop: if crate A names something in crate B, B cannot name
 anything in A. So any code whose parts name each other in a loop, directly or through others,
@@ -125,29 +126,48 @@ the table's 600 MB per 19,000 lines carried on linearly (about 17 GB), so rustc'
 slower than the lines; the split is about build time and rebuilds after a change, not about
 whether one crate fits.
 
-## Breaking the loops
+## Header and body crates
 
-Only the first two sources of loops are the translator's own; the third is the program's, and a
-split must take it as it is. Two changes would cut the first two, each at a cost:
+Crates cannot name each other in a loop, and translated classes do, so `split.rs` does not split
+along classes. It splits declarations from code, as C splits headers from sources:
 
-- **Dispatch through tables at a crate's boundary.** A hierarchy whose classes are in several
-  crates would be a trait (a table of functions) in the crate of its root class instead of an
-  enum, with each subclass implementing it in its own crate. The parent then no longer names its
-  subclasses. The cost is the enum's advantages there: calls through a pointer instead of a
-  `match`, and no proof that the subclasses are all known. Inside a crate the enum stays.
-- **`Object` with an open variant.** Classes in later crates would be held as
-  `Object::Other(Rc<dyn Any>)`-like values that cast back through a table, instead of a variant of
-  their own, so that `Object` does not name them.
+- **The header crate** has every module and item of the program, made `pub`: the structs, the
+  enums of the hierarchies, the statics, the traits, and every function and method. A function or
+  method whose code can move keeps only its signature there. Its body calls a function declared
+  in an `unsafe extern "Rust"` block of its module (`safe fn j2r__<module>__<type>__<name>(..)`),
+  with its parameters renamed `p0`, `p1`, .. so that every pattern is a plain name.
+- **Each body crate** depends on the header alone and defines those functions for the modules
+  given to it, each with `#[unsafe(no_mangle)]`. A module of a body crate starts with
+  `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names
+  everything as it did, `crate::..` paths included: the body crate has every module, and a module
+  without moved code is the re-export alone. A method's code moves into a private trait that the
+  body crate implements for the header's type (`impl Bodies0 for Circle { fn body_area(&self) ..
+  }`), so that `self`, `Self` and calls of the type's other methods mean what they did; the
+  exported function calls the trait's method. The trait's methods are named `body_<name>`, so
+  that a call of the original name finds the header's method, never the trait's.
+- **The binary** depends on the header and every body crate (`use body_0 as _;` makes rustc
+  link each) and its `main` calls the header's.
 
-These are the same boundary the JDK crate needs ([large-projects.md](large-projects.md),
-[natural-rust.md](natural-rust.md)): the translated JDK names the program's classes only through
-these enums (a program class in `Object`, a `Comparable` or `Iterable` that the program
-implements, the dispatch of `toString`, `equals` and `hashCode`).
+What cannot move stays in the header with its code: generic functions and the methods of generic
+`impl`s (Rust needs their code in the crate that instantiates them), `const` functions (statics
+call them), functions with an `impl Trait` in their signature, methods of a trait `impl` whose
+signature names `Self::..`, and the initializers of statics. The header calls into the body
+crates, which depend on it; rustc's linker (lld, the default on x86-64 Linux) resolves symbols
+whatever the order of the libraries.
 
-## Order
+The modules go to the body crates in the order of the module tree, each crate taking modules until
+it has its share of the moved code, so the same program is split the same way every time, and
+neighbouring packages share a crate. A module is the unit, so a crate root with much code of its
+own makes its crate larger than the others.
 
-1. Measure javac's groups again once it translates, at the size it then has.
-2. A crate per group of the program's own code against one crate for the rest, with dispatch
-   through tables only across the boundary; the generator's layout gets a rule that puts each
-   module in a crate, and the name resolver writes `other_crate::path` and `pub` across crates.
-3. The JDK as its own crate, the boundary case above.
+What it costs: a call of a moved function from another crate goes through the header's wrapper and
+cannot be inlined without link-time optimization. The release profile's fat LTO inlines across
+crates again, at the memory of a whole-program build; debug builds and `cargo check` gain the
+most from the split.
+
+## Not done yet
+
+- The translated JDK as a crate reused between programs ([large-projects.md](large-projects.md)):
+  its code depends on the program's classes through the hierarchies' enums.
+- Splitting a large module (such as the crate root) across body crates, by item rather than by
+  module.
