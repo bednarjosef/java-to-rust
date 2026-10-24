@@ -305,6 +305,19 @@ impl<'t> Lowering<'t> {
             ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int") => {
                 "Unsafe.arrayIndexScale"
             }
+            // `sun.misc.Unsafe`'s, which give the same as an `int`, after the warning for
+            // `arrayBaseOffset` (`sun_unsafe.rs`).
+            (
+                crate::program::SUN_MISC_UNSAFE,
+                "arrayBaseOffset" | "arrayIndexScale",
+                "(java.lang.Class<?>)int",
+            ) => {
+                if symbol.name == "arrayBaseOffset" {
+                    "Unsafe.arrayBaseOffset"
+                } else {
+                    "Unsafe.arrayIndexScale"
+                }
+            }
             _ => return Ok(None),
         };
         // A class literal, or a variable of an array class's type, which can hold nothing else
@@ -342,7 +355,16 @@ impl<'t> Lowering<'t> {
                 primitive.into_iter().find(|p| *p == element).unwrap_or("java.lang.Object"),
             )
         };
-        Ok(Some(ExprKind::Builtin(Builtin::Native(native), Vec::new())))
+        let value = ExprKind::Builtin(Builtin::Native(native), Vec::new());
+        if symbol.owner != crate::program::SUN_MISC_UNSAFE {
+            return Ok(Some(value));
+        }
+        let ty = if symbol.name == "arrayBaseOffset" { Type::Long } else { Type::Int };
+        let value = self.convert(self.synth(value, node.pos(), ty), Type::Int).kind;
+        match symbol.name {
+            "arrayBaseOffset" => self.after_memory_access_warning(node, symbol.name, value).map(Some),
+            _ => Ok(Some(value)),
+        }
     }
 
     /// What the thread that `Thread.start0(t, ..)` starts runs: `t.run()`, added to the arguments

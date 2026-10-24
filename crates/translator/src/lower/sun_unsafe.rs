@@ -35,6 +35,22 @@
 //! `this`, a local or parameter, or a field of the class whose code makes the call. A method
 //! reference to such a method is rejected: Java's walker skips the frame of the reference's
 //! hidden class and names whoever calls the functional interface.
+//!
+//! Its methods of raw memory, which reach memory outside the heap by address (`allocateMemory`,
+//! `getInt(long)`, `copyMemory`, `invokeCleaner`, `program::sun_misc_memory` names them), and
+//! `addressSize` and `pageSize`, which do not warn, are calls of the methods of the same names
+//! of `jdk.internal.misc.TranslatedUnsafeMemory` (`java/overlay`), which do what
+//! `sun.misc.Unsafe`'s do after the warning: call `jdk.internal.misc.Unsafe`'s, which the
+//! translation has (`docs/natives-and-input.md`). Such a call evaluates its arguments into locals,
+//! then checks the receiver and warns, as Java does, so its arguments may do anything;
+//! `invokeCleaner` checks that its buffer is direct before it warns, as `sun.misc.Unsafe`'s does.
+//! `arrayBaseOffset` and `arrayIndexScale` of a class literal are the constants of
+//! `jdk.internal.misc.Unsafe`'s (`natives.rs`), the first after the warning.
+//!
+//! The class's own initialization is translated, as a program that reads its `theUnsafe` by
+//! reflection runs it; a patch (`java/patches/sun/misc/Unsafe.java`) leaves out the reflection
+//! that finds the warning's flag and the filter that hides `getUnsafe` from reflection, which the
+//! reflection table leaves out instead (`reflection.rs`).
 
 use super::*;
 use crate::program::SUN_MISC_UNSAFE;
@@ -71,6 +87,102 @@ impl<'t> Lowering<'t> {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body }],
         })
+    }
+
+    /// A call `node` of one of `sun.misc.Unsafe`'s methods that reach memory by address or tell
+    /// its layout (`program::sun_misc_memory`): the receiver and arguments evaluated, the
+    /// method's warning, then the call of the translator's method that does what the method does
+    /// after it (`program::TRANSLATED_UNSAFE_MEMORY`). An argument whose evaluation may do
+    /// something is kept in a local first, so it is evaluated before the warning, as in Java.
+    /// `None` for any other call.
+    pub(super) fn sun_memory_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+    ) -> Result<Option<ExprKind>, Error> {
+        let Some(warns) = crate::program::sun_misc_memory(symbol.owner, symbol.name, symbol.ty) else {
+            return Ok(None);
+        };
+        let resolve = |name: &str, signature: &str| {
+            self.methods.iter().position(|m| {
+                self.types[m.owner].javac == crate::program::TRANSLATED_UNSAFE_MEMORY
+                    && m.name == name
+                    && m.sig == signature
+            })
+        };
+        let method = symbol.name;
+        let Some(resolved) = resolve(method, symbol.ty) else {
+            return unsupported(node, &format!("`sun.misc.Unsafe.{method}` outside a whole program"));
+        };
+        let (pos, ret) = (node.pos(), self.ty(node, node.java_type())?);
+        let select = node.child("methodSelect")?;
+        let Some(receiver) = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT") else {
+            return unsupported(node, &format!("`sun.misc.Unsafe.{method}` without a receiver"));
+        };
+        let cleaner = method == "invokeCleaner";
+        if cleaner && !self.quiet_argument(receiver) {
+            return unsupported(
+                node,
+                "`sun.misc.Unsafe.invokeCleaner` of a receiver that may have an effect",
+            );
+        }
+        let mut block = Vec::new();
+        let mut kept = Vec::new();
+        let params = lambdas::signature(symbol.ty).0;
+        for (i, (arg, param)) in node.list("arguments").zip(params).enumerate() {
+            let ty = self.ty(arg, param)?;
+            if self.quiet_argument(arg) {
+                kept.push((Err(arg), ty));
+                continue;
+            }
+            let name = self.fresh_name(&format!("memory_arg{i}"));
+            let value = self.convert(self.expr(arg)?, ty);
+            block.push(Stmt::Local { ty, name: name.clone(), init: Some(value), pos });
+            kept.push((Ok(name), ty));
+        }
+        let args = || -> Result<Vec<Expr>, Error> {
+            kept.iter()
+                .map(|(arg, ty)| match arg {
+                    Ok(name) => Ok(self.synth(ExprKind::Var(name.clone()), pos, *ty)),
+                    Err(node) => Ok(self.convert(self.expr(*node)?, *ty)),
+                })
+                .collect()
+        };
+        // `invokeCleaner` checks its buffer before it warns, once the call has found its receiver.
+        if cleaner {
+            block.push(Stmt::Expr(self.receiver_checked(receiver, method, pos)?));
+            let (check, signature) = crate::program::CLEANER_CHECK;
+            let call = ExprKind::Call {
+                name: check.to_string(),
+                args: args()?,
+                resolved: resolve(check, signature),
+            };
+            block.push(Stmt::Expr(self.synth(call, pos, Type::Void)));
+        }
+        if warns {
+            block.push(Stmt::Expr(self.memory_access_warning(node, method)?));
+        } else {
+            block.push(Stmt::Expr(self.receiver_checked(receiver, method, pos)?));
+        }
+        let call = self.synth(
+            ExprKind::Call { name: method.to_string(), args: args()?, resolved: Some(resolved) },
+            pos,
+            ret,
+        );
+        block.push(if ret == Type::Void { Stmt::Expr(call) } else { Stmt::Yield(call) });
+        Ok(Some(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        }))
+    }
+
+    /// The receiver `receiver` of a call of the method `method`, checked for null as the call
+    /// checks it.
+    fn receiver_checked(&self, receiver: Node<'t>, method: &str, pos: Pos) -> Result<Expr, Error> {
+        let value = self.expr(receiver)?;
+        let ty = value.ty;
+        let checked = Builtin::NullChecked(Some(interned_name(method)));
+        Ok(self.synth(ExprKind::Builtin(checked, vec![value]), pos, ty))
     }
 
     /// The warning of `sun.misc.Unsafe`'s `objectFieldOffset` that defines the field handle
@@ -130,7 +242,9 @@ impl<'t> Lowering<'t> {
     /// a local or parameter, or a field of the class whose code is being lowered.
     fn quiet_argument(&self, node: Node<'t>) -> bool {
         let node = handles::plain(node);
-        if node.kind().ends_with("_LITERAL") {
+        if node.kind().ends_with("_LITERAL")
+            || (node.kind() == "MEMBER_SELECT" && node.str("identifier") == "class")
+        {
             return true;
         }
         if node.kind() != "IDENTIFIER" {

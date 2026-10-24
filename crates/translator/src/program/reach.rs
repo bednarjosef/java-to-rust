@@ -361,9 +361,12 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
 /// initialization makes of the first two passes a class literal of an array class, and
 /// `objectFieldOffset` of a class literal and a field's name, or of the field that
 /// `getDeclaredField` finds by its name, makes a field handle (`lower/handles.rs`).
+/// `sun.misc.Unsafe`'s first two give the same.
 pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
+    ("sun.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)int"),
+    ("sun.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.reflect.Field)long"),
     ("jdk.internal.misc.Unsafe", "staticFieldOffset", "(java.lang.reflect.Field)long"),
@@ -625,6 +628,7 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
         || unsafe_field_access(class, name, signature).is_some()
         || unsafe_field_update(class, name, signature).is_some()
         || sun_misc_forwarded(class, name, signature).is_some()
+        || sun_misc_memory(class, name, signature).is_some()
 }
 
 /// Whether the class with qualified name `class` is one of the JDK's.
@@ -729,6 +733,45 @@ pub fn updater_function(
         _ => return None,
     })
 }
+
+/// The translator's class of `sun.misc.Unsafe`'s accesses of memory by address
+/// (`java/overlay/jdk/internal/misc/TranslatedUnsafeMemory.java`).
+pub const TRANSLATED_UNSAFE_MEMORY: &str = "jdk.internal.misc.TranslatedUnsafeMemory";
+
+/// Whether the method is one of `sun.misc.Unsafe`'s that reach memory outside the heap by
+/// address, or that tell its layout (`addressSize`, `pageSize`), and whether it prints the
+/// memory access warning first (`Some(true)`): a call of it is a call of the method of
+/// `TRANSLATED_UNSAFE_MEMORY` with the same name and signature, after that warning
+/// (`lower/sun_unsafe.rs`).
+pub fn sun_misc_memory(class: &str, name: &str, signature: &str) -> Option<bool> {
+    if class != SUN_MISC_UNSAFE {
+        return None;
+    }
+    let kinds = ["byte", "short", "char", "int", "long", "float", "double"];
+    let kind = |rest: &str| kinds.iter().find(|k| k.eq_ignore_ascii_case(rest)).copied();
+    let warns = match (name, signature) {
+        ("addressSize" | "pageSize", "()int") => false,
+        ("getAddress", "(long)long")
+        | ("putAddress", "(long,long)void")
+        | ("allocateMemory", "(long)long")
+        | ("reallocateMemory", "(long,long)long")
+        | ("freeMemory", "(long)void")
+        | ("setMemory", "(java.lang.Object,long,long,byte)void" | "(long,long,byte)void")
+        | ("copyMemory", "(java.lang.Object,long,java.lang.Object,long,long)void" | "(long,long,long)void")
+        | ("invokeCleaner", "(java.nio.ByteBuffer)void") => true,
+        _ => {
+            let get = name.strip_prefix("get").and_then(kind).map(|k| format!("(long){k}"));
+            let put = name.strip_prefix("put").and_then(kind).map(|k| format!("(long,{k})void"));
+            get.or(put).filter(|s| s == signature)?;
+            true
+        }
+    };
+    Some(warns)
+}
+
+/// What `sun.misc.Unsafe.invokeCleaner` checks before its warning, a method of
+/// `TRANSLATED_UNSAFE_MEMORY`.
+pub const CLEANER_CHECK: (&str, &str) = ("checkCleaner", "(java.nio.ByteBuffer)void");
 
 /// One of `Unsafe`'s atomic updates of a field at an offset (see `unsafe_field_update`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -927,6 +970,8 @@ pub const UNSET_PROPERTIES: &[&str] = &[
     "jdk.trackAllThreads",
     // Whether `ThreadLocal` prints where a virtual thread sets one.
     "jdk.traceVirtualThreadLocals",
+    // What `sun.misc.Unsafe`'s memory access methods do (`--sun-misc-unsafe-memory-access`).
+    "sun.misc.unsafe.memory.access",
 ];
 
 /// The `if` statements among the statements of `block` whose `then` branch never runs: their
@@ -3051,6 +3096,16 @@ impl<'t> Walk<'t> {
                     .or_else(|| charset_coding(&owner, &name, text(symbol, "type"))) =>
             {
                 self.work.push(Item::Method((class.into(), to.into(), signature.into())));
+            }
+            // `sun.misc.Unsafe`'s accesses of memory by address (`TRANSLATED_UNSAFE_MEMORY`).
+            "METHOD" if sun_misc_memory(&owner, &name, text(symbol, "type")).is_some() => {
+                let signature = text(symbol, "type").to_string();
+                if name == "invokeCleaner" {
+                    let (check, check_signature) = CLEANER_CHECK;
+                    let check = (TRANSLATED_UNSAFE_MEMORY.into(), check.into(), check_signature.into());
+                    self.work.push(Item::Method(check));
+                }
+                self.work.push(Item::Method((TRANSLATED_UNSAFE_MEMORY.into(), name, signature)));
             }
             // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
             "METHOD" if let Some((class, to)) = redirected_call(&owner, &name, text(symbol, "type")) => {

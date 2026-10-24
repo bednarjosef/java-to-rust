@@ -1193,6 +1193,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.handle_access(node, &symbol)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.sun_memory_call(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.handle_value_call(node, &symbol)? {
             return Ok(kind);
         }

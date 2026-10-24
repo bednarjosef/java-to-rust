@@ -537,8 +537,13 @@ name:
   `file:` URL, as for `java Main` run from the folder of the program's classes. Java evaluates
   the arguments before the warning, so every argument but the offset must be one whose
   evaluation does nothing (a literal, `this`, a local, a field of the calling class); other
-  arguments, a method reference to such a method, and raw memory (`allocateMemory`, accesses at
-  an address) are rejected.
+  arguments and a method reference to such a method are rejected. Its methods of raw memory
+  (`allocateMemory`, `freeMemory`, `setMemory`, `copyMemory`, accesses at an address,
+  `invokeCleaner`), which netty uses, call `jdk.internal.misc.Unsafe`'s after the same warning,
+  with their arguments evaluated first as in Java; `addressSize`, `pageSize` and
+  `arrayIndexScale` do not warn. Accesses at an offset that is not a field's or an array
+  element's, found at run time (`staticFieldOffset` of a reflected field, an offset passed in),
+  are rejected.
 - **Handles found at run time**, as netty finds its own (`lower/handle_values.rs`): a
   `VarHandle`, `MethodHandle`, `MethodHandles.Lookup` or `MethodType` kept in a local or a field,
   passed to a method or returned from one, made in a `try` whose `catch` sets it to null. At run

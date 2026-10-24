@@ -36,6 +36,11 @@ const LIST_CONSTRUCTORS: &str = "(java.lang.Class<?>,boolean)java.lang.reflect.C
 const NEW_INSTANCE_OF: &str = "(java.lang.Class<?>)java.lang.Object";
 const SUBCLASS: &str = "(java.lang.Class<?>,boolean)java.lang.Class<?>";
 
+/// The methods that the JDK hides from reflection (`Reflection.registerMethodsToFilter`), by
+/// class and name: `sun.misc.Unsafe`'s initialization registers its `getUnsafe`, and the
+/// translator's patch of it leaves that out (`java/patches/sun/misc/Unsafe.java`).
+const FILTERED_METHODS: &[(&str, &str)] = &[("sun.misc.Unsafe", "getUnsafe")];
+
 /// The constructors of the three classes, which `table0` calls.
 const MEMBER_CONSTRUCTORS: [(&str, &str); 3] = [
     (
@@ -620,6 +625,7 @@ impl<'t> Lowering<'t> {
                                 || self.types[owner].node.kind() == "INTERFACE"
                                     && !info.node.has_flag("PRIVATE");
                             if info.name.starts_with('<')
+                                || FILTERED_METHODS.contains(&(self.types[owner].javac.as_str(), info.name))
                                 || !reflected(t, info.name)
                                 || depth > 0 && !public
                                 || !seen.insert((info.name, info.sig))

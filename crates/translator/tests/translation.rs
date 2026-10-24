@@ -4041,11 +4041,17 @@ fn a_write_through_the_offset_of_a_superclass_field_is_the_field() {
 fn sun_misc_unsafe_accesses_warn_and_are_the_field() {
     // `sun.misc.Unsafe`'s methods forward to `jdk.internal.misc.Unsafe`'s after their warning,
     // which names the class whose code calls them.
-    // The class is in a JDK module other than `java.base`, which the translation reads with it.
-    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES") else {
+    // The class is in a JDK module other than `java.base`, `jdk.unsupported`, which the
+    // translation reads with it from its sources next to those of `java.base`.
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(std::path::PathBuf::from) else {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this test");
         return;
     };
+    let unsupported = java_base.parent().unwrap().join("jdk.unsupported");
+    if !unsupported.is_dir() {
+        println!("skipped: no sources of jdk.unsupported next to those of java.base");
+        return;
+    }
     let main = "import sun.misc.Unsafe;
         public class Main {
             static Unsafe U;
@@ -4066,29 +4072,11 @@ fn sun_misc_unsafe_accesses_warn_and_are_the_field() {
                 System.out.println(m.swap(1, 5) + \" \" + U.getIntVolatile(m, COUNT));
             }
         }";
-    // A stand-in of the class in its module, `jdk.unsupported`; the methods' bodies, which
-    // forward to `jdk.internal.misc.Unsafe`'s, are not translated.
-    let unsafe_ = "package sun.misc;
-        public final class Unsafe {
-            private Unsafe() {}
-            private static final Unsafe theUnsafe = new Unsafe();
-            public native long objectFieldOffset(java.lang.reflect.Field f);
-            public native int getIntVolatile(Object o, long offset);
-            public final native int getAndAddInt(Object o, long offset, int delta);
-            public final native boolean compareAndSwapInt(Object o, long offset, int expected, int x);
-        }";
-    let dir = write_sources(
-        "sun-misc-unsafe",
-        &[
-            ("app/Main.java", main),
-            ("jdk.unsupported/module-info.java", "module jdk.unsupported { exports sun.misc; }"),
-            ("jdk.unsupported/sun/misc/Unsafe.java", unsafe_),
-        ],
-    );
+    let dir = write_sources("sun-misc-unsafe", &[("app/Main.java", main)]);
     let program = java_to_rust::Program {
         main: "Main".into(),
         sources: vec![dir.join("app")],
-        libraries: vec![java_base.into(), dir.join("jdk.unsupported")],
+        libraries: vec![java_base, unsupported],
         ..Default::default()
     };
     let rust =

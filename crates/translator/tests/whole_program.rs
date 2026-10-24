@@ -598,6 +598,158 @@ fn run_time_handles_not_followed_are_rejected() {
     }
 }
 
+/// `sun.misc.Unsafe`'s methods of raw memory, at addresses and in arrays at their offsets, which
+/// netty uses: they warn once on standard error, naming the class of their caller and where it was
+/// loaded from, after their arguments are evaluated and the receiver is checked, and
+/// `invokeCleaner` checks that its buffer is direct before. The class is in `jdk.unsupported`,
+/// whose sources the translation reads next to those of `java.base`. Both runs are from the
+/// directory of Java's classes, the class path, and print the same on both streams.
+#[test]
+fn sun_misc_raw_memory_matches_java() {
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let unsupported = java_base.parent().unwrap().join("jdk.unsupported");
+    if !unsupported.is_dir() {
+        println!("skipped: no sources of jdk.unsupported next to those of java.base");
+        return;
+    }
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-raw-memory");
+    let _ = std::fs::remove_dir_all(&work);
+    let sources = work.join("src");
+    let classes = work.join("classes");
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("RawMemory.java"), RAW_MEMORY).unwrap();
+    let javac =
+        Command::new("javac").arg("-d").arg(&classes).arg(sources.join("RawMemory.java")).output().unwrap();
+    assert!(javac.status.success(), "{}", String::from_utf8_lossy(&javac.stderr));
+    let java = Command::new("java").args(["-cp", ".", "RawMemory"]).current_dir(&classes).output().unwrap();
+    let dir = work.join("crate");
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "RawMemory", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(&java_base)
+        .arg("--library")
+        .arg(&unsupported)
+        .arg("--crate")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    // The target directory of the corpus's programs, which has the runtime built.
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program").join("cargo");
+    let built = Command::new("cargo")
+        .args(["build", "-q", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let rust = Command::new(target.join("debug").join("rawmemory")).current_dir(&classes).output().unwrap();
+    for (stream, java, rust) in
+        [("output", &java.stdout, &rust.stdout), ("error", &java.stderr, &rust.stderr)]
+    {
+        assert_eq!(
+            String::from_utf8_lossy(rust),
+            String::from_utf8_lossy(java),
+            "standard {stream} differs from Java's"
+        );
+    }
+    assert_eq!(rust.status.code(), java.status.code());
+}
+
+const RAW_MEMORY: &str = r#"import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import sun.misc.Unsafe;
+
+public class RawMemory {
+    static final Unsafe U;
+    static final long BYTES;
+    static final long INTS;
+    static final long INT_SCALE;
+    static final long SCRATCH;
+    static Unsafe none;
+
+    static long size(long bytes) {
+        System.err.println("size " + bytes);
+        return bytes;
+    }
+
+    static {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            U = (Unsafe) f.get(null);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+        SCRATCH = U.allocateMemory(size(64));
+        BYTES = U.arrayBaseOffset(byte[].class);
+        INTS = U.arrayBaseOffset(int[].class);
+        INT_SCALE = U.arrayIndexScale(int[].class);
+    }
+
+    public static void main(String[] args) {
+        System.out.println(U.addressSize() + " " + U.pageSize() + " " + BYTES + " " + INTS + " " + INT_SCALE);
+        long a = SCRATCH;
+        U.setMemory(a, 16, (byte) 0);
+        U.putInt(a, 0x01020304);
+        U.putLong(a + 8, -2L);
+        U.putByte(a + 4, (byte) 7);
+        U.putShort(a + 5, (short) -300);
+        System.out.println(U.getByte(a) + " " + U.getInt(a) + " " + U.getLong(a + 8) + " " + U.getShort(a + 5));
+        U.putChar(a + 16, 'x');
+        U.putFloat(a + 20, 1.5f);
+        U.putDouble(a + 24, -0.25);
+        System.out.println(U.getChar(a + 16) + " " + U.getFloat(a + 20) + " " + U.getDouble(a + 24));
+        U.putAddress(a + 32, a);
+        System.out.println(U.getAddress(a + 32) == a);
+        byte[] bytes = new byte[16];
+        U.copyMemory(null, a, bytes, BYTES, 16);
+        System.out.println(java.util.Arrays.toString(bytes));
+        System.out.println(U.getInt(bytes, BYTES) + " " + U.getLong(bytes, BYTES + 8));
+        U.putByte(bytes, BYTES + 1, (byte) 9);
+        long b = U.allocateMemory(4);
+        U.copyMemory(bytes, BYTES, null, b, 4);
+        System.out.println(U.getInt(b));
+        long c = U.reallocateMemory(b, 32);
+        U.copyMemory(a, c + 4, 16);
+        System.out.println(U.getInt(c) + " " + U.getLong(c + 12));
+        int[] ints = {5, 6, 7};
+        System.out.println(U.getInt(ints, INTS + INT_SCALE * 2));
+        U.freeMemory(c);
+        U.setMemory(bytes, BYTES, 4, (byte) 1);
+        System.out.println(java.util.Arrays.toString(bytes));
+        try {
+            U.invokeCleaner(ByteBuffer.allocate(8));
+        } catch (IllegalArgumentException e) {
+            System.out.println(e);
+        }
+        ByteBuffer direct = ByteBuffer.allocateDirect(8);
+        try {
+            U.invokeCleaner(direct.slice());
+        } catch (IllegalArgumentException e) {
+            System.out.println(e);
+        }
+        U.invokeCleaner(direct);
+        System.out.println("cleaned");
+        try {
+            none.getInt(a);
+        } catch (NullPointerException e) {
+            System.out.println(e.getMessage());
+        }
+        try {
+            none.pageSize();
+        } catch (NullPointerException e) {
+            System.out.println(e.getMessage());
+        }
+        U.freeMemory(a);
+    }
+}
+"#;
+
 /// The accesses of a view handle of a `ByteBuffer` that the translation does not do: the atomic
 /// updates, and a read or write at a type the handle's would have to narrow to, for which Java
 /// throws `WrongMethodTypeException`.
