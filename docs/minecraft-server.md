@@ -20,13 +20,15 @@ the machine running out of memory.
 | `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required | seconds |
 | `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`: 5,037 files, 547,614 lines. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 34 s |
 | `libraries` | each library jar decompiled the same way, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s |
+| `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`: `java.base` plus 14 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events) and `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) | seconds |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
 | `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below) | stopped by the memory cap, see below |
 | `summary` | splits the census by origin, into the server, each library and the JDK (`scripts/census-by-origin.py`) | seconds |
 
 The census gives the translator only `Main.java` as a source file. The rest of the server is a
-`--library` root like the decompiled libraries and the JDK modules. This way javac reads and
+`--library` root like the libraries and the JDK modules. Each library's root is its published
+sources where `library-sources` has them, and its decompiled code otherwise. This way javac reads and
 attributes only the classes that the code reachable from `main` uses, not all 5,037 server files
 and 2,411 fastutil files. fastutil is then only the few dozen classes the server reaches.
 
@@ -142,22 +144,23 @@ of memory, which is the first wall". The survey confirms it with measurements.
 holds them in about 3 GB. The server's census already holds twice that after three rounds. Any
 progress on javac's memory carries over directly.
 
-**Until then:** the census can be rerun with a cap of about 24 to 32 GB on a quiet machine, or
-on a rented machine with more memory. The script only needs `MEMORY_CAP` raised.
+**Until then:** on this machine the census runs with a cap of at most 12 GB, on a quiet machine,
+so that it cannot run the machine out of memory; a larger cap needs a rented machine with more
+memory. The script only needs `MEMORY_CAP` raised.
 
 ### 2. Decompiled sources that do not compile
 
 These do not stop a census any more, but they would stop a translation, and every marked piece
 is rejected.
 
-- **Libraries with published sources should use their sources, not decompiled code.** Guava,
-  Gson, Netty, log4j, fastutil, commons-io, commons-lang3, JNA, OSHI, JOML, jopt-simple, lz4-java,
-  slf4j and msal4j are open source. Their source jars on Maven Central are the code that was
-  compiled. That removes about 1,900 of the 2,445 errors in the reached code: all of Guava's,
-  fastutil's and Gson's. The source jars must be downloaded once, into the cache.
+- **Libraries with published sources use their sources, not decompiled code.** Guava, Gson,
+  Netty, log4j, fastutil, commons-io, commons-lang3, JNA, OSHI, JOML, jopt-simple, lz4-java, slf4j
+  and msal4j are open source, and their source jars on Maven Central are the code that was
+  compiled. By the decompiled-library counts this removes about 1,900 of the 2,445 errors in the
+  reached code: all of Guava's, fastutil's and Gson's.
 
-  Brigadier and DataFixerUpper are published by Mojang on GitHub under MIT. authlib is the only
-  Mojang library that has to stay decompiled.
+  Brigadier and DataFixerUpper are published by Mojang on GitHub under MIT, but not as source
+  jars; they, authlib, jtracy and logging stay decompiled.
 
 - **Compile-only annotation libraries** (Error Prone, JSR 305, J2ObjC, JetBrains, Checker
   Framework) are not in the bundle. For a census this no longer matters. A translation needs
@@ -194,7 +197,6 @@ needs the server's census first.
 
 ## Next
 
-1. Get the census through loading: a run with a cap of 24 to 32 GB when the machine is quiet, or
-   after the memory steps land.
-2. Swap the open-source libraries' decompiled code for their source jars, and rerun.
-3. Compare the server's rejections with javac's, and list the new kinds.
+1. Get the census through loading: a run with the library sources under a 12 GB cap on a quiet
+   machine, then the memory steps if that is not enough.
+2. Compare the server's rejections with javac's, and list the new kinds.

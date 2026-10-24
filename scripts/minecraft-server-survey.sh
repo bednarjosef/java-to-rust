@@ -4,7 +4,7 @@
 #
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
-# Steps: extract, decompile, libraries, jdk-sources, parse, census, summary.
+# Steps: extract, decompile, libraries, library-sources, jdk-sources, parse, census, summary.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -92,10 +92,39 @@ libraries() {
   done
 }
 
-# The source roots of the translation's libraries: each decompiled library and each JDK module.
+# The published sources of each library that has them on Maven Central, into
+# src/library-sources/<artifact> (only the Java files). The bundler keeps its libraries in Maven's
+# layout, so each sources jar sits next to where the jar's path says; Mojang's own libraries
+# (authlib, brigadier, datafixerupper, jtracy, logging) are not there and stay decompiled.
+library-sources() {
+  local maven=https://repo1.maven.org/maven2
+  mkdir -p "$cache/source-jars" "$cache/src/library-sources"
+  (cd "$cache/jar/META-INF/libraries" && find . -name '*.jar' | LC_ALL=C sort) | while IFS= read -r lib; do
+    local name path jar out
+    name=$(basename "$lib" .jar)
+    case $name in *-linux-* | *-osx-* | *-windows-*) continue ;; esac
+    path=${lib#./}
+    jar=$cache/source-jars/$name-sources.jar
+    if [ ! -f "$jar" ]; then
+      curl -fsS -o "$jar.sha1" "$maven/${path%.jar}-sources.jar.sha1" 2>/dev/null \
+        || { rm -f "$jar.sha1"; echo "no published sources for $name"; continue; }
+      curl -fsS -o "$jar" "$maven/${path%.jar}-sources.jar"
+    fi
+    echo "$(cut -c1-40 "$jar.sha1")  $jar" | sha1sum -c --quiet
+    out=$cache/src/library-sources/$name
+    rm -rf "$out" && mkdir -p "$out"
+    unzip -q "$jar" '*.java' -d "$out"
+    echo "$(find "$out" -name '*.java' | wc -l) source files from $(basename "$jar")"
+  done
+}
+
+# The source roots of the translation's libraries: each library's published sources, or its
+# decompiled ones where none are published, and each JDK module.
 library_args() {
-  local dir
+  local dir name
   for dir in "$cache"/src/libraries/*/; do
+    name=$(basename "$dir")
+    [ -d "$cache/src/library-sources/$name" ] && dir=$cache/src/library-sources/$name
     printf -- '--library\n%s\n' "${dir%/}"
   done
   printf -- '--library\n%s\n' "$jdk_sources/java.base"
@@ -209,11 +238,11 @@ summary() {
 }
 
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(extract decompile libraries jdk-sources parse census summary)
+[ ${#steps[@]} -gt 0 ] || steps=(extract decompile libraries library-sources jdk-sources parse census summary)
 for step in "${steps[@]}"; do
   case $step in
-    extract | decompile | libraries | jdk-sources | parse | census | summary) "$step" ;;
-    *) echo "unknown step $step (extract, decompile, libraries, jdk-sources, parse, census, summary)" >&2
+    extract | decompile | libraries | library-sources | jdk-sources | parse | census | summary) "$step" ;;
+    *) echo "unknown step $step (extract, decompile, libraries, library-sources, jdk-sources, parse, census, summary)" >&2
       exit 2 ;;
   esac
 done
