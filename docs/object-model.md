@@ -467,7 +467,9 @@ to run.
   when a sibling is mutable. Interface enums and `Object` may mix `Arc<C>` and `Arc<RefCell<C>>`
   variants.
 - **Celled** (`Arc<C>` whose fields are `java::Field` cells, `analysis/objects.rs::celled_classes`):
-  a mutable family none of whose classes is owned or a Java enum. Every field of the family is a cell: a read copies the value out
+  a mutable family none of whose classes is owned or a Java enum. A class of the family that
+  no `new` creates (an abstract one) may be immutable on its own, having no objects, without
+  keeping the family from cells; it is then celled, not immutable. Every field of the family is a cell: a read copies the value out
   (`o.count.get()`), a write puts a new one in (`o.count.set(v)`), so no borrow is held and
   none can conflict, and there is no borrow flag. Methods take `&self`, and `base()` lends the
   fields struct as `&XFields`. A field assignment whose object may be null computes the value

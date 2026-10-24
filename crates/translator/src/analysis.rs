@@ -417,7 +417,9 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.not_plain = borrowing.not_plain;
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
-    (facts.celled, facts.monitored) = objects::celled_classes(class, facts, &monitor_classes);
+    (facts.celled, facts.monitored) = objects::celled_classes(class, facts, &monitor_classes, &created);
+    // A class without objects of a celled tree counts as celled, not immutable.
+    facts.immutable.retain(|c| !facts.celled.contains(c));
 }
 
 /// The classes with subclasses whose constructors cannot build their fields struct as a plain

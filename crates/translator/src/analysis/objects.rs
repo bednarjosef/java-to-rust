@@ -39,16 +39,19 @@ pub fn remove_families(class: &Class, immutable: &mut HashSet<String>, classes: 
 /// `Arc<java::Monitored<C>>` of `java::SharedField`s, where the others hold `java::Field`s. A
 /// class tree is celled and monitored together or not at all, like immutability, so that an enum
 /// over it reaches the fields it shares in one way; a tree with an owned class or a Java enum
-/// keeps its `RefCell`s or locks.
+/// keeps its `RefCell`s or locks. A class that no `new` creates (an abstract one) can be
+/// immutable while the classes below it are not: it has no objects that could change, and its
+/// tree is celled all the same.
 pub fn celled_classes(
     class: &Class,
     facts: &Facts,
     monitor_classes: &HashSet<String>,
+    created: &[bool],
 ) -> (HashSet<String>, HashSet<String>) {
     let celled = |t: usize| {
         let name = &class.types[t].name;
         class.types[t].enum_constants.is_none()
-            && !facts.immutable.contains(name)
+            && (!facts.immutable.contains(name) || !created[t])
             && !facts.owned.contains(name)
     };
     let monitored =
