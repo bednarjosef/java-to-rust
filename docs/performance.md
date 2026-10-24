@@ -18,7 +18,8 @@ measured inside the program, and it is reported in the two kernel columns.
 ## Results
 
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
-milliseconds) at a load average of 2.5 on 16 cores.
+milliseconds) at a load average of 2.5 on 16 cores; MatrixMultiply's row is from a run of it
+alone at a load of 2.9.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -31,7 +32,7 @@ milliseconds) at a load average of 2.5 on 16 cores.
 | Collatz        |    1131 |     567 |      0.50 |           - |           - |            - |
 | Interpreter    |    1086 |    1152 |      1.06 |         335 |         382 |         1.14 |
 | Mandelbrot     |    3359 |    1111 |      0.33 |        1114 |        1109 |         1.00 |
-| MatrixMultiply |     121 |    1878 |     15.56 |          27 |         625 |        23.15 |
+| MatrixMultiply |     117 |     175 |      1.49 |          26 |          57 |         2.19 |
 | NBody          |    1776 |    1846 |      1.04 |         588 |         599 |         1.02 |
 | NodeList       |     207 |     148 |      0.72 |           - |           - |            - |
 | ParticleArray  |    1392 |    1019 |      0.73 |           - |           - |            - |
@@ -91,14 +92,17 @@ profiles taken with `perf`.
   `#[inline(never)]` throwing function (runtime `array.rs`). Interpreter's stack and locals are
   plain `Vec<i32>` with the same checks, since its indexes come from the program it interprets.
   `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`.
-- **MatrixMultiply (15.6x, kernel 23x).** `multiply(a, b)` takes its matrices as shared
-  `java::Array<java::Array<i32>>` by value, and `run` passes `b.clone()` since it reads `b`
-  afterwards (`a = b`). So the inner loop reads `b[k][j]` with two `java::get` calls, each a
-  borrow and a bounds check, and does not vectorize. Borrowing both matrices as `&[Vec<i32>]`, as
-  `c` already is in `multiply`, gives the sliced inner loop of `analysis/arrays/slices.rs`
-  (`&b[k][..n]` and `&mut c[i][..n]` without checks, once `n` is checked against both rows),
-  which ran within 1.5 times Java's kernel; the array analysis no longer finds that the parameters can be
-  borrowed here.
+- **MatrixMultiply (1.5x, kernel 2.2x).** The matrices are plain
+  `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
+  and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
+  is assigned. `create`'s store `m[i][j] = (x >>> 16) % 100` stays a plain store: Java computes a
+  stored value before it throws for the array, so a value that may throw is computed first, with
+  the row held in a local, which gives the row a second name and makes the whole matrix shared
+  (`lower/argument_order.rs`); a remainder by a nonzero constant cannot throw. When `k` is a row
+  of `b` and `n` is at most the lengths of `b[k]` and `c[i]`, the inner loop runs over the slices
+  `&b[k][..n]` and `&mut c[i][..n]` without a check, and vectorizes (`analysis/arrays/slices.rs`);
+  otherwise it runs with every check. The remaining gap against the JIT is not profiled; the
+  loop computes with `wrapping_add` and `wrapping_mul` on `i32`.
 - **Statics (2.1x).** A primitive static is a `thread_local!` `Cell`, read with `get` and
   written with `set`; the histogram, an `int[]`, is a `thread_local!` `RefCell`. The hot loop
   does no allocation and no extra work, but 59% of its samples sit on a single store into a

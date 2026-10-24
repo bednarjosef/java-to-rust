@@ -430,6 +430,25 @@ fn an_array_borrowed_for_a_call_is_read_after_the_arguments_that_write_it() {
 }
 
 #[test]
+fn a_row_stored_with_a_value_that_cannot_throw_stays_plain() {
+    // Java computes a stored value before it throws for the array, so a value that may throw
+    // holds the row in a local first, and the row then has two names. `% 100` and a division of
+    // doubles cannot throw.
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[][] m = new int[3][3];
+            double[][] d = new double[3][3];
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) { m[i][j] = (i * 7 + j) % 100; d[i][j] = i / 2.0; }
+            }
+            System.out.println(m[2][1] + \" \" + d[2][1]);
+        } }",
+    );
+    assert_contains(&rust, &["Vec<Vec<i32>>", "Vec<Vec<f64>>"]);
+    assert_lacks(&rust, &["java::Array", "receiver_"]);
+}
+
+#[test]
 fn arrays_passed_to_methods_are_borrowed() {
     let rust = translate(
         "class A {
