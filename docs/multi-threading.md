@@ -490,8 +490,10 @@ name:
   local, or passed to a `long` parameter of a private method by each of its calls
   (`LazyCollections`). An access at it is `a[index]`.
 - **`VarHandle` constants** of fields (`findVarHandle`, `ConstantBootstraps.fieldVarHandle`), of
-  static fields (`findStaticVarHandle`), of array elements and of `byte[]` views as numbers
-  (`byteArrayViewVarHandle`) are handles too, as is a `MethodHandle` constant of a constructor.
+  static fields (`findStaticVarHandle`), of array elements, and of the bytes of a `byte[]` or a
+  `ByteBuffer` viewed as numbers (`byteArrayViewVarHandle`, `byteBufferViewVarHandle`, whose
+  accesses are the translator's methods in `java/overlay/java/nio/TranslatedBufferViews.java`,
+  with the handle's checks and byte order) are handles too, as is a `MethodHandle` constant of a constructor.
 - **Field updater constants** (`AtomicIntegerFieldUpdater.newUpdater(C.class, "f")`, the `long`
   one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`) are handles of a
   field for which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
@@ -633,7 +635,7 @@ own slot or object and `join` orders the output, or where the program checks its
 (every increment counted, every item consumed once) and prints the result. Programs that use the
 JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `AtomicArrayDekker`,
 `ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`,
-`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `StaticVarHandles`, `ScopedValues`). Shape tests of the generated Rust are in
+`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ByteBufferViews`, `StaticVarHandles`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
 unchanged and that a class no thread reaches has no monitor.
 

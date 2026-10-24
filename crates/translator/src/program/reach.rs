@@ -1733,6 +1733,53 @@ pub fn segment_access(node: &Value) -> Option<(&'static str, String)> {
     Some((name, signature))
 }
 
+/// The translator's class of the accesses of a `ByteBuffer` through a view handle of
+/// `MethodHandles.byteBufferViewVarHandle` (`java/overlay/java/nio/TranslatedBufferViews.java`).
+pub const TRANSLATED_BUFFER_VIEWS: &str = "java.nio.TranslatedBufferViews";
+
+/// The method of `TRANSLATED_BUFFER_VIEWS`, by name and signature, that does the access `method`
+/// (`get`, `setRelease`) of a view handle of values of the primitive `kind` (`Int` in the name
+/// `java`), with the handle's byte order as its last parameter. `None` for a method that is no
+/// read or write.
+pub fn buffer_view_method(method: &str, kind: &str, java: &str) -> Option<(String, String)> {
+    let (put, mode) = match method {
+        "get" | "set" => (method == "set", ""),
+        "getVolatile" | "setVolatile" => (method == "setVolatile", "Volatile"),
+        "getAcquire" => (false, "Acquire"),
+        "setRelease" => (true, "Release"),
+        "getOpaque" | "setOpaque" => (method == "setOpaque", "Opaque"),
+        _ => return None,
+    };
+    Some(if put {
+        (format!("set{java}{mode}"), format!("(java.nio.ByteBuffer,int,{kind},boolean)void"))
+    } else {
+        (format!("get{java}{mode}"), format!("(java.nio.ByteBuffer,int,boolean){kind}"))
+    })
+}
+
+/// The methods of `TRANSLATED_BUFFER_VIEWS` that the access `node` may call in its place, when it
+/// is a read or write of a `VarHandle` whose first argument is a `ByteBuffer`, as the access of a
+/// view handle of a buffer is: one for each kind of value, since the handle is not resolved here.
+pub fn buffer_view_access(node: &Value) -> Vec<(String, String)> {
+    let symbol = &node["symbol"];
+    let buffer = node["arguments"].as_array().and_then(|a| a.first()).map(|a| text(a, "javaType"));
+    if text(node, "kind") != "METHOD_INVOCATION"
+        || text(symbol, "owner") != "java.lang.invoke.VarHandle"
+        || !matches!(buffer, Some("java.nio.ByteBuffer" | "java.nio.MappedByteBuffer"))
+    {
+        return Vec::new();
+    }
+    let kinds = [
+        ("short", "Short"),
+        ("char", "Char"),
+        ("int", "Int"),
+        ("long", "Long"),
+        ("float", "Float"),
+        ("double", "Double"),
+    ];
+    kinds.iter().filter_map(|(kind, java)| buffer_view_method(text(symbol, "name"), kind, java)).collect()
+}
+
 /// `Locale.getLanguage()`, which `String.toUpperCase(locale)` and `toLowerCase(locale)` call to
 /// tell the languages with their own case mapping (see `lower::strings`).
 pub const LOCALE_LANGUAGE: JdkMethod = ("java.util.Locale", "getLanguage", "()java.lang.String");
@@ -2780,6 +2827,15 @@ impl<'t> Walk<'t> {
             // So does a call that the runtime makes on `System.out` or `System.err`
             // (`direct_stream_call`).
             Value::Object(_) if runtime_stream_call(value) => self.scan(&value["arguments"]),
+            // An access of a buffer through a view handle calls the translator's method, and the
+            // handle, which is a constant, is no field of the translation (`lower/handles.rs`).
+            Value::Object(_) if !buffer_view_access(value).is_empty() => {
+                for (name, signature) in buffer_view_access(value) {
+                    self.work.push(Item::Method((TRANSLATED_BUFFER_VIEWS.into(), name, signature)));
+                }
+                self.scan(&value["methodSelect"]);
+                self.scan(&value["arguments"]);
+            }
             // An access of a segment through a value layout's handle calls the translator's
             // method, with the layout, and makes no handle.
             Value::Object(_) if let Some((name, signature)) = segment_access(value) => {

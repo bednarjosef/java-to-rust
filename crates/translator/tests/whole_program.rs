@@ -525,6 +525,57 @@ fn a_class_as_a_constable_is_rejected() {
     }
 }
 
+/// The accesses of a view handle of a `ByteBuffer` that the translation does not do: the atomic
+/// updates, and a read or write at a type the handle's would have to narrow to, for which Java
+/// throws `WrongMethodTypeException`.
+#[test]
+fn buffer_view_updates_and_narrowings_are_rejected() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-buffer-view-rejections");
+    let cases = [
+        (
+            "System.out.println(INTS.compareAndSet(b, 0, 0, 1));",
+            "`VarHandle.compareAndSet` of a view of a byte buffer",
+        ),
+        ("System.out.println(INTS.getAndAdd(b, 0, 1));", "`VarHandle.getAndAdd` of a view of a byte buffer"),
+        (
+            "System.out.println((short) INTS.get(b, 0));",
+            "`VarHandle.get` of a view at another type than its own",
+        ),
+        ("INTS.set(b, 0, 1L);", "`VarHandle.set` of a view at another type than its own"),
+    ];
+    for (i, (statement, message)) in cases.iter().enumerate() {
+        let sources = work.join(i.to_string());
+        let _ = std::fs::remove_dir_all(&sources);
+        std::fs::create_dir_all(&sources).unwrap();
+        let java = format!(
+            "import java.lang.invoke.*;\nimport java.nio.*;\npublic class Main {{\n    \
+             static final VarHandle INTS = MethodHandles.byteBufferViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);\n    \
+             public static void main(String[] args) {{\n        ByteBuffer b = ByteBuffer.allocateDirect(8);\n        \
+             {statement}\n    }}\n}}\n"
+        );
+        std::fs::write(sources.join("Main.java"), java).unwrap();
+        let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+            .args(["--main", "Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join(format!("{i}.rs")))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr);
+        assert!(!translated.status.success(), "translated:\n{statement}");
+        assert!(
+            stderr.contains(&format!("{message} not supported yet")),
+            "not rejected:\n{statement}\n{stderr}"
+        );
+    }
+}
+
 /// A program whose source root and libraries are modules, with a `module-info.java` each, as the
 /// JDK's own are: the libraries' sources are read and translated as those of a program without
 /// modules are, and a module that the program uses but that is not given is named in the error.

@@ -88,6 +88,13 @@
 //! `Unsafe` at the field or element; a view's `get` and `set` are `Builtin::ByteView`, whose
 //! operand is the access of the first byte (`a[i]`, or `a[i] = (byte) v`), so the analyses see
 //! it, and which throws Java's `ArrayIndexOutOfBoundsException` when the value's bytes do not fit.
+//! A view of the bytes of a `ByteBuffer` (`byteBufferViewVarHandle`) is a handle too: its `get`
+//! and `set` in each memory mode are calls of the translator's methods
+//! (`java/overlay/java/nio/TranslatedBufferViews.java`), with the handle's byte order last, which
+//! check what the handle checks in its order (a null or read-only buffer, the value's bytes before
+//! the limit, and for the modes other than the plain one a direct buffer and an aligned address);
+//! its atomic updates, and an access at a type the handle would narrow to (which Java answers with
+//! `WrongMethodTypeException`), are rejected.
 //! A static method that returns such a handle of its parameters (`ByteArray.create`) makes one
 //! too, and so does `withInvokeExactBehavior()` of one (`SHA3.asLittleEndian`). Any other use of
 //! a `VarHandle` is rejected.
@@ -231,6 +238,33 @@ fn literal_kind(node: Node) -> Option<Kind> {
     Some(PRIMITIVES.into_iter().find(|p| *p == element).unwrap_or("reference"))
 }
 
+/// Whether a value of the primitive type `from` is one of `to` or converts to one by widening.
+fn widens(from: &str, to: &str) -> bool {
+    let wider: &[&str] = match from {
+        "byte" => &["short", "int", "long", "float", "double"],
+        "short" | "char" => &["int", "long", "float", "double"],
+        "int" => &["long", "float", "double"],
+        "long" => &["float", "double"],
+        "float" => &["double"],
+        _ => &[],
+    };
+    (from == to && PRIMITIVES.contains(&from)) || wider.contains(&to)
+}
+
+/// The class that boxes a value of the primitive type `kind`.
+fn boxed(kind: Kind) -> &'static str {
+    match kind {
+        "boolean" => "java.lang.Boolean",
+        "byte" => "java.lang.Byte",
+        "short" => "java.lang.Short",
+        "char" => "java.lang.Character",
+        "int" => "java.lang.Integer",
+        "long" => "java.lang.Long",
+        "float" => "java.lang.Float",
+        _ => "java.lang.Double",
+    }
+}
+
 /// The kind of the elements of type `ty`.
 fn type_kind(ty: Type) -> Kind {
     match ty {
@@ -363,6 +397,9 @@ enum VarHandleOf<'t> {
     /// The values of this kind whose bytes are those of a `byte[]`, in big-endian order or not
     /// (`byteArrayViewVarHandle`).
     ByteView(Kind, bool),
+    /// The values of this kind whose bytes are those of a `ByteBuffer`, in big-endian order or
+    /// not (`byteBufferViewVarHandle`).
+    BufferView(Kind, bool),
 }
 
 /// The method of `MethodHandles` (or of its `Lookup`) that `node` calls, and its arguments.
@@ -1272,12 +1309,12 @@ impl<'t> Lowering<'t> {
         self.var_handle_declaration(owner, member)
     }
 
-    /// What the `VarHandle` that `value` makes reaches: a call of `arrayElementVarHandle` or
-    /// `byteArrayViewVarHandle` of an array class literal, of `findVarHandle` of a class literal
-    /// and a field's name, or of `MhUtil.findVarHandle` of a field of `owner` (the class of the
-    /// lookup); a call of a static method that returns one of those of its parameters (`bound`
-    /// gives their arguments), as `ByteArray.create(int[].class)` does; `withInvokeExactBehavior()`
-    /// of one; or a constant whose value is one. `block` is the static block `value` is in, if any.
+    /// What the `VarHandle` that `value` makes reaches: a call of `arrayElementVarHandle`,
+    /// `byteArrayViewVarHandle` or `byteBufferViewVarHandle` of an array class literal, of
+    /// `findVarHandle` of a class literal and a field's name, or of `MhUtil.findVarHandle` of a
+    /// field of `owner` (the class of the lookup); a call of a static method that returns one of
+    /// those of its parameters (`bound` gives their arguments), as `ByteArray.create(int[].class)`
+    /// does; `withInvokeExactBehavior()` of one; or a constant whose value is one. `block` is the static block `value` is in, if any.
     fn var_handle_value(
         &self,
         value: Node<'t>,
@@ -1310,10 +1347,15 @@ impl<'t> Lowering<'t> {
         if let Some((name, args)) = handles_call(value) {
             return match (name, &args[..]) {
                 ("arrayElementVarHandle", [class]) => Some(VarHandleOf::Element(literal_kind(arg(*class))?)),
-                ("byteArrayViewVarHandle", [class, order]) => {
+                ("byteArrayViewVarHandle" | "byteBufferViewVarHandle", [class, order]) => {
                     let kind = literal_kind(arg(*class))?;
-                    matches!(kind, "short" | "char" | "int" | "long" | "float" | "double")
-                        .then_some(VarHandleOf::ByteView(kind, byte_order(arg(*order))?))
+                    let big_endian = byte_order(arg(*order))?;
+                    matches!(kind, "short" | "char" | "int" | "long" | "float" | "double").then_some(
+                        match name {
+                            "byteArrayViewVarHandle" => VarHandleOf::ByteView(kind, big_endian),
+                            _ => VarHandleOf::BufferView(kind, big_endian),
+                        },
+                    )
                 }
                 ("findVarHandle", [class, name, _]) => {
                     Some(VarHandleOf::Field(self.offset_class(arg(*class), block)?, field_name(*name)?))
@@ -1448,6 +1490,13 @@ impl<'t> Lowering<'t> {
                     .map(Some);
             }
             VarHandleOf::ByteView(kind, big_endian) => (kind, big_endian),
+            VarHandleOf::BufferView(kind, big_endian) => {
+                if update.is_some() {
+                    let what = "of a view of a byte buffer";
+                    return unsupported(node, &format!("`VarHandle.{}` {what}", symbol.name));
+                }
+                return self.buffer_view(node, symbol.name, &args, kind, big_endian).map(Some);
+            }
         };
         if update.is_some() {
             return unsupported(node, &format!("`VarHandle.{}` of a view of a byte array", symbol.name));
@@ -1491,6 +1540,71 @@ impl<'t> Lowering<'t> {
             _ => unreachable!("a view's element"),
         };
         let read = self.synth(ExprKind::Builtin(builtin, vec![element]), pos, ty);
+        Ok(self.convert(read, self.ty(node, node.java_type())?).kind)
+    }
+
+    /// The read or write (`args[2]`) in the access mode of `method` (`get`, `setRelease`) of the
+    /// value of kind `kind` in the bytes of the `ByteBuffer` `args[0]` from the absolute index
+    /// `args[1]` on: a call of the translator's method that does what the handle does
+    /// (`java/overlay/java/nio/TranslatedBufferViews.java`), with the handle's byte order last.
+    fn buffer_view(
+        &self,
+        node: Node<'t>,
+        method: &str,
+        args: &[Node<'t>],
+        kind: Kind,
+        big_endian: bool,
+    ) -> Result<ExprKind, Error> {
+        let (ty, java) = match kind {
+            "short" => (Type::Short, "Short"),
+            "char" => (Type::Char, "Char"),
+            "int" => (Type::Int, "Int"),
+            "long" => (Type::Long, "Long"),
+            "float" => (Type::Float, "Float"),
+            _ => (Type::Double, "Double"),
+        };
+        let (name, signature) = crate::program::buffer_view_method(method, kind, java)
+            .expect("a view's access is a get or a set");
+        let class = crate::program::TRANSLATED_BUFFER_VIEWS;
+        let resolved = self
+            .methods
+            .iter()
+            .position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == signature);
+        if resolved.is_none() {
+            return unsupported(node, "a view of a byte buffer through a handle outside a whole program");
+        }
+        // The handle's access converts its operands and result from and to javac's types of the
+        // call as `asType` does, which throws `WrongMethodTypeException` for a narrowing.
+        let fits = match args.get(2) {
+            Some(value) => {
+                let from = plain(*value).java_type();
+                widens(from, kind) || from == boxed(kind)
+            }
+            None => {
+                let to = node.java_type();
+                widens(kind, to) || to == boxed(kind) || to == "java.lang.Object"
+            }
+        };
+        if !fits {
+            return unsupported(
+                node,
+                &format!("`VarHandle.{method}` of a view at another type than its own"),
+            );
+        }
+        let pos = node.pos();
+        let mut operands = vec![
+            self.convert(self.expr(args[0])?, Type::class("java.nio.ByteBuffer")),
+            self.convert(self.expr(args[1])?, Type::Int),
+        ];
+        if let Some(value) = args.get(2) {
+            operands.push(self.convert(self.expr(*value)?, ty));
+        }
+        operands.push(self.synth(ExprKind::Bool(big_endian), pos, Type::Boolean));
+        let call = ExprKind::Call { name, args: operands, resolved };
+        if args.len() == 3 {
+            return Ok(call);
+        }
+        let read = self.synth(call, pos, ty);
         Ok(self.convert(read, self.ty(node, node.java_type())?).kind)
     }
 
