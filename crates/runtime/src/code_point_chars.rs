@@ -6,7 +6,7 @@
 
 use crate::code_point::{high_surrogate, is_bmp_code_point, is_valid_code_point, low_surrogate};
 use crate::code_point_case_tables::{ALPHABETIC, LOWER, LOWERCASE, UPPER, UPPERCASE};
-use crate::code_point_tables::{DIGITS, FRACTIONS, LETTERS, NUMERIC};
+use crate::code_point_tables::{DIGITS, FRACTIONS, LETTERS, NON_SPACING_MARKS, NUMERIC};
 use crate::{Elements, Exception, throw, try_set};
 
 const MIN_SUPPLEMENTARY: i32 = 0x1_0000;
@@ -49,6 +49,13 @@ pub fn is_digit_code_point(cp: i32) -> bool {
 /// Java's `Character.isLetterOrDigit(int)`.
 pub fn is_letter_or_digit_code_point(cp: i32) -> bool {
     is_letter_code_point(cp) || is_digit_code_point(cp)
+}
+
+/// Whether `Character.getType(cp)` is `Character.NON_SPACING_MARK` (Unicode category Mn), from a
+/// table of every plane.
+pub(crate) fn is_non_spacing_mark(cp: u32) -> bool {
+    let i = NON_SPACING_MARKS.partition_point(|&(_, last)| last < cp);
+    matches!(NON_SPACING_MARKS.get(i), Some(&(first, _)) if first <= cp)
 }
 
 /// Java's `Character.isWhitespace(int)`. No supplementary code point is whitespace.

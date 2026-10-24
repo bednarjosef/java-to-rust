@@ -2,12 +2,13 @@
 //! of `java.util.regex` that programs commonly use, matched by backtracking in Java's order, so
 //! the same match is found. Supported: literal characters and escapes (`\t`, `\n`, `\.`, `\Q..\E`,
 //! `\xhh`, `\uhhhh`), `.`, the classes `\d \D \s \S \w \W`, the line break `\R`, character sets
-//! (`[a-z_]`, `[^,;]`), groups (capturing and `(?:..)`), back references (`\1`), `|`, `^`, `$`, and
-//! the greedy and reluctant quantifiers `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`. Anything else
-//! (lookaround, flags,
-//! possessive quantifiers, Unicode properties, boundaries, set unions and intersections) is
-//! rejected: the translator checks a constant pattern when it translates the call, and any other
-//! pattern fails when it is compiled at run time.
+//! (`[a-z_]`, `[^,;]`), groups (capturing, `(?:..)` and atomic `(?>..)`), lookahead (`(?=..)`,
+//! `(?!..)`), back references (`\1`), `|`, `^`, `$`, the word boundaries `\b` and `\B`, and the
+//! greedy, reluctant and possessive quantifiers `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`. Anything
+//! else (lookbehind, flags, named groups, Unicode properties, set unions and intersections) is
+//! rejected: the translator checks a constant pattern when it translates the call (and has the
+//! JDK's own `Pattern` run it where the program has it, `lower::regex`), and any other pattern
+//! fails when it is compiled at run time.
 //!
 //! The input is matched as code points, as Java's `Pattern` matches: a lone surrogate is a code
 //! point of its own, which `.` and a negated set match. A pattern or a replacement string with a
@@ -30,7 +31,16 @@ struct Piece {
     node: Node,
     min: u32,
     max: u32,
-    lazy: bool,
+    greed: Greed,
+}
+
+/// How a quantifier repeats: as many times as it can and then fewer, as few as it can and then
+/// more, or as many as it can and never fewer (`+`, as Java's `POSSESSIVE`).
+#[derive(Clone, Copy, PartialEq)]
+enum Greed {
+    Greedy,
+    Lazy,
+    Possessive,
 }
 
 enum Node {
@@ -44,6 +54,13 @@ enum Node {
     End,
     /// A group, with its number if it captures.
     Group(Alt, Option<usize>),
+    /// `(?>..)`: a group that keeps the first way it matches, never backtracking into it.
+    Atomic(Alt),
+    /// `(?=..)` or, negated, `(?!..)`: whether the group matches here, without consuming input.
+    /// The groups it captures in a match stay captured, as in Java.
+    Ahead(Alt, bool),
+    /// `\b` or, negated, `\B`: a word boundary, as Java's `Bound` tells it.
+    Boundary(bool),
     /// `\R`: a line break, `\r\n` or one of `\n \u000B \f \r \u0085 \u2028 \u2029`.
     LineBreak,
     /// `\n`: the text that group `n` matched last, if it did.
@@ -146,14 +163,15 @@ impl Parser<'_> {
                         self.at += 2;
                         break;
                     }
-                    seq.push(Piece { node: Node::Char(self.chars[self.at]), min: 1, max: 1, lazy: false });
+                    let node = Node::Char(self.chars[self.at]);
+                    seq.push(Piece { node, min: 1, max: 1, greed: Greed::Greedy });
                     self.at += 1;
                 }
                 continue;
             }
             let node = self.atom()?;
-            let (min, max, lazy) = self.quantifier()?;
-            seq.push(Piece { node, min, max, lazy });
+            let (min, max, greed) = self.quantifier()?;
+            seq.push(Piece { node, min, max, greed });
         }
         Ok(seq)
     }
@@ -162,21 +180,30 @@ impl Parser<'_> {
         let c = self.next().expect("seq checks for the end");
         Ok(match c {
             '(' => {
-                let capture = if self.peek() == Some('?') {
-                    if self.chars.get(self.at + 1) != Some(&':') {
-                        return self.error("lookaround, flags and named groups");
+                // The group's kind, from what follows `(?`: `None` for a capturing group.
+                let kind = if self.peek() == Some('?') {
+                    let kind = self.chars.get(self.at + 1).copied();
+                    if !matches!(kind, Some(':' | '>' | '=' | '!')) {
+                        return self.error("lookbehind, flags and named groups");
                     }
                     self.at += 2;
-                    None
+                    kind
                 } else {
                     self.groups += 1;
-                    Some(self.groups)
+                    None
                 };
+                let number = self.groups;
                 let alt = self.alt()?;
                 if self.next() != Some(')') {
                     return self.malformed("an unclosed group");
                 }
-                Node::Group(alt, capture)
+                match kind {
+                    None => Node::Group(alt, Some(number)),
+                    Some('>') => Node::Atomic(alt),
+                    Some('=') => Node::Ahead(alt, false),
+                    Some('!') => Node::Ahead(alt, true),
+                    _ => Node::Group(alt, None),
+                }
             }
             '[' => Node::Set(self.set()?),
             '.' => Node::Any,
@@ -185,6 +212,13 @@ impl Parser<'_> {
             '\\' if self.peek() == Some('R') => {
                 self.at += 1;
                 Node::LineBreak
+            }
+            '\\' if matches!(self.peek(), Some('b' | 'B')) => {
+                // `\b{g}` is a grapheme boundary.
+                if self.chars.get(self.at..self.at + 3) == Some(&['b', '{', 'g'][..]) {
+                    return self.error("grapheme boundaries");
+                }
+                Node::Boundary(self.next() == Some('B'))
             }
             '\\' if self.peek().is_some_and(|c| matches!(c, '1'..='9')) => Node::BackRef(self.group_number()),
             '\\' => match self.escape(false)? {
@@ -221,7 +255,7 @@ impl Parser<'_> {
         self.chars[start..self.at].iter().collect::<String>().parse().ok()
     }
 
-    fn quantifier(&mut self) -> Result<(u32, u32, bool), Problem> {
+    fn quantifier(&mut self) -> Result<(u32, u32, Greed), Problem> {
         let (min, max) = match self.peek() {
             Some('*') => (0, u32::MAX),
             Some('+') => (1, u32::MAX),
@@ -240,16 +274,16 @@ impl Parser<'_> {
                 }
                 (min, max)
             }
-            _ => return Ok((1, 1, false)),
+            _ => return Ok((1, 1, Greed::Greedy)),
         };
         self.at += 1;
-        let lazy = self.peek() == Some('?');
-        if lazy {
-            self.at += 1;
-        } else if self.peek() == Some('+') {
-            return self.error("possessive quantifiers");
-        }
-        Ok((min, max, lazy))
+        let greed = match self.peek() {
+            Some('?') => Greed::Lazy,
+            Some('+') => Greed::Possessive,
+            _ => return Ok((min, max, Greed::Greedy)),
+        };
+        self.at += 1;
+        Ok((min, max, greed))
     }
 
     fn hex(&mut self, digits: usize) -> Result<char, Problem> {
@@ -280,7 +314,7 @@ impl Parser<'_> {
             'x' => Escaped::Char(self.hex(2)?),
             'u' => Escaped::Char(self.hex(4)?),
             // Only outside a set, where `atom` reads them.
-            'R' | '1'..='9' if in_set => return self.malformed("an illegal escape in a set"),
+            'R' | 'b' | 'B' | '1'..='9' if in_set => return self.malformed("an illegal escape in a set"),
             c if c.is_ascii_alphanumeric() => {
                 let place = if in_set { " in a set" } else { "" };
                 return self.error(&format!("the escape \\{c}{place}"));
@@ -408,7 +442,11 @@ impl Matcher<'_> {
     }
 
     fn repeat(&self, p: &Piece, n: u32, pos: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
-        if p.lazy && n >= p.min && k(pos) {
+        if p.greed == Greed::Possessive {
+            return self.possessive(p, pos, k);
+        }
+        let lazy = p.greed == Greed::Lazy;
+        if lazy && n >= p.min && k(pos) {
             return true;
         }
         if n < p.max {
@@ -419,7 +457,71 @@ impl Matcher<'_> {
                 return true;
             }
         }
-        !p.lazy && n >= p.min && k(pos)
+        !lazy && n >= p.min && k(pos)
+    }
+
+    /// The first way `node` matches at `pos`, if it does: where it ends. What it captured stays.
+    fn first(&self, node: &Node, pos: usize) -> Option<usize> {
+        let mut end = None;
+        self.atom(node, pos, &mut |q| {
+            end = Some(q);
+            true
+        });
+        end
+    }
+
+    /// A possessive quantifier, as Java's `Curly` matches one: the atom's first match, `min` times
+    /// and then as many more as it matches, up to `max` and stopping at one that matches nothing,
+    /// never giving any back.
+    fn possessive(&self, p: &Piece, mut pos: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
+        for _ in 0..p.min {
+            match self.first(&p.node, pos) {
+                Some(q) => pos = q,
+                None => return false,
+            }
+        }
+        for _ in p.min..p.max {
+            match self.first(&p.node, pos) {
+                Some(q) if q != pos => pos = q,
+                _ => break,
+            }
+        }
+        k(pos)
+    }
+
+    /// Whether `pos` is at a word boundary, as Java's `Bound.check` tells it: whether a word
+    /// character lies on one side and not the other. A word character is ASCII (`[a-zA-Z_0-9]`),
+    /// or a non-spacing mark after a letter or a digit, maybe through other marks.
+    fn at_boundary(&self, pos: usize) -> bool {
+        let input = &self.input;
+        let word = |c: u32| Class::Word.contains(c);
+        let mark = crate::code_point_chars::is_non_spacing_mark;
+        // Java's `hasBaseCharacter`, from the code point at index `i` back, a `char` at a time:
+        // the first `char` it reads is that code point when `whole`, and its last one otherwise.
+        let based = |mut i: usize, whole: bool| {
+            // The `char` that ends the code point at `i`: a low surrogate for one above U+FFFF.
+            let last = |c: u32| if c > 0xFFFF { 0xDC00 | (c & 0x3FF) } else { c };
+            let mut c = if whole { input[i] } else { last(input[i]) };
+            loop {
+                if crate::is_letter_or_digit_code_point(c as i32) {
+                    return true;
+                }
+                if !mark(c) || i == 0 {
+                    return false;
+                }
+                i -= 1;
+                c = last(input[i]);
+            }
+        };
+        let left = pos > 0 && {
+            let c = input[pos - 1];
+            word(c) || (mark(c) && based(pos - 1, false))
+        };
+        let right = pos < input.len() && {
+            let c = input[pos];
+            word(c) || (mark(c) && based(pos, true))
+        };
+        left != right
     }
 
     fn atom(&self, node: &Node, pos: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
@@ -449,6 +551,16 @@ impl Matcher<'_> {
                 pos + len <= input.len() && input[start..end] == input[pos..pos + len] && k(pos + len)
             }
             Node::Group(alt, None) => self.alt(alt, pos, k),
+            Node::Atomic(alt) => {
+                let mut end = None;
+                self.alt(alt, pos, &mut |q| {
+                    end = Some(q);
+                    true
+                });
+                end.is_some_and(k)
+            }
+            Node::Ahead(alt, negated) => self.alt(alt, pos, &mut |_| true) != *negated && k(pos),
+            Node::Boundary(negated) => self.at_boundary(pos) != *negated && k(pos),
             Node::Group(alt, Some(i)) => self.alt(alt, pos, &mut |end| {
                 let old = self.caps.borrow()[*i];
                 self.caps.borrow_mut()[*i] = Some((pos, end));
@@ -461,9 +573,11 @@ impl Matcher<'_> {
     }
 
     /// The first match that starts at or after `from`, as Java's `Matcher.find` finds it.
+    /// The groups are cleared once, as Java's `search` clears them: a group that a lookahead
+    /// captured in a try that failed later stays captured in the next.
     fn find(&self, from: usize) -> Option<Captures> {
+        *self.caps.borrow_mut() = vec![None; self.regex.groups + 1];
         for start in from..=self.input.len() {
-            *self.caps.borrow_mut() = vec![None; self.regex.groups + 1];
             let mut end = None;
             if self.alt(&self.regex.alt, start, &mut |e| {
                 end = Some(e);
@@ -747,12 +861,39 @@ mod tests {
     }
 
     #[test]
+    fn boundaries_lookahead_and_possessives_follow_java() {
+        let zeros = w("((?:(?:^|:)0+\\b){2,8}):?(?!\\S*\\b\\1:0+\\b)(\\S*)");
+        assert_eq!(replace_all(w("fe80:0:0:0:0:0:0:1"), zeros, w("::$2")), "fe80::1");
+        assert_eq!(replace_all(w("1:0:0:2:0:0:0:3"), zeros, w("::$2")), "1:0:0:2::3");
+        assert_eq!(replace_all(w("0:0:0:0:0:0:0:0"), zeros, w("::$2")), "::");
+        assert_eq!(parts("one two\u{e9}three", "\\b", 0), ["one", " ", "two", "\u{e9}", "three"]);
+        assert_eq!(replace_all(w("hello world"), w("\\b"), w("|")), "|hello| |world|");
+        assert_eq!(replace_all(w("hello world"), w("\\B"), w("-")), "h-e-l-l-o w-o-r-l-d");
+        // A non-spacing mark after a letter is a word character; one that starts a word is not.
+        let marks = w("e\u{301}x \u{301}y a\u{301}\u{302}");
+        assert_eq!(replace_all(marks, w("\\b"), w("|")), "|e\u{301}x| \u{301}|y| |a\u{301}\u{302}|");
+        // Java reads a mark above U+FFFF before a position as its low surrogate: no word character.
+        assert_eq!(replace_all(w("x\u{1D167}y"), w("\\b"), w("|")), "|x\u{1D167}|y|");
+        assert!(!matches_all(w("aaa"), w("a++a")));
+        assert!(matches_all(w("aab"), w("a*+b")));
+        assert!(matches_all(w("abab"), w("(ab){1,}+")));
+        assert_eq!(replace_all(w("aaa"), w("(a?)++"), w("<$1>")), "<><>");
+        assert_eq!(replace_all(w("aaab"), w("(?>a|aa)b"), w("X")), "aaX");
+        assert!(!matches_all(w("ab"), w("(?>a|ab)")));
+        assert_eq!(parts("a1b2c3", "(?=\\d)", 0), ["a", "1b", "2c", "3"]);
+        assert_eq!(replace_all(w("foobar foobaz"), w("foo(?!bar)"), w("X")), "foobar Xbaz");
+        assert_eq!(replace_all(w("abc"), w("(?=(b))"), w("[$1]")), "a[b]bc");
+        // A group that a lookahead captured stays captured when the match fails after it.
+        assert_eq!(replace_all(w("xy"), w("(?:(?=(x))z|y)"), w("<$1>")), "x<x>");
+    }
+
+    #[test]
     fn unsupported_patterns_are_rejected() {
-        for p in ["(?i)a", "a++", "\\bword", "[a-z&&[^b]]", "\\0", "\\p{L}"] {
+        for p in ["(?i)a", "(?<=a)b", "(?<n>a)", "\\b{g}", "[a-z&&[^b]]", "\\0", "\\p{L}"] {
             assert!(check(p).is_err(), "{p}");
         }
         // Malformed patterns throw as in Java, so they are not rejected.
-        for p in ["a{", "(a", "a)", "*a", "[z-a]", "\\"] {
+        for p in ["a{", "(a", "a)", "*a", "[z-a]", "\\", "[\\b]"] {
             assert!(check(p).is_ok(), "{p}");
             assert!(compile(p).is_err_and(|problem| problem.malformed), "{p}");
         }

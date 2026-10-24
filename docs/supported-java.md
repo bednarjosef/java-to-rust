@@ -97,12 +97,14 @@ included (docs/collector.md).
   `exp`, `log`, `pow`, `cbrt`, `sinh` and `tanh` cannot be ported and use the platform's libm,
   which agrees on all but about 0.1 percent of arguments.
 - **Regular expressions** (`split`, `replaceAll`, `replaceFirst`, `matches`) run a small
-  backtracking engine in the runtime (`regex.rs`): literals, escapes, classes, `\R`, groups, back
-  references, alternation, anchors, greedy and lazy quantifiers. Lookaround, flags, `\b`,
-  `\p{..}`, possessive quantifiers and set intersections are rejected in a constant pattern and
-  throw `UnsupportedOperationException` in a computed one. In a program translated with the
-  JDK's sources, a computed pattern is the JDK's own `Pattern`'s instead, as Java's `String`
-  calls it (`lower/regex.rs`).
+  backtracking engine in the runtime (`regex.rs`): literals, escapes, classes, `\R`, groups
+  (atomic too), lookahead, back references, alternation, anchors, the word boundaries `\b` and
+  `\B` (Java's: an ASCII word character, or a non-spacing mark after a letter or digit), and
+  greedy, lazy and possessive quantifiers. Lookbehind, flags, named groups, `\p{..}` and set
+  intersections are rejected in a constant pattern and throw `UnsupportedOperationException` in
+  a computed one. In a program translated with the JDK's sources, such a constant pattern and
+  every computed one are the JDK's own `Pattern`'s instead, as Java's `String` calls it
+  (`lower/regex.rs`).
 - **`String.format`** is Java's `Formatter` in the US locale for `%b %h %s %c %d %o %x %e %f %g
   %n %%` with indexes, flags, width and precision, rounding half up from the shortest decimal as
   Java does. Arguments keep their Java type (`java::Arg::Long(n)`), so a mismatch throws

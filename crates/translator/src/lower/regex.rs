@@ -1,5 +1,6 @@
-//! A regular expression call of `String` whose pattern is not a constant, in a program translated
-//! with the JDK's sources: the JDK's own `Pattern` runs it, as the JDK's `String` calls it
+//! A regular expression call of `String` whose pattern is not a constant, or is a constant that
+//! the runtime does not support (lookaround, flags, Unicode properties and so on), in a program
+//! translated with the JDK's sources: the JDK's own `Pattern` runs it, as the JDK's `String` calls it
 //! (`program::REGEX_CALLS`), so that what it throws for a malformed pattern or replacement, and
 //! the message, are Java's. `s.replaceAll(regex, replacement)` becomes
 //!
@@ -13,8 +14,9 @@
 //! does, before the pattern compiles. `s.matches(regex)` is `Pattern.matches(regex, s)` and
 //! `s.split(regex, limit)` is `Pattern.compile(regex).split(s, limit)` (with a `limit` of 0 for
 //! `s.split(regex)`; the JDK's shortcut for a pattern of one plain character splits as the
-//! pattern does). A constant pattern is the runtime's (`lower::strings`), which is checked when
-//! the program is translated, and so is every pattern where the program has no `Pattern`.
+//! pattern does). A constant pattern that the runtime supports is the runtime's
+//! (`lower::strings`), which is checked when the program is translated, and so is every pattern
+//! where the program has no `Pattern`.
 
 use super::*;
 

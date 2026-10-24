@@ -1617,25 +1617,33 @@ const PATTERN_MATCHER: JdkMethod =
     ("java.util.regex.Pattern", "matcher", "(java.lang.CharSequence)java.util.regex.Matcher");
 
 /// The JDK's methods (`REGEX_CALLS`) that the call `node` runs, where it is a regular expression
-/// call of `String` whose pattern is not a constant.
+/// call of `String` whose pattern is not a constant, or is one (with a constant replacement) that
+/// the runtime does not support.
 pub fn regex_call(node: &Value) -> Option<&'static [JdkMethod]> {
-    fn constant(node: &Value) -> bool {
+    fn constant(node: &Value) -> Option<&str> {
         match text(node, "kind") {
-            "STRING_LITERAL" => true,
+            "STRING_LITERAL" => node["value"].as_str(),
             "PARENTHESIZED" => constant(&node["expression"]),
-            "IDENTIFIER" | "MEMBER_SELECT" => {
-                text(node, "javaType") == "java.lang.String" && node["symbol"]["constant"].as_str().is_some()
+            "IDENTIFIER" | "MEMBER_SELECT" if text(node, "javaType") == "java.lang.String" => {
+                node["symbol"]["constant"].as_str()
             }
-            _ => false,
+            _ => None,
         }
     }
     let symbol = &node["symbol"];
     if text(node, "kind") != "METHOD_INVOCATION" || text(symbol, "owner") != "java.lang.String" {
         return None;
     }
-    let (_, methods) = REGEX_CALLS.iter().find(|(name, _)| *name == text(symbol, "name"))?;
-    let pattern = node["arguments"].as_array()?.first()?;
-    (!constant(pattern)).then_some(*methods)
+    let (name, methods) = REGEX_CALLS.iter().find(|(name, _)| *name == text(symbol, "name"))?;
+    let args = node["arguments"].as_array()?;
+    let Some(pattern) = constant(args.first()?) else { return Some(*methods) };
+    let supported = match args.get(1).and_then(constant) {
+        Some(replacement) if name.starts_with("replace") => {
+            java_runtime::regex::check_replacement(pattern, replacement)
+        }
+        _ => java_runtime::regex::check(pattern),
+    };
+    supported.is_err().then_some(*methods)
 }
 
 /// The methods that a for-each over an `Iterable` calls.
