@@ -988,7 +988,7 @@ pub(super) fn runtime_failures(
                     out.push(("java.lang.IllegalArgumentException", "this call of the library", false, x.id));
                 }
                 if let Builtin::Native(Native::MonitorWait) = builtin
-                    && !matches!(args[1].kind, ExprKind::Long(n) if n >= 0)
+                    && (args.len() > 2 || !matches!(args[1].kind, ExprKind::Long(n) if n >= 0))
                 {
                     out.push(("java.lang.IllegalArgumentException", "this call of the library", true, x.id));
                 }

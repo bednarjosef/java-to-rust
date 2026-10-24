@@ -137,7 +137,8 @@ included (docs/collector.md).
   program, as the translation does not keep their identity.
 - `super.clone()` of `Object` is a shallow copy of the runtime class, a `match` on the variant in
   a class tree; a class that is not `Cloneable` throws `CloneNotSupportedException`. `clone` of
-  an object other than `this` is rejected.
+  an object other than `this` is rejected. `super.finalize()` of `Object` does nothing, as
+  `Object`'s `finalize` is empty.
 - A covariant override's value is converted to the overridden method's representation.
 
 ## Class trees, interfaces, `Object` and generics
@@ -277,10 +278,10 @@ translates exactly as before.
 `synchronized`, `wait`, `notify`, `notifyAll` and `holdsLock` are Java's, kept only where the
 program can tell. In a whole program `java.util.concurrent` (atomics, `ConcurrentHashMap`,
 `ForkJoinPool`, `LockSupport`) and `ThreadLocal` are the JDK's translated code.
+`wait(millis, nanos)` waits a millisecond longer for any nanoseconds, as `Object`'s does.
 
-Rejected: `wait` with a timeout in nanoseconds, and the monitor (`synchronized`, `wait`,
-`notify`) of a string, a box, an array or another value that has no identity in the translation
-(`lower/sync.rs`).
+Rejected: the monitor (`synchronized`, `wait`, `notify`) of a string, a box, an array or another
+value that has no identity in the translation (`lower/sync.rs`).
 
 ## Class values and reflection
 

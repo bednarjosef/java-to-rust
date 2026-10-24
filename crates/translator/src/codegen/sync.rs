@@ -140,6 +140,15 @@ impl<'a> Gen<'a> {
         match native {
             Native::MonitorWait => {
                 let millis = self.value(&args[1], Type::Long).text;
+                if let Some(nanos) = args.get(2) {
+                    let nanos = self.value(nanos, Type::Int).text;
+                    return self.may_fail(
+                        id,
+                        "monitor_wait_nanos",
+                        "",
+                        &format!("{handle}, {millis}, {nanos}"),
+                    );
+                }
                 self.may_fail(id, "monitor_wait", "", &format!("{handle}, {millis}"))
             }
             Native::MonitorNotify { all } => {
