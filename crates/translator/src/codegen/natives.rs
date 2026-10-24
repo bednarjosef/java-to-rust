@@ -281,6 +281,33 @@ impl<'a> Gen<'a> {
                 texts.extend(args[2..].iter().map(|a| self.value(a, Type::Int).text));
                 self.array_call(args, 1, texts, |g, t| call(g, "crc32_update_bytes", t.to_vec()))
             }
+            Native::Adler32Update => {
+                let ints = args.iter().map(|a| self.value(a, Type::Int).text).collect();
+                call(self, "adler32_update", ints)
+            }
+            Native::Adler32UpdateBytes => {
+                let mut texts = vec![self.value(&args[0], Type::Int).text, String::new()];
+                texts.extend(args[2..].iter().map(|a| self.value(a, Type::Int).text));
+                self.array_call(args, 1, texts, |g, t| call(g, "adler32_update_bytes", t.to_vec()))
+            }
+            Native::Crc32UpdateBuffer | Native::Adler32UpdateBuffer => {
+                let texts = [Type::Int, Type::Long, Type::Int, Type::Int]
+                    .into_iter()
+                    .zip(args)
+                    .map(|(ty, a)| self.value(a, ty).text)
+                    .collect();
+                let f = if native == Native::Crc32UpdateBuffer {
+                    "crc32_update_buffer"
+                } else {
+                    "adler32_update_buffer"
+                };
+                call(self, f, texts)
+            }
+            Native::CurrentPid => call(self, "current_pid", vec![]),
+            Native::ProcessStartTime => {
+                let pid = self.value(&args[0], Type::Long).text;
+                call(self, "process_start_time", vec![pid])
+            }
             Native::InflateInit
             | Native::InflateBytes
             | Native::InflateBytesBuffer

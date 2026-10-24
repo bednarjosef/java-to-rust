@@ -82,7 +82,11 @@ something a translated program does not have.
 | `MappedMemoryUtils.force0`, `Unsafe.writeback0`, `writebackPreSync0`, `writebackPostSync0` | nothing (statement dropped) | exact because no mapping is writable or synchronous, so there is nothing to write back |
 | `Unsafe.fullFence()` (and `loadFence`, `storeFence`) | a full fence | |
 | `Unsafe.park`, `unpark` | `thread.rs` | `LockSupport`'s permits |
-| `CRC32.update`, `updateBytes0` | `java::crc32_update`, `crc32_update_bytes` | zlib's CRC-32 |
+| `CRC32.update`, `updateBytes0`, `updateByteBuffer0` | `java::crc32_update`, `crc32_update_bytes`, `crc32_update_buffer` | zlib's CRC-32, of an array or of memory outside the heap by address (direct buffers) |
+| `Adler32.update`, `updateBytes`, `updateByteBuffer` | `java::adler32_update`, `adler32_update_bytes`, `adler32_update_buffer` | zlib's Adler-32, likewise |
+| `ProcessHandleImpl.initNative()` | nothing | on Linux it only reads the boot time and the clock's ticks, which `isAlive0` reads itself |
+| `ProcessHandleImpl.getCurrentPid0()` | `java::current_pid()` | the process's id |
+| `ProcessHandleImpl.isAlive0(pid)` | `java::process_start_time(pid)` | as the JDK reads `/proc/<pid>/stat` on Linux: -1 when there is no such process, 0 when its fields cannot be read, else its start time in milliseconds since the epoch (`btime` of `/proc/stat` plus the start's clock ticks at `AT_CLKTCK` per second) |
 | `Inflater` natives (`inflateBytesBytes`, `inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, ...) | `inflate.rs` | zlib inflation, from arrays or from memory outside the heap by address (direct buffers) |
 | `Deflater` natives (`init`, `deflateBytesBytes`, `deflateBytesBuffer`, `deflateBufferBytes`, `deflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, `getAdler`, `reset`, `end`) | `deflate.rs` | a compressor of the runtime's own, see "Compression" below |
 | `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()` | code on the field `referent`; `false` | see "References" below |
@@ -184,6 +188,18 @@ the program could call, and what is left of it is its outcome. In a whole progra
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
   definition and module natives, sockets, `MappedMemoryUtils.isLoaded0`, `load0` and
   `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
+- The natives of a library's own classes, outside the JDK (jtracy's `TracyBindings`, JNA's
+  `Native`, netty's `epoll` and `kqueue` classes). Their code is in a JNI library that the
+  program loads with `System.load` or `System.loadLibrary`, which a translation rejects. Planned:
+  a call of one becomes what Java does where that library was never loaded, since an accepted
+  program never loads one: the JVM finds no function for the method and throws
+  `UnsatisfiedLinkError` at each call, after the arguments are evaluated, with the message of the
+  method in quotes, its return type first and its parameters separated by `, ` (`'void
+  com.mojang.jtracy.TracyBindings.markFrameStart(long)'`). Libraries that check for their
+  native code catch that error and fall back to Java (netty to NIO); jtracy calls its natives only
+  once its loader has succeeded. Telling a library's class from the JDK's needs the module of the
+  class's source root (`java.*` and `jdk.*` modules are the JDK's), which lowering does not know
+  yet, and the error needs `UnsatisfiedLinkError` among the translator's standard exceptions.
 
 ## The reachability boundary
 

@@ -233,6 +233,17 @@ pub enum Native {
     Crc32Update,
     /// `CRC32.updateBytes0(crc, b, off, len)`.
     Crc32UpdateBytes,
+    /// `CRC32.updateByteBuffer0(crc, address, off, len)`, of memory outside the heap.
+    Crc32UpdateBuffer,
+    /// `Adler32.update(adler, b)`, `updateBytes(adler, b, off, len)` and
+    /// `updateByteBuffer(adler, address, off, len)`.
+    Adler32Update,
+    Adler32UpdateBytes,
+    Adler32UpdateBuffer,
+    /// `ProcessHandleImpl.getCurrentPid0()`.
+    CurrentPid,
+    /// `ProcessHandleImpl.isAlive0(pid)`: the process's start time, or -1 when it does not exist.
+    ProcessStartTime,
     /// `Reference.hasReferencePendingList()`: a translated program has no garbage collector that
     /// discovers references, so no reference is ever pending.
     NoPendingReferences,
@@ -418,6 +429,15 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         }
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
+        ("java.util.zip.CRC32", "updateByteBuffer0", "(int,long,int,int)int") => Native::Crc32UpdateBuffer,
+        ("java.util.zip.Adler32", "update", "(int,int)int") => Native::Adler32Update,
+        ("java.util.zip.Adler32", "updateBytes", "(int,byte[],int,int)int") => Native::Adler32UpdateBytes,
+        ("java.util.zip.Adler32", "updateByteBuffer", "(int,long,int,int)int") => Native::Adler32UpdateBuffer,
+        // On Linux, `initNative` reads the boot time and the clock's ticks, which `isAlive0`
+        // reads again itself (`java_runtime::process_start_time`).
+        ("java.lang.ProcessHandleImpl", "initNative", "()void") => Native::Nothing,
+        ("java.lang.ProcessHandleImpl", "getCurrentPid0", "()long") => Native::CurrentPid,
+        ("java.lang.ProcessHandleImpl", "isAlive0", "(long)long") => Native::ProcessStartTime,
         ("java.util.zip.Inflater", "init", "(boolean)long") => Native::InflateInit,
         ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
             Native::InflateBytes
@@ -775,6 +795,27 @@ mod tests {
             Some(Native::DeflateBufferBuffer)
         );
         assert_eq!(found("java.util.zip.Deflater", "reset", "(long)void"), Some(Native::DeflateReset));
+        assert_eq!(
+            found("java.util.zip.CRC32", "updateByteBuffer0", "(int,long,int,int)int"),
+            Some(Native::Crc32UpdateBuffer)
+        );
+        assert_eq!(found("java.util.zip.Adler32", "update", "(int,int)int"), Some(Native::Adler32Update));
+        assert_eq!(
+            found("java.util.zip.Adler32", "updateBytes", "(int,byte[],int,int)int"),
+            Some(Native::Adler32UpdateBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Adler32", "updateByteBuffer", "(int,long,int,int)int"),
+            Some(Native::Adler32UpdateBuffer)
+        );
+        assert_eq!(
+            found("java.lang.ProcessHandleImpl", "getCurrentPid0", "()long"),
+            Some(Native::CurrentPid)
+        );
+        assert_eq!(
+            found("java.lang.ProcessHandleImpl", "isAlive0", "(long)long"),
+            Some(Native::ProcessStartTime)
+        );
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
         assert_eq!(found("jdk.internal.misc.Unsafe", "initialize", "()void"), None);

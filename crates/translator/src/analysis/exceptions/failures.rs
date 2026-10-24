@@ -374,6 +374,12 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::FreeNative
             | Native::SetMemory
             | Native::Crc32Update
+            | Native::Adler32Update
+            // Memory outside every block ends the program, as for `SetMemory`.
+            | Native::Crc32UpdateBuffer
+            | Native::Adler32UpdateBuffer
+            | Native::CurrentPid
+            | Native::ProcessStartTime
             | Native::InflateInit
             | Native::InflateAdler
             | Native::InflateReset
@@ -536,8 +542,9 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         // what it cannot write, as `PrintStream` does.
         Builtin::StringArrayOf | Builtin::ObjectArrayOf | Builtin::ArraysFill => &[],
         Builtin::Native(Native::ErrPrint { .. }) => &[],
-        // `CRC32.updateBytes0` runs on what the JDK's code has checked already, as the JVM's does.
-        Builtin::Native(Native::Crc32UpdateBytes) => &[],
+        // `CRC32.updateBytes0` and `Adler32.updateBytes` run on what the JDK's code has checked
+        // already, as the JVM's do.
+        Builtin::Native(Native::Crc32UpdateBytes | Native::Adler32UpdateBytes) => &[],
         _ => &["?"],
     }
 }
