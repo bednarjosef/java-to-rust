@@ -179,6 +179,12 @@ an operand of `&&`, and the lowering lowers only the other branch:
   false. It guards the pinning of virtual threads (`ReferenceQueue.poll` and other code under a
   lock).
 - `FALSE_INSTANCE_CALLS`: `Thread.isVirtual()`; there are no virtual threads.
+- `TRUE_CALLS`, whose `!` is never true and whose `if` runs only its `then` branch:
+  `GraphicsEnvironment.isHeadless()` and its `getHeadlessProperty()`. A translation is headless,
+  as with `-Djava.awt.headless=true`, which is the value `System.getProperty` and
+  `Boolean.getBoolean` give for that key (`lower/system.rs`), since AWT's natives are not
+  translated. So code that only a display runs (Swing, `java.awt.Component`, the X11 toolkit)
+  is not reached; the Minecraft server reached all of it through `showGui`.
 - A constant variable that is `false`, named by its simple name (`private final boolean
   crtDebug = false;` in javac's `CRTable`): javac writes no code for the branch either, so the
   messages of its null dereferences, which `BytecodeNames` finds no code for, are not needed.

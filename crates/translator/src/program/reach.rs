@@ -672,6 +672,15 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
 /// `ReferenceQueue.poll` and other code under a lock do.
 pub const FALSE_CALLS: &[(&str, &str)] = &[("jdk.internal.vm.ContinuationSupport", "isSupported")];
 
+/// Static methods without parameters that return `true` in every translated program, as the
+/// `FALSE_CALLS` return false: a translation is headless, as if run with
+/// `-Djava.awt.headless=true` (`lower::system::HEADLESS`), since AWT's natives are not translated.
+/// `GraphicsEnvironment.isHeadless()` and the private `getHeadlessProperty()` behind it read that
+/// property, so the branches that would open a window, find a screen or start AWT's toolkit
+/// never run, and their code (Swing, `java.awt.Component`, the X11 toolkit) is not reached.
+pub const TRUE_CALLS: &[(&str, &str)] =
+    &[("java.awt.GraphicsEnvironment", "isHeadless"), ("java.awt.GraphicsEnvironment", "getHeadlessProperty")];
+
 /// Instance methods without parameters that return `false` in every translated program, called
 /// on a receiver that reading has no effects: there are no virtual threads, so
 /// `Thread.isVirtual()` is false, and the branches that would park, unpark or ask a virtual
@@ -826,7 +835,7 @@ pub fn recreated_exception(node: &Value) -> Option<&str> {
 
 /// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
 /// (`never_true`: the `else` branch, `Null` for an `if` without one) or always true (a test that
-/// one of the `ARCHIVED_FIELDS` is null: the `then` branch).
+/// one of the `ARCHIVED_FIELDS` is null, or a call of one of the `TRUE_CALLS`: the `then` branch).
 pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
     if !matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION") {
         return None;
@@ -837,7 +846,8 @@ pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
     if never_true(condition, sequential) {
         return Some(else_branch(node));
     }
-    (archived_null_test(condition, true) || stub_null_test(condition, true)).then(|| then_branch(node))
+    (archived_null_test(condition, true) || stub_null_test(condition, true) || always_true(condition))
+        .then(|| then_branch(node))
 }
 
 /// Whether `node` is `Runtime.version().feature()`, the release of the JDK, which the translation
@@ -877,7 +887,7 @@ fn stub_null_test(condition: &Value, equal: bool) -> bool {
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
 /// branch can run: it reads one of the `FALSE_FLAGS` or a constant variable that is `false` by its
 /// simple name (whose branch javac writes no code for), or calls one of the `FALSE_CALLS` or
-/// `FALSE_INSTANCE_CALLS`, or, when the program's streams are all
+/// `FALSE_INSTANCE_CALLS`, or is `!` of a call of one of the `TRUE_CALLS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
 /// of its nodes has children (`getChildCount() > 0`); alone, or as the first
 /// operand of `&&`, or as the second after one that only computes a value (the lowering drops the
@@ -909,8 +919,22 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
                 && text(symbol, "type") == "()boolean";
             false_call || (sequential && sequential::is_parallel_test(condition))
         }
+        "LOGICAL_COMPLEMENT" => always_true(&condition["expression"]),
         "NOT_EQUAL_TO" => archived_null_test(condition, false) || stub_null_test(condition, false),
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
+        _ => false,
+    }
+}
+
+/// Whether `condition` is a call of one of the `TRUE_CALLS`, maybe in parentheses.
+fn always_true(condition: &Value) -> bool {
+    let symbol = &condition["symbol"];
+    match text(condition, "kind") {
+        "PARENTHESIZED" => always_true(&condition["expression"]),
+        "METHOD_INVOCATION" => {
+            TRUE_CALLS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+                && text(symbol, "type") == "()boolean"
+        }
         _ => false,
     }
 }
@@ -2671,6 +2695,36 @@ mod tests {
         let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
         assert!(rounds.methods.contains(&method("Deeper", "go")), "{rounds:?}");
         assert!(!rounds.methods.contains(&method("Library", "unused")), "{rounds:?}");
+    }
+
+    #[test]
+    fn a_translation_is_headless_so_what_needs_a_display_is_not_reached() {
+        let headless = json!({"kind": "METHOD_INVOCATION", "symbol": {"kind": "METHOD",
+            "owner": "java.awt.GraphicsEnvironment", "name": "isHeadless", "type": "()boolean", "static": true}});
+        let gui = json!({"kind": "IDENTIFIER", "symbol": {"kind": "LOCAL_VARIABLE", "name": "gui"}});
+        // `if (gui && !GraphicsEnvironment.isHeadless()) Window.show(); else Console.run();`
+        let shows = json!({"kind": "IF",
+            "condition": {"kind": "PARENTHESIZED", "expression": {"kind": "CONDITIONAL_AND",
+                "leftOperand": gui,
+                "rightOperand": {"kind": "LOGICAL_COMPLEMENT", "expression": headless}}},
+            "thenStatement": call("Window", "show"),
+            "elseStatement": call("Console", "run")});
+        // `if (GraphicsEnvironment.isHeadless()) Console.log(); else Toolkit.start();`
+        let starts = json!({"kind": "IF",
+            "condition": {"kind": "PARENTHESIZED", "expression": headless},
+            "thenStatement": call("Console", "log"),
+            "elseStatement": call("Toolkit", "start")});
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![shows, starts])]),
+            class("Window", &[("show", vec![])]),
+            class("Toolkit", &[("start", vec![])]),
+            class("Console", &[("run", vec![]), ("log", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
+        assert!(reach.methods.contains(&method("Console", "run")), "{reach:?}");
+        assert!(reach.methods.contains(&method("Console", "log")), "{reach:?}");
+        assert!(!reach.classes.contains("Window") && !reach.classes.contains("Toolkit"), "{reach:?}");
     }
 
     #[test]

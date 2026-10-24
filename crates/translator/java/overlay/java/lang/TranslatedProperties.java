@@ -18,6 +18,7 @@ final class TranslatedProperties {
             Properties p = new Properties();
             put(p, "file.encoding", System.getProperty("file.encoding"));
             put(p, "file.separator", System.getProperty("file.separator"));
+            put(p, "java.awt.headless", System.getProperty("java.awt.headless"));
             put(p, "java.class.path", System.getProperty("java.class.path"));
             put(p, "java.class.version", System.getProperty("java.class.version"));
             put(p, "java.home", System.getProperty("java.home"));

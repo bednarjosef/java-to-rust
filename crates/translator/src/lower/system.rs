@@ -6,6 +6,9 @@
 //!   answers them; `java.home` is the `JAVA_HOME` of the run, or else the home of the JDK that the
 //!   translator ran with.
 //! - `java.class.path` is `.`, as for `java Main` without a class path.
+//! - `java.awt.headless` is `"true"` (`HEADLESS`), as for `java -Djava.awt.headless=true Main`:
+//!   a translation has no display, as AWT's natives are not translated, so the JDK's own checks
+//!   (`GraphicsEnvironment.isHeadless()`, `Boolean.getBoolean("java.awt.headless")`) find none.
 //! - Any other key that the JDK the translator runs with sets (`java -XshowSettings:properties`:
 //!   `java.version`, `java.vendor`, `file.encoding`, `user.language`, ...) has that JDK's value,
 //!   fixed in the translation.
@@ -47,6 +50,10 @@ const KEYS: &[&str] = &[
 /// Keys whose value a translated program cannot have: the command line of the run (the main class
 /// and its arguments), and the time zone, which the JDK sets when `TimeZone` first runs.
 const REJECTED: &[&str] = &["sun.java.command", "user.timezone"];
+
+/// The property that makes AWT headless, and its value in every translation: no window, screen
+/// or keyboard of AWT's, whatever the machine has (`program::TRUE_CALLS`).
+pub const HEADLESS: (&str, &str) = ("java.awt.headless", "true");
 
 /// The properties of the JDK on the path (`java -XshowSettings:properties -version`), read once;
 /// `None` when it cannot be run. A value listed on several lines (`java.library.path`) is a path
@@ -105,6 +112,9 @@ fn property(key: &str) -> Result<Property, String> {
     }
     if key == "java.class.path" {
         return Ok(Property::Fixed(".".to_string()));
+    }
+    if key == HEADLESS.0 {
+        return Ok(Property::Fixed(HEADLESS.1.to_string()));
     }
     let Some(jdk) = jdk_properties() else {
         return Err(format!(
@@ -199,10 +209,13 @@ impl<'t> Lowering<'t> {
         // to `"true"` (`java -XshowSettings:properties` lists none), only `-D` on the command line
         // does, which a translated program has no equivalent of, and the translation has no
         // `System.setProperty`: so it is false for every key, null included, as for a program run
-        // without options. `jdk.compat.DecimalFormat`, which `DigitList` reads, is such a key. A
-        // key whose evaluation has effects is still evaluated.
+        // without options, but `HEADLESS`'s, which is true. `jdk.compat.DecimalFormat`, which
+        // `DigitList` reads, is such a key. A key whose evaluation has effects is still evaluated.
         if (symbol.owner, symbol.name) == ("java.lang.Boolean", "getBoolean") {
             let Some(key) = args.first_mut() else { return unsupported(node, "this `Boolean.getBoolean`") };
+            if matches!(&key.kind, ExprKind::Str(k) if k == HEADLESS.0) {
+                return Ok(Some(ExprKind::Bool(true)));
+            }
             if !has_effects(key) {
                 return Ok(Some(ExprKind::Bool(false)));
             }
@@ -389,7 +402,7 @@ impl<'t> Lowering<'t> {
         }
         let pos = node.pos();
         let mut keys: Vec<&str> = jdk.keys().map(String::as_str).chain(KEYS.iter().copied()).collect();
-        keys.push("java.class.path");
+        keys.extend(["java.class.path", HEADLESS.0]);
         keys.retain(|key| !REJECTED.contains(key));
         keys.sort_unstable();
         keys.dedup();

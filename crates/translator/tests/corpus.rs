@@ -36,8 +36,9 @@ use rust_cache::{RustCache, Stored};
 
 /// The JVM arguments of every Java run: short-lived JVMs skip the optimizing compiler, the parallel
 /// collector and perf data (whose lock-file warnings go to stdout when many JVMs run at once).
-/// The output does not change.
-const JVM_ARGS: [&str; 3] = ["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData"];
+/// The output does not change. AWT is headless, as in every translation (`lower::system`).
+const JVM_ARGS: [&str; 4] =
+    ["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Djava.awt.headless=true"];
 
 struct Program {
     /// The binary name, such as `features-hello`.
