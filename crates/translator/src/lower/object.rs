@@ -946,6 +946,14 @@ impl<'t> Lowering<'t> {
                     // Nor does a class whose objects the program never creates (`Year`, whose
                     // static methods alone are reached): its `compareTo` never runs.
                     None if self.reach.is_some_and(|r| !r.instantiated.contains(&self.types[t].javac)) => {}
+                    // Nor does a class that declares a `compareTo` that no call reaches (`URI`,
+                    // whose objects the program makes but never compares): it never runs.
+                    None if self.types[t].node.list("members").any(|m| {
+                        m.kind() == "METHOD"
+                            && m.str("name") == "compareTo"
+                            && !m.has_flag("STATIC")
+                            && m.list("parameters").count() == 1
+                    }) => {}
                     // In a census, the class goes on without the bridge.
                     None => {
                         let pos = self.types[t].node.pos();
