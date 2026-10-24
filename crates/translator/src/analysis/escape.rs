@@ -1654,6 +1654,7 @@ fn only_looks(builtin: &Builtin) -> bool {
             | Builtin::ClassName { .. }
             | Builtin::SameClass { .. }
             | Builtin::NullChecked
+            | Builtin::MemoryAccessWarning(_)
             | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash)
     )
 }

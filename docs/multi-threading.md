@@ -516,6 +516,18 @@ name:
   `int` and `long` ones (a compare-and-set of the bits, or of the word that holds the byte), are
   the same updates of the field or element, so their bodies, which compute offsets, are not
   translated.
+- **`sun.misc.Unsafe`**, which libraries use, forwards its accesses and updates at an offset and
+  its `objectFieldOffset(Field)` to `jdk.internal.misc.Unsafe`'s (`compareAndSwapInt` to
+  `compareAndSetInt`, `getObject` to `getReference`, `putOrderedInt` to `putIntRelease`), after
+  a warning that the first such call of a run prints on standard error: the method, the class
+  that called it and where that class was loaded from. A call of one of them is the forwarded
+  access, after that warning (`lower/sun_unsafe.rs`, `java::memory_access_warning`). The calling
+  class is the one whose code makes the call, and its location is the working directory as a
+  `file:` URL, as for `java Main` run from the folder of the program's classes. Java evaluates
+  the arguments before the warning, so every argument but the offset must be one whose
+  evaluation does nothing (a literal, `this`, a local, a field of the calling class); other
+  arguments, a method reference to such a method, and raw memory (`allocateMemory`, accesses at
+  an address) are rejected.
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
 

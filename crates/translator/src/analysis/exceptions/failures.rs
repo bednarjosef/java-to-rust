@@ -789,6 +789,11 @@ pub(super) fn runtime_failures(
             // checks no other (`codegen::sync`).
             Builtin::MonitorEnter if null(&args[0]) => out.push((NPE, "this synchronized", true, args[0].id)),
             Builtin::MonitorEnter => {}
+            // The call of a method of `sun.misc.Unsafe` on a null object (`lower::sun_unsafe`).
+            Builtin::MemoryAccessWarning(_) if null(&args[0]) => {
+                out.push((NPE, "this call", true, args[0].id))
+            }
+            Builtin::MemoryAccessWarning(_) => {}
             // A class name that is not in the translation (`lower::by_name`).
             Builtin::UnknownClass => out.push(("java.lang.ClassNotFoundException", "this class name", false, x.id)),
             // A field updater's object that is null (`lower::handles` tests it first).

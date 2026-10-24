@@ -797,6 +797,12 @@ impl<'a> Gen<'a> {
                 Code::never(format!("{}({format})", self.runtime("throw_uncaught")))
             }
             Builtin::MonitorEnter => self.null_check(&args[0]),
+            Builtin::MemoryAccessWarning(method) => {
+                let check = self.null_check(&args[0]).text;
+                let caller = self.value(&args[1], Type::JavaClass).text;
+                let warn = self.runtime("memory_access_warning");
+                Code::atom(format!("{{ {check}; {warn}({caller}, {method:?}); }}"))
+            }
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
             Builtin::GetClass => self.get_class(&args[0]),

@@ -4061,6 +4061,74 @@ fn a_write_through_the_offset_of_a_superclass_field_is_the_field() {
 }
 
 #[test]
+fn sun_misc_unsafe_accesses_warn_and_are_the_field() {
+    // `sun.misc.Unsafe`'s methods forward to `jdk.internal.misc.Unsafe`'s after their warning,
+    // which names the class whose code calls them.
+    // The class is in a JDK module other than `java.base`, which the translation reads with it.
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES") else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this test");
+        return;
+    };
+    let main = "import sun.misc.Unsafe;
+        public class Main {
+            static Unsafe U;
+            private volatile int count;
+            private static final long COUNT;
+            static {
+                try {
+                    COUNT = U.objectFieldOffset(Main.class.getDeclaredField(\"count\"));
+                } catch (NoSuchFieldException e) {
+                    throw new Error(e);
+                }
+            }
+            int bump() { return U.getAndAddInt(this, COUNT, 1); }
+            boolean swap(int from, int to) { return U.compareAndSwapInt(this, COUNT, from, to); }
+            public static void main(String[] a) {
+                Main m = new Main();
+                m.bump();
+                System.out.println(m.swap(1, 5) + \" \" + U.getIntVolatile(m, COUNT));
+            }
+        }";
+    // A stand-in of the class in its module, `jdk.unsupported`; the methods' bodies, which
+    // forward to `jdk.internal.misc.Unsafe`'s, are not translated.
+    let unsafe_ = "package sun.misc;
+        public final class Unsafe {
+            private Unsafe() {}
+            private static final Unsafe theUnsafe = new Unsafe();
+            public native long objectFieldOffset(java.lang.reflect.Field f);
+            public native int getIntVolatile(Object o, long offset);
+            public final native int getAndAddInt(Object o, long offset, int delta);
+            public final native boolean compareAndSwapInt(Object o, long offset, int expected, int x);
+        }";
+    let dir = write_sources(
+        "sun-misc-unsafe",
+        &[
+            ("app/Main.java", main),
+            ("jdk.unsupported/module-info.java", "module jdk.unsupported { exports sun.misc; }"),
+            ("jdk.unsupported/sun/misc/Unsafe.java", unsafe_),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![java_base.into(), dir.join("jdk.unsupported")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            "java::memory_access_warning(",
+            "\"objectFieldOffset\"",
+            "\"getAndAddInt\"",
+            "\"compareAndSwapInt\"",
+        ],
+    );
+    assert_lacks(&rust, &["MAIN_COUNT", "field_offset", "fn get_and_add_int", "fn compare_and_swap_int"]);
+}
+
+#[test]
 fn an_access_at_an_element_offset_is_the_element() {
     let rust = translate_with_natives(
         "jdk-element-handles",
