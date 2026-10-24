@@ -19,6 +19,7 @@ the machine running out of memory.
 |---|---|---|
 | `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required | seconds |
 | `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 3 min 12 s on a busy machine (34 s without the libraries on a quiet one) |
+| `repair` | edits the decompiled server where javac rejects it, with edits that keep the bytecode's behaviour ([below](#repairing-what-the-decompiler-left-out)), up to `REPAIR_ROUNDS` (4) rounds; every edit is listed in `repair-log.txt` | about 5 min |
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`: `java.base` plus 14 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events) and `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) | seconds |
@@ -55,6 +56,47 @@ arguments of every generic call, gives more errors, with the libraries (296 agai
 without them (642 against 585); `--verify-merges`, `--verify-pre-post-merges` and
 `--simplify-stack=false` change the count by at most one; `--old-try-dedup` writes `switch`
 code that does not parse. 1.12.0 is the latest Vineflower release.
+
+### Repairing what the decompiler left out
+
+The `repair` step (`scripts/RepairDecompile.java`) compiles the decompiled server with javac's
+tree API, so that it sees each error's kind, the expression it is at and the types involved,
+not just javac's message. It makes only edits whose bytecode the class file already has:
+
+- **A cast to the type javac expects**, where the type found cannot be converted but its erasure
+  is a subtype of the expected type's erasure: `return (Brain<Hoglin>) (Brain<?>)
+  super.getBrain();`, `(List<Component>) (List<?>) stream.toList()`. Such a cast is unchecked:
+  javac emits no `checkcast` for it, which is what the original's cast compiled to. The cast
+  through the wildcard type is what makes it legal when the two parameterizations are provably
+  distinct. A cast that would need a check (`Object` to `EntityHitResult`) is not made, since
+  the class file may not have one there.
+- **Type arguments for a diamond** that javac cannot infer, copied from the declared type of
+  the variable it initializes or the method result it is returned as, when that is the same
+  class: `return new SortedArraySet<T>(...)`. Type arguments are inference only, with no
+  bytecode of their own.
+- **A misnamed catch variable:** Vineflower sometimes declares `catch (Exception e)` and uses
+  `ex` in the block. Every use of the unresolved name is renamed to the parameter of a catch
+  that encloses all of them, if that parameter is not used in its block, no other catch around
+  a use has an unused parameter, and nothing inside the block declares the parameter's name
+  again. A use inside a nested catch whose own parameter is unused could read either
+  parameter, so that name is left alone.
+
+Classes are named as the file can name them: by simple name when the file imports them or they
+are in its package or in `java.lang`, otherwise qualified. A type that source cannot write (a
+captured wildcard outside a type argument, an intersection, a local class) gets no edit. After
+each round, a file whose errors (outside imports and annotations) did not go down gets its text
+back, and those edits are not tried again.
+
+On the server taken file by file from the decompile setup that compiles best (159 errors in 104
+files), it keeps 41 edits in 39 files from one round (a second finds nothing more) and leaves 118
+errors in 68 files; 42 of those are imports and annotations of annotation packages that no
+library jar has (`javax.annotation`, `org.jetbrains.annotations`).
+
+What is left is mostly inference that fails inside a lambda or a method reference (a lambda
+returning `List<EntityReference<EndCrystal>>` where `List<EntityReference<UniquelyIdentifyable>>`
+is inferred), lambdas for interfaces that are not functional, checked casts that the
+decompiler left out, and decompiler bugs that no type can repair (a variable declared twice, a
+record pattern's temporaries used outside their `try`).
 
 ### Going on past compile errors
 
@@ -215,8 +257,10 @@ all name missing classes throws as Java would; any other marked piece is rejecte
 - **The server's own decompiled code:** 185 errors in 117 files (about 2% of them), now that
   Vineflower decompiles with the library jars ([above](#decompiling-with-the-libraries)). They
   cannot be fixed by hand under this target's rules. Most are type arguments and casts that the
-  class files do not record at all, so no pass over the class files can bring them back; what is
-  left to try is:
+  class files do not record at all, so no pass over the class files can bring them back. The
+  `repair` step puts back the unchecked casts, diamond type arguments and catch variable names
+  that javac's errors show ([above](#repairing-what-the-decompiler-left-out)); what is left to try
+  is:
   - another decompiler (CFR, Procyon), compared by error count with the `parse` step;
   - for each file, the decompile (with or without the libraries) that compiles: 7 files
     compile only without them;
