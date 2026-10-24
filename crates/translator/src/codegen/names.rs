@@ -213,6 +213,11 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             }
             Home::Enum(t) => {
                 (m.name == "toString" && m.params.is_empty())
+                    // `Type`'s `getTypeName()`, which a class held as a `Type` answers itself
+                    // (see `dispatch::enum_body`).
+                    || (m.name == "getTypeName"
+                        && m.params.is_empty()
+                        && class.types[m.class].name == "java.lang.reflect.Type")
                     || h.concretes(t).into_iter().any(|c| h.implementation(i, c) != Some(i))
             }
             _ => false,

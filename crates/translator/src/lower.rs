@@ -14,6 +14,7 @@ mod file_channels;
 mod foreach;
 mod functional;
 mod generic_args;
+mod generic_types;
 mod generics;
 mod handles;
 mod hierarchy;
