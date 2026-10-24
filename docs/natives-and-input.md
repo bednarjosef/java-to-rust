@@ -139,6 +139,34 @@ written as stored bytes, with the fixed codes or with dynamic Huffman codes made
 is smallest. Level 0 writes stored blocks, and `HUFFMAN_ONLY` literals only. The output is within
 a few percent of zlib's size at each level.
 
+### Loading native libraries
+
+A translated program has no JNI: the natives it can call are the runtime's, and a call of any
+other native is rejected where the translator meets it. Loading a library therefore adds nothing
+the program could call, and what is left of it is its outcome. In a whole program,
+`System.loadLibrary`, `System.load` and `System.mapLibraryName` are the translator's
+(`java/overlay/java/lang/TranslatedLibraries.java`, by `REDIRECTED_CALLS`):
+
+- `mapLibraryName` gives the JDK native's name (`libzip.so`, `libzip.dylib` or `zip.dll` by
+  `os.name`), with its `IllegalArgumentException` for a name over 240 characters and its
+  `NullPointerException` without a message.
+- `loadLibrary(name)` looks for that file where Java does: the directories of
+  `sun.boot.library.path`, then, for a class that the boot loader did not define, of
+  `java.library.path`. Where it is found, the call succeeds and does nothing; where it is not,
+  it throws Java's `UnsatisfiedLinkError` ("no zip in system library path: ..." or "no zip in
+  java.library.path: ..."), and so does a name with a `/`. `load(path)` does the same for one
+  file: "Expecting an absolute path of the library" and "Can't load library".
+- Only a file that is there but that the system could not load (not a library, or one whose
+  dependencies are missing) differs: Java throws, the translation succeeds.
+- Both are restricted methods. Java runs them silently in the JDK's modules that it gives native
+  access (`java.desktop`, `java.management`, `java.prefs` and the rest of `NATIVE_ACCESS_MODULES`),
+  and elsewhere first prints a warning that names where the caller's class was loaded from
+  (`file:/...`), which a translation does not know. A call in any other module, the program's
+  included, is rejected (`lower.rs`).
+
+`BootLoader.loadLibrary`, the JDK's own loading of `zip` or `net`, does nothing
+(`lower/libraries.rs`).
+
 ### Not implemented
 
 - `Throwable.fillInStackTrace(int)` and `NullPointerException.getExtendedNPEMessage()` are not

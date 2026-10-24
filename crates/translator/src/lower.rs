@@ -1246,7 +1246,20 @@ impl<'t> Lowering<'t> {
                     &format!("`{}.{}` outside a whole program", symbol.owner, symbol.name),
                 );
             }
-            let args = self.convert_generic_args(node, resolved, args)?;
+            if crate::program::NATIVE_ACCESS_CALLS.contains(&(symbol.owner, symbol.name))
+                && !self.has_native_access()
+            {
+                return unsupported(
+                    node,
+                    &format!(
+                        "`{}.{}` outside the JDK's modules with native access (Java warns, naming \
+                         where the caller's class was loaded from)",
+                        symbol.owner, symbol.name
+                    ),
+                );
+            }
+            let mut args = self.convert_generic_args(node, resolved, args)?;
+            args.extend(self.caller_arg(node, resolved)?);
             return Ok(ExprKind::Call { name: to.to_string(), args, resolved });
         }
         if let Some(kind) = self.descriptor_call(node, &symbol, receiver, &mut args)? {

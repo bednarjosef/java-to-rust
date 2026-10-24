@@ -271,9 +271,9 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         Builtin::Bits(..) => &[],
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => &[],
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => &[],
-        // Overflow, and bounds the wrong way round. `ceilDivExact` also throws for a zero divisor,
-        // which `runtime_failures` declares as the checked form.
-        Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => &[],
+        // Overflow, and bounds the wrong way round. The exact quotients also throw for a zero
+        // divisor, which `runtime_failures` declares as the checked form.
+        Builtin::Native(Native::Math { name: "ceilDivExact" | "divideExact" | "floorDivExact", .. }) => &[],
         Builtin::Native(Native::Math { name, .. }) if name.ends_with("Exact") => {
             &["java.lang.ArithmeticException"]
         }
@@ -811,7 +811,7 @@ pub(super) fn runtime_failures(
                 }
             }
             // `MIN_VALUE / -1` overflows too, so only another constant divisor is known to pass.
-            Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => {
+            Builtin::Native(Native::Math { name: "ceilDivExact" | "divideExact" | "floorDivExact", .. }) => {
                 let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0 && v != -1)
                     || matches!(args[1].kind, ExprKind::Long(v) if v != 0 && v != -1);
                 if !constant {

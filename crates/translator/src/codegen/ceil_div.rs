@@ -1,7 +1,7 @@
 //! `Math.ceilDiv`, `Math.ceilMod` and `Math.ceilDivExact` on `int` and `long`, with the
-//! `(long, int)` forms of `ceilDiv` and `ceilMod`, in `Math` and `StrictMath` alike. They are the
-//! runtime's `ceil_div` family, in the checked form where a `catch` or a `finally` sees the
-//! exception.
+//! `(long, int)` forms of `ceilDiv` and `ceilMod`, and the other exact quotients `divideExact`
+//! and `floorDivExact`, in `Math` and `StrictMath` alike. They are the runtime's `ceil_div`
+//! family, in the checked form where a `catch` or a `finally` sees the exception.
 
 use super::*;
 
@@ -19,6 +19,8 @@ impl<'a> Gen<'a> {
             "ceilDiv" => "ceil_div",
             "ceilMod" => "ceil_mod",
             "ceilDivExact" => "ceil_div_exact",
+            "divideExact" => "divide_exact",
+            "floorDivExact" => "floor_div_exact",
             _ => return None,
         };
         // The operands compute in `long` if either is one. The result is that type, except that

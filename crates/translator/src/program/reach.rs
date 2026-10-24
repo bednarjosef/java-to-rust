@@ -1317,6 +1317,53 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.net.NetworkInterface", "getByName0", "(java.lang.String)java.net.NetworkInterface"),
         ("java.net.TranslatedNet", "getByName0"),
     ),
+    // Loading a native library, which a translation without JNI does by finding its file as Java
+    // does, and the name of a library's file (`java/lang/TranslatedLibraries.java`); the caller
+    // must be in a module that Java gives native access (`NATIVE_ACCESS_CALLS`).
+    (
+        ("java.lang.System", "loadLibrary", "(java.lang.String)void"),
+        ("java.lang.TranslatedLibraries", "loadLibrary"),
+    ),
+    (("java.lang.System", "load", "(java.lang.String)void"), ("java.lang.TranslatedLibraries", "load")),
+    (
+        ("java.lang.System", "mapLibraryName", "(java.lang.String)java.lang.String"),
+        ("java.lang.TranslatedLibraries", "mapLibraryName"),
+    ),
+];
+
+/// The restricted methods among `REDIRECTED_CALLS`, which Java lets code of a module without
+/// native access call only after it prints a warning that names where the caller's class was
+/// loaded from (`Module.ensureNativeAccess`). A translation does not know that place, so a call
+/// is supported only in the modules of `NATIVE_ACCESS_MODULES` (`lower.rs`).
+pub const NATIVE_ACCESS_CALLS: &[(&str, &str)] =
+    &[("java.lang.System", "loadLibrary"), ("java.lang.System", "load")];
+
+/// The modules of the JDK that Java 26 gives native access, with no warning
+/// (`ModuleLoaderMap.nativeAccessModules()`).
+pub const NATIVE_ACCESS_MODULES: &[&str] = &[
+    "java.base",
+    "java.desktop",
+    "java.instrument",
+    "java.management",
+    "java.prefs",
+    "java.rmi",
+    "java.security.jgss",
+    "java.smartcardio",
+    "jdk.accessibility",
+    "jdk.attach",
+    "jdk.compiler",
+    "jdk.crypto.cryptoki",
+    "jdk.hotspot.agent",
+    "jdk.internal.le",
+    "jdk.internal.vm.ci",
+    "jdk.jdi",
+    "jdk.jfr",
+    "jdk.jpackage",
+    "jdk.management",
+    "jdk.management.agent",
+    "jdk.net",
+    "jdk.sctp",
+    "jdk.security.auth",
 ];
 
 /// The translator's class of the JDK's modules and class loaders as the translation has them
