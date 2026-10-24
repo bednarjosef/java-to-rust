@@ -107,35 +107,9 @@ fn lower_going_on<'t>(
     census_of: Option<bool>,
 ) -> Lowered {
     let census = RefCell::new((Vec::new(), Vec::new(), None));
-    // A census that finds a change in place of a `String[]` that is also an `Object[]` in code
-    // that can run is taken again with `Reach::string_array_writes` (`program::census`), so it
-    // stops at the first attempt that finds one: the attempts after it would only add
-    // rejections, which it throws away.
-    let restarts = std::cell::Cell::new(false);
-    let class = super::real_generics::retry_until(
-        |real, covariant| {
-            let lowered =
-                lower_with(units, program_units, reach, main, real, covariant, Some((&census, census_of)));
-            if census_of.is_some() && !reach.string_array_writes {
-                let (rejected, _, live) = &*census.borrow();
-                let writes = |r: &&Rejected| r.error.message.starts_with(super::STRING_ARRAY_WRITE);
-                if rejected.iter().any(|r| writes(&r)) {
-                    let runs = |live: &crate::analysis::live_methods::LiveMethods| {
-                        rejected.iter().filter(writes).any(|r| live.runs(r.ty, r.method))
-                    };
-                    restarts.set(match (live, &lowered) {
-                        (Some(live), _) => runs(live),
-                        (None, Ok((class, ..))) => {
-                            crate::analysis::live_methods::live_methods(class).is_ok_and(|live| runs(&live))
-                        }
-                        (None, Err(_)) => false,
-                    });
-                }
-            }
-            lowered
-        },
-        || restarts.get(),
-    );
+    let class = super::real_generics::retry(|real, covariant| {
+        lower_with(units, program_units, reach, main, real, covariant, Some((&census, census_of)))
+    });
     let (rejected, units, live) = census.into_inner();
     Lowered { class, rejected, units, live }
 }
