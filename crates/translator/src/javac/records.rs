@@ -74,7 +74,8 @@ pub(super) fn completion(records: &[&Value], survey: &Survey) -> Completion {
         let name = qualified(record);
         let components = components(record);
         let interface_methods = survey.interface_methods(record);
-        let accessors = components.iter().map(|c| accessor_overrides(record, &name, c, &interface_methods, survey));
+        let accessors =
+            components.iter().map(|c| accessor_overrides(record, &name, c, &interface_methods, survey));
         let hash_code = writes_hash_code(record, &name, survey);
         let equals = writes_equals(record, survey);
         let objects = components.iter().filter(|c| hashed_by_objects(&c.ty));
@@ -376,7 +377,9 @@ fn complete_record(record: &mut Value, survey: &Survey) {
     let interface_methods = survey.interface_methods(record);
     let mut added = Vec::new();
     for c in &components {
-        let Some(overrides) = accessor_overrides(record, &name, c, &interface_methods, survey) else { continue };
+        let Some(overrides) = accessor_overrides(record, &name, c, &interface_methods, survey) else {
+            continue;
+        };
         let overrides: Vec<Value> = overrides.iter().map(|(i, t)| json!({"owner": i, "type": t})).collect();
         let body = vec![at.node("RETURN", json!({"expression": field(c)}))];
         added.push(at.method(&name, &c.name, &c.ty, Vec::new(), body, overrides));
@@ -408,7 +411,8 @@ fn complete_record(record: &mut Value, survey: &Survey) {
 
 /// Whether the record declares a method of this name with this many parameters.
 fn declares(record: &Value, method: &str, arity: usize) -> bool {
-    members(record).any(|m| text(m, "kind") == "METHOD" && text(m, "name") == method && params(m).len() == arity)
+    members(record)
+        .any(|m| text(m, "kind") == "METHOD" && text(m, "name") == method && params(m).len() == arity)
 }
 
 /// The interfaces and types of the methods that the accessor of the component `c` of the record
@@ -449,7 +453,8 @@ fn writes_equals(record: &Value, survey: &Survey) -> bool {
 /// Whether the written `hashCode` and `equals` hash and compare a component of javac's type `ty`
 /// with `java.util.Objects` (`Pos::objects_call`): one that is no primitive and no array.
 fn hashed_by_objects(ty: &str) -> bool {
-    !matches!(ty, "int" | "long" | "double" | "float" | "boolean" | "char" | "short" | "byte") && !ty.ends_with("[]")
+    !matches!(ty, "int" | "long" | "double" | "float" | "boolean" | "char" | "short" | "byte")
+        && !ty.ends_with("[]")
 }
 
 /// Ends the canonical constructor with the assignments of the fields, unless it assigns them

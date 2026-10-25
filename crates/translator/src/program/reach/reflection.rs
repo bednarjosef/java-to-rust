@@ -161,7 +161,11 @@ impl<'t> Walk<'t> {
             "METHOD_INVOCATION" | "NEW_CLASS" => {
                 let symbol = &node["symbol"];
                 let callee = || -> MethodKey {
-                    (strip_arguments(text(symbol, "owner")), text(symbol, "name").into(), text(symbol, "type").into())
+                    (
+                        strip_arguments(text(symbol, "owner")),
+                        text(symbol, "name").into(),
+                        text(symbol, "type").into(),
+                    )
                 };
                 for (index, argument) in node["arguments"].as_array().into_iter().flatten().enumerate() {
                     if is_class_value(argument) {
@@ -273,9 +277,9 @@ impl<'t> Walk<'t> {
                         let mut all: BTreeSet<&str> = BTreeSet::new();
                         for owner in owners.iter() {
                             match kind {
-                                Kind::Field => {
-                                    all.extend(fields.get(owner.as_str()).into_iter().flatten().map(String::as_str))
-                                }
+                                Kind::Field => all.extend(
+                                    fields.get(owner.as_str()).into_iter().flatten().map(String::as_str),
+                                ),
                                 _ => all.extend(
                                     methods
                                         .get(owner.as_str())

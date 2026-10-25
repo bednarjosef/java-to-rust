@@ -118,7 +118,9 @@ impl<'t> Index<'t> {
         let mut check = Check { index: self, only_pipelines, never_true: HashSet::new() };
         check.solve(walk);
         let contexts = &check.index.contexts;
-        self.writes.iter().all(|(context, value)| value.is_some_and(|v| check.value(v, context.map(|c| &contexts[c]))))
+        self.writes
+            .iter()
+            .all(|(context, value)| value.is_some_and(|v| check.value(v, context.map(|c| &contexts[c]))))
     }
 }
 

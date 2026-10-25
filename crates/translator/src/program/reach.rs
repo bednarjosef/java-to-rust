@@ -3086,7 +3086,10 @@ impl<'t> Walk<'t> {
         // reaches only what its arguments do.
         // So does an in-place one of a `String[]`, unless it reaches the JDK's
         // (`Reach::string_array_writes`).
-        if call && runtime_arrays_call(value) && !(self.reach.string_array_writes && writes_string_array(value)) {
+        if call
+            && runtime_arrays_call(value)
+            && !(self.reach.string_array_writes && writes_string_array(value))
+        {
             if writes_string_array(value) {
                 match string_array_write_items(value) {
                     Some(items) => self.string_array_write_items.extend(items),
@@ -3151,8 +3154,10 @@ impl<'t> Walk<'t> {
             }
             self.reflective(value);
         }
-        if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS" | "MEMBER_REFERENCE" | "STRING_LITERAL" | "MEMBER_SELECT")
-        {
+        if matches!(
+            kind,
+            "METHOD_INVOCATION" | "NEW_CLASS" | "MEMBER_REFERENCE" | "STRING_LITERAL" | "MEMBER_SELECT"
+        ) {
             self.reflection_scan(value);
         }
         if kind == "TRY" && recreated_exception(value).is_some() {
