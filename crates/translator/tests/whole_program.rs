@@ -504,6 +504,45 @@ fn uncertain_package_lookups_are_rejected() {
     }
 }
 
+/// What a translation's secure random numbers cannot do throws (see
+/// `corpus/whole-program/SecureRandoms.java` for what they do): `DRBG`, whose mechanisms read
+/// the security properties, and a seed source that is not a file, which would open a connection
+/// (the translation's `java.security.egd` is unset, but the seed generator's code reads it).
+#[test]
+fn what_secure_randoms_cannot_do_throws() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-secure-randoms");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    let java = "import java.security.SecureRandom;
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println(SecureRandom.getInstance(\"SHA1PRNG\").generateSeed(4).length);
+        System.out.println(SecureRandom.getInstance(\"DRBG\").nextInt());
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    for wanted in ["DRBG SecureRandom not supported yet", "not a file, which the translation does not read"] {
+        assert!(rust.contains(wanted), "no {wanted} in the translation");
+    }
+}
+
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see
 /// `corpus/whole-program/ClassesAsReflectTypes.java`), but not `Constable`, whose
 /// `describeConstable()` would need the class's descriptor as an object: a class converted to a

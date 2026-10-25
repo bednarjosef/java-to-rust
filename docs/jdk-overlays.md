@@ -155,6 +155,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/lang/reflect/Proxy.java` | defines and finds the proxy classes that the translator wrote through `TranslatedProxies` (`program/reach/proxies.rs`), without generating or caching classes; `InvocationHandler.invokeDefault` throws |
 | `java/net/InetAddress.java`, `Inet4AddressImpl.java`, `Inet6AddressImpl.java` | names looked up by the system through `TranslatedNet`; no hosts file and no resolver of the program's own |
 | `java/security/MessageDigest.java` | `getInstance(String)` makes the `SUN` provider's digests (MD2, MD5, SHA-1, SHA-2, SHA-3) by name through `TranslatedDigests`, without `Provider`, `Security` or `GetInstance`; `toString` names `SUN`, `getProvider()` is null |
+| `java/security/SecureRandom.java` | `new SecureRandom()` and `getInstance(String)` make the `SUN` provider's generators (`NativePRNG` and its blocking and non-blocking variants, `SHA1PRNG`) by name through `TranslatedRandoms`, the default one as `SUN` chooses it; `getProvider()` is null. `DRBG`, which reads the security properties, throws a `ProviderException` that says it is not supported yet |
 | `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |
 | `java/net/URLClassLoader.java` | finds only what its parent finds; code from its URLs fails loudly |
 | `java/nio/file/DirectoryIteratorException.java`, `InvalidPathException.java` | constructors that do not throw |
@@ -178,6 +179,9 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `sun/reflect/generics/reflectiveObjects/ParameterizedTypeImpl.java`, `WildcardTypeImpl.java` | made from the types javac gives (`TranslatedTypes`, `lower/generic_types.rs`): the owner type as given, no check of the arguments, a wildcard's bounds as types rather than signatures |
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own |
+| `sun/security/provider/SecureRandom.java` | `SHA1PRNG` asks for the SHA-1 digest by its name alone, not by the `SUN` provider's name |
+| `sun/security/provider/SeedGenerator.java` | the system's entropy leaves out the network adapters (`NetworkInterface`'s natives are not translated) and reads the heap's figures from `Runtime.getRuntime()` directly, not through a local; a seed source that is not a `file:` URL throws instead of opening a connection |
+| `sun/security/provider/SunEntries.java` | the seed source is `file:/dev/random`, the value of the JDK's `java.security` file, unless `java.security.egd` sets it |
 | `sun/security/util/Debug.java` | translated although `sun.security` is not; writing a message, which names the caller's frame, fails loudly |
 | `sun/util/logging/PlatformLogger.java` | every logger's backend is `TranslatedConsoleLogger`, Java's default one; levels without their `System.Logger.Level`; loggers cached strongly; `setLevel` a native the translation does not have |
 
