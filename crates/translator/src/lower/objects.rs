@@ -126,6 +126,7 @@ impl<'t> Lowering<'t> {
             member_outers: Vec::new(),
             library: Vec::new(),
             census: None,
+            string_array_writes: Default::default(),
             catch_panics: false,
             stubbing: Cell::new(false),
             stub_message: Default::default(),
