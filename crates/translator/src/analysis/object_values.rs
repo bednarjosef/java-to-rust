@@ -182,16 +182,17 @@ impl Eq for ClassSet {}
 /// What the analysis found: the places that may hold a string or a box, and the classes of
 /// their objects.
 pub struct ObjectValues {
-    /// The variables of each method in each of its contexts.
-    vars: HashMap<(usize, usize), HashMap<String, Flow>>,
+    /// The variables of each method in each of its contexts, by their slots in `followed`.
+    vars: HashMap<(usize, usize), Vec<Flow>>,
     returns: HashMap<(usize, usize), Flow>,
     /// Instance fields, by the class that declares them.
     fields: HashMap<(usize, String), Flow>,
     statics: HashMap<(usize, String), Flow>,
     elements: HashMap<Type, Flow>,
-    /// The variables of each method that the analysis follows: its parameters (unless the
-    /// runtime may call it) and the variables it declares, loops over or binds with a pattern.
-    followed: Vec<HashSet<String>>,
+    /// The variables of each method that the analysis follows, each with its slot in `vars`: its
+    /// parameters (unless the runtime may call it) and the variables it declares, loops over or
+    /// binds with a pattern.
+    followed: Vec<HashMap<String, usize>>,
     /// For dispatch, the parameters of each method that the runtime may call itself
     /// (`runtime_called`), which hold what the runtime holds besides what calls pass them.
     runtime_params: Vec<Vec<String>>,
@@ -382,6 +383,13 @@ impl ObjectValues {
             .any(|&ctx| self.eval(class, m, ctx, l).value && self.eval(class, m, ctx, r).value)
     }
 
+    /// The update of variable `name` of method `m` in context `ctx` with `flow`, when the analysis
+    /// follows the variable: one it does not follow holds anything (`var`).
+    fn var_update(&self, m: usize, ctx: usize, name: &str, flow: Flow) -> Option<Update> {
+        let &slot = self.followed.get(m)?.get(name)?;
+        Some(Update::Var(m, ctx, slot, flow))
+    }
+
     /// Notes that the running visit reads `place`.
     fn read(&self, place: impl FnOnce() -> Read) {
         if let Some(reads) = self.reads.borrow_mut().as_mut() {
@@ -390,14 +398,14 @@ impl ObjectValues {
     }
 
     fn var(&self, m: usize, ctx: usize, name: &str) -> Flow {
-        if !self.followed.get(m).is_some_and(|f| f.contains(name)) {
+        let Some(&slot) = self.followed.get(m).and_then(|f| f.get(name)) else {
             return Flow::top();
-        }
+        };
         self.read(|| Read::Vars(m, ctx));
         if !self.runtime_params[m].is_empty() {
             self.read(|| Read::Handed);
         }
-        let mut flow = self.vars.get(&(m, ctx)).and_then(|v| v.get(name)).cloned().unwrap_or_default();
+        let mut flow = self.vars.get(&(m, ctx)).map(|v| v[slot].clone()).unwrap_or_default();
         if self.runtime_params[m].iter().any(|p| p == name) {
             flow.join(&self.handed);
         }
@@ -535,7 +543,8 @@ impl ObjectValues {
 
 /// What one visit of a method learns about a place.
 enum Update {
-    Var(usize, usize, String, Flow),
+    /// A variable of a method in a context, by its slot.
+    Var(usize, usize, usize, Flow),
     Return(usize, usize, Flow),
     Field(usize, String, Flow),
     Static(usize, String, Flow),
@@ -770,8 +779,10 @@ fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> Vec<Read> {
     let mut changed = Vec::new();
     for update in updates {
         match update {
-            Update::Var(m, ctx, name, flow) => {
-                if values.vars.entry((m, ctx)).or_default().entry(name).or_default().join(&flow) {
+            Update::Var(m, ctx, slot, flow) => {
+                let slots = values.followed[m].len();
+                let vars = values.vars.entry((m, ctx)).or_insert_with(|| vec![Flow::default(); slots]);
+                if vars[slot].join(&flow) {
                     changed.push(Read::Vars(m, ctx));
                 }
             }
@@ -813,11 +824,11 @@ fn visit(values: &ObjectValues, class: &Class, m: usize, ctx: usize, body: &[Stm
         visit_stmt(s, &mut |e| out.extend(visit_value(values, class, m, ctx, e)), &mut |s| match s {
             Stmt::Local { ty, name, init: Some(init), .. } => {
                 let flow = values.types.filter(values.eval(class, m, ctx, init), *ty);
-                declared.push(Update::Var(m, ctx, name.clone(), flow));
+                declared.extend(values.var_update(m, ctx, name, flow));
             }
             Stmt::ForEach { ty, name, array, .. } => {
                 let flow = values.elements_of(array.ty.element());
-                declared.push(Update::Var(m, ctx, name.clone(), values.types.filter(flow, *ty)));
+                declared.extend(values.var_update(m, ctx, name, values.types.filter(flow, *ty)));
             }
             Stmt::Return(Some(e), _) => declared.push(Update::Return(m, ctx, values.eval(class, m, ctx, e))),
             Stmt::Throw(e) if values.dispatch => declared.push(Update::Handed(values.eval(class, m, ctx, e))),
@@ -842,7 +853,7 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
                 None => eval(value),
             };
             match target {
-                Place::Var(name) => out.push(Update::Var(m, ctx, name.clone(), flow)),
+                Place::Var(name) => out.extend(values.var_update(m, ctx, name, flow)),
                 Place::Field { object, name } => match class.field_owner(object.ty, name) {
                     Some(owner) => out.push(Update::Field(owner, name.clone(), flow)),
                     // A field the analysis cannot place: every field of that name.
@@ -864,7 +875,7 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
             }
         }
         ExprKind::InstanceOf { value, ty, binding: Some(name) } => {
-            out.push(Update::Var(m, ctx, name.clone(), values.types.filter(eval(value), *ty)));
+            out.extend(values.var_update(m, ctx, name, values.types.filter(eval(value), *ty)));
         }
         ExprKind::Call { args, .. }
         | ExprKind::New { args, .. }
@@ -874,7 +885,7 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
             let flows: Vec<Flow> = args.iter().map(eval).collect();
             for (t, c) in values.targets(class, m, ctx, x) {
                 for (p, flow) in class.methods[t].params.iter().zip(&flows) {
-                    out.push(Update::Var(t, c, p.name.clone(), values.types.filter(flow.clone(), p.ty)));
+                    out.extend(values.var_update(t, c, &p.name, values.types.filter(flow.clone(), p.ty)));
                 }
             }
         }
@@ -925,7 +936,7 @@ pub(super) fn handed(
 
 /// The variables of `method` that the analysis follows, its parameters among them when `params`.
 /// A name that a catch clause binds anywhere in the method is left to be anything.
-fn followed(method: &Method, params: bool) -> HashSet<String> {
+fn followed(method: &Method, params: bool) -> HashMap<String, usize> {
     let mut names: HashSet<String> =
         if params { method.params.iter().map(|p| p.name.clone()).collect() } else { HashSet::new() };
     let mut bindings = Vec::new();
@@ -951,7 +962,9 @@ fn followed(method: &Method, params: bool) -> HashSet<String> {
     for name in caught {
         names.remove(&name);
     }
-    names
+    let mut names: Vec<String> = names.into_iter().collect();
+    names.sort();
+    names.into_iter().enumerate().map(|(slot, name)| (name, slot)).collect()
 }
 
 #[cfg(test)]
