@@ -158,7 +158,9 @@ fn lower_with<'t>(
                 && lowering.covariant.noted.borrow().is_empty()
                 && !rejected.is_empty() =>
         {
-            Some(crate::analysis::live_methods::live_methods(class))
+            Some(crate::timings::phase("methods that can run", || {
+                crate::analysis::live_methods::live_methods(class)
+            }))
         }
         _ => None,
     };

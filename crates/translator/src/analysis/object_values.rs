@@ -705,6 +705,19 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     let mut visits: Vec<(usize, usize)> =
         (0..class.methods.len()).flat_map(|m| values.contexts[m].iter().map(move |&ctx| (m, ctx))).collect();
     visits.push((usize::MAX, STATIC));
+    let timings = crate::timings::enabled();
+    if timings {
+        let slots: usize =
+            visits.iter().filter(|&&(m, _)| m != usize::MAX).map(|&(m, _)| values.followed[m].len()).sum();
+        eprintln!(
+            "timing: points-to{}: {} visits of {} methods, {slots} variable slots{}",
+            if dispatch { " for dispatch" } else { "" },
+            visits.len(),
+            class.methods.len(),
+            crate::timings::memory()
+        );
+    }
+    let mut runs = 0usize;
     let mut queued = vec![true; visits.len()];
     let mut queue: VecDeque<usize> = (0..visits.len()).collect();
     let mut readers: HashMap<Read, BTreeSet<usize>> = HashMap::new();
@@ -714,6 +727,16 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         visits.iter().enumerate().map(|(v, &mc)| (mc, v)).collect();
     while let Some(v) = queue.pop_front() {
         queued[v] = false;
+        runs += 1;
+        if timings && runs.is_multiple_of(1_000_000) {
+            let entries: usize = readers.values().map(BTreeSet::len).sum();
+            eprintln!(
+                "timing: points-to: {runs} runs, {} queued, {} read places with {entries} readers{}",
+                queue.len(),
+                readers.len(),
+                crate::timings::memory()
+            );
+        }
         let (m, ctx) = visits[v];
         let updates = match m {
             usize::MAX => visit_outside_methods(&values, class),
