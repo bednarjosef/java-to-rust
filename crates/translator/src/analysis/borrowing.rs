@@ -53,7 +53,8 @@ pub struct Reach<'c> {
 }
 
 pub fn reach(class: &Class) -> Reach<'_> {
-    let scans: Vec<Scan> = class.methods.iter().map(|m| scan(class, m)).collect();
+    let mut memo = Memo::default();
+    let scans: Vec<Scan> = class.methods.iter().map(|m| scan(class, m, &mut memo)).collect();
     let calls: Vec<Vec<usize>> =
         scans.iter().map(|s| s.calls.iter().map(|&(callee, _)| callee).collect()).collect();
     let touches: Vec<Bits> = scans.iter().map(|s| s.touches.clone()).collect();
@@ -155,6 +156,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             }
     };
     debug_assert_eq!(h.overriders.len(), class.methods.len(), "the hierarchy is out of date");
+    let mut memo = Memo::default();
     let mut plain_constructors = HashSet::new();
     let mut not_plain = HashMap::new();
     for t in 0..class.types.len() {
@@ -166,7 +168,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             .map(|m| class.methods[m].pos);
         let failing_inits = class.types[t].fields.iter().filter_map(|f| f.init.as_ref()).filter(|init| {
             let mut s = Scan::default();
-            s.expr(class, init);
+            s.expr(class, init, &mut memo);
             s.this_as_value || !s.this_calls.iter().all(|&call| plain_call(t, call))
         });
         let failing: Vec<Pos> = failing_ctors.chain(failing_inits.map(|init| init.pos)).collect();
@@ -242,12 +244,23 @@ struct Scan<'c> {
     writes: HashSet<&'c str>,
 }
 
-fn scan<'c>(class: &'c Class, m: &Method) -> Scan<'c> {
+fn scan<'c>(class: &'c Class, m: &Method, memo: &mut Memo) -> Scan<'c> {
     let mut s = Scan::default();
     for stmt in &m.body {
-        visit_stmt(stmt, &mut |e| s.expr(class, e), &mut |_| {});
+        visit_stmt(stmt, &mut |e| s.expr(class, e, memo), &mut |_| {});
     }
+    // The calls are a set: a call on an `Object` runs thousands of methods, again at each one.
+    s.calls.sort_unstable();
+    s.calls.dedup();
     s
+}
+
+/// What `Scan` finds of each class once: the classes a handle of it may hold, and the
+/// `toString`s that turning one into text may run.
+#[derive(Default)]
+struct Memo {
+    touches: HashMap<usize, Bits>,
+    texts: HashMap<usize, Vec<usize>>,
 }
 
 /// The classes an object of type `ty` may be of: the type itself and the concrete classes
@@ -265,7 +278,7 @@ fn class_indexes(class: &Class, ty: Type) -> Vec<usize> {
 }
 
 impl<'c> Scan<'c> {
-    fn expr(&mut self, class: &'c Class, e: &Expr) {
+    fn expr(&mut self, class: &'c Class, e: &Expr, memo: &mut Memo) {
         // `this` nodes in an allowed position, so that the remaining ones are values.
         let mut allowed = HashSet::new();
         let mut selves = Vec::new();
@@ -277,7 +290,7 @@ impl<'c> Scan<'c> {
                     if is_this(object) {
                         allowed.insert(object.id);
                     } else {
-                        self.touch(class, object.ty);
+                        self.touch(class, object.ty, memo);
                     }
                 }
                 ExprKind::Assign { target: Place::Field { object, .. }, .. }
@@ -286,7 +299,7 @@ impl<'c> Scan<'c> {
                         allowed.insert(object.id);
                         self.writes_this = true;
                     } else {
-                        self.touch(class, object.ty);
+                        self.touch(class, object.ty, memo);
                         self.writes.extend(classes(class, object.ty));
                     }
                 }
@@ -296,7 +309,7 @@ impl<'c> Scan<'c> {
                         allowed.insert(receiver.id);
                         self.this_calls.push(ThisCall::Method { resolved: *callee, is_super: *is_super });
                     } else if !class.methods[*callee].is_static {
-                        self.touch(class, receiver.ty);
+                        self.touch(class, receiver.ty, memo);
                     }
                     self.calls.extend(class.callees(x).into_iter().map(|c| (c, on_this)));
                 }
@@ -308,19 +321,19 @@ impl<'c> Scan<'c> {
                 // Printing an object or concatenating it calls its `toString`.
                 ExprKind::Builtin(Builtin::Print | Builtin::Println, args) => {
                     for a in args {
-                        self.text(class, a, &mut allowed);
+                        self.text(class, a, &mut allowed, memo);
                     }
                 }
                 ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
-                    self.text(class, l, &mut allowed);
-                    self.text(class, r, &mut allowed);
+                    self.text(class, l, &mut allowed, memo);
+                    self.text(class, r, &mut allowed, memo);
                 }
                 // A builder's `append(s, start, end)` calls `length` and `charAt` of `s`, which
                 // is never `this` itself (it is converted to a `CharSequence`).
                 ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args) if args.len() == 4 => {
                     let callees = class.callees(x);
                     if !callees.is_empty() {
-                        self.touch(class, args[1].ty);
+                        self.touch(class, args[1].ty, memo);
                         self.calls.extend(callees.into_iter().map(|c| (c, false)));
                     }
                 }
@@ -331,29 +344,28 @@ impl<'c> Scan<'c> {
     }
 
     /// An operand turned into text: an object's `toString` runs on it.
-    fn text(&mut self, class: &'c Class, e: &Expr, allowed: &mut HashSet<ExprId>) {
+    fn text(&mut self, class: &'c Class, e: &Expr, allowed: &mut HashSet<ExprId>, memo: &mut Memo) {
         let Some(t) = class.class_index(e.ty) else { return };
         let on_this = matches!(e.kind, ExprKind::This);
         if on_this {
             allowed.insert(e.id);
             self.this_calls.push(ThisCall::Text);
         } else {
-            self.touch(class, e.ty);
+            self.touch(class, e.ty, memo);
         }
-        let mut runs: Vec<usize> = class.hierarchy.concretes(t);
-        if !runs.contains(&t) {
-            runs.push(t);
-        }
-        for c in runs {
-            if let Some(index) = to_string_impl(class, c) {
-                self.calls.push((index, on_this));
+        let runs = memo.texts.entry(t).or_insert_with(|| {
+            let mut runs: Vec<usize> = class.hierarchy.concretes(t);
+            if !runs.contains(&t) {
+                runs.push(t);
             }
-        }
+            runs.into_iter().filter_map(|c| to_string_impl(class, c)).collect()
+        });
+        self.calls.extend(runs.iter().map(|&index| (index, on_this)));
     }
 
-    fn touch(&mut self, class: &'c Class, ty: Type) {
-        for c in class_indexes(class, ty) {
-            self.touches.insert(c);
-        }
+    fn touch(&mut self, class: &'c Class, ty: Type, memo: &mut Memo) {
+        let Some(t) = class.class_index(ty) else { return };
+        let touched = memo.touches.entry(t).or_insert_with(|| class_indexes(class, ty).into_iter().collect());
+        self.touches.union(touched);
     }
 }
