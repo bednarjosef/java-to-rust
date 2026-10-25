@@ -80,7 +80,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// What the analysis found (see the module's comment).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct StackObjects {
     /// The `new`s and the calls of factories (by expression id) whose objects never leave the
     /// method whose body holds them and, in a loop, are no longer reachable when the next

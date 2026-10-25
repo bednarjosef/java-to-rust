@@ -17,7 +17,7 @@ use std::collections::HashMap;
 /// How many times the program's code assigns each static, by its class and name, and the
 /// statements of its class's `<clinit>` that assign it (by method and statement), found once for
 /// the program instead of once for each read.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::analysis) struct StaticWrites {
     of: HashMap<(usize, String), Writes>,
 }
