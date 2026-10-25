@@ -54,6 +54,7 @@ use super::object_values::{self, ClassSet, Flow, ObjectValues, STATIC};
 use crate::ast::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 mod known;
 
@@ -128,6 +129,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
             },
             built: HashSet::new(),
         }),
+        memos: RefCell::default(),
     };
     walk.captured_fields();
     for (m, method) in class.methods.iter().enumerate() {
@@ -269,6 +271,7 @@ impl Walk<'_> {
                 },
                 built: HashSet::new(),
             }),
+            memos: RefCell::default(),
         };
         for e in &class.raised {
             thread.code(STATIC, STATIC, e);
@@ -388,6 +391,22 @@ struct Walk<'a> {
     supers: Vec<Vec<usize>>,
     index: HashMap<&'a str, usize>,
     state: RefCell<State>,
+    /// What the points-to facts, which do not change during the walk, answer: the methods that
+    /// each call runs on each object, and the concrete classes below each type. A method is walked
+    /// again whenever what it relies on changes, and a call on a receiver that may be any class
+    /// runs thousands of methods.
+    memos: RefCell<Memos>,
+}
+
+/// The methods that a call runs, each with the class of the object it runs on.
+type Targets = Rc<[(usize, usize)]>;
+
+#[derive(Default)]
+struct Memos {
+    targets: HashMap<(ExprId, usize), Targets>,
+    /// Each list of targets once.
+    lists: HashSet<Targets>,
+    concretes: HashMap<usize, Rc<[usize]>>,
 }
 
 struct State {
@@ -420,6 +439,36 @@ struct State {
 }
 
 impl Walk<'_> {
+    /// The methods that the call `x` in method `m` runs on an object of class `ctx`, each with the
+    /// class of the object (`ObjectValues::targets`, remembered).
+    fn targets(&self, m: usize, ctx: usize, x: &Expr) -> Targets {
+        if let Some(found) = self.memos.borrow().targets.get(&(x.id, ctx)) {
+            return found.clone();
+        }
+        let targets = self.values.targets(self.class, m, ctx, x);
+        let mut memos = self.memos.borrow_mut();
+        let list = match memos.lists.get(targets.as_slice()) {
+            Some(list) => list.clone(),
+            None => {
+                let list: Targets = targets.into();
+                memos.lists.insert(list.clone());
+                list
+            }
+        };
+        memos.targets.insert((x.id, ctx), list.clone());
+        list
+    }
+
+    /// The concrete classes below type `t`, itself included (`Hierarchy::concretes`, remembered).
+    fn concretes(&self, t: usize) -> Rc<[usize]> {
+        if let Some(found) = self.memos.borrow().concretes.get(&t) {
+            return found.clone();
+        }
+        let found: Rc<[usize]> = self.class.hierarchy.concretes(t).into();
+        self.memos.borrow_mut().concretes.insert(t, found.clone());
+        found
+    }
+
     /// Method `m` is entered on an object of class `ctx` with the arguments `args` of method
     /// `caller` (`None`: arguments that the walk does not see).
     fn enter(&self, m: usize, ctx: usize, caller: usize, args: Option<&[Expr]>) {
@@ -480,7 +529,7 @@ impl Walk<'_> {
             // An enum's static initialization creates its constants, objects of the enum and
             // of the classes of their bodies.
             if decl.kind == TypeKind::Enum {
-                for c in class.hierarchy.concretes(t) {
+                for &c in self.concretes(t).iter() {
                     self.instantiate(c);
                 }
             }
@@ -588,7 +637,7 @@ impl Walk<'_> {
             | ExprKind::MethodCall { args, .. }
             | ExprKind::ThisCall { args, .. }
             | ExprKind::SuperInit { args, .. } => {
-                let targets = self.values.targets(self.class, m, ctx, x);
+                let targets = self.targets(m, ctx, x);
                 if targets.len() > 100_000 && crate::timings::enabled() {
                     let name = format!(
                         "{}.{}",
@@ -607,7 +656,7 @@ impl Walk<'_> {
                     let classes = state.live.receivers.entry(receiver.id).or_default();
                     targets.iter().for_each(|&(_, c)| classes.insert(c));
                 }
-                for (target, c) in targets {
+                for &(target, c) in targets.iter() {
                     self.enter(target, c, m, Some(args));
                 }
             }

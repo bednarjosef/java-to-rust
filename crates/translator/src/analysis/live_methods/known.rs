@@ -369,11 +369,12 @@ impl Walk<'_> {
                     && self.literal_group(*r) =>
             {
                 let t = class.class_index(receiver.ty)?;
+                let concretes = self.concretes(t);
                 let classes: Vec<usize> = {
                     let mut state = self.state.borrow_mut();
                     state.known.instance_readers.entry(t).or_default().insert(m);
                     let live = &state.live.instantiated;
-                    class.hierarchy.concretes(t).into_iter().filter(|c| live.contains(c)).collect()
+                    concretes.iter().copied().filter(|c| live.contains(c)).collect()
                 };
                 let mut value = None;
                 for c in classes {
