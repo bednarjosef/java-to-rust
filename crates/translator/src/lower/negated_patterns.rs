@@ -34,6 +34,16 @@
 //! ```text
 //! !(o instanceof T name) ? false : f(name)     o instanceof T name ? f(name) : false
 //! ```
+//!
+//! An `if` whose condition negates an `&&` chain with a pattern has it negated operand by operand
+//! first, which runs the same: `!(a && x instanceof T name)` is `!a || !(x instanceof T name)`.
+//! An `||` chain inside the condition's `&&` chains (`a && (!(x instanceof T name) || c(name))`)
+//! whose negated pattern a later operand reads becomes a conditional, which binds the pattern
+//! for the operands it guards:
+//!
+//! ```text
+//! !(x instanceof T name) || c(name)            x instanceof T name ? c(name) : true
+//! ```
 
 use super::*;
 
@@ -51,6 +61,7 @@ impl<'t> Lowering<'t> {
     /// `if (cond) then else otherwise`, turned around as above when `cond` is an `||` chain with
     /// a negated pattern whose variable a later operand or the else branch reads.
     pub(super) fn if_stmt(&self, cond: Expr, then: Stmt, otherwise: Option<Stmt>) -> Stmt {
+        let cond = self.inner_ors(self.negated_and(cond));
         let mut operands = Vec::new();
         chain(&cond, BinOp::Or, &mut operands);
         let read_later = operands.iter().enumerate().any(|(i, operand)| {
@@ -101,20 +112,116 @@ impl<'t> Lowering<'t> {
         stmts
     }
 
+    /// `cond`, an `&&` chain with a pattern under a negation, as the `||` chain of its operands
+    /// negated.
+    fn negated_and(&self, cond: Expr) -> Expr {
+        match cond.kind {
+            ExprKind::Unary(UnOp::Not, inner)
+                if matches!(inner.kind, ExprKind::Binary(BinOp::And, ..)) && binds_pattern(&inner) =>
+            {
+                let pos = cond.pos;
+                into_chain(*inner, BinOp::And)
+                    .into_iter()
+                    .map(|operand| self.negated(operand))
+                    .reduce(|left, right| {
+                        self.synth(
+                            ExprKind::Binary(BinOp::Or, Box::new(left), Box::new(right)),
+                            pos,
+                            Type::Boolean,
+                        )
+                    })
+                    .expect("an `&&` chain has operands")
+            }
+            kind => Expr { kind, ..cond },
+        }
+    }
+
+    /// `cond` with each `||` chain among the operands of its `&&` chains (those of its own `||`
+    /// chain) that has a negated pattern which a later operand reads as a conditional.
+    fn inner_ors(&self, cond: Expr) -> Expr {
+        let mut disjuncts = Vec::new();
+        chain(&cond, BinOp::Or, &mut disjuncts);
+        let needed = disjuncts.iter().any(|d| {
+            let mut conjuncts = Vec::new();
+            chain(d, BinOp::And, &mut conjuncts);
+            conjuncts.len() > 1
+                && conjuncts.iter().any(|c| {
+                    let mut operands = Vec::new();
+                    chain(c, BinOp::Or, &mut operands);
+                    operands.iter().enumerate().any(|(i, o)| {
+                        negated_pattern(o)
+                            .is_some_and(|name| operands[i + 1..].iter().any(|l| mentions(l, name)))
+                    })
+                })
+        });
+        if !needed {
+            return cond;
+        }
+        let pos = cond.pos;
+        let join = |op: BinOp, operands: Vec<Expr>| {
+            operands
+                .into_iter()
+                .reduce(|left, right| {
+                    self.synth(ExprKind::Binary(op, Box::new(left), Box::new(right)), pos, Type::Boolean)
+                })
+                .expect("a chain has operands")
+        };
+        let disjuncts = into_chain(cond, BinOp::Or)
+            .into_iter()
+            .map(|disjunct| {
+                let conjuncts = into_chain(disjunct, BinOp::And);
+                if conjuncts.len() < 2 {
+                    return join(BinOp::And, conjuncts);
+                }
+                let conjuncts =
+                    conjuncts.into_iter().map(|c| self.or_as_conditional(into_chain(c, BinOp::Or))).collect();
+                join(BinOp::And, conjuncts)
+            })
+            .collect();
+        join(BinOp::Or, disjuncts)
+    }
+
+    /// The `||` chain of `operands`, from its first negated pattern that a later operand reads on
+    /// as `x instanceof T name ? (later operands) : true`.
+    fn or_as_conditional(&self, mut operands: Vec<Expr>) -> Expr {
+        let first = operands.remove(0);
+        let pos = first.pos;
+        if operands.is_empty() {
+            return first;
+        }
+        let rest = self.or_as_conditional(operands);
+        match negated_pattern(&first) {
+            Some(name) if mentions(&rest, name) => {
+                let ExprKind::Unary(UnOp::Not, pattern) = first.kind else {
+                    unreachable!("a negated pattern")
+                };
+                let yes = Box::new(rest);
+                let no = Box::new(self.synth(ExprKind::Bool(true), pos, Type::Boolean));
+                self.synth(ExprKind::Conditional(pattern, yes, no), pos, Type::Boolean)
+            }
+            _ => self.synth(ExprKind::Binary(BinOp::Or, Box::new(first), Box::new(rest)), pos, Type::Boolean),
+        }
+    }
+
+    /// `!operand`, without a double negation.
+    fn negated(&self, operand: Expr) -> Expr {
+        match operand.kind {
+            ExprKind::Unary(UnOp::Not, inner) => *inner,
+            kind => {
+                let operand = Expr { kind, ..operand };
+                let pos = operand.pos;
+                self.synth(ExprKind::Unary(UnOp::Not, Box::new(operand)), pos, Type::Boolean)
+            }
+        }
+    }
+
     /// `if (cond) then else otherwise` with `cond` an `||` chain, as `if (!a && ..) otherwise
     /// else then`.
     fn turned(&self, cond: Expr, then: Stmt, otherwise: Option<Stmt>) -> Stmt {
         let pos = cond.pos;
         let mut chain: Option<Expr> = None;
-        for operand in into_disjuncts(cond) {
-            let negated = match operand.kind {
-                ExprKind::Unary(UnOp::Not, inner) => *inner,
-                kind => {
-                    let operand = Expr { kind, ..operand };
-                    let pos = operand.pos;
-                    self.synth(ExprKind::Unary(UnOp::Not, Box::new(operand)), pos, Type::Boolean)
-                }
-            };
+        for operand in into_chain(cond, BinOp::Or) {
+            let negated = self.negated(operand);
             chain = Some(match chain {
                 None => negated,
                 Some(left) => self.synth(
@@ -143,12 +250,12 @@ fn chain<'e>(e: &'e Expr, op: BinOp, out: &mut Vec<&'e Expr>) {
     }
 }
 
-/// The operands of the `||` chain that `e` is, left to right, taken out of it.
-fn into_disjuncts(e: Expr) -> Vec<Expr> {
+/// The operands of the chain of `op` that `e` is, left to right, taken out of it.
+fn into_chain(e: Expr, op: BinOp) -> Vec<Expr> {
     match e.kind {
-        ExprKind::Binary(BinOp::Or, l, r) => {
-            let mut out = into_disjuncts(*l);
-            out.extend(into_disjuncts(*r));
+        ExprKind::Binary(o, l, r) if o == op => {
+            let mut out = into_chain(*l, op);
+            out.extend(into_chain(*r, op));
             out
         }
         kind => vec![Expr { kind, ..e }],

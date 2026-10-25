@@ -351,8 +351,12 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
   `continue` or `throw`). An `if` whose condition is an `||` chain with a negated pattern is
   turned around into an `&&` chain of the negated operands with its branches swapped, and a
   `?:` whose condition is a negated pattern has its branches swapped (`!(o instanceof C c) ?
-  false : f(c)`, as decompilers write `equals`; `lower/negated_patterns.rs`). A read anywhere else is rejected: "a pattern variable used here
-  not supported yet". A pattern variable may be assigned, except one of a record or switch
+  false : f(c)`, as decompilers write `equals`). An `if` whose condition negates an `&&` chain
+  with a pattern has it negated operand by operand first (`!(a && x instanceof C c)` is `!a ||
+  !(x instanceof C c)`), and an `||` inside the condition's `&&` chain whose negated pattern a
+  later operand reads becomes a conditional (`!(x instanceof C c) || f(c)` is `x instanceof C c
+  ? f(c) : true`; all in `lower/negated_patterns.rs`). A read anywhere else is rejected: "a
+  pattern variable used here not supported yet". A pattern variable may be assigned, except one of a record or switch
   pattern.
 - A downcast `(Circle) s` is `java::cast(&s, |o| o.as_circle(), ("Circle", java::APP))`, which
   returns the value or throws `ClassCastException` with HotSpot's message: "class Square cannot
