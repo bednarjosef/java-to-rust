@@ -19,7 +19,7 @@ use super::constants::static_value;
 use super::{FastMap, FastSet};
 use crate::ast::*;
 use crate::types::binary_type;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub fn analyze(class: &Class, facts: &mut Facts) {
     let mut no_square_narrowing = FastSet::default();
@@ -116,7 +116,7 @@ struct Var {
 }
 
 /// The ranges of the integer variables in scope; `None` where the program cannot be.
-type Env = HashMap<String, Var>;
+type Env = super::FastMap<String, Var>;
 
 fn join(a: Option<Env>, b: Option<Env>) -> Option<Env> {
     match (a, b) {
@@ -361,7 +361,7 @@ impl<'a> Analysis<'a> {
 
     fn method(&mut self, m: usize) {
         let method = &self.class.methods[m];
-        let mut env = Env::new();
+        let mut env = Env::default();
         self.thresholds.clear();
         self.thresholds.extend_from_slice(self.literals[m].get_or_insert_with(|| literals(method)));
         for (i, p) in method.params.iter().enumerate() {
