@@ -245,7 +245,11 @@ public class JavaTree {
                     com.sun.tools.javac.tree.JCTree.JCCompilationUnit unit = javac.parse(file);
                     // In the module that every source is in (see `oneModule`).
                     unit.modle = ((com.sun.tools.javac.tree.JCTree.JCCompilationUnit) given.get(0)).modle;
-                    javac.enterTrees(com.sun.tools.javac.util.List.of(unit));
+                    // Entered with `Enter.main`, not `JavaCompiler.enterTrees`: its `enterDone`
+                    // unblocks the annotations a second time, after which javac's blocks of them
+                    // block nothing, and it attributes annotations of local variables before
+                    // their symbols are made, leaving them without types.
+                    com.sun.tools.javac.comp.Enter.instance(context).main(com.sun.tools.javac.util.List.of(unit));
                     if (printed.add(unit)) {
                         units.add(unit);
                     }
@@ -310,8 +314,8 @@ public class JavaTree {
      * Attributes the given classes and checks their flow, as {@link JavacTaskImpl#analyze} does,
      * except that with {@code --keep-going} a crash of javac's own in one class is a compile error
      * of that class and the others go on. javac asserts, for one, that every annotation of a local
-     * variable has its type, which in some decompiled code it never gives one: the method of the
-     * first such variable is marked (see {@link #markErrors}), and so is the class if there is none.
+     * variable has its type: the method of the first variable whose annotation has none is marked
+     * (see {@link #markErrors}), or the class if there is none.
      */
     private static void analyze(JavacTaskImpl task, List<Element> classes) {
         if (!keepGoing) {
