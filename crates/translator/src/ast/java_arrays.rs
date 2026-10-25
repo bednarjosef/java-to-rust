@@ -1,7 +1,7 @@
 //! The `java.util.Arrays` methods, and `clone()`, that the translator knows for arrays of primitives
 //! and strings. Each takes the array (and its other arguments) as its first arguments.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArraysOp {
     /// `Arrays.equals(a, b)`: null arrays are equal only to each other.
     Equals,

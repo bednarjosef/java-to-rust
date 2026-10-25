@@ -5,7 +5,7 @@
 //! arguments.
 
 /// A method of `String`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StringOp {
     /// `s.substring(begin)` and `s.substring(begin, end)`.
     Substring,
@@ -43,7 +43,7 @@ pub enum StringOp {
     GetChars,
     /// The UTF-16 code units of a string as an `int[]`, which `s.chars()` and `s.codePoints()`,
     /// the method named, stream (see `program::reach::STRING_STREAMS`).
-    CharCodes(&'static str),
+    CharCodes(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// `JavaLangAccess.join(prefix, suffix, delimiter, elements, size)`: the first `size`
     /// strings of `elements` joined by `delimiter`, between `prefix` and `suffix`.
     JoinRange,
@@ -67,7 +67,10 @@ pub enum StringOp {
     /// The check of `s` for null that calling the method named (`matches`) with the parameters
     /// shown (`String`) on it makes, as a statement: the receiver of a regular expression call
     /// that the JDK's `Pattern` runs (`lower::regex`).
-    Receiver(&'static str, &'static str),
+    Receiver(
+        #[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr,
+        #[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr,
+    ),
     /// `s.equals(x)` where `x` is no string (a box, a builder, an enum, an array, an object): never
     /// equal, after evaluating both and throwing on a null `s`.
     EqualsOther,
@@ -95,7 +98,7 @@ pub enum StringOp {
 }
 
 /// A method of `StringBuilder`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuilderOp {
     /// `new StringBuilder()`, `new StringBuilder(capacity)` and `new StringBuilder(text)`.
     New,
@@ -166,7 +169,7 @@ impl BuilderOp {
 }
 
 /// A bit or radix method of `Integer` or `Long`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BitsOp {
     ToHexString,
     ToBinaryString,

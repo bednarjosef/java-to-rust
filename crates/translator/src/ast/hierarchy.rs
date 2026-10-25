@@ -10,7 +10,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 /// A hash of type and method indices, which need no protection from chosen keys: the default
 /// hash took a tenth of a translation of javac, in `declared` and `implementations`.
-#[derive(Default)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct IndexHasher(u64);
 
 impl Hasher for IndexHasher {
@@ -32,7 +32,7 @@ impl Hasher for IndexHasher {
 type IndexMap<K, V> = HashMap<K, V, BuildHasherDefault<IndexHasher>>;
 
 /// The supertypes, subtypes and overrides of the program's types and methods.
-#[derive(Default)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Hierarchy {
     /// Direct subtypes of each type: classes extending it, interfaces extending it, classes
     /// implementing it.

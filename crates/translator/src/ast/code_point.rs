@@ -1,6 +1,6 @@
 /// The code point methods of `Character`, see `Builtin::CodePoint`. Each takes an `int` code
 /// point, or two `char`s for `ToCodePoint`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodePointOp {
     /// `Character.toChars(cp)`: a `char[]` of one or two units; throws on an invalid code point.
     ToChars,

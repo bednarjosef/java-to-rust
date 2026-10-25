@@ -850,7 +850,7 @@ pub fn sun_misc_memory(class: &str, name: &str, signature: &str) -> Option<bool>
 pub const CLEANER_CHECK: (&str, &str) = ("checkCleaner", "(java.nio.ByteBuffer)void");
 
 /// One of `Unsafe`'s atomic updates of a field at an offset (see `unsafe_field_update`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FieldUpdate {
     /// `getAndAdd<Kind><Mode>(o, offset, delta)`: the old value, the field incremented.
     GetAndAdd,

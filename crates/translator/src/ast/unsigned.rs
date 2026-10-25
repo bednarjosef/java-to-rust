@@ -1,7 +1,7 @@
 /// The unsigned methods, see `Builtin::Unsigned`. The kind of the operation is the primitive of
 /// its operands: `Type::Int` for `Integer`, `Type::Long` for `Long`, and for `Widen` the narrow
 /// type it widens from (`Type::Byte`, `Type::Short` or `Type::Int`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsignedOp {
     /// `Integer.divideUnsigned(a, b)` and `Long.divideUnsigned`: throws on a zero divisor.
     Divide,
