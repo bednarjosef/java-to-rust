@@ -117,6 +117,8 @@ pub fn live_methods_unless(
         glue: object_values::runtime_called_for_dispatch(class).into_iter().collect(),
         glue_declared: glue_declared(class),
         supers: supers(class),
+        initializers: methods_by_type(class, |m| class.is_initializer(m)),
+        constructors: methods_by_type(class, |m| class.methods[m].is_ctor),
         index: class.types.iter().enumerate().map(|(t, d)| (d.name.as_str(), t)).collect(),
         stop: Stop::new(class, code),
         state: RefCell::new(State {
@@ -294,6 +296,8 @@ impl Walk<'_> {
             glue: self.glue.clone(),
             glue_declared: self.glue_declared.clone(),
             supers: self.supers.clone(),
+            initializers: self.initializers.clone(),
+            constructors: self.constructors.clone(),
             index: self.index.clone(),
             stop: Stop::default(),
             state: RefCell::new(State {
@@ -414,6 +418,15 @@ fn glue_declared(class: &Class) -> Vec<Vec<usize>> {
     declared
 }
 
+/// The methods of each type for which `keep` holds, in index order.
+fn methods_by_type(class: &Class, keep: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
+    let mut out = vec![Vec::new(); class.types.len()];
+    for m in (0..class.methods.len()).filter(|&m| keep(m)) {
+        out[class.methods[m].class].push(m);
+    }
+    out
+}
+
 fn supers(class: &Class) -> Vec<Vec<usize>> {
     (0..class.types.len())
         .map(|t| {
@@ -439,6 +452,10 @@ struct Walk<'a> {
     /// The groups of `glue` that each type declares a method of (`glue_declared`).
     glue_declared: Vec<Vec<usize>>,
     supers: Vec<Vec<usize>>,
+    /// The methods of each type's static initialization (`Class::is_initializer`), in index order.
+    initializers: Vec<Vec<usize>>,
+    /// The constructors of each type, in index order.
+    constructors: Vec<Vec<usize>>,
     index: HashMap<&'a str, usize>,
     stop: Stop,
     state: RefCell<State>,
@@ -615,10 +632,8 @@ impl Walk<'_> {
                 continue;
             }
             let class = self.class;
-            for (m, method) in class.methods.iter().enumerate() {
-                if method.class == t && (method.name == "<clinit>" || class.builds_constants(m)) {
-                    self.enter(m, STATIC, STATIC, None);
-                }
+            for &m in &self.initializers[t] {
+                self.enter(m, STATIC, STATIC, None);
             }
             let decl = &class.types[t];
             for init in decl.statics.iter().filter_map(|f| f.init.as_ref()) {
@@ -769,12 +784,12 @@ impl Walk<'_> {
                     Some(r) => self.enter(*r, *c, m, Some(args)),
                     // Without a constructor of its own, it runs those of its superclasses.
                     None => {
-                        let ancestors = self.class.hierarchy.ancestors(*c);
-                        let class = self.class;
-                        for (r, method) in class.methods.iter().enumerate() {
-                            if method.is_ctor && ancestors.contains(&method.class) {
-                                self.enter(r, *c, m, None);
-                            }
+                        let mut ctors: Vec<usize> = (self.class.hierarchy.ancestors(*c).iter())
+                            .flat_map(|&a| self.constructors[a].iter().copied())
+                            .collect();
+                        ctors.sort_unstable();
+                        for r in ctors {
+                            self.enter(r, *c, m, None);
                         }
                     }
                 }
