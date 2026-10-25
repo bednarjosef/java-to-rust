@@ -162,10 +162,10 @@ impl<'t> Lowering<'t> {
             if !seen.insert(t) {
                 continue;
             }
-            let found = self
-                .methods
-                .iter()
-                .position(|m| m.owner == t && m.name == name && m.node.list("parameters").next().is_none());
+            let found = self.methods_of(t).into_iter().find(|&m| {
+                let m = &self.methods[m];
+                m.name == name && m.node.list("parameters").next().is_none()
+            });
             if found.is_some() {
                 return found;
             }
