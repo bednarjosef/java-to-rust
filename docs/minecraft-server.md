@@ -368,10 +368,10 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   The libraries without published sources go through the same two steps: `library-best-of`
   decompiles each four ways into `decompiled/libraries/<artifact>` and puts it together into
   `src/libraries/<artifact>`, compiled against the other library jars, and `repair` then edits it.
-  Brigadier, jtracy and logging compile as Vineflower writes them. DataFixerUpper goes from 172
-  errors in 57 files to 165 with 2 files from CFR (Vineflower without the libraries and CFR's
-  whole set are both worse), and to 145 errors in 46 files after the repair keeps 21 casts in 16
-  files. 73 of the 145 are imports and uses of `javax.annotation`. All 107 of authlib's are `javax.annotation`,
+  Brigadier, jtracy and logging compile as Vineflower writes them. DataFixerUpper goes from 169
+  errors in 57 files to 165 in 59 with 2 files from CFR and 2 from Procyon (Vineflower without the
+  libraries, and CFR's and Procyon's whole sets, are all worse), and to 147 errors in 48 files
+  after the repair. 75 of the 147 are imports and uses of `javax.annotation`. All 107 of authlib's are `javax.annotation`,
   so neither step changes them. What DataFixerUpper keeps is its heavy generics: type variables
   used from a static context, and inference over its `App<Mu, ...>` encodings that fails.
 
