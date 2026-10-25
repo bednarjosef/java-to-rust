@@ -23,12 +23,15 @@
 //! `Method` and the arguments boxed into an `Object[]` (`null` for none). Its result is cast to
 //! the method's return type, or unboxed, which throws the `ClassCastException` and the
 //! `NullPointerException` of Java's checks, and an exception that the method may not throw is
-//! wrapped in an `UndeclaredThrowableException`. A method that two interfaces declare with the
+//! wrapped in an `UndeclaredThrowableException`. A method of a generic superinterface takes the
+//! types that the listed interface gives its type parameters (`test(String)` for an interface
+//! that extends `Predicate<String>`), as javac must see it to compile the class, and javac adds
+//! the erased bridge; the handler gets the superinterface's own `Method`. A method that two interfaces declare with the
 //! same parameter types is one, the first's; with other return types or exceptions, the list
 //! has no class. The `Method`s are found in the class's static initialization, by name, so they
 //! are in the reflection table.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::{Item, Walk, has_flag, members, outside, strip_arguments, symbol_type, text};
 use crate::value::Value;
@@ -66,8 +69,9 @@ fn creation(node: &Value) -> Option<Option<&Vec<Value>>> {
     Some(array["initializers"].as_array())
 }
 
-/// A method of a proxy class: its name, erased parameter and return types, the exceptions it
-/// declares, and the interface whose `Method` the handler gets.
+/// A method of a proxy class: its name, erased parameter and return types as the listed
+/// interface sees them, the exceptions it declares, the interface whose `Method` the handler
+/// gets, and that method's own erased parameter types, by which it is found.
 #[derive(Clone)]
 struct Proxied {
     name: String,
@@ -75,6 +79,7 @@ struct Proxied {
     ret: String,
     throws: Vec<String>,
     declaring: String,
+    lookup: Vec<String>,
 }
 
 impl<'t> Walk<'t> {
@@ -203,6 +208,7 @@ impl<'t> Walk<'t> {
         };
         let mut methods: Vec<Proxied> = Vec::new();
         for interface in list {
+            let views = self.type_arguments_seen(interface);
             for owner in self.interface_and_supers(interface, &mut waiting) {
                 let Some(&(decl, _)) = self.classes.get(&owner) else { continue };
                 let interface = text(decl, "kind") == "INTERFACE";
@@ -216,7 +222,8 @@ impl<'t> Walk<'t> {
                     {
                         continue;
                     }
-                    let Some(proxied) = proxied_method(member, &owner) else { return Ok(None) };
+                    let seen = views.get(&owner);
+                    let Some(proxied) = proxied_method(member, &owner, seen) else { return Ok(None) };
                     for ty in proxied.params.iter().chain([&proxied.ret]).chain(&proxied.throws) {
                         let class = ty.trim_end_matches("[]");
                         if class.contains('.') && !outside(class) {
@@ -243,6 +250,51 @@ impl<'t> Walk<'t> {
             }
         }
         if waiting.is_empty() { Ok(Some((package, methods))) } else { Err(waiting) }
+    }
+
+    /// The type arguments that the interface `interface`, raw, gives the type parameters of each
+    /// of its superinterfaces, directly or not, as erased types: an interface method's parameter
+    /// of a type variable has the type of its argument there (`Predicate.test(T)` is `test(String)`
+    /// in an interface that extends `Predicate<String>`), as javac sees it. The superinterfaces of
+    /// a generic interface that is raw are erased, and so are those of a raw superinterface.
+    fn type_arguments_seen(&self, interface: &str) -> HashMap<String, HashMap<String, String>> {
+        let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
+        out.insert(interface.to_string(), HashMap::new());
+        let mut work = vec![interface.to_string()];
+        while let Some(class) = work.pop() {
+            let Some(&(decl, _)) = self.classes.get(&class) else { continue };
+            let here = out[&class].clone();
+            let parameters: Vec<&str> =
+                decl["typeParameters"].as_array().into_iter().flatten().map(|p| text(p, "name")).collect();
+            let raw = parameters.iter().any(|p| !here.contains_key(*p));
+            for clause in decl["implementsClause"].as_array().into_iter().flatten() {
+                let written = text(clause, "javaType");
+                let name = strip_arguments(written);
+                if out.contains_key(&name) {
+                    continue;
+                }
+                let mut seen = HashMap::new();
+                if !raw && let Some(&(superinterface, _)) = self.classes.get(&name) {
+                    let arguments = type_arguments(written);
+                    let names = superinterface["typeParameters"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| text(p, "name"))
+                        .collect::<Vec<_>>();
+                    if arguments.len() == names.len() {
+                        for (parameter, argument) in names.into_iter().zip(arguments) {
+                            let argument =
+                                here.get(argument).map_or_else(|| strip_arguments(argument), Clone::clone);
+                            seen.insert(parameter.to_string(), argument);
+                        }
+                    }
+                }
+                out.insert(name.clone(), seen);
+                work.push(name);
+            }
+        }
+        out
     }
 
     /// The interface `interface` and its superinterfaces, directly or not, in the order of their
@@ -313,10 +365,29 @@ pub(super) const OBJECT_METHODS: &[(&str, &[&str], &str)] = &[
 ];
 
 /// The method of a proxy class for the interface method `member` of `owner`, from its erased
-/// signature; `None` when it throws a type variable.
-fn proxied_method(member: &Value, owner: &str) -> Option<Proxied> {
+/// signature, with the types that the listed interface gives `owner`'s type parameters, `seen`
+/// (`type_arguments_seen`); `None` when it throws a type variable.
+fn proxied_method(member: &Value, owner: &str, seen: Option<&HashMap<String, String>>) -> Option<Proxied> {
     let erased = member["symbol"]["erased"].as_str().unwrap_or(symbol_type(member));
-    let (params, ret) = split_signature(erased)?;
+    let (lookup, ret) = split_signature(erased)?;
+    // A parameter or result of a type variable of `owner`'s, not of the method's own.
+    let own: Vec<&str> =
+        member["typeParameters"].as_array().into_iter().flatten().map(|p| text(p, "name")).collect();
+    let view = |written: &str, erased: &str| -> String {
+        let element = written.trim_end_matches("[]");
+        match seen.and_then(|seen| seen.get(element)) {
+            Some(argument) if !own.contains(&element) => format!("{argument}{}", &written[element.len()..]),
+            _ => erased.to_string(),
+        }
+    };
+    let written: Vec<&str> =
+        member["parameters"].as_array().into_iter().flatten().map(|p| text(&p["type"], "javaType")).collect();
+    let params = if written.len() == lookup.len() {
+        written.iter().zip(&lookup).map(|(w, e)| view(w, e)).collect()
+    } else {
+        lookup.clone()
+    };
+    let ret = view(text(&member["returnType"], "javaType"), &ret);
     let mut throws = Vec::new();
     for thrown in member["throws"].as_array().into_iter().flatten() {
         let ty = strip_arguments(text(thrown, "javaType"));
@@ -331,7 +402,28 @@ fn proxied_method(member: &Value, owner: &str) -> Option<Proxied> {
         ret,
         throws,
         declaring: owner.to_string(),
+        lookup,
     })
+}
+
+/// The type arguments of the type `written`, `java.util.Map<K, java.util.List<V>>`, as written.
+fn type_arguments(written: &str) -> Vec<&str> {
+    let Some(start) = written.find('<') else { return Vec::new() };
+    let Some(inner) = written[start + 1..].strip_suffix('>') else { return Vec::new() };
+    let (mut out, mut depth, mut from) = (Vec::new(), 0, 0);
+    for (i, c) in inner.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(inner[from..i].trim());
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(inner[from..].trim());
+    out
 }
 
 /// The parameter types and the return type of an erased signature, `(int,java.lang.String)void`.
@@ -364,6 +456,7 @@ fn proxy_class(
             ret: ret.to_string(),
             throws: Vec::new(),
             declaring: "java.lang.Object".to_string(),
+            lookup: params.iter().map(|p| p.to_string()).collect(),
         })
         .collect();
     let all: Vec<&Proxied> = object.iter().chain(methods).collect();
@@ -390,7 +483,7 @@ fn proxy_class(
     }
     out.push_str("\n    static {\n        try {\n");
     for (i, m) in all.iter().enumerate() {
-        let types: String = m.params.iter().map(|p| format!(", {p}.class")).collect();
+        let types: String = m.lookup.iter().map(|p| format!(", {p}.class")).collect();
         out.push_str(&format!(
             "            m{i} = {}.class.getMethod(\"{}\"{types});\n",
             m.declaring, m.name
