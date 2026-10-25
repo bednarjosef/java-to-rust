@@ -167,7 +167,15 @@ fn census_reached(program: &Program, reaching: Reaching) -> Result<Taken, Progra
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
             let names = Names { program, jdk_temps: RefCell::new(jdk_temps), found: RefCell::new(None) };
-            analyse(&mut class, &lowered.units, &mut rejections, &mut modules, &names, program.ends_rejected)
+            analyse(
+                &mut class,
+                &lowered.units,
+                &unit_files,
+                &mut rejections,
+                &mut modules,
+                &names,
+                program.ends_rejected,
+            )
         });
     }
     std::panic::set_hook(hook);
@@ -212,6 +220,7 @@ type Pass<'a> = &'a dyn Fn(&mut Class) -> Result<(), Vec<Error>>;
 fn analyse(
     class: &mut Class,
     units: &[Option<usize>],
+    files: &[String],
     rejections: &mut Vec<Rejection>,
     modules: &mut Option<ModuleTree>,
     names: &Names,
@@ -278,11 +287,12 @@ fn analyse(
                         let in_unit = |m: &Method| units.get(m.class).copied().flatten() == rejection.unit;
                         class.methods.iter().find(|m| m.pos == at && in_unit(m))
                     });
-                    let owner = owner.map(|m| format!("{}.{}", class.types[m.class].name, m.name));
-                    let Pos { line, column, .. } = rejection.error.pos;
+                    let owner = owner.map_or("nothing".to_string(), |m| {
+                        format!("{}.{}", class.types[m.class].name, m.name)
+                    });
                     eprintln!(
-                        "timing: census: stubbed {} at {line}:{column}: {}",
-                        owner.as_deref().unwrap_or("nothing"),
+                        "timing: census: stubbed {owner} at {}: {}",
+                        place(files, &rejection),
                         rejection.error.message
                     );
                 }
