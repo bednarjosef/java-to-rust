@@ -458,12 +458,12 @@ impl ObjectValues {
     /// How many words the class sets of the places hold, and in how many distinct buffers they
     /// are, for the timings.
     fn class_set_words(&self) -> (usize, usize) {
-        let mut seen = HashSet::new();
+        let mut seen = super::FastSet::default();
         let (mut words, mut held) = (0, 0);
         let flows = self.vars.values().flatten().chain(self.returns.values()).chain(self.fields.values());
         for flow in flows.chain(self.statics.values()).chain(self.elements.values()) {
             words += flow.classes.words.len();
-            if seen.insert(Rc::as_ptr(&flow.classes.words)) {
+            if seen.insert(Rc::as_ptr(&flow.classes.words) as usize) {
                 held += flow.classes.words.len();
             }
         }
