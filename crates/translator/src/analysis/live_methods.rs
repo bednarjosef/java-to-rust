@@ -112,6 +112,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
             work: Vec::new(),
             queued: HashSet::default(),
             seen: HashSet::default(),
+            rescans: [0; 4],
             waiting: HashMap::new(),
             waited: HashSet::default(),
             contexts: HashMap::new(),
@@ -179,9 +180,11 @@ impl Walk<'_> {
                 let state = self.state.borrow();
                 let waiting: usize = state.waiting.values().map(Vec::len).sum();
                 let words: usize = state.live.receivers.values().map(ClassSet::words).sum();
+                let [parameter, field, object, catch] = state.rescans;
                 eprintln!(
                     "timing: live walk: {walks} walks, {} to go, {} seen, {waiting} waiting, {} receivers in \
-                     {words} words{}",
+                     {words} words; walked again for a parameter {parameter}, a field {field}, an object \
+                     {object}, a catch {catch}{}",
                     state.work.len(),
                     state.seen.len(),
                     state.live.receivers.len(),
@@ -262,6 +265,7 @@ impl Walk<'_> {
                 work: Vec::new(),
                 queued: HashSet::default(),
                 seen: HashSet::default(),
+                rescans: [0; 4],
                 waiting: HashMap::new(),
                 waited: HashSet::default(),
                 contexts: HashMap::new(),
@@ -419,6 +423,16 @@ struct Memos {
     concretes: HashMap<usize, Rc<[usize]>>,
 }
 
+/// Why a method is walked again (`rescan`): a parameter, a field or an `instanceof` or call that it
+/// reads is known to hold more, or a class that one of its `catch` clauses catches has objects.
+#[derive(Clone, Copy)]
+enum Rescan {
+    Parameter,
+    Field,
+    Object,
+    Catch,
+}
+
 struct State {
     /// The methods to scan, each with the class of the object it runs on (`STATIC`: none).
     work: Vec<(usize, usize)>,
@@ -426,6 +440,8 @@ struct State {
     /// walk knows by then.
     queued: HashSet<(usize, usize)>,
     seen: HashSet<(usize, usize)>,
+    /// How many times a method was put on the work list again, by `Rescan`.
+    rescans: [usize; 4],
     /// The instance methods called on objects of a class that no object of is created yet, by
     /// that class: they run once one is. Each once, in the order first called: a call on a
     /// receiver that may be any class calls the method on thousands of them, each time the
@@ -587,7 +603,7 @@ impl Walk<'_> {
             woken
         };
         for m in woken {
-            self.rescan(m);
+            self.rescan(m, Rescan::Catch);
         }
         self.created(c);
         let waiting = self.state.borrow_mut().waiting.remove(&c).unwrap_or_default();
