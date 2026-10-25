@@ -183,8 +183,8 @@ impl Eq for ClassSet {}
 /// their objects.
 pub struct ObjectValues {
     /// The variables of each method in each of its contexts, by their slots in `followed`.
-    vars: HashMap<(usize, usize), Vec<Flow>>,
-    returns: HashMap<(usize, usize), Flow>,
+    vars: super::FastMap<(usize, usize), Vec<Flow>>,
+    returns: super::FastMap<(usize, usize), Flow>,
     /// Instance fields, by the class that declares them.
     fields: HashMap<(usize, String), Flow>,
     statics: HashMap<(usize, String), Flow>,
@@ -241,8 +241,8 @@ struct Types {
     /// are not open, so that it does not spread past them (the analysis for dispatch).
     bounded: bool,
     /// The method with a body that each type declares for an override group.
-    declared: HashMap<(usize, usize), usize>,
-    implementations: RefCell<HashMap<(usize, usize), Option<usize>>>,
+    declared: super::FastMap<(usize, usize), usize>,
+    implementations: RefCell<super::FastMap<(usize, usize), Option<usize>>>,
 }
 
 impl Types {
@@ -279,7 +279,7 @@ impl Types {
                 concretes[s].push(c);
             }
         }
-        let mut declared = HashMap::new();
+        let mut declared = super::FastMap::default();
         for (m, method) in class.methods.iter().enumerate() {
             if !method.is_abstract && !method.is_static && !method.is_ctor {
                 declared.insert((method.class, class.hierarchy.group_id(m)), m);
@@ -686,8 +686,8 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         })
         .collect();
     let mut values = ObjectValues {
-        vars: HashMap::new(),
-        returns: HashMap::new(),
+        vars: super::FastMap::default(),
+        returns: super::FastMap::default(),
         fields: HashMap::new(),
         statics: HashMap::new(),
         elements: HashMap::new(),

@@ -993,3 +993,25 @@ pub(crate) fn held_value<'c>(class: &'c Class, m: usize, e: &'c Expr) -> &'c Exp
     }
     found.unwrap_or(e)
 }
+
+/// A hash of indices, which need no protection from chosen keys.
+#[derive(Default)]
+pub(crate) struct IndexHasher(u64);
+
+impl std::hash::Hasher for IndexHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_usize(b as usize);
+        }
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (self.0.rotate_left(5) ^ n as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IndexHasher>>;
