@@ -102,12 +102,31 @@ impl Walk<'_> {
     /// arguments the walk does not see). When that changes what a parameter is known to hold,
     /// the method is walked again.
     pub(super) fn pass(&self, caller: usize, target: usize, args: Option<&[Expr]>) {
+        self.pass_known(caller, target, args, &mut vec![None; args.map_or(0, <[Expr]>::len)]);
+    }
+
+    /// `pass`, with what is known of each argument once found, in `found`: a call's arguments
+    /// are the same for each method that it runs.
+    pub(super) fn pass_known(
+        &self,
+        caller: usize,
+        target: usize,
+        args: Option<&[Expr]>,
+        found: &mut [Option<Known>],
+    ) {
         let params = &self.class.methods[target].params;
         let values: Vec<Known> = match args {
             Some(args) if args.len() == params.len() => args
                 .iter()
                 .zip(params)
-                .map(|(a, p)| if tracked(p.ty) { Known::of(self.known(caller, a)) } else { Known::Varying })
+                .zip(found.iter_mut())
+                .map(|((a, p), found)| {
+                    if tracked(p.ty) {
+                        *found.get_or_insert_with(|| Known::of(self.known(caller, a)))
+                    } else {
+                        Known::Varying
+                    }
+                })
                 .collect(),
             _ => vec![Known::Varying; params.len()],
         };
