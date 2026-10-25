@@ -70,7 +70,10 @@ pub(super) struct Knowledge {
     unplaced: HashSet<String>,
     /// The methods whose code read each field.
     field_readers: HashMap<(usize, String), HashSet<usize>>,
-    /// The methods whose code relied on there being no object of a class below each type.
+    /// The methods whose code relied on there being no object of a class below each type: once
+    /// there is one, nothing makes their values known again, so they are walked again once.
+    absence_readers: HashMap<usize, HashSet<usize>>,
+    /// The methods whose code relied on which classes below each type have objects.
     instance_readers: HashMap<usize, HashSet<usize>>,
     /// The types that no value of the runtime can be and that only classes are below, by type.
     program_only: HashMap<usize, bool>,
@@ -190,8 +193,9 @@ impl Walk<'_> {
     pub(super) fn created(&self, c: usize) {
         let mut readers = HashSet::default();
         {
-            let state = self.state.borrow();
+            let mut state = self.state.borrow_mut();
             for t in &self.supers[c] {
+                readers.extend(state.known.absence_readers.remove(t).into_iter().flatten());
                 readers.extend(state.known.instance_readers.get(t).into_iter().flatten().copied());
             }
         }
@@ -369,10 +373,11 @@ impl Walk<'_> {
                     return None;
                 }
                 let mut state = self.state.borrow_mut();
-                state.known.instance_readers.entry(t).or_default().insert(m);
-                if state.live.instantiated.iter().any(|&c| self.supers[c].contains(&t)) {
+                // The types above a class with objects (`LiveMethods::constructed`).
+                if state.live.constructed.contains(&t) {
                     return None;
                 }
+                state.known.absence_readers.entry(t).or_default().insert(m);
                 0
             }
             // A method that nothing overrides and that only returns a literal.
