@@ -1040,11 +1040,7 @@ impl<'t> Lowering<'t> {
                 } else {
                     self.ty(node, node.java_type())?
                 };
-                ExprKind::Conditional(
-                    Box::new(condition),
-                    Box::new(self.convert(yes, ty)),
-                    Box::new(self.convert(no, ty)),
-                )
+                self.conditional(condition, self.convert(yes, ty), self.convert(no, ty))
             }
             "METHOD_INVOCATION" => self.call(node)?,
             "NEW_CLASS" => match self.new_text(node)? {
