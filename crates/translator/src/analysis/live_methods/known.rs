@@ -80,7 +80,41 @@ pub(super) struct Knowledge {
     /// Whether some implementation of each method only returns a literal, by method.
     literal_groups: HashMap<usize, bool>,
     /// The parameters and locals of the method being walked (`STATIC`: none).
-    pub(super) env: Env,
+    pub(super) env: Rc<Env>,
+    /// Where what code relies on goes instead of the readers, while the walk looks at arguments
+    /// before deciding whether to pass them (`Walk::probe`).
+    deferred: Option<Vec<(Reliance, usize)>>,
+}
+
+/// What a method's code relied on (`Knowledge::rely`).
+#[derive(Clone)]
+pub(super) enum Reliance {
+    /// A field, by declaring class and name.
+    Field((usize, String)),
+    /// There being no object of a class below a type.
+    Absence(usize),
+    /// Which classes below a type have objects.
+    Instance(usize),
+}
+
+impl Knowledge {
+    /// Method `m` relied on `on`.
+    fn rely(&mut self, on: Reliance, m: usize) {
+        match &mut self.deferred {
+            Some(deferred) => deferred.push((on, m)),
+            None => self.relied(on, m),
+        }
+    }
+
+    /// Records that method `m` relied on `on`, among the readers.
+    pub(super) fn relied(&mut self, on: Reliance, m: usize) {
+        let readers = match on {
+            Reliance::Field(key) => self.field_readers.entry(key).or_default(),
+            Reliance::Absence(t) => self.absence_readers.entry(t).or_default(),
+            Reliance::Instance(t) => self.instance_readers.entry(t).or_default(),
+        };
+        readers.insert(m);
+    }
 }
 
 /// Whether the walk tracks the values of a place of type `ty`: one of an integer type or
@@ -118,36 +152,45 @@ impl Walk<'_> {
         found: &mut [Option<Known>],
     ) {
         let params = &self.class.methods[target].params;
-        let values: Vec<Known> = match args {
-            Some(args) if args.len() == params.len() => args
-                .iter()
-                .zip(params)
-                .zip(found.iter_mut())
-                .map(|((a, p), found)| {
-                    if tracked(p.ty) {
-                        *found.get_or_insert_with(|| Known::of(self.known(caller, a)))
-                    } else {
-                        Known::Varying
-                    }
-                })
-                .collect(),
-            _ => vec![Known::Varying; params.len()],
-        };
+        let args = args.filter(|args| args.len() == params.len());
         let mut changed = false;
-        {
-            let mut state = self.state.borrow_mut();
-            for (i, v) in values.into_iter().enumerate() {
-                let old = state.known.params.get(&(target, i)).copied();
-                let new = Known::join(old, v);
-                if old != Some(new) {
-                    state.known.params.insert((target, i), new);
-                    changed = true;
+        for (i, p) in params.iter().enumerate() {
+            // What is known of an argument does not depend on what the parameters hold.
+            let v = match args {
+                Some(args) if tracked(p.ty) => {
+                    *found[i].get_or_insert_with(|| Known::of(self.known(caller, &args[i])))
                 }
+                _ => Known::Varying,
+            };
+            let mut state = self.state.borrow_mut();
+            let old = state.known.params.get(&(target, i)).copied();
+            let new = Known::join(old, v);
+            if old != Some(new) {
+                state.known.params.insert((target, i), new);
+                changed = true;
             }
         }
         if changed {
             self.rescan(target, Rescan::Parameter);
         }
+    }
+
+    /// What is known of the arguments `args` of a call in method `caller` at the positions
+    /// `order`, in that order, as `pass_known` finds it, with what that relies on, which is not
+    /// recorded among the readers (`Knowledge::relied`) but returned in the order found.
+    pub(super) fn probe(
+        &self,
+        caller: usize,
+        args: &[Expr],
+        order: &[usize],
+    ) -> (Vec<Option<Known>>, Vec<(Reliance, usize)>) {
+        let mut found = vec![None; args.len()];
+        self.state.borrow_mut().known.deferred = Some(Vec::new());
+        for &i in order {
+            found[i] = Some(Known::of(self.known(caller, &args[i])));
+        }
+        let relied = self.state.borrow_mut().known.deferred.take().unwrap_or_default();
+        (found, relied)
     }
 
     /// The code of method `m` is given `value` for the field `name` of an object of type `ty`
@@ -158,7 +201,11 @@ impl Walk<'_> {
             None => Known::Varying,
         };
         let Some(owner) = self.field_owner(ty, name) else {
-            self.state.borrow_mut().known.unplaced.insert(name.to_string());
+            let mut state = self.state.borrow_mut();
+            // What every method found that read a field of that name may change.
+            if state.known.unplaced.insert(name.to_string()) {
+                state.prepared.clear();
+            }
             return;
         };
         self.give_field(owner, name, known);
@@ -207,6 +254,7 @@ impl Walk<'_> {
     /// Method `m` is walked again, on every object that it was walked on.
     pub(super) fn rescan(&self, m: usize, why: Rescan) {
         let mut state = self.state.borrow_mut();
+        state.prepared.remove(&m);
         let contexts = state.contexts.get(&m).cloned().unwrap_or_default();
         for ctx in contexts {
             if state.queued.insert((m, ctx)) {
@@ -364,8 +412,9 @@ impl Walk<'_> {
                 if state.known.unplaced.contains(name) {
                     return None;
                 }
-                state.known.field_readers.entry(key.clone()).or_default().insert(m);
-                state.known.fields.get(&key).unwrap_or(&Known::Value(0)).value()?
+                let known = *state.known.fields.get(&key).unwrap_or(&Known::Value(0));
+                state.known.rely(Reliance::Field(key), m);
+                known.value()?
             }
             ExprKind::InstanceOf { ty, .. } if m != STATIC => {
                 let t = class.class_index(*ty)?;
@@ -377,7 +426,7 @@ impl Walk<'_> {
                 if state.live.constructed.contains(&t) {
                     return None;
                 }
-                state.known.absence_readers.entry(t).or_default().insert(m);
+                state.known.rely(Reliance::Absence(t), m);
                 0
             }
             // A method that nothing overrides and that only returns a literal.
@@ -396,22 +445,8 @@ impl Walk<'_> {
                     && self.literal_group(*r) =>
             {
                 let t = class.class_index(receiver.ty)?;
-                let concretes = self.concretes(t);
-                let classes: Vec<usize> = {
-                    let mut state = self.state.borrow_mut();
-                    state.known.instance_readers.entry(t).or_default().insert(m);
-                    let live = &state.live.instantiated;
-                    concretes.iter().copied().filter(|c| live.contains(c)).collect()
-                };
-                let mut value = None;
-                for c in classes {
-                    let v = self.literal_result(class.hierarchy.implementation(*r, c)?)?;
-                    if value.is_some_and(|known| known != v) {
-                        return None;
-                    }
-                    value = Some(v);
-                }
-                value?
+                self.state.borrow_mut().known.rely(Reliance::Instance(t), m);
+                self.same_literal(*r, t)?
             }
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return int(value),
             ExprKind::Cast(to, x) if tracked(*to) && tracked(x.ty) => {
@@ -452,6 +487,37 @@ impl Walk<'_> {
         };
         // Java's arithmetic wraps; within its type's range the value is exact.
         in_range(e.ty, v).then_some(v)
+    }
+
+    /// The literal that every implementation of method `r` returns in the classes below type `t`
+    /// that have objects, when there are some and they all return the same one. Remembered until
+    /// another class has objects.
+    fn same_literal(&self, r: usize, t: usize) -> Option<i128> {
+        let objects = self.state.borrow().live.instantiated.len();
+        if self.fast
+            && let Some(&(seen, value)) = self.memos.borrow().literals.get(&(r, t))
+            && seen == objects
+        {
+            return value;
+        }
+        let concretes = self.concretes(t);
+        let value = (|| {
+            let state = self.state.borrow();
+            let mut value = None;
+            // `literal_result` of a literal does not look at the state.
+            for &c in concretes.iter().filter(|c| state.live.instantiated.contains(c)) {
+                let v = self.literal_result(self.class.hierarchy.implementation(r, c)?)?;
+                if value.is_some_and(|known| known != v) {
+                    return None;
+                }
+                value = Some(v);
+            }
+            value
+        })();
+        if self.fast {
+            self.memos.borrow_mut().literals.insert((r, t), (objects, value));
+        }
+        value
     }
 
     /// The literal that method `r` returns, when its body only returns one.

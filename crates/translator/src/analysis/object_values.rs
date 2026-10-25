@@ -181,6 +181,11 @@ impl ClassSet {
         true
     }
 
+    /// Whether every class of `other` is in this set.
+    pub(super) fn holds(&self, other: &ClassSet) -> bool {
+        other.words.iter().enumerate().all(|(i, &word)| word & !self.word(other.start + i) == 0)
+    }
+
     /// Keeps the classes that are also in `other`.
     fn intersect(&mut self, other: &ClassSet) {
         let start = self.start;
@@ -1074,6 +1079,16 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
     out
 }
 
+/// Whether the runtime is handed objects by `x` itself (`handed`): by a builtin that holds them,
+/// or a string concatenation.
+pub(super) fn hands(x: &Expr) -> bool {
+    match &x.kind {
+        ExprKind::Builtin(builtin, _) => hands_objects(builtin),
+        ExprKind::Binary(_, _, _) | ExprKind::Assign { op: Some(_), .. } => x.ty == Type::String,
+        _ => false,
+    }
+}
+
 /// What the runtime is handed by the expression `x` itself, not counting the expressions inside
 /// it: the arguments of a builtin that may hold them (`hands_objects`), and the operands of a
 /// string concatenation.
@@ -1084,8 +1099,11 @@ pub(super) fn handed(
     ctx: usize,
     x: &Expr,
 ) -> Vec<(Flow, Type)> {
+    if !hands(x) {
+        return Vec::new();
+    }
     let operands: Vec<&Expr> = match &x.kind {
-        ExprKind::Builtin(builtin, args) if hands_objects(builtin) => args.iter().collect(),
+        ExprKind::Builtin(_, args) => args.iter().collect(),
         ExprKind::Binary(_, l, r) if x.ty == Type::String => vec![l, r],
         ExprKind::Assign { op: Some(_), value, .. } if x.ty == Type::String => vec![value],
         _ => Vec::new(),
