@@ -3429,6 +3429,37 @@ fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
     );
 }
 
+/// Two source roots that are modules of the JDK, as javac's `jdk.compiler` and `java.compiler`
+/// are: javac patches one module at most in a compilation, so the class files whose names the
+/// messages of a `NullPointerException` show come from one compilation for each.
+#[test]
+fn messages_name_the_class_files_of_two_modules_of_the_jdk() {
+    let dir = write_sources(
+        "two-jdk-modules",
+        &[
+            ("prefs/module-info.java", "module java.prefs {\n}\n"),
+            (
+                "prefs/p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] args) {\n        String t = args.length > 3 ? \"a\" : null;\n        try { System.out.println(t.length()); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+            ),
+            ("logging/module-info.java", "module java.logging {\n}\n"),
+            (
+                "logging/q/Other.java",
+                "package q;\npublic class Other {\n    public static String name() { return \"!\"; }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir.join("prefs"), dir.join("logging")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // The JDK compiles its modules with `-g`: the message names the local.
+    assert_contains(&rust, &["Cannot invoke \\\"String.length()\\\" because \\\"t\\\" is null"]);
+}
+
 #[test]
 fn census_json_writes_the_census_to_the_file_given() {
     let dir = census_sources("census_cli");

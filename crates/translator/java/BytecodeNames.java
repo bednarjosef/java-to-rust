@@ -29,7 +29,8 @@ import javax.tools.*;
  *
  * <p>Usage: {@code java BytecodeNames [--patch-module MODULE=ROOT]... FILE...}, or the source on
  * standard input for one file. The files under the root of a module that the JDK has too, such
- * as javac's {@code jdk.compiler}, compile as part of that module, as the JDK compiles them.
+ * as javac's {@code jdk.compiler}, compile as part of that module, as the JDK compiles them; with
+ * several such roots, each module's files compile on their own, against the JDK's other modules.
  * Prints one line, {@code {"java":"26","entries":[[CLASS,LINE,COLUMN,KIND,NAME,TEXT],...]}}:
  * the Java version, then for each use in the source (by the outermost class it is in, and the
  * line and column where it starts) of
@@ -96,18 +97,78 @@ public class BytecodeNames {
             }
         });
         List<File> files = new ArrayList<>();
+        // The roots of the JDK's own modules, such as javac's `jdk.compiler`, by module: their
+        // packages compile only as part of that module.
+        Map<String, File> patches = new LinkedHashMap<>();
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--patch-module") && i + 1 < args.length) {
-                // A root of the JDK's own module, such as javac's `jdk.compiler`: its packages
-                // compile only as part of that module.
-                String patch = args[++i];
-                if (java.lang.module.ModuleFinder.ofSystem().find(patch.split("=", 2)[0]).isPresent()) {
-                    options.addAll(List.of("--patch-module", patch));
+                String[] patch = args[++i].split("=", 2);
+                if (patch.length == 2 && java.lang.module.ModuleFinder.ofSystem().find(patch[0]).isPresent()) {
+                    patches.put(patch[0], new File(patch[1]));
                 }
             } else {
                 files.add(new File(args[i]));
             }
         }
+        // javac patches one module at most when it compiles without a module source path ("too
+        // many patched modules"; given more, it reads a file of one module both as given and as
+        // a source of the other, and fails an assertion): the files of each module compile on
+        // their own, against the JDK's compiled modules, and the others without a patch.
+        Map<String, List<File>> compilations = new LinkedHashMap<>();
+        if (patches.size() <= 1) {
+            compilations.put(patches.keySet().stream().findFirst().orElse(""), files);
+        } else {
+            for (File f : files) {
+                String module = "";
+                for (Map.Entry<String, File> patch : patches.entrySet()) {
+                    if (f.getAbsoluteFile().toPath().normalize().startsWith(patch.getValue().getAbsoluteFile().toPath().normalize())) {
+                        module = patch.getKey();
+                        break;
+                    }
+                }
+                compilations.computeIfAbsent(module, m -> new ArrayList<>()).add(f);
+            }
+        }
+        Map<List<Object>, String> entries = new LinkedHashMap<>();
+        for (Map.Entry<String, List<File>> compilation : compilations.entrySet()) {
+            List<String> with = new ArrayList<>(options);
+            if (!compilation.getKey().isEmpty()) {
+                with.addAll(List.of("--patch-module", compilation.getKey() + "=" + patches.get(compilation.getKey())));
+            }
+            entries.putAll(compile(compiler, discarding, diagnostics, standard, with, compilation.getValue()));
+        }
+        StringBuilder out = new StringBuilder("{\"java\":\"").append(Runtime.version().feature()).append("\",\"entries\":[");
+        boolean first = true;
+        for (Map.Entry<List<Object>, String> e : entries.entrySet()) {
+            out.append(first ? "" : ",").append('[');
+            first = false;
+            List<Object> key = e.getKey();
+            string((String) key.get(0), out);
+            out.append(',').append(key.get(1)).append(',').append(key.get(2)).append(',');
+            string((String) key.get(3), out);
+            out.append(',');
+            string((String) key.get(4), out);
+            out.append(',');
+            if (e.getValue() == null) {
+                out.append("null");
+            } else {
+                string(e.getValue(), out);
+            }
+            out.append(']');
+        }
+        out.append("]}\n");
+        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
+        stdout.print(out);
+        stdout.flush();
+    }
+
+    /**
+     * Compiles {@code files} (none: the source on standard input) with {@code options}, and
+     * returns the entries of their code; exits at the first error.
+     */
+    private static Map<List<Object>, String> compile(JavaCompiler compiler, JavaFileManager discarding,
+            DiagnosticCollector<JavaFileObject> diagnostics, StandardJavaFileManager standard, List<String> options,
+            List<File> files) throws Exception {
         Iterable<? extends JavaFileObject> sources;
         if (!files.isEmpty()) {
             sources = standard.getJavaFileObjectsFromFiles(files);
@@ -135,29 +196,8 @@ public class BytecodeNames {
                 System.exit(1);
             }
         }
-        StringBuilder out = new StringBuilder("{\"java\":\"").append(Runtime.version().feature()).append("\",\"entries\":[");
-        boolean first = true;
-        for (Map.Entry<List<Object>, String> e : names.entries.entrySet()) {
-            out.append(first ? "" : ",").append('[');
-            first = false;
-            List<Object> key = e.getKey();
-            string((String) key.get(0), out);
-            out.append(',').append(key.get(1)).append(',').append(key.get(2)).append(',');
-            string((String) key.get(3), out);
-            out.append(',');
-            string((String) key.get(4), out);
-            out.append(',');
-            if (e.getValue() == null) {
-                out.append("null");
-            } else {
-                string(e.getValue(), out);
-            }
-            out.append(']');
-        }
-        out.append("]}\n");
-        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
-        stdout.print(out);
-        stdout.flush();
+        CLASS_FILES.clear();
+        return names.entries;
     }
 
     private static void string(String s, StringBuilder out) {
