@@ -284,9 +284,14 @@ Everywhere else `synchronized` is the null check of its lock, so a program witho
 `wait` translates as before. `synchronized (this)` in a constructor keeps no monitor: no other
 thread has the object yet.
 
-Rejected, by name: `synchronized` on a string, a box, an array, a Java enum's constant, or the
-class of a value (`o.getClass()`) where the monitor would be kept (they are values or handles
-without a lock), and `wait`, `notify` or `holdsLock` on a string, box or array anywhere;
+An array's monitor is kept in any program with threads. An array that threads share
+(`java::SharedArray`) makes its lock the first time a thread takes it (`LazyMonitor` in
+`monitor.rs`, a pointer that stays null for the many arrays never locked); one that a single
+thread uses keeps its monitor by address, as a `RefCell` object does.
+
+Rejected, by name: `synchronized` on a string, a box, a Java enum's constant, or the class of a
+value (`o.getClass()`) where the monitor would be kept (they are values without a lock), and
+`wait`, `notify` or `holdsLock` on a string or box anywhere;
 `wait(millis, nanos)`. A string, box or `Class` held as an `Object` has no monitor either, since
 the translation keeps them as values; where a locked `Object` may hold one of them as well as the
 program's objects (as `Collections.synchronizedSet(set, mutex)` locks what it is given), the
@@ -299,7 +304,8 @@ held as an Object is not supported by the translation" (`java::unkept_monitor`).
 An object whose monitor is kept, of a class that threads share or one whose monitor the program
 waits on, notifies or asks about, is an `Arc<java::Monitored<C>>`, whose reentrant lock is its
 monitor. Its fields take no lock, so the monitor is the only lock its object has. (A builder and
-a `java::Locked` object have their data lock as their monitor; an array has none, as 3.1 says.)
+a `java::Locked` object have their data lock as their monitor, and an array its elements', as 3.1
+says.)
 
 - `synchronized (x) { .. }` is `{ let _monitor = java::enter(&x); { .. } }`. The guard drops
   however the block ends, so `?`, `break` and `return` release it as `monitorexit` does.

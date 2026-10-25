@@ -62,13 +62,19 @@ impl<C: std::fmt::Debug, T> std::fmt::Debug for ArrayData<C, T> {
 
 /// The elements of a `SharedArray`: a cell per element, each read and written as one atomic action
 /// (`java::SharedField`). The length never changes.
-pub struct SharedElements<T>(Box<[SharedField<T>]>);
+///
+/// The array's monitor is made the first time a thread locks it (`synchronized (a)`), as few
+/// arrays are ever locked.
+pub struct SharedElements<T>(Box<[SharedField<T>]>, pub(crate) crate::monitor::LazyMonitor);
 
 impl<T> SharedElements<T> {
     fn new(items: Vec<T>) -> SharedElements<T> {
         let items: Box<[T]> = items.into_boxed_slice();
         // A `SharedField<T>` is a transparent `UnsafeCell<T>`, which has the layout of a `T`.
-        SharedElements(unsafe { Box::from_raw(Box::into_raw(items) as *mut [SharedField<T>]) })
+        SharedElements(
+            unsafe { Box::from_raw(Box::into_raw(items) as *mut [SharedField<T>]) },
+            crate::monitor::LazyMonitor::new(),
+        )
     }
 
     /// The elements lent to a runtime function that reads them (`lent.rs`): read from their cells
