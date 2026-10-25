@@ -150,25 +150,27 @@ fn lower_with<'t>(
     // only an error in code that can run (`analysis::live_methods`): the others leave the
     // program as it is, and the Rust generics may stay. A lowering that noted covariant arrays
     // is lowered again whatever it found (`real_generics::retry`), so its methods that can run
-    // are not looked for. Those found are handed on with the program, which a census narrows to
-    // them (`program::narrow`).
+    // are not looked for. Nor are they once a rejection can run, as that lowering is retried:
+    // the walk stops there (`live_methods_unless`). Those found are handed on with the program,
+    // which a census narrows to them (`program::narrow`).
     let live = match &lowered {
         Ok((class, ..))
             if !lowering.real.is_empty()
                 && lowering.covariant.noted.borrow().is_empty()
                 && !rejected.is_empty() =>
         {
+            let code: Vec<(usize, Option<usize>)> = rejected.iter().map(|r| (r.ty, r.method)).collect();
             Some(crate::timings::phase("methods that can run", || {
-                crate::analysis::live_methods::live_methods(class)
+                crate::analysis::live_methods::live_methods_unless(class, &code)
             }))
         }
         _ => None,
     };
     let retried = live.as_ref().is_some_and(|live| match live {
-        Ok(live) => rejected.iter().any(|r| live.runs(r.ty, r.method)),
-        Err(_) => true,
+        Ok(Some(live)) => rejected.iter().any(|r| live.runs(r.ty, r.method)),
+        Ok(None) | Err(_) => true,
     });
-    let live = live.and_then(Result::ok);
+    let live = live.and_then(Result::ok).flatten();
     let first = rejected.first().map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
     *census.borrow_mut() = (rejected, (0..lowering.types.len()).map(unit).collect(), live);
     match first {
