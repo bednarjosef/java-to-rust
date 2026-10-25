@@ -32,9 +32,9 @@ pub struct Borrowing {
     pub mutating: HashSet<usize>,
     /// Classes, by qualified name, whose constructors build a plain value.
     pub plain_constructors: HashSet<String>,
-    /// For each of the other classes, by index, the position of the first constructor (or else
-    /// field initializer) that keeps it from building a plain value.
-    pub not_plain: HashMap<usize, Pos>,
+    /// For each of the other classes, by index, the positions of the constructors and then of
+    /// the field initializers that keep it from building a plain value.
+    pub not_plain: HashMap<usize, Vec<Pos>>,
     /// Methods and constructors that touch no shared object but their own `this`, directly or
     /// through what they call.
     pub isolated: HashSet<usize>,
@@ -153,19 +153,21 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     let mut not_plain = HashMap::new();
     for t in 0..class.types.len() {
         let ctors = h.methods_of(t).iter().copied().filter(|&m| class.methods[m].is_ctor);
-        let mut failing_ctor = ctors
+        let failing_ctors = ctors
             .filter(|&m| {
                 scans[m].this_as_value || !scans[m].this_calls.iter().all(|&call| plain_call(t, call))
             })
             .map(|m| class.methods[m].pos);
-        let failing_init = class.types[t].fields.iter().filter_map(|f| f.init.as_ref()).find(|init| {
+        let failing_inits = class.types[t].fields.iter().filter_map(|f| f.init.as_ref()).filter(|init| {
             let mut s = Scan::default();
             s.expr(class, init);
             s.this_as_value || !s.this_calls.iter().all(|&call| plain_call(t, call))
         });
-        match failing_ctor.next().or(failing_init.map(|init| init.pos)) {
-            Some(pos) => _ = not_plain.insert(t, pos),
-            None => _ = plain_constructors.insert(class.types[t].name.clone()),
+        let failing: Vec<Pos> = failing_ctors.chain(failing_inits.map(|init| init.pos)).collect();
+        if failing.is_empty() {
+            plain_constructors.insert(class.types[t].name.clone());
+        } else {
+            not_plain.insert(t, failing);
         }
     }
     // Immutable and owned objects have no `RefCell` to borrow.

@@ -195,9 +195,9 @@ pub struct Facts {
     pub self_methods: HashSet<usize>,
     /// The classes whose constructors build a plain value, which `new` then shares.
     pub plain_constructors: HashSet<String>,
-    /// For each other class, by index, the position of the constructor or field initializer
-    /// that keeps it from building a plain value.
-    pub not_plain: HashMap<usize, Pos>,
+    /// For each other class, by index, the positions of the constructors and field initializers
+    /// that keep it from building a plain value.
+    pub not_plain: HashMap<usize, Vec<Pos>>,
     /// Methods and constructors that touch no object but their own, so they borrow no other.
     pub isolated: HashSet<usize>,
     /// Methods and constructors that may borrow a shared object mutably, through what they call.
@@ -462,7 +462,8 @@ fn whole_object_classes(class: &Class) -> HashSet<usize> {
 
 /// Rejects what the analyses show the translation cannot do: a superclass's constructor runs
 /// before its subclass's object exists, building the fields struct as a plain value, so it may
-/// use `this` only for that struct. Every class that does is reported, after one another.
+/// use `this` only for that struct. Every class that does is reported, at each constructor and
+/// field initializer that does, after one another.
 fn validate(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
     let mut errors = Vec::new();
     let mut structs: Vec<usize> = facts.fields_structs.iter().copied().collect();
@@ -472,14 +473,18 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
             continue;
         }
         let first = || class.methods.iter().find(|m| m.is_ctor && m.class == t).map(|m| m.pos);
-        let pos = facts.not_plain.get(&t).copied().or_else(first).unwrap_or_default();
-        errors.push(Error {
-            pos,
-            message:
-                "constructors of a class with subclasses that use `this` as a value or call overridable \
-                      methods not supported yet"
+        let positions = match facts.not_plain.get(&t) {
+            Some(positions) => positions.clone(),
+            None => vec![first().unwrap_or_default()],
+        };
+        for pos in positions {
+            errors.push(Error {
+                pos,
+                message: "constructors of a class with subclasses that use `this` as a value or call \
+                          overridable methods not supported yet"
                     .to_string(),
-        });
+            });
+        }
     }
     // An enum may implement an interface's method with one that every enum has; the dispatcher
     // knows `name()`, `ordinal()` and `toString()`, and `Object`'s methods.
