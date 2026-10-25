@@ -5,7 +5,7 @@
 //! with javac, code generation included, and prints them; that costs a second compile, so the
 //! translation asks for them only when the program reads such a message.
 
-use super::{fail, java, parse};
+use super::{fail, java};
 use crate::ast::{Error, Pos};
 use crate::value::Value;
 use std::collections::HashMap;
@@ -34,9 +34,11 @@ pub enum NameKind {
 pub struct BytecodeNames {
     /// The feature version of the Java that compiled the program, such as `26`.
     pub java: String,
-    /// The text of each name, `None` where javac's code generator leaves it uncertain.
-    entries: HashMap<(String, Pos, NameKind, String), Option<String>>,
+    /// The text of each name, by class, `None` where javac's code generator leaves it uncertain.
+    entries: Entries,
 }
+
+type Entries = HashMap<String, HashMap<(Pos, NameKind, String), Option<String>>>;
 
 impl BytecodeNames {
     /// The JVM's text for the name `name` of kind `kind` starting at `pos` in the code of the
@@ -44,7 +46,7 @@ impl BytecodeNames {
     /// starts at a position, and the translation may have renamed the local.
     pub fn get(&self, class: &str, pos: Pos, kind: NameKind, name: &str) -> Option<&str> {
         let name = if kind == NameKind::Local { "" } else { name };
-        self.entries.get(&(class.to_string(), pos, kind, name.to_string()))?.as_deref()
+        self.entries.get(class)?.get(&(pos, kind, name.to_string()))?.as_deref()
     }
 }
 
@@ -82,38 +84,67 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(fail(format!("compiling the program for its class files failed: {}", stderr.trim())).1);
     }
-    let tree =
-        parse(&output.stdout).map_err(|e| fail(format!("unreadable names of the class files: {e}")).1)?;
-    let mut entries = HashMap::new();
-    for entry in tree["entries"].as_array().into_iter().flatten() {
-        let Some(
-            [
-                Value::String(class),
-                Value::Number(line),
-                Value::Number(column),
-                Value::String(kind),
-                Value::String(name),
-                text,
-            ],
-        ) = entry.as_array().map(Vec::as_slice)
-        else {
-            continue;
-        };
-        let kind = match kind.as_str() {
-            "local" => NameKind::Local,
-            "temp" => NameKind::Temp,
-            "call" => NameKind::Call,
-            "static" => NameKind::Static,
-            _ => continue,
-        };
-        let pos = Pos::new(
-            line.as_u64().unwrap_or_default() as usize,
-            column.as_u64().unwrap_or_default() as usize,
-        );
-        let name = if kind == NameKind::Local { String::new() } else { name.to_string() };
-        entries.insert((class.to_string(), pos, kind, name), text.as_str().map(str::to_string));
+    read_names(&output.stdout).map_err(|e| fail(format!("unreadable names of the class files: {e}")).1)
+}
+
+/// The names that `java/BytecodeNames.java` prints, read entry by entry into the map: as a tree,
+/// the names of a program as large as the Minecraft server and its libraries take gigabytes.
+fn read_names(json: &[u8]) -> serde_json::Result<BytecodeNames> {
+    use serde::de::{DeserializeSeed, Deserializer as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct Names;
+    impl<'de> Visitor<'de> for Names {
+        type Value = BytecodeNames;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("the names of the class files")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BytecodeNames, A::Error> {
+            let mut names = BytecodeNames { java: String::new(), entries: HashMap::new() };
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "java" => names.java = map.next_value()?,
+                    "entries" => map.next_value_seed(Each(&mut names.entries))?,
+                    _ => _ = map.next_value::<IgnoredAny>()?,
+                }
+            }
+            Ok(names)
+        }
     }
-    Ok(BytecodeNames { java: tree["java"].as_str().unwrap_or_default().to_string(), entries })
+    /// Reads the entries into the map.
+    struct Each<'m>(&'m mut Entries);
+    impl<'de> DeserializeSeed<'de> for Each<'_> {
+        type Value = ();
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_seq(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Each<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("the entries of the names")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            type Entry = (String, u64, u64, String, String, Option<String>);
+            while let Some((class, line, column, kind, name, text)) = seq.next_element::<Entry>()? {
+                let kind = match kind.as_str() {
+                    "local" => NameKind::Local,
+                    "temp" => NameKind::Temp,
+                    "call" => NameKind::Call,
+                    "static" => NameKind::Static,
+                    _ => continue,
+                };
+                let pos = Pos::new(line as usize, column as usize);
+                let name = if kind == NameKind::Local { String::new() } else { name };
+                self.0.entry(class).or_default().insert((pos, kind, name), text);
+            }
+            Ok(())
+        }
+    }
+    let mut reader = serde_json::Deserializer::from_slice(json);
+    let names = (&mut reader).deserialize_map(Names)?;
+    reader.end()?;
+    Ok(names)
 }
 
 impl BytecodeNames {
@@ -121,7 +152,10 @@ impl BytecodeNames {
     /// compile.
     pub fn add_jdk_temps(&mut self, temps: JdkTemps) {
         for (class, pos, name, text) in temps {
-            self.entries.insert((class, pos, NameKind::Temp, name.to_string()), Some(text));
+            self.entries
+                .entry(class)
+                .or_default()
+                .insert((pos, NameKind::Temp, name.to_string()), Some(text));
         }
     }
 }
