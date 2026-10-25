@@ -59,7 +59,7 @@ pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_ty
 pub use string_identity::string_identity;
 pub(crate) use string_identity::{Made, made, value_of_operand};
 pub use threads::array_family;
-pub use whole_objects::{whole_objects, whole_objects_all};
+pub use whole_objects::whole_objects;
 
 /// The types whose statics a thread that the program starts may touch (`Class::thread_statics`),
 /// for a translation that does not keep only the methods that can run (a whole program's does,

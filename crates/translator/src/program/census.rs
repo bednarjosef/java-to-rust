@@ -231,7 +231,10 @@ fn analyse(
     let represented: std::cell::RefCell<Option<analysis::Facts>> = Default::default();
     let passes: [Pass; 4] = [
         &|class| crate::timings::phase("census: string identity", || analysis::string_identity(class)),
-        &|class| crate::timings::phase("census: whole objects", || analysis::whole_objects_all(class)),
+        &|class| {
+            crate::timings::phase("census: whole objects", || analysis::whole_objects(class))
+                .map_err(|e| vec![e])
+        },
         &unresolved_calls,
         &|class| {
             let tolerated = tolerated.borrow();

@@ -34,12 +34,6 @@ use crate::ast::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
-    whole_objects_all(class).map_err(|mut errors| errors.remove(0))
-}
-
-/// `whole_objects`, with every constructor that it cannot rewrite rather than the first: a
-/// census stubs them together (`program/census.rs`).
-pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     let first = whole_object_classes(class);
     if first.is_empty() {
         return Ok(());
@@ -82,7 +76,6 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     // parameters that pass the synthetic fields of its zero object (of its superclass's, for one
     // of a class without subclasses).
     let mut sources: HashMap<usize, Vec<Source>> = HashMap::new();
-    let mut errors = Vec::new();
     for m in (0..class.methods.len()).filter(|&m| {
         let method = &class.methods[m];
         method.is_ctor && (whole.contains(&method.class) || leaves.contains(&method.class))
@@ -96,7 +89,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
         match found {
             Some(found) => _ = sources.insert(m, found),
             None => {
-                errors.push(Error {
+                return Err(Error {
                     pos: class.methods[m].pos,
                     message: "constructors of a class with subclasses that use `this` as a value or call \
                               overridable methods, in a class with an enclosing instance or captured locals \
@@ -105,9 +98,6 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
                 });
             }
         }
-    }
-    if !errors.is_empty() {
-        return Err(errors);
     }
     for &m in &original {
         rewrite.construct.insert(m, construct_name(class, class.methods[m].class));
