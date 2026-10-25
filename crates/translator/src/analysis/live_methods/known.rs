@@ -143,7 +143,7 @@ impl Walk<'_> {
             }
         }
         if changed {
-            self.rescan(target);
+            self.rescan(target, Rescan::Parameter);
         }
     }
 
@@ -181,7 +181,7 @@ impl Walk<'_> {
             state.known.field_readers.get(&key).cloned().unwrap_or_default()
         };
         for m in readers {
-            self.rescan(m);
+            self.rescan(m, Rescan::Field);
         }
     }
 
@@ -196,17 +196,18 @@ impl Walk<'_> {
             }
         }
         for m in readers {
-            self.rescan(m);
+            self.rescan(m, Rescan::Object);
         }
     }
 
     /// Method `m` is walked again, on every object that it was walked on.
-    pub(super) fn rescan(&self, m: usize) {
+    pub(super) fn rescan(&self, m: usize, why: Rescan) {
         let mut state = self.state.borrow_mut();
         let contexts = state.contexts.get(&m).cloned().unwrap_or_default();
         for ctx in contexts {
             if state.queued.insert((m, ctx)) {
                 state.work.push((m, ctx));
+                state.rescans[why as usize] += 1;
             }
         }
     }
