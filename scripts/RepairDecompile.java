@@ -37,7 +37,24 @@
 // - a cast whose last type argument the decompiler left empty (`(Function<Object, >) a -> x`)
 //   made a cast to the raw type;
 // - an unresolved variable in a catch block renamed to the catch parameter that encloses every
-//   use of the name and is not used itself (the decompiler declared `e` and used `ex`);
+//   use of the name and is not used itself (the decompiler declared `e` and used `ex`), or, in
+//   nested catches, to the one whose exception variable the class file reads there;
+// - an unresolved variable that is assigned declared with the assigned value's type
+//   (`List<PositionStep> var24;`, a temporary of a record pattern), and a local variable declared
+//   again in the same scope renamed, with its uses after it;
+// - CFR's `SwitchBootstraps.typeSwitch(..)` call replaced with the index its call site returns
+//   (`x == null ? -1 : n <= 0 && x instanceof A ? 0 : ..`), the one edit that is not the class
+//   file's bytecode but computes the same;
+// - at an error of inference or of a call no method fits, these options, each tried when the
+//   ones before did not lower the file's errors: the type arguments of the calls around the
+//   error worked out from the types the expression is for, the arguments' declared types and
+//   what lambdas and method references return (`MethodInfo.<Params>paramsTypedCodec()`), first
+//   of the calls javac names, then of every call, with an argument the parameter then does not
+//   take cast to it (`(U) this.value`); the decompiler's casts to a raw class made casts to a
+//   type variable of that erasure; an argument holding a captured wildcard cast to its raw class;
+//   a lambda or method reference cast to the interface the class file makes it for; the receiver
+//   whose wildcard javac captured cast to its raw class; and the cast through a wildcard type to
+//   the declared type of the whole;
 // - a parameter whose type the decompiler erased, in a method that then overrides nothing and
 //   leaves its class abstract, written with the type of the method of a supertype that has the
 //   same erasure (`encode(R input, ..)` for `encode(Object input, ..)`);
@@ -48,14 +65,17 @@
 // - `new Outer.Inner<>(..)` of an inner class of a generic class that the enclosing class is or
 //   extends, which javac rejects with the raw qualifier, written `new Inner<>(..)`.
 //
-// A file whose errors outside imports and annotations do not go down after a round gets its
-// previous text back. Each edit is written to LOG.
+// Each round takes, for every error, its first option not tried before. A file whose errors
+// outside imports and annotations do not go down after a round gets its previous text back; an
+// option tried alone is then not tried again, and a file that had several gets one per round
+// from then on. Each edit is written to LOG.
 import com.sun.source.tree.*;
 import com.sun.source.util.*;
 import com.sun.tools.javac.api.ClientCodeWrapper;
 import com.sun.tools.javac.api.JavacTaskImpl;
 import com.sun.tools.javac.code.Kinds;
 import com.sun.tools.javac.code.Symbol;
+import com.sun.tools.javac.code.Symtab;
 import com.sun.tools.javac.code.Type;
 import com.sun.tools.javac.code.TypeTag;
 import com.sun.tools.javac.code.Types;
@@ -63,11 +83,18 @@ import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.TreeInfo;
 import com.sun.tools.javac.util.Context;
 import com.sun.tools.javac.util.JCDiagnostic;
+import com.sun.tools.javac.util.Name;
 import java.io.*;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.CodeModel;
 import java.lang.classfile.Opcode;
+import java.lang.classfile.Instruction;
+import java.lang.classfile.TypeKind;
+import java.lang.classfile.instruction.ConstantInstruction;
 import java.lang.classfile.instruction.InvokeDynamicInstruction;
+import java.lang.classfile.instruction.LabelTarget;
+import java.lang.classfile.instruction.LoadInstruction;
+import java.lang.classfile.instruction.StoreInstruction;
 import java.lang.classfile.instruction.TypeCheckInstruction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -111,19 +138,43 @@ public class RepairDecompile {
         Map<Path, List<Error>> errors = errorsOf(all);
         report("before", errors);
         Set<Path> pending = new TreeSet<>(errors.keySet());
-        // Edits that did not lower their file's errors, which are not tried again.
-        Map<Path, Set<Edit>> failed = new HashMap<>();
+        // The options that did not lower their file's errors, which are not tried again, and the
+        // files whose options are tried one at a time, since several together did not.
+        Map<Path, Set<List<String>>> failed = new HashMap<>();
+        Set<Path> alone = new HashSet<>();
         for (int round = 1; round <= rounds && !pending.isEmpty(); round++) {
             Map<Path, String> before = new HashMap<>();
             Map<Path, Long> counted = new HashMap<>();
             Map<Path, List<Edit>> edits = new TreeMap<>();
+            Map<Path, List<List<String>>> tried = new HashMap<>();
             compile(List.copyOf(pending), (task, units) -> {
                 for (CompilationUnitTree unit : units) {
                     Path file = Path.of(unit.getSourceFile().toUri());
                     List<Error> found = errors.getOrDefault(file, List.of());
-                    List<Edit> fileEdits = new ArrayList<>(repairs(task, unit, found));
-                    fileEdits.removeAll(failed.getOrDefault(file, Set.of()));
-                    if (!fileEdits.isEmpty()) edits.put(file, fileEdits);
+                    Set<List<String>> notAgain = failed.getOrDefault(file, Set.of());
+                    // For each error, its first option not tried before.
+                    List<List<Edit>> chosen = new ArrayList<>();
+                    List<List<String>> keys = new ArrayList<>();
+                    for (List<List<Edit>> options : repairs(task, unit, found)) {
+                        for (List<Edit> option : options) {
+                            List<String> key = key(unit, option);
+                            if (notAgain.contains(key)) continue;
+                            if (!keys.contains(key)) {
+                                chosen.add(option);
+                                keys.add(key);
+                            }
+                            break;
+                        }
+                    }
+                    if (alone.contains(file) && chosen.size() > 1) {
+                        chosen = chosen.subList(0, 1);
+                        keys = keys.subList(0, 1);
+                    }
+                    List<Edit> fileEdits = chosen.stream().flatMap(List::stream).distinct().toList();
+                    if (!fileEdits.isEmpty()) {
+                        edits.put(file, fileEdits);
+                        tried.put(file, keys);
+                    }
                 }
             }, errors);
             for (var entry : edits.entrySet()) {
@@ -141,7 +192,9 @@ public class RepairDecompile {
                 long now = after.getOrDefault(file, List.of()).stream().filter(e -> !e.ignored()).count();
                 if (now >= counted.get(file)) {
                     Files.writeString(file, before.get(file));
-                    failed.computeIfAbsent(file, f -> new HashSet<>()).addAll(edits.get(file));
+                    // One option is not tried again; of several, each is tried alone next.
+                    if (tried.get(file).size() == 1) failed.computeIfAbsent(file, f -> new HashSet<>()).add(tried.get(file).get(0));
+                    else alone.add(file);
                     log.printf("round %d %s: reverted (%d errors before, %d after)%n", round, root.relativize(file),
                         counted.get(file), now);
                 } else {
@@ -153,6 +206,15 @@ public class RepairDecompile {
             pending.retainAll(errors.keySet());
         }
         report("after", errorsOf(all));
+    }
+
+    // What identifies an option across rounds, when other edits have moved its text: each edit's
+    // text before and after.
+    static List<String> key(CompilationUnitTree unit, List<Edit> option) {
+        List<String> key = new ArrayList<>();
+        for (Edit edit : option)
+            key.add(source((JCTree.JCCompilationUnit) unit, edit.start(), edit.end()) + "\u0000" + edit.text() + "\u0000" + edit.what());
+        return key;
     }
 
     static void report(String when, Map<Path, List<Error>> errors) {
@@ -230,33 +292,93 @@ public class RepairDecompile {
         return found[0];
     }
 
-    // The edits for one file's errors.
-    static List<Edit> repairs(JavacTask task, CompilationUnitTree unit, List<Error> errors) {
+    // The options for each of one file's errors: the edits of each, in the order they are tried.
+    static List<List<List<Edit>>> repairs(JavacTask task, CompilationUnitTree unit, List<Error> errors) {
         Context context = ((JavacTaskImpl) task).getContext();
         Types types = Types.instance(context);
         var elements = com.sun.tools.javac.model.JavacElements.instance(context);
         java.util.function.Function<String, Symbol.ClassSymbol> named =
             binary -> (Symbol.ClassSymbol) elements.getTypeElement(binary.replace('$', '.'));
         JCTree.JCCompilationUnit cu = (JCTree.JCCompilationUnit) unit;
-        List<Edit> edits = new ArrayList<>();
+        Symtab syms = Symtab.instance(context);
+        List<List<List<Edit>>> all = new ArrayList<>();
         Set<Integer> renamed = new HashSet<>();
         for (Error error : errors) {
             if (error.ignored()) continue;
             JCDiagnostic diag = error.diag();
+            // The first option's edits, and the options after it.
+            List<Edit> edits = new ArrayList<>();
+            List<List<Edit>> more = new ArrayList<>();
+            try {
+                options(types, cu, unit, diag, named, renamed, edits, more);
+            } catch (Unprintable e) {
+                // a type that source cannot name (a captured or intersection type, a local class)
+            }
+            try {
+                laterOptions(types, syms, cu, unit, diag, named, more);
+            } catch (Unprintable e) {
+                // a type that source cannot name (a captured or intersection type, a local class)
+            }
+            List<List<Edit>> options = new ArrayList<>();
+            if (!edits.isEmpty()) options.add(edits.stream().distinct().toList());
+            for (List<Edit> option : more) if (!option.isEmpty() && !options.contains(option)) options.add(option);
+            if (!options.isEmpty()) all.add(options);
+        }
+        return all;
+    }
+
+    // The options tried after the first for an error of inference or of a call no method fits:
+    // the type arguments worked out around the error (rewriting those the decompiler wrote that
+    // disagree), first of the calls whose type variables javac names, then of every call; the
+    // decompiler's casts to a raw type made casts to a type variable; an argument holding a
+    // captured wildcard cast to its raw class; a lambda or method reference cast to the interface
+    // the class file makes it for; the receiver whose wildcard javac captured cast to its raw
+    // class; and the cast through a wildcard type to the declared type of the whole.
+    static void laterOptions(Types types, Symtab syms, JCTree.JCCompilationUnit cu, CompilationUnitTree unit,
+            JCDiagnostic diag, java.util.function.Function<String, Symbol.ClassSymbol> named, List<List<Edit>> more)
+            throws Unprintable {
+        String code = diag.getCode();
+        if (!code.equals("compiler.err.prob.found.req") && !code.startsWith("compiler.err.cant.apply.symbol")) return;
+        JCTree tree = diag.getDiagnosticPosition() == null ? null : diag.getDiagnosticPosition().getTree();
+        if (tree == null) return;
+        TreePath path = pathTo(unit, tree);
+        if (path == null) return;
+        more.add(Witnesses.around(types, syms, cu, path, uninferred(diag)));
+        more.add(Witnesses.around(types, syms, cu, path, null));
+        more.addAll(typeVariableCasts(types, cu, path));
+        more.add(rawCapturedArguments(cu, path));
+        more.add(functionalArguments(types, cu, path, named));
+        JCDiagnostic detail = inconvertible(diag);
+        if (detail != null && detail.getArgs()[1] instanceof Type.CapturedType) {
+            Edit edit = rawReceiver(cu, path);
+            if (edit != null) more.add(List.of(edit));
+        }
+        Edit edit = declaredCast(types, cu, path);
+        if (edit != null) more.add(List.of(edit));
+    }
+
+    static void options(Types types, JCTree.JCCompilationUnit cu, CompilationUnitTree unit, JCDiagnostic diag,
+            java.util.function.Function<String, Symbol.ClassSymbol> named, Set<Integer> renamed, List<Edit> edits,
+            List<List<Edit>> more) throws Unprintable {
             if (diag.getCode().equals("compiler.err.illegal.start.of.type")) {
                 Edit edit = rawCastOfMissingArgument(cu, (int) diag.getPosition());
                 if (edit != null) edits.add(edit);
-                continue;
+                return;
             }
             if (diag.getCode().equals("compiler.err.cyclic.inheritance")) {
                 edits.addAll(qualifiedBounds(cu));
-                continue;
+                return;
             }
             JCTree tree = diag.getDiagnosticPosition() == null ? null : diag.getDiagnosticPosition().getTree();
-            if (tree == null) continue;
+            if (tree == null) return;
             TreePath path = TreePath.getPath(unit, tree);
-            if (path == null) continue;
-            try {
+            if (path == null) return;
+            Edit typeSwitch = typeSwitch(cu, path);
+            if (typeSwitch != null) {
+                edits.add(typeSwitch);
+                return;
+            }
+            {
                 switch (diag.getCode()) {
                     case "compiler.err.prob.found.req" -> {
                         JCDiagnostic detail = inconvertible(diag);
@@ -274,8 +396,19 @@ public class RepairDecompile {
                             Edit edit = path.getParentPath().getLeaf() instanceof JCTree.JCMethodInvocation call
                                 && call.args.contains(tree) ? objectTypeArguments(cu, call) : null;
                             if (edit == null) edit = witness(cu, path);
-                            if (edit == null) edit = cast(types, cu, tree, path.getParentPath().getLeaf(), found, expected);
+                            // The cast is of the expression the error is at only where the found
+                            // type is that expression's (or its elements', looped over), not an
+                            // argument's inside it.
+                            boolean own = path.getParentPath().getLeaf() instanceof JCTree.JCEnhancedForLoop loop && loop.expr == tree
+                                || (tree.type != null && !tree.type.isErroneous()
+                                    ? types.isSameType(types.erasure(tree.type), types.erasure(found)) : !inference(diag));
+                            if (edit == null && own) edit = cast(types, cu, tree, path.getParentPath().getLeaf(), found, expected);
                             if (edit != null) edits.add(edit);
+                            // Where the expected type holds a captured wildcard, which a cast
+                            // through the wildcard type does not reach: the cast to the raw class.
+                            if (own && tree instanceof JCTree.JCExpression && expected.hasTag(TypeTag.CLASS)
+                                    && expected.isParameterized() && capturing(expected))
+                                more.add(List.of(wrap(cu, tree, printClass(cu, (Symbol.ClassSymbol) expected.tsym), "cast to raw ")));
                         } else if (inference(diag)) {
                             edits.addAll(inferenceHints(types, cu, tree));
                         }
@@ -304,19 +437,970 @@ public class RepairDecompile {
                         if (edit != null) edits.add(edit);
                     }
                     case "compiler.err.cant.resolve.location" -> {
-                        if (diag.getArgs()[0] == Kinds.KindName.VAR && renamed.add(tree.getStartPosition()))
-                            edits.addAll(renameCatchVariable(cu, path, diag.getArgs()[1].toString(), renamed));
+                        if (diag.getArgs()[0] == Kinds.KindName.VAR && renamed.add(tree.getStartPosition())) {
+                            String name = diag.getArgs()[1].toString();
+                            List<Edit> renames = renameCatchVariable(cu, path, name, renamed);
+                            if (renames.isEmpty()) {
+                                Edit declared = declareAssigned(types, cu, path, name, renamed);
+                                if (declared != null) edits.add(declared);
+                            }
+                            edits.addAll(renames);
+                        }
+                    }
+                    case "compiler.err.already.defined" -> {
+                        if (tree instanceof JCTree.JCVariableDecl variable) edits.addAll(renameRedeclared(cu, path, variable));
                     }
                     default -> {}
                 }
-            } catch (Unprintable e) {
-                // a type that source cannot name (a captured or intersection type, a local class)
             }
-        }
-        return edits.stream().distinct().toList();
     }
 
     static class Unprintable extends Exception {}
+
+    // Type arguments that javac could not infer in decompiled code, worked out from what the
+    // original source must have given javac: the type an expression is for (the variable it
+    // initializes, the result it returns, the parameter it is passed to), the declared types of
+    // the arguments, and what a lambda or a method reference returns, through chains of calls
+    // (`a.b(..).c(..)`, where the type `c` is for tells the type `a.b(..)` must have). The
+    // decompiler writes no type arguments where javac inferred them and the original source had
+    // none, but a call whose arguments the decompiler changed (a raw `new C(..)`, a lambda whose
+    // parameter type is gone) can no longer be inferred. Writing the type arguments out is
+    // inference only: the call, its descriptor and its result's erasure stay.
+    static final class Witnesses {
+        final Types types;
+        final Symtab syms;
+        final JCTree.JCCompilationUnit cu;
+        // The methods whose type arguments are written: those whose type variables javac said it
+        // could not infer, or every method when null. Type arguments the decompiler wrote that
+        // disagree with the worked-out ones are rewritten either way.
+        final Set<Symbol> named;
+        final Set<Symbol> scope = new HashSet<>();
+        final Map<Symbol, Type> locals = new HashMap<>();
+        final Map<Integer, Edit> edits = new TreeMap<>();
+        int depth;
+
+        Witnesses(Types types, Symtab syms, JCTree.JCCompilationUnit cu, Set<Symbol> named) {
+            this.types = types;
+            this.syms = syms;
+            this.cu = cu;
+            this.named = named;
+        }
+
+        // The edits for the expression around the error at `path`: from the outermost expression
+        // that the error's is part of, through calls, lambdas and conditionals.
+        static List<Edit> around(Types types, Symtab syms, JCTree.JCCompilationUnit cu, TreePath path, Set<Symbol> named) {
+            TreePath top = path;
+            Type target = null;
+            while (top.getParentPath() != null) {
+                Tree leaf = top.getLeaf(), parent = top.getParentPath().getLeaf();
+                if (parent instanceof JCTree.JCMethodInvocation || parent instanceof JCTree.JCFieldAccess
+                        || parent instanceof JCTree.JCParens || parent instanceof JCTree.JCConditional
+                        || parent instanceof JCTree.JCLambda || parent instanceof JCTree.JCTypeCast
+                        || parent instanceof JCTree.JCNewClass && ((JCTree.JCNewClass) parent).def == null
+                        || parent instanceof JCTree.JCMemberReference) {
+                    top = top.getParentPath();
+                    continue;
+                }
+                if (parent instanceof JCTree.JCReturn) {
+                    TreePath up = top.getParentPath();
+                    while (up != null && !(up.getLeaf() instanceof JCTree.JCLambda || up.getLeaf() instanceof JCTree.JCMethodDecl
+                            || up.getLeaf() instanceof JCTree.JCClassDecl))
+                        up = up.getParentPath();
+                    if (up != null && up.getLeaf() instanceof JCTree.JCLambda) {
+                        top = up;
+                        continue;
+                    }
+                }
+                if (leaf instanceof JCTree.JCExpression expr) target = declaredFor(top);
+                if (parent instanceof JCTree.JCAssign assign && assign.rhs == leaf && assign.lhs.type != null)
+                    target = assign.lhs.type;
+                break;
+            }
+            if (!(top.getLeaf() instanceof JCTree.JCExpression expr)) return List.of();
+            Witnesses w = new Witnesses(types, syms, cu, named);
+            w.scopeOf(top);
+            try {
+                w.down(expr, target);
+            } catch (RuntimeException e) {
+                // javac's attribution of erroneous code holds what the solving does not expect
+                return List.of();
+            }
+            return List.copyOf(w.edits.values());
+        }
+
+        // The type variables that code at `path` can name: those of the methods around it, and
+        // of the classes around it up to a static member.
+        void scopeOf(TreePath path) {
+            boolean statics = false;
+            for (TreePath up = path; up != null; up = up.getParentPath()) {
+                if (up.getLeaf() instanceof JCTree.JCMethodDecl method && method.sym != null) {
+                    for (Symbol.TypeVariableSymbol v : method.sym.getTypeParameters()) scope.add(v);
+                    if (method.sym.isStatic()) statics = true;
+                } else if (up.getLeaf() instanceof JCTree.JCVariableDecl field && field.sym != null
+                        && field.sym.owner instanceof Symbol.ClassSymbol && field.sym.isStatic()) {
+                    statics = true;
+                } else if (up.getLeaf() instanceof JCTree.JCClassDecl c && c.sym != null) {
+                    if (!statics) for (Symbol.TypeVariableSymbol v : c.sym.getTypeParameters()) scope.add(v);
+                    if (c.sym.isStatic() || c.sym.owner instanceof Symbol.PackageSymbol) statics = true;
+                }
+            }
+        }
+
+        // Whether `t` can be written here as a type argument: no captured type, no type variable
+        // out of scope, nothing raw or erroneous.
+        boolean writable(Type t) {
+            if (t == null || t.isErroneous()) return false;
+            switch (t.getTag()) {
+                case CLASS -> {
+                    if (t.isCompound() || t.isIntersection() || t.isUnion() || t.isRaw()) return false;
+                    if (t.getEnclosingType().hasTag(TypeTag.CLASS) && !writable(t.getEnclosingType())) return false;
+                    for (Type a : t.getTypeArguments()) {
+                        if (a.hasTag(TypeTag.WILDCARD)) {
+                            Type.WildcardType w = (Type.WildcardType) a;
+                            if (w.kind != com.sun.tools.javac.code.BoundKind.UNBOUND && !writable(w.type)) return false;
+                        } else if (!writable(a)) return false;
+                    }
+                    return true;
+                }
+                case TYPEVAR -> {
+                    return !(t instanceof Type.CapturedType) && scope.contains(t.tsym);
+                }
+                case ARRAY -> {
+                    return writable(((Type.ArrayType) t).elemtype);
+                }
+                default -> {
+                    return t.isPrimitive();
+                }
+            }
+        }
+
+        // How a type pattern stands to the actual type it is matched with.
+        enum Way { SAME, BELOW, ABOVE }
+
+        // What the matches tell of each unknown type variable: the types it must be, be a
+        // subtype of, or be a supertype of.
+        final class Constraints {
+            final Set<Type> unknown;
+            final Map<Type, List<Type>> exact = new HashMap<>(), upper = new HashMap<>(), lower = new HashMap<>();
+
+            Constraints(Set<Type> unknown) {
+                this.unknown = unknown;
+            }
+
+            void add(Type v, Type t, Way way) {
+                if (t.isPrimitive()) t = types.boxedClass(t).type;
+                if (!writable(t)) return;
+                (way == Way.SAME ? exact : way == Way.BELOW ? upper : lower).computeIfAbsent(v, x -> new ArrayList<>()).add(t);
+            }
+
+            // Each variable's type: the one it must be; else the most specific of the types it
+            // must be below (what a type argument written for it can be, the arguments then
+            // converting to it); else the most general of those it must be above. A variable
+            // whose types disagree stays unknown.
+            Map<Type, Type> resolve() {
+                Map<Type, Type> bound = new LinkedHashMap<>();
+                for (Type v : unknown) {
+                    Type t;
+                    if (exact.containsKey(v)) {
+                        t = one(exact.get(v), null);
+                        if (t == null) continue;
+                    } else if (upper.containsKey(v)) {
+                        t = one(upper.get(v), Way.BELOW);
+                    } else if (lower.containsKey(v)) {
+                        t = one(lower.get(v), Way.ABOVE);
+                    } else {
+                        continue;
+                    }
+                    if (t != null) bound.put(v, t);
+                }
+                return bound;
+            }
+
+            // The one type of `ts`, or with `way`, the one of them below (or above) all others.
+            Type one(List<Type> ts, Way way) {
+                for (Type t : ts) {
+                    boolean fits = true;
+                    for (Type other : ts) {
+                        if (types.isSameType(t, other)) continue;
+                        if (way == null || !(way == Way.BELOW ? types.isSubtype(t, other) : types.isSubtype(other, t))) {
+                            fits = false;
+                            break;
+                        }
+                    }
+                    if (fits) return t;
+                }
+                return null;
+            }
+
+            // Matches `pattern`, which holds unknown type variables, with `actual`.
+            void unify(Type pattern, Type actual, Way way) {
+                if (pattern == null || actual == null || actual.isErroneous() || actual.hasTag(TypeTag.BOT)) return;
+                if (pattern.hasTag(TypeTag.TYPEVAR) && unknown.contains(pattern)) {
+                    if (!actual.hasTag(TypeTag.WILDCARD)) add(pattern, actual, way);
+                    return;
+                }
+                if (pattern.hasTag(TypeTag.ARRAY) && actual.hasTag(TypeTag.ARRAY)) {
+                    unify(((Type.ArrayType) pattern).elemtype, ((Type.ArrayType) actual).elemtype, way);
+                    return;
+                }
+                if (!pattern.hasTag(TypeTag.CLASS) || !actual.hasTag(TypeTag.CLASS) || actual.isRaw()) return;
+                Type p = pattern, a = actual;
+                if (p.tsym != a.tsym) {
+                    if (way == Way.SAME) return;
+                    if (way == Way.BELOW) p = types.asSuper(p, a.tsym);
+                    else a = types.asSuper(a, p.tsym);
+                    if (p == null || a == null || p.tsym != a.tsym || a.isRaw()) return;
+                }
+                var ps = p.getTypeArguments();
+                var as = a.getTypeArguments();
+                if (ps.size() != as.size()) return;
+                for (int i = 0; i < ps.size(); i++) argument(ps.get(i), as.get(i));
+            }
+
+            // Matches a type argument of a pattern with the actual one in the same place.
+            void argument(Type p, Type a) {
+                var UNBOUND = com.sun.tools.javac.code.BoundKind.UNBOUND;
+                var EXTENDS = com.sun.tools.javac.code.BoundKind.EXTENDS;
+                if (p.hasTag(TypeTag.WILDCARD)) {
+                    Type.WildcardType w = (Type.WildcardType) p;
+                    if (w.kind == UNBOUND) return;
+                    Type.WildcardType aw = a.hasTag(TypeTag.WILDCARD) ? (Type.WildcardType) a : null;
+                    if (w.kind == EXTENDS) {
+                        // `? extends X` holds a type, a `? extends` of one, and `?` (any type is one of Object).
+                        if (aw == null) unify(w.type, a, Way.ABOVE);
+                        else if (aw.kind == EXTENDS) unify(w.type, aw.type, Way.ABOVE);
+                        else if (aw.kind == UNBOUND) unify(w.type, syms.objectType, Way.ABOVE);
+                    } else {
+                        if (aw == null) unify(w.type, a, Way.BELOW);
+                        else if (aw.kind != EXTENDS && aw.kind != UNBOUND) unify(w.type, aw.type, Way.BELOW);
+                    }
+                    return;
+                }
+                if (a.hasTag(TypeTag.WILDCARD)) {
+                    Type.WildcardType aw = (Type.WildcardType) a;
+                    if (aw.kind == UNBOUND) return;
+                    unify(p, aw.type, aw.kind == EXTENDS ? Way.BELOW : Way.ABOVE);
+                    return;
+                }
+                unify(p, a, Way.SAME);
+            }
+        }
+
+        static com.sun.tools.javac.util.List<Type> list(List<Type> types) {
+            return com.sun.tools.javac.util.List.from(types);
+        }
+
+        Type subst(Type t, Map<Type, Type> bound) {
+            if (t == null || bound.isEmpty()) return t;
+            List<Type> from = new ArrayList<>(bound.keySet()), to = new ArrayList<>(bound.values());
+            return types.subst(t, list(from), list(to));
+        }
+
+        // Whether `t` mentions one of `unknown`.
+        static boolean mentions(Type t, Collection<Type> unknown) {
+            return t != null && !unknown.isEmpty() && t.containsAny(list(new ArrayList<>(unknown)));
+        }
+
+        // The type of `expr` that needs no inference: a variable's or a field's declared type (a
+        // lambda parameter's as worked out), a literal's or a cast's, `this`, and a call of a method
+        // that is not generic on such a receiver. Null where it needs inference.
+        Type known(JCTree.JCExpression expr) {
+            if (expr == null) return null;
+            Type t = null;
+            switch (expr) {
+                case JCTree.JCParens parens -> t = known(parens.expr);
+                case JCTree.JCLiteral literal -> t = literal.type;
+                case JCTree.JCTypeCast cast -> t = cast.clazz.type;
+                case JCTree.JCIdent ident -> {
+                    Symbol s = ident.sym;
+                    if (s instanceof Symbol.VarSymbol var) t = locals.containsKey(var) ? locals.get(var) : var.type;
+                    else if (s != null && s.name == s.name.table.names._this) t = ident.type;
+                }
+                case JCTree.JCFieldAccess access -> {
+                    Symbol s = access.sym;
+                    if (s instanceof Symbol.VarSymbol var) {
+                        if (var.isStatic()) t = var.type;
+                        else {
+                            Type site = known(access.selected);
+                            if (site != null && site.hasTag(TypeTag.CLASS)) t = types.memberType(site, var);
+                        }
+                    }
+                }
+                case JCTree.JCMethodInvocation call -> {
+                    Symbol s = TreeInfo.symbol(call.meth);
+                    if (s instanceof Symbol.MethodSymbol m && m.getTypeParameters().isEmpty() && call.typeargs.isEmpty()) {
+                        Type site = siteOf(call, m);
+                        if (site != null || m.isStatic()) t = (site == null ? m.type : types.memberType(site, m)).getReturnType();
+                        if (t != null && site == null && mentions(t, m.owner.type.getTypeArguments())) t = null;
+                    }
+                }
+                case JCTree.JCNewClass created -> {
+                    // The type arguments of a generic class are the decompiler's, which may be wrong.
+                    if (created.def == null && created.clazz.type != null && created.clazz.type.tsym.type.getTypeArguments().isEmpty())
+                        t = created.clazz.type;
+                }
+                default -> {}
+            }
+            return t == null || t.isErroneous() || t.hasTag(TypeTag.METHOD) || t.hasTag(TypeTag.FORALL) ? null : t;
+        }
+
+        // The type of the receiver of `call` of instance method `m` that needs no inference: the
+        // enclosing class's for an unqualified call. Null for a static method or where unknown.
+        Type siteOf(JCTree.JCMethodInvocation call, Symbol.MethodSymbol m) {
+            if (m.isStatic()) return null;
+            if (call.meth instanceof JCTree.JCFieldAccess access) {
+                Type t = known(access.selected);
+                return t == null || !t.hasTag(TypeTag.CLASS) ? null : types.asSuper(t, m.owner);
+            }
+            JCTree.JCClassDecl c = enclosingClass(cu, call);
+            return c == null || c.sym == null ? null : types.asOuterSuper(c.sym.type, m.owner);
+        }
+
+        // Works the type arguments out for `expr` as an expression of type `target` (null, or
+        // holding type variables still unknown, where that is not known), adding the edits that
+        // write them. Returns the type `expr` then has, where that is known.
+        Type down(JCTree.JCExpression expr, Type target) {
+            if (expr == null || ++depth > 100000) return null;
+            switch (expr) {
+                case JCTree.JCParens parens -> {
+                    return down(parens.expr, target);
+                }
+                case JCTree.JCConditional conditional -> {
+                    Type a = down(conditional.truepart, target), b = down(conditional.falsepart, target);
+                    return a != null && b != null && types.isSameType(a, b) ? a : null;
+                }
+                case JCTree.JCTypeCast cast -> {
+                    // A cast through a wildcard type (`(Codec<X>) (Codec<?>) e`) passes the type on.
+                    Type to = cast.clazz.type;
+                    boolean through = to != null && to.hasTag(TypeTag.CLASS) && !to.getTypeArguments().isEmpty()
+                        && to.getTypeArguments().stream().allMatch(a -> a.hasTag(TypeTag.WILDCARD)
+                            && ((Type.WildcardType) a).kind == com.sun.tools.javac.code.BoundKind.UNBOUND);
+                    down(cast.expr, through ? target : to);
+                    return known(cast);
+                }
+                case JCTree.JCMethodInvocation call -> {
+                    return call(call, target);
+                }
+                case JCTree.JCNewClass created -> {
+                    return created(created, target);
+                }
+                case JCTree.JCLambda lambda -> {
+                    lambda(lambda, target);
+                    return null;
+                }
+                default -> {
+                    return known(expr);
+                }
+            }
+        }
+
+        // The function type of `target` with its parameter and result types, or null.
+        Type descriptor(Type target) {
+            if (target == null || !target.hasTag(TypeTag.CLASS) || !target.tsym.isInterface()) return null;
+            try {
+                return types.findDescriptorType(target);
+            } catch (RuntimeException e) {
+                return null;
+            }
+        }
+
+        // The lambda's parameters given the types of `target`'s function type, where those are
+        // known, and its result worked out for that type's result.
+        void lambda(JCTree.JCLambda lambda, Type target) {
+            Type descriptor = descriptor(target);
+            if (descriptor == null) return;
+            var params = descriptor.getParameterTypes();
+            if (params.size() == lambda.params.size())
+                for (int i = 0; i < params.size(); i++)
+                    if (lambda.params.get(i).vartype == null || lambda.paramKind == JCTree.JCLambda.ParameterKind.IMPLICIT)
+                        if (writable(params.get(i))) locals.put(lambda.params.get(i).sym, params.get(i));
+            Type result = descriptor.getReturnType();
+            if (result.hasTag(TypeTag.VOID)) result = null;
+            for (JCTree.JCExpression returned : results(lambda)) down(returned, result);
+        }
+
+        // The expressions a lambda returns.
+        static List<JCTree.JCExpression> results(JCTree.JCLambda lambda) {
+            if (lambda.body instanceof JCTree.JCExpression body) return List.of(body);
+            List<JCTree.JCExpression> found = new ArrayList<>();
+            new TreeScanner<Void, Void>() {
+                public Void visitReturn(ReturnTree node, Void v) {
+                    if (node.getExpression() != null) found.add((JCTree.JCExpression) node.getExpression());
+                    return null;
+                }
+                public Void visitLambdaExpression(LambdaExpressionTree node, Void v) { return null; }
+                public Void visitClass(ClassTree node, Void v) { return null; }
+            }.scan(lambda.body, null);
+            return found;
+        }
+
+        // What a lambda or a method reference returns given the parameter types of
+        // `descriptor`, where that needs no inference.
+        Type resultOf(JCTree.JCExpression function, Type descriptor) {
+            var params = descriptor.getParameterTypes();
+            if (function instanceof JCTree.JCLambda lambda) {
+                if (!(lambda.body instanceof JCTree.JCExpression body) || params.size() != lambda.params.size()) return null;
+                for (int i = 0; i < params.size(); i++) {
+                    if (!writable(params.get(i))) return null;
+                    if (lambda.paramKind == JCTree.JCLambda.ParameterKind.IMPLICIT) locals.put(lambda.params.get(i).sym, params.get(i));
+                }
+                Type t = known(body);
+                if (t == null && body instanceof JCTree.JCMethodInvocation) {
+                    // A generic call whose type arguments its arguments give.
+                    Map<Integer, Edit> kept = new TreeMap<>(edits);
+                    t = down(body, null);
+                    edits.clear();
+                    edits.putAll(kept);
+                }
+                return t;
+            }
+            if (!(function instanceof JCTree.JCMemberReference ref)) return null;
+            Symbol.MethodSymbol m = ref.sym instanceof Symbol.MethodSymbol s ? s : referenced(ref, params.size());
+            if (m == null) return null;
+            if (m.isConstructor()) {
+                Type made = ref.expr.type;
+                return made != null && made.hasTag(TypeTag.CLASS) && (made.tsym.type.getTypeArguments().isEmpty()
+                    || ref.expr instanceof JCTree.JCTypeApply) ? made : null;
+            }
+            Type site = null;
+            // `C::m` takes its receiver as the first parameter; `e::m` has `e`'s.
+            boolean unbound = !m.isStatic() && (ref.expr instanceof JCTree.JCIdent id && id.sym instanceof Symbol.ClassSymbol
+                || ref.expr instanceof JCTree.JCFieldAccess fa && fa.sym instanceof Symbol.ClassSymbol
+                || ref.expr instanceof JCTree.JCTypeApply);
+            if (!m.isStatic()) {
+                site = unbound ? (params.isEmpty() ? null : params.get(0)) : known(ref.expr);
+                if (site == null || !site.hasTag(TypeTag.CLASS)) return null;
+                site = types.asSuper(site, m.owner);
+                if (site == null) return null;
+            }
+            Type type = site == null ? m.type : types.memberType(site, m);
+            Type result = type.getReturnType();
+            if (site == null && !m.isStatic()) return null;
+            if (result == null || result.hasTag(TypeTag.VOID)) return null;
+            List<Type> variables = type.getTypeArguments();
+            if (variables.isEmpty()) return result;
+            // A generic method's type variables, from the function type's parameters it takes;
+            // those still unknown become wildcards in the result, a type it is a subtype of.
+            Constraints k = new Constraints(new LinkedHashSet<>(variables));
+            var own = type.getParameterTypes();
+            int skip = unbound ? 1 : 0;
+            if (own.size() + skip == params.size())
+                for (int i = 0; i < own.size(); i++) k.unify(own.get(i), params.get(i + skip), Way.ABOVE);
+            return wildcarded(subst(result, k.resolve()), variables);
+        }
+
+        // The method `ref` refers to where javac resolved none: the one of its name in the
+        // qualifier's class that takes `count` parameters (with the receiver, for `C::m` of an
+        // instance method).
+        Symbol.MethodSymbol referenced(JCTree.JCMemberReference ref, int count) {
+            if (ref.expr.type == null || !(ref.expr.type.tsym instanceof Symbol.ClassSymbol c)) return null;
+            boolean type = ref.expr instanceof JCTree.JCIdent id && id.sym instanceof Symbol.ClassSymbol
+                || ref.expr instanceof JCTree.JCFieldAccess fa && fa.sym instanceof Symbol.ClassSymbol
+                || ref.expr instanceof JCTree.JCTypeApply;
+            Symbol.MethodSymbol found = null;
+            Iterable<Symbol> members = ref.name == ref.name.table.names.init ? c.members().getSymbolsByName(ref.name)
+                : types.membersClosure(c.type, false).getSymbolsByName(ref.name);
+            for (Symbol member : members) {
+                if (!(member instanceof Symbol.MethodSymbol m) || m.isVarArgs()) continue;
+                int n = m.params().size() + (type && !m.isStatic() && !m.isConstructor() ? 1 : 0);
+                if (n != count) continue;
+                if (found != null && !found.overrides(m, c, types, false) && !m.overrides(found, c, types, false)) return null;
+                if (found == null || m.overrides(found, c, types, false)) found = m;
+            }
+            return found;
+        }
+
+        // `t` with each of `variables` in it as a type argument made `?`; null where one is `t`
+        // itself or is anywhere else.
+        Type wildcarded(Type t, List<Type> variables) {
+            if (!mentions(t, variables)) return t;
+            if (!t.hasTag(TypeTag.CLASS) || t.isCompound()) return null;
+            List<Type> args = new ArrayList<>();
+            for (Type a : t.getTypeArguments()) {
+                if (variables.contains(a)) {
+                    args.add(new Type.WildcardType(syms.objectType, com.sun.tools.javac.code.BoundKind.UNBOUND, syms.boundClass));
+                } else if (a.hasTag(TypeTag.WILDCARD)) {
+                    if (mentions(a, variables)) return null;
+                    args.add(a);
+                } else {
+                    Type inner = wildcarded(a, variables);
+                    if (inner == null) return null;
+                    args.add(inner);
+                }
+            }
+            if (mentions(t.getEnclosingType(), variables)) return null;
+            return new Type.ClassType(t.getEnclosingType(), list(args), t.tsym);
+        }
+
+        // The parameter types of a call of `m` with `count` arguments, the variable arity
+        // parameter spread over the arguments it takes.
+        static List<Type> parameters(Symbol.MethodSymbol m, Type type, int count) {
+            List<Type> params = new ArrayList<>(type.getParameterTypes());
+            if (m.isVarArgs() && !params.isEmpty() && params.size() != count) {
+                Type last = params.remove(params.size() - 1);
+                Type element = last.hasTag(TypeTag.ARRAY) ? ((Type.ArrayType) last).elemtype : last;
+                while (params.size() < count) params.add(element);
+            }
+            return params.size() == count ? params : null;
+        }
+
+        // The class of the value `expr` has, as far as its declarations tell.
+        Symbol.ClassSymbol classOf(JCTree.JCExpression expr) {
+            if (TreeInfo.symbol(expr) instanceof Symbol.ClassSymbol named) return named;
+            Type t = known(expr);
+            if (t == null && expr instanceof JCTree.JCMethodInvocation call && resolve(call) instanceof Symbol.MethodSymbol m)
+                t = m.getReturnType();
+            if (t == null && expr instanceof JCTree.JCNewClass created && created.clazz.type != null) t = created.clazz.type;
+            if (t == null && expr instanceof JCTree.JCParens parens) return classOf(parens.expr);
+            return t != null && t.tsym instanceof Symbol.ClassSymbol c ? c : null;
+        }
+
+        // How many parameters a lambda or method reference can take, or null for any: a method
+        // reference `C::m` takes m's parameters, and the receiver first for an instance method.
+        Set<Integer> arity(JCTree.JCExpression function) {
+            if (function instanceof JCTree.JCLambda lambda) return Set.of(lambda.params.size());
+            if (!(function instanceof JCTree.JCMemberReference ref) || ref.expr.type == null
+                    || !(ref.expr.type.tsym instanceof Symbol.ClassSymbol c)) return null;
+            boolean type = ref.expr instanceof JCTree.JCIdent id && id.sym instanceof Symbol.ClassSymbol
+                || ref.expr instanceof JCTree.JCFieldAccess fa && fa.sym instanceof Symbol.ClassSymbol
+                || ref.expr instanceof JCTree.JCTypeApply;
+            Set<Integer> counts = new HashSet<>();
+            for (Symbol member : types.membersClosure(c.type, false).getSymbolsByName(ref.name)) {
+                if (!(member instanceof Symbol.MethodSymbol m)) continue;
+                if (m.isVarArgs()) return null;
+                int n = m.params().size();
+                counts.add(type && !m.isStatic() && !m.isConstructor() ? n + 1 : n);
+            }
+            return counts.isEmpty() ? null : counts;
+        }
+
+        // The method `call` calls: javac's, or where javac resolved none (its receiver's type
+        // being erroneous), the one method of the receiver's class of that name that the
+        // arguments fit by number, lambdas by their parameters.
+        Symbol resolve(JCTree.JCMethodInvocation call) {
+            Symbol s = TreeInfo.symbol(call.meth);
+            if (s instanceof Symbol.MethodSymbol || !(call.meth instanceof JCTree.JCFieldAccess access)) return s;
+            Symbol.ClassSymbol c = classOf(access.selected);
+            if (c == null) return s;
+            Symbol.MethodSymbol found = null;
+            for (Symbol member : types.membersClosure(c.type, false).getSymbolsByName(access.name)) {
+                if (!(member instanceof Symbol.MethodSymbol m) || m.isConstructor()) continue;
+                List<Type> params = parameters(m, m.type, call.args.size());
+                if (params == null) continue;
+                boolean fits = true;
+                for (int i = 0; i < params.size() && fits; i++) {
+                    Set<Integer> n = arity(call.args.get(i));
+                    if (n == null) continue;
+                    Type descriptor = descriptor(params.get(i));
+                    fits = descriptor != null && n.contains(descriptor.getParameterTypes().size());
+                }
+                if (!fits) continue;
+                if (found != null && found != m && !found.overrides(m, c, types, false) && !m.overrides(found, c, types, false)) return s;
+                if (found == null || m.overrides(found, c, types, false)) found = m;
+            }
+            return found != null ? found : s;
+        }
+
+        Type call(JCTree.JCMethodInvocation call, Type target) {
+            Symbol s = resolve(call);
+            JCTree.JCExpression receiver = call.meth instanceof JCTree.JCFieldAccess access ? access.selected : null;
+            if (!(s instanceof Symbol.MethodSymbol m)) {
+                if (receiver != null) down(receiver, null);
+                for (JCTree.JCExpression arg : call.args) down(arg, null);
+                return null;
+            }
+            // The receiver's type, worked out from below where it needs inference.
+            Type site = null;
+            boolean trusted = m.isStatic() || receiver == null || known(receiver) != null;
+            if (!m.isStatic()) {
+                site = siteOf(call, m);
+                if (site == null && receiver != null) {
+                    Map<Integer, Edit> kept = new TreeMap<>(edits);
+                    Type below = down(receiver, null);
+                    edits.clear();
+                    edits.putAll(kept);
+                    if (below != null && below.hasTag(TypeTag.CLASS) && writable(below)) site = types.asSuper(below, m.owner);
+                    // Where the result on that receiver is not what the call is for, the original
+                    // had type arguments in the receiver that the target then gives.
+                    if (site != null && target != null && writable(target) && m.getTypeParameters().isEmpty()
+                            && !types.isAssignable(types.memberType(site, m).getReturnType(), target))
+                        site = null;
+                }
+            }
+            Set<Type> unknown = new LinkedHashSet<>();
+            Type type;
+            if (site != null) type = types.memberType(site, m);
+            else {
+                type = m.type;
+                if (!m.isStatic()) unknown.addAll(m.owner.type.getTypeArguments());
+            }
+            List<Type> variables = type.getTypeArguments();
+            unknown.addAll(variables);
+            Constraints k = new Constraints(unknown);
+            if (target != null) k.unify(type.getReturnType(), target, Way.BELOW);
+            Map<Type, Type> bound = k.resolve();
+            List<Type> params = parameters(m, type, call.args.size());
+            if (params == null) return null;
+            for (int round = 0; round < 3; round++) {
+                bound = k.resolve();
+                for (int i = 0; i < call.args.size(); i++) {
+                    JCTree.JCExpression arg = call.args.get(i);
+                    Type param = params.get(i);
+                    bound = k.resolve();
+                    if (arg instanceof JCTree.JCLambda || arg instanceof JCTree.JCMemberReference) {
+                        Type descriptor = descriptor(subst(param, bound));
+                        Type pattern = descriptor(param);
+                        if (descriptor == null || pattern == null || descriptor.getParameterTypes().stream().anyMatch(p -> mentions(p, unknown)))
+                            continue;
+                        Type result = resultOf(arg, descriptor);
+                        if (result != null) k.unify(pattern.getReturnType(), result, Way.ABOVE);
+                    } else {
+                        Type t = known(arg);
+                        if (t == null && round < 2) {
+                            Map<Integer, Edit> kept = new TreeMap<>(edits);
+                            t = down(arg, subst(param, bound));
+                            edits.clear();
+                            edits.putAll(kept);
+                        }
+                        if (t != null) k.unify(param, t, Way.ABOVE);
+                    }
+                }
+                // A bound of a variable that is known gives the variables in it (`M extends Map<K, V>`).
+                for (Type v : variables) {
+                    Type value = bound.get(v);
+                    if (value == null) continue;
+                    for (Type b : types.getBounds((Type.TypeVar) v))
+                        if (mentions(b, unknown)) k.unify(b, value, Way.ABOVE);
+                }
+            }
+            bound = k.resolve();
+            // The type arguments the decompiler wrote count where nothing else gives them.
+            boolean written = !call.typeargs.isEmpty() && call.typeargs.size() == variables.size();
+            boolean differ = false;
+            if (written) {
+                for (int i = 0; i < variables.size(); i++) {
+                    Type given = call.typeargs.get(i).type;
+                    Type worked = bound.get(variables.get(i));
+                    if (worked == null) {
+                        if (given != null && !given.isErroneous()) bound.put(variables.get(i), given);
+                    } else if (given == null || !types.isSameType(given, worked)) {
+                        differ = true;
+                    }
+                }
+            }
+            boolean all = !variables.isEmpty() && variables.stream().allMatch(bound::containsKey);
+            if (all && (written ? differ : named == null || named.contains(m))) {
+                witness(call, m, variables, bound, written);
+                // An argument whose declared type the parameter's then does not take, cast to
+                // it, as the class file's unchecked conversion had it (`(U) this.value`).
+                for (int i = 0; i < call.args.size(); i++) {
+                    JCTree.JCExpression arg = call.args.get(i);
+                    Type t = known(arg), param = subst(params.get(i), bound);
+                    if (t == null || t.hasTag(TypeTag.BOT) || !writable(param) || types.isAssignable(t, param)) continue;
+                    try {
+                        Edit edit = cast(types, cu, arg, call, t, param);
+                        if (edit != null) edits.put(edit.start(), edit);
+                    } catch (Unprintable e) {
+                        // left as it is
+                    }
+                }
+            }
+            // The receiver, for the type its class variables were found to have.
+            if (receiver != null && !trusted) {
+                List<Type> classVariables = m.owner.type.getTypeArguments();
+                Type wanted = site == null && !classVariables.isEmpty() ? subst(m.owner.type, bound) : null;
+                down(receiver, wanted);
+            }
+            for (int i = 0; i < call.args.size(); i++) down(call.args.get(i), subst(params.get(i), bound));
+            Type result = subst(type.getReturnType(), bound);
+            return result == null || mentions(result, unknown) || result.isErroneous() ? null : result;
+        }
+
+        // `Q.<T>m(..)` for `Q.m(..)` (or for the type arguments written), `Owner.<T>m(..)` or
+        // `this.<T>m(..)` for `m(..)`.
+        void witness(JCTree.JCMethodInvocation call, Symbol.MethodSymbol m, List<Type> variables, Map<Type, Type> bound,
+                boolean written) {
+            List<String> printed = new ArrayList<>();
+            try {
+                for (Type v : variables) printed.add(print(cu, bound.get(v), false));
+            } catch (Unprintable e) {
+                return;
+            }
+            String arguments = "<" + String.join(", ", printed) + ">";
+            int start, end;
+            String text = arguments;
+            if (call.meth instanceof JCTree.JCFieldAccess access) {
+                int after = TreeInfo.getEndPos(access.selected, cu.endPositions);
+                String between = source(cu, after, TreeInfo.getEndPos(access, cu.endPositions));
+                int dot = between.indexOf('.');
+                if (dot < 0) return;
+                start = after + dot + 1;
+                end = start;
+                if (written) {
+                    int open = between.indexOf('<', dot), close = between.lastIndexOf('>');
+                    if (open < 0 || close < open) return;
+                    start = after + open;
+                    end = after + close + 1;
+                }
+            } else if (call.meth instanceof JCTree.JCIdent ident && !written) {
+                start = end = TreeInfo.getStartPos(ident);
+                JCTree.JCClassDecl c = enclosingClass(cu, call);
+                try {
+                    if (m.isStatic()) text = printClass(cu, (Symbol.ClassSymbol) m.owner) + "." + arguments;
+                    else if (c != null && c.sym != null && c.sym.isSubClass(m.owner, types)) text = "this." + arguments;
+                    else return;
+                } catch (Unprintable e) {
+                    return;
+                }
+            } else {
+                return;
+            }
+            edits.put(start, new Edit(start, end, text, "type arguments " + arguments + " for " + m.name));
+        }
+
+        // `new C<T>(..)` for a raw `new C(..)` or for type arguments that disagree with `target`.
+        Type created(JCTree.JCNewClass created, Type target) {
+            Symbol.ClassSymbol c = created.clazz.type == null ? null : (Symbol.ClassSymbol) created.clazz.type.tsym;
+            if (c == null) {
+                for (JCTree.JCExpression arg : created.args) down(arg, null);
+                return null;
+            }
+            // javac's constructor, or where it resolved none, the one that takes as many arguments.
+            Symbol.MethodSymbol constructor = created.constructor instanceof Symbol.MethodSymbol m ? m : null;
+            if (constructor == null) {
+                for (Symbol member : c.members().getSymbolsByName(c.name.table.names.init)) {
+                    if (member instanceof Symbol.MethodSymbol m && parameters(m, m.type, created.args.size()) != null) {
+                        if (constructor != null) {
+                            constructor = null;
+                            break;
+                        }
+                        constructor = m;
+                    }
+                }
+            }
+            List<Type> variables = c.type.getTypeArguments();
+            Constraints k = new Constraints(new LinkedHashSet<>(variables));
+            if (target != null && !variables.isEmpty()) k.unify(c.type, target, Way.BELOW);
+            Map<Type, Type> bound = k.resolve();
+            JCTree.JCExpression clazz = created.clazz instanceof JCTree.JCAnnotatedType annotated ? annotated.underlyingType : created.clazz;
+            boolean all = !variables.isEmpty() && variables.stream().allMatch(bound::containsKey);
+            if (all && created.def == null && created.encl == null) {
+                Type wanted = subst(c.type, bound);
+                if (clazz instanceof JCTree.JCTypeApply apply) {
+                    Type written = apply.type != null ? apply.type : created.clazz.type;
+                    if (!apply.arguments.isEmpty() && written != null && !types.isSameType(written, wanted)) {
+                        try {
+                            List<String> printed = new ArrayList<>();
+                            for (Type v : variables) printed.add(print(cu, bound.get(v), false));
+                            int start = TreeInfo.getEndPos(apply.clazz, cu.endPositions), end = TreeInfo.getEndPos(apply, cu.endPositions);
+                            String arguments = "<" + String.join(", ", printed) + ">";
+                            edits.put(start, new Edit(start, end, arguments, "type arguments " + arguments + " for new " + c.name));
+                        } catch (Unprintable e) {
+                            // left as written
+                        }
+                    }
+                } else {
+                    try {
+                        List<String> printed = new ArrayList<>();
+                        for (Type v : variables) printed.add(print(cu, bound.get(v), false));
+                        int end = TreeInfo.getEndPos(clazz, cu.endPositions);
+                        String arguments = "<" + String.join(", ", printed) + ">";
+                        edits.put(end, new Edit(end, end, arguments, "type arguments " + arguments + " for new " + c.name));
+                    } catch (Unprintable e) {
+                        // left raw
+                    }
+                }
+            } else if (clazz instanceof JCTree.JCTypeApply apply && !apply.arguments.isEmpty() && apply.type != null) {
+                for (int i = 0; i < variables.size() && i < apply.type.getTypeArguments().size(); i++)
+                    bound.putIfAbsent(variables.get(i), apply.type.getTypeArguments().get(i));
+            }
+            List<Type> params = constructor == null ? null : parameters(constructor, constructor.type, created.args.size());
+            for (int i = 0; i < created.args.size(); i++)
+                down(created.args.get(i), params == null ? null : subst(params.get(i), bound));
+            return all ? subst(c.type, bound) : known(created);
+        }
+    }
+
+    // The path to `tree` in the unit, or where javac reported the error at a copy of the unit's
+    // tree that it attributed on the side (an argument of an inference that failed), to the tree
+    // of the unit of the same kind at the same place.
+    static TreePath pathTo(CompilationUnitTree unit, JCTree tree) {
+        TreePath path = TreePath.getPath(unit, tree);
+        if (path != null) return path;
+        JCTree.JCCompilationUnit cu = (JCTree.JCCompilationUnit) unit;
+        int start = TreeInfo.getStartPos(tree);
+        String text = tree.toString();
+        TreePath[] found = {null};
+        new TreePathScanner<Void, Void>() {
+            public Void scan(Tree t, Void v) {
+                if (found[0] != null) return null;
+                if (t instanceof JCTree j) {
+                    if (TreeInfo.getStartPos(j) > start || TreeInfo.getEndPos(j, cu.endPositions) < start) return null;
+                    if (j.getKind() == tree.getKind() && TreeInfo.getStartPos(j) == start && j.toString().equals(text)) {
+                        found[0] = new TreePath(getCurrentPath(), t);
+                        return null;
+                    }
+                }
+                return super.scan(t, v);
+            }
+        }.scan(unit, null);
+        return found[0];
+    }
+
+    // The outermost expression around `path` below its statement.
+    static TreePath expressionOf(TreePath path) {
+        TreePath at = path;
+        while (at.getParentPath() != null && !(at.getParentPath().getLeaf() instanceof StatementTree)
+                && !(at.getParentPath().getLeaf() instanceof JCTree.JCLambda)
+                && !(at.getParentPath().getLeaf() instanceof ClassTree))
+            at = at.getParentPath();
+        return at.getLeaf() instanceof JCTree.JCExpression ? at : null;
+    }
+
+    // For each cast of the decompiler's to a raw class or an array of one (`(Comparable) value`,
+    // `(Enum[]) keys`) in the expression of an error: the cast to each type variable in scope
+    // whose erasure that is, one option each. A cast to a type variable has the checkcast of its
+    // erasure, the same as the raw cast.
+    static List<List<Edit>> typeVariableCasts(Types types, JCTree.JCCompilationUnit cu, TreePath path) {
+        TreePath top = expressionOf(path);
+        if (top == null) return List.of();
+        Witnesses w = new Witnesses(types, null, cu, null);
+        w.scopeOf(top);
+        List<List<Edit>> options = new ArrayList<>();
+        new TreeScanner<Void, Void>() {
+            public Void visitTypeCast(TypeCastTree node, Void v) {
+                JCTree.JCTypeCast cast = (JCTree.JCTypeCast) node;
+                Type to = cast.clazz.type;
+                int dims = 0;
+                while (to != null && to.hasTag(TypeTag.ARRAY)) {
+                    to = ((Type.ArrayType) to).elemtype;
+                    dims++;
+                }
+                if (to != null && to.hasTag(TypeTag.CLASS) && to.isRaw()) {
+                    for (Symbol variable : w.scope) {
+                        if (!types.isSameType(types.erasure(variable.type), to)) continue;
+                        int start = TreeInfo.getStartPos(cast.clazz), end = TreeInfo.getEndPos(cast.clazz, cu.endPositions);
+                        String text = variable.name + "[]".repeat(dims);
+                        options.add(List.of(new Edit(start, end, text, "cast to the type variable " + text + " for "
+                            + source(cu, start, end))));
+                    }
+                }
+                return super.visitTypeCast(node, v);
+            }
+        }.scan(top.getLeaf(), null);
+        return options;
+    }
+
+    static boolean capturing(Type t) {
+        if (t == null) return false;
+        if (t instanceof Type.CapturedType) return true;
+        if (t.hasTag(TypeTag.CLASS)) {
+            for (Type a : t.getTypeArguments()) if (capturing(a)) return true;
+        }
+        if (t.hasTag(TypeTag.WILDCARD)) return capturing(((Type.WildcardType) t).type);
+        if (t.hasTag(TypeTag.ARRAY)) return capturing(((Type.ArrayType) t).elemtype);
+        return false;
+    }
+
+    // The call at or around `path`.
+    static JCTree.JCMethodInvocation callAround(TreePath path) {
+        for (TreePath at = path; at != null; at = at.getParentPath()) {
+            if (at.getLeaf() instanceof JCTree.JCMethodInvocation call) return call;
+            if (at.getLeaf() instanceof StatementTree || at.getLeaf() instanceof JCTree.JCLambda) return null;
+        }
+        return null;
+    }
+
+    // The arguments of the call at the error whose types hold a captured wildcard
+    // (`List<Pair<String, Dynamic<CAP#1>>>` for a parameter `List<Pair<String, Dynamic<?>>>`),
+    // cast to their raw class: that converts unchecked, with no checkcast.
+    static List<Edit> rawCapturedArguments(JCTree.JCCompilationUnit cu, TreePath path) throws Unprintable {
+        JCTree.JCMethodInvocation call = callAround(path);
+        if (call == null) return List.of();
+        List<Edit> edits = new ArrayList<>();
+        for (JCTree.JCExpression arg : call.args)
+            if (arg.type != null && arg.type.hasTag(TypeTag.CLASS) && arg.type.isParameterized() && capturing(arg.type))
+                edits.add(wrap(cu, arg, printClass(cu, (Symbol.ClassSymbol) arg.type.tsym), "cast to raw "));
+        return edits;
+    }
+
+    // The lambdas and method references passed to the call at the error, cast to the interface
+    // that the class file makes them for, where one such interface fits the parameter of a method
+    // of the call's name and arity (`(Fixer) Fix::fixBucket` for a `Function<Typed<?>, Typed<?>>`).
+    static List<Edit> functionalArguments(Types types, JCTree.JCCompilationUnit cu, TreePath path,
+            java.util.function.Function<String, Symbol.ClassSymbol> named) throws Unprintable {
+        JCTree.JCMethodInvocation call = callAround(path);
+        if (call == null) return List.of();
+        Type site = call.meth instanceof JCTree.JCFieldAccess access ? access.selected.type : null;
+        if (site == null) {
+            JCTree.JCClassDecl c = enclosingClass(cu, call);
+            if (c == null || c.sym == null) return List.of();
+            site = c.sym.type;
+        }
+        if (!site.hasTag(TypeTag.CLASS)) return List.of();
+        Name name = TreeInfo.name(call.meth);
+        List<Edit> edits = new ArrayList<>();
+        for (int i = 0; i < call.args.size(); i++) {
+            JCTree.JCExpression arg = call.args.get(i);
+            if (!(arg instanceof JCTree.JCLambda || arg instanceof JCTree.JCMemberReference)) continue;
+            Set<Edit> found = new LinkedHashSet<>();
+            for (Symbol member : types.membersClosure(site, false).getSymbolsByName(name)) {
+                if (!(member instanceof Symbol.MethodSymbol m) || m.params().size() != call.args.size()) continue;
+                Edit edit = functionalCast(types, cu, arg, m.params().get(i).type, named);
+                if (edit != null) found.add(edit);
+            }
+            if (found.size() == 1) edits.addAll(found);
+        }
+        return edits;
+    }
+
+    // `((Registry) registries).getId(registry)` for `registries.getId(registry)`, where the
+    // argument's expected type is a capture of the receiver's wildcard: the call through the raw
+    // receiver has the same descriptor.
+    static Edit rawReceiver(JCTree.JCCompilationUnit cu, TreePath path) throws Unprintable {
+        Tree parent = path.getParentPath() == null ? null : path.getParentPath().getLeaf();
+        if (!(parent instanceof JCTree.JCMethodInvocation call) || !call.args.contains(path.getLeaf())
+                || !(call.meth instanceof JCTree.JCFieldAccess access) || access.selected.type == null
+                || !access.selected.type.hasTag(TypeTag.CLASS) || !access.selected.type.isParameterized())
+            return null;
+        JCTree.JCExpression receiver = access.selected;
+        int start = TreeInfo.getStartPos(receiver), end = TreeInfo.getEndPos(receiver, cu.endPositions);
+        String raw = printClass(cu, (Symbol.ClassSymbol) receiver.type.tsym);
+        return new Edit(start, end, "((" + raw + ") " + source(cu, start, end) + ")",
+            "receiver cast to raw " + raw + ": " + oneLine(source(cu, start, end)));
+    }
+
+    // A generic call that is the whole initializer or result of its declared type, which no
+    // instance of its type variables gives (`Codec<Named<?, ?>> CODEC = typedCodec()` of a
+    // `<P, R> Codec<Named<P, R>>`): cast to that type through the wildcard type, unchecked.
+    static Edit declaredCast(Types types, JCTree.JCCompilationUnit cu, TreePath path) throws Unprintable {
+        TreePath top = expressionOf(path);
+        if (top == null || !(top.getLeaf() instanceof JCTree.JCMethodInvocation call)
+                || !(TreeInfo.symbol(call.meth) instanceof Symbol.MethodSymbol m) || m.getTypeParameters().isEmpty())
+            return null;
+        Type declared = declaredFor(top);
+        if (declared == null || !declared.hasTag(TypeTag.CLASS) || !declared.isParameterized()) return null;
+        return cast(types, cu, call, top.getParentPath().getLeaf(), types.erasure(m.getReturnType()), declared);
+    }
+
+    // The methods whose type variables an inference error names as not inferred.
+    static Set<Symbol> uninferred(JCDiagnostic diag) {
+        Set<Symbol> found = new HashSet<>();
+        collectUninferred(diag.getArgs(), found);
+        return found;
+    }
+
+    static void collectUninferred(Object[] args, Set<Symbol> found) {
+        for (Object arg : args) {
+            if (arg instanceof JCDiagnostic detail) collectUninferred(detail.getArgs(), found);
+            else if (arg instanceof Iterable<?> list) {
+                for (Object item : list) collectUninferred(new Object[] {item}, found);
+            } else if (arg instanceof Type.TypeVar v && !(v instanceof Type.CapturedType)
+                    && v.tsym.owner instanceof Symbol.MethodSymbol m) {
+                found.add(m);
+            }
+        }
+    }
 
     // Whether an error is one of inference: a call's type variables that javac cannot infer, or
     // whose bounds disagree.
@@ -673,14 +1757,23 @@ public class RepairDecompile {
 
     // What the class file of a class holds that the repair checks against: the classes its
     // checkcasts cast to, and the interfaces its lambdas and method references make (the type of
-    // each invokedynamic of LambdaMetafactory), as binary names.
-    record ClassCode(Set<String> checkcasts, Set<String> lambdas) {}
+    // each invokedynamic of LambdaMetafactory), as binary names, also by the name of the method
+    // each refers to; and where each string constant is loaded.
+    record ClassCode(Set<String> checkcasts, Set<String> lambdas, Map<String, Set<String>> referenced,
+            Map<String, List<Constant>> strings) {}
+
+    // A load of a string constant: in which method (by its index in the class file), the local
+    // variable that the start of the nearest exception handler before it stores the exception in,
+    // and the reference variable loaded right after it (-1 for none).
+    record Constant(int method, int handler, int loaded) {}
 
     // The class file of class `owner` (a binary name), read once.
     static ClassCode classCode(String owner) {
-        if (classes == null) return new ClassCode(Set.of(), Set.of());
+        if (classes == null) return new ClassCode(Set.of(), Set.of(), Map.of(), Map.of());
         return classCodes.computeIfAbsent(owner, o -> {
             Set<String> checks = new HashSet<>(), lambdas = new HashSet<>();
+            Map<String, Set<String>> referenced = new HashMap<>();
+            Map<String, List<Constant>> strings = new HashMap<>();
             var entry = classes.getEntry(o.replace('.', '/') + ".class");
             if (entry != null) {
                 byte[] bytes;
@@ -689,19 +1782,53 @@ public class RepairDecompile {
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
-                for (var method : ClassFile.of().parse(bytes).methods())
-                    for (var element : method.code().map(CodeModel::elementList).orElse(List.of())) {
+                int index = 0;
+                for (var method : ClassFile.of().parse(bytes).methods()) {
+                    index++;
+                    CodeModel code = method.code().orElse(null);
+                    if (code == null) continue;
+                    Set<java.lang.classfile.Label> handlers = new HashSet<>();
+                    for (var handler : code.exceptionHandlers()) handlers.add(handler.handler());
+                    boolean atHandler = false;
+                    int handlerSlot = -1, pendingHandler = -1;
+                    String pending = null;
+                    for (var element : code.elementList()) {
+                        if (element instanceof LabelTarget target) {
+                            if (handlers.contains(target.label())) atHandler = true;
+                            continue;
+                        }
+                        if (!(element instanceof Instruction instruction)) continue;
+                        if (pending != null) {
+                            int loaded = instruction instanceof LoadInstruction load && load.typeKind() == TypeKind.REFERENCE
+                                ? load.slot() : -1;
+                            strings.computeIfAbsent(pending, s -> new ArrayList<>()).add(new Constant(index, pendingHandler, loaded));
+                            pending = null;
+                        }
+                        if (atHandler) {
+                            handlerSlot = instruction instanceof StoreInstruction store ? store.slot() : -1;
+                            atHandler = false;
+                        }
+                        if (instruction instanceof ConstantInstruction.LoadConstantInstruction ldc
+                                && ldc.constantValue() instanceof String s) {
+                            pending = s;
+                            pendingHandler = handlerSlot;
+                        }
                         if (element instanceof TypeCheckInstruction check && check.opcode() == Opcode.CHECKCAST)
                             checks.add(check.type().asInternalName().replace('/', '.'));
                         if (element instanceof InvokeDynamicInstruction indy
                                 && indy.bootstrapMethod().owner().descriptorString()
                                     .equals("Ljava/lang/invoke/LambdaMetafactory;")) {
                             String made = indy.typeSymbol().returnType().descriptorString();
-                            lambdas.add(made.substring(1, made.length() - 1).replace('/', '.'));
+                            made = made.substring(1, made.length() - 1).replace('/', '.');
+                            lambdas.add(made);
+                            if (indy.bootstrapArgs().size() > 1
+                                    && indy.bootstrapArgs().get(1) instanceof java.lang.constant.DirectMethodHandleDesc handle)
+                                referenced.computeIfAbsent(handle.methodName(), n -> new HashSet<>()).add(made);
                         }
                     }
+                }
             }
-            return new ClassCode(checks, lambdas);
+            return new ClassCode(checks, lambdas, referenced, strings);
         });
     }
 
@@ -723,8 +1850,12 @@ public class RepairDecompile {
         JCTree.JCClassDecl owner = enclosingClass(cu, expr);
         if (owner == null || owner.sym == null) return null;
         List<Symbol.ClassSymbol> candidates = new ArrayList<>();
-        for (String made : classCode(owner.sym.flatname.toString()).lambdas()) {
-            Symbol.ClassSymbol sub = named.apply(made);
+        ClassCode code = classCode(owner.sym.flatname.toString());
+        // A method reference's interface is one the class file makes for that method.
+        Set<String> made = expr instanceof JCTree.JCMemberReference ref
+            ? code.referenced().getOrDefault(ref.name.toString(), Set.of()) : code.lambdas();
+        for (String interfaceName : made) {
+            Symbol.ClassSymbol sub = named.apply(interfaceName);
             if (sub != null && sub != expected.tsym && types.isSubtype(types.erasure(sub.type), types.erasure(expected)))
                 candidates.add(sub);
         }
@@ -847,13 +1978,18 @@ public class RepairDecompile {
         }.scan(body, null);
         if (uses.isEmpty()) return List.of();
         // Each use must have exactly one catch around it whose parameter is unused, the same one
-        // for all: with two (a use in a nested catch), either could be the variable it reads.
+        // for all: with two (a use in a nested catch), either could be the variable it reads, and
+        // the class file tells which.
         JCTree.JCCatch chosen = null;
         for (List<JCTree.JCCatch> catches : around) {
             List<JCTree.JCCatch> unused = catches.stream().filter(c -> !usesVariable(c)).toList();
-            if (unused.size() != 1 || (chosen != null && unused.get(0) != chosen)) return List.of();
+            if (unused.size() != 1 || (chosen != null && unused.get(0) != chosen)) {
+                chosen = catchInClassFile(cu, uses, around);
+                break;
+            }
             chosen = unused.get(0);
         }
+        if (chosen == null) return List.of();
         String parameter = chosen.param.name.toString();
         if (declares(chosen.body, parameter)) return List.of(); // the parameter would be shadowed
         List<Edit> edits = new ArrayList<>();
@@ -863,6 +1999,219 @@ public class RepairDecompile {
                 "renamed " + name + " to the catch parameter " + parameter));
         }
         return edits;
+    }
+
+    // Of the catches around every use of an unresolved name, the one whose exception the class
+    // file's code reads there. A string constant just before a use (`warn("Failed ..", ex)`) is
+    // loaded right before the variable the use reads; a string constant of a catch's own block
+    // comes after the start of its handler, which stores the exception in that catch's variable.
+    // Each constant must be in the class file once, all in the same method.
+    static JCTree.JCCatch catchInClassFile(JCTree.JCCompilationUnit cu, List<JCTree.JCIdent> uses,
+            List<List<JCTree.JCCatch>> around) {
+        JCTree.JCClassDecl owner = enclosingClass(cu, uses.get(0));
+        if (owner == null || owner.sym == null) return null;
+        ClassCode code = classCode(owner.sym.flatname.toString());
+        Constant read = null;
+        for (JCTree.JCIdent use : uses) {
+            String before = stringBefore(cu, use);
+            if (before == null) continue;
+            List<Constant> found = code.strings().getOrDefault(before, List.of());
+            if (found.size() != 1 || found.get(0).loaded() < 0) return null;
+            Constant constant = found.get(0);
+            if (read != null && (read.method() != constant.method() || read.loaded() != constant.loaded())) return null;
+            read = constant;
+        }
+        if (read == null) return null;
+        List<JCTree.JCCatch> common = new ArrayList<>(around.get(0));
+        for (List<JCTree.JCCatch> catches : around) common.retainAll(catches);
+        JCTree.JCCatch chosen = null;
+        for (JCTree.JCCatch c : common) {
+            String first = firstString(c.body);
+            List<Constant> found = first == null ? List.of() : code.strings().getOrDefault(first, List.of());
+            if (found.size() != 1 || found.get(0).method() != read.method()) continue;
+            if (found.get(0).handler() == read.loaded()) {
+                if (chosen != null) return null;
+                chosen = c;
+            }
+        }
+        return chosen;
+    }
+
+    // The string literal that is the argument just before `use` in a call or a creation.
+    static String stringBefore(JCTree.JCCompilationUnit cu, JCTree.JCIdent use) {
+        TreePath path = TreePath.getPath(cu, use);
+        if (path == null || path.getParentPath() == null) return null;
+        Tree parent = path.getParentPath().getLeaf();
+        List<JCTree.JCExpression> args = parent instanceof JCTree.JCMethodInvocation call ? call.args
+            : parent instanceof JCTree.JCNewClass created ? created.args : List.of();
+        int i = args.indexOf(use);
+        return i > 0 && args.get(i - 1) instanceof JCTree.JCLiteral literal && literal.getValue() instanceof String s ? s : null;
+    }
+
+    // The first string literal of a catch block, outside the catches, lambdas and classes in it,
+    // whose code is elsewhere than right after the handler's start.
+    static String firstString(JCTree.JCBlock body) {
+        String[] found = {null};
+        new TreeScanner<Void, Void>() {
+            public Void scan(Tree t, Void v) {
+                return found[0] != null ? null : super.scan(t, v);
+            }
+            public Void visitLiteral(LiteralTree node, Void v) {
+                if (node.getValue() instanceof String s) found[0] = s;
+                return null;
+            }
+            public Void visitCatch(CatchTree node, Void v) { return null; }
+            public Void visitLambdaExpression(LambdaExpressionTree node, Void v) { return null; }
+            public Void visitClass(ClassTree node, Void v) { return null; }
+        }.scan(body, null);
+        return found[0];
+    }
+
+    // An unresolved name that is assigned (`var24 = e.steps();`, where the decompiler left out the
+    // declaration of a temporary), declared with the type of the value first assigned to it, at the
+    // statement of the innermost block that holds every use of the name, if the first use is the
+    // assignment and its value's type can be written.
+    static Edit declareAssigned(Types types, JCTree.JCCompilationUnit cu, TreePath path, String name, Set<Integer> done)
+            throws Unprintable {
+        TreePath body = path;
+        while (body != null && !(body.getLeaf() instanceof MethodTree) && !(body.getLeaf() instanceof LambdaExpressionTree))
+            body = body.getParentPath();
+        if (body == null) return null;
+        List<TreePath> uses = new ArrayList<>();
+        new TreePathScanner<Void, Void>() {
+            public Void visitIdentifier(IdentifierTree node, Void v) {
+                JCTree.JCIdent ident = (JCTree.JCIdent) node;
+                if (ident.name.contentEquals(name) && unresolved(ident)) uses.add(getCurrentPath());
+                return null;
+            }
+            public Void visitClass(ClassTree node, Void v) { return null; }
+        }.scan(body, null);
+        if (uses.isEmpty()) return null;
+        TreePath first = uses.get(0);
+        if (!(first.getParentPath().getLeaf() instanceof JCTree.JCAssign assign) || assign.lhs != first.getLeaf()
+                || !(first.getParentPath().getParentPath().getLeaf() instanceof JCTree.JCExpressionStatement)) return null;
+        // javac gives the value the erroneous type of the name it is assigned to, so its type is
+        // the one that its declarations give.
+        Type type = new Witnesses(types, null, cu, null).known(assign.rhs);
+        if (type == null) type = assign.rhs.type;
+        if (type == null || type.isErroneous() || type.hasTag(TypeTag.BOT) || type.hasTag(TypeTag.VOID)) return null;
+        String written = print(cu, type, false);
+        // The innermost block around every use, and its statement that holds the first.
+        JCTree.JCBlock block = null;
+        JCTree.JCStatement statement = null;
+        for (TreePath up = first.getParentPath(); up.getParentPath() != null; up = up.getParentPath()) {
+            if (up.getParentPath().getLeaf() instanceof JCTree.JCBlock b && up.getLeaf() instanceof JCTree.JCStatement s
+                    && uses.stream().allMatch(u -> within(cu, u.getLeaf(), b))) {
+                block = b;
+                statement = s;
+                break;
+            }
+            if (up.getLeaf() == body.getLeaf()) return null;
+        }
+        if (block == null) return null;
+        for (TreePath use : uses) done.add(((JCTree) use.getLeaf()).getStartPosition());
+        int start = TreeInfo.getStartPos(statement);
+        return new Edit(start, start, written + " " + name + "; ", "declared " + written + " " + name + " that is assigned");
+    }
+
+    static boolean within(JCTree.JCCompilationUnit cu, Tree inner, JCTree outer) {
+        return TreeInfo.getStartPos(outer) <= TreeInfo.getStartPos((JCTree) inner)
+            && TreeInfo.getEndPos((JCTree) inner, cu.endPositions) <= TreeInfo.getEndPos(outer, cu.endPositions);
+    }
+
+    // A local variable declared again in the scope of one of the same name (the decompiler gave
+    // two variables one name), renamed with the uses of the name after it in its block to a name
+    // the file does not use.
+    static List<Edit> renameRedeclared(JCTree.JCCompilationUnit cu, TreePath path, JCTree.JCVariableDecl variable) {
+        if (!(path.getParentPath().getLeaf() instanceof JCTree.JCBlock block)) return List.of();
+        String name = variable.name.toString(), text;
+        try {
+            text = cu.getSourceFile().getCharContent(true).toString();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        int n = 2;
+        while (java.util.regex.Pattern.compile("\\b" + name + n + "\\b").matcher(text).find()) n++;
+        String fresh = name + n;
+        int at = variable.pos;
+        if (!text.startsWith(name, at)) return List.of();
+        List<Edit> edits = new ArrayList<>();
+        edits.add(new Edit(at, at + name.length(), fresh, "renamed the second " + name + " to " + fresh));
+        boolean[] redeclared = {false};
+        int from = TreeInfo.getEndPos(variable, cu.endPositions);
+        new TreeScanner<Void, Void>() {
+            public Void visitIdentifier(IdentifierTree node, Void v) {
+                JCTree.JCIdent ident = (JCTree.JCIdent) node;
+                if (ident.name.contentEquals(name) && ident.getStartPosition() >= at && !(ident.sym instanceof Symbol.MethodSymbol))
+                    edits.add(new Edit(ident.getStartPosition(), ident.getStartPosition() + name.length(), fresh,
+                        "renamed " + name + " to " + fresh));
+                return null;
+            }
+            public Void visitVariable(VariableTree node, Void v) {
+                if (node != variable && node.getName().contentEquals(name) && ((JCTree) node).getStartPosition() >= from)
+                    redeclared[0] = true;
+                return super.visitVariable(node, v);
+            }
+            public Void visitMethodInvocation(MethodInvocationTree node, Void v) {
+                // a method of the name is not the variable
+                JCTree.JCMethodInvocation call = (JCTree.JCMethodInvocation) node;
+                if (!(call.meth instanceof JCTree.JCIdent)) scan(call.meth, v);
+                scan(call.typeargs, v);
+                scan(call.args, v);
+                return null;
+            }
+        }.scan(block, null);
+        return redeclared[0] ? List.of() : edits;
+    }
+
+    // `SwitchBootstraps.typeSwitch("typeSwitch", new Object[]{A.class, B.class}, x, n)`, CFR's
+    // writing of the invokedynamic of a pattern switch, as what the bootstrap's call site
+    // returns: -1 for null, else the index of the first class from `n` on that `x` is an instance
+    // of, else the number of classes (`x == null ? -1 : n <= 0 && x instanceof A ? 0 : ..`). Only
+    // for a selector and a restart index that are variables or constants, which can be read again.
+    static Edit typeSwitch(JCTree.JCCompilationUnit cu, TreePath path) {
+        JCTree.JCMethodInvocation call = null;
+        for (TreePath up = path; up != null && !(up.getLeaf() instanceof StatementTree && !(up.getLeaf() instanceof JCTree.JCSwitch));
+                up = up.getParentPath()) {
+            if (up.getLeaf() instanceof JCTree.JCMethodInvocation c && c.meth instanceof JCTree.JCFieldAccess access
+                    && access.name.contentEquals("typeSwitch")
+                    && TreeInfo.symbol(access.selected) instanceof Symbol.ClassSymbol owner
+                    && owner.getQualifiedName().contentEquals("java.lang.runtime.SwitchBootstraps")) {
+                call = c;
+                break;
+            }
+            if (up.getLeaf() instanceof JCTree.JCSwitch s) {
+                JCTree.JCExpression selector = TreeInfo.skipParens(s.selector);
+                if (selector instanceof JCTree.JCMethodInvocation c && c.meth instanceof JCTree.JCFieldAccess access
+                        && access.name.contentEquals("typeSwitch")
+                        && TreeInfo.symbol(access.selected) instanceof Symbol.ClassSymbol owner
+                        && owner.getQualifiedName().contentEquals("java.lang.runtime.SwitchBootstraps"))
+                    call = c;
+                break;
+            }
+        }
+        if (call == null || call.args.size() != 4 || !(call.args.get(1) instanceof JCTree.JCNewArray labels)
+                || labels.elems == null) return null;
+        JCTree.JCExpression selector = call.args.get(2), restart = call.args.get(3);
+        JCTree.JCExpression read = selector;
+        while (read instanceof JCTree.JCTypeCast || read instanceof JCTree.JCParens)
+            read = read instanceof JCTree.JCTypeCast cast ? cast.expr : ((JCTree.JCParens) read).expr;
+        if (!(read instanceof JCTree.JCIdent) || !(restart instanceof JCTree.JCIdent || restart instanceof JCTree.JCLiteral))
+            return null;
+        String x = "(" + source(cu, TreeInfo.getStartPos(selector), TreeInfo.getEndPos(selector, cu.endPositions)) + ")";
+        String n = source(cu, TreeInfo.getStartPos(restart), TreeInfo.getEndPos(restart, cu.endPositions));
+        StringBuilder out = new StringBuilder("(" + x + " == null ? -1 : ");
+        int i = 0;
+        for (JCTree.JCExpression label : labels.elems) {
+            if (!(label instanceof JCTree.JCFieldAccess literal) || !literal.name.contentEquals("class")) return null;
+            String type = source(cu, TreeInfo.getStartPos(literal.selected), TreeInfo.getEndPos(literal.selected, cu.endPositions));
+            out.append(n).append(" <= ").append(i).append(" && ").append(x).append(" instanceof ").append(type)
+                .append(" ? ").append(i).append(" : ");
+            i++;
+        }
+        out.append(i).append(")");
+        int start = TreeInfo.getStartPos(call), end = TreeInfo.getEndPos(call, cu.endPositions);
+        return new Edit(start, end, out.toString(), "pattern switch index for " + oneLine(source(cu, start, end)));
     }
 
     // Whether a variable of that name is declared inside the tree (a local, a lambda's or a nested
