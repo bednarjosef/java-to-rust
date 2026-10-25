@@ -296,6 +296,22 @@ checks each set of assigned variables against a scan of the statements for each 
 javac's whole translation, its census report and the 28 targets' translations are byte for byte
 the same. On javac the analysis goes from 1.05 to 1.16 s to 0.55 to 0.60 s.
 
+**Census rounds that stop at a check.** A census runs the analyses again after each round of
+stubs (`program/census.rs`), and on the Minecraft server most rounds end at a check: a pattern
+variable, then `synchronized` on a string, then exceptions. The checks (`analysis::analyze_from`)
+run in their order as soon as what they read is known: the validation of constructors and enums
+and the checks of strings and boxes as `Object`s, of what threads share and of monitors read only
+the code and the representation's facts. The range analysis, fixed fields, statics, early static
+reads and nullness, which none of them reads, come after them, so a round that one of these
+checks ends no longer runs them. The result is the same by construction: each check sees the
+facts it saw before, and the steps moved after the checks see the checks' own facts (the
+identity checks, the boxes compared by identity) only once they have run, as before. The range
+analysis reads no facts, and a census keeps its facts with the representation's while no stub
+changes the program. javac's census report and whole translation, the 28 targets' translations,
+and the translations and census reports of the whole-program corpus are byte for byte the same.
+`a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round` (`tests/translation.rs`)
+has a round for each kind; its first two rounds run none of the steps moved after the checks.
+
 Further speed-ups, not done:
 
 - The walk from scratch when the members written into a record change is what is left of the
