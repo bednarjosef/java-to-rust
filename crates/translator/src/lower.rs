@@ -363,6 +363,9 @@ struct Lowering<'t> {
     /// The places of each class's code where a handle may be a value, found the first time one
     /// is lowered (see `handle_values`).
     handle_slots: RefCell<std::collections::HashMap<usize, std::collections::HashSet<*const Value>>>,
+    /// The writes of each class's static fields in its static blocks, found the first time one
+    /// of its fields' values is asked for (see `handles::static_value`).
+    static_writes: RefCell<std::collections::HashMap<usize, std::rc::Rc<handles::StaticWrites<'t>>>>,
     /// The arrays of references that are `Object[]`s (see `covariant`).
     covariant: covariant::Covariant,
     /// Where `Object` goes, in a program that uses it (see `object`).

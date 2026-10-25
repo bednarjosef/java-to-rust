@@ -127,6 +127,7 @@ use super::sun_unsafe::SUN_OFFSET_OF_FIELD;
 use super::*;
 use crate::program::FieldUpdate;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// A method that lowering adds for an atomic update of a field through `Unsafe`.
 pub(super) struct FieldUpdateMethod {
@@ -327,6 +328,11 @@ fn walk_in_methods<'t>(
 /// Whether `node` is the variable of an assignment, compound assignment, `++` or `--` that
 /// `target` tells apart.
 fn assigns<'t>(node: Node<'t>, target: impl Fn(Node<'t>) -> bool) -> bool {
+    assigned(node).is_some_and(target)
+}
+
+/// What `node` assigns, when it is an assignment, an increment or a decrement.
+fn assigned(node: Node) -> Option<Node> {
     let kind = node.kind();
     let variable = if kind == "ASSIGNMENT" || kind.ends_with("_ASSIGNMENT") {
         node.get("variable")
@@ -335,8 +341,12 @@ fn assigns<'t>(node: Node<'t>, target: impl Fn(Node<'t>) -> bool) -> bool {
     } else {
         None
     };
-    variable.is_some_and(|v| target(plain(v)))
+    variable.map(plain)
 }
+
+/// The writes of a class's static fields in its static blocks, by name: how many there are, and
+/// the value and block of the last that is a statement assigning the field.
+pub(super) type StaticWrites<'t> = HashMap<&'t str, (usize, Option<(Node<'t>, Option<Node<'t>>)>)>;
 
 /// Whether evaluating `e` again gives the same value and does nothing else: a constant, a local
 /// (which nothing assigns between the two reads), `this`, an enclosing instance, and their
@@ -495,23 +505,39 @@ impl<'t> Lowering<'t> {
         if let Some(init) = member.get("initializer") {
             return Some((init, None));
         }
-        let (name, javac) = (member.str("name"), self.types[owner].javac.as_str());
-        let is_field = |v: Node| {
-            v.symbol().is_some_and(|s| s.kind == "FIELD" && s.name == name && s.owner == javac && s.is_static)
+        let writes = self.static_writes(owner);
+        let &(count, found) = writes.get(member.str("name"))?;
+        found.filter(|_| count == 1)
+    }
+
+    /// `StaticWrites` of class `owner`, made by one walk of its static blocks.
+    fn static_writes(&self, owner: usize) -> Rc<StaticWrites<'t>> {
+        if let Some(writes) = self.static_writes.borrow().get(&owner) {
+            return writes.clone();
+        }
+        let javac = self.types[owner].javac.as_str();
+        // The name of the static field of `owner` that `v` is.
+        let field = |v: Node<'t>| {
+            v.symbol().filter(|s| s.kind == "FIELD" && s.owner == javac && s.is_static).map(|s| s.name)
         };
-        let (mut writes, mut found) = (0, None);
+        let mut writes: StaticWrites<'t> = HashMap::new();
         for block in self.types[owner].node.list("members").filter(|m| Self::is_static_block(*m)) {
             walk(block.0, &mut |n| {
-                writes += usize::from(assigns(n, is_field));
+                if let Some(name) = assigned(n).and_then(field) {
+                    writes.entry(name).or_insert((0, None)).0 += 1;
+                }
                 if n.kind() == "EXPRESSION_STATEMENT"
                     && let Some(e) = n.get("expression").filter(|e| e.kind() == "ASSIGNMENT")
-                    && e.get("variable").is_some_and(|v| is_field(plain(v)))
+                    && let Some(name) = e.get("variable").and_then(|v| field(plain(v)))
                 {
-                    found = e.get("expression").map(|value| (value, Some(block)));
+                    writes.entry(name).or_insert((0, None)).1 =
+                        e.get("expression").map(|value| (value, Some(block)));
                 }
             });
         }
-        found.filter(|_| writes == 1)
+        let writes = Rc::new(writes);
+        self.static_writes.borrow_mut().insert(owner, writes.clone());
+        writes
     }
 
     /// The class and declaration of the field handle whose value the statement `node` gives it,
