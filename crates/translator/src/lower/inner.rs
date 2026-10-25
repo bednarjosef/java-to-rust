@@ -14,6 +14,7 @@
 //! numbered where that is taken.
 
 use super::*;
+use std::collections::HashMap;
 
 /// How a class is nested in code that has variables of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,11 +139,36 @@ impl<'t> Lowering<'t> {
     pub(super) fn name_nested(&mut self) {
         // A local class's name can say the name of the class it is in, which may be hoisted.
         self.name_hoisted();
+        // How many names and javac names of classes there are with the dots left out, which a new
+        // name must not repeat. Looking through every class for each one took a large part of the
+        // Minecraft server's lowering.
+        let flat = |name: &str| name.replace('.', "");
+        // And the same as they are, for `package_of`, which `type_index` would answer by indexing
+        // every class again after each new name.
+        let mut flat_names: HashMap<String, usize> = HashMap::new();
+        let mut names: HashMap<String, usize> = HashMap::new();
+        for info in &self.types {
+            *flat_names.entry(flat(&info.name)).or_default() += 1;
+            *flat_names.entry(flat(&info.javac)).or_default() += 1;
+            *names.entry(info.name.clone()).or_default() += 1;
+            *names.entry(info.javac.clone()).or_default() += 1;
+        }
+        fn recount(counts: &mut HashMap<String, usize>, old: String, new: String) {
+            if let Some(count) = counts.get_mut(&old) {
+                *count -= 1;
+            }
+            *counts.entry(new).or_default() += 1;
+        }
+        let rename = |types: &mut [TypeInfo], flat_names: &mut _, names: &mut _, t: usize, name: String| {
+            let old = std::mem::replace(&mut types[t].name, name.clone());
+            recount(flat_names, flat(&old), flat(&name));
+            recount(names, old, name);
+        };
         for t in 0..self.types.len() {
             // A member of a local or anonymous class is declared after it, so its name is final.
             if let Some(&(_, outer)) = self.member_outers.iter().find(|(member, _)| *member == t) {
-                self.types[t].name =
-                    format!("{}.{}", self.types[outer].name, self.types[t].node.str("simpleName"));
+                let name = format!("{}.{}", self.types[outer].name, self.types[t].node.str("simpleName"));
+                rename(&mut self.types, &mut flat_names, &mut names, t, name);
                 continue;
             }
             let Some(nested) = &self.types[t].nested else { continue };
@@ -159,15 +185,17 @@ impl<'t> Lowering<'t> {
                     // A local class's binary name has its number before its simple name.
                     let simple = supertype.rsplit(['.', '$']).next().unwrap_or_default();
                     let simple = simple.trim_start_matches(|c: char| c.is_ascii_digit());
-                    let package = self.package_of(t);
+                    let package = self.package_with(t, |outer| names.get(outer).is_some_and(|&n| n > 0));
                     format!("{package}{simple}In{place}")
                 }
             };
-            let taken = |name: &str, lowering: &Self| {
-                let flat = name.replace('.', "");
-                lowering.types.iter().enumerate().any(|(o, other)| {
-                    o != t && (other.name.replace('.', "") == flat || other.javac.replace('.', "") == flat)
-                })
+            // Whether another class has the name or javac name, with the dots left out: those of
+            // the class itself are not counted.
+            let own = [flat(&self.types[t].name), flat(&self.types[t].javac)];
+            let taken = |name: &str, _: &Self| {
+                let name = flat(name);
+                let count = flat_names.get(&name).copied().unwrap_or(0);
+                count > own.iter().filter(|o| **o == name).count()
             };
             let mut name = base.clone();
             if taken(&name, self) && self.types[t].nested.as_ref().is_some_and(|n| n.kind == NestKind::Local)
@@ -180,9 +208,9 @@ impl<'t> Lowering<'t> {
                 name = format!("{first}{n}");
                 n += 1;
             }
-            self.types[t].name = name;
-            self.indices.get_mut().forget_types();
+            rename(&mut self.types, &mut flat_names, &mut names, t, name);
         }
+        self.indices.get_mut().forget_types();
     }
 
     /// The place of a local or anonymous class, as a part of its name: its method (`Main` for
@@ -199,6 +227,11 @@ impl<'t> Lowering<'t> {
 
     /// The package prefix of class `t`'s name (`com.example.`), from its top-level class.
     pub(super) fn package_of(&self, t: usize) -> String {
+        self.package_with(t, |outer| self.type_index(outer).is_some())
+    }
+
+    /// `package_of`, with `declared` telling whether a class has a name or javac name.
+    fn package_with(&self, t: usize, declared: impl Fn(&str) -> bool) -> String {
         let mut top = t;
         while let Some(n) = &self.types[top].nested {
             top = n.enclosing;
@@ -208,7 +241,7 @@ impl<'t> Lowering<'t> {
         // prefix that is a declared class.
         let mut at = name.as_str();
         while let Some((outer, _)) = at.rsplit_once('.') {
-            if self.type_index(outer).is_none() {
+            if !declared(outer) {
                 return format!("{outer}.");
             }
             at = outer;
