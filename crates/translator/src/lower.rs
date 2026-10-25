@@ -68,6 +68,7 @@ mod primitives;
 mod processors;
 mod program;
 mod prologues;
+mod proxies;
 mod recreate;
 mod reflection;
 mod regex;
@@ -171,6 +172,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             element_classes: lowering.element_classes.take(),
             array_tests: lowering.array_tests.take(),
             volatile_elements: lowering.volatile_elements.take(),
+            proxy_classes: Default::default(),
             receivers: Default::default(),
         };
         Ok((class, lowering.real.clone(), failed))
@@ -646,7 +648,7 @@ impl<'t> Lowering<'t> {
             is_synchronized: node.has_flag("SYNCHRONIZED"),
             overrides: self.overrides(node),
             type_params: self.method_type_params(index),
-            jdk_code: false,
+            jdk_code: self.is_proxy_class(info.owner),
             field_update: None,
         })
     }
@@ -1342,6 +1344,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.proxy_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.module_native(node, &symbol, &mut args)? {

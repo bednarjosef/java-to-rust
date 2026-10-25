@@ -188,12 +188,21 @@ impl Class {
 
     /// `getName()`.
     pub fn get_name(&self) -> crate::JString {
-        self.name.into()
+        self.shown().into()
+    }
+
+    /// The binary name as `getName` gives it: a proxy class's is the one it was given when it
+    /// was defined (`proxy_classes`).
+    fn shown(&self) -> &'static str {
+        crate::proxy_classes::proxy_name(self.name).unwrap_or(self.name)
     }
 
     /// `getSimpleName()`.
     pub fn get_simple_name(&self) -> crate::JString {
-        self.simple.into()
+        match crate::proxy_classes::proxy_name(self.name) {
+            Some(name) => name.rsplit('.').next().unwrap_or(name).into(),
+            None => self.simple.into(),
+        }
     }
 
     /// `getCanonicalName()`: the name in the source with its outer classes (`a.Outer.Inner`,
@@ -210,6 +219,9 @@ impl Class {
         }
         if self.kind == Kind::Primitive {
             return Some(self.name.to_string());
+        }
+        if let Some(name) = crate::proxy_classes::proxy_name(self.name) {
+            return Some(name.to_string());
         }
         let mut segments = self.name.split('$');
         let first = segments.next().unwrap_or_default();
@@ -232,7 +244,7 @@ impl Class {
         } else if self.component.is_some() {
             self.name.replace('.', "/")
         } else {
-            format!("L{};", self.name.replace('.', "/"))
+            format!("L{};", self.shown().replace('.', "/"))
         };
         text.into()
     }
@@ -246,7 +258,7 @@ impl Class {
         if self.kind == Kind::Primitive {
             return "java.lang".into();
         }
-        self.name.rsplit_once('.').map_or("", |(package, _)| package).into()
+        self.shown().rsplit_once('.').map_or("", |(package, _)| package).into()
     }
 
     /// `getTypeName()`: for an array, the name of its innermost component type with a `[]` for
@@ -258,7 +270,7 @@ impl Class {
     /// `getTypeName()` where the program's strings are shared: a class's name is the interned
     /// string, an array's a new one, as the JDK makes them.
     pub fn shared_type_name(&self) -> crate::JStr {
-        if self.is_array() { crate::JStr::new(self.type_name()) } else { crate::interned(self.name) }
+        if self.is_array() { crate::JStr::new(self.type_name()) } else { crate::interned(self.shown()) }
     }
 
     fn type_name(&self) -> String {
@@ -268,7 +280,7 @@ impl Class {
             class = component;
             dimensions += 1;
         }
-        format!("{}{}", class.name, "[]".repeat(dimensions))
+        format!("{}{}", class.shown(), "[]".repeat(dimensions))
     }
 
     /// The binary name, as `getName` gives it, without a copy.
@@ -345,7 +357,7 @@ impl Class {
             && !names.contains(&self.name)
         {
             let from = names.first().copied().unwrap_or("java.lang.Object");
-            crate::throw("java.lang.ClassCastException", &format!("Cannot cast {from} to {}", self.name));
+            crate::throw("java.lang.ClassCastException", &format!("Cannot cast {from} to {}", self.shown()));
         }
     }
 
@@ -374,7 +386,7 @@ impl Hash for Class {
 impl fmt::Display for Class {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.kind {
-            Kind::Class | Kind::Enum => write!(f, "class {}", self.name),
+            Kind::Class | Kind::Enum => write!(f, "class {}", self.shown()),
             Kind::Interface | Kind::Annotation => write!(f, "interface {}", self.name),
             Kind::Primitive => f.write_str(self.name),
         }

@@ -80,7 +80,11 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol,
         args: &mut Vec<Expr>,
     ) -> Result<Option<ExprKind>, Error> {
-        if (symbol.owner != MODULE && symbol.owner != CLASS_LOADER) || !symbol.native {
+        // `dynamicProxy0` is the runtime's (`Native::DynamicProxy`).
+        if (symbol.owner != MODULE && symbol.owner != CLASS_LOADER)
+            || !symbol.native
+            || symbol.name == "dynamicProxy0"
+        {
             return Ok(None);
         }
         let Some(reach) = self.reach else {

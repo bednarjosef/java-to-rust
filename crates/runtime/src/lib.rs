@@ -59,6 +59,7 @@ mod null;
 mod out;
 mod parse_range;
 mod preconditions;
+mod proxy_classes;
 mod random;
 pub mod regex;
 mod scalb;
@@ -140,6 +141,7 @@ pub use out::{
 };
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
 pub use preconditions::*;
+pub use proxy_classes::{annotations_made, in_dynamic_module, name_proxy_class, note_annotation};
 pub use random::*;
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
@@ -385,7 +387,9 @@ impl<T: CastSource + ?Sized> CastSource for &T {
 /// "class A cannot be cast to class B (A and B are in unnamed module of loader 'app')", or with
 /// each class's module of its own when they differ.
 pub fn cast_message(from: CastClass, to: CastClass) -> String {
-    let ((a, a_module), (b, b_module)) = (from, to);
+    // A proxy class's name and module are those it was given at run time (`proxy_classes`).
+    let shown = |(name, module): CastClass| proxy_classes::proxy_class(name).unwrap_or((name, module));
+    let ((a, a_module), (b, b_module)) = (shown(from), shown(to));
     let modules = if a_module == b_module {
         format!("{a} and {b} are in {a_module}")
     } else {

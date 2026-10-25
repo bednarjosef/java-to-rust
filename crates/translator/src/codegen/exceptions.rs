@@ -1216,7 +1216,14 @@ impl<'a> Gen<'a> {
     /// `o.getClass().getName()`: the binary name of the object's class; with `simple`,
     /// `o.getClass().getSimpleName()`, the name of the class in its source.
     pub(super) fn class_name(&mut self, object: &'a Expr, simple: bool) -> Code {
+        let method = if simple { "get_simple_name" } else { "get_name" };
         match self.enum_of(object) {
+            // A proxy class is named when it is defined (`Class::proxy_classes`).
+            None if self.struct_class(object).is_some_and(|c| self.class.proxy_classes.contains(&c)) => {
+                let c = self.struct_class(object).expect("an object has a class");
+                let class = self.type_class(Type::class(&self.class.types[c].name));
+                self.after_object(object, &format!("{class}.{method}()"))
+            }
             None => {
                 let c = self.struct_class(object).expect("an object has a class");
                 let name = rust_string(&self.java_class_name(c, simple));
@@ -1226,13 +1233,15 @@ impl<'a> Gen<'a> {
                 let obj = self.object(object);
                 // An `Object[]` that may carry its class (`Class::element_classes`) is named by it.
                 let object_array = Type::array(Type::class(OBJECT));
+                // So is a value that may be of a proxy class (`Class::proxy_classes`).
+                let variants = self.enum_variants(t);
                 if self.carries_class(object_array)
-                    && self.enum_variants(t).into_iter().any(|c| self.class.array_of(c) == Some(object_array))
+                    && variants.iter().any(|&c| self.class.array_of(c) == Some(object_array))
+                    || variants.iter().any(|c| self.class.proxy_classes.contains(c))
                 {
                     self.need(Need::RuntimeClass(t));
                     let class = super::class_values::method_on(&obj, "runtime_class");
-                    let name = if simple { "get_simple_name" } else { "get_name" };
-                    return Code::atom(format!("{class}.{name}()"));
+                    return Code::atom(format!("{class}.{method}()"));
                 }
                 let mut arms: Vec<String> = self
                     .enum_variants(t)

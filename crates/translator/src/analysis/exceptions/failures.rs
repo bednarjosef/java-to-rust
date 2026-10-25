@@ -355,6 +355,10 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::Nothing
             | Native::Missing { .. }
             | Native::CdsConfigStatus
+            | Native::NameProxyClass
+            | Native::DynamicProxy
+            | Native::NoteAnnotation
+            | Native::AnnotationsMade
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported
             | Native::NanoTimeAdjustment
@@ -899,6 +903,9 @@ pub(super) fn runtime_failures(
                         | Builtin::Native(Native::SystemIdentityHash)
                         // The JVM's `getSystemTimeZoneID` gives null for a null Java home.
                         | Builtin::Native(Native::SystemTimeZoneId)
+                        // `TranslatedProxies` names a class of its own table, by texts it makes, and `Module`
+                        // asks of a class that it has.
+                        | Builtin::Native(Native::NameProxyClass | Native::DynamicProxy)
                         // The expected and the new element of an atomic update may be null.
                         | Builtin::ElementUpdate(_)
                 );

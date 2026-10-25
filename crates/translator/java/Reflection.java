@@ -25,16 +25,18 @@ final class Method {
     private final String name;
     private final Class<?>[] parameterTypes;
     private final Class<?> returnType;
+    private final Class<?>[] exceptionTypes;
     private final int modifiers;
     private final int slot;
 
     Method(Class<?> owner, Class<?> clazz, String name, Class<?>[] parameterTypes, Class<?> returnType,
-            int modifiers, int slot) {
+            Class<?>[] exceptionTypes, int modifiers, int slot) {
         this.owner = owner;
         this.clazz = clazz;
         this.name = name;
         this.parameterTypes = parameterTypes;
         this.returnType = returnType;
+        this.exceptionTypes = exceptionTypes;
         this.modifiers = modifiers;
         this.slot = slot;
     }
@@ -57,6 +59,10 @@ final class Method {
 
     public Class<?>[] getParameterTypes() {
         return Constructor.copy(parameterTypes);
+    }
+
+    public Class<?>[] getExceptionTypes() {
+        return Constructor.copy(exceptionTypes);
     }
 
     public int getParameterCount() {
@@ -120,8 +126,13 @@ final class Method {
     }
 
     public String toString() {
-        return Constructor.modifierText(modifiers & ~0x80) + Constructor.typeName(returnType) + " "
-                + Constructor.typeName(clazz) + "." + name + "(" + Constructor.typeNames(parameterTypes) + ")";
+        // A default method's access, `default`, then its other modifiers, as `Executable` writes them.
+        String modifierText = isDefault()
+                ? Constructor.modifierText(modifiers & 7) + "default " + Constructor.modifierText(modifiers & ~7 & ~0x80)
+                : Constructor.modifierText(modifiers & ~0x80);
+        return modifierText + Constructor.typeName(returnType) + " "
+                + Constructor.typeName(clazz) + "." + name + "(" + Constructor.typeNames(parameterTypes) + ")"
+                + Constructor.throwsText(exceptionTypes);
     }
 
     // `c.getMethod(name, types)`, or with `declared` `c.getDeclaredMethod(name, types)`.
@@ -399,12 +410,14 @@ final class Constructor<T> {
 
     private final Class<T> clazz;
     private final Class<?>[] parameterTypes;
+    private final Class<?>[] exceptionTypes;
     private final int modifiers;
     private final int slot;
 
-    Constructor(Class<T> clazz, Class<?>[] parameterTypes, int modifiers, int slot) {
+    Constructor(Class<T> clazz, Class<?>[] parameterTypes, Class<?>[] exceptionTypes, int modifiers, int slot) {
         this.clazz = clazz;
         this.parameterTypes = parameterTypes;
+        this.exceptionTypes = exceptionTypes;
         this.modifiers = modifiers;
         this.slot = slot;
     }
@@ -423,6 +436,10 @@ final class Constructor<T> {
 
     public Class<?>[] getParameterTypes() {
         return copy(parameterTypes);
+    }
+
+    public Class<?>[] getExceptionTypes() {
+        return copy(exceptionTypes);
     }
 
     public int getParameterCount() {
@@ -484,7 +501,8 @@ final class Constructor<T> {
     }
 
     public String toString() {
-        return modifierText(modifiers & ~0x80) + typeName(clazz) + "(" + typeNames(parameterTypes) + ")";
+        return modifierText(modifiers & ~0x80) + typeName(clazz) + "(" + typeNames(parameterTypes) + ")"
+                + throwsText(exceptionTypes);
     }
 
     // `c.getConstructor(types)`, or with `declared` `c.getDeclaredConstructor(types)`.
@@ -621,6 +639,11 @@ final class Constructor<T> {
             out = out + typeName(types[i]);
         }
         return out;
+    }
+
+    // The `throws` clause of a member's `toString`, empty when it declares no exception.
+    static String throwsText(Class<?>[] types) {
+        return types.length == 0 ? "" : " throws " + typeNames(types);
     }
 
     // The modifiers as `Modifier.toString` writes them, with a space after them.

@@ -45,10 +45,10 @@ const FILTERED_METHODS: &[(&str, &str)] = &[("sun.misc.Unsafe", "getUnsafe")];
 const MEMBER_CONSTRUCTORS: [(&str, &str); 3] = [
     (
         METHOD,
-        "(java.lang.Class<?>,java.lang.Class<?>,java.lang.String,java.lang.Class<?>[],java.lang.Class<?>,int,int)void",
+        "(java.lang.Class<?>,java.lang.Class<?>,java.lang.String,java.lang.Class<?>[],java.lang.Class<?>,java.lang.Class<?>[],int,int)void",
     ),
     (FIELD, "(java.lang.Class<?>,java.lang.Class<?>,java.lang.String,java.lang.Class<?>,int,int)void"),
-    (CONSTRUCTOR, "(java.lang.Class<T>,java.lang.Class<?>[],int,int)void"),
+    (CONSTRUCTOR, "(java.lang.Class<T>,java.lang.Class<?>[],java.lang.Class<?>[],int,int)void"),
 ];
 
 /// The methods of `Class` that the translator's classes answer: the method of `Class`, the
@@ -97,9 +97,9 @@ fn constructor_slot(of_abstract: bool, slot: usize) -> i32 {
 /// What a lookup of a file finds by name, of one kind: `None` for every member.
 type Names = Option<HashSet<String>>;
 
-/// A member of the table, with the class it is looked up in.
+/// A member of the table, with the class it is looked up in (`None` for `Object`).
 struct Entry<'t> {
-    found_on: usize,
+    found_on: Option<usize>,
     member: Member<'t>,
 }
 
@@ -108,7 +108,19 @@ enum Member<'t> {
     Method(usize),
     /// A field: the class that declares it, and its declaration.
     Field(usize, Node<'t>),
+    /// One of `Object`'s `hashCode`, `equals` and `toString`, which the runtime's `Object` has
+    /// (see `object`), looked up in `Object` itself: a proxy class passes them to its handler
+    /// (`program/reach/proxies.rs`).
+    Object(&'static str),
 }
+
+/// `Object`'s methods in the table: the name, the parameter types and the result, and the bits
+/// of `Modifier` (`hashCode` is `native`).
+const OBJECT_METHODS: [(&str, &[&str], &str, i32); 3] = [
+    ("hashCode", &[], "int", 0x101),
+    ("equals", &["java.lang.Object"], "boolean", 1),
+    ("toString", &[], "java.lang.String", 1),
+];
 
 impl<'t> Lowering<'t> {
     /// A lookup of `Class` by name (see the module's comment), or `None` for any other call of
@@ -481,6 +493,50 @@ impl<'t> Lowering<'t> {
                 let assign = ExprKind::Assign { op: None, target: place, value: Box::new(value) };
                 Ok(Some(vec![Stmt::Expr(self.synth(assign, pos, ty)), Stmt::Yield(var(2))]))
             }
+            (Member::Object(name), "invoke0") => {
+                let Some(at) = self.object else { return Ok(None) };
+                // `Method.invoke` checked the receiver and the arguments before; they are tested
+                // again, as for the program's methods.
+                let null = || self.synth(ExprKind::Null, pos, Type::Null);
+                let not_null = |e: Expr| {
+                    self.synth(ExprKind::Binary(BinOp::Ne, Box::new(e), Box::new(null())), pos, Type::Boolean)
+                };
+                let receiver = Box::new(var(1));
+                let (call, cond) = match *name {
+                    "hashCode" => {
+                        let call = ExprKind::MethodCall {
+                            receiver,
+                            name: name.to_string(),
+                            args: Vec::new(),
+                            resolved: Some(at.hash_code),
+                            is_super: false,
+                        };
+                        (self.synth(call, pos, Type::Int), not_null(var(1)))
+                    }
+                    "equals" => {
+                        let other = argument(2, 0, object)?;
+                        let call = ExprKind::MethodCall {
+                            receiver,
+                            name: name.to_string(),
+                            args: vec![other],
+                            resolved: Some(at.equals),
+                            is_super: false,
+                        };
+                        let both = ExprKind::Binary(
+                            BinOp::And,
+                            Box::new(not_null(var(1))),
+                            Box::new(not_null(var(2))),
+                        );
+                        (self.synth(call, pos, Type::Boolean), self.synth(both, pos, Type::Boolean))
+                    }
+                    _ => {
+                        let text = ExprKind::Builtin(Builtin::ObjectText, vec![*receiver]);
+                        (self.synth(text, pos, Type::String), not_null(var(1)))
+                    }
+                };
+                let then = Stmt::Block(vec![Stmt::Yield(self.convert(call, object))]);
+                Ok(Some(vec![Stmt::If { cond, then: Box::new(then), otherwise: None }, Stmt::Yield(null())]))
+            }
             _ => Ok(None),
         }
     }
@@ -525,12 +581,19 @@ impl<'t> Lowering<'t> {
         };
         let mut made = Vec::new();
         for (slot, entry) in entries.iter().enumerate() {
-            let found_on = literal(self.self_type(entry.found_on));
+            let found_on = literal(entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t)));
             let args = match &entry.member {
                 Member::Method(m) if class == CONSTRUCTOR => {
                     let owner = self.methods[*m].owner;
                     let slot = constructor_slot(self.types[owner].node.has_flag("ABSTRACT"), slot);
-                    vec![found_on, classes(self.param_types(*m)?, 1), int(self.modifiers(*m)), int(slot)]
+                    let types = classes(self.param_types(*m)?, 1);
+                    vec![
+                        found_on,
+                        types,
+                        classes(self.thrown_types(*m)?, 2),
+                        int(self.modifiers(*m)),
+                        int(slot),
+                    ]
                 }
                 Member::Method(m) => {
                     let declaring = literal(self.self_type(self.methods[*m].owner));
@@ -538,7 +601,17 @@ impl<'t> Lowering<'t> {
                         self.synth(ExprKind::Str(self.methods[*m].name.to_string()), pos, Type::String);
                     let ret = literal(self.return_type(node, *m)?);
                     let types = classes(self.param_types(*m)?, 3);
-                    vec![found_on, declaring, name, types, ret, int(self.modifiers(*m)), int(slot as i32)]
+                    let thrown = classes(self.thrown_types(*m)?, 5);
+                    vec![
+                        found_on,
+                        declaring,
+                        name,
+                        types,
+                        ret,
+                        thrown,
+                        int(self.modifiers(*m)),
+                        int(slot as i32),
+                    ]
                 }
                 Member::Field(declaring, decl) => {
                     let decl = *decl;
@@ -547,6 +620,25 @@ impl<'t> Lowering<'t> {
                     let modifiers = flags(decl, self.types[*declaring].node.kind() == "INTERFACE", false);
                     let declaring = literal(self.self_type(*declaring));
                     vec![found_on, declaring, name, ty, int(modifiers), int(slot as i32)]
+                }
+                Member::Object(name) => {
+                    let (_, params, ret, modifiers) =
+                        OBJECT_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Object`'s methods");
+                    let ty = |name: &str| self.ty(node, name);
+                    let types = params.iter().map(|p| ty(p)).collect::<Result<Vec<_>, _>>()?;
+                    let declaring = literal(Type::class(OBJECT));
+                    let name = self.synth(ExprKind::Str(name.to_string()), pos, Type::String);
+                    let (types, ret) = (classes(types, 3), literal(ty(ret)?));
+                    vec![
+                        found_on,
+                        declaring,
+                        name,
+                        types,
+                        ret,
+                        classes(Vec::new(), 5),
+                        int(*modifiers),
+                        int(slot as i32),
+                    ]
                 }
             };
             let new = ExprKind::New { class: t, args, ctor: Some(ctor) };
@@ -581,6 +673,8 @@ impl<'t> Lowering<'t> {
                 Member::Field(class, decl) => {
                     (slot as i32, decl, format!("{}#{}", self.types[class].javac, decl.str("name")))
                 }
+                // Without a declaration of the program, and so without annotations.
+                Member::Object(_) => continue,
             });
         }
         Ok(out)
@@ -612,7 +706,7 @@ impl<'t> Lowering<'t> {
                     }
                     for m in self.methods_of(t) {
                         if self.methods[m].name == "<init>" && self.callable(node, m)? {
-                            out.push(Entry { found_on: t, member: Member::Method(m) });
+                            out.push(Entry { found_on: Some(t), member: Member::Method(m) });
                         }
                     }
                 }
@@ -633,7 +727,7 @@ impl<'t> Lowering<'t> {
                             {
                                 continue;
                             }
-                            out.push(Entry { found_on: t, member: Member::Method(m) });
+                            out.push(Entry { found_on: Some(t), member: Member::Method(m) });
                         }
                     }
                 }
@@ -654,9 +748,20 @@ impl<'t> Lowering<'t> {
                             {
                                 continue;
                             }
-                            out.push(Entry { found_on: t, member: Member::Field(owner, decl) });
+                            out.push(Entry { found_on: Some(t), member: Member::Field(owner, decl) });
                         }
                     }
+                }
+            }
+        }
+        // `Object`'s own, which only a whole program's lookups find (`Reach::reflected`).
+        if kind == LookupKind::Method
+            && self.object.is_some()
+            && let Some(reach) = self.reach
+        {
+            for (name, ..) in OBJECT_METHODS {
+                if reach.reflected.contains(&("java.lang.Object".to_string(), name.to_string())) {
+                    out.push(Entry { found_on: None, member: Member::Object(name) });
                 }
             }
         }
@@ -674,11 +779,12 @@ impl<'t> Lowering<'t> {
             && self.plain_object != Some(t)
     }
 
-    /// Whether the method or constructor `m` can be called through the table: not generic, and
-    /// with parameters and a result that are boxed to and from `Object`.
+    /// Whether the method or constructor `m` can be called through the table: not generic, with
+    /// parameters and a result that are boxed to and from `Object`, and exceptions that are
+    /// classes of the translation (its `getExceptionTypes`).
     fn callable(&self, node: Node<'t>, m: usize) -> Result<bool, Error> {
         let info = &self.methods[m];
-        if info.node.list("typeParameters").next().is_some() {
+        if info.node.list("typeParameters").next().is_some() || self.thrown_types(m).is_err() {
             return Ok(false);
         }
         let Ok(params) = self.param_types(m) else { return Ok(false) };

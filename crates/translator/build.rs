@@ -14,7 +14,7 @@ use std::process::Command;
 
 /// The packages of javac's implementation that `JavaTree` and `java/BytecodeNames.java`, which
 /// reads what javac's code generator decided, use (see `javac.rs`).
-const JAVAC_PACKAGES: [&str; 5] = ["api", "code", "tree", "util", "jvm"];
+const JAVAC_PACKAGES: [&str; 6] = ["api", "code", "tree", "util", "jvm", "main"];
 
 fn main() {
     println!("cargo:rerun-if-changed=java/JavaTree.java");

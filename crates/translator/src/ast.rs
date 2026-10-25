@@ -326,6 +326,10 @@ pub struct Class {
     /// (`lower::handles`). In an array that threads share, they are `SeqCst` loads and stores of
     /// the element's cell.
     pub volatile_elements: HashSet<ExprId>,
+    /// The proxy classes that reachability wrote (`program/reach/proxies.rs`), whose names
+    /// `TranslatedProxies` gives them at run time (`java::name_proxy_class`): the name of one's
+    /// object is asked of its `java::Class`.
+    pub proxy_classes: HashSet<usize>,
     /// The classes whose objects the receiver of each instance call in code that can run may be,
     /// by the receiver's id, from the points-to facts of `analysis::live_methods` (a whole
     /// program's); sorted. A call that is not here may be on an object of any class its type
@@ -619,8 +623,9 @@ pub struct Method {
     /// The type parameters of a generic method that is a Rust generic, as types of kind `Param`.
     pub type_params: Vec<Type>,
     /// The code is the JDK's, though the class is the program's: `CharSequence`'s default
-    /// `getChars` in a class without one of its own (`lower::object`). Its class file is the
-    /// JDK's, which has the names of its locals.
+    /// `getChars` in a class without one of its own (`lower::object`), and the methods of a proxy
+    /// class (`program/reach/proxies.rs`), which stand for what the JDK's `ProxyGenerator` writes.
+    /// Its class file is the JDK's, which has the names of its locals.
     pub jdk_code: bool,
     /// The atomic update of a field of the method's class through `Unsafe` that the method makes,
     /// a method that lowering adds (`lower::handles`): its body reads, compares and writes the

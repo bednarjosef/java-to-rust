@@ -196,7 +196,12 @@ class Module {
     /** The module of the class {@code c}: {@code c.getModule()}. */
     @Add
     static Module of(Class<?> c) {
-        String module = moduleOf0(c.getPackageName());
+        String pn = c.getPackageName();
+        if (dynamicProxy0(c)) {
+            throw new UnsupportedOperationException(
+                    "the module of a proxy class, a dynamic module, which the translation does not make");
+        }
+        String module = moduleOf0(pn);
         if (module != null) {
             return named().get(module);
         }
@@ -593,6 +598,13 @@ class Module {
     /** The name of the named module with the package {@code pn}, or null. */
     @Add
     private static native String moduleOf0(String pn);
+
+    /**
+     * Whether {@code c} is a proxy class defined in a dynamic module ({@code jdk.proxy1}), which
+     * the translation has no {@code Module} of ({@code java::in_dynamic_module}).
+     */
+    @Add
+    private static native boolean dynamicProxy0(Class<?> c);
 
     /**
      * What the named module {@code name} declares and holds, each a line of words: {@code open},

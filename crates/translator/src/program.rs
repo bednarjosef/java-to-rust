@@ -245,6 +245,8 @@ fn load(
     let javac_error = |(file, error)| modules::explain(ProgramError { file, error }, &modules);
     let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let start = std::time::Instant::now();
+    // Where the proxy classes that reachability finds are written (`reach::ProxyClass`).
+    let proxies = ProxySources::new(program).map_err(fail)?;
     let (mut session, mut new) = javac::Session::start(
         &files,
         &sourcepath(program),
@@ -310,8 +312,13 @@ fn load(
             rounds.add(&trees[old..]).map_err(fail)?;
         }
         reaching += start.elapsed();
+        // The proxy classes that javac is to add, by their files, rather than by name.
+        let made = rounds.proxy_classes();
+        let mut asked = rounds.missing();
+        asked.retain(|class| !made.iter().any(|m| m.class == *class));
+        asked.extend(proxies.write(&made).map_err(fail)?.iter().map(|file| format!("+{}", file.display())));
         let start = std::time::Instant::now();
-        new = session.load(&rounds.missing()).map_err(javac_error)?;
+        new = session.load(&asked).map_err(javac_error)?;
         javac += start.elapsed();
         if crate::timings::enabled() {
             // Each round as it ends, for a program whose loading takes long.
@@ -351,6 +358,53 @@ fn load(
         );
     }
     Ok((units, reach))
+}
+
+/// The directory that the proxy classes of a translation with libraries are written to as
+/// reachability finds them (`reach::ProxyClass`), for javac to add to the program by their files
+/// (`javac::Session::load`): one of its own under the system's temporary directory, removed
+/// when the translation has loaded its units.
+struct ProxySources {
+    root: Option<PathBuf>,
+}
+
+impl ProxySources {
+    fn new(program: &Program) -> Result<ProxySources, String> {
+        if program.libraries.is_empty() {
+            return Ok(ProxySources { root: None });
+        }
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("java-to-rust-proxies-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).map_err(|e| format!("cannot make {}: {e}", root.display()))?;
+        Ok(ProxySources { root: Some(root) })
+    }
+
+    /// Writes the sources of the classes that are not written yet, and returns their files.
+    fn write(&self, classes: &[reach::ProxyClass]) -> Result<Vec<PathBuf>, String> {
+        let Some(root) = &self.root else { return Ok(Vec::new()) };
+        let mut written = Vec::new();
+        for made in classes {
+            let file = root.join(format!("{}.java", made.class.replace('.', "/")));
+            if file.exists() {
+                continue;
+            }
+            let wrote = std::fs::create_dir_all(file.parent().expect("a file is in the directory"))
+                .and_then(|()| std::fs::write(&file, &made.source));
+            wrote.map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+            written.push(file);
+        }
+        Ok(written)
+    }
+}
+
+impl Drop for ProxySources {
+    fn drop(&mut self) {
+        if let Some(root) = &self.root {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
 }
 
 /// Values that stay where they are while more are added, so that the rounds of `load` can keep

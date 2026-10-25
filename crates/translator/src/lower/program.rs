@@ -293,6 +293,7 @@ fn lower_into<'t>(
         element_classes: lowering.element_classes.take(),
         array_tests: lowering.array_tests.take(),
         volatile_elements: lowering.volatile_elements.take(),
+        proxy_classes: (0..lowering.types.len()).filter(|&t| lowering.is_proxy_class(t)).collect(),
         receivers: Default::default(),
     };
     Ok((class, lowering.real.clone(), failed))

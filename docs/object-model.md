@@ -556,7 +556,9 @@ the program's classes implement:
   `InvocationHandler`, `java.security.Key` and its private and public keys, `KeySpec`,
   `AlgorithmParameterSpec`, `PrivilegedExceptionAction`) are translated from the JDK's sources as
   any interface of the program (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their
-  objects in the JDK (`Proxy`, a provider's keys, `getGenericSuperclass`) stays untranslated.
+  objects in the JDK (a provider's keys, `getGenericSuperclass`) stays untranslated, except
+  `Proxy`, which makes the proxy classes the translator writes (see
+  [reflection-and-plugins.md](reflection-and-plugins.md)).
   `Class` implements `Type` in Java, and so does the runtime's class where the program has
   `Type` (and `TypeDescriptor` and `Serializable`, `CLASS_VALUE_INTERFACES` in `ast.rs`): a class
   held as a `Type` is the variant of the runtime's `java.lang.Class` in `Type`'s enum, found again

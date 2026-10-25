@@ -308,6 +308,19 @@ pub enum Native {
     PosixFadvise,
     /// `LinuxNativeDispatcher.directCopy0(dst, src, cancel)`: answers `IOStatus.UNSUPPORTED`.
     DirectCopy,
+    /// `TranslatedProxies.name0(c, name, module, dynamic)`: gives the proxy class `c` its run-time
+    /// name, none that is known for an empty name, the module and loader that a
+    /// `ClassCastException` names, and whether that module is a dynamic one
+    /// (`java::name_proxy_class`, see `java/overlay/java/lang/reflect/TranslatedProxies.java`).
+    NameProxyClass,
+    /// `Module.dynamicProxy0(c)`: whether `c` is a proxy class in a dynamic module
+    /// (`java::in_dynamic_module`).
+    DynamicProxy,
+    /// `TranslatedAnnotations.made0()`, which the patched `AnnotationInvocationHandler` calls as
+    /// an annotation is made, and `TranslatedProxies.annotationsMade0()`, whether one was: Java
+    /// makes an annotation as a proxy, of a proxy class defined then (`java::note_annotation`).
+    NoteAnnotation,
+    AnnotationsMade,
     /// `UnixFileSystem.bufferedCopy0Errno(dst, src, address, size, cancel)` (the patch's name for
     /// the JDK's `bufferedCopy0`): copies through the buffer at `address`, and answers the `errno`
     /// of a failed read or write (`file_copy.rs`).
@@ -403,6 +416,14 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ) => Native::CopyMemory { swap: true },
         ("jdk.internal.misc.Unsafe", "allocateMemory0", "(long)long") => Native::AllocateNative,
         ("jdk.internal.misc.UnsafeConstants", "pageSize0", "()int") => Native::PageSize,
+        (
+            "java.lang.reflect.TranslatedProxies",
+            "name0",
+            "(java.lang.Class<?>,java.lang.String,java.lang.String,boolean)void",
+        ) => Native::NameProxyClass,
+        ("java.lang.Module", "dynamicProxy0", "(java.lang.Class<?>)boolean") => Native::DynamicProxy,
+        ("java.lang.reflect.TranslatedProxies", "annotationsMade0", "()boolean") => Native::AnnotationsMade,
+        ("sun.reflect.annotation.TranslatedAnnotations", "made0", "()void") => Native::NoteAnnotation,
         ("jdk.internal.misc.Unsafe", "reallocateMemory0", "(long,long)long") => Native::ReallocateNative,
         ("jdk.internal.misc.Unsafe", "freeMemory0", "(long)void") => Native::FreeNative,
         // A transfer is copied by the JDK's own fallback, and a mapping by `MapFile`, which

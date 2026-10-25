@@ -51,7 +51,8 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol,
         args: &mut Vec<Expr>,
     ) -> Result<Option<ExprKind>, Error> {
-        if symbol.owner != MEMBERS || !symbol.native {
+        // `made0` is the runtime's (`Native::NoteAnnotation`).
+        if symbol.owner != MEMBERS || !symbol.native || symbol.name != "members0" {
             return Ok(None);
         }
         let pos = node.pos();

@@ -150,8 +150,9 @@ skipped. The error names the patch's file and line, and the JDK's file:
 |---|---|
 | `java/io/PrintStream.java` | encodes text itself with `String.getBytes` instead of through a `StreamEncoder` |
 | `java/io/InputStreamReader.java`, `OutputStreamWriter.java` | decode and encode the common charsets themselves instead of through `StreamDecoder` and `StreamEncoder` |
-| `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; no layers but the boot layer |
+| `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; no layers but the boot layer, and no dynamic modules: the module of a proxy class in one throws |
 | `java/lang/Package.java` | a package of the translation, made by `Class.getPackage()`; the manifest attributes of an unnamed module's package and every package's annotations throw; not an `AnnotatedElement`; `getPackage(name)` and `getPackages()` throw, as the lowering answers or rejects their calls |
+| `java/lang/reflect/Proxy.java` | defines and finds the proxy classes that the translator wrote through `TranslatedProxies` (`program/reach/proxies.rs`), without generating or caching classes; `InvocationHandler.invokeDefault` throws |
 | `java/net/InetAddress.java`, `Inet4AddressImpl.java`, `Inet6AddressImpl.java` | names looked up by the system through `TranslatedNet`; no hosts file and no resolver of the program's own |
 | `java/security/MessageDigest.java` | `getInstance(String)` makes the `SUN` provider's digests (MD2, MD5, SHA-1, SHA-2, SHA-3) by name through `TranslatedDigests`, without `Provider`, `Security` or `GetInstance`; `toString` names `SUN`, `getProvider()` is null |
 | `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |

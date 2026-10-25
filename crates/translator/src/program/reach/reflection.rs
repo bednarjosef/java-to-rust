@@ -35,6 +35,8 @@ use super::{
 };
 use crate::value::Value;
 
+const OBJECT: &str = "java.lang.Object";
+
 /// What a lookup looks for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Kind {
@@ -154,6 +156,7 @@ impl<'t> Walk<'t> {
             let service = self.class_value(service);
             self.service_loads.insert(service);
         }
+        self.proxy_scan(node);
         match text(node, "kind") {
             "METHOD_INVOCATION" | "NEW_CLASS" => {
                 let symbol = &node["symbol"];
@@ -197,7 +200,7 @@ impl<'t> Walk<'t> {
     /// (see the module's comment), and whether that is anything new: the walk then goes on, as
     /// what it reaches may name more classes and more strings.
     pub(super) fn reflect(&mut self) -> bool {
-        let loaded = self.load_services();
+        let loaded = self.load_services() | self.make_proxies();
         if self.lookups.is_empty() {
             return loaded;
         }
@@ -254,6 +257,20 @@ impl<'t> Walk<'t> {
                         .clone()
                 }
             };
+            // `Object`'s `hashCode`, `equals` and `toString`, which the runtime's `Object` has
+            // (`lower/reflection.rs`): the methods that a proxy class passes to its handler.
+            if lookup.kind == Kind::Method && classes.iter().any(|c| c == OBJECT) {
+                for (name, _, _) in super::proxies::OBJECT_METHODS {
+                    let wanted = match &lookup.name {
+                        Some(n) if !lookup.every => n == name,
+                        _ => lookup.every || self.strings.contains(*name),
+                    };
+                    let key = (OBJECT.to_string(), name.to_string());
+                    if wanted && !self.reflected_keys.contains(&key) && seen.insert(key.clone()) {
+                        found.push((OBJECT.to_string(), name.to_string(), key, true));
+                    }
+                }
+            }
             for class in classes.into_iter().filter(|c| self.classes.contains_key(c)) {
                 let owners = supertypes.entry(class.clone()).or_insert_with(|| self.supertypes_of(&class));
                 let names: Vec<String> = match (&lookup.name, lookup.kind) {
@@ -324,7 +341,7 @@ impl<'t> Walk<'t> {
     }
 
     /// What the `Class` value `node` of the code being scanned is.
-    fn class_value(&self, node: &Value) -> ClassValue {
+    pub(super) fn class_value(&self, node: &Value) -> ClassValue {
         if let Some(class) = literal_class(node) {
             return ClassValue::Literal(class);
         }
@@ -338,9 +355,9 @@ impl<'t> Walk<'t> {
         ClassValue::Other
     }
 
-    /// Adds the services that the `Class` value `value` can be to `out`, and whether it can only
+    /// Adds the classes that the `Class` value `value` can be to `out`, and whether it can only
     /// be those (see the module's comment); `seen` holds the parameters already followed.
-    fn services_of(
+    pub(super) fn classes_of(
         &self,
         value: &ClassValue,
         seen: &mut HashSet<(MethodKey, usize)>,
@@ -370,7 +387,7 @@ impl<'t> Walk<'t> {
             return false;
         }
         let passed = self.class_values.get(&(method.clone(), index)).cloned().unwrap_or_default();
-        passed.iter().all(|value| self.services_of(value, seen, out))
+        passed.iter().all(|value| self.classes_of(value, seen, out))
     }
 
     /// Makes reachable the providers of the services that reachable code loads, each with what
@@ -383,7 +400,7 @@ impl<'t> Walk<'t> {
         }
         let (mut services, mut seen, mut any) = (BTreeSet::new(), HashSet::new(), false);
         for value in &self.service_loads {
-            any |= !self.services_of(value, &mut seen, &mut services);
+            any |= !self.classes_of(value, &mut seen, &mut services);
         }
         let mut new = false;
         for (service, provider, modular) in self.providers.clone() {
@@ -419,7 +436,7 @@ impl<'t> Walk<'t> {
     }
 
     /// The class `class` and its supertypes, directly or not.
-    fn supertypes_of(&self, class: &str) -> Vec<String> {
+    pub(super) fn supertypes_of(&self, class: &str) -> Vec<String> {
         let mut out = vec![class.to_string()];
         let mut at = 0;
         while at < out.len() {

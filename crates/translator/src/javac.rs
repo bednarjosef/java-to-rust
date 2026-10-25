@@ -44,7 +44,7 @@ fn java(main: &str, options: &[&str]) -> Command {
 }
 
 /// The packages of javac's implementation that the programs of `java/` use.
-const JAVAC_PACKAGES: [&str; 5] = ["api", "code", "tree", "util", "jvm"];
+const JAVAC_PACKAGES: [&str; 6] = ["api", "code", "tree", "util", "jvm", "main"];
 
 pub fn tree(source: &str) -> Result<Value, Error> {
     let fail = |message: String| Error { pos: Pos::default(), message };

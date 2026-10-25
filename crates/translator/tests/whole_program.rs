@@ -907,3 +907,47 @@ fn loading_native_libraries_needs_native_access() {
         "{stderr}"
     );
 }
+
+/// What a translation's proxies cannot do throws (`java/overlay/java/lang/reflect/TranslatedProxies.java`,
+/// `corpus/whole-program/Proxies.java` for what they do): a list of interfaces computed at run
+/// time has no proxy class, and a proxy class in a dynamic module has no `Module`.
+#[test]
+fn what_proxies_cannot_do_throws() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-proxies");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    let java = "import java.lang.reflect.Proxy;
+public class Main {
+    public interface Named { String name(); }
+    public static void main(String[] args) throws Exception {
+        Class<?>[] list = new Class<?>[args.length];
+        for (int i = 0; i < list.length; i++) {
+            list[i] = Class.forName(args[i]);
+        }
+        Object computed = Proxy.newProxyInstance(Main.class.getClassLoader(), list, (p, m, a) -> null);
+        Object named = Proxy.newProxyInstance(Main.class.getClassLoader(), new Class<?>[] {Named.class}, (p, m, a) -> \"n\");
+        System.out.println(computed + \" \" + named.getClass().getModule());
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    for wanted in ["a proxy class of ", "the module of a proxy class, a dynamic module"] {
+        assert!(rust.contains(wanted), "no {wanted} in the translation");
+    }
+}

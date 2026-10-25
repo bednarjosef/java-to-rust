@@ -431,8 +431,7 @@ These are plans. Work on several of them is under way but not merged yet.
 4. The translator's refusals still open from the last census, by kind:
    - reflection: generic types of interfaces, methods and fields; type variables; the rest of
      `Class`'s interfaces (`AnnotatedElement`, `GenericDeclaration`, ...); member and parameter
-     annotations; `Method.getExceptionTypes` and `toGenericString`; dynamic proxies
-     (`Proxy.newProxyInstance`);
+     annotations; `Method.toGenericString`;
    - method handles: constant handles (`lookup`, `findVirtual`, `insertArguments`, ...), the
      handles Netty builds at run time, byte array and byte buffer view handles, and field
      updaters' `getAndUpdate`/`accumulateAndGet` loops;

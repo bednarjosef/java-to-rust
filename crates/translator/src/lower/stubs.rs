@@ -64,7 +64,7 @@ fn stub_method(class: &str, name: &str, sig: &str) -> Option<Value> {
         })
         .collect();
     Some(json!({"kind": "METHOD", "name": name, "modifiers": [], "parameters": parameters,
-        "typeParameters": [], "thrown": [], "returnType": {"kind": "IDENTIFIER", "javaType": ret},
+        "typeParameters": [], "throws": [], "returnType": {"kind": "IDENTIFIER", "javaType": ret},
         "body": {"kind": "BLOCK", "statements": []},
         "symbol": {"kind": "METHOD", "name": name, "owner": class, "static": false, "type": sig}}))
 }

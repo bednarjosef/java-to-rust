@@ -153,7 +153,7 @@ public class JavaTree {
         PrintStream stdout = new PrintStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 1 << 16),
                 false, StandardCharsets.UTF_8);
         if (serve) {
-            serve((JavacTaskImpl) task, units, diagnostics, stdout);
+            serve((JavacTaskImpl) task, fileManager, units, diagnostics, stdout);
             return;
         }
         task.analyze();
@@ -199,11 +199,12 @@ public class JavaTree {
      * {@code {"units":[...]}}; then reads lines of qualified class names separated by commas from
      * standard input, and answers each with a line of the same form: the units that declare those
      * classes, attributed, that it has not printed before. A class that the source path does not
-     * have, or not as a source file, adds no unit. It ends at the end of the input. javac
+     * have, or not as a source file, adds no unit; a name {@code +FILE} adds the source file
+     * {@code FILE}. It ends at the end of the input. javac
      * attributes a unit as a whole run would, so the units are the same, and only those asked for
      * are attributed at all.
      */
-    private static void serve(JavacTaskImpl task, List<CompilationUnitTree> given,
+    private static void serve(JavacTaskImpl task, StandardJavaFileManager fileManager, List<CompilationUnitTree> given,
             DiagnosticCollector<JavaFileObject> diagnostics, PrintStream stdout) throws IOException {
         Trees trees = Trees.instance(task);
         // The given units' classes have symbols once entered.
@@ -236,6 +237,20 @@ public class JavaTree {
             }
             units = new ArrayList<>();
             for (String name : line.split(",")) {
+                // A file to add, which javac would not find on the source path: one written since
+                // javac looked in its package (see `program/reach/proxies.rs`).
+                if (name.startsWith("+")) {
+                    com.sun.tools.javac.main.JavaCompiler javac = com.sun.tools.javac.main.JavaCompiler.instance(context);
+                    JavaFileObject file = fileManager.getJavaFileObjects(name.substring(1)).iterator().next();
+                    com.sun.tools.javac.tree.JCTree.JCCompilationUnit unit = javac.parse(file);
+                    // In the module that every source is in (see `oneModule`).
+                    unit.modle = ((com.sun.tools.javac.tree.JCTree.JCCompilationUnit) given.get(0)).modle;
+                    javac.enterTrees(com.sun.tools.javac.util.List.of(unit));
+                    if (printed.add(unit)) {
+                        units.add(unit);
+                    }
+                    continue;
+                }
                 TypeElement type = name.isEmpty() ? null : elements.getTypeElement(name);
                 TreePath path = type == null ? null : trees.getPath(outermost(type));
                 if (path != null && printed.add(path.getCompilationUnit())) {
@@ -659,6 +674,12 @@ public class JavaTree {
         string(typeText(e.asType()), out);
         if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {
             overrides((ExecutableElement) e, t, out);
+            // The erased signature of an interface's method, which a proxy class declares it
+            // with (`program/reach/proxies.rs`).
+            if (t.getKind() == ElementKind.INTERFACE) {
+                out.append(",\"erased\":");
+                string(typeText(types.erasure(e.asType())), out);
+            }
         }
         if (declaration && e instanceof TypeElement t && (e.getKind() == ElementKind.CLASS || e.getKind() == ElementKind.ENUM)) {
             inherits(t, out);

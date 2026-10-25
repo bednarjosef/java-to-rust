@@ -199,6 +199,16 @@ impl<'t> Lowering<'t> {
             .collect()
     }
 
+    /// The types of the `throws` clause of method `index`.
+    pub(super) fn thrown_types(&self, index: usize) -> Result<Vec<Type>, Error> {
+        let owner = self.methods[index].owner;
+        self.methods[index]
+            .node
+            .list("throws")
+            .map(|t| self.declared_type(t, t.java_type(), owner, Some(index)))
+            .collect()
+    }
+
     /// The arguments of a call of method `index`, each converted to its parameter's type.
     pub(super) fn convert_args(&self, index: Option<usize>, args: Vec<Expr>) -> Result<Vec<Expr>, Error> {
         let Some(index) = index else { return Ok(args) };

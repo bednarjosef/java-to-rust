@@ -133,6 +133,19 @@ impl<'a> Gen<'a> {
                 let entries = format!("{}()", self.runtime("environ"));
                 Code::atom(format!("{}({entries})", self.array_maker("from_vec", ty)))
             }
+            Native::NameProxyClass => {
+                let class = self.value(&args[0], Type::JavaClass).text;
+                let name = self.text_ref(&args[1]);
+                let module = self.text_ref(&args[2]);
+                let dynamic = self.value(&args[3], Type::Boolean).text;
+                call(self, "name_proxy_class", vec![class, name, module, dynamic])
+            }
+            Native::DynamicProxy => {
+                let class = self.value(&args[0], Type::JavaClass).text;
+                call(self, "in_dynamic_module", vec![class])
+            }
+            Native::NoteAnnotation => call(self, "note_annotation", vec![]),
+            Native::AnnotationsMade => call(self, "annotations_made", vec![]),
             Native::FreeNative => {
                 let address = self.value(&args[0], Type::Long).text;
                 call(self, "free_native", vec![address])

@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
 mod initialize;
+mod proxies;
 mod reflection;
 mod sequential;
 mod stubs;
@@ -24,6 +25,7 @@ pub use by_name::{
     class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes, module_for_name,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
+pub use proxies::ProxyClass;
 pub use reflection::{Kind as LookupKind, Lookup, lookup};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
@@ -94,6 +96,9 @@ pub struct Reach {
     /// The members that reflection looks up by name, as (the class it looks in, the member's
     /// name), `<init>` for constructors (`reflection.rs`).
     pub reflected: BTreeSet<(String, String)>,
+    /// The proxy classes of the lists of interfaces that reachable code makes proxies of
+    /// (`proxies.rs`).
+    pub proxies: BTreeMap<Vec<String>, ProxyClass>,
     /// The modules of the program's roots, which its `java.lang.Module` and `ClassLoader` answer with
     /// (`modules::contents`, `lower/modules.rs`); set after reachability.
     pub modules: Vec<super::modules::Contents>,
@@ -239,6 +244,8 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
 /// reflection table (`reflection.rs`), and so are `InvocationTargetException`, which wraps the
 /// exceptions of what they call, and `UndeclaredThrowableException` (`java/Standard.java`).
+/// `Proxy` is the superclass of the proxy classes that the translator writes, which its
+/// `TranslatedProxies` defines (`proxies.rs`).
 /// `TypeDescriptor` is the interface of descriptors that `java.lang.constant`'s `ClassDesc` and
 /// `MethodTypeDesc` implement, plain methods over the descriptor strings.
 pub const TRANSLATED_ANYWAY: &[&str] = &[
@@ -353,6 +360,8 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.reflect.Method",
     "java.lang.reflect.Field",
     "java.lang.reflect.Constructor",
+    "java.lang.reflect.Proxy",
+    "java.lang.reflect.TranslatedProxies",
 ];
 
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
@@ -1458,20 +1467,6 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.lang.System", "getLogger", "(java.lang.String)java.lang.System.Logger"),
         ("java.lang.TranslatedSystemLogger", "getLogger"),
     ),
-    // Whether a class is a proxy's, and a proxy's handler: a translation makes no proxies but its
-    // annotations, which are their own handlers (`java/lang/TranslatedProxies.java`).
-    (
-        ("java.lang.reflect.Proxy", "isProxyClass", "(java.lang.Class<?>)boolean"),
-        ("java.lang.TranslatedProxies", "isProxyClass"),
-    ),
-    (
-        (
-            "java.lang.reflect.Proxy",
-            "getInvocationHandler",
-            "(java.lang.Object)java.lang.reflect.InvocationHandler",
-        ),
-        ("java.lang.TranslatedProxies", "getInvocationHandler"),
-    ),
     // An action run with the caller's privileges, which, with no security manager, is running it,
     // a checked exception it throws wrapped in a `PrivilegedActionException`
     // (`java/lang/TranslatedAccessController.java`). The overloads that take an
@@ -2132,6 +2127,19 @@ impl<'t> Rounds<'t> {
         missing.into_iter().cloned().collect()
     }
 
+    /// The proxy classes that reachable code makes, whose sources `load` writes for javac
+    /// (`proxies.rs`).
+    pub fn proxy_classes(&self) -> Vec<ProxyClass> {
+        let walks = self.sequential.iter().chain(self.parallel.as_ref().filter(|_| !self.stays_sequential));
+        let mut out: Vec<ProxyClass> = Vec::new();
+        for made in walks.flat_map(|walk| walk.reach.proxies.values()) {
+            if !out.contains(made) {
+                out.push(made.clone());
+            }
+        }
+        out
+    }
+
     /// What reachable code uses, over the units so far.
     pub fn finish(self) -> Reach {
         if let Some(walk) = &self.sequential {
@@ -2248,6 +2256,14 @@ struct Walk<'t> {
     /// The providers found whose classes no unit declares yet, so that what makes them
     /// (`load_services`) is reached once a later round declares them.
     unmade: BTreeSet<String>,
+    /// The lists of interfaces that the creations of proxies of reachable code pass, as their
+    /// `Class` values (`None` for a list that is not an array creation); the proxy classes whose
+    /// constructors are not reachable yet, as no unit declares them; the lists that have no
+    /// proxy class; and the classes that the lists wait for (`proxies.rs`).
+    proxy_creations: BTreeSet<Option<Vec<reflection::ClassValue>>>,
+    unmade_proxies: BTreeSet<String>,
+    proxy_failed: BTreeSet<Vec<String>>,
+    proxy_waiting: HashSet<String>,
     /// With `JAVA_TO_RUST_REACH_WHY`, the item whose visit first made each item reachable.
     why: Option<HashMap<Item, Item>>,
     /// The `then` branches of the `if`s that test for a class without objects
@@ -2629,7 +2645,7 @@ impl<'t> Walk<'t> {
             self.reach.dormant.insert(key.clone());
             self.waiting.entry(class.clone()).or_default().push(key);
             self.work.push(Item::Class(class));
-            for part in ["typeParameters", "returnType", "parameters", "thrown"] {
+            for part in ["typeParameters", "returnType", "parameters", "throws"] {
                 self.scan(&node[part]);
             }
             return;

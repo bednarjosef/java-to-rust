@@ -87,8 +87,10 @@ program where such a lookup can happen, so they can be checked before the progra
   fields, or only the class of the receiver when it is a class literal. The member names are
   the spelled-out name, or for a computed name any string literal of reachable code, or every
   member for `getMethods()` and its relatives. Reachability finds these
-  (`program/reach/reflection.rs`, kept in `Reach::reflected`). In a single file the candidates
-  are its classes and the names in its string literals (`lower/reflection.rs`, `file_names`).
+  (`program/reach/reflection.rs`, kept in `Reach::reflected`). Of `Object`'s methods, the table
+  holds `hashCode`, `equals` and `toString`, when code looks them up. In a single file the
+  candidates are its classes and the names in its string literals (`lower/reflection.rs`,
+  `file_names`).
   `Method`, `Field` and `Constructor` are the translator's own classes
   (`java/Reflection.java`). Each holds a slot in the table, and `Method.invoke`, `Field.get` and
   `set` (with their typed forms) and `Constructor.newInstance` are a `switch` over the slots,
@@ -226,36 +228,33 @@ handles.
   `Reach::reflected` and `Reach::services`) in a whole program, and to `file_names` in a single
   file. The rest of the table needs nothing new.
 - **The report** of the lookups that cannot be resolved when translating is not written yet.
-- **Proxies.** `Proxy.newProxyInstance` is still rejected, so a translation makes no proxies
-  but its annotation objects, which Java makes as proxies and the translation as the patched
-  `AnnotationInvocationHandler` itself (see below). `Proxy.isProxyClass` and
-  `getInvocationHandler` are redirected to `java/overlay/java/lang/TranslatedProxies.java`
-  (`REDIRECTED_CALLS`): no class is a proxy class, and a non-proxy's handler is Java's
-  `IllegalArgumentException`. An annotation's class, a proxy class in Java, throws
-  `UnsupportedOperationException` instead, since code that finds a proxy class goes on to treat
-  it as one (JMX's `Introspector` takes its first interface). JNA's `Native.synchronizedLibrary`
-  and `getNativeLibrary` and its `CallbackReference` ask this of objects that only
-  `newProxyInstance` makes.
-
-  *Plan for `newProxyInstance`.* A list of interfaces known when translating (class literals
-  in an array creation) gets one synthetic proxy class, declared as a lambda's class is
-  (`lower/lambdas.rs`): it implements the interfaces and holds the handler, and each method boxes
-  its arguments into an `Object[]` and calls `h.invoke(this, m, args)`, `m` the interface
-  method's `Method` from the reflection table (reachability puts the interfaces' methods in it),
-  then unboxes the result: `null` for a primitive is the `NullPointerException` whose message
-  names `InvocationHandler.invoke(Object, java.lang.reflect.Method, Object[])` as the return
-  value, a value of another type a `ClassCastException`, and a checked exception that the method
-  does not declare is wrapped in an `UndeclaredThrowableException`. `equals`, `hashCode` and
-  `toString` go to the handler too, with `Object`'s `Method`s, which the table does not hold yet
-  (members of the runtime's classes are not in it). Java 26 names a proxy class `$ProxyN` in the
-  package of a non-public interface and `jdk.proxyK.$ProxyN` for public ones (`K` numbering the
-  class loaders' dynamic modules), `N` counting every proxy class as it is defined, annotations'
-  included; matching those names needs a run-time counter that the annotation objects also
-  advance. Every caller in the Minecraft census (JNA's `Native.load` and `CallbackReference`,
-  JMX's `JMX.newMBeanProxy` and `MXBeanLookup`, JFR's `AnnotationConstruct`, netty's
-  `BouncyCastleAlpnSslUtils`) passes a list computed at run time (a `Class` parameter, or a class
-  found by name), so covering them needs a proxy class for each interface that such code can be
-  given, chosen as the reflection table's candidates are, and a test of the list against them.
+- **Proxies.** `Proxy.newProxyInstance` and `getProxyClass` in a translation with the JDK's
+  sources use proxy classes that the translator writes as Java source, as the JDK's
+  `ProxyGenerator` writes a class file (`program/reach/proxies.rs`), one for each list of
+  interfaces that reachable code can pass. The lists are chosen as `ServiceLoader`'s providers
+  are: the array of interfaces must be an array creation, each element a class literal, a `Class`
+  parameter of a method that only its calls give values, or, alone in the array, any interface
+  whose class literal reachable code has or whose name a string literal spells out. A class
+  extends `Proxy`, implements the interfaces, and has a method for `hashCode`, `equals`,
+  `toString` and each method of the interfaces, which calls the handler with the proxy, the
+  method's `Method` from the reflection table (`Object`'s three are in it too) and the arguments
+  boxed. Its result is cast or unboxed with Java's `ClassCastException` and
+  `NullPointerException`, and a checked exception the method does not declare is wrapped in an
+  `UndeclaredThrowableException`. The patched `Proxy` (`java/patches/java/lang/reflect/Proxy.java`)
+  calls `java/overlay/java/lang/reflect/TranslatedProxies.java`, which checks the interfaces as
+  Java does, with its messages, and defines a class when its list is first asked for: it gets
+  Java's run-time name then, `jdk.proxy1.$Proxy0` (`$ProxyN` in the package of a non-public
+  interface), which `getName`, `getSimpleName` and the messages of a `ClassCastException` give
+  (the runtime's `proxy_classes.rs`). `isProxyClass` and `getInvocationHandler` work on them. A
+  list without a class throws `UnsupportedOperationException`, and so do a second class loader
+  for a list, the module, class loader and package of a class in a dynamic module (there are
+  none in a translation), a default method called through `InvocationHandler.invokeDefault`, and
+  the name of a proxy class defined after an annotation object was made: Java makes annotations as
+  proxies, which numbers the classes defined after them, while the translation makes them as the
+  patched `AnnotationInvocationHandler` itself (see below). `isProxyClass` of an annotation's
+  class throws too, since code that finds a proxy class goes on to treat it as one (JMX's
+  `Introspector` takes its first interface). In a translation of single files,
+  `Proxy.newProxyInstance` is rejected.
 - **Annotations read by reflection**, method handles and `java.lang.invoke` are still
   rejected, except a class's `getAnnotation(A.class)`, a chain of tests of the class against
   those whose declarations have `A`, each making the annotation from the declared values and the

@@ -24,6 +24,12 @@ final class TranslatedAnnotations {
     static native String[] members0(Class<?> type);
 
     /**
+     * Notes that an annotation is made, which Java makes as a proxy, of a proxy class that it
+     * may define then and number (see {@code java/lang/reflect/TranslatedProxies.java}).
+     */
+    static native void made0();
+
+    /**
      * The annotation of type {@code type} that a declaration has, as {@code AnnotationParser}
      * makes it: the defaults of the type's members ({@code defaults}, names and values in turn,
      * in the order of the type's declaration), with the values that the declaration gives
