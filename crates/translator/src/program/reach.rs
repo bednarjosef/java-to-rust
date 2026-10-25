@@ -2281,6 +2281,10 @@ struct Walk<'t> {
     classes: HashMap<String, (&'t Value, Option<String>)>,
     methods: HashMap<MethodKey, &'t Value>,
     fields: HashMap<FieldKey, &'t Value>,
+    /// The methods by class and name, and the names of the fields by class, for the lookups of
+    /// reflection (`reflection.rs`).
+    methods_by_name: HashMap<String, BTreeMap<String, Vec<MethodKey>>>,
+    fields_by_class: HashMap<String, BTreeSet<String>>,
     /// The direct supertypes of each class.
     supertypes: HashMap<String, Vec<String>>,
     /// The methods that override each method, as javac reports them.
@@ -2504,6 +2508,8 @@ impl<'t> Walk<'t> {
             classes: std::mem::take(&mut self.classes),
             methods: std::mem::take(&mut self.methods),
             fields: std::mem::take(&mut self.fields),
+            methods_by_name: std::mem::take(&mut self.methods_by_name),
+            fields_by_class: std::mem::take(&mut self.fields_by_class),
             supertypes: std::mem::take(&mut self.supertypes),
             overriders: std::mem::take(&mut self.overriders),
             sequential,
@@ -2595,9 +2601,13 @@ impl<'t> Walk<'t> {
                         self.overriders.entry(overridden.clone()).or_default().push(key.clone());
                         self.found_overriders.push((overridden, key.clone()));
                     }
-                    self.methods.insert(key, member);
+                    if self.methods.insert(key.clone(), member).is_none() {
+                        let names = self.methods_by_name.entry(class.clone()).or_default();
+                        names.entry(key.1.clone()).or_default().push(key);
+                    }
                 }
                 "VARIABLE" => {
+                    self.fields_by_class.entry(class.clone()).or_default().insert(name.clone());
                     self.fields.insert((class.clone(), name), member);
                 }
                 _ => self.declare(member, Some(&class)),

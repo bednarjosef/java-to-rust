@@ -47,28 +47,59 @@ pub(super) fn complete_unit(unit: &mut Value, survey: &Survey) {
     visit_records(unit, &mut |record| complete_record(record, survey));
 }
 
-/// The records of a compilation unit that no other record holds, with their members as
-/// `complete_unit` writes them with this survey: all of the unit that the survey decides, as
-/// moving local types out of the code does not depend on it.
-pub(super) fn completed_records(unit: &Value, survey: &Survey) -> Vec<Value> {
-    fn outermost<'v>(v: &'v Value, out: &mut Vec<&'v Value>) {
+/// The record declarations of a compilation unit, inner ones first, as `visit_records` finds them.
+pub(super) fn records(unit: &Value) -> Vec<&Value> {
+    fn find<'v>(v: &'v Value, out: &mut Vec<&'v Value>) {
         match v {
-            Value::Object(fields) if fields.get("kind").and_then(Value::as_str) == Some("RECORD") => {
-                out.push(v)
+            Value::Object(fields) => {
+                fields.values().for_each(|x| find(x, out));
+                if fields.get("kind").and_then(Value::as_str) == Some("RECORD") {
+                    out.push(v);
+                }
             }
-            Value::Object(fields) => fields.values().for_each(|x| outermost(x, out)),
-            Value::Array(items) => items.iter().for_each(|x| outermost(x, out)),
+            Value::Array(items) => items.iter().for_each(|x| find(x, out)),
             _ => {}
         }
     }
     let mut records = Vec::new();
-    outermost(unit, &mut records);
-    let complete = |record: &Value| {
-        let mut record = record.clone();
-        visit_records(&mut record, &mut |r| complete_record(r, survey));
-        record
+    find(unit, &mut records);
+    records
+}
+
+/// What `complete_record` writes into these records (`records`) that this survey decides: all of
+/// the unit that the survey decides, as moving local types out of the code does not depend on it.
+/// When it is the same with two surveys, so is what `complete_unit` makes of the unit.
+pub(super) fn completion(records: &[&Value], survey: &Survey) -> Completion {
+    let decide = |record: &Value| {
+        let name = qualified(record);
+        let components = components(record);
+        let interface_methods = survey.interface_methods(record);
+        let accessors = components.iter().map(|c| accessor_overrides(record, &name, c, &interface_methods, survey));
+        let hash_code = writes_hash_code(record, &name, survey);
+        let equals = writes_equals(record, survey);
+        let objects = components.iter().filter(|c| hashed_by_objects(&c.ty));
+        let plain = objects.filter(|_| hash_code || equals).map(|c| survey.plain_value(&c.ty)).collect();
+        RecordCompletion { accessors: accessors.collect(), hash_code, equals, plain }
     };
-    records.into_iter().map(complete).collect()
+    Completion(records.iter().map(|record| decide(record)).collect())
+}
+
+/// What `completion` gives: for each record, what the survey decides of the members written.
+#[derive(PartialEq)]
+pub struct Completion(Vec<RecordCompletion>);
+
+#[derive(PartialEq)]
+struct RecordCompletion {
+    /// For each component, the interfaces and types of the methods that its accessor overrides,
+    /// when one is written (`accessor_overrides`).
+    accessors: Vec<Option<Vec<(String, String)>>>,
+    /// Whether `hashCode` and `equals` are written.
+    hash_code: bool,
+    equals: bool,
+    /// When either is, whether each component that `java.util.Objects` hashes and compares
+    /// (`hashed_by_objects`) is a plain value (`Survey::plain_value`), which makes its calls
+    /// implicit.
+    plain: Vec<bool>,
 }
 
 /// Whether `complete_unit` may change the compilation unit: it has no package, it declares a
@@ -342,39 +373,23 @@ fn complete_record(record: &mut Value, survey: &Survey) {
     let simple = text(record, "simpleName").to_string();
     let components = components(record);
     let at = Pos { line: record["line"].clone(), column: record["column"].clone() };
-    let declares = |method: &str, arity: usize| {
-        members(record)
-            .any(|m| text(m, "kind") == "METHOD" && text(m, "name") == method && params(m).len() == arity)
-    };
     let interface_methods = survey.interface_methods(record);
     let mut added = Vec::new();
     for c in &components {
-        let implements: Vec<&(String, String, String)> =
-            interface_methods.iter().filter(|(_, n, _)| *n == c.name).collect();
-        if declares(&c.name, 0)
-            || (implements.is_empty() && !survey.called.contains(&(name.clone(), c.name.clone())))
-        {
-            continue;
-        }
-        let overrides: Vec<Value> =
-            implements.iter().map(|(i, _, t)| json!({"owner": i, "type": t})).collect();
+        let Some(overrides) = accessor_overrides(record, &name, c, &interface_methods, survey) else { continue };
+        let overrides: Vec<Value> = overrides.iter().map(|(i, t)| json!({"owner": i, "type": t})).collect();
         let body = vec![at.node("RETURN", json!({"expression": field(c)}))];
         added.push(at.method(&name, &c.name, &c.ty, Vec::new(), body, overrides));
     }
-    if !declares("toString", 0) {
+    if !declares(record, "toString", 0) {
         let body = vec![at.node("RETURN", json!({"expression": at.to_string_text(&simple, &components)}))];
         added.push(at.method(&name, "toString", "java.lang.String", Vec::new(), body, Vec::new()));
     }
-    if !declares("hashCode", 0) && survey.hashed.contains(&name) {
+    if writes_hash_code(record, &name, survey) {
         let body = vec![at.node("RETURN", json!({"expression": at.hash(&components, survey)}))];
         added.push(at.method(&name, "hashCode", "int", Vec::new(), body, Vec::new()));
     }
-    let declares_equals = members(record).any(|m| {
-        text(m, "kind") == "METHOD"
-            && text(m, "name") == "equals"
-            && matches!(params(m), [p] if text(&p["symbol"], "type") == "java.lang.Object")
-    });
-    if !declares_equals && survey.runs("equals") {
+    if writes_equals(record, survey) {
         let owner = "equals(java.lang.Object)";
         let param = json!({
             "kind": "VARIABLE", "line": at.line, "column": at.column, "name": "other",
@@ -389,6 +404,52 @@ fn complete_record(record: &mut Value, survey: &Survey) {
     if let Some(list) = record["members"].as_array_mut() {
         list.extend(added);
     }
+}
+
+/// Whether the record declares a method of this name with this many parameters.
+fn declares(record: &Value, method: &str, arity: usize) -> bool {
+    members(record).any(|m| text(m, "kind") == "METHOD" && text(m, "name") == method && params(m).len() == arity)
+}
+
+/// The interfaces and types of the methods that the accessor of the component `c` of the record
+/// `name` overrides, when one is written: when the record does not declare it, and something
+/// calls it or an interface of the record declares it (`interface_methods`, of the record).
+fn accessor_overrides(
+    record: &Value,
+    name: &str,
+    c: &Component,
+    interface_methods: &[(String, String, String)],
+    survey: &Survey,
+) -> Option<Vec<(String, String)>> {
+    let implements: Vec<&(String, String, String)> =
+        interface_methods.iter().filter(|(_, n, _)| *n == c.name).collect();
+    if declares(record, &c.name, 0)
+        || (implements.is_empty() && !survey.called.contains(&(name.to_string(), c.name.clone())))
+    {
+        return None;
+    }
+    Some(implements.iter().map(|(i, _, t)| (i.clone(), t.clone())).collect())
+}
+
+/// Whether `hashCode` is written into the record `name`.
+fn writes_hash_code(record: &Value, name: &str, survey: &Survey) -> bool {
+    !declares(record, "hashCode", 0) && survey.hashed.contains(name)
+}
+
+/// Whether `equals` is written into the record.
+fn writes_equals(record: &Value, survey: &Survey) -> bool {
+    let declares_equals = members(record).any(|m| {
+        text(m, "kind") == "METHOD"
+            && text(m, "name") == "equals"
+            && matches!(params(m), [p] if text(&p["symbol"], "type") == "java.lang.Object")
+    });
+    !declares_equals && survey.runs("equals")
+}
+
+/// Whether the written `hashCode` and `equals` hash and compare a component of javac's type `ty`
+/// with `java.util.Objects` (`Pos::objects_call`): one that is no primitive and no array.
+fn hashed_by_objects(ty: &str) -> bool {
+    !matches!(ty, "int" | "long" | "double" | "float" | "boolean" | "char" | "short" | "byte") && !ty.ends_with("[]")
 }
 
 /// Ends the canonical constructor with the assignments of the fields, unless it assigns them

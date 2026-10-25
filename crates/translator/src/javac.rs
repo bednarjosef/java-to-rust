@@ -4,6 +4,7 @@
 
 mod bytecode_names;
 mod records;
+pub use records::Completion;
 mod run_cache;
 
 pub use bytecode_names::{
@@ -298,10 +299,16 @@ impl Records {
         records::complete_unit(&mut unit["tree"], &self.survey);
     }
 
-    /// The records of a unit, as `complete` writes them: when these are the same as before a
-    /// round's units were added, so is what `complete` makes of the unit.
-    pub fn completed_records(&self, unit: &Value) -> Vec<Value> {
-        records::completed_records(&unit["tree"], &self.survey)
+    /// The record declarations of a unit, for `completion`.
+    pub fn records_of(unit: &Value) -> Vec<&Value> {
+        records::records(&unit["tree"])
+    }
+
+    /// What `complete` writes into these records of a unit (`records_of`) that the units so far
+    /// decide: when it is the same as before a round's units were added, so is what `complete`
+    /// makes of the unit.
+    pub fn completion(&self, records: &[&Value]) -> Completion {
+        records::completion(records, &self.survey)
     }
 }
 

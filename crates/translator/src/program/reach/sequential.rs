@@ -84,7 +84,8 @@ impl<'t> Index<'t> {
             if let Some(node) = walk.methods.get(key)
                 && self.methods.insert(key.clone())
             {
-                self.scan(&walk.classes, node, Some(key));
+                self.contexts.push(key.clone());
+                self.scan(&walk.classes, node, Some(self.contexts.len() - 1));
             }
         }
         for key in &walk.reach.fields {
@@ -116,7 +117,8 @@ impl<'t> Index<'t> {
         });
         let mut check = Check { index: self, only_pipelines, never_true: HashSet::new() };
         check.solve(walk);
-        self.writes.iter().all(|(context, value)| value.is_some_and(|v| check.value(v, context.as_ref())))
+        let contexts = &check.index.contexts;
+        self.writes.iter().all(|(context, value)| value.is_some_and(|v| check.value(v, context.map(|c| &contexts[c]))))
     }
 }
 
@@ -124,13 +126,15 @@ impl<'t> Index<'t> {
 /// the methods that a method reference names, the parameters that are assigned, and every write
 /// of the field with the value written (`None` for a compound assignment); and what of the code
 /// it has indexed: the methods, the fields' initializers, and the initializer blocks of classes,
-/// static (`true`) or not.
+/// static (`true`) or not. A call and a write are made in the code of the method whose parameters
+/// its names refer to, by its position in `contexts`.
 #[derive(Default)]
 pub(super) struct Index<'t> {
-    calls: HashMap<MethodKey, Vec<(Option<MethodKey>, &'t Value)>>,
-    referenced: HashSet<MethodKey>,
+    calls: HashMap<Member<'t>, Vec<(Option<usize>, &'t Value)>>,
+    referenced: HashSet<Member<'t>>,
     assigned: HashSet<(MethodKey, String)>,
-    writes: Vec<(Option<MethodKey>, Option<&'t Value>)>,
+    writes: Vec<(Option<usize>, Option<&'t Value>)>,
+    contexts: Vec<MethodKey>,
     methods: HashSet<MethodKey>,
     fields: HashSet<FieldKey>,
     blocks: HashSet<(String, bool)>,
@@ -142,7 +146,7 @@ impl<'t> Index<'t> {
     /// fail more often. What the assumption skips is skipped, as reachability does.
     /// A local or anonymous class among the program's `classes` is indexed with its own reached
     /// members, not with the code that declares it, as reachability does.
-    fn scan(&mut self, classes: &Classes<'t>, node: &'t Value, context: Option<&MethodKey>) {
+    fn scan(&mut self, classes: &Classes<'t>, node: &'t Value, context: Option<usize>) {
         match node {
             Value::Object(fields) => {
                 let kind = text(node, "kind");
@@ -172,11 +176,11 @@ impl<'t> Index<'t> {
     }
 
     /// Records a call, a method reference or an assignment.
-    fn node(&mut self, node: &'t Value, kind: &str, context: Option<&MethodKey>) {
+    fn node(&mut self, node: &'t Value, kind: &str, context: Option<usize>) {
         let target = match kind {
             "METHOD_INVOCATION" | "NEW_CLASS" => {
                 let calls = self.calls.entry(key(&node["symbol"])).or_default();
-                calls.push((context.cloned(), &node["arguments"]));
+                calls.push((context, &node["arguments"]));
                 return;
             }
             "MEMBER_REFERENCE" => {
@@ -192,11 +196,11 @@ impl<'t> Index<'t> {
         match text(symbol, "kind") {
             "FIELD" if (text(symbol, "owner"), text(symbol, "name")) == PARALLEL_FIELD => {
                 let value = (kind == "ASSIGNMENT").then(|| &node["expression"]);
-                self.writes.push((context.cloned(), value));
+                self.writes.push((context, value));
             }
             "PARAMETER" => {
                 if let Some(method) = context {
-                    self.assigned.insert((method.clone(), text(symbol, "name").to_string()));
+                    self.assigned.insert((self.contexts[method].clone(), text(symbol, "name").to_string()));
                 }
             }
             _ => {}
@@ -204,9 +208,17 @@ impl<'t> Index<'t> {
     }
 }
 
+/// A method or constructor, by class, name and type, as a symbol names it.
+type Member<'t> = (&'t str, &'t str, &'t str);
+
 /// The method or constructor that a symbol names.
-fn key(symbol: &Value) -> MethodKey {
-    (text(symbol, "owner").to_string(), text(symbol, "name").to_string(), text(symbol, "type").to_string())
+fn key(symbol: &Value) -> Member<'_> {
+    (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"))
+}
+
+/// A method's key as a `Member`, to look it up by.
+fn member(key: &MethodKey) -> Member<'_> {
+    (&key.0, &key.1, &key.2)
 }
 
 /// A parameter: its method and its name.
@@ -231,7 +243,7 @@ impl Check<'_, '_> {
             let direct = method.1 == "<init>"
                 || node["symbol"]["static"].as_bool() == Some(true)
                 || has_flag(node, "PRIVATE");
-            if !direct || self.index.referenced.contains(method) {
+            if !direct || self.index.referenced.contains(&member(method)) {
                 continue;
             }
             let parameters: Vec<&Value> = node["parameters"].as_array().into_iter().flatten().collect();
@@ -253,9 +265,10 @@ impl Check<'_, '_> {
                 .iter()
                 .filter(|(p, _)| self.never_true.contains(p))
                 .filter(|((method, _), position)| {
-                    let calls = self.index.calls.get(method).map(Vec::as_slice).unwrap_or_default();
+                    let calls = self.index.calls.get(&member(method)).map(Vec::as_slice).unwrap_or_default();
                     !calls.iter().all(|(caller, args)| {
-                        args.get(*position).is_some_and(|arg| self.value(arg, caller.as_ref()))
+                        let caller = caller.map(|c| &self.index.contexts[c]);
+                        args.get(*position).is_some_and(|arg| self.value(arg, caller))
                     })
                 })
                 .map(|(p, _)| p.clone())
