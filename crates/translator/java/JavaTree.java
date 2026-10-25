@@ -221,7 +221,7 @@ public class JavaTree {
                     }
                 }
             }
-            task.analyze(classes);
+            analyze(task, classes);
             if (keepGoing) {
                 takeErrors(diagnostics);
             } else {
@@ -306,6 +306,89 @@ public class JavaTree {
      * not the code of its methods. Field initializers stay, since a constant's value may be
      * computed from one when another unit uses it.
      */
+    /**
+     * Attributes the given classes and checks their flow, as {@link JavacTaskImpl#analyze} does,
+     * except that with {@code --keep-going} a crash of javac's own in one class is a compile error
+     * of that class and the others go on. javac asserts, for one, that every annotation of a local
+     * variable has its type, which in some decompiled code it never gives one: the method of the
+     * first such variable is marked (see {@link #markErrors}), and so is the class if there is none.
+     */
+    private static void analyze(JavacTaskImpl task, List<Element> classes) {
+        if (!keepGoing) {
+            task.analyze(classes);
+            return;
+        }
+        task.enter();
+        com.sun.tools.javac.main.JavaCompiler compiler = com.sun.tools.javac.main.JavaCompiler.instance(context);
+        Set<Element> wanted = new HashSet<>(classes);
+        Queue<com.sun.tools.javac.comp.Env<com.sun.tools.javac.comp.AttrContext>> deferred = new ArrayDeque<>();
+        try {
+            while (compiler.todo.peek() != null) {
+                com.sun.tools.javac.comp.Env<com.sun.tools.javac.comp.AttrContext> env = compiler.todo.remove();
+                // The same test as `JavacTaskImpl.Filter`'s.
+                com.sun.tools.javac.code.Symbol test = null;
+                if (env.tree instanceof com.sun.tools.javac.tree.JCTree.JCModuleDecl module) {
+                    test = module.sym;
+                } else if (env.tree instanceof com.sun.tools.javac.tree.JCTree.JCPackageDecl) {
+                    test = env.toplevel.packge;
+                } else if (env.enclClass.sym != null) {
+                    test = env.enclClass.sym.outermostClass();
+                }
+                if (test == null || !wanted.contains(test)) {
+                    deferred.add(env);
+                    continue;
+                }
+                try {
+                    compiler.warn(compiler.flow(compiler.attribute(env)));
+                } catch (AssertionError | RuntimeException crash) {
+                    crashed(compiler, env, crash);
+                }
+            }
+        } finally {
+            compiler.todo.addAll(deferred);
+            compiler.log.reportOutstandingWarnings();
+            compiler.log.flush();
+        }
+    }
+
+    private static void crashed(com.sun.tools.javac.main.JavaCompiler compiler,
+            com.sun.tools.javac.comp.Env<com.sun.tools.javac.comp.AttrContext> env, Throwable crash) {
+        com.sun.tools.javac.code.Symtab symbols = com.sun.tools.javac.code.Symtab.instance(context);
+        com.sun.tools.javac.tree.JCTree[] at = {env.tree};
+        // The annotations that javac gave no type, typed as errors, and the first one's variable.
+        new com.sun.tools.javac.tree.TreeScanner() {
+            @Override
+            public void visitVarDef(com.sun.tools.javac.tree.JCTree.JCVariableDecl variable) {
+                for (com.sun.tools.javac.tree.JCTree.JCAnnotation annotation : variable.mods.annotations) {
+                    if (annotation.type == null) {
+                        annotation.type = symbols.errType;
+                        if (annotation.annotationType.type == null) {
+                            annotation.annotationType.type = symbols.errType;
+                        }
+                        if (at[0] == env.tree) {
+                            at[0] = variable;
+                        }
+                    }
+                }
+                super.visitVarDef(variable);
+            }
+        }.scan(env.tree);
+        com.sun.tools.javac.comp.Attr.instance(context).postAttr(env.tree);
+        com.sun.tools.javac.comp.CompileStates.instance(context).put(env, com.sun.tools.javac.comp.CompileStates.CompileState.ATTR);
+        JavaFileObject before = compiler.log.useSource(env.toplevel.sourcefile);
+        try {
+            compiler.log.error(at[0].pos(), com.sun.tools.javac.resources.CompilerProperties.Errors.ProcMessager(
+                    "javac crashed in " + env.enclClass.sym + ": " + crash));
+        } finally {
+            compiler.log.useSource(before);
+        }
+        try {
+            compiler.flow(env);
+        } catch (AssertionError | RuntimeException again) {
+            // Its flow is not checked, then: the error marks the code.
+        }
+    }
+
     private static void release(CompilationUnitTree unit) {
         new TreeScanner<Void, Void>() {
             @Override
