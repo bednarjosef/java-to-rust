@@ -5,12 +5,13 @@ use super::{ChannelCall, channel_call, channel_nothing};
 
 /// A call into the native layer; its arguments are those of the `Builtin` that holds it, with
 /// the receiver first for instance methods.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
     /// A `Math` or `StrictMath` function beyond `abs`, `max`, `min`, `sqrt` and `Math.pow`, by its
     /// Java name; `strict` for `StrictMath`.
     Math {
-        name: &'static str,
+        #[serde(deserialize_with = "crate::ast::static_str")]
+        name: super::StaticStr,
         strict: bool,
     },
     /// `System.arraycopy(src, srcPos, dest, destPos, length)`.
@@ -20,7 +21,8 @@ pub enum Native {
     /// elsewhere it is code that never runs, as in the branch of `Inflater.inflate` that only a
     /// direct buffer takes.
     Missing {
-        what: &'static str,
+        #[serde(deserialize_with = "crate::ast::static_str")]
+        what: super::StaticStr,
     },
     DoubleToLongBits,
     DoubleToRawLongBits,
@@ -58,7 +60,7 @@ pub enum Native {
     },
     /// `System.getProperty(key)` for a key whose value does not depend on the JVM (see
     /// `lower/system.rs`), by its literal key.
-    SystemProperty(&'static str),
+    SystemProperty(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// `System.getenv(name)`: the variable of the environment the program runs in, or null.
     Getenv,
     /// The patched `ProcessEnvironment.environ0()`: every entry of the environment the program
@@ -164,17 +166,17 @@ pub enum Native {
     FileSetLength,
     /// A native of `java.io.UnixFileSystem` by its name (`getBooleanAttributes0`, `list0`, ...),
     /// whose `File` arguments are their paths (`java_runtime::fs`).
-    FileSystem(&'static str),
+    FileSystem(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// A native of the translator's `sun.nio.fs.UnixNativeDispatcher`
     /// (`java/patches/sun/nio/fs/UnixNativeDispatcher.java`) by its name (`open0`, `stat0`, ...):
     /// a system call of `java.nio.file` on the bytes of a path, which records its `errno` rather
     /// than failing (`java_runtime::unix`, `UNIX_CALLS`).
-    Unix(&'static str),
+    Unix(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// A native of the translator's `java.net.TranslatedNet`
     /// (`java/overlay/java/net/TranslatedNet.java`) by its name, or `InetAddress`'s tests of the
     /// address families: a call of the C library's name service on the bytes of a name or an
     /// address, which records its error rather than failing (`java_runtime::net`, `NET_CALLS`).
-    Net(&'static str),
+    Net(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// The natives of the stream under the translator's `System.out` and `System.err` objects
     /// (`java/overlay/java/io/StandardOutput.java`), the runtime's buffered standard output and
     /// error (`java_runtime::out`): `write0(fd, b)`, `writeBytes0(fd, b, off, len)`,
@@ -187,7 +189,7 @@ pub enum Native {
     /// statement is dropped.
     Nothing,
     /// A native of `sun.nio.ch` that a file channel calls (`ast/channels.rs`).
-    Channel(&'static ChannelCall),
+    Channel(#[serde(deserialize_with = "crate::ast::leaked")] &'static ChannelCall),
     /// `CDS.getCDSConfigStatus()`.
     CdsConfigStatus,
     /// `CDS.getRandomSeedForDumping()`.
@@ -206,7 +208,7 @@ pub enum Native {
     ReflectArraySet,
     /// `Unsafe.arrayIndexScale(c)` of a class literal of an array class, by the element type: a
     /// primitive type, or `java.lang.Object` for every reference type.
-    ArrayIndexScale(&'static str),
+    ArrayIndexScale(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// `FileDescriptor.getHandle(fd)`.
     DescriptorHandle,
     /// `FileDescriptor.getAppend(fd)`.
@@ -257,7 +259,7 @@ pub enum Native {
     LoadAverage,
     /// A native of `com.sun.management.internal.OperatingSystemImpl` without arguments, by the
     /// runtime's function that answers it (`os_total_memory`, ...).
-    OperatingSystem(&'static str),
+    OperatingSystem(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// `MappedMemoryUtils.isLoaded0(address, length, pageCount)`: a mapping is a block of memory
     /// of the process holding the file's bytes, so it is loaded.
     MappingLoaded,

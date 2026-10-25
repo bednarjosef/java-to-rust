@@ -5,6 +5,7 @@
 //! lowered and translated.
 
 mod census;
+mod checkpoint;
 mod modules;
 mod reach;
 mod survey;

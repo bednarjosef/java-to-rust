@@ -3,7 +3,7 @@
 //! lowering makes each operation a `Builtin::Charset` expression (see `lower/charsets.rs`).
 
 /// A charset, by the constant that names it, or the lookup of a name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CharsetOp {
     /// `StandardCharsets.UTF_8`.
     Utf8,

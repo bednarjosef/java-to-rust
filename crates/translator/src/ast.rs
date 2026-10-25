@@ -159,6 +159,103 @@ impl Type {
 }
 
 /// A class or enum name, leaked once so that types stay `Copy`.
+/// A `Type` as it is saved (`program/checkpoint.rs`), owning what the type interns.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum Stored {
+    Plain(u8),
+    Array(Box<Stored>),
+    Class(String, Vec<Stored>),
+    Enum(String),
+    Boxed(Box<Stored>),
+}
+
+const PLAIN: [Type; 14] = [
+    Type::Int,
+    Type::Long,
+    Type::Double,
+    Type::Byte,
+    Type::Short,
+    Type::Char,
+    Type::Float,
+    Type::Boolean,
+    Type::String,
+    Type::Void,
+    Type::Null,
+    Type::StringBuilder,
+    Type::JavaClass,
+    Type::Charset,
+];
+
+impl From<Type> for Stored {
+    fn from(ty: Type) -> Stored {
+        match ty {
+            Type::Array(e) => Stored::Array(Box::new((*e).into())),
+            Type::Class(name, args) => {
+                Stored::Class(name.to_string(), args.iter().map(|&a| a.into()).collect())
+            }
+            Type::Enum(name) => Stored::Enum(name.to_string()),
+            Type::Boxed(p) => Stored::Boxed(Box::new((*p).into())),
+            plain => Stored::Plain(PLAIN.iter().position(|&p| p == plain).expect("a plain type") as u8),
+        }
+    }
+}
+
+impl From<Stored> for Type {
+    fn from(stored: Stored) -> Type {
+        match stored {
+            Stored::Plain(i) => PLAIN[i as usize],
+            Stored::Array(e) => Type::array((*e).into()),
+            Stored::Class(name, args) => {
+                Type::generic(&name, &args.into_iter().map(Type::from).collect::<Vec<_>>())
+            }
+            Stored::Enum(name) => Type::enum_type(&name),
+            Stored::Boxed(p) => Type::boxed((*p).into()),
+        }
+    }
+}
+
+impl serde::Serialize for Type {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        Stored::from(*self).serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Type {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Type, D::Error> {
+        Stored::deserialize(d).map(Type::from)
+    }
+}
+
+/// A name kept for the life of the process, which `static_str` reads (written so, the derived
+/// `Deserialize` does not borrow it from what it reads).
+pub type StaticStr = &'static str;
+
+/// Reads a name that the program keeps for the life of the process (`program/checkpoint.rs`).
+pub(crate) fn static_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<&'static str, D::Error> {
+    <String as serde::Deserialize>::deserialize(d).map(|s| interned_name(&s))
+}
+
+pub(crate) fn static_str_option<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<&'static str>, D::Error> {
+    <Option<String> as serde::Deserialize>::deserialize(d).map(|s| s.map(|s| interned_name(&s)))
+}
+
+/// Reads a map by names kept for the life of the process.
+pub(crate) fn static_keys<'de, D: serde::Deserializer<'de>, V: serde::Deserialize<'de>>(
+    d: D,
+) -> Result<std::collections::BTreeMap<StaticStr, V>, D::Error> {
+    <std::collections::BTreeMap<String, V> as serde::Deserialize>::deserialize(d)
+        .map(|m| m.into_iter().map(|(k, v)| (interned_name(&k), v)).collect())
+}
+
+/// Reads a value that the program refers to for the life of the process, kept for it.
+pub(crate) fn leaked<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>>(
+    d: D,
+) -> Result<&'static T, D::Error> {
+    T::deserialize(d).map(|t| &*Box::leak(Box::new(t)))
+}
+
 pub(crate) fn interned_name(name: &str) -> &'static str {
     static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
     let mut names = NAMES.lock().unwrap();
@@ -245,7 +342,7 @@ impl fmt::Display for Type {
 /// that an error an analysis or the generator reports at an expression names its file, where a
 /// line and column alone may be those of code in another file. Positions compare by line and
 /// column alone, as those that javac's class files give (`javac::bytecode_names`) have no unit.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default)]
 pub struct Pos {
     pub line: usize,
     pub column: usize,
@@ -280,6 +377,7 @@ impl std::hash::Hash for Pos {
 
 /// The translated file: its classes, and every method and constructor of all of them in one list,
 /// so that analyses can refer to any of them by index.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Class {
     /// The class that declares `main`, which names the program.
     pub name: String,
@@ -351,6 +449,7 @@ impl Class {
 
 /// An assumption of the translation at a place of the program: the method (index into
 /// `Class::methods`) whose code it is in, the position, and what is assumed.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Note {
     pub method: Option<usize>,
     pub pos: Pos,
@@ -364,7 +463,7 @@ pub type ChainedCalls = HashMap<(String, Pos, String, Pos), Option<CallName>>;
 /// What the class files that javac writes name, where lowering knows it from javac's tree: the
 /// JDK's code, which `javac::BytecodeNames` does not compile, needs it for the messages of its
 /// `NullPointerException`s (`analysis::npe_messages`).
-#[derive(Default)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct ClassFileNames {
     /// The class that names each static field read, by the class whose code reads it, the
     /// position and the field's name: javac names a field `C.f` by `C`, which may be a subclass
@@ -396,7 +495,7 @@ pub struct ClassFileNames {
 /// by (the class the call names, the erasure of the receiver's static type, or
 /// `java.lang.Object` for an instance method of `Object`), its name, and the erasures of its
 /// parameters' types (`int`, `java.lang.String`, `java.util.Map.Entry[]`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CallName {
     pub class: String,
     pub name: String,
@@ -404,7 +503,7 @@ pub struct CallName {
 }
 
 /// What kind of type a declaration is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeKind {
     Class,
     Interface,
@@ -497,6 +596,7 @@ pub fn runtime_type(name: &str) -> Option<Type> {
 }
 
 /// A class of the file: its fields. Methods and constructors are in `Class::methods`.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TypeDecl {
     pub name: String,
     /// The class's package, such as `com.example`; empty for the unnamed package.
@@ -532,6 +632,7 @@ pub struct TypeDecl {
 }
 
 /// A local variable that a local or anonymous class captures.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Capture {
     /// The local's name in the enclosing code.
     pub name: String,
@@ -544,7 +645,7 @@ pub struct Capture {
 }
 
 /// Where a class is declared.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
     /// A class of a package, or a member of a class.
     Member,
@@ -580,6 +681,7 @@ impl Origin {
 }
 
 /// One constant of an enum: `PLANET(3.0, 4.0)`.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EnumConstant {
     pub name: String,
     /// The value of each instance field, in declaration order: the constructor's assignment with
@@ -587,6 +689,7 @@ pub struct EnumConstant {
     pub values: Vec<Expr>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub name: String,
     pub ty: Type,
@@ -599,6 +702,7 @@ pub struct Field {
     pub pos: Pos,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Method {
     /// `<init>` for a constructor.
     pub name: String,
@@ -633,11 +737,13 @@ pub struct Method {
     pub field_update: Option<(crate::program::FieldUpdate, String)>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Param {
     pub name: String,
     pub ty: Type,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Stmt {
     Local {
         ty: Type,
@@ -704,6 +810,7 @@ pub enum Stmt {
 
 /// One `catch` clause: the exception classes it catches (indexes into `Class::types`, several
 /// for a multi-catch `catch (A | B e)`), its parameter, and its statements.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Catch {
     pub types: Vec<usize>,
     pub name: String,
@@ -717,11 +824,13 @@ pub struct Catch {
 /// One `case` group of a switch: the labels that select it and its statements. A group falls
 /// through into the next one unless its statements end by leaving (`break`, `return`, ...). An
 /// arrow case ends with a `Break`, so it never falls through.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Case {
     pub labels: Vec<CaseLabel>,
     pub body: Vec<Stmt>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum CaseLabel {
     /// A constant of the selector's type.
     Value(Expr),
@@ -731,6 +840,7 @@ pub enum CaseLabel {
 /// Identifies an expression, for facts that analyses attach to it.
 pub type ExprId = usize;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Expr {
     pub kind: ExprKind,
     pub pos: Pos,
@@ -740,6 +850,7 @@ pub struct Expr {
     pub id: ExprId,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ExprKind {
     Int(i32),
     Long(i64),
@@ -847,6 +958,7 @@ pub enum ExprKind {
 }
 
 /// What an assignment, `++` or `--` writes to.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Place {
     /// A local variable or parameter.
     Var(String),
@@ -858,7 +970,7 @@ pub enum Place {
     Static { class: usize, name: String },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
     Println,
     Print,
@@ -902,7 +1014,7 @@ pub enum Builtin {
     /// the `NullPointerException` of calling the method named here on it; then the first such
     /// call of the program prints the JDK's warning that the method was called by `caller`, a
     /// class literal.
-    MemoryAccessWarning(&'static str),
+    MemoryAccessWarning(#[serde(deserialize_with = "crate::ast::static_str")] StaticStr),
     /// The lock of a `synchronized` block, the statement before the block: evaluated, and a
     /// `NullPointerException` when it is null. Where the program can tell (`codegen::sync`), the
     /// block holds the lock's monitor.
@@ -1024,7 +1136,7 @@ pub enum Builtin {
     /// `MethodHandle.invokeExact`, see `lower::handles`), whose exception has the JVM's message
     /// for the call at the expression's position; without one it has none, as javac's
     /// `Objects.requireNonNull`.
-    NullChecked(Option<&'static str>),
+    NullChecked(#[serde(deserialize_with = "crate::ast::static_str_option")] Option<StaticStr>),
     /// `[selector]`: the end of an exhaustive pattern switch that no case matched, which only a
     /// null selector reaches: it throws `NullPointerException`.
     Unmatched,
@@ -1081,7 +1193,7 @@ pub enum Builtin {
 }
 
 /// The methods of `java.lang.Class` that a program can use without reflection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassOp {
     GetName,
     GetSimpleName,
@@ -1122,7 +1234,7 @@ impl ClassOp {
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
 /// and of the result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoxedOp {
     /// `Integer.parseInt(s)` and the other `parseX`: the primitive of the result's kind, read from
     /// a string. `Integer.valueOf(s)` is the same, boxed.
@@ -1151,13 +1263,13 @@ pub enum BoxedOp {
     Sum,
     /// `Double.isNaN(d)`, `isInfinite` and `isFinite`, static or on a box: the Rust method of the
     /// same test on the primitive, such as `is_nan`.
-    FloatTest(&'static str),
+    FloatTest(#[serde(deserialize_with = "crate::ast::static_str")] StaticStr),
     /// `Boolean.logicalAnd(a, b)`, `logicalOr` and `logicalXor`: `&`, `|` or `^` on both operands,
     /// neither short-circuited.
     Logical(BinOp),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
     Plus,
@@ -1165,7 +1277,7 @@ pub enum UnOp {
     BitNot,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,
@@ -1223,7 +1335,7 @@ impl BinOp {
 }
 
 /// A translation error: a syntax error, a type error or a Java feature not supported yet.
-#[derive(Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct Error {
     pub pos: Pos,
     pub message: String,

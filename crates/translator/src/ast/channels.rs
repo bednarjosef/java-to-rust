@@ -3,13 +3,16 @@
 
 /// A native of `sun.nio.ch` that the runtime implements (`Native::Channel`): its class and name,
 /// and the runtime's function that answers it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChannelCall {
-    pub class: &'static str,
-    pub name: &'static str,
+    #[serde(deserialize_with = "crate::ast::static_str")]
+    pub class: super::StaticStr,
+    #[serde(deserialize_with = "crate::ast::static_str")]
+    pub name: super::StaticStr,
     /// The runtime's function. It takes the arguments as Java's native does, a `FileDescriptor`
     /// as its descriptor number.
-    pub function: &'static str,
+    #[serde(deserialize_with = "crate::ast::static_str")]
+    pub function: super::StaticStr,
     /// Whether the function returns a `Result` whose failure is raised as an `IOException`.
     pub fails: bool,
 }

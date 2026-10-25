@@ -33,6 +33,7 @@
 //! the piece of the method or lambda in which lowering met it, unless it is in an initializer
 //! that a constructor runs; otherwise, to the piece at its position.
 
+use super::checkpoint;
 use super::survey::{self, Part, Piece};
 use super::{Program, ProgramError, Reach, Reaching, Writes, class_file_names, load, source_files};
 use crate::ast::{Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt};
@@ -58,6 +59,7 @@ pub struct Census {
 /// An error that the census recorded and went on past: the unit of the code it is in (`None`
 /// in the code that lowering provides, such as the standard exceptions), the position of the
 /// method or lambda it is in, and the error.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Rejection {
     unit: Option<usize>,
     anchor: Option<Pos>,
@@ -68,6 +70,11 @@ struct Rejection {
 /// `String` arrays as `Object` arrays (`Reach::string_array_writes`), as a translation decides
 /// (`super::translate_program_modules`).
 pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
+    if let Some(lowered) = checkpoint::load(program) {
+        let hook = std::panic::take_hook();
+        lower::quiet_panics();
+        return Ok(analysed(program, lowered, hook));
+    }
     let (units, reach, asked) = load(program, Reaching::Walk(false))?;
     // When a walk with the writes would reach the same, the census is first taken with them.
     let same = asked.is_some();
@@ -100,7 +107,6 @@ fn census_reached(
     writes: Writes,
     same: bool,
 ) -> Result<Taken, ProgramError> {
-    use crate::timings::phase;
     let files = source_files(program)?;
     let (units, mut reach) = loaded;
     reach.string_array_writes = writes != Writes::Without;
@@ -143,30 +149,54 @@ fn census_reached(
     // What the JDK's messages of a `NullPointerException` need of its trees.
     let jdk_temps = javac::jdk_temps(&trees[files.len()..]);
     let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
-    if let Some(class) = &class {
-        super::print_notes(class, &unit_files);
-    }
     drop(trees);
     drop((units, reach));
+    let lowered =
+        Lowered { class, units: lowered_units, files: unit_files, rejections, fatal, scan, jdk_temps };
+    if lowered.class.is_some() {
+        checkpoint::save(program, &lowered);
+    }
+    Ok(Taken::Census(analysed(program, lowered, hook)))
+}
+
+/// What the census has of the program once it is lowered and narrowed, which the analyses and
+/// the generator take from there (and a checkpoint keeps: `checkpoint`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Lowered {
+    class: Option<Class>,
+    /// The unit of each type of the program.
+    units: Vec<Option<usize>>,
+    /// The file of each unit.
+    files: Vec<String>,
+    rejections: Vec<Rejection>,
+    fatal: Option<Rejection>,
+    scan: survey::Census,
+    #[serde(with = "checkpoint::jdk_temps")]
+    jdk_temps: javac::JdkTemps,
+}
+
+/// The census of the lowered program: its analyses and generator, past every rejection.
+fn analysed(
+    program: &Program,
+    lowered: Lowered,
+    hook: Box<dyn Fn(&std::panic::PanicHookInfo) + Sync + Send>,
+) -> Census {
+    use crate::timings::phase;
+    let Lowered { class, units, files, mut rejections, mut fatal, scan, jdk_temps } = lowered;
+    if let Some(class) = &class {
+        super::print_notes(class, &files);
+    }
     let mut modules = None;
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
             let names = Names { program, jdk_temps: RefCell::new(jdk_temps), found: RefCell::new(None) };
-            analyse(
-                &mut class,
-                &lowered_units,
-                &unit_files,
-                &mut rejections,
-                &mut modules,
-                &names,
-                program.ends_rejected,
-            )
+            analyse(&mut class, &units, &files, &mut rejections, &mut modules, &names, program.ends_rejected)
         });
     }
     std::panic::set_hook(hook);
-    let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
+    let tally = Tally::new(&scan.pieces, &files, rejections, fatal);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
-    Ok(Taken::Census(Census { report, json, modules }))
+    Census { report, json, modules }
 }
 
 /// The program lowered for a census and narrowed to the code that can run (`super::narrow`).

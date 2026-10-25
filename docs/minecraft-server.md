@@ -37,6 +37,16 @@ sources where `library-sources` has them, and its decompiled code otherwise. Thi
 attributes only the classes that the code reachable from `main` uses, not all 5,037 server files
 and 2,411 fastutil files. fastutil is then only the few dozen classes the server reaches.
 
+### Census checkpoints
+
+javac, reach, lowering and the walk of the code that can run take about a quarter of an hour of
+a census of the server. With `JAVA_TO_RUST_CENSUS_CHECKPOINT=FILE`, the translator saves the
+lowered program to `FILE` (`program/checkpoint.rs`) when the file does not exist, and when it
+does, it reads the program from it and starts the census at the analyses. A census taken from a
+checkpoint is the same as the full one (checked on javac's census and translation). A checkpoint
+belongs to one program and to a translator whose javac, reach and lowering give the same
+program. After a change to those, delete the file so that the next census writes a new one.
+
 ### Comparing censuses
 
 `scripts/census-compare.py OLD NEW [NAME=ROOT...]` reads two censuses (each a `census.json` or a

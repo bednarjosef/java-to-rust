@@ -40,7 +40,7 @@ pub struct Survey {
 }
 
 /// Whether code is the program's own or comes from a library root.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(super) enum Part {
     Program,
     Library,
@@ -140,11 +140,13 @@ pub(super) fn scan(units: &[&Value], reach: &Reach, program: &Program, files: &[
 }
 
 /// A reachable piece of code and the unsupported features it uses.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Piece {
     pub(super) part: Part,
     pub(super) class: String,
     /// `method`, `constructor`, `field initializer`, `static block` or `instance block`.
-    pub(super) kind: &'static str,
+    #[serde(deserialize_with = "crate::ast::static_str")]
+    pub(super) kind: crate::ast::StaticStr,
     /// The name of a method or field; empty for a block.
     pub(super) name: String,
     /// `file:line` of the piece.
@@ -157,7 +159,8 @@ pub(super) struct Piece {
     /// for, as Java would, where it uses one (javac's `missingClass`, with `--keep-going`).
     pub(super) missing_class: Option<String>,
     /// Each feature the piece uses, with the place where it first does.
-    features: BTreeMap<&'static str, String>,
+    #[serde(deserialize_with = "crate::ast::static_keys")]
+    features: BTreeMap<crate::ast::StaticStr, String>,
 }
 
 /// What the scan of a piece of code finds: its unsupported features, each with its first place,
@@ -188,7 +191,7 @@ fn place(file: &str, node: &Value) -> String {
     format!("{file}:{}", node["line"].as_u64().unwrap_or(0))
 }
 
-#[derive(Default)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 pub(super) struct Census {
     pub(super) pieces: Vec<Piece>,
     /// The classes of the sources and libraries, local and anonymous ones included, to tell calls
