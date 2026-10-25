@@ -4,6 +4,7 @@
 //! null, so that read gives null, and `next` holds it. A static that starts empty
 //! (`Facts::placeholder_statics`) is then null wherever such a read flows (see `nullness`).
 
+use super::closure::Bits;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
@@ -24,21 +25,24 @@ pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
         .filter(|(_, m)| m.name == "<clinit>")
         .map(|(i, m)| (m.class, i))
         .collect();
-    let mut summaries: Vec<Option<Summary>> = (0..class.methods.len()).map(|_| None).collect();
+    // The classes whose initializers are walked, each with its statics that start unset.
+    let walked: Vec<(usize, usize, HashSet<&str>)> = (eager.iter())
+        .filter_map(|&t| {
+            let unset: HashSet<&str> = (class.types[t].statics.iter())
+                .filter(|f| matches!(f.ty, Type::Class(..)) && f.init.is_some())
+                .map(|f| f.name.as_str())
+                .collect();
+            Some((t, *clinits.get(&t)?, unset)).filter(|(.., unset)| !unset.is_empty())
+        })
+        .collect();
+    let summaries: Vec<Summary> = (0..class.methods.len()).map(|m| summary(class, &clinits, m)).collect();
+    let reaching = Reaching::new(&summaries, &walked);
     let mut early = HashSet::new();
     // The methods seen for the initializer of each class, as the number of that class's turn:
     // a set for each class without clearing one.
     let mut seen_in: Vec<u32> = vec![0; class.methods.len()];
     let mut turn = 0;
-    for &t in eager {
-        let Some(&clinit) = clinits.get(&t) else { continue };
-        let mut unset: HashSet<&str> = (class.types[t].statics.iter())
-            .filter(|f| matches!(f.ty, Type::Class(..)) && f.init.is_some())
-            .map(|f| f.name.as_str())
-            .collect();
-        if unset.is_empty() {
-            continue;
-        }
+    for (w, (t, clinit, mut unset)) in walked.into_iter().enumerate() {
         let mut statements = Vec::new();
         flatten(&class.methods[clinit].body, &mut statements);
         // The initializer under way returns at once when code it runs uses its class again.
@@ -58,15 +62,17 @@ pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
                 }
             };
             mark(&first.reads);
-            let mut work = first.runs;
+            // A method from which no read of the class's statics can run is not walked: what it
+            // runs marks nothing.
+            let mut work: Vec<usize> = first.runs.into_iter().filter(|&m| reaching.reads(m, w)).collect();
             while let Some(m) = work.pop() {
                 if seen_in[m] == turn {
                     continue;
                 }
                 seen_in[m] = turn;
-                let known = summaries[m].get_or_insert_with(|| summary(class, &clinits, m));
+                let known = &summaries[m];
                 mark(&known.reads);
-                work.extend(known.runs.iter().filter(|&&r| seen_in[r] != turn));
+                work.extend(known.runs.iter().filter(|&&r| seen_in[r] != turn && reaching.reads(r, w)));
             }
             if let Stmt::Expr(Expr {
                 kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, .. },
@@ -79,6 +85,47 @@ pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
         }
     }
     early
+}
+
+/// For each method, the initializers walked (by their place in `walked`) whose class's statics
+/// that start unset it may read, itself or through what it runs: one set for each group of
+/// methods that run each other.
+struct Reaching {
+    component: Vec<usize>,
+    unions: Vec<Bits>,
+}
+
+impl Reaching {
+    fn new(summaries: &[Summary], walked: &[(usize, usize, HashSet<&str>)]) -> Reaching {
+        let by_class: HashMap<usize, usize> = walked.iter().enumerate().map(|(w, &(t, ..))| (t, w)).collect();
+        let next: Vec<Vec<usize>> = summaries.iter().map(|s| s.runs.clone()).collect();
+        let (component, components) = super::closure::components(&next);
+        let mut unions: Vec<Bits> = Vec::with_capacity(components.len());
+        for (c, members) in components.iter().enumerate() {
+            let mut union = Bits::default();
+            for &m in members {
+                for (class, name, _) in &summaries[m].reads {
+                    if let Some(&w) = by_class.get(class)
+                        && walked[w].2.contains(name.as_str())
+                    {
+                        union.insert(w);
+                    }
+                }
+                for &r in &next[m] {
+                    if component[r] != c {
+                        union.union(&unions[component[r]]);
+                    }
+                }
+            }
+            unions.push(union);
+        }
+        Reaching { component, unions }
+    }
+
+    /// Whether method `m` may read a static of the class of initializer `w` that starts unset.
+    fn reads(&self, m: usize, w: usize) -> bool {
+        self.unions[self.component[m]].contains(w)
+    }
 }
 
 /// The statements of a static initializer in the order they run, with those of blocks and of
