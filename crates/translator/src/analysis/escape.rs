@@ -134,11 +134,27 @@ pub fn stack_objects(class: &Class) -> StackObjects {
             callers[t].push(m);
         }
     }
+    // Callees are solved before their callers, so that a caller is mostly solved once, with its
+    // callees' summaries final: the order of the strongly connected components of the calls, each
+    // after those it calls. The least fixpoint is the same in any order.
+    let callees: Vec<Vec<usize>> = {
+        let mut callees = vec![Vec::new(); n];
+        for (t, cs) in callers.iter().enumerate() {
+            for &c in cs {
+                callees[c].push(t);
+            }
+        }
+        callees
+    };
+    let (rank, _) = super::closure::components(&callees);
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     let mut queued = vec![true; n];
-    let mut work: Vec<usize> = (0..n).rev().collect();
-    while let Some(m) = work.pop() {
+    let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
+        (0..n).map(|m| std::cmp::Reverse((rank[m], m))).collect();
+    let mut solves = 0;
+    while let Some(std::cmp::Reverse((_, m))) = work.pop() {
         queued[m] = false;
+        solves += 1;
         let MethodFacts { summary, read, .. } = analysis.solve(m);
         for t in read {
             if edges.insert((t, m)) {
@@ -149,10 +165,13 @@ pub fn stack_objects(class: &Class) -> StackObjects {
             analysis.set_summary(m, summary);
             for &caller in &callers[m] {
                 if !std::mem::replace(&mut queued[caller], true) {
-                    work.push(caller);
+                    work.push(std::cmp::Reverse((rank[caller], caller)));
                 }
             }
         }
+    }
+    if crate::timings::enabled() {
+        eprintln!("timing: stack objects: {solves} solves of {n} methods");
     }
     // The factories, with the summaries known: a method is one when what it returns of its own
     // objects is one object, made by a `new` or a call of another factory. Adding a factory can
