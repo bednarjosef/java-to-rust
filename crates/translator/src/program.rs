@@ -31,6 +31,7 @@ use crate::ast::{Error, Pos};
 use crate::output::ModuleTree;
 use crate::value::Value;
 use crate::{analysis, codegen, javac, lower};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -336,12 +337,16 @@ fn load_in_rounds(
     let providers = modules::service_providers(program.sources.iter().chain(&program.libraries));
     let new_rounds = || {
         let rounds = reach::Rounds::new(&program.main)
+            .asking()
             .with_locale_data(locale_data.clone())
             .with_providers(providers.clone());
         if string_array_writes { rounds.with_string_array_writes() } else { rounds }
     };
     let mut rounds = new_rounds();
-    let (mut round, mut walks) = (0, 0);
+    // The classes javac has been asked for (`reach::Rounds::asked`).
+    let mut asked_so_far: BTreeSet<String> = BTreeSet::new();
+    let (mut round, mut for_records, mut stale) = (0, 0, 0);
+    let check = std::env::var_os("JAVA_TO_RUST_REACH_CHECK").is_some();
     let mut asked_in_rounds = (!string_array_writes).then(Vec::new);
     loop {
         round += 1;
@@ -377,11 +382,18 @@ fn load_in_rounds(
             trees[index] = &copy["tree"];
         }
         if restart {
-            walks += 1 + rounds.restarts();
+            (for_records, stale) = (for_records + 1, stale + rounds.restarts());
             rounds = new_rounds();
+            rounds.asked(&asked_so_far.iter().cloned().collect::<Vec<_>>());
             rounds.add(&trees).map_err(fail)?;
         } else {
             rounds.add(&trees[old..]).map_err(fail)?;
+        }
+        if check {
+            let mut scratch = new_rounds();
+            scratch.asked(&asked_so_far.iter().cloned().collect::<Vec<_>>());
+            scratch.add(&trees).map_err(fail)?;
+            check_round(round, &rounds, scratch).map_err(fail)?;
         }
         if asked_in_rounds.is_some() && !rounds.same_with_string_array_writes() {
             asked_in_rounds = None;
@@ -390,12 +402,20 @@ fn load_in_rounds(
         // The proxy classes that javac is to add, by their files, rather than by name.
         let made = rounds.proxy_classes();
         let mut asked = rounds.missing();
+        // The classes asked for the first time, by name or as proxy classes.
+        let newly: Vec<String> = asked
+            .iter()
+            .cloned()
+            .chain(made.iter().map(|m| m.class.clone()))
+            .filter(|class| asked_so_far.insert(class.clone()))
+            .collect();
         asked.retain(|class| !made.iter().any(|m| m.class == *class));
         let classes = asked_in_rounds.is_some().then(|| asked.clone());
         asked.extend(proxies.write(&made).map_err(fail)?.iter().map(|file| format!("+{}", file.display())));
         let start = std::time::Instant::now();
         new = session.load(&asked).map_err(javac_error)?;
         javac += start.elapsed();
+        rounds.asked(&newly);
         if let (Some(asked), Some(classes)) = (&mut asked_in_rounds, classes) {
             asked.push((classes, made, new.len()));
         }
@@ -409,11 +429,13 @@ fn load_in_rounds(
                 crate::timings::memory()
             );
         }
-        if new.is_empty() {
+        // The methods that waited for the classes that javac has none of are reached in
+        // another round, as external ones (`reach::Rounds::asking`).
+        if new.is_empty() && newly.is_empty() {
             break;
         }
     }
-    walks += rounds.restarts();
+    stale += rounds.restarts();
     let mut reach = rounds.finish();
     // The chains asked for are written (`reach::Rounds::finish`); nothing else is.
     if std::env::var_os("JAVA_TO_RUST_REACH_WHY").is_some() {
@@ -433,10 +455,44 @@ fn load_in_rounds(
         let received = session.received as f64 / 1e6;
         eprintln!("timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees{memory}", units.len());
         eprintln!(
-            "timing: reach: {reaching:.3} s, {round} rounds ({walks} walks from the start again), {classes} classes and {methods} methods"
+            "timing: reach: {reaching:.3} s, {round} rounds ({} walks from the start again: {for_records} for records, \
+             {stale} stale), {classes} classes and {methods} methods",
+            for_records + stale
         );
     }
+    // What was reached is written, for comparing two reachabilities; nothing else is.
+    if let Some(path) = std::env::var_os("JAVA_TO_RUST_REACH_DUMP") {
+        std::fs::write(&path, reach.dump())
+            .map_err(|e| fail(format!("{}: {e}", Path::new(&path).display())))?;
+        std::process::exit(0);
+    }
     Ok((units, reach, asked_in_rounds.map(Asked)))
+}
+
+/// With `JAVA_TO_RUST_REACH_CHECK`, that a round reached what a walk from scratch over the same
+/// units, with the same classes asked for, reaches (`scratch`): the rounds only add to what they
+/// reached, so each must reach what one walk would. When the variable names a path, the two
+/// reaches are written next to it (`.rounds`, `.scratch`); with `JAVA_TO_RUST_REACH_WHY`, the
+/// chains of the walk from scratch are written.
+fn check_round(round: usize, rounds: &reach::Rounds, scratch: reach::Rounds) -> Result<(), String> {
+    let (incremental, from_scratch) = (rounds.dump(), scratch.dump());
+    if incremental == from_scratch {
+        return Ok(());
+    }
+    if let Some(prefix) = std::env::var("JAVA_TO_RUST_REACH_CHECK").ok().filter(|p| !p.is_empty()) {
+        let _ = std::fs::write(format!("{prefix}.rounds"), &incremental);
+        let _ = std::fs::write(format!("{prefix}.scratch"), &from_scratch);
+    }
+    scratch.finish();
+    let only = |a: &str, b: &str| {
+        let b: BTreeSet<&str> = b.lines().collect();
+        a.lines().filter(|l| !b.contains(l)).take(20).collect::<Vec<_>>().join("\n")
+    };
+    Err(format!(
+        "round {round} reached other than a walk from scratch;\nonly in the round:\n{}\nonly from scratch:\n{}",
+        only(&incremental, &from_scratch),
+        only(&from_scratch, &incremental)
+    ))
 }
 
 /// The units of `load_in_rounds` with `Reach::string_array_writes`, from what the load without

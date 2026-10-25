@@ -9,7 +9,9 @@
 //! `JAVA_TO_RUST_REACH_WHY=prefix,prefix` writes on standard error, for each prefix of a
 //! `class.method` (`java.awt.Component.<init>`), the chain of methods, classes and fields through
 //! which reachable code first reached the first method it names whose body runs, and ends the
-//! translation after reachability.
+//! translation after reachability. `JAVA_TO_RUST_REACH_DUMP=file` writes what was reached
+//! (`Reach::dump`) to the file and ends the translation, for comparing two translators, and
+//! `JAVA_TO_RUST_REACH_CHECK` checks every round against a walk from scratch (`program.rs`).
 
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -105,6 +107,43 @@ pub struct Reach {
 }
 
 impl Reach {
+    /// What was reached, one sorted line per item, for comparing two reachabilities
+    /// (`JAVA_TO_RUST_REACH_DUMP`).
+    pub fn dump(&self) -> String {
+        let mut lines = BTreeSet::new();
+        let sets: [(&str, &HashSet<String>); 5] = [
+            ("class", &self.classes),
+            ("initialized", &self.initialized),
+            ("instantiated", &self.instantiated),
+            ("live", &self.live),
+            ("without_objects", &self.without_objects),
+        ];
+        for (kind, set) in sets {
+            lines.extend(set.iter().map(|c| format!("{kind} {c}")));
+        }
+        for (kind, set) in
+            [("method", &self.methods), ("dormant", &self.dormant), ("external", &self.external)]
+        {
+            lines.extend(set.iter().map(|m| format!("{kind} {}.{}{}", m.0, m.1, m.2)));
+        }
+        lines.extend(self.fields.iter().map(|f| format!("field {}.{}", f.0, f.1)));
+        lines.extend(self.missing.iter().map(|c| format!("missing {c}")));
+        lines.extend(self.stubs.iter().map(|s| format!("stub {s:?}")));
+        lines.extend(self.ensured.iter().map(|c| format!("ensured {c}")));
+        lines.extend(self.named.iter().map(|c| format!("named {c}")));
+        lines.extend(self.found_by_name.iter().map(|c| format!("found {c}")));
+        lines.extend(self.services.iter().map(|s| format!("service {s:?}")));
+        lines.extend(self.reflected.iter().map(|r| format!("reflected {r:?}")));
+        lines.extend(
+            self.proxies.iter().map(|(interfaces, made)| format!("proxy {interfaces:?} {}", made.class)),
+        );
+        lines.insert(format!(
+            "sequential {} string_array_writes {}",
+            self.sequential, self.string_array_writes
+        ));
+        lines.into_iter().map(|l| l + "\n").collect()
+    }
+
     /// Whether a member of the class with qualified name `class` (a node of its `members`) is
     /// reachable and so is translated.
     pub fn member(&self, class: &str, member: &Value) -> bool {
@@ -2094,8 +2133,10 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
 /// because no unit declared their class wait for that class, and a new unit's methods that
 /// override a method whose overriders may run become reachable as they would have had the unit
 /// been there from the start. A walk that reached what it would not have with the new units from
-/// the start walks again from `main` (`Walk::stale`). The units walked must not change: when
-/// they do, a new `Rounds` walks them all again.
+/// the start walks again from `main` (`Walk::stale`); with `asking`, what depends on a class
+/// that javac has not answered for yet waits for its answer (`Walk::asked`), which leaves that
+/// to a unit that declares a class javac said it had none of. The units walked must not change:
+/// when they do, a new `Rounds` walks them all again.
 pub struct Rounds<'t> {
     main: String,
     units: Vec<&'t Value>,
@@ -2115,6 +2156,10 @@ pub struct Rounds<'t> {
     restarts: usize,
     /// `Reach::string_array_writes`.
     string_array_writes: bool,
+    /// The classes that javac has been asked for, when units come as their classes are asked for
+    /// (`asking`), and those asked for since the last units were added (`Walk::asked`).
+    asked: Option<HashSet<String>>,
+    newly_asked: Vec<String>,
 }
 
 impl<'t> Rounds<'t> {
@@ -2130,7 +2175,23 @@ impl<'t> Rounds<'t> {
             parallel: None,
             restarts: 0,
             string_array_writes: false,
+            asked: None,
+            newly_asked: Vec::new(),
         }
+    }
+
+    /// Reachability over units that come as javac is asked for the classes they declare
+    /// (`asked`): a method of a class that no unit declares waits for javac's answer before it is
+    /// taken for an external one (`Walk::asked`).
+    pub fn asking(mut self) -> Rounds<'t> {
+        self.asked = Some(HashSet::new());
+        self
+    }
+
+    /// Notes classes that javac was asked for: those that the next units added do not declare
+    /// are not among its sources.
+    pub fn asked(&mut self, classes: &[String]) {
+        self.newly_asked.extend_from_slice(classes);
     }
 
     /// Reachability in which `Arrays.sort` and `Arrays.fill` of a `String[]` reach the JDK's
@@ -2164,9 +2225,13 @@ impl<'t> Rounds<'t> {
     /// Adds units to the program, and reaches what they add.
     pub fn add(&mut self, units: &[&'t Value]) -> Result<(), String> {
         self.units.extend(units);
+        let asked = std::mem::take(&mut self.newly_asked);
+        if let Some(all) = &mut self.asked {
+            all.extend(asked.iter().cloned());
+        }
         let sequential = match &mut self.sequential {
             Some(walk) => {
-                walk.add(units);
+                walk.add(units, &asked);
                 if walk.stale {
                     self.restarts += 1;
                     self.check = sequential::Index::default();
@@ -2182,6 +2247,7 @@ impl<'t> Rounds<'t> {
                     self.string_array_writes,
                     &self.locale_data,
                     &self.providers,
+                    self.asked.clone(),
                 )?;
                 self.sequential.insert(walk)
             }
@@ -2189,7 +2255,7 @@ impl<'t> Rounds<'t> {
         self.stays_sequential = self.check.streams_stay_sequential(sequential);
         match &mut self.parallel {
             Some(walk) => {
-                walk.add(units);
+                walk.add(units, &asked);
                 if walk.stale {
                     self.restarts += 1;
                     walk.restart(&self.main);
@@ -2203,6 +2269,7 @@ impl<'t> Rounds<'t> {
                     self.string_array_writes,
                     &self.locale_data,
                     &self.providers,
+                    self.asked.clone(),
                 )?;
                 self.parallel = Some(walk);
             }
@@ -2242,6 +2309,19 @@ impl<'t> Rounds<'t> {
         self.sequential.iter().chain(&self.parallel).all(Walk::same_with_string_array_writes)
     }
 
+    /// What the walks reached over the units so far, as `Reach::dump` writes it, for comparing
+    /// the rounds with a walk from scratch over the same units (`JAVA_TO_RUST_REACH_CHECK`).
+    pub fn dump(&self) -> String {
+        let mut out = format!("stays sequential {}\n", self.stays_sequential);
+        if let Some(walk) = &self.sequential {
+            out += &walk.reach.dump();
+        }
+        if let Some(walk) = self.parallel.as_ref().filter(|_| !self.stays_sequential) {
+            out += &walk.reach.dump().lines().map(|l| format!("parallel {l}\n")).collect::<String>();
+        }
+        out
+    }
+
     /// What reachable code uses, over the units so far.
     pub fn finish(self) -> Reach {
         if let Some(walk) = &self.sequential {
@@ -2262,6 +2342,15 @@ impl<'t> Rounds<'t> {
     }
 }
 
+/// What the `instanceof` of an `if` decides of its `then` branch (`Walk::objectless`).
+enum Guard {
+    /// It waits for the class it tests for to have objects.
+    Objectless(String),
+    /// It waits for the class it tests for to have objects, or for javac to give the second
+    /// class or to have none, whichever comes first.
+    Waits(String, String),
+}
+
 /// A declaration that has become reachable and is still to be visited.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Item {
@@ -2272,6 +2361,9 @@ enum Item {
     /// The `then` branch of an `if` that waited for the class it tests for to be live
     /// (`Walk::branches`).
     Branch(usize),
+    /// The constructor that makes a new exception of this class from another, once reachable
+    /// code makes one (`Walk::recreatable`), which waited for a supertype of the class.
+    Recreate(String),
 }
 
 /// The declarations of the program, and the worklist over them.
@@ -2299,8 +2391,21 @@ struct Walk<'t> {
     /// Whether the walk reached what it would not have reached with all its units from the
     /// start: a method that it took for an external one, as no unit declared its class, made
     /// its overriders reachable, and once a unit did, the method is one of the `dormant` ones,
-    /// which make none reachable. The walk is then made again (`Rounds`).
+    /// which make none reachable. The walk is then made again (`Rounds`). With `asked`, a method
+    /// is taken for an external one only once javac had no unit for its class, so this happens
+    /// only when a later unit declares the class all the same.
     stale: bool,
+    /// The classes that javac has been asked for, when units come as their classes are asked
+    /// for (`Rounds::asking`). A method of a class that no unit declares and that javac has not
+    /// been asked for yet is not taken for an external one: it waits for the class (`blocked`),
+    /// and is external only once javac has none, as it would have been with every unit from the
+    /// start. Taking it for one earlier could make its overriders reachable where, once a unit
+    /// declares the class, it is `dormant` (`stale`). The other decisions that depend on whether
+    /// a class is declared wait for it too: whether an `instanceof` guards a branch
+    /// (`objectless`) and whether a class is an exception's (`recreatable`). So the walk
+    /// reaches over the units so far what a walk from scratch over them reaches, whatever the
+    /// order they came in. `None` when every unit is given at once.
+    asked: Option<HashSet<String>>,
     /// Items that could not be visited because no unit declares their class, by that class:
     /// they are visited when a unit added later does (`block`).
     blocked: HashMap<String, HashSet<Item>>,
@@ -2377,6 +2482,9 @@ struct Walk<'t> {
     /// those that wait, by that class.
     branches: Vec<(&'t Value, Option<MethodKey>, Option<String>)>,
     waiting_branches: HashMap<String, Vec<usize>>,
+    /// The `if`s among `branches` whose test waits for a class that javac may still give
+    /// (`objectless`), by the class they test for: each is scanned again when that class is live.
+    undecided_ifs: HashMap<String, Vec<usize>>,
     /// Without `Reach::string_array_writes`: what a walk with them would visit for the
     /// `Arrays.sort` and `Arrays.fill` of a `String[]` that this one met, besides their arguments
     /// (`string_array_write_items`), and whether it met one whose visit is not known that way.
@@ -2448,6 +2556,7 @@ impl<'t> Walk<'t> {
                         Some(m) => format!("branch of an instanceof in {}.{}{}", m.0, m.1, m.2),
                         None => "branch of an instanceof in an initializer".to_string(),
                     },
+                    Item::Recreate(c) => format!("new exception of class {c} from another"),
                 };
                 eprintln!("  {line}");
                 match why.get(&item) {
@@ -2468,9 +2577,11 @@ impl<'t> Walk<'t> {
         string_array_writes: bool,
         locale_data: &[String],
         providers: &[super::modules::ServiceProvider],
+        asked: Option<HashSet<String>>,
     ) -> Result<Walk<'t>, String> {
         let mut walk = Walk {
             sequential,
+            asked,
             why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::new()),
             locale_data: locale_data.to_vec(),
             providers: providers.to_vec(),
@@ -2515,6 +2626,7 @@ impl<'t> Walk<'t> {
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
             providers: std::mem::take(&mut self.providers),
+            asked: self.asked.take(),
             why: self.why.as_ref().map(|_| HashMap::new()),
             ..Walk::default()
         };
@@ -2525,8 +2637,10 @@ impl<'t> Walk<'t> {
 
     /// Adds units, and walks on to what they add: the items that waited for a class they
     /// declare, the supertypes of their classes that are live, and their methods that override
-    /// a method whose overriders may run.
-    fn add(&mut self, units: &[&'t Value]) {
+    /// a method whose overriders may run. Of the classes `asked` for since the last units, those
+    /// that no unit declares are not among the sources: the methods that waited for them are
+    /// external.
+    fn add(&mut self, units: &[&'t Value], asked: &[String]) {
         self.declare_units(units);
         for class in std::mem::take(&mut self.declared) {
             self.reach.missing.remove(&class);
@@ -2549,6 +2663,17 @@ impl<'t> Walk<'t> {
             } else {
                 self.waiting.entry(overrider.0.clone()).or_default().push(overrider);
             }
+        }
+        if let Some(all) = &mut self.asked {
+            all.extend(asked.iter().cloned());
+        }
+        for class in asked {
+            let waiting = self.blocked.get(class).into_iter().flatten();
+            let undecided: Vec<Item> = waiting
+                .filter(|item| matches!(item, Item::Method(_) | Item::Branch(_) | Item::Recreate(_)))
+                .cloned()
+                .collect();
+            self.work.extend(undecided);
         }
         self.add_named();
         self.run();
@@ -2658,6 +2783,7 @@ impl<'t> Walk<'t> {
                     Item::Method(key) => self.method(key),
                     Item::Field(key) => self.field(key),
                     Item::Branch(index) => self.branch(index),
+                    Item::Recreate(class) => self.recreatable(&class),
                 }
                 if let (Some(why), Some(current)) = (&mut self.why, current) {
                     for pushed in &self.work[before.min(self.work.len())..] {
@@ -2747,6 +2873,10 @@ impl<'t> Walk<'t> {
         let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
         let Some(&node) = node else {
             self.block(&key.0, Item::Method(key.clone()));
+            // A class that javac has not been asked for yet may still come (`asked`).
+            if self.waits_for(&key.0) {
+                return;
+            }
             // An enum's `values()` and `valueOf()`, which javac declares without code, initialize
             // the enum: its constants are built with what their arguments call.
             if matches!(key.1.as_str(), "values" | "valueOf")
@@ -2846,10 +2976,18 @@ impl<'t> Walk<'t> {
     /// objects yet and its objects can only come from its constructors, which reachability sees:
     /// `has_objects`, and neither an exception, a standard class nor a class whose values an
     /// `Object` holds (a boxed value made by boxing, a string, a builder or a class), which the
-    /// runtime makes objects of, nor one whose supertypes are not all declared.
-    fn objectless(&self, node: &Value) -> Option<String> {
+    /// runtime makes objects of, nor one whose supertypes are not all declared. While that
+    /// depends on a class that javac may still give (`waits_for`), the `if` waits for it.
+    fn objectless(&mut self, node: &Value) -> Option<Guard> {
         let class = instanceof_guard(node)?;
-        if self.reach.live.contains(&class) || !self.has_objects(&class) {
+        if self.reach.live.contains(&class) {
+            return None;
+        }
+        if self.waits_for(&class) {
+            return Some(Guard::Waits(class.clone(), class));
+        }
+        self.absent(&class);
+        if !self.has_objects(&class) {
             return None;
         }
         let mut work = vec![class.clone()];
@@ -2864,10 +3002,31 @@ impl<'t> Walk<'t> {
             match self.supertypes.get(&c) {
                 Some(supertypes) => work.extend(supertypes.iter().cloned()),
                 None if outside(&c) => {}
-                None => return None,
+                None if self.waits_for(&c) => return Some(Guard::Waits(class, c)),
+                None => {
+                    self.absent(&c);
+                    return None;
+                }
             }
         }
-        Some(class)
+        Some(Guard::Objectless(class))
+    }
+
+    /// Whether `class` is one that no unit declares yet and that javac has not been asked for,
+    /// when units come as their classes are asked for (`Rounds::asking`): javac may still give
+    /// it, so what depends on it waits (`block`) rather than being decided without it.
+    fn waits_for(&self, class: &str) -> bool {
+        self.asked.as_ref().is_some_and(|asked| !asked.contains(class))
+            && !self.classes.contains_key(class)
+            && !outside(class)
+    }
+
+    /// Notes `class`, which a decision found undeclared after javac was asked for it
+    /// (`waits_for`), as missing, as it was while the decision waited for it.
+    fn absent(&mut self, class: &str) {
+        if self.asked.is_some() {
+            self.missing(class);
+        }
     }
 
     /// The `then` branch of an `if` that waited for the class it tests for to be live, scanned as
@@ -2914,15 +3073,23 @@ impl<'t> Walk<'t> {
     /// parameters (and `initCause`, a standard method).
     fn recreatable(&mut self, class: &str) {
         let mut work = vec![class.to_string()];
-        let mut throwable = false;
+        let (mut throwable, mut waits) = (false, None);
         while let Some(c) = work.pop() {
             if c == "java.lang.Throwable" || crate::lower::standard_subclass(&c, "java.lang.Throwable") {
                 throwable = true;
                 break;
             }
-            work.extend(self.supertypes.get(&c).cloned().unwrap_or_default());
+            match self.supertypes.get(&c) {
+                Some(supertypes) => work.extend(supertypes.iter().cloned()),
+                None if waits.is_none() && self.waits_for(&c) => waits = Some(c),
+                None => self.absent(&c),
+            }
         }
         if !throwable {
+            // Whether it is an exception may depend on a class that javac may still give.
+            if let Some(missing) = waits {
+                self.block(&missing, Item::Recreate(class.to_string()));
+            }
             return;
         }
         for signature in ["(java.lang.Throwable)void", "()void"] {
@@ -2969,6 +3136,9 @@ impl<'t> Walk<'t> {
                 for branch in self.waiting_branches.remove(&class).unwrap_or_default() {
                     self.work.push(Item::Branch(branch));
                 }
+            }
+            for branch in self.undecided_ifs.remove(&class).unwrap_or_default() {
+                self.work.push(Item::Branch(branch));
             }
             work.extend(self.supertypes.get(&class).cloned().unwrap_or_default());
         }
@@ -3068,9 +3238,22 @@ impl<'t> Walk<'t> {
         // The `then` branch of an `if` that tests for a class without objects waits until
         // the class has some (`Reach::without_objects`).
         if kind == "IF"
-            && let Some(class) = self.objectless(value)
+            && let Some(guard) = self.objectless(value)
         {
             self.scan(&value["condition"]);
+            let class = match guard {
+                Guard::Objectless(class) => class,
+                Guard::Waits(tested, missing) => {
+                    // The whole `if` is scanned again once javac gives the class or has none,
+                    // or once the class it tests for is live.
+                    self.scan(&value["elseStatement"]);
+                    let branch = (value, self.scanning.clone(), self.lookup_class.clone());
+                    self.block(&missing, Item::Branch(self.branches.len()));
+                    self.undecided_ifs.entry(tested).or_default().push(self.branches.len());
+                    self.branches.push(branch);
+                    return;
+                }
+            };
             self.scan(&value["elseStatement"]);
             let branch = (&value["thenStatement"], self.scanning.clone(), self.lookup_class.clone());
             self.waiting_branches.entry(class.clone()).or_default().push(self.branches.len());
@@ -3543,6 +3726,53 @@ mod tests {
         let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
         assert!(rounds.methods.contains(&method("Deeper", "go")), "{rounds:?}");
         assert!(!rounds.methods.contains(&method("Library", "unused")), "{rounds:?}");
+    }
+
+    #[test]
+    fn asking_rounds_wait_for_javacs_answer_and_reach_what_a_walk_from_scratch_does() {
+        // `if (x instanceof Target) Inside.run();` and `Library.run();`, where `Target extends
+        // Base` and neither `Base` nor `Library` is declared by the first unit.
+        let test = json!({"kind": "INSTANCE_OF", "expression": {"kind": "IDENTIFIER", "name": "x"},
+            "type": {"kind": "IDENTIFIER", "javaType": "Target", "symbol": {"kind": "CLASS", "type": "Target"}}});
+        let guarded = json!({"kind": "IF", "condition": {"kind": "PARENTHESIZED", "expression": test},
+            "thenStatement": call("Inside", "run")});
+        let first = json!({"typeDecls": [
+            class("Main", &[("main", vec![guarded, call("Library", "run")])]),
+            {"kind": "CLASS", "symbol": {"type": "Target"}, "members": [],
+             "extendsClause": {"kind": "IDENTIFIER", "symbol": {"type": "Base"}}},
+            class("Inside", &[("run", vec![])]),
+        ]});
+        let base = json!({"typeDecls": [{"kind": "CLASS", "symbol": {"type": "Base"}, "members": []}]});
+        let library = ("Library".to_string(), "run".to_string(), "()void".to_string());
+        let inside = ("Inside".to_string(), "run".to_string(), "()void".to_string());
+        // Each round reaches what a walk from scratch over its units, with the same classes asked
+        // for, does.
+        let from_scratch = |units: &[&Value], asked: &[String]| {
+            let mut rounds = Rounds::new("Main").asking();
+            rounds.asked(asked);
+            rounds.add(units).unwrap();
+            rounds.dump()
+        };
+        for base_comes in [true, false] {
+            let mut rounds = Rounds::new("Main").asking();
+            rounds.add(&[&first]).unwrap();
+            assert_eq!(rounds.dump(), from_scratch(&[&first], &[]));
+            // Nothing is decided on the missing classes before javac answers for them.
+            assert_eq!(rounds.missing(), ["Base", "Library"]);
+            let asked = rounds.missing();
+            rounds.asked(&asked);
+            let second: Vec<&Value> = if base_comes { vec![&base] } else { vec![] };
+            rounds.add(&second).unwrap();
+            let all: Vec<&Value> = [&first].into_iter().chain(second).collect();
+            assert_eq!(rounds.dump(), from_scratch(&all, &asked));
+            let reach = rounds.finish();
+            // `Library` is not among the sources: its method is an external one.
+            assert!(reach.external.contains(&library), "{reach:?}");
+            // `Target` has no objects once `Base` is declared; without `Base`, whether it can
+            // have any is not known, and the branch is reached.
+            assert_eq!(reach.methods.contains(&inside), !base_comes, "{reach:?}");
+            assert_eq!(reach.without_objects.contains("Target"), base_comes, "{reach:?}");
+        }
     }
 
     #[test]
