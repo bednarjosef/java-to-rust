@@ -265,6 +265,13 @@ fn analyse(
                     vec![Error { pos: codegen::panicked_in().unwrap_or_default(), message }]
                 }
             };
+            if crate::timings::enabled() {
+                let first = errors.first().map_or("", |e| e.message.as_str());
+                eprintln!(
+                    "timing: census: pass {index} rejects {} pieces of code, first: {first}",
+                    errors.len()
+                );
+            }
             let mut stuck = Vec::new();
             let mut stubbed = false;
             for error in errors {
