@@ -236,8 +236,8 @@ best-of() {
 
 # Edits a decompiled tree where javac rejects it, compiled against CLASSPATH, with edits that keep
 # the bytecode's behaviour: casts the decompiler left out (checked ones only where the class file
-# in the jar CLASSES has the check), diamond type arguments, misnamed catch variables
-# (scripts/RepairDecompile.java). Each edit is listed in LOG.
+# in the jar CLASSES has the check), the type arguments of calls javac cannot infer, misnamed
+# catch variables (scripts/RepairDecompile.java). Each edit is listed in LOG.
 repair_tree() {
   local dir=$1 classpath=$2 log=$3 classes=$4
   local -a exports=()

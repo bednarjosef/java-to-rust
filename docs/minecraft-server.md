@@ -133,6 +133,35 @@ bytecode the class file already has:
   (`.map(key -> Component.literal(..)).orElse(INVALID_TEST_NAME)`, where javac infers
   `MutableComponent` from the lambda): the type that the whole is returned as or initializes,
   written out (`.<Component>map(..)`), as the original's source had it.
+- **Type arguments worked out around an inference error**, or around a call that no method
+  fits: those of the calls in the whole expression around the error, through calls, lambdas,
+  conditionals and casts, as the original's source must have given them. They come from the type
+  the expression is for (the variable it initializes, the result it returns, the parameter it is
+  passed to, the result of the lambda it is returned from), the declared types of the
+  arguments, what a lambda or a method reference returns given its parameter types, and the
+  bounds of the method's type variables (`M extends Map<K, V>`), through chains of calls
+  (`a.b(..).c(..)`, where the type `c` is for tells the type `a.b(..)` must have). Each type
+  variable is the type it must be, else the most specific of those it must be below, else the
+  most general of those it must be above: `MethodInfo.<Params>paramsTypedCodec()`,
+  `RecordCodecBuilder.<Pair<P, P>>create(..)`, `new RunOne<Allay>(..)`. Type arguments the decompiler
+  wrote that disagree are rewritten (`<PathfinderMob>` to `<Piglin>`), and a raw `new C(..)`
+  gets them. They are written first only for the calls whose type variables javac names as not
+  inferred, then, if that does not do, for every call. An argument whose declared type the
+  parameter then does not take is cast to it, unchecked as the original's conversion was
+  (`Optional.<U>of((U) this.value)`). A receiver that javac infers on its own, whose result does
+  not fit what the call on it is for, gets its type arguments from that instead
+  (`.<Single<?>>map(Single::fromEntry).toList()` returned as a `List<Single<?>>`): the original
+  wrote them. Type arguments are inference only; the calls and their descriptors stay.
+- **Other options at such an error**, each tried when the ones before it did not lower the
+  file's errors: the decompiler's cast to a raw class made a cast to a type variable in scope of
+  that erasure (`(Comparable) v` to `(T) v`, the same `checkcast`); an argument whose type holds a
+  captured wildcard cast to its raw class; a lambda or method reference passed to the call cast to
+  the one interface that fits the parameter and that the class file makes for it (for a method
+  reference, the interfaces made for that method's name: `(EntitySpawnerItemVariantComponentFix.Fixer)
+  EntitySpawnerItemVariantComponentFix::fixSalmonBucket`); the receiver cast to its raw class
+  where the argument's expected type is a capture of the receiver's wildcard
+  (`((Registry) BuiltInRegistries.REGISTRY).getId(..)`); and the call cast through the wildcard
+  type to the declared type of the whole (`(Codec<X>) (Codec<?>) typedCodec()`).
 - **A diamond in an argument** `new C(..)` of a generic class C, written raw, of a call whose
   type variables javac then cannot infer (`register(registry, "resource", ..., new
   ResourceArgument.Info())`): `new C<>(..)`, tried before a cast at the same error.
@@ -156,7 +185,26 @@ bytecode the class file already has:
   that encloses all of them, if that parameter is not used in its block, no other catch around
   a use has an unused parameter, and nothing inside the block declares the parameter's name
   again. A use inside a nested catch whose own parameter is unused could read either
-  parameter, so that name is left alone.
+  parameter; the class file tells which. A string constant just before a use
+  (`LOGGER.warn("Failed to delete ..", ex)`) is loaded right before the variable the use reads,
+  and a string constant of a catch's own block comes after the start of its handler, which
+  stores the exception in that catch's variable. The name becomes the parameter of the one catch
+  whose variable is the one read, if each constant is in the class file once.
+- **A temporary the decompiler did not declare** (`var24 = var10000.steps();` in a `try`, a
+  record pattern's component that Vineflower reads into a variable it declares nowhere): declared
+  with the type of the value first assigned to it (`List<PositionStep> var24;`), just before the
+  statement of the innermost block that holds every use. The first use must be that assignment.
+- **A local variable declared twice** in one scope (Vineflower giving two variables the same
+  name): the second, and every use of the name after it in its block, renamed to a name the file
+  does not use (`totalInterpolationTicks2`).
+- **CFR's `SwitchBootstraps.typeSwitch(..)` call**, its way of writing the `invokedynamic` of a
+  pattern `switch`, which javac rejects (the bootstrap method takes a lookup, a name and a method
+  type): replaced with the index the call site returns, `x == null ? -1 : n <= 0 && x instanceof
+  A ? 0 : n <= 1 && x instanceof B ? 1 : 2` for the labels `A.class, B.class` and the restart
+  index `n`. This one is not the original's bytecode, but it computes the same index: -1 for
+  `null`, else the first label from `n` on that `x` is an instance of, else the number of labels.
+  It is made only where `x` and `n` are variables or constants, which can be read again, and
+  every label is a class.
 - **A parameter type the decompiler erased** in a method that then overrides nothing, so javac
   says its class does not implement an abstract method (`encode(Object input, ..)` in a
   `MapEncoder.Implementation<R>` of DataFixerUpper's `RecordCodecBuilder`, whose method is
@@ -179,33 +227,26 @@ bytecode the class file already has:
 
 Classes are named as the file can name them: by simple name when the file imports them or they
 are in its package or in `java.lang`, otherwise qualified. A type that source cannot write (a
-captured wildcard outside a type argument, an intersection, a local class) gets no edit. After
-each round, a file whose errors (outside imports and annotations) did not go down gets its text
-back, and those edits are not tried again.
+captured wildcard outside a type argument, an intersection, a local class) gets no edit.
+
+An error can have several options, tried in order: in each round, every error gets its first
+option not tried before. After the round, a file whose errors (outside imports and annotations)
+did not go down gets its text back. A single option that did not help is not tried again; where
+the file had several errors' options at once, its options are tried one per round from then on.
 
 On the server taken file by file from the decompile setups that compile best (151 errors in 100
-files), it leaves 88 errors in 53 files; 42 of those are imports and annotations of annotation
-packages that no library jar has (`javax.annotation`, `org.jetbrains.annotations`).
-
-What is left is mostly inference that fails inside a lambda or a method reference (a lambda
-returning `List<EntityReference<EndCrystal>>` where `List<EntityReference<UniquelyIdentifyable>>`
-is inferred), lambdas for interfaces that are not functional, checked casts that the
-decompiler left out, and decompiler bugs that no type can repair (a variable declared twice, a
-record pattern's temporaries used outside their `try`).
+files, 109 of them outside imports and annotations), it leaves 42 errors in 18 files, all of them
+imports and annotations of annotation packages that no library jar has (`javax.annotation`,
+`org.jetbrains.annotations`). Four rounds are enough.
 
 ### What is fixed by hand
 
-What the repair leaves in the server's own code, about 40 places that javac's inference rejects,
-is fixed by hand: a type argument written out (`EntityReference.<LivingEntity>streamCodec()`,
-`ImmutableList.<BehaviorControl<? super Allay>>of(..)`), a cast to the raw type, a misnamed
-variable, or a method CFR wrote with `SwitchBootstraps` written as `instanceof` tests. The fixes
-are Minecraft's code, so they live in the cache only, as `hand-fixes/server.patch` (with
-`hand-fixes/orig/`, the repaired text of each file before its fix, and `make-patch.sh`, which
-diffs the two), and the `repair` step applies the patch after its own edits. A hunk that the
-repair already made is skipped, and `hand-fixes/applied.txt` lists it. What is left after
-it: the annotations of packages no jar has, four data fixes of DataFixerUpper's optics (which
-run only to upgrade a world saved by an older version) and the registry dump of the data
-generator.
+The repair leaves no error in the server's own code outside imports and annotations, so nothing
+there needs a fix by hand. Where one is needed, it would be Minecraft's code, so it lives in the
+cache only, as `hand-fixes/server.patch` (with `hand-fixes/orig/`, the repaired text of each file
+before its fix, and `make-patch.sh`, which diffs the two), and the `repair` step applies the
+patch after its own edits. A hunk that the repair already made is skipped, and
+`hand-fixes/applied.txt` lists it.
 
 ### Going on past compile errors
 
@@ -245,8 +286,8 @@ dependencies can be built: it stops only at a rejected piece, as any translation
 
 - **The server:** 185 errors in 117 of its 5,037 files with Vineflower and the libraries alone,
   compiled against the original library jars (579 in 282 when decompiled without the libraries;
-  151 in 100 with the files chosen from the four setups by the `best-of` step, and 88 in 53
-  after the `repair` step, see
+  151 in 100 with the files chosen from the four setups by the `best-of` step, and 42 in 18,
+  all in imports and annotations, after the `repair` step, see
   [below](#2-decompiled-sources-that-do-not-compile)). The largest kinds, with Vineflower alone:
 
   | errors | kind |
@@ -400,21 +441,18 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   from 186 errors in 118 files to 151 in 100, with 10 files from Vineflower without the
   libraries, 8 from CFR and 5 from Procyon (among them `TypedDataComponent`, whose static
   methods Vineflower writes with the record's type variable, and `DataFixers`), in 6 compiles.
-  Each of 15 of the 50 files that keep real errors after the repair has at most one error in
-  Procyon's version compiled on its own against the jars, but in the whole tree most of them
-  break the files that use them. The `repair` step then puts back the unchecked casts,
-  diamond type arguments and catch variable names that javac's errors show
-  ([above](#repairing-what-the-decompiler-left-out)), which leaves 88 errors in 53 files. What is
-  left is mostly inference inside lambdas and method references, and annotation packages that no
-  library jar has; those pieces stay rejected.
+  The `repair` step then puts back the type arguments, unchecked casts and catch variable names
+  that javac's errors and the class files show ([above](#repairing-what-the-decompiler-left-out)),
+  which leaves 42 errors in 18 files, all imports and annotations of annotation packages that no
+  library jar has.
 
   The libraries without published sources go through the same two steps: `library-best-of`
   decompiles each four ways into `decompiled/libraries/<artifact>` and puts it together into
   `src/libraries/<artifact>`, compiled against the other library jars, and `repair` then edits it.
   Brigadier, jtracy and logging compile as Vineflower writes them. DataFixerUpper goes from 169
   errors in 57 files to 165 in 59 with 2 files from CFR and 2 from Procyon (Vineflower without the
-  libraries, and CFR's and Procyon's whole sets, are all worse), and to 108 errors in 42 files
-  after the repair. 75 of the 108 are imports and uses of `javax.annotation`. All 107 of authlib's are `javax.annotation`,
+  libraries, and CFR's and Procyon's whole sets, are all worse), and to 93 errors in 34 files
+  after the repair. 73 of the 93 are imports and uses of `javax.annotation`. All 107 of authlib's are `javax.annotation`,
   so neither step changes them. What DataFixerUpper keeps is inference over its `App<Mu, ...>`
   encodings of higher-kinded types that fails.
 
@@ -443,11 +481,9 @@ These are plans. Work on several of them is under way but not merged yet.
    (it writes `jdk-src/modules.txt`), then the decompile, best-of, library-best-of and repair
    steps, then the census. Then compare its rejections with the last census's and with javac's,
    and list the new kinds.
-2. The decompiled code javac still rejects: 45 errors in the server, which the hand fixes cover,
-   and 24 in DataFixerUpper's optics (outside imports and annotations) after the best-of and
-   repair steps, mostly inference inside lambdas and method references. Most of the server's
-   need type arguments that no declared type gives (`MethodInfo.<Params>paramsTypedCodec()`,
-   `RecordCodecBuilder.<Pair<P, P>>create(..)` whose result a call unwraps).
+2. The decompiled code javac still rejects: 20 errors in DataFixerUpper's optics (outside
+   imports and annotations) after the best-of and repair steps, mostly inference over its
+   `App<Mu, ...>` encodings inside lambdas and method references.
 3. The census's speed: the last one lowered the whole program five times, about 370 s each,
    because a failed try with Rust generics starts lowering over. Planned: cheaper retries.
 4. The translator's refusals still open from the last census, by kind:
