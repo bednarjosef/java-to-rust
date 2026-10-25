@@ -23,7 +23,7 @@ the machine running out of memory.
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
 | `library-best-of` | each library without published sources decompiled the four ways of `decompile` into `decompiled/libraries/<artifact>`, and put together into `src/libraries/<artifact>` as `best-of` does for the server, compiled against the other library jars | 3 min |
-| `repair` | edits `src/server`, and each library in `src/libraries` that has no published sources, where javac rejects it, with edits that keep the bytecode's behaviour ([below](#repairing-what-the-decompiler-left-out)), up to `REPAIR_ROUNDS` (4) rounds; every edit is listed in `repair-log.txt` for the server and `repair-log-<artifact>.txt` for a library; then `hand-fixes/server.patch` in the cache, if there is one, is applied to `src/server` ([below](#what-is-fixed-by-hand)) | about 5 min, and 1 min for the libraries |
+| `repair` | edits `src/server`, and each library in `src/libraries` that has no published sources, where javac rejects it, with edits that keep the bytecode's behaviour ([below](#repairing-what-the-decompiler-left-out)), up to `REPAIR_ROUNDS` (10) rounds; every edit is listed in `repair-log.txt` for the server and `repair-log-<artifact>.txt` for a library; then `hand-fixes/server.patch` in the cache, if there is one, is applied to `src/server` ([below](#what-is-fixed-by-hand)) | about 5 min, and 1 min for the libraries |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`, [below](#the-jdk-modules): `java.base` plus 30 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events), `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) and `jdk.httpserver` (the HTTP server of an authentication library) | under a minute |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
 | `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
@@ -148,10 +148,17 @@ bytecode the class file already has:
   gets them. They are written first only for the calls whose type variables javac names as not
   inferred, then, if that does not do, for every call. An argument whose declared type the
   parameter then does not take is cast to it, unchecked as the original's conversion was
-  (`Optional.<U>of((U) this.value)`). A receiver that javac infers on its own, whose result does
-  not fit what the call on it is for, gets its type arguments from that instead
-  (`.<Single<?>>map(Single::fromEntry).toList()` returned as a `List<Single<?>>`): the original
-  wrote them. Type arguments are inference only; the calls and their descriptors stay.
+  (`Optional.<U>of((U) this.value)`), and so is a lambda's body that the result of its function
+  type then does not take (`e -> (Optic<? super P, ?, ?, ?, ?>) (Optic<?, ?, ?, ?, ?>)
+  e.optic()`). A diamond that cannot be inferred is written out, with its arguments cast the
+  same way (`new Typed<Either<A, B>>(.., (Either<A, B>) (Either<?, ?>) inj1().build(value))`). A
+  receiver that javac infers on its own, whose result does not fit what the call on it is for,
+  gets its type arguments from that instead (`.<Single<?>>map(Single::fromEntry).toList()`
+  returned as a `List<Single<?>>`): the original wrote them. As a third try, every receiver
+  that needs inference gets them from what the call is for, even where its own result fits:
+  `elements.stream().map(e -> e.optic()).collect(toList())` assigned to a `List<Optic<? super
+  P, ?, ?, ?, ?>>` maps to that type, the lambda's own being narrower. Type arguments are
+  inference only; the calls and their descriptors stay.
 - **Other options at such an error**, each tried when the ones before it did not lower the
   file's errors: the decompiler's cast to a raw class made a cast to a type variable in scope of
   that erasure (`(Comparable) v` to `(T) v`, the same `checkcast`); an argument whose type holds a
@@ -160,8 +167,20 @@ bytecode the class file already has:
   reference, the interfaces made for that method's name: `(EntitySpawnerItemVariantComponentFix.Fixer)
   EntitySpawnerItemVariantComponentFix::fixSalmonBucket`); the receiver cast to its raw class
   where the argument's expected type is a capture of the receiver's wildcard
-  (`((Registry) BuiltInRegistries.REGISTRY).getId(..)`); and the call cast through the wildcard
-  type to the declared type of the whole (`(Codec<X>) (Codec<?>) typedCodec()`).
+  (`((Registry) BuiltInRegistries.REGISTRY).getId(..)`); the call cast through the wildcard
+  type to the declared type of the whole (`(Codec<X>) (Codec<?>) typedCodec()`); a diamond for
+  every raw `new C(..)` of a generic class passed anywhere in the statement (`new
+  Pair.Instance<>()`); the method's one type variable that none of its code names, written for
+  each `?` in the statement's casts (Vineflower writes `?` for a type variable that the method
+  declares but never names); and the statement's casts that compile to nothing left out. Those
+  casts are the decompiler's guesses at types, often with the wrong type variables
+  (`(Either<Either<B, C>, A>) prism.match(a)`, where the original infers `A2`), and they keep
+  javac from inferring what the original inferred. A cast between two parameterizations of one
+  class has no `checkcast`, and neither has a cast to a wider class; the casts between
+  parameterizations of one class are left out first, before any other option. A cast to a wider
+  class stays where its type can choose what the code means: when it is not to a parameterized
+  type (`(Object) s`), when a member of it is selected (a hidden field), and when it is passed to
+  a method or constructor that has another one of the name with as many parameters.
 - **A diamond in an argument** `new C(..)` of a generic class C, written raw, of a call whose
   type variables javac then cannot infer (`register(registry, "resource", ..., new
   ResourceArgument.Info())`): `new C<>(..)`, tried before a cast at the same error.
@@ -175,8 +194,18 @@ bytecode the class file already has:
   same cast.
 - **A class's type variable in a static method**, written in a cast or in a call's type
   arguments (`Lens.<S, T, A, B>unbox(l)`, `(S) g.apply(c)`), where the decompiler used the class's
-  names for the method's own type variables: the cast or the type arguments are left out. A cast
-  to a type variable has no `checkcast`, and type arguments are inference only.
+  names for the method's own type variables: first every cast in the statement that compiles to
+  nothing left out (the other casts there are the decompiler's guesses too), then the one cast or
+  the type arguments. A cast to a type variable has no `checkcast`, and type arguments are
+  inference only.
+- **A method that the class file declares static** but the source does not, before the first
+  round: declared `static`. Procyon writes a static interface method as `default` (`unbox` of
+  DataFixerUpper's `CartesianLike`), which javac then rejects at every call from a static
+  method.
+- **A decompiler's cast to exactly the type javac expects** that javac does not allow, as the
+  two parameterizations are provably distinct: a cast through its class's wildcard type before
+  it (`(PointFree<Function<A, C>>) (PointFree<?>) f`). The original's cast is still made, with its
+  `checkcast` where it had one.
 - **A bound that names the type variable itself** (`CartesianLike<..., Mu extends Mu>`), where
   the original's bound is a member class of the same name: written as the member
   (`Mu extends CartesianLike.Mu`).
@@ -237,7 +266,7 @@ the file had several errors' options at once, its options are tried one per roun
 On the server taken file by file from the decompile setups that compile best (151 errors in 100
 files, 109 of them outside imports and annotations), it leaves 42 errors in 18 files, all of them
 imports and annotations of annotation packages that no library jar has (`javax.annotation`,
-`org.jetbrains.annotations`). Four rounds are enough.
+`org.jetbrains.annotations`), in three rounds. DataFixerUpper needs nine.
 
 ### What is fixed by hand
 
@@ -310,7 +339,7 @@ dependencies can be built: it stops only at a rejected piece, as any translation
   | Guava | 2,023 errors in 320 of its 608 files |
   | netty-handler | 526 errors in 28 files |
   | netty-common | 140 errors in 28 files |
-  | DataFixerUpper | 172 errors in 57 of its 164 files (97 after the `library-best-of` and `repair` steps, 24 of them outside imports and annotations, all in its optics and point-free functions, which run only in data fixes) |
+  | DataFixerUpper | 172 errors in 57 of its 164 files (73 after the `library-best-of` and `repair` steps, all of them imports and uses of `javax.annotation`) |
   | authlib, Gson | 107 errors each |
   | netty-codec-compression | 101 errors |
   | most others | a few |
@@ -451,10 +480,9 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   `src/libraries/<artifact>`, compiled against the other library jars, and `repair` then edits it.
   Brigadier, jtracy and logging compile as Vineflower writes them. DataFixerUpper goes from 169
   errors in 57 files to 165 in 59 with 2 files from CFR and 2 from Procyon (Vineflower without the
-  libraries, and CFR's and Procyon's whole sets, are all worse), and to 93 errors in 34 files
-  after the repair. 73 of the 93 are imports and uses of `javax.annotation`. All 107 of authlib's are `javax.annotation`,
-  so neither step changes them. What DataFixerUpper keeps is inference over its `App<Mu, ...>`
-  encodings of higher-kinded types that fails.
+  libraries, and CFR's and Procyon's whole sets, are all worse), and to 73 errors in 24 files
+  after the repair, all imports and uses of `javax.annotation`. All 107 of authlib's are
+  `javax.annotation`, so neither step changes them.
 
 ### 3. What the translator itself rejects
 
@@ -481,12 +509,9 @@ These are plans. Work on several of them is under way but not merged yet.
    (it writes `jdk-src/modules.txt`), then the decompile, best-of, library-best-of and repair
    steps, then the census. Then compare its rejections with the last census's and with javac's,
    and list the new kinds.
-2. The decompiled code javac still rejects: 20 errors in DataFixerUpper's optics (outside
-   imports and annotations) after the best-of and repair steps, mostly inference over its
-   `App<Mu, ...>` encodings inside lambdas and method references.
-3. The census's speed: the last one lowered the whole program five times, about 370 s each,
+2. The census's speed: the last one lowered the whole program five times, about 370 s each,
    because a failed try with Rust generics starts lowering over. Planned: cheaper retries.
-4. The translator's refusals still open from the last census, by kind:
+3. The translator's refusals still open from the last census, by kind:
    - reflection: generic types of interfaces, methods and fields; type variables; the rest of
      `Class`'s interfaces (`AnnotatedElement`, `GenericDeclaration`, ...); member and parameter
      annotations; `Method.toGenericString`;
@@ -507,6 +532,6 @@ These are plans. Work on several of them is under way but not merged yet.
      `String` constructors, switches and patterns on some types, a few lambda forms,
      `JavaLangAccess`'s thread and module calls, `isAnnotationPresent(Deprecated.class)`, and
      DataFixerUpper's generic method types as values.
-5. Two behaviours waiting for a decision: the objects `getAnnotation` and `getGenericSuperclass`
+4. Two behaviours waiting for a decision: the objects `getAnnotation` and `getGenericSuperclass`
    return are equal but not the same object across calls, and `Thread.dumpStack` and
    `getStackTrace` print and return no frames.

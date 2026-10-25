@@ -25,7 +25,7 @@
 # SRC_ZIP            the JDK's src.zip that the jdk-sources step unpacks the modules from (default:
 #                    lib/src.zip of the JDK whose java is on PATH)
 # JAVA               the java that runs the decompiler and the repair (default: java on PATH)
-# REPAIR_ROUNDS      how many times the repair step compiles and edits each tree (default 4)
+# REPAIR_ROUNDS      how many times the repair step compiles and edits each tree (default 10)
 # TRANSLATOR         the java-to-rust binary (default: target/release/java-to-rust, built if missing)
 # SLOT               a command that every heavy step runs under, such as a build-slot limiter
 #                    (default: none)
@@ -37,7 +37,7 @@
 #                    workspace with that many body crates (--crates); the trial step builds and
 #                    runs it (default: none)
 # TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G),
-#                    with CARGO_BUILD_JOBS crates built at once (default 4)
+#                    with CARGO_BUILD_JOBS crates built at once (default 10)
 # TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
 #                    memory and time to build)
 # PREVIOUS_CENSUS    the census that the summary compares the latest with, a directory with a
@@ -246,7 +246,7 @@ repair_tree() {
     exports+=(--add-exports "jdk.compiler/com.sun.tools.javac.$package=ALL-UNNAMED")
   done
   "${slot[@]}" nice -n 19 "$java" -Xmx4g "${exports[@]}" "$root/scripts/RepairDecompile.java" "$dir" "$classpath" \
-    "${REPAIR_ROUNDS:-4}" "$log" "$classes"
+    "${REPAIR_ROUNDS:-10}" "$log" "$classes"
 }
 
 # src/server repaired against the library jars, into repair-log.txt, and each library that has
