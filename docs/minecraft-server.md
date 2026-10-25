@@ -23,7 +23,7 @@ the machine running out of memory.
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
 | `library-sources` | downloads the sources jar that Maven Central publishes for each library, checks its SHA-1, and unpacks its Java files into `src/library-sources`: 30 of the 35 libraries, every class that their decompiled code has. Mojang's authlib, brigadier, datafixerupper, jtracy and logging are not published there and stay decompiled | under a minute |
 | `library-best-of` | each library without published sources decompiled the four ways of `decompile` into `decompiled/libraries/<artifact>`, and put together into `src/libraries/<artifact>` as `best-of` does for the server, compiled against the other library jars | 3 min |
-| `repair` | edits `src/server`, and each library in `src/libraries` that has no published sources, where javac rejects it, with edits that keep the bytecode's behaviour ([below](#repairing-what-the-decompiler-left-out)), up to `REPAIR_ROUNDS` (4) rounds; every edit is listed in `repair-log.txt` for the server and `repair-log-<artifact>.txt` for a library | about 5 min, and 1 min for the libraries |
+| `repair` | edits `src/server`, and each library in `src/libraries` that has no published sources, where javac rejects it, with edits that keep the bytecode's behaviour ([below](#repairing-what-the-decompiler-left-out)), up to `REPAIR_ROUNDS` (4) rounds; every edit is listed in `repair-log.txt` for the server and `repair-log-<artifact>.txt` for a library; then `hand-fixes/server.patch` in the cache, if there is one, is applied to `src/server` ([below](#what-is-fixed-by-hand)) | about 5 min, and 1 min for the libraries |
 | `jdk-sources` | unpacks the JDK modules the server and its libraries use from the JDK's `src.zip`, [below](#the-jdk-modules): `java.base` plus 30 others, including `java.desktop` (the server's Swing console), `jdk.jfr` (its profiling events), `jdk.unsupported` (`sun.misc.Unsafe` for Netty and others) and `jdk.httpserver` (the HTTP server of an authentication library) | under a minute |
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
 | `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
@@ -174,10 +174,22 @@ is inferred), lambdas for interfaces that are not functional, checked casts that
 decompiler left out, and decompiler bugs that no type can repair (a variable declared twice, a
 record pattern's temporaries used outside their `try`).
 
+### What is fixed by hand
+
+What the repair leaves in the server's own code, about 40 places that javac's inference rejects,
+is fixed by hand: a type argument written out (`EntityReference.<LivingEntity>streamCodec()`,
+`ImmutableList.<BehaviorControl<? super Allay>>of(..)`), a cast to the raw type, a misnamed
+variable, or a method CFR wrote with `SwitchBootstraps` written as `instanceof` tests. The fixes
+are Minecraft's code, so they live in the cache only, as `hand-fixes/server.patch` (with
+`hand-fixes/orig/`, the repaired text of each file before its fix, and `make-patch.sh`, which
+diffs the two), and the `repair` step applies the patch after its own edits. What is left after
+it: the annotations of packages no jar has, four data fixes of DataFixerUpper's optics (which
+run only to upgrade a world saved by an older version) and the registry dump of the data
+generator.
+
 ### Going on past compile errors
 
-Decompiled code does not always compile, and the rules for this target say not to fix it by hand.
-The first census attempt stopped at the first error. The decompiler had written
+Decompiled code does not always compile. The first census attempt stopped at the first error. The decompiler had written
 `(Function<Object, >)` in DataFixerUpper's `RecordCodecBuilder`.
 
 So a census now takes `--keep-going`. With it, javac prints each compile error instead of
@@ -340,9 +352,9 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   class, cannot be loaded at all, as on the JVM: log4j's `AsyncLoggerDisruptor` is one.
 
 - **The server's own decompiled code:** 185 errors in 117 files (about 2% of them) when
-  Vineflower decompiles with the library jars ([above](#decompiling-with-the-libraries)). They
-  cannot be fixed by hand under this target's rules. Most are type arguments and casts that the
-  class files do not record at all, so no pass over the class files can bring them back.
+  Vineflower decompiles with the library jars ([above](#decompiling-with-the-libraries)). Most
+  are type arguments and casts that the class files do not record at all, so no pass over the
+  class files can bring them back.
 
   So the server is decompiled four ways and put together file by file. The `decompile` step
   writes four trees into `decompiled/`: Vineflower with the libraries, Vineflower without them,

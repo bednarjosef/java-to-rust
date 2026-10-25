@@ -251,9 +251,14 @@ repair_tree() {
 
 # src/server repaired against the library jars, into repair-log.txt, and each library that has
 # no published sources (src/libraries/<artifact>) against the other library jars, into
-# repair-log-<artifact>.txt.
+# repair-log-<artifact>.txt. Then the edits made by hand in the cache, if any:
+# hand-fixes/server.patch, applied in src/server (it is never part of this repository).
 repair() {
   repair_tree "$cache/src/server" "$(library_jars | paste -sd:)" "$cache/repair-log.txt" "$(server_jar)"
+  if [ -f "$cache/hand-fixes/server.patch" ]; then
+    patch -p1 -N -d "$cache/src/server" < "$cache/hand-fixes/server.patch" > "$cache/hand-fixes/applied.txt"
+    echo "hand fixes: $(grep -c '^patching' "$cache/hand-fixes/applied.txt") files"
+  fi
   unpublished_jars | while IFS= read -r lib; do
     local name
     name=$(basename "$lib" .jar)
