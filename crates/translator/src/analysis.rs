@@ -1027,8 +1027,13 @@ pub(crate) fn held_value<'c>(class: &'c Class, m: usize, e: &'c Expr) -> &'c Exp
 pub struct IndexHasher(u64);
 
 impl std::hash::Hasher for IndexHasher {
+    /// A name, eight bytes at a time.
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
+        let mut words = bytes.chunks_exact(8);
+        for word in &mut words {
+            self.write_usize(u64::from_le_bytes(word.try_into().expect("eight bytes")) as usize);
+        }
+        for &b in words.remainder() {
             self.write_usize(b as usize);
         }
     }
