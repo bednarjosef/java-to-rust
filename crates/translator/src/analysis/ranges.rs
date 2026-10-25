@@ -16,12 +16,13 @@
 
 use super::Facts;
 use super::constants::static_value;
+use super::{FastMap, FastSet};
 use crate::ast::*;
 use crate::types::binary_type;
 use std::collections::{HashMap, HashSet};
 
 pub fn analyze(class: &Class, facts: &mut Facts) {
-    let mut no_square_narrowing = HashSet::new();
+    let mut no_square_narrowing = FastSet::default();
     loop {
         let mut a = Analysis::new(class, no_square_narrowing.clone());
         a.run();
@@ -215,30 +216,30 @@ struct Analysis<'a> {
     ret: Interval,
     /// Whether facts are recorded: only in the final pass over a stable state.
     record: bool,
-    visited: HashSet<ExprId>,
-    overflow: HashSet<ExprId>,
+    visited: FastSet<ExprId>,
+    overflow: FastSet<ExprId>,
     /// The values each array index takes, keyed by the indexing or element assignment.
-    indexes: HashMap<ExprId, Interval>,
-    risky_division: HashSet<ExprId>,
+    indexes: FastMap<ExprId, Interval>,
+    risky_division: FastSet<ExprId>,
     loops: Vec<Flow>,
     /// Upper bounds of counters inside counting loops: (variable, bound).
     budgets: Vec<(String, i128)>,
-    no_square_narrowing: HashSet<ExprId>,
-    square_narrowed: HashSet<ExprId>,
+    no_square_narrowing: FastSet<ExprId>,
+    square_narrowed: FastSet<ExprId>,
     /// `(char)` casts, and those whose value some recorded visit leaves outside ASCII.
-    chars: HashSet<ExprId>,
-    wide_chars: HashSet<ExprId>,
+    chars: FastSet<ExprId>,
+    wide_chars: FastSet<ExprId>,
     /// Where widening stops before the end of the type, for the current method: its literals
     /// and the bounds of its parameters, sorted.
     thresholds: Vec<i128>,
     /// The last invariant found for each loop of the current method, keyed by the loop's
     /// address. An inner loop is solved again on every pass over the outer loop; starting from
     /// its last invariant usually confirms it in one pass instead of rebuilding it.
-    heads: HashMap<usize, Env>,
+    heads: FastMap<usize, Env>,
 }
 
 impl<'a> Analysis<'a> {
-    fn new(class: &'a Class, no_square_narrowing: HashSet<ExprId>) -> Analysis<'a> {
+    fn new(class: &'a Class, no_square_narrowing: FastSet<ExprId>) -> Analysis<'a> {
         let n = class.methods.len();
         Analysis {
             class,
@@ -249,18 +250,18 @@ impl<'a> Analysis<'a> {
             method: 0,
             ret: EMPTY,
             record: false,
-            visited: HashSet::new(),
-            overflow: HashSet::new(),
-            indexes: HashMap::new(),
-            risky_division: HashSet::new(),
+            visited: FastSet::default(),
+            overflow: FastSet::default(),
+            indexes: FastMap::default(),
+            risky_division: FastSet::default(),
             loops: Vec::new(),
             budgets: Vec::new(),
             no_square_narrowing,
-            square_narrowed: HashSet::new(),
-            chars: HashSet::new(),
-            wide_chars: HashSet::new(),
+            square_narrowed: FastSet::default(),
+            chars: FastSet::default(),
+            wide_chars: FastSet::default(),
             thresholds: Vec::new(),
-            heads: HashMap::new(),
+            heads: FastMap::default(),
         }
     }
 

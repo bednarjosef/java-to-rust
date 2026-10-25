@@ -69,6 +69,9 @@ pub struct Hierarchy {
     words: usize,
     /// The index of each type by its qualified name (the first, as `Class::type_index` finds it).
     names: HashMap<String, usize>,
+    /// The index of each runtime class by its name (the first, as `Class::runtime_index` finds
+    /// it).
+    runtime_names: HashMap<String, usize>,
 }
 
 impl Hierarchy {
@@ -129,9 +132,12 @@ impl Hierarchy {
                 }
             }
         }
-        let mut names = HashMap::new();
+        let (mut names, mut runtime_names) = (HashMap::new(), HashMap::new());
         for (t, decl) in types.iter().enumerate() {
             names.entry(decl.name.clone()).or_insert(t);
+            if decl.kind == TypeKind::Runtime {
+                runtime_names.entry(decl.name.clone()).or_insert(t);
+            }
         }
         Hierarchy {
             subtypes,
@@ -156,6 +162,7 @@ impl Hierarchy {
             supertype_bits,
             words,
             names,
+            runtime_names,
         }
     }
 
@@ -400,7 +407,17 @@ impl Class {
     /// box that the program also has from the JDK's source (`Character`, for its static methods)
     /// has a class of that name too, which `type_index` finds first; the values are not its.
     fn runtime_index(&self, name: &str) -> Option<usize> {
-        self.types.iter().position(|t| t.name == name && t.kind == TypeKind::Runtime)
+        let scan = || self.types.iter().position(|t| t.name == name && t.kind == TypeKind::Runtime);
+        // The hierarchy's index, made from the types as they were when it was built.
+        let found = match self.hierarchy.runtime_names.get(name) {
+            Some(&t) if self.types.get(t).is_some_and(|d| d.name == name && d.kind == TypeKind::Runtime) => {
+                Some(t)
+            }
+            Some(_) => scan(),
+            None => None,
+        };
+        debug_assert_eq!(found, scan(), "runtime class index of {name}");
+        found
     }
 
     /// The array type of runtime class `c`, when it is the class of arrays that become `Object`s
