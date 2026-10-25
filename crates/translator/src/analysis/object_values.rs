@@ -172,6 +172,11 @@ impl ClassSet {
         }
     }
 
+    /// How many words the set holds, for the timings.
+    pub(super) fn words(&self) -> usize {
+        self.words.len()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.words.iter().enumerate().flat_map(move |(i, &word)| {
             (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| (self.start + i) * 64 + b)

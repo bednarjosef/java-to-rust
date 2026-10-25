@@ -96,6 +96,9 @@ impl LiveMethods {
 /// tell, when they do not.
 pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
     let values = object_values::analyze_for_dispatch(class);
+    if crate::timings::enabled() {
+        eprintln!("timing: points-to for dispatch done{}", crate::timings::memory());
+    }
     let walk = Walk {
         class,
         values: &values,
@@ -154,9 +157,25 @@ impl Walk<'_> {
     /// Walks the methods on the work list, and those they reach, until none is left.
     fn run(&self) {
         let class = self.class;
+        let timings = crate::timings::enabled();
+        let mut walks = 0usize;
         loop {
             let next = self.state.borrow_mut().work.pop();
             let Some((m, ctx)) = next else { break };
+            walks += 1;
+            if timings && walks.is_multiple_of(100_000) {
+                let state = self.state.borrow();
+                let waiting: usize = state.waiting.values().map(Vec::len).sum();
+                let words: usize = state.live.receivers.values().map(ClassSet::words).sum();
+                eprintln!(
+                    "timing: live walk: {walks} walks, {} to go, {} seen, {waiting} waiting, {} receivers in \
+                     {words} words{}",
+                    state.work.len(),
+                    state.seen.len(),
+                    state.live.receivers.len(),
+                    crate::timings::memory()
+                );
+            }
             let env = self.env(m);
             self.state.borrow_mut().known.env = env;
             let mut dead = self.dead(m);
