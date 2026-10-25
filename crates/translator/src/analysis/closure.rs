@@ -45,6 +45,19 @@ impl Bits {
         }
     }
 
+    /// Adds every member of `other`; whether that added any.
+    pub fn union_grew(&mut self, other: &Bits) -> bool {
+        if self.words.len() < other.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        let mut grew = false;
+        for (w, o) in self.words.iter_mut().zip(&other.words) {
+            grew |= o & !*w != 0;
+            *w |= o;
+        }
+        grew
+    }
+
     /// Adds every member of `other` that is not in `except`.
     pub fn union_except(&mut self, other: &Bits, except: &Bits) {
         if self.words.len() < other.words.len() {
