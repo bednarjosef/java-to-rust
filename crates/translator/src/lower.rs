@@ -456,6 +456,7 @@ impl<'t> Lowering<'t> {
             methods.push(clinit);
         }
         let mut writes = enums::EnumFieldWrites::default();
+        let mut uses = enum_tables::EnumFieldUses::default();
         let enum_indices: Vec<usize> =
             (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM").collect();
         // Every enum's constant bodies come first: a body's method may read another enum's fields,
@@ -471,9 +472,10 @@ impl<'t> Lowering<'t> {
             })
             .collect();
         for (index, bodies) in enum_indices.into_iter().zip(made) {
-            let finished = self.finish_enum(index, types, methods, bodies, &mut writes);
+            let finished = self.finish_enum(index, types, methods, bodies, &mut writes, &mut uses);
             // The enum's own methods may have changed.
             writes.forget(methods, index);
+            uses.forget(methods, index);
             if let Err(e) = finished {
                 // In a census, an enum that lowering rejects keeps its constants without values.
                 self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
@@ -494,6 +496,7 @@ impl<'t> Lowering<'t> {
         methods: &mut Vec<Method>,
         bodies: Result<Vec<Vec<Field>>, Error>,
         writes: &mut enums::EnumFieldWrites,
+        uses: &mut enum_tables::EnumFieldUses,
     ) -> Result<(), Error> {
         let bodies = bodies?;
         let own_fields = types[index].fields.len();
@@ -508,7 +511,7 @@ impl<'t> Lowering<'t> {
             Err(_) => {
                 types[index].fields.truncate(own_fields);
                 self.add_body_fields(&bodies, &mut types[index].fields)?;
-                self.enum_tables(index, types, methods, bodies)?;
+                self.enum_tables(index, types, methods, bodies, uses)?;
                 let names = self.enum_constant_names(index);
                 names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
             }
