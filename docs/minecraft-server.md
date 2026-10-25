@@ -129,6 +129,10 @@ bytecode the class file already has:
   extends it and that the class file's lambdas are made for (`(EntityDataSerializer.ForValueType<T>)
   () -> codec`), read from the `invokedynamic` instructions of the class. That is what the
   original's lambda was for; its default methods leave one abstract method.
+- **A type argument for a generic call** whose result a call on it unwraps
+  (`.map(key -> Component.literal(..)).orElse(INVALID_TEST_NAME)`, where javac infers
+  `MutableComponent` from the lambda): the type that the whole is returned as or initializes,
+  written out (`.<Component>map(..)`), as the original's source had it.
 - **A diamond in an argument** `new C(..)` of a generic class C, written raw, of a call whose
   type variables javac then cannot infer (`register(registry, "resource", ..., new
   ResourceArgument.Info())`): `new C<>(..)`, tried before a cast at the same error.

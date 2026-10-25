@@ -242,7 +242,7 @@ repair_tree() {
   local dir=$1 classpath=$2 log=$3 classes=$4
   local -a exports=()
   local package
-  for package in api code tree util; do
+  for package in api code model tree util; do
     exports+=(--add-exports "jdk.compiler/com.sun.tools.javac.$package=ALL-UNNAMED")
   done
   "${slot[@]}" nice -n 19 "$java" -Xmx4g "${exports[@]}" "$root/scripts/RepairDecompile.java" "$dir" "$classpath" \

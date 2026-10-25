@@ -25,6 +25,9 @@
 //   cast at the same error;
 // - in a for-each loop over a raw collection whose elements the class file casts to the loop
 //   variable's class, the collection cast to `Iterable` of that class;
+// - the type argument of a generic call whose result's type argument a call on it returns
+//   (`.<InteractionResult>map(..).orElse(PASS)`), written as the declared type that the whole
+//   is returned as or initializes;
 // - a lambda or method reference for an interface that is not functional, cast to the one
 //   interface extending it that the class file makes lambdas for (`(ForValueType<T>) () -> codec`);
 // - an unresolved variable in a catch block renamed to the catch parameter that encloses every
@@ -242,7 +245,8 @@ public class RepairDecompile {
                             edits.addAll(diamonds);
                         } else if (detail != null) {
                             Type found = (Type) detail.getArgs()[0], expected = (Type) detail.getArgs()[1];
-                            Edit edit = cast(types, cu, tree, path.getParentPath().getLeaf(), found, expected);
+                            Edit edit = witness(cu, path);
+                            if (edit == null) edit = cast(types, cu, tree, path.getParentPath().getLeaf(), found, expected);
                             if (edit != null) edits.add(edit);
                         }
                     }
@@ -266,23 +270,60 @@ public class RepairDecompile {
 
     static class Unprintable extends Exception {}
 
+    // For an argument (at `path`) of a call `inner(..).outer(arg)` whose result is the inner
+    // result's type argument (`Optional.orElse`), where `inner` is a generic method with one type
+    // variable called without type arguments (`Optional.map`) and the whole call is returned or
+    // initializes a variable: that type variable written out as the declared type
+    // (`.<InteractionResult>map(..).orElse(InteractionResult.PASS)`), which the original had
+    // where javac would infer the lambda's type instead. Type arguments are inference only.
+    static Edit witness(JCTree.JCCompilationUnit cu, TreePath path) throws Unprintable {
+        TreePath up = path.getParentPath();
+        if (up == null || !(up.getLeaf() instanceof JCTree.JCMethodInvocation outer) || !outer.args.contains(path.getLeaf()))
+            return null;
+        if (!(outer.meth instanceof JCTree.JCFieldAccess select)
+                || !(select.selected instanceof JCTree.JCMethodInvocation inner) || inner.typeargs.nonEmpty()
+                || !(inner.meth instanceof JCTree.JCFieldAccess innerSelect)
+                || !(TreeInfo.symbol(innerSelect) instanceof Symbol.MethodSymbol method)
+                || method.getTypeParameters().size() != 1
+                || inner.type == null || !inner.type.hasTag(TypeTag.CLASS)) return null;
+        // The call on the inner result does not resolve, so its method is looked up by name.
+        boolean returnsArgument = false;
+        for (Symbol member : inner.type.tsym.members().getSymbolsByName(select.name)) {
+            if (member instanceof Symbol.MethodSymbol result && result.params().size() == outer.args.size()
+                    && result.getReturnType().hasTag(TypeTag.TYPEVAR) && result.getReturnType().tsym.owner == result.owner)
+                returnsArgument = true;
+        }
+        if (!returnsArgument) return null;
+        Type declared = declaredFor(up);
+        if (declared == null || declared.isErroneous() || declared.isPrimitive()) return null;
+        String written = print(cu, declared, false);
+        int after = TreeInfo.getEndPos(innerSelect.selected, cu.endPositions);
+        int dot = source(cu, after, TreeInfo.getEndPos(innerSelect, cu.endPositions)).indexOf('.');
+        if (dot < 0) return null;
+        dot += after;
+        return new Edit(dot + 1, dot + 1, "<" + written + ">", "type argument <" + written + "> for " + innerSelect.name);
+    }
+
+    // The declared type that the expression at `path` is returned as or initializes, if it is.
+    static Type declaredFor(TreePath path) {
+        Tree leaf = path.getLeaf(), parent = path.getParentPath().getLeaf();
+        if (parent instanceof JCTree.JCVariableDecl variable && variable.init == leaf && variable.vartype != null)
+            return variable.vartype.type;
+        if (parent instanceof JCTree.JCReturn) {
+            for (TreePath up = path.getParentPath(); up != null; up = up.getParentPath()) {
+                if (up.getLeaf() instanceof LambdaExpressionTree) return null;
+                if (up.getLeaf() instanceof JCTree.JCMethodDecl method)
+                    return method.restype == null ? null : method.restype.type;
+            }
+        }
+        return null;
+    }
+
     // The type of class `written` that the expression at `path` is for: the declared type of the
     // variable it initializes or of the method result it returns, where that is of the class, and
     // the raw class otherwise.
     static Type targetOf(TreePath path, Symbol.ClassSymbol written, Types types) {
-        Tree leaf = path.getLeaf(), parent = path.getParentPath().getLeaf();
-        Type declared = null;
-        if (parent instanceof JCTree.JCVariableDecl variable && variable.init == leaf && variable.vartype != null) {
-            declared = variable.vartype.type;
-        } else if (parent instanceof JCTree.JCReturn) {
-            for (TreePath up = path.getParentPath(); up != null; up = up.getParentPath()) {
-                if (up.getLeaf() instanceof LambdaExpressionTree) break;
-                if (up.getLeaf() instanceof JCTree.JCMethodDecl method) {
-                    declared = method.restype == null ? null : method.restype.type;
-                    break;
-                }
-            }
-        }
+        Type declared = declaredFor(path);
         return declared != null && declared.tsym == written ? declared : types.erasure(written.type);
     }
 
