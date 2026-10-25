@@ -205,7 +205,9 @@ impl Walk<'_> {
         let mut state = self.state.borrow_mut();
         let contexts = state.contexts.get(&m).cloned().unwrap_or_default();
         for ctx in contexts {
-            state.work.push((m, ctx));
+            if state.queued.insert((m, ctx)) {
+                state.work.push((m, ctx));
+            }
         }
     }
 

@@ -110,6 +110,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         index: class.types.iter().enumerate().map(|(t, d)| (d.name.as_str(), t)).collect(),
         state: RefCell::new(State {
             work: Vec::new(),
+            queued: HashSet::default(),
             seen: HashSet::default(),
             waiting: HashMap::new(),
             waited: HashSet::default(),
@@ -164,7 +165,14 @@ impl Walk<'_> {
         let timings = crate::timings::enabled();
         let mut walks = 0usize;
         loop {
-            let next = self.state.borrow_mut().work.pop();
+            let next = {
+                let mut state = self.state.borrow_mut();
+                let next = state.work.pop();
+                if let Some(pair) = next {
+                    state.queued.remove(&pair);
+                }
+                next
+            };
             let Some((m, ctx)) = next else { break };
             walks += 1;
             if timings && walks.is_multiple_of(10_000) {
@@ -252,6 +260,7 @@ impl Walk<'_> {
             index: self.index.clone(),
             state: RefCell::new(State {
                 work: Vec::new(),
+                queued: HashSet::default(),
                 seen: HashSet::default(),
                 waiting: HashMap::new(),
                 waited: HashSet::default(),
@@ -413,6 +422,9 @@ struct Memos {
 struct State {
     /// The methods to scan, each with the class of the object it runs on (`STATIC`: none).
     work: Vec<(usize, usize)>,
+    /// Those on the work list: one already on it is not added again, as its walk reads what the
+    /// walk knows by then.
+    queued: HashSet<(usize, usize)>,
     seen: HashSet<(usize, usize)>,
     /// The instance methods called on objects of a class that no object of is created yet, by
     /// that class: they run once one is. Each once, in the order first called: a call on a
@@ -502,7 +514,7 @@ impl Walk<'_> {
             state.unknown = Some(format!("`{name}` run on {on}"));
         }
         state.live.methods.insert(m);
-        if state.seen.insert((m, ctx)) {
+        if state.seen.insert((m, ctx)) && state.queued.insert((m, ctx)) {
             state.work.push((m, ctx));
             state.contexts.entry(m).or_default().push(ctx);
         }
