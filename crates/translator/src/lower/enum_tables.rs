@@ -72,6 +72,7 @@ impl<'t> Lowering<'t> {
         methods: &mut Vec<Method>,
         bodies: Vec<Vec<Field>>,
         uses: &mut EnumFieldUses,
+        clinit_ctors: &super::clinit_errors::ClinitCtors,
     ) -> Result<(), Error> {
         self.current.set(index);
         self.in_ctor.set(false);
@@ -284,7 +285,7 @@ impl<'t> Lowering<'t> {
                     jdk_code: false,
                     field_update: None,
                 };
-                self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
+                self.guard_clinit(index, &mut clinit, &mut types[index], clinit_ctors);
                 methods.push(clinit);
             }
         }
