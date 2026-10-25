@@ -205,6 +205,9 @@ impl Names<'_> {
             let names = crate::timings::phase("census: class files", || class_file_names(self.program));
             let mut names = names.map_err(|e| vec![e.error])?;
             names.add_jdk_temps(self.jdk_temps.take());
+            if crate::timings::enabled() {
+                eprintln!("timing: census: class files: {}", names.sizes());
+            }
             *found = Some(names);
         }
         let names = found.as_ref().expect("found above");

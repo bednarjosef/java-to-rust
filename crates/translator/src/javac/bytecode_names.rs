@@ -34,11 +34,31 @@ pub enum NameKind {
 pub struct BytecodeNames {
     /// The feature version of the Java that compiled the program, such as `26`.
     pub java: String,
-    /// The text of each name, by class, `None` where javac's code generator leaves it uncertain.
-    entries: Entries,
+    /// The texts of the names that are certain, by class, and by line, column, kind and name,
+    /// each name and text an index into `strings`: those of the Minecraft server and its
+    /// libraries are tens of millions, most of them the same few texts.
+    entries: HashMap<String, HashMap<(u32, u32, NameKind, u32), u32>>,
+    strings: Strings,
 }
 
-type Entries = HashMap<String, HashMap<(Pos, NameKind, String), Option<String>>>;
+/// Each name and text once.
+#[derive(Default)]
+struct Strings {
+    list: Vec<Box<str>>,
+    ids: HashMap<Box<str>, u32>,
+}
+
+impl Strings {
+    fn id(&mut self, s: &str) -> u32 {
+        if let Some(&id) = self.ids.get(s) {
+            return id;
+        }
+        let id = self.list.len() as u32;
+        self.list.push(s.into());
+        self.ids.insert(s.into(), id);
+        id
+    }
+}
 
 impl BytecodeNames {
     /// The JVM's text for the name `name` of kind `kind` starting at `pos` in the code of the
@@ -46,7 +66,35 @@ impl BytecodeNames {
     /// starts at a position, and the translation may have renamed the local.
     pub fn get(&self, class: &str, pos: Pos, kind: NameKind, name: &str) -> Option<&str> {
         let name = if kind == NameKind::Local { "" } else { name };
-        self.entries.get(class)?.get(&(pos, kind, name.to_string()))?.as_deref()
+        let name = *self.strings.ids.get(name)?;
+        let text = *self.entries.get(class)?.get(&(pos.line as u32, pos.column as u32, kind, name))?;
+        Some(&self.strings.list[text as usize])
+    }
+
+    /// How many names there are, in how many classes, with how many texts, for `--timings`.
+    pub fn sizes(&self) -> String {
+        let names: usize = self.entries.values().map(HashMap::len).sum();
+        format!("{names} names in {} classes, {} names and texts", self.entries.len(), self.strings.list.len())
+    }
+
+    /// Sets the text of a name, `None` where it is uncertain, which `get` gives as it gives a
+    /// name it does not know.
+    fn set(&mut self, class: String, pos: Pos, kind: NameKind, name: &str, text: Option<&str>) {
+        let name = if kind == NameKind::Local { "" } else { name };
+        match text {
+            Some(text) => {
+                let key = (pos.line as u32, pos.column as u32, kind, self.strings.id(name));
+                let text = self.strings.id(text);
+                self.entries.entry(class).or_default().insert(key, text);
+            }
+            None => {
+                if let (Some(&name), Some(entries)) =
+                    (self.strings.ids.get(name), self.entries.get_mut(&class))
+                {
+                    entries.remove(&(pos.line as u32, pos.column as u32, kind, name));
+                }
+            }
+        }
     }
 }
 
@@ -74,22 +122,48 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
     // The code generator's `binaryQualifier`, which names a member's class as a class file does.
     let mut command =
         java("BytecodeNames", &["--add-opens", "jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED"]);
-    let output = match source {
+    let cannot_run = |e: std::io::Error| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")).1;
+    let failed = |stderr: &[u8]| {
+        let stderr = String::from_utf8_lossy(stderr);
+        fail(format!("compiling the program for its class files failed: {}", stderr.trim())).1
+    };
+    let unreadable = |e: serde_json::Error| fail(format!("unreadable names of the class files: {e}")).1;
+    if let Some(source) = source.filter(|_| files.is_empty()) {
         // A source on standard input is all that decides the run, which may have been kept.
-        Some(source) if files.is_empty() => super::run_cache::run(command, source),
-        _ => super::run_cache::run_uncached(command.args(files), source.unwrap_or_default()),
+        let output = super::run_cache::run(command, source).map_err(cannot_run)?;
+        if !output.success {
+            return Err(failed(&output.stderr));
+        }
+        return read_names(output.stdout.as_slice()).map_err(unreadable);
     }
-    .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")).1)?;
-    if !output.success {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(fail(format!("compiling the program for its class files failed: {}", stderr.trim())).1);
+    // The names of a program's files, read as they are printed: those of a program as large as
+    // the Minecraft server and its libraries are gigabytes.
+    use std::process::Stdio;
+    let mut child = command
+        .args(files)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(cannot_run)?;
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let errors = std::thread::spawn(move || {
+        let mut errors = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut errors);
+        errors
+    });
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let names = read_names(std::io::BufReader::with_capacity(1 << 20, stdout));
+    let status = child.wait().map_err(cannot_run)?;
+    let errors = errors.join().unwrap_or_default();
+    if !status.success() {
+        return Err(failed(&errors));
     }
-    read_names(&output.stdout).map_err(|e| fail(format!("unreadable names of the class files: {e}")).1)
+    names.map_err(unreadable)
 }
 
-/// The names that `java/BytecodeNames.java` prints, read entry by entry into the map: as a tree,
-/// the names of a program as large as the Minecraft server and its libraries take gigabytes.
-fn read_names(json: &[u8]) -> serde_json::Result<BytecodeNames> {
+/// The names that `java/BytecodeNames.java` prints, read entry by entry into the map.
+fn read_names(json: impl std::io::Read) -> serde_json::Result<BytecodeNames> {
     use serde::de::{DeserializeSeed, Deserializer as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
     use std::fmt;
 
@@ -100,11 +174,12 @@ fn read_names(json: &[u8]) -> serde_json::Result<BytecodeNames> {
             f.write_str("the names of the class files")
         }
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BytecodeNames, A::Error> {
-            let mut names = BytecodeNames { java: String::new(), entries: HashMap::new() };
+            let mut names =
+                BytecodeNames { java: String::new(), entries: HashMap::new(), strings: Strings::default() };
             while let Some(key) = map.next_key::<String>()? {
                 match key.as_str() {
                     "java" => names.java = map.next_value()?,
-                    "entries" => map.next_value_seed(Each(&mut names.entries))?,
+                    "entries" => map.next_value_seed(Each(&mut names))?,
                     _ => _ = map.next_value::<IgnoredAny>()?,
                 }
             }
@@ -112,7 +187,7 @@ fn read_names(json: &[u8]) -> serde_json::Result<BytecodeNames> {
         }
     }
     /// Reads the entries into the map.
-    struct Each<'m>(&'m mut Entries);
+    struct Each<'m>(&'m mut BytecodeNames);
     impl<'de> DeserializeSeed<'de> for Each<'_> {
         type Value = ();
         fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
@@ -134,14 +209,12 @@ fn read_names(json: &[u8]) -> serde_json::Result<BytecodeNames> {
                     "static" => NameKind::Static,
                     _ => continue,
                 };
-                let pos = Pos::new(line as usize, column as usize);
-                let name = if kind == NameKind::Local { String::new() } else { name };
-                self.0.entry(class).or_default().insert((pos, kind, name), text);
+                self.0.set(class, Pos::new(line as usize, column as usize), kind, &name, text.as_deref());
             }
             Ok(())
         }
     }
-    let mut reader = serde_json::Deserializer::from_slice(json);
+    let mut reader = serde_json::Deserializer::from_reader(json);
     let names = (&mut reader).deserialize_map(Names)?;
     reader.end()?;
     Ok(names)
@@ -152,10 +225,7 @@ impl BytecodeNames {
     /// compile.
     pub fn add_jdk_temps(&mut self, temps: JdkTemps) {
         for (class, pos, name, text) in temps {
-            self.entries
-                .entry(class)
-                .or_default()
-                .insert((pos, NameKind::Temp, name.to_string()), Some(text));
+            self.set(class, pos, NameKind::Temp, name, Some(&text));
         }
     }
 }
