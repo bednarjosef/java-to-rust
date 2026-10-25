@@ -211,7 +211,8 @@ pub struct ObjectValues {
 /// A place whose flow a visit reads, so that the visit runs again when the place changes.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Read {
-    /// The variables of a method in a context.
+    /// The variables of a method in a context, which only the visit of that method in that
+    /// context reads (so they have no readers, see `analyze_with`).
     Vars(usize, usize),
     Return(usize, usize),
     Field(usize, String),
@@ -401,7 +402,6 @@ impl ObjectValues {
         let Some(&slot) = self.followed.get(m).and_then(|f| f.get(name)) else {
             return Flow::top();
         };
-        self.read(|| Read::Vars(m, ctx));
         if !self.runtime_params[m].is_empty() {
             self.read(|| Read::Handed);
         }
@@ -708,6 +708,10 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     let mut queued = vec![true; visits.len()];
     let mut queue: VecDeque<usize> = (0..visits.len()).collect();
     let mut readers: HashMap<Read, BTreeSet<usize>> = HashMap::new();
+    // Only the visit of a method in a context reads its variables there (`var`), so a change to
+    // them runs that visit again, with no readers kept for them.
+    let visit_of: super::FastMap<(usize, usize), usize> =
+        visits.iter().enumerate().map(|(v, &mc)| (mc, v)).collect();
     while let Some(v) = queue.pop_front() {
         queued[v] = false;
         let (m, ctx) = visits[v];
@@ -719,7 +723,11 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             readers.entry(read).or_default().insert(v);
         }
         for changed in apply(&mut values, updates) {
-            for &r in readers.get(&changed).into_iter().flatten() {
+            let own = match changed {
+                Read::Vars(m, ctx) => visit_of.get(&(m, ctx)).copied(),
+                _ => None,
+            };
+            for &r in own.iter().chain(readers.get(&changed).into_iter().flatten()) {
                 if !queued[r] {
                     queued[r] = true;
                     queue.push_back(r);
