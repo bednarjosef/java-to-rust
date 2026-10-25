@@ -35,8 +35,10 @@
 //!   such code may hold (`escaped`): those that the runtime or an unresolved call is given, and
 //!   the arrays in those. As for objects, the runtime is taken to reach no array but those it is
 //!   given and the arrays in them, not those in the fields of the objects it is given.
-//! - An instance method is followed for every concrete class under its own, as `super.m()` runs
-//!   it on objects of a class that overrides it, and so is an instance field's initializer.
+//! - An instance method is followed for every concrete class that runs it: those it is the
+//!   implementation for, and those that the overrides calling it with `super.m()` are followed
+//!   for (`dispatch_contexts`). A constructor and an instance field's initializer are followed
+//!   for every concrete class under their own.
 //! - The constants of an enum set its instance fields.
 //! - The parameters of a method that the runtime may call itself (`runtime_called`) hold what
 //!   calls in the code pass them and what the runtime holds (`handed`): the objects it was given.
@@ -57,7 +59,7 @@ use super::Facts;
 use super::{FastMap, FastSet};
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 
 /// The context of code that has no `this`: a static method, or a method that no class runs.
@@ -1208,6 +1210,10 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             false => Vec::new(),
         })
         .collect();
+    let super_called = match dispatch {
+        true => dispatch_contexts(class, &types),
+        false => Vec::new(),
+    };
     let contexts = class
         .methods
         .iter()
@@ -1215,8 +1221,10 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         .map(|(m, method)| {
             let found: Vec<usize> = if method.is_static {
                 Vec::new()
-            } else if method.is_ctor || dispatch {
+            } else if method.is_ctor {
                 types.concretes[method.class].clone()
+            } else if dispatch {
+                super_called[m].iter().copied().collect()
             } else {
                 let group = class.hierarchy.group_id(m);
                 types.concretes[method.class]
@@ -1390,6 +1398,84 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
 
 /// The number of updates past which a visit runs again only once no other is queued.
 const HUGE_VISIT: usize = 100_000;
+
+/// The concrete classes that each instance method runs on, for dispatch: those whose objects run
+/// it for a call of its override group, and those that run a method (a constructor or an
+/// override) that calls it with `super.m()` on `this`, as far as such calls go, or an instance
+/// field's initializer that does. A `super` call on another object, that of an enclosing class
+/// (`Outer.super.m()`) or the one a lambda captured, is on an object that the analysis does not
+/// know here, so the method it calls is followed for every concrete class under its own. A
+/// constructor runs on every concrete class under its own.
+fn dispatch_contexts(class: &Class, types: &Types) -> Vec<BTreeSet<usize>> {
+    let mut contexts: Vec<BTreeSet<usize>> = class
+        .methods
+        .iter()
+        .enumerate()
+        .map(|(m, method)| {
+            if method.is_static {
+                BTreeSet::new()
+            } else if method.is_ctor {
+                types.concretes[method.class].iter().copied().collect()
+            } else {
+                let group = class.hierarchy.group_id(m);
+                types.concretes[method.class]
+                    .iter()
+                    .copied()
+                    .filter(|&c| types.implementation(class, group, c) == Some(m))
+                    .collect()
+            }
+        })
+        .collect();
+    // The methods that each method calls with `super.m()` on `this`, and those called so on
+    // another object.
+    let mut calls: Vec<Vec<usize>> = vec![Vec::new(); class.methods.len()];
+    let mut on_others: Vec<usize> = Vec::new();
+    let super_call = |e: &Expr| match &e.kind {
+        ExprKind::MethodCall { resolved: Some(r), is_super: true, receiver, .. }
+            if !class.methods[*r].is_static =>
+        {
+            Some((*r, matches!(receiver.kind, ExprKind::This)))
+        }
+        _ => None,
+    };
+    for (m, method) in class.methods.iter().enumerate() {
+        let mut on_expr = |e: &Expr| {
+            visit_expr(e, &mut |e| match super_call(e) {
+                Some((r, true)) => calls[m].push(r),
+                Some((r, false)) => on_others.push(r),
+                None => {}
+            })
+        };
+        for s in &method.body {
+            visit_stmt(s, &mut on_expr, &mut |_| {});
+        }
+    }
+    // An instance field's initializer runs on every concrete class under its own.
+    for (t, decl) in class.types.iter().enumerate() {
+        for init in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
+            visit_expr(init, &mut |e| match super_call(e) {
+                Some((r, true)) => contexts[r].extend(types.concretes[t].iter().copied()),
+                Some((r, false)) => on_others.push(r),
+                None => {}
+            });
+        }
+    }
+    for r in on_others {
+        contexts[r] = types.concretes[class.methods[r].class].iter().copied().collect();
+    }
+    let mut work: Vec<usize> = (0..class.methods.len()).collect();
+    while let Some(m) = work.pop() {
+        for &r in &calls[m] {
+            let before = contexts[r].len();
+            let added: Vec<usize> = contexts[m].iter().copied().collect();
+            contexts[r].extend(added);
+            if contexts[r].len() > before {
+                work.push(r);
+            }
+        }
+    }
+    contexts
+}
 
 /// What the code outside methods stores: field initializers, the exceptions that the runtime
 /// raises and, for dispatch, the constants of enums.

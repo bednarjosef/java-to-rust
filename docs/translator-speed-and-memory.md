@@ -338,10 +338,10 @@ of that code, plus the few methods being worked on at a time. In order:
 5. **Compact data in the translator.** Typed structures read straight from that format instead of
    `serde_json` values; names and types interned as 32-bit ids; tree nodes in large blocks
    instead of one allocation each. Done for the points-to analysis for dispatch, which follows
-   each instance method once for every concrete class under its own and took the Minecraft
-   server's census from 8.5 GB past 16 GB: a set of classes keeps only the words from its lowest
-   class to its highest, a method's variables in a context are a vector with a slot for each,
-   not a map from names, and its maps keyed by indices use a cheap hash.
+   each instance method once for each concrete class that runs it, and whose facts took the
+   Minecraft server's census from 8.5 GB past 16 GB: a set of classes keeps only the words from
+   its lowest class to its highest, a method's variables in a context are a vector with a slot
+   for each, not a map from names, and its maps keyed by indices use a cheap hash.
 6. **Output written as it is made**, straight to each crate's files, instead of one string of
    millions of lines.
 7. **Reaching less.** Dispatch of `toString`, `equals` and `hashCode` from library code reaches
