@@ -236,6 +236,8 @@ struct Analysis<'a> {
     /// Where widening stops before the end of the type, for the current method: its literals
     /// and the bounds of its parameters, sorted.
     thresholds: Vec<i128>,
+    /// The literals of each method visited (`literals`), found on its first visit.
+    literals: Vec<Option<Vec<i128>>>,
     /// The last invariant found for each loop of the current method, keyed by the loop's
     /// address. An inner loop is solved again on every pass over the outer loop; starting from
     /// its last invariant usually confirms it in one pass instead of rebuilding it.
@@ -278,6 +280,7 @@ impl<'a> Analysis<'a> {
             chars: FastSet::default(),
             wide_chars: FastSet::default(),
             thresholds: Vec::new(),
+            literals: vec![None; n],
             heads: FastMap::default(),
             grown: Vec::new(),
             grown_marks: vec![false; n],
@@ -359,7 +362,8 @@ impl<'a> Analysis<'a> {
     fn method(&mut self, m: usize) {
         let method = &self.class.methods[m];
         let mut env = Env::new();
-        self.thresholds = literals(method);
+        self.thresholds.clear();
+        self.thresholds.extend_from_slice(self.literals[m].get_or_insert_with(|| literals(method)));
         for (i, p) in method.params.iter().enumerate() {
             if p.ty.is_integral() {
                 let range = self.params[m][i];
