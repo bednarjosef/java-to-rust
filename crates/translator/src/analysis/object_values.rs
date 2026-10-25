@@ -294,7 +294,14 @@ struct Types {
     /// The method with a body that each type declares for an override group.
     declared: super::FastMap<(usize, usize), usize>,
     implementations: RefCell<super::FastMap<(usize, usize), Option<usize>>>,
+    /// The targets of a call of each override group on every class of a list of `concretes_of`,
+    /// by group and the list's address: a call on a value that may be of any class its type
+    /// allows is visited many times, and the list may be every class of the program.
+    any_targets: RefCell<super::FastMap<(usize, usize), Targets>>,
 }
+
+/// The implementations that a call runs, each with the class of its object.
+type Targets = Rc<[(usize, usize)]>;
 
 impl Types {
     fn new(class: &Class, bounded: bool) -> Types {
@@ -353,6 +360,7 @@ impl Types {
             all_concretes,
             declared,
             implementations: RefCell::default(),
+            any_targets: RefCell::default(),
             bounded,
         }
     }
@@ -385,6 +393,19 @@ impl Types {
     }
 
     /// The concrete classes whose objects a value of type `ty` may be.
+    /// The implementations, each with its class, that the classes of `concretes`, a list of
+    /// `concretes_of`, run for a call of a method of override group `group`.
+    fn targets_on(&self, class: &Class, group: usize, concretes: &[usize]) -> Targets {
+        let key = (group, concretes.as_ptr() as usize);
+        if let Some(found) = self.any_targets.borrow().get(&key) {
+            return found.clone();
+        }
+        let found: Targets =
+            concretes.iter().filter_map(|&c| Some((self.implementation(class, group, c)?, c))).collect();
+        self.any_targets.borrow_mut().insert(key, found.clone());
+        found
+    }
+
     fn concretes_of(&self, ty: Type) -> &[usize] {
         match ty {
             Type::Class(name, _) | Type::Enum(name) => match self.index.get(name) {
@@ -587,6 +608,10 @@ impl ObjectValues {
                     return vec![(*r, context(*r, ctx))];
                 }
                 let flow = self.eval(class, m, ctx, receiver);
+                if flow.any && !*is_super {
+                    let concretes = self.types.concretes_of(receiver.ty);
+                    return self.types.targets_on(class, class.hierarchy.group_id(*r), concretes).to_vec();
+                }
                 let classes: Vec<usize> = if flow.any {
                     self.types.concretes_of(receiver.ty).to_vec()
                 } else {
