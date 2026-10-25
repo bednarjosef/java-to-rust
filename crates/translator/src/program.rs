@@ -329,9 +329,9 @@ fn load_in_rounds(
     let (given, completed) = (Store::default(), Store::default());
     let mut records = javac::Records::default();
     // The tree that the rounds walk of each unit, and the units that completing their records
-    // changes, by index, with their records as completed.
+    // changes, by index, with their records and what completing them wrote.
     let mut trees: Vec<&Value> = Vec::new();
-    let mut changing: Vec<(usize, &Value, Vec<Value>)> = Vec::new();
+    let mut changing: Vec<(usize, &Value, Vec<&Value>, javac::Completion)> = Vec::new();
     let locale_data = reach::locale_data_classes(&program.libraries);
     let providers = modules::service_providers(program.sources.iter().chain(&program.libraries));
     let new_rounds = || {
@@ -354,8 +354,8 @@ fn load_in_rounds(
             copy
         };
         let mut changed: Vec<(usize, Value)> = Vec::new();
-        for (index, unit, completed) in &mut changing {
-            let now = records.completed_records(unit);
+        for (index, unit, of, completed) in &mut changing {
+            let now = records.completion(of);
             if now != *completed {
                 changed.push((*index, complete(unit)));
                 *completed = now;
@@ -366,7 +366,9 @@ fn load_in_rounds(
         for (unit, &changes) in units.iter().zip(&changes) {
             if changes {
                 changed.push((trees.len(), complete(unit)));
-                changing.push((trees.len(), unit, records.completed_records(unit)));
+                let of = javac::Records::records_of(unit);
+                let completed = records.completion(&of);
+                changing.push((trees.len(), unit, of, completed));
             }
             trees.push(&unit["tree"]);
         }
@@ -419,7 +421,7 @@ fn load_in_rounds(
     }
     let roots = program.sources.iter().chain(&program.libraries);
     reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
-    let changing: Vec<usize> = changing.iter().map(|&(index, _, _)| index).collect();
+    let changing: Vec<usize> = changing.iter().map(|&(index, ..)| index).collect();
     let mut units = given.into_values();
     for index in changing {
         records.complete(&mut units[index]);

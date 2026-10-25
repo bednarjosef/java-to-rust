@@ -27,7 +27,7 @@
 //! finds it not, and its code never assigns the parameter. A load of any other `Class` value
 //! loads any service whose class literal reachable code has.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::{
     Item, MethodKey, Walk, by_name::class_bound, by_name::class_for_name, has_flag, literal_class,
@@ -160,15 +160,17 @@ impl<'t> Walk<'t> {
         match text(node, "kind") {
             "METHOD_INVOCATION" | "NEW_CLASS" => {
                 let symbol = &node["symbol"];
-                let callee: MethodKey = (
-                    strip_arguments(text(symbol, "owner")),
-                    text(symbol, "name").into(),
-                    text(symbol, "type").into(),
-                );
+                let callee = || -> MethodKey {
+                    (
+                        strip_arguments(text(symbol, "owner")),
+                        text(symbol, "name").into(),
+                        text(symbol, "type").into(),
+                    )
+                };
                 for (index, argument) in node["arguments"].as_array().into_iter().flatten().enumerate() {
                     if is_class_value(argument) {
                         let value = self.class_value(argument);
-                        self.class_values.entry((callee.clone(), index)).or_default().insert(value);
+                        self.class_values.entry((callee(), index)).or_default().insert(value);
                     }
                 }
             }
@@ -222,18 +224,12 @@ impl<'t> Walk<'t> {
 
     /// What the lookups find that they did not find before: each class and member name, its key
     /// in `Walk::reflected_keys`, and whether the class declares or inherits a member of that
-    /// name; and the members to make reachable. The members are indexed by class and name once,
-    /// as a computed name can be any of thousands of strings in a library.
+    /// name; and the members to make reachable. The members are found by class and name
+    /// (`Walk::methods_by_name`, `Walk::fields_by_class`), as a computed name can be any of
+    /// thousands of strings in a library.
     #[allow(clippy::type_complexity)]
     fn reflected_members(&self) -> (Vec<(String, String, (String, String), bool)>, Vec<Item>) {
-        let mut methods: HashMap<&str, BTreeMap<&str, Vec<&MethodKey>>> = HashMap::new();
-        for key in self.methods.keys() {
-            methods.entry(key.0.as_str()).or_default().entry(key.1.as_str()).or_default().push(key);
-        }
-        let mut fields: HashMap<&str, BTreeSet<&str>> = HashMap::new();
-        for (class, name) in self.fields.keys() {
-            fields.entry(class.as_str()).or_default().insert(name.as_str());
-        }
+        let (methods, fields) = (&self.methods_by_name, &self.fields_by_class);
         let mut supertypes: HashMap<String, Vec<String>> = HashMap::new();
         let mut candidates: HashMap<(&str, bool), Vec<String>> = HashMap::new();
         let mut found = Vec::new();
@@ -281,12 +277,15 @@ impl<'t> Walk<'t> {
                         let mut all: BTreeSet<&str> = BTreeSet::new();
                         for owner in owners.iter() {
                             match kind {
-                                Kind::Field => all.extend(fields.get(owner.as_str()).into_iter().flatten()),
+                                Kind::Field => all.extend(
+                                    fields.get(owner.as_str()).into_iter().flatten().map(String::as_str),
+                                ),
                                 _ => all.extend(
                                     methods
                                         .get(owner.as_str())
                                         .into_iter()
                                         .flat_map(|m| m.keys())
+                                        .map(String::as_str)
                                         .filter(|n| !n.starts_with('<')),
                                 ),
                             }

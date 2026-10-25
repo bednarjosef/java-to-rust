@@ -51,14 +51,12 @@ impl Walk<'_> {
             return;
         }
         let symbol = &call["symbol"];
-        let callee: MethodKey = (
-            strip_arguments(text(symbol, "owner")),
-            text(symbol, "name").into(),
-            text(symbol, "type").into(),
-        );
+        let callee = || -> MethodKey {
+            (strip_arguments(text(symbol, "owner")), text(symbol, "name").into(), text(symbol, "type").into())
+        };
         for (index, argument) in arguments.iter().enumerate() {
             let Some(class) = literal_class(argument) else { continue };
-            let key = (callee.clone(), index);
+            let key = (callee(), index);
             if self.initializing.contains(&key) {
                 self.ensure(class.clone());
             }

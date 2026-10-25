@@ -202,13 +202,43 @@ twice each:
 For the small programs reachability was 0.1 to 0.3 s and is about two thirds of that; the
 translation's time is javac's. Peak memory is unchanged (1.1 GB + 2.3 GB for these two).
 
+**Cheaper walks.** On a large program most of reachability is walks from `main` again, so the
+cost of a node is most of its time. A node of the walk has its kind read once, and the tests
+of its shape run only for the kinds they can hold for, in the same order as before; owners,
+names and call keys are copied only when an item is made of them; a field of a tree node is
+found by its first byte before its whole name (`value::Map::search`). A stale walk stops as
+soon as it goes stale, as all it reached is thrown away. Reflection's lookups use an index of
+the declared methods and fields that the walk keeps as it declares them, and the check that
+streams stay sequential indexes calls by the names in javac's symbols without copying them.
+Whether the records' members changed with a round's units is told by comparing what completing
+them would write (which accessors and what they override, whether `hashCode` and `equals` are
+written, which components are plain values; `javac::Completion`), decided by the functions
+that `complete_record` uses, instead of completing copies of the records and comparing them.
+The rounds, the classes asked for and `Reach` are the same, and the translations byte for byte
+(18 whole programs of the corpus, `-o`, `--crate` and `--census`); release translator, two or
+three runs each on a machine with other builds running:
+
+| program | before | after |
+|---|---:|---:|
+| javac (`--census`, 10 rounds, 5 walks from the start) | 12.4 to 12.8 s | 5.2 to 5.4 s |
+| ExtendedAttributes | 4.2 to 4.5 s | 1.7 to 1.8 s |
+| SymbolicLinkCopies | 3.8 to 4.5 s | 1.8 to 1.9 s |
+| JarManifests | 2.4 to 2.6 s | 1.2 s |
+| SystemLoggerValues | 2.6 to 3.4 s | 1.1 to 1.2 s |
+
 Further speed-ups, not done:
 
 - The restarts of a stale walk are now about half of what is left of reachability on the large
   programs (a round without one takes 0.06 to 0.35 s, one with one 0.5 to 0.6 s). Holding a
   method of a missing class back until its class comes, instead of taking it for external
   meanwhile, would avoid them, but it changes what the rounds in between ask for, and so the
-  units' order and the output.
+  units' order and the output. Most stale walks come from overriders that arrive in the same
+  round as the class of the method they override, and leaving those to that method's own visit
+  avoids the restart (javac's walks from the start go from 5 to 2, its reachability from 5.2 to
+  3.5 s), but it changes what is reached too: a walk that does not start again keeps decisions
+  that depended on the units declared at the time, such as an `instanceof` guard that is not
+  applied while its class or a supertype is undeclared (`objectless`), so `ExtendedAttributes`
+  then reaches `FileInputStream.getChannel` and asks for two more classes.
 - javac is now most of a large program's translation (9 to 15 s of `ScannerGrades`), and at
   least 2.4 s and 0.9 GB of any. A cache of javac's trees per JDK unit would have to be keyed
   by the whole JDK tree (a unit's attributed tree depends on the declarations of others), and

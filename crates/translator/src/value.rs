@@ -185,7 +185,9 @@ impl Map {
 
     /// Where field `key` is, or would be.
     fn search(&self, key: &str) -> Result<usize, usize> {
-        self.0.binary_search_by(|(k, _)| k.0.cmp(key))
+        // The first bytes decide most comparisons, without comparing the strings in full.
+        let first = key.as_bytes().first();
+        self.0.binary_search_by(|(k, _)| k.0.as_bytes().first().cmp(&first).then_with(|| k.0.cmp(key)))
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
