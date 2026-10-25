@@ -39,7 +39,7 @@
 use super::Facts;
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 /// The context of code that has no `this`: a static method, or a method that no class runs.
@@ -142,6 +142,10 @@ impl ClassSet {
 
     /// Adds the classes of `other`; whether that added any.
     fn union(&mut self, other: &ClassSet) -> bool {
+        // A copy of this set (copies share their words) adds nothing.
+        if self.start == other.start && Rc::ptr_eq(&self.words, &other.words) {
+            return false;
+        }
         let Some(from) = other.words.iter().position(|&w| w != 0) else { return false };
         let to = other.words.iter().rposition(|&w| w != 0).unwrap_or(from) + 1;
         let (from, to) = (other.start + from, other.start + to);
@@ -179,7 +183,10 @@ impl ClassSet {
 
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.words.iter().enumerate().flat_map(move |(i, &word)| {
-            (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| (self.start + i) * 64 + b)
+            let base = (self.start + i) * 64;
+            // Each bit set, lowest first: the word with the bits below it cleared.
+            std::iter::successors((word != 0).then_some(word), |&w| (w & (w - 1) != 0).then(|| w & (w - 1)))
+                .map(move |w| base + w.trailing_zeros() as usize)
         })
     }
 }
@@ -219,7 +226,7 @@ pub struct ObjectValues {
     /// The variables of each method that the analysis follows, each with its slot in `vars`: its
     /// parameters (unless the runtime may call it) and the variables it declares, loops over or
     /// binds with a pattern.
-    followed: Vec<HashMap<String, usize>>,
+    followed: Vec<super::FastMap<String, usize>>,
     /// For dispatch, the parameters of each method that the runtime may call itself
     /// (`runtime_called`), which hold what the runtime holds besides what calls pass them.
     runtime_params: Vec<Vec<String>>,
@@ -232,7 +239,7 @@ pub struct ObjectValues {
     /// The analysis for the calls that can run (see the module's comment).
     dispatch: bool,
     /// While the analysis runs, the places that the current visit has read.
-    reads: RefCell<Option<HashSet<Read>>>,
+    reads: RefCell<Option<super::FastSet<Read>>>,
 }
 
 /// A place whose flow a visit reads, so that the visit runs again when the place changes.
@@ -252,7 +259,7 @@ enum Read {
 
 /// What the analysis needs to know of the program's types.
 struct Types {
-    index: HashMap<String, usize>,
+    index: super::FastMap<String, usize>,
     /// Types no string or box is a value of.
     excluded: Vec<bool>,
     /// Types that objects of every class may be values of: `Object` and its kin, and type
@@ -741,7 +748,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         contexts,
         types,
         dispatch,
-        reads: RefCell::new(Some(HashSet::new())),
+        reads: RefCell::new(Some(super::FastSet::default())),
     };
     // The visits, each of a method in one of its contexts or (`usize::MAX`) of the code outside
     // methods, run again whenever a place that they read changes, until none does. As every
@@ -764,7 +771,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     let mut runs = 0usize;
     let mut queued = vec![true; visits.len()];
     let mut queue: VecDeque<usize> = (0..visits.len()).collect();
-    let mut readers: HashMap<Read, BTreeSet<usize>> = HashMap::new();
+    let mut readers: super::FastMap<Read, super::FastSet<usize>> = super::FastMap::default();
     // Only the visit of a method in a context reads its variables there (`var`), so a change to
     // them runs that visit again, with no readers kept for them.
     let visit_of: super::FastMap<(usize, usize), usize> =
@@ -773,7 +780,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         queued[v] = false;
         runs += 1;
         if timings && runs.is_multiple_of(100_000) {
-            let entries: usize = readers.values().map(BTreeSet::len).sum();
+            let entries: usize = readers.values().map(|r| r.len()).sum();
             let (words, held) = values.class_set_words();
             eprintln!(
                 "timing: points-to: {runs} runs, {} queued, {} read places with {entries} readers, \
@@ -790,7 +797,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             usize::MAX => visit_outside_methods(&values, class),
             _ => visit(&values, class, m, ctx, &class.methods[m].body),
         };
-        let reads = values.reads.borrow_mut().replace(HashSet::new()).unwrap_or_default();
+        let reads = values.reads.borrow_mut().replace(super::FastSet::default()).unwrap_or_default();
         if timings && (updates.len() > 200_000 || reads.len() > 200_000) {
             let name = match m {
                 usize::MAX => "the code outside methods".to_string(),
@@ -975,10 +982,20 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
         | ExprKind::SuperInit { args, .. }
         | ExprKind::MethodCall { args, .. } => {
             let flows: Vec<Flow> = args.iter().map(eval).collect();
+            // What each parameter of a target method gets, by its slot: the same for each class
+            // that the method runs on.
+            let mut passed: super::FastMap<usize, Vec<(usize, Flow)>> = super::FastMap::default();
             for (t, c) in values.targets(class, m, ctx, x) {
-                for (p, flow) in class.methods[t].params.iter().zip(&flows) {
-                    out.extend(values.var_update(t, c, &p.name, values.types.filter(flow.clone(), p.ty)));
-                }
+                let params = passed.entry(t).or_insert_with(|| {
+                    let followed = &values.followed[t];
+                    let params = class.methods[t].params.iter().zip(&flows);
+                    params
+                        .filter_map(|(p, flow)| {
+                            Some((*followed.get(&p.name)?, values.types.filter(flow.clone(), p.ty)))
+                        })
+                        .collect()
+                });
+                out.extend(params.iter().map(|(slot, flow)| Update::Var(t, c, *slot, flow.clone())));
             }
         }
         // A library function may store its arguments, or the elements of an array it is given,
@@ -1028,7 +1045,7 @@ pub(super) fn handed(
 
 /// The variables of `method` that the analysis follows, its parameters among them when `params`.
 /// A name that a catch clause binds anywhere in the method is left to be anything.
-fn followed(method: &Method, params: bool) -> HashMap<String, usize> {
+fn followed(method: &Method, params: bool) -> super::FastMap<String, usize> {
     let mut names: HashSet<String> =
         if params { method.params.iter().map(|p| p.name.clone()).collect() } else { HashSet::new() };
     let mut bindings = Vec::new();
