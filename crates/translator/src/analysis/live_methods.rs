@@ -657,8 +657,10 @@ impl Walk<'_> {
                     let classes = state.live.receivers.entry(receiver.id).or_default();
                     targets.iter().for_each(|&(_, c)| classes.insert(c));
                 }
+                let mut found = vec![None; args.len()];
                 for &(target, c) in targets.iter() {
-                    self.enter(target, c, m, Some(args));
+                    self.pass_known(m, target, Some(args), &mut found);
+                    self.reach(target, c);
                 }
             }
             ExprKind::New { class: c, ctor, args } => {
