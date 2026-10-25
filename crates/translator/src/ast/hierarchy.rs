@@ -323,9 +323,12 @@ impl Hierarchy {
     /// The implementations that a call resolved to `m` on a receiver of static type `t` may run.
     pub fn targets(&self, m: usize, t: usize) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
+        // Each implementation once, in the order first found: a type with thousands of classes
+        // below it has thousands of implementations of `toString`.
+        let mut found = std::collections::HashSet::new();
         for c in self.concretes(t) {
             if let Some(i) = self.implementation(m, c)
-                && !out.contains(&i)
+                && found.insert(i)
             {
                 out.push(i);
             }
