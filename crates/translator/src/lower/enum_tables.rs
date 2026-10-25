@@ -12,6 +12,7 @@
 //! fields stay `match`es on the constant.
 
 use super::*;
+use std::collections::HashSet;
 
 /// The name of the static array that holds field `field` of every constant.
 fn table(field: &str) -> String {
@@ -21,6 +22,40 @@ fn table(field: &str) -> String {
 /// The field whose table is the static array `name`, if it is one.
 pub(crate) fn tabled_field(name: &str) -> Option<&str> {
     name.strip_suffix("OfConstants").filter(|f| !f.is_empty())
+}
+
+/// For each method, the enums whose fields it reads or writes through a value of theirs, worked out
+/// once for the method instead of once for every enum that takes the table form: on the Minecraft
+/// server, rewriting every method for each such enum was a large part of lowering. A table form
+/// only takes the accesses of its own enum out of other classes' methods, and the methods of its
+/// enum are forgotten after it (`forget`), so what is kept stays true for the enums still to come.
+#[derive(Default)]
+pub(super) struct EnumFieldUses {
+    of: Vec<Option<HashSet<usize>>>,
+}
+
+impl EnumFieldUses {
+    /// Whether method `m` reads or writes a field through a value of enum `index`.
+    fn uses(&mut self, lowering: &Lowering, methods: &[Method], m: usize, index: usize) -> bool {
+        if self.of.len() <= m {
+            self.of.resize(m + 1, None);
+        }
+        let uses = self.of[m].get_or_insert_with(|| lowering.field_uses(&methods[m])).contains(&index);
+        debug_assert!(
+            uses || !lowering.field_uses(&methods[m]).contains(&index),
+            "a method changed unnoticed"
+        );
+        uses
+    }
+
+    /// Forgets what the methods of class `class` use, as they changed.
+    pub(super) fn forget(&mut self, methods: &[Method], class: usize) {
+        for (m, uses) in self.of.iter_mut().enumerate() {
+            if methods.get(m).is_some_and(|method| method.class == class) {
+                *uses = None;
+            }
+        }
+    }
 }
 
 /// The parameter of a constant builder that names the constant it builds.
@@ -36,6 +71,7 @@ impl<'t> Lowering<'t> {
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
         bodies: Vec<Vec<Field>>,
+        uses: &mut EnumFieldUses,
     ) -> Result<(), Error> {
         self.current.set(index);
         self.in_ctor.set(false);
@@ -131,8 +167,11 @@ impl<'t> Lowering<'t> {
         let ctors: Vec<usize> =
             (0..methods.len()).filter(|&m| methods[m].class == index && methods[m].is_ctor).collect();
         // Every field access on a value of this enum goes through the tables.
-        for method in methods.iter_mut() {
-            for stmt in &mut method.body {
+        for m in 0..methods.len() {
+            if !uses.uses(self, methods, m, index) {
+                continue;
+            }
+            for stmt in &mut methods[m].body {
                 rewrite_stmt(stmt, &mut |e| self.table_access(e, index, &has_fields));
             }
         }
@@ -253,6 +292,34 @@ impl<'t> Lowering<'t> {
     }
 
     /// `e.f` and `e.f = v` of a field `f` of enum `index` as `fOfConstants[e.ordinal()]`.
+    /// The enums through a value of which `method` reads or writes a field, as `table_access`
+    /// finds them.
+    fn field_uses(&self, method: &Method) -> HashSet<usize> {
+        let mut uses = HashSet::new();
+        let mut note = |object: &Expr| {
+            if let Type::Enum(n) = object.ty
+                && let Some(e) = self.enum_index(n)
+            {
+                uses.insert(e);
+            }
+        };
+        for stmt in &method.body {
+            visit_stmt(
+                stmt,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        ExprKind::Field { object, .. }
+                        | ExprKind::Assign { target: Place::Field { object, .. }, .. }
+                        | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => note(object),
+                        _ => {}
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        uses
+    }
+
     fn table_access(&self, e: &mut Expr, index: usize, fields: &std::collections::HashMap<String, Type>) {
         let on_enum = |object: &Expr, name: &str| {
             matches!(object.ty, Type::Enum(n) if self.enum_index(n) == Some(index))
