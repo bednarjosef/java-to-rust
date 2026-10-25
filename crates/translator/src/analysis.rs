@@ -331,7 +331,6 @@ pub fn represented(class: &Class) -> Facts {
 
 /// `analyze_tolerating`, from the facts that `represented` found for `class`.
 pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Result<Facts, Vec<Error>> {
-    let one = |e: Error| vec![e];
     let checked = |result: Result<(), Vec<Error>>| {
         let mut errors = result.err().unwrap_or_default();
         errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
@@ -341,7 +340,7 @@ pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Res
     checked(phase("analysis: validate", || validate(class, &facts)))?;
     facts.fixed_fields =
         phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, facts.threaded));
-    patterns::check(class).map_err(one)?;
+    patterns::check(class)?;
     facts.eager_init = statics::eager_classes(class);
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
