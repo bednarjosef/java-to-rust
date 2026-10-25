@@ -908,7 +908,13 @@ impl<'a> Gen<'a> {
         // class (`lower::covariant`), of the classes the code makes or tests arrays of.
         if let Some((variant, filled, zero)) = objects {
             let mut covariant: Vec<Type> = Vec::new();
-            for &class in self.class.element_classes.values().chain(self.class.array_tests.values()) {
+            // In the order of the expressions, so that the translation is the same every time.
+            let in_order = |map: &'a std::collections::HashMap<ExprId, Type>| {
+                let mut found: Vec<(ExprId, Type)> = map.iter().map(|(&id, &ty)| (id, ty)).collect();
+                found.sort_unstable_by_key(|&(id, _)| id);
+                found.into_iter().map(|(_, ty)| ty)
+            };
+            for class in in_order(&self.class.element_classes).chain(in_order(&self.class.array_tests)) {
                 if class != object_array && !covariant.contains(&class) {
                     covariant.push(class);
                 }
