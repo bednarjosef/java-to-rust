@@ -169,7 +169,7 @@ impl Walk<'_> {
     /// An object of class `c` is created: the methods that relied on there being none of a type
     /// above it are walked again.
     pub(super) fn created(&self, c: usize) {
-        let mut readers = HashSet::new();
+        let mut readers = HashSet::default();
         {
             let state = self.state.borrow();
             for t in &self.supers[c] {
@@ -255,7 +255,7 @@ impl Walk<'_> {
     /// condition that it does not take, and the right operand of an `&&` or `||` that the left
     /// one decides.
     pub(super) fn dead(&self, m: usize) -> HashSet<ExprId> {
-        let dead = RefCell::new(HashSet::new());
+        let dead = RefCell::new(HashSet::default());
         let mark_expr = |e: &Expr| {
             visit_expr(e, &mut |x| {
                 dead.borrow_mut().insert(x.id);
