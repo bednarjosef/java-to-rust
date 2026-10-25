@@ -207,8 +207,15 @@ fn narrow(
         );
     }
     class.thread_statics = live.thread_statics.clone();
-    class.receivers =
-        live.receivers.iter().map(|(&id, classes)| (id, classes.iter().copied().collect())).collect();
+    let mut lists: std::collections::HashMap<Vec<usize>, std::sync::Arc<[usize]>> = Default::default();
+    class.receivers = live
+        .receivers
+        .iter()
+        .map(|(&id, classes)| {
+            let list: Vec<usize> = classes.iter().collect();
+            (id, lists.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone())
+        })
+        .collect();
     analysis::live_methods::prune(class, &live);
     (running, live.unresolved)
 }

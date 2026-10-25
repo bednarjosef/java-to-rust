@@ -50,10 +50,10 @@
 //! exceptions among them (`Class::raised`), so a clause whose classes have none yet waits, and the
 //! method is walked again once one of them does.
 
-use super::object_values::{self, Flow, ObjectValues, STATIC};
+use super::object_values::{self, ClassSet, Flow, ObjectValues, STATIC};
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 mod known;
 
@@ -78,7 +78,7 @@ pub struct LiveMethods {
     pub thread_statics: Option<HashSet<usize>>,
     /// The classes whose objects the receiver of each instance call that can run may be, over
     /// every object of every class that runs the calling method (`Class::receivers`).
-    pub receivers: HashMap<ExprId, BTreeSet<usize>>,
+    pub receivers: HashMap<ExprId, ClassSet>,
 }
 
 impl LiveMethods {
@@ -106,6 +106,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
             work: Vec::new(),
             seen: HashSet::new(),
             waiting: HashMap::new(),
+            waited: HashSet::new(),
             contexts: HashMap::new(),
             catching: HashMap::new(),
             glued: HashSet::new(),
@@ -229,6 +230,7 @@ impl Walk<'_> {
                 work: Vec::new(),
                 seen: HashSet::new(),
                 waiting: HashMap::new(),
+                waited: HashSet::new(),
                 contexts: HashMap::new(),
                 catching: HashMap::new(),
                 glued: HashSet::new(),
@@ -356,8 +358,11 @@ struct State {
     work: Vec<(usize, usize)>,
     seen: HashSet<(usize, usize)>,
     /// The instance methods called on objects of a class that no object of is created yet, by
-    /// that class: they run once one is.
+    /// that class: they run once one is. Each once, in the order first called: a call on a
+    /// receiver that may be any class calls the method on thousands of them, each time the
+    /// calling method is walked.
     waiting: HashMap<usize, Vec<usize>>,
+    waited: HashSet<(usize, usize)>,
     /// The objects that each method has been walked on, by method.
     contexts: HashMap<usize, Vec<usize>>,
     /// The methods with a `catch` clause that catches no class with objects yet, by each type
@@ -398,7 +403,9 @@ impl Walk<'_> {
         let mut state = self.state.borrow_mut();
         // A method runs on an object only once one is created.
         if ctx != STATIC && !state.live.instantiated.contains(&ctx) {
-            state.waiting.entry(ctx).or_default().push(m);
+            if state.waited.insert((ctx, m)) {
+                state.waiting.entry(ctx).or_default().push(m);
+            }
             return;
         }
         // The facts of a method are for the objects that the analysis followed it on.
@@ -550,7 +557,7 @@ impl Walk<'_> {
                 {
                     let mut state = self.state.borrow_mut();
                     let classes = state.live.receivers.entry(receiver.id).or_default();
-                    classes.extend(targets.iter().map(|&(_, c)| c));
+                    targets.iter().for_each(|&(_, c)| classes.insert(c));
                 }
                 for (target, c) in targets {
                     self.enter(target, c, m, Some(args));
