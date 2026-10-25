@@ -20,6 +20,7 @@ use super::{FastMap, FastSet};
 use crate::ast::*;
 use crate::types::binary_type;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 pub fn analyze(class: &Class, facts: &mut Facts) {
     let mut no_square_narrowing = FastSet::default();
@@ -115,50 +116,160 @@ struct Var {
     range: Interval,
 }
 
-/// The ranges of the integer variables in scope; `None` where the program cannot be.
-type Env = super::FastMap<String, Var>;
+/// A variable's name, numbered by `Names`, so that states are copied and joined without
+/// hashing or copying names.
+type Name = u32;
+
+/// The names of the analysis's variables, by number.
+#[derive(Default)]
+struct Names {
+    ids: FastMap<String, Name>,
+    names: Vec<String>,
+}
+
+impl Names {
+    fn get(&self, name: &str) -> Option<Name> {
+        self.ids.get(name).copied()
+    }
+
+    fn id(&mut self, name: &str) -> Name {
+        if let Some(id) = self.get(name) {
+            return id;
+        }
+        let id = self.names.len() as Name;
+        self.ids.insert(name.to_string(), id);
+        self.names.push(name.to_string());
+        id
+    }
+}
+
+/// The integer types, by the number that a `Slot` keeps for its type.
+const INTEGRAL: [Type; 5] = [Type::Int, Type::Long, Type::Byte, Type::Short, Type::Char];
+
+/// A variable of an `Env`.
+#[derive(Clone, Copy)]
+struct Slot {
+    name: Name,
+    /// The index of the variable's type in `INTEGRAL`.
+    ty: u8,
+    range: Interval,
+}
+
+impl Slot {
+    fn new(name: Name, var: Var) -> Slot {
+        let ty = INTEGRAL.iter().position(|&t| t == var.ty).expect("only integer variables have ranges");
+        Slot { name, ty: ty as u8, range: var.range }
+    }
+
+    fn var(self) -> Var {
+        Var { ty: INTEGRAL[self.ty as usize], range: self.range }
+    }
+}
+
+/// The ranges of the integer variables in scope, sorted by name (an `Option<Env>` is `None` where
+/// the program cannot be). Being sorted, two states join in one pass over both.
+#[derive(Default)]
+struct Env(Vec<Slot>);
+
+impl Clone for Env {
+    /// A copy with room for a few more variables, since a copy is often made to declare more.
+    fn clone(&self) -> Env {
+        let mut slots = Vec::with_capacity(self.0.len() + 4);
+        slots.extend_from_slice(&self.0);
+        Env(slots)
+    }
+}
+
+impl Env {
+    fn find(&self, name: Name) -> Result<usize, usize> {
+        self.0.binary_search_by_key(&name, |s| s.name)
+    }
+
+    fn get(&self, name: Name) -> Option<Var> {
+        self.find(name).ok().map(|i| self.0[i].var())
+    }
+
+    fn range_mut(&mut self, name: Name) -> Option<&mut Interval> {
+        self.find(name).ok().map(|i| &mut self.0[i].range)
+    }
+
+    fn insert(&mut self, name: Name, var: Var) {
+        let slot = Slot::new(name, var);
+        match self.find(name) {
+            Ok(i) => self.0[i] = slot,
+            Err(i) => self.0.insert(i, slot),
+        }
+    }
+
+    fn remove(&mut self, name: Name) {
+        if let Ok(i) = self.find(name) {
+            self.0.remove(i);
+        }
+    }
+
+    /// The variables of both `self` and `other`, each with its slot in both.
+    fn common<'e>(&'e self, other: &'e Env) -> impl Iterator<Item = (Slot, Slot)> + 'e {
+        let mut j = 0;
+        self.0.iter().filter_map(move |&a| {
+            while j < other.0.len() && other.0[j].name < a.name {
+                j += 1;
+            }
+            let b = *other.0.get(j).filter(|b| b.name == a.name)?;
+            Some((a, b))
+        })
+    }
+}
 
 fn join(a: Option<Env>, b: Option<Env>) -> Option<Env> {
     match (a, b) {
         (None, x) | (x, None) => x,
         // A variable missing on one side went out of scope.
-        (Some(a), Some(b)) => Some(
-            a.into_iter()
-                .filter_map(|(k, v)| {
-                    let w = b.get(&k)?;
-                    Some((k, Var { ty: v.ty, range: v.range.join(w.range) }))
-                })
-                .collect(),
-        ),
+        (Some(mut a), Some(b)) => {
+            let mut j = 0;
+            a.0.retain_mut(|v| {
+                while j < b.0.len() && b.0[j].name < v.name {
+                    j += 1;
+                }
+                let Some(w) = b.0.get(j).filter(|w| w.name == v.name) else { return false };
+                v.range = v.range.join(w.range);
+                true
+            });
+            Some(a)
+        }
     }
 }
 
-/// `env` with every variable that the statements assign at the full range of its type.
-fn widened<'s>(env: &Env, stmts: impl Iterator<Item = &'s Stmt> + Clone) -> Env {
-    env.iter()
-        .map(|(k, v)| {
-            let assigned = stmts.clone().any(|s| assigns_stmt(s, k));
-            (k.clone(), if assigned { Var { ty: v.ty, range: Interval::full(v.ty) } } else { *v })
-        })
-        .collect()
+/// `env` with every variable in `assigned` (sorted) at the full range of its type.
+fn widened(env: &Env, assigned: &[Name]) -> Env {
+    let mut env = env.clone();
+    for slot in &mut env.0 {
+        if assigned.binary_search(&slot.name).is_ok() {
+            slot.range = Interval::full(INTEGRAL[slot.ty as usize]);
+        }
+    }
+    env
 }
 
 fn within(a: &Env, b: &Env) -> bool {
-    a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.range.within(w.range)))
+    let mut common = 0;
+    a.common(b).all(|(v, w)| {
+        common += 1;
+        v.range.within(w.range)
+    }) && common == a.0.len()
 }
 
 /// Joins `next` into `head`, sending bounds that still move to the next threshold or the end of
 /// the type.
 fn widen(head: &Env, next: &Env, thresholds: &[i128]) -> Env {
-    next.iter()
-        .filter_map(|(k, n)| {
-            let h = head.get(k)?;
+    Env(next
+        .common(head)
+        .map(|(n, h)| {
             let range = if h.range.is_empty() {
                 n.range
             } else if n.range.is_empty() {
                 h.range
             } else {
-                let full = Interval::full(n.ty);
+                let full = Interval::full(INTEGRAL[n.ty as usize]);
                 let lo = if n.range.lo < h.range.lo {
                     let i = thresholds.partition_point(|&t| t <= n.range.lo);
                     if i > 0 && thresholds[i - 1] >= full.lo { thresholds[i - 1] } else { full.lo }
@@ -173,9 +284,30 @@ fn widen(head: &Env, next: &Env, thresholds: &[i128]) -> Env {
                 };
                 Interval { lo, hi }
             };
-            Some((k.clone(), Var { ty: n.ty, range }))
+            Slot { range, ..n }
         })
-        .collect()
+        .collect())
+}
+
+/// The names that `stmts` assign, sorted.
+fn assigned<'s>(names: &mut Names, stmts: impl Iterator<Item = &'s Stmt>) -> Vec<Name> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        visit_stmt(
+            stmt,
+            &mut |e| {
+                visit_expr(e, &mut |x| match &x.kind {
+                    ExprKind::Assign { target: Place::Var(target), .. }
+                    | ExprKind::IncDec { target: Place::Var(target), .. } => out.push(names.id(target)),
+                    _ => {}
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// What a frame of `Analysis::loops` is: a loop, a switch statement, a switch expression, or a
@@ -226,8 +358,10 @@ struct Analysis<'a> {
     indexes: FastMap<ExprId, Interval>,
     risky_division: FastSet<ExprId>,
     loops: Vec<Flow>,
+    /// The values of the arguments of the calls being evaluated, innermost last.
+    values: Vec<Interval>,
     /// Upper bounds of counters inside counting loops: (variable, bound).
-    budgets: Vec<(String, i128)>,
+    budgets: Vec<(Name, i128)>,
     no_square_narrowing: FastSet<ExprId>,
     square_narrowed: FastSet<ExprId>,
     /// `(char)` casts, and those whose value some recorded visit leaves outside ASCII.
@@ -246,6 +380,14 @@ struct Analysis<'a> {
     /// before, and a mark for each method that is among them.
     grown: Vec<(usize, Vec<Interval>)>,
     grown_marks: Vec<bool>,
+    names: Names,
+    /// What the body (0), the handlers (1) and the `finally` (2) of each `try`, and the body (3)
+    /// of each counting loop, by the statement's address, assign: found once rather than on every
+    /// pass over them.
+    assigned: FastMap<(usize, u8), Rc<[Name]>>,
+    /// With `JAVA_TO_RUST_RANGES_CHECK`: checks each use of `assigned` against a scan of the
+    /// statements for each variable.
+    check: bool,
 }
 
 impl<'a> Analysis<'a> {
@@ -274,6 +416,7 @@ impl<'a> Analysis<'a> {
             indexes: FastMap::default(),
             risky_division: FastSet::default(),
             loops: Vec::new(),
+            values: Vec::new(),
             budgets: Vec::new(),
             no_square_narrowing,
             square_narrowed: FastSet::default(),
@@ -284,6 +427,9 @@ impl<'a> Analysis<'a> {
             heads: FastMap::default(),
             grown: Vec::new(),
             grown_marks: vec![false; n],
+            names: Names::default(),
+            assigned: FastMap::default(),
+            check: std::env::var_os("JAVA_TO_RUST_RANGES_CHECK").is_some(),
         }
     }
 
@@ -367,7 +513,7 @@ impl<'a> Analysis<'a> {
         for (i, p) in method.params.iter().enumerate() {
             if p.ty.is_integral() {
                 let range = self.params[m][i];
-                env.insert(p.name.clone(), Var { ty: p.ty, range });
+                env.insert(self.names.id(&p.name), Var { ty: p.ty, range });
                 if !range.is_empty() {
                     self.thresholds.extend([range.lo, range.hi]);
                 }
@@ -429,20 +575,57 @@ impl<'a> Analysis<'a> {
 
     fn stmts(&mut self, stmts: &[Stmt], env: Option<Env>) -> Option<Env> {
         let mut env = env;
-        let mut declared = Vec::new();
         for stmt in stmts {
-            if let Stmt::Local { name, .. } = stmt {
-                declared.push(name);
-            }
             env = self.stmt(stmt, env);
             env.as_ref()?;
         }
         env.map(|mut env| {
-            for name in declared {
-                env.remove(name);
+            for stmt in stmts {
+                if let Stmt::Local { name, .. } = stmt {
+                    self.remove(&mut env, name);
+                }
             }
             env
         })
+    }
+
+    /// Takes `name` out of `env`.
+    fn remove(&self, env: &mut Env, name: &str) {
+        if let Some(name) = self.names.get(name) {
+            env.remove(name);
+        }
+    }
+
+    /// What the statements of a part of `at` (see `Analysis::assigned`) assign.
+    fn assigned_in<'s>(&mut self, at: &Stmt, part: u8, stmts: impl Iterator<Item = &'s Stmt>) -> Rc<[Name]> {
+        let key = (at as *const Stmt as usize, part);
+        if let Some(found) = self.assigned.get(&key) {
+            return found.clone();
+        }
+        let found: Rc<[Name]> = assigned(&mut self.names, stmts).into();
+        self.assigned.insert(key, found.clone());
+        found
+    }
+
+    /// With `JAVA_TO_RUST_RANGES_CHECK`, checks `assigned` against a scan of `stmts` for each
+    /// variable of `env`.
+    fn check_assigned<'s>(
+        &self,
+        assigned: &[Name],
+        stmts: impl Iterator<Item = &'s Stmt> + Clone,
+        env: &Env,
+    ) {
+        if !self.check {
+            return;
+        }
+        for slot in &env.0 {
+            let name = &self.names.names[slot.name as usize];
+            assert_eq!(
+                assigned.binary_search(&slot.name).is_ok(),
+                stmts.clone().any(|s| assigns_stmt(s, name)),
+                "whether the statements assign {name}"
+            );
+        }
     }
 
     fn stmt(&mut self, stmt: &Stmt, env: Option<Env>) -> Option<Env> {
@@ -457,9 +640,9 @@ impl<'a> Analysis<'a> {
                     None => EMPTY,
                 };
                 if ty.is_integral() {
-                    env.insert(name.clone(), Var { ty: *ty, range });
+                    env.insert(self.names.id(name), Var { ty: *ty, range });
                 } else {
-                    env.remove(name);
+                    self.remove(&mut env, name);
                 }
                 Some(env)
             }
@@ -492,7 +675,7 @@ impl<'a> Analysis<'a> {
                 out.map(|mut env| {
                     for s in init {
                         if let Stmt::Local { name, .. } = s {
-                            env.remove(name);
+                            self.remove(&mut env, name);
                         }
                     }
                     env
@@ -556,7 +739,9 @@ impl<'a> Analysis<'a> {
             Stmt::Try { body, catches, finally } => {
                 // An exception can leave the body at any point, so a handler starts from the
                 // state before the `try` with what the body assigns at any value.
-                let raised = widened(&env, body.iter());
+                let assigned = self.assigned_in(stmt, 0, body.iter());
+                self.check_assigned(&assigned, body.iter(), &env);
+                let raised = widened(&env, &assigned);
                 let mut out = self.stmts(body, Some(env));
                 for catch in catches {
                     let handled = self.stmts(&catch.body, Some(raised.clone()));
@@ -565,24 +750,33 @@ impl<'a> Analysis<'a> {
                 let Some(finally) = finally else { return out };
                 // The `finally` also runs on the way out of an exception, a `return`, a `break` or
                 // a `continue`, from any point of the body and the handlers.
-                let escaping = widened(&raised, catches.iter().flat_map(|c| &c.body));
+                let handlers = || catches.iter().flat_map(|c| &c.body);
+                let assigned = self.assigned_in(stmt, 1, handlers());
+                self.check_assigned(&assigned, handlers(), &raised);
+                let escaping = widened(&raised, &assigned);
                 let after = self.stmts(finally, join(out.clone(), Some(escaping)));
+                let assigned = self.assigned_in(stmt, 2, finally.iter());
+                for flow in &self.loops {
+                    for env in [&flow.breaks, &flow.continues].into_iter().flatten() {
+                        self.check_assigned(&assigned, finally.iter(), env);
+                    }
+                }
                 for flow in &mut self.loops {
-                    flow.breaks = flow.breaks.take().map(|e| widened(&e, finally.iter()));
-                    flow.continues = flow.continues.take().map(|e| widened(&e, finally.iter()));
+                    flow.breaks = flow.breaks.take().map(|e| widened(&e, &assigned));
+                    flow.continues = flow.continues.take().map(|e| widened(&e, &assigned));
                 }
                 out.and(after)
             }
             Stmt::ForEach { ty, name, array, body } => {
                 self.expr(array, &mut env);
                 if ty.is_integral() {
-                    env.insert(name.clone(), Var { ty: *ty, range: Interval::full(*ty) });
+                    env.insert(self.names.id(name), Var { ty: *ty, range: Interval::full(*ty) });
                 }
                 let out = self.looping(env, None, body, &[], false);
                 // The loop also ends when the elements run out, in the state at its head.
                 let head = self.heads.get(&(&**body as *const Stmt as usize)).cloned();
                 join(head, out).map(|mut env| {
-                    env.remove(name);
+                    self.remove(&mut env, name);
                     env
                 })
             }
@@ -722,26 +916,32 @@ impl<'a> Analysis<'a> {
         update: &[Expr],
         body: &Stmt,
         env: &Env,
-    ) -> Vec<(String, i128)> {
+    ) -> Vec<(Name, i128)> {
         let Some((var, _, end)) = counting_loop(init, cond, update, body) else { return Vec::new() };
-        let start = env[var].range;
+        let var = self.names.get(var).expect("the counter is in scope");
+        let counter = env.get(var).expect("the counter is in scope");
+        let start = counter.range;
         let end = self.peek(end, env);
         if start.is_empty() || end.is_empty() {
             return Vec::new();
         }
         let trips = (end.hi - start.lo).max(0);
         let mut context = env.clone();
-        let var_ty = env[var].ty;
-        context.insert(var.to_string(), Var { ty: var_ty, range: Interval::new(start.lo, end.hi - 1) });
+        context.insert(var, Var { ty: counter.ty, range: Interval::new(start.lo, end.hi - 1) });
+        // A variable that the body does not assign does not grow.
+        let assigned = self.assigned_in(body, 3, std::iter::once(body));
+        self.check_assigned(&assigned, std::iter::once(body), env);
         let mut budgets = Vec::new();
-        for (name, v) in env {
-            if name == var || v.range.is_empty() {
+        for slot in &env.0 {
+            let v = slot.var();
+            if slot.name == var || v.range.is_empty() || assigned.binary_search(&slot.name).is_err() {
                 continue;
             }
-            if let Some(step) = self.increase(body, name, &context, body) {
+            let name = self.names.names[slot.name as usize].clone();
+            if let Some(step) = self.increase(body, &name, &context, body) {
                 let bound = v.range.hi + step * trips;
                 if step > 0 && bound <= Interval::full(v.ty).hi {
-                    budgets.push((name.clone(), bound));
+                    budgets.push((slot.name, bound));
                 }
             }
         }
@@ -816,11 +1016,11 @@ impl<'a> Analysis<'a> {
 
     /// Lowers the upper bound of a counter about to be increased by `step`, by the budget of the
     /// enclosing counting loops.
-    fn clamp(&self, name: &str, range: Interval, step: Option<i128>) -> Interval {
+    fn clamp(&self, name: Name, range: Interval, step: Option<i128>) -> Interval {
         let Some(step) = step else { return range };
         let mut range = range;
         for (counter, bound) in &self.budgets {
-            if counter == name {
+            if *counter == name {
                 range = range.meet(Interval::new(-UNBOUNDED, bound - step));
             }
         }
@@ -838,13 +1038,13 @@ impl<'a> Analysis<'a> {
     /// A call of a method runs any method of its override group, so the arguments reach all of
     /// them and the result is any of theirs.
     fn call(&mut self, args: &[Expr], callee: usize, ty: Type, env: &mut Env) -> Interval {
-        let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
+        let values = self.args(args, env);
         let id = self.class.hierarchy.group_id(callee);
         if self.update_summaries && self.integral_params[id] {
             for &g in self.class.hierarchy.group_members(callee) {
                 for (i, p) in self.class.methods[g].params.iter().enumerate() {
                     if p.ty.is_integral() {
-                        let v = convert(values[i], args[i].ty, p.ty);
+                        let v = convert(self.values[values + i], args[i].ty, p.ty);
                         let joined = self.params[g][i].join(v);
                         if joined != self.params[g][i] {
                             if !self.grown_marks[g] {
@@ -857,6 +1057,7 @@ impl<'a> Analysis<'a> {
                 }
             }
         }
+        self.values.truncate(values);
         if !ty.is_integral() {
             return Interval::full(Type::Long);
         }
@@ -866,6 +1067,16 @@ impl<'a> Analysis<'a> {
             "the return range of the group of {callee}"
         );
         self.group_returns[id]
+    }
+
+    /// Evaluates the arguments `args` onto `values`, and returns where their values start.
+    fn args(&mut self, args: &[Expr], env: &mut Env) -> usize {
+        let start = self.values.len();
+        for a in args {
+            let v = self.expr(a, env);
+            self.values.push(v);
+        }
+        start
     }
 
     fn expr(&mut self, e: &Expr, env: &mut Env) -> Interval {
@@ -882,7 +1093,9 @@ impl<'a> Analysis<'a> {
             | ExprKind::Units(_)
             | ExprKind::EnumConstant { .. }
             | ExprKind::Null => other,
-            ExprKind::Var(name) => env.get(name).map_or(Interval::full(ty), |v| v.range),
+            ExprKind::Var(name) => {
+                self.names.get(name).and_then(|n| env.get(n)).map_or(Interval::full(ty), |v| v.range)
+            }
             ExprKind::Unary(op, x) => {
                 let v = self.expr(x, env);
                 if !ty.is_integral() || v.is_empty() {
@@ -917,7 +1130,9 @@ impl<'a> Analysis<'a> {
             }
             ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let v = self.expr(value, env);
-                let Some(var) = env.get(target).copied() else { return other };
+                let Some((target, var)) = self.names.get(target).and_then(|n| Some((n, env.get(n)?))) else {
+                    return other;
+                };
                 let range = match op {
                     None => convert(v, value.ty, var.ty),
                     Some(op) => {
@@ -941,15 +1156,17 @@ impl<'a> Analysis<'a> {
                         convert(r, result, var.ty)
                     }
                 };
-                env.insert(target.clone(), Var { ty: var.ty, range });
+                env.insert(target, Var { ty: var.ty, range });
                 range
             }
             ExprKind::IncDec { target: Place::Var(target), increment, prefix } => {
-                let Some(var) = env.get(target).copied() else { return other };
+                let Some((target, var)) = self.names.get(target).and_then(|n| Some((n, env.get(n)?))) else {
+                    return other;
+                };
                 let current = if *increment { self.clamp(target, var.range, Some(1)) } else { var.range };
                 let op = if *increment { BinOp::Add } else { BinOp::Sub };
                 let range = self.arith(op, current, Interval::point(1), var.ty, e.id);
-                env.insert(target.clone(), Var { ty: var.ty, range });
+                env.insert(target, Var { ty: var.ty, range });
                 if *prefix { range } else { current }
             }
             ExprKind::NewArray(sizes) => {
@@ -1070,7 +1287,10 @@ impl<'a> Analysis<'a> {
                 other
             }
             ExprKind::Builtin(builtin, args) => {
-                let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
+                let start = self.args(args, env);
+                // The first two, which is all that the builtins below take.
+                let values = [0, 1].map(|i| self.values.get(start + i).copied().unwrap_or(EMPTY));
+                self.values.truncate(start);
                 if !ty.is_integral() {
                     return other;
                 }
@@ -1246,7 +1466,7 @@ impl<'a> Analysis<'a> {
         if let ExprKind::Var(x) = &l.kind
             && !assigns(r, x)
         {
-            restrict(&mut env, x, |v| refine(v, op, b))?;
+            self.restrict(&mut env, x, |v| refine(v, op, b))?;
         }
         if let ExprKind::Var(y) = &r.kind
             && !assigns(l, y)
@@ -1258,7 +1478,7 @@ impl<'a> Analysis<'a> {
                 BinOp::Ge => BinOp::Le,
                 other => other,
             };
-            restrict(&mut env, y, |v| refine(v, flipped, a))?;
+            self.restrict(&mut env, y, |v| refine(v, flipped, a))?;
         }
         // `x * x <= b` bounds `x` by the square root of `b`, if `x * x` does not overflow.
         if let ExprKind::Binary(BinOp::Mul, p, q) = &l.kind
@@ -1276,21 +1496,21 @@ impl<'a> Analysis<'a> {
                 return None;
             }
             let s = isqrt(limit);
-            restrict(&mut env, x, |v| v.meet(Interval::new(-s, s)))?;
+            self.restrict(&mut env, x, |v| v.meet(Interval::new(-s, s)))?;
         }
         Some(env)
     }
-}
 
-/// Applies `f` to the range of `name`; `None` if that leaves no possible value.
-fn restrict(env: &mut Env, name: &str, f: impl FnOnce(Interval) -> Interval) -> Option<()> {
-    if let Some(v) = env.get_mut(name) {
-        v.range = f(v.range);
-        if v.range.is_empty() {
-            return None;
+    /// Applies `f` to the range of `name`; `None` if that leaves no possible value.
+    fn restrict(&self, env: &mut Env, name: &str, f: impl FnOnce(Interval) -> Interval) -> Option<()> {
+        if let Some(range) = self.names.get(name).and_then(|n| env.range_mut(n)) {
+            *range = f(*range);
+            if range.is_empty() {
+                return None;
+            }
         }
+        Some(())
     }
-    Some(())
 }
 
 fn feasible(op: BinOp, a: Interval, b: Interval) -> bool {

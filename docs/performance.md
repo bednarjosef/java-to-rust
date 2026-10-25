@@ -281,6 +281,21 @@ from which no read of the class's statics can run is worked out over the groups.
 unless both find the same reads. On javac the step goes from 0.25 to 0.11 s, and its census
 report and the 28 targets' translations are byte for byte the same.
 
+**Ranges over numbered variables.** `analysis/ranges.rs` copies the state of the variables at
+every branch and joins two states wherever paths meet. The state used to be a hash map from each
+variable's name to its range, so every copy allocated each name again and every join hashed
+them; on the Minecraft server, where the analysis took 56 to 64 s in each round, hashing,
+copying names and allocating were about half of its profile.
+Names are now numbered once per analysis (`Names`), and a state is a vector of variables sorted
+by number (`Env`): a copy is one allocation and a copy of memory, and a join, a widening or a
+comparison of two states is one pass over both. What the body, the handlers and the `finally`
+of a `try`, and the body of a counting loop, assign is found once per statement rather than once
+per variable on every pass, and a counting loop looks for the counters that grow by constants
+only among the variables its body assigns. The facts are the same: `JAVA_TO_RUST_RANGES_CHECK=1`
+checks each set of assigned variables against a scan of the statements for each variable, and
+javac's whole translation, its census report and the 28 targets' translations are byte for byte
+the same. On javac the analysis goes from 1.05 to 1.16 s to 0.55 to 0.60 s.
+
 Further speed-ups, not done:
 
 - The walk from scratch when the members written into a record change is what is left of the
