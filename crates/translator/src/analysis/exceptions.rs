@@ -142,14 +142,17 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     if class.type_index("java.lang.Throwable").is_none() {
         return Ok(());
     }
-    facts.static_writes = guards::static_writes(class);
-    facts.initialized_statics = initialized_statics(class, facts);
+    use crate::timings::phase;
+    facts.static_writes = phase("exceptions: static writes", || guards::static_writes(class));
+    facts.initialized_statics =
+        phase("exceptions: initialized statics", || initialized_statics(class, facts));
     let mut errors = Vec::new();
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     printf_of_streams(class, &mut reject);
     let h = &class.hierarchy;
-    let mut points: Vec<Vec<Point>> =
-        (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
+    let mut points: Vec<Vec<Point>> = phase("exceptions: points", || {
+        (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect()
+    });
     let matches = |k: &Kind, t: usize| match k {
         Kind::Class(c) => h.is_subtype(*c, t),
         // A failure not known exactly may be of any class of the JDK; one that is known is of
@@ -187,6 +190,13 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             Raise::Runtime { class, .. } => BTreeSet::from([Kind::Runtime(class)]),
             Raise::Text(_) => BTreeSet::new(),
         }
+    };
+    // Whether every kind that `raised` gives holds `test`, without gathering them.
+    let raised_all = |p: &Point, escapes: &[BTreeSet<Kind>], test: &dyn Fn(&Kind) -> bool| match &p.raise {
+        Raise::Throw(t) => thrown(*t).into_iter().all(|c| test(&Kind::Class(c))),
+        Raise::Call(callees) => callees.iter().all(|&c| escapes[c].iter().all(test)),
+        Raise::Runtime { class, .. } => test(&Kind::Runtime(class)),
+        Raise::Text(_) => true,
     };
 
     // The JDK's own `toString`s throw only for bugs, as for an object's text (see the module's
@@ -332,46 +342,49 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             .map(|set| set.iter().map(|k| kinds[k].clone()).collect())
             .collect::<Vec<BTreeSet<Kind>>>()
     };
-    let mut escapes = escapes_of(&points);
+    let mut escapes = phase("exceptions: escapes", || escapes_of(&points));
     // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
     // one out only shrinks what escapes, so the calls are looked at again until none is left.
-    loop {
-        let mut dropped = Vec::new();
-        for (m, ps) in points.iter().enumerate() {
-            for (i, p) in ps.iter().enumerate() {
-                let Raise::Call(callees) = &p.raise else { continue };
-                if p.known.is_empty() || raised(p, &escapes).is_empty() {
-                    continue;
-                }
-                let callee = callees[0];
-                let quiet = p.known.iter().all(|args| {
+    phase("exceptions: quiet calls", || {
+        loop {
+            let mut dropped = Vec::new();
+            for (m, ps) in points.iter().enumerate() {
+                for (i, p) in ps.iter().enumerate() {
+                    let Raise::Call(callees) = &p.raise else { continue };
+                    if p.known.is_empty() || raised_all(p, &escapes, &|_| false) {
+                        continue;
+                    }
+                    let callee = callees[0];
+                    let quiet = p.known.iter().all(|args| {
                     let run = guards::run(class, &facts.static_writes, callee, args);
                     points[callee].iter().all(|q| {
                         // The start of a method that initializes the caller's own class, which is
                         // initialized or being initialized, does nothing.
                         let own = matches!(&q.raise, Raise::Call(cs) if q.what == entry::START && cs.iter().all(|&c| class.methods[c].class == class.methods[m].class));
-                        own || run.skips(q.pos, &q.raise) || raised(q, &escapes).iter().all(|k| caught(k, &q.frames))
+                        own || run.skips(q.pos, &q.raise) || raised_all(q, &escapes, &|k| caught(k, &q.frames))
                     })
                 });
-                if quiet {
-                    dropped.push((m, i));
+                    if quiet {
+                        dropped.push((m, i));
+                    }
                 }
             }
+            if dropped.is_empty() {
+                break;
+            }
+            for &(m, i) in dropped.iter().rev() {
+                points[m].remove(i);
+            }
+            escapes = phase("exceptions: escapes", || escapes_of(&points));
         }
-        if dropped.is_empty() {
-            break;
-        }
-        for &(m, i) in dropped.iter().rev() {
-            points[m].remove(i);
-        }
-        escapes = escapes_of(&points);
-    }
+    });
 
     // What the callers of each method observe: what the callers of its callers observe, and
     // what the `try`s around its calls catch. A call may run any method of an override group, so
     // the methods of a group observe the same. A method is looked at again whenever what it
     // observes grows, until nothing does; that only grows, so the order does not change the
     // outcome.
+    let started = std::time::Instant::now();
     let mut seen: Vec<Seen> = vec![Seen::default(); class.methods.len()];
     let mut queued = vec![true; class.methods.len()];
     let mut queue: VecDeque<usize> = (0..class.methods.len()).collect();
@@ -409,6 +422,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 queue.push_back(c);
             }
         }
+    }
+    if crate::timings::enabled() {
+        eprintln!("timing: exceptions: observed: {:.3} s", started.elapsed().as_secs_f64());
     }
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
 
@@ -692,7 +708,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     }
     // The initializers of instance fields run in each constructor, outside its `try`s: what they
     // raise escapes the constructor (see `field_inits`).
-    let init_throwing = field_inits::throwing(class, facts, &raised, &escapes);
+    let init_throwing =
+        phase("exceptions: field initializers", || field_inits::throwing(class, facts, &raised, &escapes));
     // The initializers of enum constants run in the static initializer, so what they raise would
     // be `ExceptionInInitializerError`: not translated yet.
     let escapes_ref = &escapes;
@@ -835,6 +852,7 @@ fn assigned_null_test(e: &Expr) -> Option<(&str, bool)> {
 /// initialized; code of the initializing thread runs after that assignment, or else during the
 /// values of it and the assignments before it, which `reads_static` shows never read it.
 fn initialized_statics(class: &Class, facts: &Facts) -> HashSet<(usize, String)> {
+    let mut walk = StaticReads::new(class);
     let mut leading = Vec::new();
     for (m, method) in class.methods.iter().enumerate() {
         if method.name != "<clinit>" {
@@ -868,7 +886,8 @@ fn initialized_statics(class: &Class, facts: &Facts) -> HashSet<(usize, String)>
                 _ => continue,
             };
             before.push(value);
-            if c == method.class && !maybe_null(facts, m, value) && !reads_static(class, &before, c, name) {
+            if c == method.class && !maybe_null(facts, m, value) && !reads_static(&mut walk, &before, c, name)
+            {
                 leading.push((c, name.clone()));
             }
         }
@@ -924,24 +943,82 @@ fn leading_statements<'s>(stmts: &'s [Stmt], out: &mut Vec<&'s Stmt>) -> bool {
 /// Whether evaluating `roots` may read the static `name` of class `c`: whether it, or a method
 /// or static initializer that it may run, transitively, reads it. A walk too long to follow says
 /// it may.
-fn reads_static(class: &Class, roots: &[&Expr], c: usize, name: &str) -> bool {
+fn reads_static(walk: &mut StaticReads, roots: &[&Expr], c: usize, name: &str) -> bool {
     const LIMIT: usize = 2000;
-    let clinits: std::collections::HashMap<usize, usize> = (class.methods.iter().enumerate())
-        .filter(|(_, m)| m.name == "<clinit>")
-        .map(|(i, m)| (m.class, i))
-        .collect();
-    let mut seen: HashSet<usize> = HashSet::new();
-    let mut work: Vec<usize> = Vec::new();
-    let mut reads = false;
-    let mut look = |e: &Expr, work: &mut Vec<usize>| {
+    let mut root = StaticRead::default();
+    for e in roots {
+        walk.look(e, &mut root);
+    }
+    let mut reads = root.reads.iter().any(|(d, n)| *d == c && n == name);
+    walk.turn += 1;
+    let turn = walk.turn;
+    let mut seen = 0;
+    let mut work = root.runs;
+    while let Some(m) = work.pop() {
+        if walk.seen[m] == turn {
+            continue;
+        }
+        walk.seen[m] = turn;
+        seen += 1;
+        if seen > LIMIT {
+            return true;
+        }
+        let known = walk.summary(m);
+        reads |= known.reads.iter().any(|(d, n)| *d == c && n == name);
+        work.extend(known.runs.iter().filter(|&&r| walk.seen[r] != turn));
+    }
+    reads
+}
+
+/// What evaluating some code reads and runs, for `reads_static`: the statics it reads, and the
+/// methods and static initializers it may run.
+#[derive(Default)]
+struct StaticRead {
+    reads: Vec<(usize, String)>,
+    runs: Vec<usize>,
+}
+
+/// The walks of `reads_static`: each method's `StaticRead`, found once, and the methods seen by
+/// the current walk, as the number of its turn.
+struct StaticReads<'c> {
+    class: &'c Class,
+    clinits: std::collections::HashMap<usize, usize>,
+    summaries: Vec<Option<std::rc::Rc<StaticRead>>>,
+    seen: Vec<u32>,
+    turn: u32,
+}
+
+impl StaticReads<'_> {
+    fn new(class: &Class) -> StaticReads<'_> {
+        let clinits = (class.methods.iter().enumerate())
+            .filter(|(_, m)| m.name == "<clinit>")
+            .map(|(i, m)| (m.class, i))
+            .collect();
+        let n = class.methods.len();
+        StaticReads { class, clinits, summaries: vec![None; n], seen: vec![0; n], turn: 0 }
+    }
+
+    fn summary(&mut self, m: usize) -> std::rc::Rc<StaticRead> {
+        if let Some(known) = &self.summaries[m] {
+            return known.clone();
+        }
+        let mut out = StaticRead::default();
+        for s in &self.class.methods[m].body {
+            visit_stmt(s, &mut |e| self.look(e, &mut out), &mut |_| {});
+        }
+        let known = std::rc::Rc::new(out);
+        self.summaries[m] = Some(known.clone());
+        known
+    }
+
+    /// Adds what `e` reads and runs to `out`.
+    fn look(&self, e: &Expr, out: &mut StaticRead) {
+        let class = self.class;
         visit_expr(e, &mut |x| {
-            if let ExprKind::Static { class: d, name: n } = &x.kind
-                && *d == c
-                && n == name
-            {
-                reads = true;
+            if let ExprKind::Static { class: d, name: n } = &x.kind {
+                out.reads.push((*d, n.clone()));
             }
-            work.extend(class.callees(x));
+            out.runs.extend(class.callees(x));
             // The first use of another class runs its static initializer, and its superclasses'.
             let mut used = match &x.kind {
                 ExprKind::Static { class: d, .. } | ExprKind::New { class: d, .. } => Some(*d),
@@ -949,28 +1026,11 @@ fn reads_static(class: &Class, roots: &[&Expr], c: usize, name: &str) -> bool {
                 _ => None,
             };
             while let Some(d) = used {
-                work.extend(clinits.get(&d));
+                out.runs.extend(self.clinits.get(&d));
                 used = class.types[d].extends;
             }
         })
-    };
-    for root in roots {
-        look(root, &mut work);
     }
-    while let Some(m) = work.pop() {
-        if !seen.insert(m) {
-            continue;
-        }
-        if seen.len() > LIMIT {
-            return true;
-        }
-        for s in &class.methods[m].body {
-            let mut found = Vec::new();
-            visit_stmt(s, &mut |e| look(e, &mut found), &mut |_| {});
-            work.extend(found);
-        }
-    }
-    reads
 }
 
 /// Whether `e` is a variable that `safe` knows not null, or a cast of one.
