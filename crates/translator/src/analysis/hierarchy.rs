@@ -3,7 +3,7 @@
 //! of each class type is represented (one concrete class's object, or an enum over several),
 //! and where each method's body is emitted.
 
-use super::Facts;
+use super::{Facts, FastSet};
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
@@ -136,14 +136,14 @@ pub fn flows(
     class: &Class,
     field_level: &HashSet<usize>,
     raised: &std::collections::BTreeSet<usize>,
-) -> Vec<HashSet<usize>> {
+) -> Vec<FastSet<usize>> {
     let h = &class.hierarchy;
     let n = class.types.len();
-    let mut flows: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut flows: Vec<FastSet<usize>> = vec![FastSet::default(); n];
     for &c in raised {
         flows[c].insert(c);
     }
-    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+    let mut edges: FastSet<(usize, usize)> = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {
         if matches!(decl.kind, TypeKind::Enum | TypeKind::Runtime) {
             flows[t].insert(t);

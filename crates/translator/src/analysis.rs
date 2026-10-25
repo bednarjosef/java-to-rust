@@ -188,7 +188,7 @@ pub struct Facts {
     pub monitored: HashSet<String>,
     /// For each type (index into `Class::types`), the concrete classes and enums whose values
     /// become values of that type (see `hierarchy::flows`).
-    pub flows: Vec<HashSet<usize>>,
+    pub flows: Vec<FastSet<usize>>,
     /// The instance methods (indexes into `Class::methods`) that change their object.
     pub mutating: HashSet<usize>,
     /// The instance methods that borrow their object for the call: `&self` or `&mut self`.
