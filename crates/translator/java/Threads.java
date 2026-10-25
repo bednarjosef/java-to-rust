@@ -18,6 +18,10 @@ class Thread {
     private static UncaughtExceptionHandler defaultUncaughtExceptionHandler;
     private static final StackTraceElement[] EMPTY_STACK_TRACE = new StackTraceElement[0];
 
+    public static final int MIN_PRIORITY = 1;
+    public static final int NORM_PRIORITY = 5;
+    public static final int MAX_PRIORITY = 10;
+
     private String name;
     private final long tid;
     private final Runnable task;
@@ -289,7 +293,7 @@ class Thread {
     }
 
     public final void setPriority(int newPriority) {
-        if (newPriority > 10 || newPriority < 1) {
+        if (newPriority > MAX_PRIORITY || newPriority < MIN_PRIORITY) {
             throw new IllegalArgumentException();
         }
         priority = newPriority;

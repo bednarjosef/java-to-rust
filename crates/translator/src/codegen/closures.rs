@@ -262,7 +262,15 @@ impl<'a> Gen<'a> {
                 || f.borrowed_optional_params.contains(&key)
                 || f.borrowed_arrays.contains_key(&key)
             {
-                values[i] = self.value(arg, self.class.methods[ctor].params[i].ty).text;
+                let ty = self.class.methods[ctor].params[i].ty;
+                // A string parameter that the creating method borrows, as an `Option<&Wtf8>`, is
+                // owned by `optional_to`; its clone would still borrow.
+                values[i] = match &arg.kind {
+                    ExprKind::Var(name) if self.borrowed_optional.contains(name) => {
+                        self.optional_to(arg, ty).text
+                    }
+                    _ => self.value(arg, ty).text,
+                };
             }
         }
         let fields = captured_fields(&self.class.methods[ctor]);
