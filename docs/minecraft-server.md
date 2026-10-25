@@ -140,6 +140,17 @@ bytecode the class file already has:
   the variable it initializes or the method result it is returned as, when that is the same
   class: `return new SortedArraySet<T>(...)`. Type arguments are inference only, with no
   bytecode of their own.
+- **A type argument the decompiler left empty** (`(Function<Object, >) a1 -> input` in
+  DataFixerUpper's `RecordCodecBuilder`, a type Vineflower could not name), found at the `>` where
+  javac's parser stops: the cast to the raw type (`(Function) a1 -> input`), which erases to the
+  same cast.
+- **A class's type variable in a static method**, written in a cast or in a call's type
+  arguments (`Lens.<S, T, A, B>unbox(l)`, `(S) g.apply(c)`), where the decompiler used the class's
+  names for the method's own type variables: the cast or the type arguments are left out. A cast
+  to a type variable has no `checkcast`, and type arguments are inference only.
+- **A bound that names the type variable itself** (`CartesianLike<..., Mu extends Mu>`), where
+  the original's bound is a member class of the same name: written as the member
+  (`Mu extends CartesianLike.Mu`).
 - **A misnamed catch variable:** Vineflower sometimes declares `catch (Exception e)` and uses
   `ex` in the block. Every use of the unresolved name is renamed to the parameter of a catch
   that encloses all of them, if that parameter is not used in its block, no other catch around
@@ -370,10 +381,10 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   `src/libraries/<artifact>`, compiled against the other library jars, and `repair` then edits it.
   Brigadier, jtracy and logging compile as Vineflower writes them. DataFixerUpper goes from 169
   errors in 57 files to 165 in 59 with 2 files from CFR and 2 from Procyon (Vineflower without the
-  libraries, and CFR's and Procyon's whole sets, are all worse), and to 147 errors in 48 files
-  after the repair. 75 of the 147 are imports and uses of `javax.annotation`. All 107 of authlib's are `javax.annotation`,
-  so neither step changes them. What DataFixerUpper keeps is its heavy generics: type variables
-  used from a static context, and inference over its `App<Mu, ...>` encodings that fails.
+  libraries, and CFR's and Procyon's whole sets, are all worse), and to 108 errors in 42 files
+  after the repair. 75 of the 108 are imports and uses of `javax.annotation`. All 107 of authlib's are `javax.annotation`,
+  so neither step changes them. What DataFixerUpper keeps is inference over its `App<Mu, ...>`
+  encodings of higher-kinded types that fails.
 
 ### 3. What the translator itself rejects
 
@@ -400,8 +411,8 @@ These are plans. Work on several of them is under way but not merged yet.
    (it writes `jdk-src/modules.txt`), then the decompile, best-of, library-best-of and repair
    steps, then the census. Then compare its rejections with the last census's and with javac's,
    and list the new kinds.
-2. The decompiled code javac still rejects: 118 errors in the server and 72 in DataFixerUpper
-   (outside its missing annotations) after the best-of and repair steps, mostly inference inside
+2. The decompiled code javac still rejects: 46 errors in the server and 33 in DataFixerUpper
+   (outside imports and annotations) after the best-of and repair steps, mostly inference inside
    lambdas and method references.
 3. The census's speed: the last one lowered the whole program five times, about 370 s each,
    because a failed try with Rust generics starts lowering over. Planned: cheaper retries.

@@ -30,6 +30,12 @@
 //   is returned as or initializes;
 // - a lambda or method reference for an interface that is not functional, cast to the one
 //   interface extending it that the class file makes lambdas for (`(ForValueType<T>) () -> codec`);
+// - a cast or a call's type arguments that name a type variable of the class in a static method
+//   (`Lens.<S, T, A, B>unbox(l)`, the decompiler's names for the method's own variables) left out;
+// - a type variable's bound that names a member class of the variable's own name
+//   (`Mu extends Mu`) written as the class's member (`Mu extends CartesianLike.Mu`);
+// - a cast whose last type argument the decompiler left empty (`(Function<Object, >) a -> x`)
+//   made a cast to the raw type;
 // - an unresolved variable in a catch block renamed to the catch parameter that encloses every
 //   use of the name and is not used itself (the decompiler declared `e` and used `ex`).
 //
@@ -228,6 +234,15 @@ public class RepairDecompile {
         for (Error error : errors) {
             if (error.ignored()) continue;
             JCDiagnostic diag = error.diag();
+            if (diag.getCode().equals("compiler.err.illegal.start.of.type")) {
+                Edit edit = rawCastOfMissingArgument(cu, (int) diag.getPosition());
+                if (edit != null) edits.add(edit);
+                continue;
+            }
+            if (diag.getCode().equals("compiler.err.cyclic.inheritance")) {
+                edits.addAll(qualifiedBounds(cu));
+                continue;
+            }
             JCTree tree = diag.getDiagnosticPosition() == null ? null : diag.getDiagnosticPosition().getTree();
             if (tree == null) continue;
             TreePath path = TreePath.getPath(unit, tree);
@@ -251,6 +266,10 @@ public class RepairDecompile {
                         }
                     }
                     case "compiler.err.cant.apply.symbol" -> edits.addAll(rawArguments(cu, path));
+                    case "compiler.err.non-static.cant.be.ref" -> {
+                        Edit edit = diag.getArgs()[0] == Kinds.KindName.TYPEVAR ? withoutOuterVariable(cu, path) : null;
+                        if (edit != null) edits.add(edit);
+                    }
                     case "compiler.err.cant.apply.diamond.1" -> {
                         Edit edit = diamond(cu, path);
                         if (edit != null) edits.add(edit);
@@ -265,10 +284,86 @@ public class RepairDecompile {
                 // a type that source cannot name (a captured or intersection type, a local class)
             }
         }
-        return edits;
+        return edits.stream().distinct().toList();
     }
 
     static class Unprintable extends Exception {}
+
+    // Each type variable bounded by a member class of its own name (`Mu extends Mu`, which names
+    // the variable itself), with the bound written as the member of the class
+    // (`Mu extends CartesianLike.Mu`), as the original source had it.
+    static List<Edit> qualifiedBounds(JCTree.JCCompilationUnit cu) {
+        List<Edit> edits = new ArrayList<>();
+        new TreeScanner<Void, Void>() {
+            public Void visitClass(ClassTree node, Void v) {
+                JCTree.JCClassDecl decl = (JCTree.JCClassDecl) node;
+                for (JCTree.JCTypeParameter param : decl.typarams) {
+                    for (JCTree.JCExpression bound : param.bounds) {
+                        if (bound instanceof JCTree.JCIdent id && id.name.equals(param.name)
+                                && decl.defs.stream().anyMatch(d -> d instanceof JCTree.JCClassDecl c && c.name.equals(param.name)))
+                            edits.add(new Edit(id.getStartPosition(), id.getStartPosition(), decl.name + ".",
+                                "bound " + decl.name + "." + id.name));
+                    }
+                }
+                return super.visitClass(node, v);
+            }
+        }.scan(cu, null);
+        return edits;
+    }
+
+    // For a type variable of the class written in a static method (at `path`), inside a cast or
+    // the type arguments of a call: the code without that cast (`(T) h.apply(..)` as `h.apply(..)`)
+    // or those type arguments (`Lens.<S, T, A, B>unbox(l)` as `Lens.unbox(l)`), which the decompiler
+    // wrote with the names of the class's variables for the method's own. A cast to a type
+    // variable makes no checkcast, and type arguments are inference only.
+    static Edit withoutOuterVariable(JCTree.JCCompilationUnit cu, TreePath path) {
+        for (TreePath up = path; up.getParentPath() != null; up = up.getParentPath()) {
+            Tree child = up.getLeaf(), parent = up.getParentPath().getLeaf();
+            if (parent instanceof JCTree.JCTypeCast cast && cast.clazz == child) {
+                int start = cast.getStartPosition(), expr = cast.expr.getStartPosition();
+                return new Edit(start, expr, "", "no cast " + source(cu, start, expr).strip());
+            }
+            if (parent instanceof JCTree.JCMethodInvocation call && call.typeargs.contains(child)
+                    && call.meth instanceof JCTree.JCFieldAccess select) {
+                int after = TreeInfo.getEndPos(select.selected, cu.endPositions);
+                int end = TreeInfo.getEndPos(select, cu.endPositions);
+                String text = source(cu, after, end);
+                int open = text.indexOf('<'), close = text.lastIndexOf('>');
+                if (open < 0 || close < open) return null;
+                return new Edit(after + open, after + close + 1, "", "no type arguments " + text.substring(open, close + 1));
+            }
+            if (parent instanceof StatementTree || parent instanceof ClassTree) return null;
+        }
+        return null;
+    }
+
+    // For a cast whose last type argument the decompiler left empty (`(Function<Object, >) a -> x`,
+    // a type it could not name), at the `>` that javac stops at: the cast to the raw type
+    // (`(Function) a -> x`), which erases to the same checkcast or none.
+    static Edit rawCastOfMissingArgument(JCTree.JCCompilationUnit cu, int pos) {
+        String text;
+        try {
+            text = cu.getSourceFile().getCharContent(true).toString();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        if (pos < 0 || pos + 1 >= text.length() || text.charAt(pos) != '>' || text.charAt(pos + 1) != ')') return null;
+        int before = pos - 1;
+        while (before >= 0 && text.charAt(before) == ' ') before--;
+        if (before < 0 || text.charAt(before) != ',') return null;
+        int depth = 0, open = pos;
+        for (; open >= 0; open--) {
+            char c = text.charAt(open);
+            if (c == '>') depth++;
+            else if (c == '<' && --depth == 0) break;
+            else if (c == '(' || c == ';' || c == '{' || c == '}') return null;
+        }
+        if (open < 0) return null;
+        int name = open;
+        while (name > 0 && (Character.isJavaIdentifierPart(text.charAt(name - 1)) || text.charAt(name - 1) == '.')) name--;
+        if (name == open || name == 0 || text.charAt(name - 1) != '(') return null;
+        return new Edit(open, pos + 1, "", "cast to raw " + text.substring(name, open) + " for a missing type argument");
+    }
 
     // For an argument (at `path`) of a call `inner(..).outer(arg)` whose result is the inner
     // result's type argument (`Optional.orElse`), where `inner` is a generic method with one type
