@@ -5,7 +5,7 @@
 //! assigned elsewhere, `null` enum values) is rejected.
 
 use super::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Whether a member is one of an enum's constants (`RED`, `PLANET(3.0)`).
 pub(super) fn is_enum_constant(node: Node) -> bool {
@@ -170,10 +170,9 @@ impl<'t> Lowering<'t> {
         }
         let ty = Type::enum_type(&self.types[index].name);
         // A field that is not final is still one value per constant if only the constructor sets it.
-        for m in (0..methods.len()).filter(|&m| !(methods[m].is_ctor && methods[m].class == index)) {
-            if let Some(pos) = writes.first(methods, m, ty) {
-                return error(pos, "assigning an enum field outside its constructor not supported yet");
-            }
+        let own_ctor = |m: usize| methods[m].is_ctor && methods[m].class == index;
+        if let Some(pos) = writes.first(methods, ty, own_ctor) {
+            return error(pos, "assigning an enum field outside its constructor not supported yet");
         }
         for m in methods.iter().filter(|m| m.class == index && m.is_ctor) {
             for stmt in &m.body {
@@ -327,28 +326,69 @@ impl<'t> Lowering<'t> {
 }
 
 /// For each method, where it first assigns a field through a value of each enum type, worked out
-/// once for the method instead of once for every enum that `check_enum` checks.
+/// once for the method instead of once for every enum that `check_enum` checks, and the methods
+/// that assign through each enum type, so that an enum's check looks at those alone.
 #[derive(Default)]
 pub(super) struct EnumFieldWrites {
+    /// What each method assigns, once worked out (`None` before, and once forgotten).
     of: Vec<Option<HashMap<Type, Pos>>>,
+    /// The methods that assign a field through a value of each enum type, from `of`.
+    by_type: HashMap<Type, BTreeSet<usize>>,
+    /// The methods worked out, by class.
+    by_class: HashMap<usize, Vec<usize>>,
+    /// How many of the methods were ever worked out, and those forgotten since.
+    known: usize,
+    forgotten: Vec<usize>,
 }
 
 impl EnumFieldWrites {
-    /// Where method `m` first assigns a field through a value of type `ty`.
-    fn first(&mut self, methods: &[Method], m: usize, ty: Type) -> Option<Pos> {
-        if self.of.len() <= m {
-            self.of.resize(m + 1, None);
-        }
-        let pos = self.of[m].get_or_insert_with(|| field_writes(&methods[m])).get(&ty).copied();
-        debug_assert_eq!(pos, field_writes(&methods[m]).get(&ty).copied(), "a method changed unnoticed");
+    /// Where the first method in `methods` but those that `skip` assigns a field through a value
+    /// of type `ty`, first.
+    fn first(&mut self, methods: &[Method], ty: Type, skip: impl Fn(usize) -> bool) -> Option<Pos> {
+        self.work_out(methods);
+        let m = self.by_type.get(&ty)?.iter().copied().find(|&m| !skip(m))?;
+        let pos = self.of[m].as_ref().and_then(|writes| writes.get(&ty)).copied();
+        debug_assert_eq!(
+            pos,
+            (0..methods.len())
+                .filter(|&m| !skip(m))
+                .find_map(|m| field_writes(&methods[m]).get(&ty).copied()),
+            "a method changed unnoticed"
+        );
         pos
     }
 
+    /// Works out what the methods not yet worked out assign: the new ones and those forgotten.
+    fn work_out(&mut self, methods: &[Method]) {
+        let new = self.known.min(methods.len())..methods.len();
+        let todo: Vec<usize> = std::mem::take(&mut self.forgotten).into_iter().chain(new).collect();
+        self.known = self.known.max(methods.len());
+        if self.of.len() < methods.len() {
+            self.of.resize(methods.len(), None);
+        }
+        for m in todo {
+            if m >= methods.len() || self.of[m].is_some() {
+                continue;
+            }
+            let writes = field_writes(&methods[m]);
+            for &ty in writes.keys() {
+                self.by_type.entry(ty).or_default().insert(m);
+            }
+            self.by_class.entry(methods[m].class).or_default().push(m);
+            self.of[m] = Some(writes);
+        }
+    }
+
     /// Forgets what the methods of class `class` assign, as they changed.
-    pub(super) fn forget(&mut self, methods: &[Method], class: usize) {
-        for (m, writes) in self.of.iter_mut().enumerate() {
-            if methods.get(m).is_some_and(|method| method.class == class) {
-                *writes = None;
+    pub(super) fn forget(&mut self, class: usize) {
+        for m in self.by_class.remove(&class).unwrap_or_default() {
+            if let Some(writes) = self.of[m].take() {
+                for ty in writes.keys() {
+                    if let Some(ms) = self.by_type.get_mut(ty) {
+                        ms.remove(&m);
+                    }
+                }
+                self.forgotten.push(m);
             }
         }
     }

@@ -479,7 +479,7 @@ impl<'t> Lowering<'t> {
             .iter()
             .map(|&index| {
                 self.constant_bodies(index, methods).and_then(|()| {
-                    kept.writes.forget(methods, index);
+                    kept.writes.forget(index);
                     self.constant_body_fields(index)
                 })
             })
@@ -487,7 +487,7 @@ impl<'t> Lowering<'t> {
         for (index, bodies) in enum_indices.into_iter().zip(made) {
             let finished = self.finish_enum(index, types, methods, bodies, &mut kept);
             // The enum's own methods may have changed.
-            kept.writes.forget(methods, index);
+            kept.writes.forget(index);
             kept.uses.forget(methods, index);
             if let Err(e) = finished {
                 // In a census, an enum that lowering rejects keeps its constants without values.
