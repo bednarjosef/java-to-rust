@@ -492,7 +492,7 @@ trial() {
   local start
   start=$(date +%s)
   (cd "$cache/trial" && CARGO_TARGET_DIR=$cache/trial-target CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} \
-    "${slot[@]}" "${cap[@]}" cargo build -q --profile "${TRIAL_PROFILE:-dev}" > "$cache/trial-build.txt" 2>&1) \
+    "${slot[@]}" "${cap[@]}" cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}" > "$cache/trial-build.txt" 2>&1) \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
   local name profile=${TRIAL_PROFILE:-dev}
