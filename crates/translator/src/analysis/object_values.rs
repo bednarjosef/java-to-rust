@@ -40,6 +40,7 @@ use super::Facts;
 use crate::ast::*;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 /// The context of code that has no `this`: a static method, or a method that no class runs.
 pub(super) const STATIC: usize = usize::MAX;
@@ -92,12 +93,24 @@ impl Flow {
 
 /// A set of classes, by index into `Class::types`: a bit for each, from the word of the lowest
 /// class in it to that of the highest, so that a set of a few classes far into the program's types
-/// takes a few words rather than one for every 64 types before them.
-#[derive(Clone, Default, Debug)]
+/// takes a few words rather than one for every 64 types before them. Copies share their words
+/// until one of them changes: a set of every class of a type is copied into a great many places,
+/// and on the Minecraft server it is thousands of words.
+#[derive(Clone, Debug)]
 pub(super) struct ClassSet {
     /// The index of the first word in `words`.
     start: usize,
-    words: Vec<u64>,
+    words: Rc<Vec<u64>>,
+}
+
+impl Default for ClassSet {
+    /// The empty set, whose words all empty sets share, so that making one allocates nothing.
+    fn default() -> ClassSet {
+        thread_local! {
+            static EMPTY: Rc<Vec<u64>> = Rc::new(Vec::new());
+        }
+        ClassSet { start: 0, words: EMPTY.with(Rc::clone) }
+    }
 }
 
 impl ClassSet {
@@ -105,21 +118,21 @@ impl ClassSet {
     fn cover(&mut self, from: usize, to: usize) {
         if self.words.is_empty() {
             self.start = from;
-            self.words.resize(to - from, 0);
+            self.words = Rc::new(vec![0; to - from]);
             return;
         }
         if from < self.start {
-            self.words.splice(0..0, std::iter::repeat_n(0, self.start - from));
+            Rc::make_mut(&mut self.words).splice(0..0, std::iter::repeat_n(0, self.start - from));
             self.start = from;
         }
         if self.start + self.words.len() < to {
-            self.words.resize(to - self.start, 0);
+            Rc::make_mut(&mut self.words).resize(to - self.start, 0);
         }
     }
 
     fn insert(&mut self, c: usize) {
         self.cover(c / 64, c / 64 + 1);
-        self.words[c / 64 - self.start] |= 1 << (c % 64);
+        Rc::make_mut(&mut self.words)[c / 64 - self.start] |= 1 << (c % 64);
     }
 
     /// The word at index `i`, of all of them.
@@ -135,9 +148,15 @@ impl ClassSet {
         if (from..to).all(|i| other.word(i) & !self.word(i) == 0) {
             return false;
         }
+        // Where `other` holds every class of this set, this set becomes a copy of it.
+        if (0..self.words.len()).all(|i| self.words[i] & !other.word(self.start + i) == 0) {
+            *self = other.clone();
+            return true;
+        }
         self.cover(from, to);
+        let words = Rc::make_mut(&mut self.words);
         for i in from..to {
-            self.words[i - self.start] |= other.word(i);
+            words[i - self.start] |= other.word(i);
         }
         true
     }
@@ -145,7 +164,10 @@ impl ClassSet {
     /// Keeps the classes that are also in `other`.
     fn intersect(&mut self, other: &ClassSet) {
         let start = self.start;
-        for (i, word) in self.words.iter_mut().enumerate() {
+        if self.words.iter().enumerate().all(|(i, &word)| word & !other.word(start + i) == 0) {
+            return;
+        }
+        for (i, word) in Rc::make_mut(&mut self.words).iter_mut().enumerate() {
             *word &= other.word(start + i);
         }
     }
@@ -382,6 +404,21 @@ impl ObjectValues {
         self.contexts[m]
             .iter()
             .any(|&ctx| self.eval(class, m, ctx, l).value && self.eval(class, m, ctx, r).value)
+    }
+
+    /// How many words the class sets of the places hold, and in how many distinct buffers they
+    /// are, for the timings.
+    fn class_set_words(&self) -> (usize, usize) {
+        let mut seen = HashSet::new();
+        let (mut words, mut held) = (0, 0);
+        let flows = self.vars.values().flatten().chain(self.returns.values()).chain(self.fields.values());
+        for flow in flows.chain(self.statics.values()).chain(self.elements.values()) {
+            words += flow.classes.words.len();
+            if seen.insert(Rc::as_ptr(&flow.classes.words)) {
+                held += flow.classes.words.len();
+            }
+        }
+        (words, held)
     }
 
     /// The update of variable `name` of method `m` in context `ctx` with `flow`, when the analysis
@@ -730,8 +767,10 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         runs += 1;
         if timings && runs.is_multiple_of(1_000_000) {
             let entries: usize = readers.values().map(BTreeSet::len).sum();
+            let (words, held) = values.class_set_words();
             eprintln!(
-                "timing: points-to: {runs} runs, {} queued, {} read places with {entries} readers{}",
+                "timing: points-to: {runs} runs, {} queued, {} read places with {entries} readers, \
+                 class sets of {words} words in {held}{}",
                 queue.len(),
                 readers.len(),
                 crate::timings::memory()
