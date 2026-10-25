@@ -964,10 +964,11 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A local for the result of a `try` block, distinct from the method's locals.
+    /// A local for the result of a `try` block, distinct from the method's locals and from the
+    /// free functions, which share their namespace.
     fn result_name(&self, label: &str) -> String {
         let mut used: HashSet<String> = self.locals.values().cloned().collect();
-        unique(label.to_string(), &mut used)
+        super::names::unique_beside(label.to_string(), &mut used, &self.static_fn_names)
     }
 
     /// The `catch` clauses that match something, each with the variants of the enum of
