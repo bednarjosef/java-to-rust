@@ -711,12 +711,19 @@ it) looks at the variant only, so a `String[]` held as an `Object[]` fails it. A
   keeps the array. `Arrays.sort` and `Arrays.fill` of one, which change it in place, run the
   JDK's code for an `Object[]` with the JDK's sources (`Reach::string_array_writes`) and are
   rejected without them ("a change in place of a `String[]` that is also an `Object[]`").
-  Whether `String[]` is an `Object[]` is known only once the program is lowered, so a
-  translation or census that finds such a call in code that can run is made again with those
-  methods reached. When reaching them adds nothing in any round of loading (other code already
-  sorts or fills an `Object[]`), the second takes the units and reach of the first instead of
-  walking again: a translation asks javac for the same classes round by round, and a census
-  keeps the units it holds (`program::load`);
+  Whether `String[]` is an `Object[]` is known only once the program is lowered, and whether
+  such a call can run only once the methods that can run are found, so a translation or census
+  takes the writes when one can run with them (`program::translate_program_modules`). When
+  reaching them adds nothing in any round of loading (other code already sorts or fills an
+  `Object[]`, or waits for javac to give `java.util.Arrays`), the program is lowered with them
+  first, over the units and reach of that one load: if lowering lowered none, they change
+  nothing; if one can run, that is the translation; otherwise the program is lowered again
+  without them (a translation asks javac for the same classes round by round again, a census
+  keeps the units it holds). This differs from deciding without them only where a write is
+  reached solely through what the writes themselves pass to the JDK's methods, which
+  `JAVA_TO_RUST_STRING_WRITES_CHECK=1` checks does not happen. Otherwise the program is made
+  without the writes, and made again with them, reached by a walk of their own, once a rejected
+  one can run;
 - an array of an enum that is an `Object[]` holds its constants as `Object`s, cast back where
   read (an `Option` where the element may be null).
 

@@ -85,11 +85,20 @@ impl<'t> Lowering<'t> {
 
     /// Whether `node`, an `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]`,
     /// calls the JDK's method for an `Object[]`, which reachability then kept
-    /// (`Reach::string_array_writes`).
+    /// (`Reach::string_array_writes`); the code that holds it is noted when it does
+    /// (`Lowering::string_array_writes`).
     pub(super) fn jdk_string_array_write(&self, node: Node<'t>) -> bool {
-        self.strings_covariant()
+        let jdk = self.strings_covariant()
             && self.reach.is_some_and(|r| r.string_array_writes)
-            && crate::program::writes_string_array(node.0)
+            && crate::program::writes_string_array(node.0);
+        if jdk {
+            let code = match self.method_ctx.get() {
+                Some(m) => (self.methods[m].owner, Some(m)),
+                None => (self.current.get(), None),
+            };
+            self.string_array_writes.borrow_mut().push(code);
+        }
+        jdk
     }
 
     /// Whether `String[]` is an `Object[]` in this lowering.

@@ -19,10 +19,11 @@
 //! recorded is one that a translation of the program would report once the code before it
 //! translated. Where a `catch` reads the message of a `NullPointerException`, the messages are
 //! found as a translation finds them (`analysis::npe_messages`), and each dereference whose
-//! message is not certain is an error of the analyses, which stubs its code. A rejected write of
-//! a `String` array as an `Object` array takes the census again with those writes reached, as it
-//! takes a translation again (`Reach::string_array_writes`). So the translation that a census
-//! writes is the one that a translation would write, but for the stubs. An error that no stub can take away ends the census there, with its place: the pieces it did not get to are
+//! message is not certain is an error of the analyses, which stubs its code. The writes of
+//! `String` arrays as `Object` arrays are taken as a translation takes them
+//! (`program::translate_program_modules`, `Reach::string_array_writes`). So the translation that
+//! a census writes is the one that a translation would write, but for the stubs. An error that
+//! no stub can take away ends the census there, with its place: the pieces it did not get to are
 //! counted as they stand. An error that lowering met outside any unit's code is placed in the
 //! unit that alone has code at its line and column.
 //!
@@ -33,7 +34,7 @@
 //! that a constructor runs; otherwise, to the piece at its position.
 
 use super::survey::{self, Part, Piece};
-use super::{Program, ProgramError, Reaching, class_file_names, load, source_files};
+use super::{Program, ProgramError, Reach, Reaching, Writes, class_file_names, load, source_files};
 use crate::ast::{Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt};
 use crate::output::ModuleTree;
 use crate::value::{Value, json};
@@ -63,91 +64,75 @@ struct Rejection {
     error: Error,
 }
 
-/// The census of the code reachable from the program's `main`. As a translation does, it first
-/// reaches without the writes of `String` arrays as `Object` arrays, and again with them where
-/// that rejects one (`Reach::string_array_writes`): from the units and reach of the first, when
-/// it reached what it would have with them (`super::load`).
+/// The census of the code reachable from the program's `main`, with or without the writes of
+/// `String` arrays as `Object` arrays (`Reach::string_array_writes`), as a translation decides
+/// (`super::translate_program_modules`).
 pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
-    match census_reached(program, Reaching::Walk(false))? {
-        Taken::Census(census) => Ok(census),
-        Taken::Again(reaching) => match census_reached(program, *reaching)? {
-            Taken::Census(census) => Ok(census),
-            Taken::Again(_) => unreachable!("a census with the writes of `String` arrays is not taken again"),
-        },
+    let (units, reach, asked) = load(program, Reaching::Walk(false))?;
+    // When a walk with the writes would reach the same, the census is first taken with them.
+    let same = asked.is_some();
+    let mut writes = if same { Writes::First } else { Writes::Without };
+    let mut loaded = (units, reach);
+    loop {
+        match census_reached(program, loaded, writes, same)? {
+            Taken::Census(census) => return Ok(census),
+            Taken::Again(Some(again), next) => (loaded, writes) = (*again, next),
+            Taken::Again(None, next) => {
+                let (units, reach, _) = load(program, Reaching::Walk(true))?;
+                (loaded, writes) = ((units, reach), next);
+            }
+        }
     }
 }
 
-/// What `census_reached` gives: the census, or, when it was taken without
-/// `Reach::string_array_writes` and rejected a write of a `String` array as an `Object` array
-/// that can run, how to load the census with them.
+/// What `census_reached` gives: the census, or the census to take instead, over these units and
+/// reach or, with none, over a load with the writes of `String` arrays.
 enum Taken {
     Census(Census),
-    Again(Box<Reaching>),
+    Again(Option<Box<(Vec<Value>, Reach)>>, Writes),
 }
 
-/// `census_program`, with the units and reach that `reaching` gives (`super::load`).
-fn census_reached(program: &Program, reaching: Reaching) -> Result<Taken, ProgramError> {
+/// `census_program` over these units and reach (`super::load`), with the writes of `String`
+/// arrays as `writes` says; `same`: a walk with them reaches the same as without.
+fn census_reached(
+    program: &Program,
+    loaded: (Vec<Value>, Reach),
+    writes: Writes,
+    same: bool,
+) -> Result<Taken, ProgramError> {
     use crate::timings::phase;
     let files = source_files(program)?;
-    let string_array_writes = !matches!(reaching, Reaching::Walk(false));
-    let (units, reach, asked) = load(program, reaching)?;
+    let (units, mut reach) = loaded;
+    reach.string_array_writes = writes != Writes::Without;
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
     lower::quiet_panics();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-    // The program's files are the first units (`load`).
-    let lower =
-        || lower::census_lower_program(&trees, files.len(), &reach, &program.main, program.ends_rejected);
-    let lowered = phase("lower", || std::panic::catch_unwind(lower));
-    let lowered = lowered.unwrap_or_else(|panic| {
-        let message = format!("the translator panicked: {}", lower::panic_message(&*panic));
-        lower::Lowered {
-            class: Err((None, Error { pos: Pos::default(), message })),
-            rejected: Vec::new(),
-            units: Vec::new(),
-            live: None,
-        }
-    });
-    let rejection = |r: lower::Rejected| Rejection { unit: r.unit, anchor: r.anchor, error: r.error };
-    let writes = |message: &str| !string_array_writes && message.starts_with(lower::STRING_ARRAY_WRITE);
-    let mut rejections = Vec::new();
-    // Whether a write that can run takes the census again.
-    let mut again = false;
-    let (class, mut fatal) = match lowered.class {
-        Err((unit, error)) => {
-            rejections.extend(lowered.rejected.into_iter().map(rejection));
-            (None, Some(Rejection { unit, anchor: None, error }))
-        }
-        // As a translation does, only what can run counts (the unresolved calls are found again
-        // below, where they are stubbed).
-        Ok(mut class) => {
-            super::stamp_units(&mut class, &lowered.units);
-            // The census is taken again with the writes of `String` arrays (`census_program`)
-            // once one of them can run: looking further, or analysing this program, would
-            // change nothing.
-            let stops = |r: &lower::Rejected| writes(&r.error.message);
-            let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live, &stops);
-            match phase("live methods", narrow) {
-                Some((running, _)) if !running.iter().any(stops) => {
-                    rejections.extend(running.into_iter().map(rejection));
-                    (Some(class), None)
-                }
-                // The walk stopped at a write, or one can run.
-                _ => {
-                    again = true;
-                    (None, None)
-                }
-            }
-        }
-    };
-    if again || rejections.iter().chain(&fatal).any(|r| writes(&r.error.message)) {
+    let narrowed = lower_and_narrow(program, &trees, files.len(), &reach, writes);
+    if writes == Writes::First && super::check_string_array_writes() {
+        // The census takes the writes when one can run with them; check that one can run
+        // without them too, as the census then takes them, or that none was lowered.
+        reach.string_array_writes = false;
+        let without = lower_and_narrow(program, &trees, files.len(), &reach, Writes::Without).again.is_some();
+        reach.string_array_writes = true;
+        let with = narrowed.wrote && narrowed.again.is_none();
+        assert_eq!(
+            with, without,
+            "JAVA_TO_RUST_STRING_WRITES_CHECK: a write of a `String[]` can run with the writes ({with}) and \
+             without them ({without})"
+        );
+    }
+    let Narrowed { class, mut rejections, mut fatal, again, units: lowered_units, .. } = narrowed;
+    if let Some(next) = again {
         std::panic::set_hook(hook);
         drop((class, trees));
-        let again = match asked {
-            Some(_) => Reaching::Loaded(units, reach),
-            None => Reaching::Walk(true),
-        };
-        return Ok(Taken::Again(Box::new(again)));
+        let again = same.then(|| Box::new((units, reach)));
+        if again.is_some() && crate::timings::enabled() {
+            eprintln!(
+                "timing: javac and reach: the units and reach of the census without the writes of `String[]`s"
+            );
+        }
+        return Ok(Taken::Again(again, next));
     }
     // What the census needs of javac's trees is taken from them now, so that they are not held
     // while the program is analysed: the pieces of code, the files, and the units of the
@@ -169,7 +154,7 @@ fn census_reached(program: &Program, reaching: Reaching) -> Result<Taken, Progra
             let names = Names { program, jdk_temps: RefCell::new(jdk_temps), found: RefCell::new(None) };
             analyse(
                 &mut class,
-                &lowered.units,
+                &lowered_units,
                 &unit_files,
                 &mut rejections,
                 &mut modules,
@@ -182,6 +167,92 @@ fn census_reached(program: &Program, reaching: Reaching) -> Result<Taken, Progra
     let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
     Ok(Taken::Census(Census { report, json, modules }))
+}
+
+/// The program lowered for a census and narrowed to the code that can run (`super::narrow`).
+struct Narrowed {
+    /// The program, unless lowering ended with `fatal` or the census is taken again.
+    class: Option<Class>,
+    rejections: Vec<Rejection>,
+    fatal: Option<Rejection>,
+    /// The unit of each type of the program.
+    units: Vec<Option<usize>>,
+    /// How the census is taken instead, when it is: with the writes of `String` arrays, where one
+    /// that lowering rejected without them can run; without them, where lowering with them over
+    /// the same reach (`Writes::First`) lowered one and none can run.
+    again: Option<Writes>,
+    /// Whether lowering lowered a write of a `String` array as a call of the JDK's method.
+    wrote: bool,
+}
+
+/// Lowers the program for a census, with the writes of `String` arrays as `writes` says (as
+/// `reach` has them), and narrows it to the code that can run.
+fn lower_and_narrow(
+    program: &Program,
+    trees: &[&Value],
+    files: usize,
+    reach: &Reach,
+    writes: Writes,
+) -> Narrowed {
+    use crate::timings::phase;
+    // The program's files are the first units (`load`).
+    let lower = || lower::census_lower_program(trees, files, reach, &program.main, program.ends_rejected);
+    let lowered = phase("lower", || std::panic::catch_unwind(lower));
+    let lowered = lowered.unwrap_or_else(|panic| {
+        let message = format!("the translator panicked: {}", lower::panic_message(&*panic));
+        lower::Lowered {
+            class: Err((None, Error { pos: Pos::default(), message })),
+            rejected: Vec::new(),
+            units: Vec::new(),
+            live: None,
+            string_array_writes: Vec::new(),
+            wrote_string_arrays: false,
+        }
+    });
+    let rejection = |r: lower::Rejected| Rejection { unit: r.unit, anchor: r.anchor, error: r.error };
+    let rejects_writes =
+        |message: &str| writes == Writes::Without && message.starts_with(lower::STRING_ARRAY_WRITE);
+    let wrote = lowered.wrote_string_arrays;
+    let mut rejections = Vec::new();
+    // Whether a write that can run takes the census again.
+    let mut again = None;
+    let (class, fatal) = match lowered.class {
+        Err((unit, error)) => {
+            rejections.extend(lowered.rejected.into_iter().map(rejection));
+            (None, Some(Rejection { unit, anchor: None, error }))
+        }
+        // As a translation does, only what can run counts (the unresolved calls are found again
+        // below, where they are stubbed).
+        Ok(mut class) => {
+            super::stamp_units(&mut class, &lowered.units);
+            // The census is taken again with the writes of `String` arrays (`census_program`)
+            // once one of them can run: looking further, or analysing this program, would
+            // change nothing.
+            let stops = |r: &lower::Rejected| rejects_writes(&r.error.message);
+            let watched = &lowered.string_array_writes;
+            let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live, &stops, watched);
+            match phase("live methods", narrow) {
+                // With the writes, over the reach without them, none of those lowered can run.
+                Some((_, _, false)) if writes == Writes::First && wrote => {
+                    again = Some(Writes::Without);
+                    (None, None)
+                }
+                Some((running, _, _)) if !running.iter().any(stops) => {
+                    rejections.extend(running.into_iter().map(rejection));
+                    (Some(class), None)
+                }
+                // The walk stopped at a write, or one can run.
+                _ => {
+                    again = Some(Writes::With);
+                    (None, None)
+                }
+            }
+        }
+    };
+    if again.is_none() && rejections.iter().chain(&fatal).any(|r| rejects_writes(&r.error.message)) {
+        again = Some(Writes::With);
+    }
+    Narrowed { class, rejections, fatal, units: lowered.units, again, wrote }
 }
 
 /// How the class files name what the messages of a `NullPointerException` show, found the first

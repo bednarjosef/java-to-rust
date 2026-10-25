@@ -73,7 +73,8 @@ pub struct Reach {
     /// Whether `Arrays.sort` and `Arrays.fill` of a `String[]` reach the JDK's methods for an
     /// `Object[]` rather than being done by the runtime (`writes_string_array`): where a
     /// `String[]` is an `Object[]` (`lower::covariant`), the runtime's in-place methods would
-    /// change only a copy. `translate_program` sets it when the lowering without it finds one.
+    /// change only a copy. A translation sets it when one can run with it
+    /// (`translate_program_modules`).
     pub string_array_writes: bool,
     /// Classes that reachable code names, or makes live, that no unit declares, other than those
     /// where reachability stops (`outside`): those that the sources do not have, and those whose
@@ -2497,8 +2498,8 @@ impl<'t> Walk<'t> {
     /// with them: visiting what a walk with them visits for each `Arrays.sort` and `Arrays.fill`
     /// of a `String[]` that it met (`string_array_write_items`) would change nothing that it
     /// reached. So it is when other calls reached the JDK's method for an `Object[]` already
-    /// (or, while no unit declares `java.util.Arrays`, took it for an external one that waits
-    /// for the class), and named the class. The walk is then at a fixed point of the walk with
+    /// (or, while no unit declares `java.util.Arrays`, have it waiting for javac's answer, or
+    /// took it for an external one), and named the class. The walk is then at a fixed point of the walk with
     /// them too, and as a walk reaches the same in whatever order it visits, that walk reaches
     /// the same.
     fn same_with_string_array_writes(&self) -> bool {
@@ -2512,10 +2513,12 @@ impl<'t> Walk<'t> {
                     && !(reach.dormant.contains(key) && reach.live.contains(&key.0))
             }
             Item::Method(key) => {
-                reach.external.contains(key)
+                (reach.external.contains(key)
                     && (self.classes.contains_key(&key.0)
                         || outside(&key.0)
-                        || reach.missing.contains(&key.0))
+                        || reach.missing.contains(&key.0)))
+                    // Waiting for javac's answer for its class (`block`).
+                    || self.blocked.get(&key.0).is_some_and(|items| items.contains(item))
             }
             Item::Class(class) if self.classes.contains_key(class) => reach.classes.contains(class),
             Item::Class(class) => outside(class) || reach.missing.contains(class),
@@ -3913,7 +3916,9 @@ mod tests {
         let arrays = json!({"kind": "CLASS", "symbol": {"type": "java.util.Arrays"}, "members": [
             {"kind": "METHOD", "name": "sort", "symbol": {"type": "(java.lang.Object[])void", "static": true},
              "body": {"kind": "BLOCK", "statements": [call("java.util.ComparableTimSort", "sort")]}}]});
-        let rounds_of = |main: Vec<Value>, string_array_writes: bool| {
+        // With `asking`, as javac gives units: a method of a class that no unit declares waits
+        // for javac's answer (`Walk::block`).
+        let rounds_of_asking = |main: Vec<Value>, string_array_writes: bool, asking: bool| {
             let units = [
                 json!({"typeDecls": [class("Main", &[("main", main)])]}),
                 json!({"typeDecls": [arrays.clone()]}),
@@ -3923,26 +3928,40 @@ mod tests {
             if string_array_writes {
                 rounds = rounds.with_string_array_writes();
             }
+            if asking {
+                rounds = rounds.asking();
+            }
             let mut asked = Vec::new();
             for unit in &units {
                 rounds.add(&[unit]).unwrap();
-                asked.push((rounds.missing(), rounds.same_with_string_array_writes()));
+                let missing = rounds.missing();
+                asked.push((missing.clone(), rounds.same_with_string_array_writes()));
+                rounds.asked(&missing);
             }
             let reach = rounds.finish();
             (asked, (reach.methods, reach.classes, reach.initialized, reach.external, reach.missing))
         };
+        let rounds_of =
+            |main: Vec<Value>, string_array_writes: bool| rounds_of_asking(main, string_array_writes, false);
         // Sorting a `Shape[]` reaches the JDK's method, so sorting the `String[]` with it adds
-        // nothing: each round asks for the same classes, and they reach the same.
+        // nothing: each round asks for the same classes, and they reach the same, also while the
+        // JDK's method waits for javac to give `java.util.Arrays`.
         let both = vec![sort("Shape[]"), sort("java.lang.String[]")];
-        let (asked, reached) = rounds_of(both.clone(), false);
-        let (asked_with, reached_with) = rounds_of(both, true);
-        assert!(asked.iter().all(|(_, same)| *same), "{asked:?}");
         let classes =
             |asked: &[(Vec<String>, bool)]| asked.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>();
-        assert_eq!(classes(&asked), classes(&asked_with));
-        assert_eq!(classes(&asked)[0], ["java.util.Arrays"]);
-        assert_eq!(reached, reached_with);
-        assert!(reached.0.contains(&("java.util.ComparableTimSort".into(), "sort".into(), "()void".into())));
+        for asking in [false, true] {
+            let (asked, reached) = rounds_of_asking(both.clone(), false, asking);
+            let (asked_with, reached_with) = rounds_of_asking(both.clone(), true, asking);
+            assert!(asked.iter().all(|(_, same)| *same), "{asked:?}");
+            assert_eq!(classes(&asked), classes(&asked_with));
+            assert_eq!(classes(&asked)[0], ["java.util.Arrays"]);
+            assert_eq!(reached, reached_with);
+            assert!(reached.0.contains(&(
+                "java.util.ComparableTimSort".into(),
+                "sort".into(),
+                "()void".into()
+            )));
+        }
         // Alone, the sort of the `String[]` asks for `java.util.Arrays` only with the writes.
         let (asked, _) = rounds_of(vec![sort("java.lang.String[]")], false);
         let (asked_with, _) = rounds_of(vec![sort("java.lang.String[]")], true);

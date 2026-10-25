@@ -56,6 +56,13 @@ pub struct Lowered {
     /// The methods of the lowered program that can run, when lowering found them (to know
     /// whether its Rust generics stay, see `lower_with`).
     pub live: Option<crate::analysis::live_methods::LiveMethods>,
+    /// The code that holds each `Arrays.sort` or `Arrays.fill` of a `String[]` that is an
+    /// `Object[]` and that calls the JDK's method for it (with `Reach::string_array_writes`), as
+    /// `Rejected::ty` and `Rejected::method` name code.
+    pub string_array_writes: Vec<(usize, Option<usize>)>,
+    /// Whether any attempt of lowering (`real_generics::retry`) lowered one: when none did,
+    /// `Reach::string_array_writes` changed nothing.
+    pub wrote_string_arrays: bool,
 }
 
 /// An error in a piece of code that lowering rejected and went on past: the unit of the code,
@@ -106,18 +113,25 @@ fn lower_going_on<'t>(
     main: &str,
     census_of: Option<bool>,
 ) -> Lowered {
-    let census = RefCell::new((Vec::new(), Vec::new(), None));
+    let census = RefCell::new(CensusSink::default());
     let class = super::real_generics::retry(|real, covariant| {
         lower_with(units, program_units, reach, main, real, covariant, Some((&census, census_of)))
     });
-    let (rejected, units, live) = census.into_inner();
-    Lowered { class, rejected, units, live }
+    let CensusSink { rejected, units, live, string_array_writes, wrote_string_arrays } = census.into_inner();
+    Lowered { class, rejected, units, live, string_array_writes, wrote_string_arrays }
 }
 
 /// What a census's lowering hands back on each attempt: the rejections, the unit of each type,
-/// and the methods that can run, when it found them.
-type CensusSink =
-    RefCell<(Vec<Rejected>, Vec<Option<usize>>, Option<crate::analysis::live_methods::LiveMethods>)>;
+/// the methods that can run, when it found them, and the code with the JDK's writes of
+/// `String[]`s; and whether any attempt lowered one of those.
+#[derive(Default)]
+struct CensusSink {
+    rejected: Vec<Rejected>,
+    units: Vec<Option<usize>>,
+    live: Option<crate::analysis::live_methods::LiveMethods>,
+    string_array_writes: Vec<(usize, Option<usize>)>,
+    wrote_string_arrays: bool,
+}
 
 /// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`, and
 /// the arrays `covariant`.
@@ -128,7 +142,7 @@ fn lower_with<'t>(
     main: &str,
     real: Option<&super::real_generics::Real>,
     covariant: &super::covariant::Covariant,
-    census: Option<(&CensusSink, Option<bool>)>,
+    census: Option<(&RefCell<CensusSink>, Option<bool>)>,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
     lowering.covariant = covariant.clone();
@@ -172,7 +186,12 @@ fn lower_with<'t>(
     });
     let live = live.and_then(Result::ok).flatten();
     let first = rejected.first().map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
-    *census.borrow_mut() = (rejected, (0..lowering.types.len()).map(unit).collect(), live);
+    let mut sink = census.borrow_mut();
+    let string_array_writes = lowering.string_array_writes.take();
+    sink.wrote_string_arrays |= !string_array_writes.is_empty();
+    (sink.rejected, sink.units, sink.live, sink.string_array_writes) =
+        (rejected, (0..lowering.types.len()).map(unit).collect(), live, string_array_writes);
+    drop(sink);
     match first {
         Some(error) if retried => Err((None, error)),
         _ => lowered,

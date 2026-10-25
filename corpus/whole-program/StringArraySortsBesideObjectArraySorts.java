@@ -2,8 +2,9 @@ import java.util.Arrays;
 
 // `Arrays.sort` and `Arrays.fill` of a `String[]` that is also an `Object[]`, beside the same calls
 // on an `Integer[]`, which run the JDK's methods for an `Object[]` anyway: reaching the JDK's
-// methods for the `String[]` too reaches nothing new, so the translation that does is loaded with
-// the units of the first one rather than reached again (`Reach::string_array_writes`).
+// methods for the `String[]` too reaches nothing new, so the program is lowered with them over the
+// units and reach of its one load, and as they can run, that is the translation
+// (`Reach::string_array_writes`).
 public class StringArraySortsBesideObjectArraySorts {
     static <T> T last(T[] a) {
         return a[a.length - 1];

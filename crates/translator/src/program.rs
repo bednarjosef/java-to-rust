@@ -94,56 +94,149 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 
 /// Translates a whole program into the modules of a Rust program that uses the `java-runtime`
 /// crate, one per package, for a layout (`output::Layout`) to write as files.
+///
+/// An `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]` calls the JDK's method
+/// for an `Object[]` (`Reach::string_array_writes`), which a walk reaches only with the writes:
+/// without them, lowering rejects it. The translation takes the writes when one can run with
+/// them. When the walk without them reaches what it would with them (`load`), as it does where
+/// other code reaches the JDK's method, the program is lowered with them first, over the same
+/// units and reach: if lowering lowered none, the writes change nothing; if one can run, that is
+/// the translation; otherwise it is lowered again without them. A write can run with them and
+/// not without them only when the walk reaches it solely through what the writes themselves
+/// pass to the JDK's method (`JAVA_TO_RUST_STRING_WRITES_CHECK=1` checks that it does not).
+/// Otherwise the program is translated without the writes, and again with them, reached by a
+/// walk of their own, where a rejected one can run.
 pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, ProgramError> {
-    // An `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]` calls the JDK's
-    // method for an `Object[]`, which only that program reaches (`Reach::string_array_writes`).
-    let mut again = None;
-    match translate_reached(program, Reaching::Walk(false), &mut again) {
-        Err(e) if e.error.message.starts_with(lower::STRING_ARRAY_WRITE) => {
-            translate_reached(program, again.unwrap_or(Reaching::Walk(true)), &mut None)
+    let (units, reach, asked) = load(program, Reaching::Walk(false))?;
+    let Some(asked) = asked else {
+        return match translate_reached(program, units, reach, Writes::Without)? {
+            Translated::Done(tree) => Ok(tree),
+            Translated::Again(_, _) => {
+                let (units, reach, _) = load(program, Reaching::Walk(true))?;
+                match translate_reached(program, units, reach, Writes::With)? {
+                    Translated::Done(tree) => Ok(tree),
+                    Translated::Again(..) => unreachable!("a translation with the writes is not taken again"),
+                }
+            }
+        };
+    };
+    let (mut units, mut reach, mut writes) = (units, reach, Writes::First);
+    loop {
+        match translate_reached(program, units, reach, writes)? {
+            Translated::Done(tree) => return Ok(tree),
+            Translated::Again(again, next) => {
+                // javac's trees were let go: javac is asked for the same units again.
+                (units, reach, writes) =
+                    load(program, Reaching::Replay(asked.clone(), again, next != Writes::Without))
+                        .map(|(units, reach, _)| (units, reach, next))?;
+            }
         }
-        result => result,
     }
 }
 
-/// `translate_program`, with the units and reach that `reaching` gives (`load`). Where lowering
-/// without `Reach::string_array_writes` rejects a write that they would take, `again` holds how
-/// the translation with them can load without walking again (`Reaching::Replay`), if it can,
-/// until the rejection is known not to run.
+/// How a translation or a census (`census::census_reached`) takes the writes of `String` arrays
+/// as `Object` arrays (`Reach::string_array_writes`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Writes {
+    /// With them, over a reach that is the same with them as without: the translation goes on
+    /// with them when lowering lowered none (they change nothing) or one can run, and is taken
+    /// without them otherwise.
+    First,
+    /// With them.
+    With,
+    /// Without them, and with them instead where a rejected one can run.
+    Without,
+}
+
+/// What `translate_reached` gives: the translation, or the reach to translate again with, and
+/// how.
+enum Translated {
+    Done(ModuleTree),
+    Again(Box<Reach>, Writes),
+}
+
+/// Whether `JAVA_TO_RUST_STRING_WRITES_CHECK` is set: where the writes of `String` arrays are
+/// taken first (`Writes::First`), lowering without them checks that one can run then too, or
+/// that none was lowered.
+pub(crate) fn check_string_array_writes() -> bool {
+    std::env::var_os("JAVA_TO_RUST_STRING_WRITES_CHECK").is_some()
+}
+
+/// `translate_program`, with these units and reach (`load`) and the writes of `String` arrays as
+/// `writes` says.
 fn translate_reached(
     program: &Program,
-    reaching: Reaching,
-    again: &mut Option<Reaching>,
-) -> Result<ModuleTree, ProgramError> {
+    units: Vec<Value>,
+    mut reach: Reach,
+    writes: Writes,
+) -> Result<Translated, ProgramError> {
     use crate::timings::phase;
-    let (units, reach, asked) = load(program, reaching)?;
+    reach.string_array_writes = writes != Writes::Without;
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
-    let (lowered, jdk_temps) = {
+    let (lowered, jdk_temps, without) = {
         let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
         let lowered =
             phase("lower", || lower::tolerant_lower_program(&trees, program_units, &reach, &program.main));
+        // Whether a rejected write can run without the writes, for the check.
+        let without = (writes == Writes::First && check_string_array_writes()).then(|| {
+            reach.string_array_writes = false;
+            let lowered = lower::tolerant_lower_program(&trees, program_units, &reach, &program.main);
+            reach.string_array_writes = true;
+            rejected_write_runs(lowered)
+        });
         // What the JDK's messages of a `NullPointerException` need of its trees.
-        (lowered, javac::jdk_temps(&trees[program_units..]))
+        (lowered, javac::jdk_temps(&trees[program_units..]), without)
     };
-    let writes = |error: &Error| error.message.starts_with(lower::STRING_ARRAY_WRITE);
-    let rejects_write = lowered.rejected.iter().any(|r| writes(&r.error))
-        || lowered.class.as_ref().is_err_and(|(_, error)| writes(error));
+    let is_write =
+        |error: &Error| writes == Writes::Without && error.message.starts_with(lower::STRING_ARRAY_WRITE);
+    let wrote = lowered.wrote_string_arrays;
     // javac's trees are not needed once the program is lowered: only the file and the classes
     // of each unit, to say where an error is.
     let kept: Vec<Unit> = units.iter().map(Unit::new).collect();
     drop(units);
-    *again = asked.filter(|_| rejects_write).map(|asked| Reaching::Replay(asked, reach));
     let units = kept;
     let file = |unit: Option<usize>| unit.map(|u| units[u].file.clone());
-    let mut class = lowered.class.map_err(|(unit, error)| ProgramError { file: file(unit), error })?;
+    let mut class = match lowered.class {
+        Ok(class) => class,
+        // Where lowering with the writes ended, the translation is as without them.
+        Err(_) if writes == Writes::First && wrote => {
+            return Ok(Translated::Again(Box::new(reach), Writes::Without));
+        }
+        Err((_, error)) if is_write(&error) => return Ok(Translated::Again(Box::new(reach), Writes::With)),
+        Err((unit, error)) => return Err(ProgramError { file: file(unit), error }),
+    };
     stamp_units(&mut class, &lowered.units);
     print_notes(&class, &units.iter().map(|u| u.file.clone()).collect::<Vec<_>>());
-    if let Err(rejected) = phase("live methods", || keep_live(&mut class, lowered.rejected)) {
+    let watched = &lowered.string_array_writes;
+    let live = || narrow(&mut class, lowered.rejected, None, &|_| false, watched);
+    let (running, unresolved, writes_run) = phase("live methods", live).expect("nothing stops the walk");
+    if let Some(without) = without {
+        let with = wrote && writes_run;
+        assert_eq!(
+            with, without,
+            "JAVA_TO_RUST_STRING_WRITES_CHECK: a write of a `String[]` can run with the writes ({with}) and \
+             without them ({without})"
+        );
+    }
+    if writes == Writes::First && wrote && !writes_run {
+        return Ok(Translated::Again(Box::new(reach), Writes::Without));
+    }
+    let unresolved = unresolved.into_iter().map(|error| lower::Rejected {
+        unit: None,
+        anchor: None,
+        error,
+        ty: 0,
+        method: None,
+    });
+    if let Some(rejected) = running.into_iter().chain(unresolved).next() {
+        if is_write(&rejected.error) {
+            return Ok(Translated::Again(Box::new(reach), Writes::With));
+        }
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
     }
-    *again = None;
+    drop(reach);
     phase("string identity", || analysis::string_identity(&mut class))
         .map_err(|mut errors| errors.remove(0))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
@@ -158,7 +251,23 @@ fn translate_reached(
         phase("messages", || analysis::npe_messages(&class, &mut facts, &names))
             .map_err(|mut errors| located(errors.remove(0)))?;
     }
-    phase("codegen", || codegen::generate_modules(&class, &facts)).map_err(located)
+    phase("codegen", || codegen::generate_modules(&class, &facts)).map_err(located).map(Translated::Done)
+}
+
+/// Whether a write of a `String` array that `lowered` (without the writes) rejected can run: the
+/// error that ends lowering, or a piece of code that it rejected and that can run, as a census
+/// finds it (`census::lower_and_narrow`).
+fn rejected_write_runs(lowered: lower::Lowered) -> bool {
+    let is_write = |error: &Error| error.message.starts_with(lower::STRING_ARRAY_WRITE);
+    match lowered.class {
+        Err((_, error)) => is_write(&error) || lowered.rejected.iter().any(|r| is_write(&r.error)),
+        Ok(mut class) => {
+            stamp_units(&mut class, &lowered.units);
+            let narrowed = narrow(&mut class, lowered.rejected, None, &|_| false, &[]);
+            let (running, _, _) = narrowed.expect("nothing stops the walk");
+            running.iter().any(|r| is_write(&r.error))
+        }
+    }
 }
 
 /// How the class files of the program's code name what the messages of a `NullPointerException`
@@ -172,21 +281,6 @@ fn class_file_names(program: &Program) -> Result<javac::BytecodeNames, ProgramEr
         .map_err(|error| ProgramError { file: None, error })
 }
 
-/// Keeps the methods of `class` that can run (`analysis::live_methods`) and gives the others a
-/// body that never runs; the first piece of code that lowering rejected and that can run, or
-/// else the first call that lowering left unresolved and that can run, if there is one.
-fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> Result<(), lower::Rejected> {
-    let (running, unresolved) = narrow(class, rejected, None, &|_| false).expect("nothing stops the walk");
-    let unresolved = unresolved.into_iter().map(|error| lower::Rejected {
-        unit: None,
-        anchor: None,
-        error,
-        ty: 0,
-        method: None,
-    });
-    running.into_iter().chain(unresolved).next().map_or(Ok(()), Err)
-}
-
 /// The pieces of code that lowering rejected (`rejected`, stubs in `class`) that can run, and
 /// the calls that lowering left unresolved that can run; the methods that cannot run get a body
 /// that never runs (`analysis::live_methods::prune`). When the methods that can run are not
@@ -194,13 +288,15 @@ fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> R
 /// for). `found` are the methods that can run when lowering found them already (`Lowered::live`),
 /// before `stamp_units`: the positions of their unresolved calls have no unit. `None`, with
 /// `class` as it was, when the methods that can run are looked for here and a rejection that
-/// `stops` can run: the walk stops there (`live_methods_unless`).
+/// `stops` can run: the walk stops there (`live_methods_unless`). Also whether any of the pieces
+/// of code `watched` (each as `lower::Rejected` names its code) can run.
 fn narrow(
     class: &mut crate::ast::Class,
     rejected: Vec<lower::Rejected>,
     found: Option<analysis::live_methods::LiveMethods>,
     stops: &dyn Fn(&lower::Rejected) -> bool,
-) -> Option<(Vec<lower::Rejected>, Vec<Error>)> {
+    watched: &[(usize, Option<usize>)],
+) -> Option<(Vec<lower::Rejected>, Vec<Error>, bool)> {
     let live = match found {
         Some(live) => Ok(live),
         None => {
@@ -215,7 +311,7 @@ fn narrow(
             if crate::timings::enabled() {
                 eprintln!("timing: live methods: not known for {unknown}, {} rejections", rejected.len());
             }
-            return Some((rejected, Vec::new()));
+            return Some((rejected, Vec::new(), !watched.is_empty()));
         }
     };
     let distinct = |rejected: &[lower::Rejected]| {
@@ -243,8 +339,9 @@ fn narrow(
             (id, lists.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone())
         })
         .collect();
+    let watched_runs = watched.iter().any(|&(ty, method)| live.runs(ty, method));
     analysis::live_methods::prune(class, &live);
-    Some((running, live.unresolved))
+    Some((running, live.unresolved, watched_runs))
 }
 
 /// The units of the program and of the library classes that its reachable code uses, with what
@@ -266,23 +363,15 @@ fn narrow(
 /// Without `Reach::string_array_writes`, the load also gives what each round asked javac for,
 /// when every round reached what it would have with them
 /// (`reach::Rounds::same_with_string_array_writes`). The rounds with them would then ask for the
-/// same classes, get the same units in the same order and reach the same, so a load with them
-/// takes those instead of walking again (`Reaching::Replay`, `Reaching::Loaded`).
+/// same classes, get the same units in the same order and reach the same, so the program is
+/// lowered with them over these units and reach, or a load with them takes those instead of
+/// walking again (`Reaching::Replay`).
 fn load(program: &Program, reaching: Reaching) -> Result<(Vec<Value>, Reach, Option<Asked>), ProgramError> {
     match reaching {
         Reaching::Walk(string_array_writes) => load_in_rounds(program, string_array_writes),
-        Reaching::Replay(asked, mut reach) => {
-            reach.string_array_writes = true;
-            Ok((replay(program, &asked)?, reach, None))
-        }
-        Reaching::Loaded(units, mut reach) => {
-            reach.string_array_writes = true;
-            if crate::timings::enabled() {
-                eprintln!(
-                    "timing: javac and reach: the units and reach of the census without the writes of `String[]`s"
-                );
-            }
-            Ok((units, reach, None))
+        Reaching::Replay(asked, mut reach, string_array_writes) => {
+            reach.string_array_writes = string_array_writes;
+            Ok((replay(program, &asked)?, *reach, None))
         }
     }
 }
@@ -292,17 +381,16 @@ enum Reaching {
     /// By asking javac for units in rounds as a walk from `main` needs them, with
     /// `Reach::string_array_writes` or without.
     Walk(bool),
-    /// With `Reach::string_array_writes`, from a load without them whose every round reached
-    /// what it would have with them: javac is asked for what that load asked for in each round
-    /// (`replay`), and what they reach is what that load reached.
-    Replay(Asked, Reach),
-    /// The same, with that load's units, which a census still holds.
-    Loaded(Vec<Value>, Reach),
+    /// From a load without `Reach::string_array_writes` whose every round reached what it would
+    /// have with them, with them or without: javac is asked for what that load asked for in each
+    /// round (`replay`), and what they reach is what that load reached.
+    Replay(Asked, Box<Reach>, bool),
 }
 
 /// What each round of a load asked javac for: the classes, and the proxy classes that
 /// reachability had found by then (`reach::ProxyClass`), whose sources it writes for javac; with
 /// how many units javac gave for them.
+#[derive(Clone)]
 struct Asked(Vec<(Vec<String>, Vec<reach::ProxyClass>, usize)>);
 
 /// `load` by walking in rounds (`Reaching::Walk`).
@@ -495,8 +583,8 @@ fn check_round(round: usize, rounds: &reach::Rounds, scratch: reach::Rounds) -> 
     ))
 }
 
-/// The units of `load_in_rounds` with `Reach::string_array_writes`, from what the load without
-/// them asked javac for in each round (`Reaching::Replay`): javac is asked for the same classes,
+/// The units of `load_in_rounds`, from what a load without `Reach::string_array_writes` asked
+/// javac for in each round (`Reaching::Replay`): javac is asked for the same classes,
 /// and adds the same proxy classes, in the same rounds, and so gives the same units in the same
 /// order, whose records are completed as that load completes them.
 fn replay(program: &Program, asked: &Asked) -> Result<Vec<Value>, ProgramError> {

@@ -400,6 +400,10 @@ struct Lowering<'t> {
     /// the type whose code it is in and the position of the method being lowered, and lowering
     /// goes on past it; `None` otherwise, when the first error ends lowering.
     census: Option<RefCell<Vec<CensusError>>>,
+    /// The code that holds each `Arrays.sort` or `Arrays.fill` of a `String[]` that is an
+    /// `Object[]` lowered as a call of the JDK's method (`jdk_string_array_write`), as a type and
+    /// a method or none, as `Rejected` names the code that a rejection is in.
+    string_array_writes: RefCell<Vec<(usize, Option<usize>)>>,
     /// Whether a census takes a panic while lowering a method for a rejection of the method. A
     /// whole program's lowering, which goes on past rejections too (`tolerant_lower_program`),
     /// lets it end the translation, as it would without them.
