@@ -165,43 +165,29 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
         count
     }
     // Finds the `try` statements of `stmts`, including those in the cases of a switch expression,
-    // which `visit_stmt` reaches only through an expression.
+    // at any depth, which `visit_stmt` reports as it reports the others.
     fn scan(facts: &Facts, all: &[Stmt], stmts: &[Stmt], out: &mut HashSet<String>) {
         for s in stmts {
-            let mut nested = HashSet::new();
-            visit_stmt(
-                s,
-                &mut |e| {
-                    visit_expr(e, &mut |x| {
-                        if let ExprKind::Switch { cases, .. } = &x.kind {
-                            for case in cases {
-                                scan(facts, all, &case.body, &mut nested);
-                            }
-                        }
-                    })
-                },
-                &mut |s| match s {
-                    Stmt::Try { body, finally: None, .. }
-                        if facts.live_tries.contains(&(s as *const Stmt as usize)) =>
-                    {
-                        assigned(all, body, out)
+            visit_stmt(s, &mut |_| {}, &mut |s| match s {
+                Stmt::Try { body, finally: None, .. }
+                    if facts.live_tries.contains(&(s as *const Stmt as usize)) =>
+                {
+                    assigned(all, body, out)
+                }
+                // The body and the `catch` clauses of a `try` with a `finally` are blocks whose
+                // ends Rust does not follow into the code after the `finally`, unless nothing
+                // leaves them early.
+                Stmt::Try { body, catches, finally: Some(_) }
+                    if facts.raising_tries.contains(&(s as *const Stmt as usize))
+                        || leaves_early(body, catches) != (false, false) =>
+                {
+                    assigned(all, body, out);
+                    for catch in catches {
+                        assigned(all, &catch.body, out);
                     }
-                    // The body and the `catch` clauses of a `try` with a `finally` are blocks whose
-                    // ends Rust does not follow into the code after the `finally`, unless nothing
-                    // leaves them early.
-                    Stmt::Try { body, catches, finally: Some(_) }
-                        if facts.raising_tries.contains(&(s as *const Stmt as usize))
-                            || leaves_early(body, catches) != (false, false) =>
-                    {
-                        assigned(all, body, out);
-                        for catch in catches {
-                            assigned(all, &catch.body, out);
-                        }
-                    }
-                    _ => {}
-                },
-            );
-            out.extend(nested);
+                }
+                _ => {}
+            });
         }
     }
     let mut out = HashSet::new();
@@ -282,31 +268,19 @@ fn tuple(items: &[String]) -> String {
 /// Whether every `try` of `body` that assigns local `name` carries its value out where Rust needs
 /// it (`carried_out`): it has no `finally`, and its block sets the local with a statement of its
 /// own or never completes normally. The `try` statements in the cases of a switch expression are
-/// looked at too.
+/// looked at too, at any depth, as `visit_stmt` reports them.
 fn carriable(body: &[Stmt], name: &str) -> bool {
     let ok = std::cell::Cell::new(true);
     for s in body {
-        visit_stmt(
-            s,
-            &mut |e| {
-                visit_expr(e, &mut |x| {
-                    if let ExprKind::Switch { cases, .. } = &x.kind
-                        && !cases.iter().all(|case| carriable(&case.body, name))
-                    {
-                        ok.set(false);
-                    }
-                })
-            },
-            &mut |s| {
-                if let Stmt::Try { body, catches, finally } = s
-                    && (assigns(body, name) || catches.iter().any(|c| assigns(&c.body, name)))
-                    && !(finally.is_none()
-                        && (!assigns(body, name) || sets_at_top(body, name) || !completes_all(body)))
-                {
-                    ok.set(false);
-                }
-            },
-        );
+        visit_stmt(s, &mut |_| {}, &mut |s| {
+            if let Stmt::Try { body, catches, finally } = s
+                && (assigns(body, name) || catches.iter().any(|c| assigns(&c.body, name)))
+                && !(finally.is_none()
+                    && (!assigns(body, name) || sets_at_top(body, name) || !completes_all(body)))
+            {
+                ok.set(false);
+            }
+        });
     }
     ok.get()
 }
