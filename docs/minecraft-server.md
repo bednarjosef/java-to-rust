@@ -509,8 +509,12 @@ These are plans. Work on several of them is under way but not merged yet.
    (it writes `jdk-src/modules.txt`), then the decompile, best-of, library-best-of and repair
    steps, then the census. Then compare its rejections with the last census's and with javac's,
    and list the new kinds.
-2. The census's speed: the last one lowered the whole program five times, about 370 s each,
-   because a failed try with Rust generics starts lowering over. Planned: cheaper retries.
+2. The census's speed. A failed try with Rust generics starts lowering over (about 85 s an
+   attempt, five attempts); the walk for the methods that can run (about 15 minutes) stops at the
+   first rejection that can run, which is all a retry needs to know. A `String[]` written as an
+   `Object[]` that can run starts the whole census over (javac, reach and lowering, about
+   20 minutes before its walk); that walk stops at the first such write. Planned: cheaper
+   retries, and knowing which `String[]` writes can run before the first reach.
 3. The translator's refusals still open from the last census, by kind:
    - reflection: generic types of interfaces, methods and fields; type variables; the rest of
      `Class`'s interfaces (`AnnotatedElement`, `GenericDeclaration`, ...); member and parameter

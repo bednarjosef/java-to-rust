@@ -107,17 +107,20 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
         // below, where they are stubbed).
         Ok(mut class) => {
             super::stamp_units(&mut class, &lowered.units);
-            let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live);
-            let (running, _) = phase("live methods", narrow);
-            // The census is taken again with the writes of `String` arrays (`census_program`):
-            // analysing this program would change nothing.
-            if !string_array_writes
-                && running.iter().any(|r| r.error.message.starts_with(lower::STRING_ARRAY_WRITE))
-            {
+            // The census is taken again with the writes of `String` arrays (`census_program`)
+            // once one of them can run: looking further, or analysing this program, would
+            // change nothing.
+            let stops = |r: &lower::Rejected| {
+                !string_array_writes && r.error.message.starts_with(lower::STRING_ARRAY_WRITE)
+            };
+            let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live, &stops);
+            let narrowed = phase("live methods", narrow);
+            if narrowed.as_ref().is_none_or(|(running, _)| running.iter().any(stops)) {
                 std::panic::set_hook(hook);
                 let census = Census { report: String::new(), json: serde_json::Value::Null, modules: None };
                 return Ok((census, true));
             }
+            let (running, _) = narrowed.expect("a walk that stopped is taken again");
             rejections.extend(running.into_iter().map(rejection));
             (Some(class), None)
         }

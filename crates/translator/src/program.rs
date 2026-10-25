@@ -160,7 +160,7 @@ fn class_file_names(program: &Program) -> Result<javac::BytecodeNames, ProgramEr
 /// body that never runs; the first piece of code that lowering rejected and that can run, or
 /// else the first call that lowering left unresolved and that can run, if there is one.
 fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> Result<(), lower::Rejected> {
-    let (running, unresolved) = narrow(class, rejected, None);
+    let (running, unresolved) = narrow(class, rejected, None, &|_| false).expect("nothing stops the walk");
     let unresolved = unresolved.into_iter().map(|error| lower::Rejected {
         unit: None,
         anchor: None,
@@ -176,19 +176,30 @@ fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> R
 /// that never runs (`analysis::live_methods::prune`). When the methods that can run are not
 /// known, every rejection can run and nothing changes (and the unresolved calls are not looked
 /// for). `found` are the methods that can run when lowering found them already (`Lowered::live`),
-/// before `stamp_units`: the positions of their unresolved calls have no unit.
+/// before `stamp_units`: the positions of their unresolved calls have no unit. `None`, with
+/// `class` as it was, when the methods that can run are looked for here and a rejection that
+/// `stops` can run: the walk stops there (`live_methods_unless`).
 fn narrow(
     class: &mut crate::ast::Class,
     rejected: Vec<lower::Rejected>,
     found: Option<analysis::live_methods::LiveMethods>,
-) -> (Vec<lower::Rejected>, Vec<Error>) {
-    let live = match found.map_or_else(|| analysis::live_methods::live_methods(class), Ok) {
+    stops: &dyn Fn(&lower::Rejected) -> bool,
+) -> Option<(Vec<lower::Rejected>, Vec<Error>)> {
+    let live = match found {
+        Some(live) => Ok(live),
+        None => {
+            let code: Vec<(usize, Option<usize>)> =
+                rejected.iter().filter(|r| stops(r)).map(|r| (r.ty, r.method)).collect();
+            analysis::live_methods::live_methods_unless(class, &code).transpose()?
+        }
+    };
+    let live = match live {
         Ok(live) => live,
         Err(unknown) => {
             if crate::timings::enabled() {
                 eprintln!("timing: live methods: not known for {unknown}, {} rejections", rejected.len());
             }
-            return (rejected, Vec::new());
+            return Some((rejected, Vec::new()));
         }
     };
     let distinct = |rejected: &[lower::Rejected]| {
@@ -217,7 +228,7 @@ fn narrow(
         })
         .collect();
     analysis::live_methods::prune(class, &live);
-    (running, live.unresolved)
+    Some((running, live.unresolved))
 }
 
 /// The units of the program and of the library classes that its reachable code uses, with what

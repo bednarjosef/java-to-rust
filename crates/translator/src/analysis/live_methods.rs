@@ -97,6 +97,16 @@ impl LiveMethods {
 /// The methods that can run in `class` (see the module's comment), or what the facts do not
 /// tell, when they do not.
 pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
+    Ok(live_methods_unless(class, &[])?.expect("a walk with nothing to stop it runs to its end"))
+}
+
+/// `live_methods`, which stops as soon as it finds that some piece of `code` can run: `None`
+/// then. Each piece is a type and a method or none, as in `LiveMethods::runs`. What the walk
+/// finds only grows, so a piece that runs when it stops runs at its end too.
+pub fn live_methods_unless(
+    class: &Class,
+    code: &[(usize, Option<usize>)],
+) -> Result<Option<LiveMethods>, String> {
     let values = object_values::analyze_for_dispatch(class);
     if crate::timings::enabled() {
         eprintln!("timing: points-to for dispatch done{}", crate::timings::memory());
@@ -108,6 +118,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         glue_declared: glue_declared(class),
         supers: supers(class),
         index: class.types.iter().enumerate().map(|(t, d)| (d.name.as_str(), t)).collect(),
+        stop: Stop::new(class, code),
         state: RefCell::new(State {
             work: Vec::new(),
             queued: HashSet::default(),
@@ -131,6 +142,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
                 receivers: HashMap::new(),
             },
             built: HashSet::default(),
+            stopped: false,
         }),
         memos: RefCell::default(),
     };
@@ -145,22 +157,30 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         walk.handed(STATIC, STATIC, e);
     }
     walk.run();
-    let thread_statics = if walk.state.borrow().unknown.is_none() { walk.thread_statics() } else { None };
+    let thread_statics = {
+        let state = walk.state.borrow();
+        if state.unknown.is_none() && !state.stopped { walk.thread_statics() } else { None }
+    };
     let Walk { state, .. } = walk;
-    let State { unknown, mut live, .. } = state.into_inner();
+    let State { unknown, mut live, stopped, .. } = state.into_inner();
     if let Some(unknown) = unknown {
         return Err(unknown);
+    }
+    if stopped {
+        return Ok(None);
     }
     let mut touched: HashSet<usize> = live.initialized.clone();
     touched.extend(live.methods.iter().map(|&m| class.methods[m].class));
     touched.extend(live.constructed.iter().copied());
     live.touched = touched;
     live.thread_statics = thread_statics;
-    Ok(live)
+    Ok(Some(live))
 }
 
 impl Walk<'_> {
-    /// Walks the methods on the work list, and those they reach, until none is left.
+    /// Walks the methods on the work list, and those they reach, until none is left, or until
+    /// the walk can stop: it met what the facts do not tell (`State::unknown`, which makes the
+    /// walk an error whatever else it finds), or code that stops it can run (`Stop`).
     fn run(&self) {
         let class = self.class;
         let timings = crate::timings::enabled();
@@ -176,6 +196,20 @@ impl Walk<'_> {
             };
             let Some((m, ctx)) = next else { break };
             walks += 1;
+            {
+                let mut state = self.state.borrow_mut();
+                // Each method that runs is on the work list once at least (`reach`).
+                if state.unknown.is_some()
+                    || self.stop.methods.contains(&m)
+                    || walks.is_multiple_of(1024) && self.stop.types_run(&state.live)
+                {
+                    state.stopped = true;
+                    if timings {
+                        eprintln!("timing: live walk stopped after {walks} walks");
+                    }
+                    break;
+                }
+            }
             if timings && walks.is_multiple_of(10_000) {
                 let state = self.state.borrow();
                 let waiting: usize = state.waiting.values().map(Vec::len).sum();
@@ -261,6 +295,7 @@ impl Walk<'_> {
             glue_declared: self.glue_declared.clone(),
             supers: self.supers.clone(),
             index: self.index.clone(),
+            stop: Stop::default(),
             state: RefCell::new(State {
                 work: Vec::new(),
                 queued: HashSet::default(),
@@ -284,6 +319,7 @@ impl Walk<'_> {
                     receivers: HashMap::new(),
                 },
                 built: HashSet::default(),
+                stopped: false,
             }),
             memos: RefCell::default(),
         };
@@ -404,12 +440,46 @@ struct Walk<'a> {
     glue_declared: Vec<Vec<usize>>,
     supers: Vec<Vec<usize>>,
     index: HashMap<&'a str, usize>,
+    stop: Stop,
     state: RefCell<State>,
     /// What the points-to facts, which do not change during the walk, answer: the methods that
     /// each call runs on each object, and the concrete classes below each type. A method is walked
     /// again whenever what it relies on changes, and a call on a receiver that may be any class
     /// runs thousands of methods.
     memos: RefCell<Memos>,
+}
+
+/// The code whose running stops a walk (`live_methods_unless`).
+#[derive(Default)]
+struct Stop {
+    /// The methods of the code, and every method of a type whose any code is.
+    methods: HashSet<usize>,
+    /// The types any of whose code is: one of them initialized or constructed stops the walk too.
+    types: Vec<usize>,
+}
+
+impl Stop {
+    fn new(class: &Class, code: &[(usize, Option<usize>)]) -> Stop {
+        let mut stop = Stop::default();
+        for &(ty, method) in code {
+            match method {
+                Some(m) => {
+                    stop.methods.insert(m);
+                }
+                None => stop.types.push(ty),
+            }
+        }
+        if !stop.types.is_empty() {
+            let types: HashSet<usize> = stop.types.iter().copied().collect();
+            stop.methods
+                .extend((0..class.methods.len()).filter(|&m| types.contains(&class.methods[m].class)));
+        }
+        stop
+    }
+
+    fn types_run(&self, live: &LiveMethods) -> bool {
+        self.types.iter().any(|t| live.initialized.contains(t) || live.constructed.contains(t))
+    }
 }
 
 /// The methods that a call runs, each with the class of the object it runs on.
@@ -460,6 +530,8 @@ struct State {
     known: known::Knowledge,
     /// The first thing that the walk met that the facts do not answer.
     unknown: Option<String>,
+    /// Whether the walk stopped before its end (`Walk::run`).
+    stopped: bool,
     live: LiveMethods,
     /// The classes whose field initializers the walk has run: those of `LiveMethods::instantiated`,
     /// except in the walk of the started threads (`thread_statics`), which starts with the
