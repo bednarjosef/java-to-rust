@@ -96,16 +96,26 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, ProgramError> {
     // An `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]` calls the JDK's
     // method for an `Object[]`, which only that program reaches (`Reach::string_array_writes`).
-    match translate_reached(program, false) {
-        Err(e) if e.error.message.starts_with(lower::STRING_ARRAY_WRITE) => translate_reached(program, true),
+    let mut again = None;
+    match translate_reached(program, Reaching::Walk(false), &mut again) {
+        Err(e) if e.error.message.starts_with(lower::STRING_ARRAY_WRITE) => {
+            translate_reached(program, again.unwrap_or(Reaching::Walk(true)), &mut None)
+        }
         result => result,
     }
 }
 
-/// `translate_program`, with `Reach::string_array_writes` or without.
-fn translate_reached(program: &Program, string_array_writes: bool) -> Result<ModuleTree, ProgramError> {
+/// `translate_program`, with the units and reach that `reaching` gives (`load`). Where lowering
+/// without `Reach::string_array_writes` rejects a write that they would take, `again` holds how
+/// the translation with them can load without walking again (`Reaching::Replay`), if it can,
+/// until the rejection is known not to run.
+fn translate_reached(
+    program: &Program,
+    reaching: Reaching,
+    again: &mut Option<Reaching>,
+) -> Result<ModuleTree, ProgramError> {
     use crate::timings::phase;
-    let (units, reach) = load(program, string_array_writes, program.keep_going)?;
+    let (units, reach, asked) = load(program, reaching)?;
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
     let (lowered, jdk_temps) = {
@@ -115,10 +125,14 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
         // What the JDK's messages of a `NullPointerException` need of its trees.
         (lowered, javac::jdk_temps(&trees[program_units..]))
     };
+    let writes = |error: &Error| error.message.starts_with(lower::STRING_ARRAY_WRITE);
+    let rejects_write = lowered.rejected.iter().any(|r| writes(&r.error))
+        || lowered.class.as_ref().is_err_and(|(_, error)| writes(error));
     // javac's trees are not needed once the program is lowered: only the file and the classes
     // of each unit, to say where an error is.
     let kept: Vec<Unit> = units.iter().map(Unit::new).collect();
-    drop((units, reach));
+    drop(units);
+    *again = asked.filter(|_| rejects_write).map(|asked| Reaching::Replay(asked, reach));
     let units = kept;
     let file = |unit: Option<usize>| unit.map(|u| units[u].file.clone());
     let mut class = lowered.class.map_err(|(unit, error)| ProgramError { file: file(unit), error })?;
@@ -128,6 +142,7 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
     }
+    *again = None;
     phase("string identity", || analysis::string_identity(&mut class))
         .map_err(|mut errors| errors.remove(0))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
@@ -245,12 +260,55 @@ fn narrow(
 /// complete (`javac::Records`). Which members a record gets depends on every unit, so when a new
 /// unit changes those of a unit walked before, the round walks all of them again.
 ///
-/// With `keep_going`, javac goes on past compile errors (`Program::keep_going`).
-fn load(
+/// With `Program::keep_going`, javac goes on past compile errors.
+///
+/// Without `Reach::string_array_writes`, the load also gives what each round asked javac for,
+/// when every round reached what it would have with them
+/// (`reach::Rounds::same_with_string_array_writes`). The rounds with them would then ask for the
+/// same classes, get the same units in the same order and reach the same, so a load with them
+/// takes those instead of walking again (`Reaching::Replay`, `Reaching::Loaded`).
+fn load(program: &Program, reaching: Reaching) -> Result<(Vec<Value>, Reach, Option<Asked>), ProgramError> {
+    match reaching {
+        Reaching::Walk(string_array_writes) => load_in_rounds(program, string_array_writes),
+        Reaching::Replay(asked, mut reach) => {
+            reach.string_array_writes = true;
+            Ok((replay(program, &asked)?, reach, None))
+        }
+        Reaching::Loaded(units, mut reach) => {
+            reach.string_array_writes = true;
+            if crate::timings::enabled() {
+                eprintln!(
+                    "timing: javac and reach: the units and reach of the census without the writes of `String[]`s"
+                );
+            }
+            Ok((units, reach, None))
+        }
+    }
+}
+
+/// How `load` gets the units of a program and what they reach.
+enum Reaching {
+    /// By asking javac for units in rounds as a walk from `main` needs them, with
+    /// `Reach::string_array_writes` or without.
+    Walk(bool),
+    /// With `Reach::string_array_writes`, from a load without them whose every round reached
+    /// what it would have with them: javac is asked for what that load asked for in each round
+    /// (`replay`), and what they reach is what that load reached.
+    Replay(Asked, Reach),
+    /// The same, with that load's units, which a census still holds.
+    Loaded(Vec<Value>, Reach),
+}
+
+/// What each round of a load asked javac for: the classes, and the proxy classes that
+/// reachability had found by then (`reach::ProxyClass`), whose sources it writes for javac; with
+/// how many units javac gave for them.
+struct Asked(Vec<(Vec<String>, Vec<reach::ProxyClass>, usize)>);
+
+/// `load` by walking in rounds (`Reaching::Walk`).
+fn load_in_rounds(
     program: &Program,
     string_array_writes: bool,
-    keep_going: bool,
-) -> Result<(Vec<Value>, Reach), ProgramError> {
+) -> Result<(Vec<Value>, Reach, Option<Asked>), ProgramError> {
     let files = source_files(program)?;
     let modules = modules::modules(program.sources.iter().chain(&program.libraries));
     let javac_error = |(file, error)| modules::explain(ProgramError { file, error }, &modules);
@@ -263,7 +321,7 @@ fn load(
         &sourcepath(program),
         modules::kept(&modules),
         patches(program),
-        keep_going,
+        program.keep_going,
     )
     .map_err(javac_error)?;
     javac += start.elapsed();
@@ -284,6 +342,7 @@ fn load(
     };
     let mut rounds = new_rounds();
     let (mut round, mut walks) = (0, 0);
+    let mut asked_in_rounds = (!string_array_writes).then(Vec::new);
     loop {
         round += 1;
         let start = std::time::Instant::now();
@@ -322,15 +381,22 @@ fn load(
         } else {
             rounds.add(&trees[old..]).map_err(fail)?;
         }
+        if asked_in_rounds.is_some() && !rounds.same_with_string_array_writes() {
+            asked_in_rounds = None;
+        }
         reaching += start.elapsed();
         // The proxy classes that javac is to add, by their files, rather than by name.
         let made = rounds.proxy_classes();
         let mut asked = rounds.missing();
         asked.retain(|class| !made.iter().any(|m| m.class == *class));
+        let classes = asked_in_rounds.is_some().then(|| asked.clone());
         asked.extend(proxies.write(&made).map_err(fail)?.iter().map(|file| format!("+{}", file.display())));
         let start = std::time::Instant::now();
         new = session.load(&asked).map_err(javac_error)?;
         javac += start.elapsed();
+        if let (Some(asked), Some(classes)) = (&mut asked_in_rounds, classes) {
+            asked.push((classes, made, new.len()));
+        }
         if crate::timings::enabled() {
             // Each round as it ends, for a program whose loading takes long.
             let received = session.received as f64 / 1e6;
@@ -368,7 +434,57 @@ fn load(
             "timing: reach: {reaching:.3} s, {round} rounds ({walks} walks from the start again), {classes} classes and {methods} methods"
         );
     }
-    Ok((units, reach))
+    Ok((units, reach, asked_in_rounds.map(Asked)))
+}
+
+/// The units of `load_in_rounds` with `Reach::string_array_writes`, from what the load without
+/// them asked javac for in each round (`Reaching::Replay`): javac is asked for the same classes,
+/// and adds the same proxy classes, in the same rounds, and so gives the same units in the same
+/// order, whose records are completed as that load completes them.
+fn replay(program: &Program, asked: &Asked) -> Result<Vec<Value>, ProgramError> {
+    let files = source_files(program)?;
+    let modules = modules::modules(program.sources.iter().chain(&program.libraries));
+    let javac_error = |(file, error)| modules::explain(ProgramError { file, error }, &modules);
+    let start = std::time::Instant::now();
+    let proxies = ProxySources::new(program).map_err(fail)?;
+    let (mut session, mut new) = javac::Session::start(
+        &files,
+        &sourcepath(program),
+        modules::kept(&modules),
+        patches(program),
+        program.keep_going,
+    )
+    .map_err(javac_error)?;
+    let mut records = javac::Records::default();
+    let (mut units, mut changing) = (Vec::new(), Vec::new());
+    for (classes, made, given) in &asked.0 {
+        let changes = records.add(&new);
+        changing.extend(
+            changes.iter().enumerate().filter(|(_, changes)| **changes).map(|(i, _)| units.len() + i),
+        );
+        units.append(&mut new);
+        let mut asked = classes.clone();
+        asked.extend(proxies.write(made).map_err(fail)?.iter().map(|file| format!("+{}", file.display())));
+        new = session.load(&asked).map_err(javac_error)?;
+        if new.len() != *given {
+            let message =
+                format!("javac gave {} units where it gave {given} for the same classes before", new.len());
+            return Err(fail(message));
+        }
+    }
+    for index in changing {
+        records.complete(&mut units[index]);
+    }
+    if crate::timings::enabled() {
+        let javac = start.elapsed().as_secs_f64();
+        let (memory, received) = (crate::timings::memory(), session.received as f64 / 1e6);
+        eprintln!("timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees{memory}", units.len());
+        eprintln!(
+            "timing: reach: the reach of the load without the writes of `String[]`s, over the units of its {} rounds",
+            asked.0.len()
+        );
+    }
+    Ok(units)
 }
 
 /// The directory that the proxy classes of a translation with libraries are written to as

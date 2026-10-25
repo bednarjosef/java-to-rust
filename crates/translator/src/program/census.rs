@@ -33,7 +33,7 @@
 //! that a constructor runs; otherwise, to the piece at its position.
 
 use super::survey::{self, Part, Piece};
-use super::{Program, ProgramError, class_file_names, load, source_files};
+use super::{Program, ProgramError, Reaching, class_file_names, load, source_files};
 use crate::ast::{Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt};
 use crate::output::ModuleTree;
 use crate::value::{Value, json};
@@ -65,20 +65,32 @@ struct Rejection {
 
 /// The census of the code reachable from the program's `main`. As a translation does, it first
 /// reaches without the writes of `String` arrays as `Object` arrays, and again with them where
-/// that rejects one (`Reach::string_array_writes`).
+/// that rejects one (`Reach::string_array_writes`): from the units and reach of the first, when
+/// it reached what it would have with them (`super::load`).
 pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
-    match census_reached(program, false)? {
-        (_, true) => census_reached(program, true).map(|(census, _)| census),
-        (census, false) => Ok(census),
+    match census_reached(program, Reaching::Walk(false))? {
+        Taken::Census(census) => Ok(census),
+        Taken::Again(reaching) => match census_reached(program, *reaching)? {
+            Taken::Census(census) => Ok(census),
+            Taken::Again(_) => unreachable!("a census with the writes of `String` arrays is not taken again"),
+        },
     }
 }
 
-/// `census_program`, with `Reach::string_array_writes` or without; and whether, without, it
-/// rejected a write of a `String` array as an `Object` array.
-fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Census, bool), ProgramError> {
+/// What `census_reached` gives: the census, or, when it was taken without
+/// `Reach::string_array_writes` and rejected a write of a `String` array as an `Object` array
+/// that can run, how to load the census with them.
+enum Taken {
+    Census(Census),
+    Again(Box<Reaching>),
+}
+
+/// `census_program`, with the units and reach that `reaching` gives (`super::load`).
+fn census_reached(program: &Program, reaching: Reaching) -> Result<Taken, ProgramError> {
     use crate::timings::phase;
     let files = source_files(program)?;
-    let (units, reach) = load(program, string_array_writes, program.keep_going)?;
+    let string_array_writes = !matches!(reaching, Reaching::Walk(false));
+    let (units, reach, asked) = load(program, reaching)?;
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
     lower::quiet_panics();
@@ -97,7 +109,10 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
         }
     });
     let rejection = |r: lower::Rejected| Rejection { unit: r.unit, anchor: r.anchor, error: r.error };
+    let writes = |message: &str| !string_array_writes && message.starts_with(lower::STRING_ARRAY_WRITE);
     let mut rejections = Vec::new();
+    // Whether a write that can run takes the census again.
+    let mut again = false;
     let (class, mut fatal) = match lowered.class {
         Err((unit, error)) => {
             rejections.extend(lowered.rejected.into_iter().map(rejection));
@@ -110,21 +125,30 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
             // The census is taken again with the writes of `String` arrays (`census_program`)
             // once one of them can run: looking further, or analysing this program, would
             // change nothing.
-            let stops = |r: &lower::Rejected| {
-                !string_array_writes && r.error.message.starts_with(lower::STRING_ARRAY_WRITE)
-            };
+            let stops = |r: &lower::Rejected| writes(&r.error.message);
             let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live, &stops);
-            let narrowed = phase("live methods", narrow);
-            if narrowed.as_ref().is_none_or(|(running, _)| running.iter().any(stops)) {
-                std::panic::set_hook(hook);
-                let census = Census { report: String::new(), json: serde_json::Value::Null, modules: None };
-                return Ok((census, true));
+            match phase("live methods", narrow) {
+                Some((running, _)) if !running.iter().any(stops) => {
+                    rejections.extend(running.into_iter().map(rejection));
+                    (Some(class), None)
+                }
+                // The walk stopped at a write, or one can run.
+                _ => {
+                    again = true;
+                    (None, None)
+                }
             }
-            let (running, _) = narrowed.expect("a walk that stopped is taken again");
-            rejections.extend(running.into_iter().map(rejection));
-            (Some(class), None)
         }
     };
+    if again || rejections.iter().chain(&fatal).any(|r| writes(&r.error.message)) {
+        std::panic::set_hook(hook);
+        drop((class, trees));
+        let again = match asked {
+            Some(_) => Reaching::Loaded(units, reach),
+            None => Reaching::Walk(true),
+        };
+        return Ok(Taken::Again(Box::new(again)));
+    }
     // What the census needs of javac's trees is taken from them now, so that they are not held
     // while the program is analysed: the pieces of code, the files, and the units of the
     // rejections of lowering that have none. Those of the analyses and the generator get theirs
@@ -147,11 +171,9 @@ fn census_reached(program: &Program, string_array_writes: bool) -> Result<(Censu
         });
     }
     std::panic::set_hook(hook);
-    let string_array_write =
-        rejections.iter().chain(&fatal).any(|r| r.error.message.starts_with(lower::STRING_ARRAY_WRITE));
     let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
-    Ok((Census { report, json, modules }, string_array_write && !string_array_writes))
+    Ok(Taken::Census(Census { report, json, modules }))
 }
 
 /// How the class files name what the messages of a `NullPointerException` show, found the first
