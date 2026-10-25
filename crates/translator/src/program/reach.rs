@@ -3729,7 +3729,7 @@ mod tests {
         assert_eq!(untranslated("java.lang.invoke.MethodHandles"), Some("reflection"));
         assert_eq!(untranslated("java.lang.runtime.SwitchBootstraps"), Some("reflection"));
         assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
-        assert_eq!(untranslated("java.lang.reflect.Proxy"), Some("reflection"));
+        assert_eq!(untranslated("java.lang.reflect.Proxy"), None);
         assert_eq!(untranslated("java.lang.reflect.Method"), None);
         assert_eq!(untranslated("java.lang.reflect.Array"), None);
         assert_eq!(untranslated("java.lang.reflect.Modifier"), None);
