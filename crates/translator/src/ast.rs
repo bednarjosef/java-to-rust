@@ -1394,6 +1394,11 @@ pub fn visit_stmt<'s>(stmt: &'s Stmt, on_expr: &mut dyn FnMut(&'s Expr), on_stmt
     walk_stmt(stmt, on_expr, on_stmt, true);
 }
 
+/// Calls `f` on every expression in `stmt`, at any depth, once each.
+pub fn visit_stmt_exprs<'s>(stmt: &'s Stmt, f: &mut dyn FnMut(&'s Expr)) {
+    walk_stmt(stmt, &mut |e| visit_expr(e, f), &mut |_| {}, false);
+}
+
 /// Calls `on_stmt` on every statement in `stmt` except those inside its switch expressions. For
 /// callers that count what belongs to one switch expression or loop: a `yield` or `continue` in a
 /// nested switch expression belongs to that expression, and Java does not let one leave it.

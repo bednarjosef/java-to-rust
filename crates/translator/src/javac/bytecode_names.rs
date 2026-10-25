@@ -37,9 +37,12 @@ pub struct BytecodeNames {
     /// The texts of the names that are certain, by class, and by line, column, kind and name,
     /// each name and text an index into `strings`: those of the Minecraft server and its
     /// libraries are tens of millions, most of them the same few texts.
-    entries: HashMap<String, HashMap<(u32, u32, NameKind, u32), u32>>,
+    entries: HashMap<String, ClassNames>,
     strings: Strings,
 }
+
+/// The texts of the names in one class, by line, column, kind and name.
+type ClassNames = HashMap<(u32, u32, NameKind, u32), u32>;
 
 /// Each name and text once.
 #[derive(Default)]
@@ -74,7 +77,11 @@ impl BytecodeNames {
     /// How many names there are, in how many classes, with how many texts, for `--timings`.
     pub fn sizes(&self) -> String {
         let names: usize = self.entries.values().map(HashMap::len).sum();
-        format!("{names} names in {} classes, {} names and texts", self.entries.len(), self.strings.list.len())
+        format!(
+            "{names} names in {} classes, {} names and texts",
+            self.entries.len(),
+            self.strings.list.len()
+        )
     }
 
     /// Sets the text of a name, `None` where it is uncertain, which `get` gives as it gives a

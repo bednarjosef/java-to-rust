@@ -1744,11 +1744,25 @@ impl<'m> Scopes<'m> {
 
     /// Notes the `new`s and pattern variables of `e`, inside the loops `loops`; pattern variables
     /// inside only the first `bindings` of them when that is given. The statements of a switch
-    /// expression are walked again with their own loops, and a `new` keeps the most loops it is
-    /// found inside.
+    /// expression are walked on their own, with the loops in them, once: walking them here too
+    /// would walk the switches nested in them once more at each level, twice as many times for
+    /// each (the decompiled Minecraft server nests them deep enough for gigabytes).
     fn expr(&mut self, e: &'m Expr, loops: &mut Vec<usize>, bindings: Option<usize>) {
+        // The expressions in the statements of `e`'s switch expressions, at any depth.
+        let mut inner: HashSet<*const Expr> = HashSet::new();
+        visit_expr(e, &mut |x| {
+            // An outer switch comes first, and holds the ones nested in its statements.
+            if let ExprKind::Switch { cases, .. } = &x.kind
+                && !inner.contains(&(x as *const Expr))
+            {
+                for s in cases.iter().flat_map(|c| &c.body) {
+                    visit_stmt_exprs(s, &mut |y| _ = inner.insert(y));
+                }
+            }
+        });
         let mut switches = Vec::new();
         visit_expr(e, &mut |x| match &x.kind {
+            _ if inner.contains(&(x as *const Expr)) => {}
             ExprKind::New { .. } | ExprKind::Call { .. } | ExprKind::MethodCall { .. }
                 if self.made.contains_key(&x.id) =>
             {
