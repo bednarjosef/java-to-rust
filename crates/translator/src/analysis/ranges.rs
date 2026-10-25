@@ -209,7 +209,11 @@ struct Analysis<'a> {
     /// Ranges of each method's parameters, joined over all calls; empty until called.
     params: Vec<Vec<Interval>>,
     returns: Vec<Interval>,
-    reached: Vec<bool>,
+    /// The join of `returns` over each override group, by group id: what a call of the group
+    /// returns.
+    group_returns: Vec<Interval>,
+    /// Whether a method of each override group, by group id, has an integral parameter.
+    integral_params: Vec<bool>,
     /// False in the final pass, which only records facts.
     update_summaries: bool,
     method: usize,
@@ -249,7 +253,16 @@ impl<'a> Analysis<'a> {
             class,
             params: class.methods.iter().map(|m| vec![EMPTY; m.params.len()]).collect(),
             returns: vec![EMPTY; n],
-            reached: vec![false; n],
+            group_returns: vec![EMPTY; n],
+            integral_params: {
+                let mut any = vec![false; n];
+                for (m, method) in class.methods.iter().enumerate() {
+                    if method.params.iter().any(|p| p.ty.is_integral()) {
+                        any[class.hierarchy.group_id(m)] = true;
+                    }
+                }
+                any
+            },
             update_summaries: true,
             method: 0,
             ret: EMPTY,
@@ -272,7 +285,6 @@ impl<'a> Analysis<'a> {
     }
 
     fn full_params(&mut self, m: usize) {
-        self.reached[m] = true;
         self.params[m] = self.class.methods[m].params.iter().map(|p| Interval::full(p.ty)).collect();
     }
 
@@ -329,6 +341,10 @@ impl<'a> Analysis<'a> {
                 growth[m] += 1;
                 if growth[m] > 4 && !returned.is_empty() {
                     self.returns[m] = Interval::full(self.class.methods[m].ret);
+                    // The full range may leave out what the method was found to return before.
+                    let group = self.class.hierarchy.group_members(m);
+                    self.group_returns[self.class.hierarchy.group_id(m)] =
+                        group.iter().fold(EMPTY, |r, &g| r.join(self.returns[g]));
                 }
                 dirty.extend(&callers[m]);
             }
@@ -363,6 +379,8 @@ impl<'a> Analysis<'a> {
         self.stmts(&method.body, Some(env));
         if self.update_summaries && method.ret.is_integral() {
             self.returns[m] = self.returns[m].join(self.ret);
+            let group = self.class.hierarchy.group_id(m);
+            self.group_returns[group] = self.group_returns[group].join(self.returns[m]);
         }
     }
 
@@ -817,10 +835,9 @@ impl<'a> Analysis<'a> {
     /// them and the result is any of theirs.
     fn call(&mut self, args: &[Expr], callee: usize, ty: Type, env: &mut Env) -> Interval {
         let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
-        let group = self.class.hierarchy.group_members(callee);
-        if self.update_summaries {
-            for &g in group {
-                self.reached[g] = true;
+        let id = self.class.hierarchy.group_id(callee);
+        if self.update_summaries && self.integral_params[id] {
+            for &g in self.class.hierarchy.group_members(callee) {
                 for (i, p) in self.class.methods[g].params.iter().enumerate() {
                     if p.ty.is_integral() {
                         let v = convert(values[i], args[i].ty, p.ty);
@@ -836,11 +853,15 @@ impl<'a> Analysis<'a> {
                 }
             }
         }
-        if ty.is_integral() {
-            group.iter().fold(EMPTY, |r, &g| r.join(self.returns[g]))
-        } else {
-            Interval::full(Type::Long)
+        if !ty.is_integral() {
+            return Interval::full(Type::Long);
         }
+        debug_assert_eq!(
+            self.group_returns[id],
+            (self.class.hierarchy.group_members(callee).iter()).fold(EMPTY, |r, &g| r.join(self.returns[g])),
+            "the return range of the group of {callee}"
+        );
+        self.group_returns[id]
     }
 
     fn expr(&mut self, e: &Expr, env: &mut Env) -> Interval {
