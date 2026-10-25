@@ -90,51 +90,80 @@ impl Flow {
     }
 }
 
-/// A set of classes, by index into `Class::types`: a bit for each.
+/// A set of classes, by index into `Class::types`: a bit for each, from the word of the lowest
+/// class in it to that of the highest, so that a set of a few classes far into the program's types
+/// takes a few words rather than one for every 64 types before them.
 #[derive(Clone, Default, Debug)]
 pub(super) struct ClassSet {
+    /// The index of the first word in `words`.
+    start: usize,
     words: Vec<u64>,
 }
 
 impl ClassSet {
-    fn insert(&mut self, c: usize) {
-        if self.words.len() <= c / 64 {
-            self.words.resize(c / 64 + 1, 0);
+    /// Widens the words to cover words `from..to`.
+    fn cover(&mut self, from: usize, to: usize) {
+        if self.words.is_empty() {
+            self.start = from;
+            self.words.resize(to - from, 0);
+            return;
         }
-        self.words[c / 64] |= 1 << (c % 64);
+        if from < self.start {
+            self.words.splice(0..0, std::iter::repeat_n(0, self.start - from));
+            self.start = from;
+        }
+        if self.start + self.words.len() < to {
+            self.words.resize(to - self.start, 0);
+        }
+    }
+
+    fn insert(&mut self, c: usize) {
+        self.cover(c / 64, c / 64 + 1);
+        self.words[c / 64 - self.start] |= 1 << (c % 64);
+    }
+
+    /// The word at index `i`, of all of them.
+    fn word(&self, i: usize) -> u64 {
+        i.checked_sub(self.start).and_then(|i| self.words.get(i)).copied().unwrap_or(0)
     }
 
     /// Adds the classes of `other`; whether that added any.
     fn union(&mut self, other: &ClassSet) -> bool {
-        if self.words.len() < other.words.len() {
-            self.words.resize(other.words.len(), 0);
+        let Some(from) = other.words.iter().position(|&w| w != 0) else { return false };
+        let to = other.words.iter().rposition(|&w| w != 0).unwrap_or(from) + 1;
+        let (from, to) = (other.start + from, other.start + to);
+        if (from..to).all(|i| other.word(i) & !self.word(i) == 0) {
+            return false;
         }
-        let mut grew = false;
-        for (word, &more) in self.words.iter_mut().zip(&other.words) {
-            grew |= more & !*word != 0;
-            *word |= more;
+        self.cover(from, to);
+        for i in from..to {
+            self.words[i - self.start] |= other.word(i);
         }
-        grew
+        true
     }
 
     /// Keeps the classes that are also in `other`.
     fn intersect(&mut self, other: &ClassSet) {
+        let start = self.start;
         for (i, word) in self.words.iter_mut().enumerate() {
-            *word &= other.words.get(i).copied().unwrap_or(0);
+            *word &= other.word(start + i);
         }
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words
-            .iter()
-            .enumerate()
-            .flat_map(|(i, &word)| (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| i * 64 + b))
+        self.words.iter().enumerate().flat_map(move |(i, &word)| {
+            (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| (self.start + i) * 64 + b)
+        })
     }
 }
 
 impl FromIterator<usize> for ClassSet {
     fn from_iter<I: IntoIterator<Item = usize>>(classes: I) -> ClassSet {
+        let classes: Vec<usize> = classes.into_iter().collect();
         let mut set = ClassSet::default();
+        if let (Some(&low), Some(&high)) = (classes.iter().min(), classes.iter().max()) {
+            set.cover(low / 64, high / 64 + 1);
+        }
         classes.into_iter().for_each(|c| set.insert(c));
         set
     }
@@ -142,8 +171,9 @@ impl FromIterator<usize> for ClassSet {
 
 impl PartialEq for ClassSet {
     fn eq(&self, other: &ClassSet) -> bool {
-        let n = self.words.len().max(other.words.len());
-        (0..n).all(|i| self.words.get(i).unwrap_or(&0) == other.words.get(i).unwrap_or(&0))
+        let from = self.start.min(other.start);
+        let to = (self.start + self.words.len()).max(other.start + other.words.len());
+        (from..to).all(|i| self.word(i) == other.word(i))
     }
 }
 
@@ -922,4 +952,23 @@ fn followed(method: &Method, params: bool) -> HashSet<String> {
         names.remove(&name);
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn class_sets_far_apart_join_and_compare() {
+        let mut far = ClassSet::from_iter([20_000]);
+        assert_eq!(far.words.len(), 1);
+        assert!(far.union(&ClassSet::from_iter([3, 20_001])));
+        assert!(!far.union(&ClassSet::from_iter([3])));
+        assert!(!far.union(&ClassSet::default()));
+        assert_eq!(far.iter().collect::<Vec<_>>(), vec![3, 20_000, 20_001]);
+        assert_eq!(far, ClassSet::from_iter([20_001, 3, 20_000]));
+        far.intersect(&ClassSet::from_iter([20_000, 70]));
+        assert_eq!(far, ClassSet::from_iter([20_000]));
+        assert_ne!(far, ClassSet::default());
+    }
 }
