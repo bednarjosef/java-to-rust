@@ -71,7 +71,7 @@ pub fn thread_statics(class: &Class) -> Option<HashSet<usize>> {
     live_methods::live_methods(class).ok()?.thread_statics.map(|t| t.into_iter().collect())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Facts {
     /// Whether the program starts a thread (see `threads`).
     pub threaded: bool,
@@ -309,12 +309,13 @@ pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
 /// monitors): a census goes on past those of them that no stub can take away, such as a field's
 /// type (`program/census.rs`).
 pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, Vec<Error>> {
-    let one = |e: Error| vec![e];
-    let checked = |result: Result<(), Vec<Error>>| {
-        let mut errors = result.err().unwrap_or_default();
-        errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
-    };
+    analyze_from(class, tolerated, represented(class))
+}
+
+/// The facts that the analyses find before their first check, which depend on the program alone
+/// and not on the errors tolerated: a census that only tolerates more errors of the same program
+/// finds them once (`program/census.rs`).
+pub fn represented(class: &Class) -> Facts {
     let mut facts = Facts {
         fields_structs: hierarchy::fields_structs(class),
         field_owners: hierarchy::field_owners(class),
@@ -325,6 +326,18 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
     phase("analysis: ranges", || ranges::analyze(class, &mut facts));
     phase("analysis: representation", || representation(class, &mut facts));
+    facts
+}
+
+/// `analyze_tolerating`, from the facts that `represented` found for `class`.
+pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Result<Facts, Vec<Error>> {
+    let one = |e: Error| vec![e];
+    let checked = |result: Result<(), Vec<Error>>| {
+        let mut errors = result.err().unwrap_or_default();
+        errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    };
+    use crate::timings::phase;
     checked(phase("analysis: validate", || validate(class, &facts)))?;
     facts.fixed_fields =
         phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, facts.threaded));
