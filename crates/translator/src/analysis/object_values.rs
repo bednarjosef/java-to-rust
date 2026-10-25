@@ -771,12 +771,17 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     let mut runs = 0usize;
     let mut queued = vec![true; visits.len()];
     let mut queue: VecDeque<usize> = (0..visits.len()).collect();
+    // The visits whose last run was huge (reflection's `Method.invoke` runs every method of the
+    // table), queued apart and run again only when no other visit is queued: each run then takes
+    // in what many others changed, and the order does not change what the places end up holding.
+    let mut huge = vec![false; visits.len()];
+    let mut later: VecDeque<usize> = VecDeque::new();
     let mut readers: super::FastMap<Read, super::FastSet<usize>> = super::FastMap::default();
     // Only the visit of a method in a context reads its variables there (`var`), so a change to
     // them runs that visit again, with no readers kept for them.
     let visit_of: super::FastMap<(usize, usize), usize> =
         visits.iter().enumerate().map(|(v, &mc)| (mc, v)).collect();
-    while let Some(v) = queue.pop_front() {
+    while let Some(v) = queue.pop_front().or_else(|| later.pop_front()) {
         queued[v] = false;
         runs += 1;
         if timings && runs.is_multiple_of(100_000) {
@@ -810,6 +815,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
                 crate::timings::memory()
             );
         }
+        huge[v] = updates.len() > HUGE_VISIT;
         for read in reads {
             readers.entry(read).or_default().insert(v);
         }
@@ -821,7 +827,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             for &r in own.iter().chain(readers.get(&changed).into_iter().flatten()) {
                 if !queued[r] {
                     queued[r] = true;
-                    queue.push_back(r);
+                    if huge[r] { later.push_back(r) } else { queue.push_back(r) }
                 }
             }
         }
@@ -829,6 +835,9 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     *values.reads.borrow_mut() = None;
     values
 }
+
+/// The number of updates past which a visit runs again only once no other is queued.
+const HUGE_VISIT: usize = 100_000;
 
 /// What the code outside methods stores: field initializers, the exceptions that the runtime
 /// raises and, for dispatch, the constants of enums.
