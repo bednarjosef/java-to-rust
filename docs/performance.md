@@ -251,6 +251,22 @@ three runs each on a machine with other builds running:
 | JarManifests | 2.4 to 2.6 s | 1.2 s |
 | SystemLoggerValues | 2.6 to 3.4 s | 1.1 to 1.2 s |
 
+**A walk of the methods that can run that skips repeats.** The walk of `analysis/live_methods.rs`
+visits a method once for each class of object it runs on, and again whenever what it relied on
+changes. A call on a receiver that may be any class runs thousands of methods, and each visit
+used to enter all of them again (pass the arguments, mark each pair of method and class reached
+or waiting), which was most of the Minecraft server's walk (about 1 ms a visit). A call now
+remembers what it passed when it last entered its methods, and on a later visit only works out
+what is known of its arguments: when that is the same, entering them again would change nothing,
+so it enters none (`Walk::call`). The values and dead code of a method walked on several objects
+are remembered until something they relied on changes, a type's initialization runs its loop over
+the types above once, and handing the runtime objects it already holds is skipped.
+`JAVA_TO_RUST_LIVE_CHECK=1` also runs the walk without these shortcuts and panics unless both
+find the same methods, classes, receivers and unresolved calls in the same order; that holds for
+javac's census and every test with it set, and the javac census report and the 28 targets'
+translations are byte for byte the same. On javac, whose visits rarely repeat a call's targets,
+the walk itself goes from 1.47 to 1.29 s (the rest of the phase is the points-to analysis).
+
 Further speed-ups, not done:
 
 - The walk from scratch when the members written into a record change is what is left of the

@@ -111,9 +111,27 @@ pub fn live_methods_unless(
     if crate::timings::enabled() {
         eprintln!("timing: points-to for dispatch done{}", crate::timings::memory());
     }
+    let found = crate::timings::phase("live walk", || walk(class, code, &values, true));
+    if std::env::var_os("JAVA_TO_RUST_LIVE_CHECK").is_some() {
+        let slow =
+            crate::timings::phase("live walk that skips nothing", || walk(class, code, &values, false));
+        check(&found, &slow);
+    }
+    found
+}
+
+/// The walk of `live_methods_unless` over the points-to facts `values`, which skips the work
+/// that it knows does nothing when `fast` (`Walk::fast`).
+fn walk(
+    class: &Class,
+    code: &[(usize, Option<usize>)],
+    values: &ObjectValues,
+    fast: bool,
+) -> Result<Option<LiveMethods>, String> {
     let walk = Walk {
         class,
-        values: &values,
+        values,
+        fast,
         glue: object_values::runtime_called_for_dispatch(class).into_iter().collect(),
         glue_declared: glue_declared(class),
         supers: supers(class),
@@ -144,6 +162,10 @@ pub fn live_methods_unless(
                 receivers: HashMap::default(),
             },
             built: HashSet::default(),
+            initialized_above: HashSet::default(),
+            prepared: HashMap::default(),
+            glued_classes: ClassSet::default(),
+            glued_any: HashSet::default(),
             stopped: false,
         }),
         memos: RefCell::default(),
@@ -177,6 +199,48 @@ pub fn live_methods_unless(
     live.touched = touched;
     live.thread_statics = thread_statics;
     Ok(Some(live))
+}
+
+/// With `JAVA_TO_RUST_LIVE_CHECK`, that the walk found what a walk that skips nothing finds:
+/// the same sets, the same unresolved calls in the same order, and the same receivers.
+fn check(fast: &Result<Option<LiveMethods>, String>, slow: &Result<Option<LiveMethods>, String>) {
+    let differ = |what: &str| panic!("live check: the walk that skips work found other {what}");
+    let (fast, slow) = match (fast, slow) {
+        (Err(a), Err(b)) if a == b => return eprintln!("live check: the same error"),
+        (Ok(None), Ok(None)) => return eprintln!("live check: both stopped"),
+        (Ok(Some(a)), Ok(Some(b))) => (a, b),
+        _ => return differ("outcome"),
+    };
+    let sets = [
+        ("methods", &fast.methods, &slow.methods),
+        ("initialized types", &fast.initialized, &slow.initialized),
+        ("instantiated classes", &fast.instantiated, &slow.instantiated),
+        ("constructed types", &fast.constructed, &slow.constructed),
+        ("touched types", &fast.touched, &slow.touched),
+    ];
+    for (what, a, b) in sets {
+        if a != b {
+            differ(what);
+        }
+    }
+    if format!("{:?}", fast.unresolved) != format!("{:?}", slow.unresolved) {
+        differ("unresolved calls");
+    }
+    if fast.thread_statics != slow.thread_statics {
+        differ("thread statics");
+    }
+    let classes = |set: &ClassSet| set.iter().collect::<Vec<usize>>();
+    if fast.receivers.len() != slow.receivers.len()
+        || fast.receivers.iter().any(|(x, a)| slow.receivers.get(x).map(classes) != Some(classes(a)))
+    {
+        differ("receivers");
+    }
+    eprintln!(
+        "live check: the same {} methods, {} classes with objects and {} receivers",
+        fast.methods.len(),
+        fast.instantiated.len(),
+        fast.receivers.len()
+    );
 }
 
 impl Walk<'_> {
@@ -227,10 +291,7 @@ impl Walk<'_> {
                     crate::timings::memory()
                 );
             }
-            let env = self.env(m);
-            self.state.borrow_mut().known.env = env;
-            let mut dead = self.dead(m);
-            dead.extend(self.dead_catches(m));
+            let dead = self.prepare(m);
             let code = |e: &Expr| {
                 visit_expr(e, &mut |x| {
                     if dead.contains(&x.id) { self.unresolved(x) } else { self.expr(m, ctx, x) }
@@ -243,8 +304,30 @@ impl Walk<'_> {
             for s in &class.methods[m].body {
                 visit_stmt(s, &mut |e| code(e), &mut |s| statement(s));
             }
-            self.state.borrow_mut().known.env.clear();
+            self.state.borrow_mut().known.env = Rc::default();
         }
+    }
+
+    /// Makes the parameters and locals of method `m` those that the walk knows (`env`), and
+    /// returns the expressions of it that cannot run (`dead`, `dead_catches`). A method walked on
+    /// more than one object gets the same on each until something that they relied on changes,
+    /// which walks it again (`rescan`): so they are remembered until then (`State::prepared`).
+    fn prepare(&self, m: usize) -> Rc<HashSet<ExprId>> {
+        let prepared = if self.fast { self.state.borrow().prepared.get(&m).cloned() } else { None };
+        if let Some((env, dead)) = prepared {
+            self.state.borrow_mut().known.env = env;
+            return dead;
+        }
+        let env = Rc::new(self.env(m));
+        self.state.borrow_mut().known.env = env.clone();
+        let mut dead = self.dead(m);
+        dead.extend(self.dead_catches(m));
+        let dead = Rc::new(dead);
+        let mut state = self.state.borrow_mut();
+        if self.fast && state.contexts.get(&m).is_some_and(|c| c.len() > 1) {
+            state.prepared.insert(m, (env, dead.clone()));
+        }
+        dead
     }
 
     /// The types whose statics code that a started thread runs may read or write, or whose
@@ -293,6 +376,7 @@ impl Walk<'_> {
         let thread = Walk {
             class,
             values: self.values,
+            fast: self.fast,
             glue: self.glue.clone(),
             glue_declared: self.glue_declared.clone(),
             supers: self.supers.clone(),
@@ -323,6 +407,10 @@ impl Walk<'_> {
                     receivers: HashMap::default(),
                 },
                 built: HashSet::default(),
+                initialized_above: HashSet::default(),
+                prepared: HashMap::default(),
+                glued_classes: ClassSet::default(),
+                glued_any: HashSet::default(),
                 stopped: false,
             }),
             memos: RefCell::default(),
@@ -333,10 +421,10 @@ impl Walk<'_> {
         }
         for (m, root) in roots {
             for &ctx in main.contexts.get(&m).into_iter().flatten() {
-                let env = thread.env(m);
+                let env = Rc::new(thread.env(m));
                 thread.state.borrow_mut().known.env = env;
                 thread.code(m, ctx, root);
-                thread.state.borrow_mut().known.env.clear();
+                thread.state.borrow_mut().known.env = Rc::default();
             }
         }
         thread.run();
@@ -448,6 +536,15 @@ fn supers(class: &Class) -> Vec<Vec<usize>> {
 struct Walk<'a> {
     class: &'a Class,
     values: &'a ObjectValues,
+    /// Whether the walk skips work that it knows does nothing or finds what it found before:
+    /// running the methods of a call again with arguments known to hold what they held when it
+    /// last ran them (`Walk::call`), handing the runtime objects that it has been handed
+    /// (`Memos::handed`, `State::glued_classes`), initializing a type again
+    /// (`State::initialized_above`), finding the values and dead code of a method again while
+    /// nothing they relied on changed (`State::prepared`), and asking whether the classes with
+    /// objects return the same literal while no other has objects (`same_literal`).
+    /// `JAVA_TO_RUST_LIVE_CHECK` checks that the walk finds the same without.
+    fast: bool,
     glue: Vec<usize>,
     /// The groups of `glue` that each type declares a method of (`glue_declared`).
     glue_declared: Vec<Vec<usize>>,
@@ -508,6 +605,24 @@ struct Memos {
     /// Each list of targets once.
     lists: HashSet<Targets>,
     concretes: HashMap<usize, Rc<[usize]>>,
+    /// What each call passed when it last ran all its targets, by call and list of targets
+    /// (`Walk::call`).
+    passed: HashMap<(ExprId, usize), Passed>,
+    /// The expressions whose objects the runtime has been handed, each with its method and the
+    /// object it runs on (`object_values::handed`), and the thrown expressions so (`handed_by`):
+    /// handing them again hands the runtime nothing new.
+    handed: HashSet<(usize, ExprId, usize)>,
+    thrown: HashSet<(usize, ExprId, usize)>,
+    /// What `same_literal` found, by method and type, with how many classes had objects then.
+    literals: HashMap<(usize, usize), (usize, Option<i128>)>,
+}
+
+/// What a call passed the methods it runs (`Walk::call`): what was known of the argument at
+/// each position that some method tracks the parameter of, in the order that `pass_known` found
+/// them, and `found` as it left it.
+struct Passed {
+    order: Rc<[usize]>,
+    found: Rc<[Option<known::Known>]>,
 }
 
 /// Why a method is walked again (`rescan`): a parameter, a field or an `instanceof` or call that it
@@ -554,6 +669,17 @@ struct State {
     /// except in the walk of the started threads (`thread_statics`), which starts with the
     /// objects of the first walk and runs the initializers of those that its code creates.
     built: HashSet<usize>,
+    /// The types whose static initialization has run with that of every type above them
+    /// (`Walk::initialize`).
+    initialized_above: HashSet<usize>,
+    /// What `prepare` found for each method walked on more than one object, until a change to
+    /// what it relied on walks the method again (`rescan`), or makes a field unknown wherever it
+    /// is (`Knowledge::unplaced`).
+    prepared: HashMap<usize, (Rc<known::Env>, Rc<HashSet<ExprId>>)>,
+    /// `glued`, and the types that the runtime has been handed objects of any class of
+    /// (`Walk::glue`).
+    glued_classes: ClassSet,
+    glued_any: HashSet<Type>,
 }
 
 impl Walk<'_> {
@@ -627,6 +753,9 @@ impl Walk<'_> {
 
     /// The static initialization of type `t` and of every type above it runs.
     fn initialize(&self, t: usize) {
+        if self.fast && self.state.borrow().initialized_above.contains(&t) {
+            return;
+        }
         for &t in &self.supers[t] {
             if !self.state.borrow_mut().live.initialized.insert(t) {
                 continue;
@@ -649,6 +778,10 @@ impl Walk<'_> {
                     self.instantiate(c);
                 }
             }
+        }
+        // Each type above is initialized now, so initializing `t` again does nothing.
+        if self.fast {
+            self.state.borrow_mut().initialized_above.insert(t);
         }
     }
 
@@ -765,18 +898,7 @@ impl Walk<'_> {
                         crate::timings::memory()
                     );
                 }
-                if let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
-                    && !self.class.methods[*r].is_static
-                {
-                    let mut state = self.state.borrow_mut();
-                    let classes = state.live.receivers.entry(receiver.id).or_default();
-                    targets.iter().for_each(|&(_, c)| classes.insert(c));
-                }
-                let mut found = vec![None; args.len()];
-                for &(target, c) in targets.iter() {
-                    self.pass_known(m, target, Some(args), &mut found);
-                    self.reach(target, c);
-                }
+                self.call(m, x, args, &targets);
             }
             ExprKind::New { class: c, ctor, args } => {
                 self.instantiate(*c);
@@ -822,8 +944,71 @@ impl Walk<'_> {
         {
             self.initialize(t);
         }
-        for (flow, ty) in object_values::handed(self.values, self.class, m, ctx, x) {
-            self.glue(flow, ty);
+        if object_values::hands(x) && (!self.fast || self.memos.borrow_mut().handed.insert((m, x.id, ctx))) {
+            for (flow, ty) in object_values::handed(self.values, self.class, m, ctx, x) {
+                self.glue(flow, ty);
+            }
+        }
+    }
+
+    /// The call `x` in method `m`, with the arguments `args`, runs `targets`, each on an object
+    /// of the class given with it.
+    ///
+    /// A method is walked many times, and a call in it runs the same targets on each walk on the
+    /// same object, thousands of them on a receiver that may be any class. Where what is known of
+    /// the arguments is what it was when the call last ran them all, running them again does
+    /// nothing: their parameters already hold those values, they already run, and what the walk
+    /// knows only grows. So the walk finds what is known of the arguments first, as running the
+    /// targets would, without recording what it relies on (`probe`); when nothing changed, it
+    /// records that, as running them would have, and runs nothing.
+    fn call(&self, m: usize, x: &Expr, args: &[Expr], targets: &Targets) {
+        let key = (x.id, Rc::as_ptr(targets).cast::<()>() as usize);
+        let passed = self
+            .fast
+            .then(|| self.memos.borrow().passed.get(&key).map(|p| (p.order.clone(), p.found.clone())));
+        let order = match passed.flatten() {
+            Some((order, found)) => {
+                let (now, relied) = self.probe(m, args, &order);
+                if *now == *found {
+                    let known = &mut self.state.borrow_mut().known;
+                    for (on, m) in relied {
+                        known.relied(on, m);
+                    }
+                    return;
+                }
+                Some(order)
+            }
+            None => None,
+        };
+        if let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
+            && !self.class.methods[*r].is_static
+        {
+            let mut state = self.state.borrow_mut();
+            let classes = state.live.receivers.entry(receiver.id).or_default();
+            targets.iter().for_each(|&(_, c)| classes.insert(c));
+        }
+        let mut found = vec![None; args.len()];
+        for &(target, c) in targets.iter() {
+            self.pass_known(m, target, Some(args), &mut found);
+            self.reach(target, c);
+        }
+        if self.fast {
+            // The positions in the order that `pass_known` finds them.
+            let order = order.unwrap_or_else(|| {
+                let mut order = Vec::new();
+                for &(target, _) in targets.iter() {
+                    let params = &self.class.methods[target].params;
+                    if params.len() == args.len() {
+                        for (i, p) in params.iter().enumerate() {
+                            if known::tracked(p.ty) && !order.contains(&i) {
+                                order.push(i);
+                            }
+                        }
+                    }
+                }
+                order.into()
+            });
+            self.memos.borrow_mut().passed.insert(key, Passed { order, found: found.into() });
         }
     }
 
@@ -844,6 +1029,9 @@ impl Walk<'_> {
     /// The runtime is handed the value of `e`, or the elements of the innermost arrays of an
     /// array.
     fn handed(&self, m: usize, ctx: usize, e: &Expr) {
+        if self.fast && !self.memos.borrow_mut().thrown.insert((m, e.id, ctx)) {
+            return;
+        }
         let (flow, ty) = object_values::handed_by(self.values, self.class, m, ctx, e);
         self.glue(flow, ty);
     }
@@ -851,12 +1039,29 @@ impl Walk<'_> {
     /// The runtime may call the methods of `runtime_called` on the objects that `flow`, of type
     /// `ty`, holds.
     fn glue(&self, flow: Flow, ty: Type) {
+        if self.fast {
+            let state = self.state.borrow();
+            let glued = if flow.any {
+                state.glued_any.contains(&ty)
+            } else {
+                state.glued_classes.holds(&flow.classes)
+            };
+            if glued {
+                return;
+            }
+        }
         let classes: Vec<usize> =
             if flow.any { self.values.concretes_of(ty).to_vec() } else { flow.classes.iter().collect() };
         for c in classes {
             // Handing the runtime an object of a class again calls nothing new.
-            if !self.state.borrow_mut().glued.insert(c) {
-                continue;
+            {
+                let mut state = self.state.borrow_mut();
+                if !state.glued.insert(c) {
+                    continue;
+                }
+                if self.fast {
+                    state.glued_classes.insert(c);
+                }
             }
             // A class implements only the groups that a type above it declares a method of: asking
             // for the others, of thousands of `toString`s and `equals`es, remembered an answer of
@@ -868,6 +1073,9 @@ impl Walk<'_> {
                     self.enter(target, c, STATIC, None);
                 }
             }
+        }
+        if self.fast && flow.any {
+            self.state.borrow_mut().glued_any.insert(ty);
         }
     }
 }
