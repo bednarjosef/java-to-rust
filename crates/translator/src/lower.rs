@@ -382,6 +382,8 @@ struct Lowering<'t> {
     functional: functional::Functional,
     /// The lambdas and method references of the code being lowered (see `lambdas`).
     lambdas: Vec<lambdas::LambdaInfo<'t>>,
+    /// Where each lambda is in `lambdas`, by its class, its constructor and method, and its node.
+    lambda_index: lambdas::LambdaIndex,
     /// The identifiers that read a local captured by the class whose code they are in, by
     /// address (see `captures`).
     capture_refs: std::collections::HashSet<*const Value>,
