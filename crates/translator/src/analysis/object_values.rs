@@ -146,21 +146,37 @@ impl ClassSet {
         if self.start == other.start && Rc::ptr_eq(&self.words, &other.words) {
             return false;
         }
-        let Some(from) = other.words.iter().position(|&w| w != 0) else { return false };
-        let to = other.words.iter().rposition(|&w| w != 0).unwrap_or(from) + 1;
-        let (from, to) = (other.start + from, other.start + to);
-        if (from..to).all(|i| other.word(i) & !self.word(i) == 0) {
-            return false;
+        let Some(first) = other.words.iter().position(|&w| w != 0) else { return false };
+        let last = other.words.iter().rposition(|&w| w != 0).unwrap_or(first) + 1;
+        // The words of `other` from its first class to its last, at `from..to` of all words: both
+        // ends hold a class, so where this set does not cover them it lacks one.
+        let theirs = &other.words[first..last];
+        let (from, to) = (other.start + first, other.start + last);
+        let (start, end) = (self.start, self.start + self.words.len());
+        if start <= from && to <= end {
+            let mine = &self.words[from - start..to - start];
+            if theirs.iter().zip(mine).all(|(t, m)| t & !m == 0) {
+                return false;
+            }
         }
         // Where `other` holds every class of this set, this set becomes a copy of it.
-        if (0..self.words.len()).all(|i| self.words[i] & !other.word(self.start + i) == 0) {
+        let (low, high) = (start.max(other.start), end.min(other.start + other.words.len()));
+        let within = low < high && {
+            let (mine, rest) =
+                (&self.words[low - start..high - start], &other.words[low - other.start..high - other.start]);
+            self.words[..low - start].iter().all(|&w| w == 0)
+                && self.words[high - start..].iter().all(|&w| w == 0)
+                && mine.iter().zip(rest).all(|(m, t)| m & !t == 0)
+        } || self.words.iter().all(|&w| w == 0);
+        if within {
             *self = other.clone();
             return true;
         }
         self.cover(from, to);
+        let start = self.start;
         let words = Rc::make_mut(&mut self.words);
-        for i in from..to {
-            words[i - self.start] |= other.word(i);
+        for (m, t) in words[from - start..to - start].iter_mut().zip(theirs) {
+            *m |= t;
         }
         true
     }
