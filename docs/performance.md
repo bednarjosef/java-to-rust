@@ -267,6 +267,20 @@ javac's census and every test with it set, and the javac census report and the 2
 translations are byte for byte the same. On javac, whose visits rarely repeat a call's targets,
 the walk itself goes from 1.47 to 1.29 s (the rest of the phase is the points-to analysis).
 
+**Early static reads by groups.** `analysis/early_reads.rs` walks, for each class with an eager
+static initializer, what each statement of the initializer runs. It used to walk method by method
+and list every method that each virtual call can run, once per call, thousands for a call on a
+receiver of a wide type; on the Minecraft server it took 90 to 132 s in each round of the
+analyses. The methods that a virtual call runs are now listed once per method and receiver type,
+and shared by the calls that have them; methods that run each other without passing through a
+static initializer are walked as one group, since reaching one reaches all (each `<clinit>`
+stays a group of its own, as a class's walk cuts off its own); and the test that leaves out code
+from which no read of the class's statics can run is worked out over the groups.
+`Hierarchy::targets` no longer checks each implementation against the list found so far.
+`JAVA_TO_RUST_EARLY_CHECK=1` also walks every method one by one, leaving none out, and panics
+unless both find the same reads. On javac the step goes from 0.25 to 0.11 s, and its census
+report and the 28 targets' translations are byte for byte the same.
+
 Further speed-ups, not done:
 
 - The walk from scratch when the members written into a record change is what is left of the
