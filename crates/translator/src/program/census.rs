@@ -273,6 +273,19 @@ fn analyse(
             let mut stubbed = false;
             for error in errors {
                 let rejection = stubs.stub(class, units, error);
+                if crate::timings::enabled() {
+                    let owner = rejection.anchor.and_then(|at| {
+                        let in_unit = |m: &Method| units.get(m.class).copied().flatten() == rejection.unit;
+                        class.methods.iter().find(|m| m.pos == at && in_unit(m))
+                    });
+                    let owner = owner.map(|m| format!("{}.{}", class.types[m.class].name, m.name));
+                    let Pos { line, column, .. } = rejection.error.pos;
+                    eprintln!(
+                        "timing: census: stubbed {} at {line}:{column}: {}",
+                        owner.as_deref().unwrap_or("nothing"),
+                        rejection.error.message
+                    );
+                }
                 if rejection.anchor.is_some() {
                     stubbed = true;
                     rejections.push(rejection);
