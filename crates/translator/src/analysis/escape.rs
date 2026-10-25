@@ -1075,14 +1075,38 @@ impl Analysis<'_> {
                 vars[named.var as usize].insert(i + usize::from(code.has_this));
             }
         }
-        // The variables: what each assignment and call gives each, until nothing grows.
-        loop {
-            let mut grew = false;
-            for (v, value) in &code.assigns {
-                let s = eval(&vars, value);
-                grew |= vars[*v as usize].union(&s);
+        // The variables: what each assignment and call gives each, until nothing grows. They only
+        // grow, by unions, so the order of the steps does not change where they end: a step is
+        // taken again only when a variable it reads grew (a method of the Minecraft server has
+        // thousands of them, which each pass over all of them took again).
+        let assigns = code.assigns.len();
+        let mut readers: Vec<Vec<u32>> = vec![Vec::new(); code.vars];
+        for (i, (_, value)) in code.assigns.iter().enumerate() {
+            for &v in &value.vars {
+                readers[v as usize].push(i as u32);
             }
-            for (call, combined) in code.calls.iter().zip(&combined) {
+        }
+        for (j, (call, combined)) in code.calls.iter().zip(&combined).enumerate() {
+            let Some(combined) = combined else { continue };
+            for (k, arg) in call.args.iter().enumerate() {
+                if combined.returned.get(k) == Some(&true) {
+                    for &v in &arg.vars {
+                        readers[v as usize].push((assigns + j) as u32);
+                    }
+                }
+            }
+        }
+        let steps = assigns + code.calls.len();
+        let mut queued = vec![true; steps];
+        let mut queue: std::collections::VecDeque<u32> = (0..steps as u32).collect();
+        while let Some(i) = queue.pop_front() {
+            let i = i as usize;
+            queued[i] = false;
+            let (target, s) = if i < assigns {
+                let (v, value) = &code.assigns[i];
+                (*v, eval(&vars, value))
+            } else {
+                let (call, combined) = (&code.calls[i - assigns], &combined[i - assigns]);
                 let mut s = Sources::default();
                 if let Some(site) = call.site
                     && active[site as usize]
@@ -1096,10 +1120,14 @@ impl Analysis<'_> {
                         }
                     }
                 }
-                grew |= vars[call.result as usize].union(&s);
-            }
-            if !grew {
-                break;
+                (call.result, s)
+            };
+            if vars[target as usize].union(&s) {
+                for &r in &readers[target as usize] {
+                    if !std::mem::replace(&mut queued[r as usize], true) {
+                        queue.push_back(r);
+                    }
+                }
             }
         }
         // What escapes, and what is returned.
