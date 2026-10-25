@@ -20,7 +20,10 @@ use crate::ast::*;
 use crate::program::FieldUpdate;
 use std::collections::HashSet;
 
-pub(super) fn check(class: &Class) -> Result<(), Error> {
+/// Every read of a pattern variable that the translation cannot make, the first of each
+/// statement of a method and of its blocks: a census stubs them together.
+pub(super) fn check(class: &Class) -> Result<(), Vec<Error>> {
+    let mut errors = Vec::new();
     for m in &class.methods {
         let declared = declarations(&m.body);
         // The patterns that `if (!(x instanceof T name))` tests, which `statement` checks.
@@ -60,11 +63,11 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
                 },
                 &mut |_| {},
             );
-            found?;
+            errors.extend(found.err());
         }
-        block(&m.body)?;
+        errors.extend(block(&m.body).err());
     }
-    Ok(())
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 /// The `==` and `!=` between two values of `Object` that may both be strings or boxes, whose

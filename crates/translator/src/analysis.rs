@@ -331,7 +331,6 @@ pub fn represented(class: &Class) -> Facts {
 
 /// `analyze_tolerating`, from the facts that `represented` found for `class`.
 pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Result<Facts, Vec<Error>> {
-    let one = |e: Error| vec![e];
     let checked = |result: Result<(), Vec<Error>>| {
         let mut errors = result.err().unwrap_or_default();
         errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
@@ -341,7 +340,7 @@ pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Res
     checked(phase("analysis: validate", || validate(class, &facts)))?;
     facts.fixed_fields =
         phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, facts.threaded));
-    patterns::check(class).map_err(one)?;
+    patterns::check(class)?;
     facts.eager_init = statics::eager_classes(class);
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
@@ -391,36 +390,46 @@ pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Res
 /// How the objects of each class are represented and which methods borrow them: the facts from
 /// `immutable` to `writers`, given `fields_structs`.
 fn representation(class: &Class, facts: &mut Facts) {
+    use crate::timings::phase;
     facts.threaded = threads::threaded(class);
     facts.interrupts = threads::interrupts(class);
     if facts.threaded {
         facts.thread_statics = class.thread_statics.clone();
-        facts.thread_shared = threads::thread_shared(class, facts);
-        facts.shared_builders = threads::shares_builders(class, facts);
-        facts.shared_arrays = threads::shared_arrays(class, facts);
-        facts.long_methods = threads::long_methods(class, &facts.thread_shared);
+        facts.thread_shared = phase("representation: thread shared", || threads::thread_shared(class, facts));
+        facts.shared_builders =
+            phase("representation: shared builders", || threads::shares_builders(class, facts));
+        facts.shared_arrays = phase("representation: shared arrays", || threads::shared_arrays(class, facts));
+        facts.long_methods =
+            phase("representation: long methods", || threads::long_methods(class, &facts.thread_shared));
     }
-    facts.monitors = monitors::observed(class);
-    let (monitor_classes, monitor_methods) = monitors::kept(class, facts);
+    facts.monitors = phase("representation: monitors", || monitors::observed(class));
+    let (monitor_classes, monitor_methods) =
+        phase("representation: kept monitors", || monitors::kept(class, facts));
     facts.long_methods.extend(monitor_methods);
-    let reach = borrowing::reach(class);
-    let created = objects::instantiated(class);
-    facts.immutable = objects::immutable_classes(class);
+    let reach = phase("representation: reach", || borrowing::reach(class));
+    let created = phase("representation: instantiated", || objects::instantiated(class));
+    facts.immutable = phase("representation: immutable", || objects::immutable_classes(class));
     // An object whose monitor is kept has a lock, or an address that stays; so does every other
     // object of its class tree, which is immutable together or not at all.
     objects::remove_families(class, &mut facts.immutable, &monitor_classes);
     loop {
-        facts.field_level = hierarchy::field_level(
-            class,
-            &reach.reach,
-            &facts.immutable,
-            &facts.fields_structs,
-            &facts.long_methods,
-        );
-        facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level, &created);
+        facts.field_level = phase("representation: field level", || {
+            hierarchy::field_level(
+                class,
+                &reach.reach,
+                &facts.immutable,
+                &facts.fields_structs,
+                &facts.long_methods,
+            )
+        });
+        facts.owned = phase("representation: owned", || {
+            owned::owned_classes(class, &facts.immutable, &facts.field_level, &created)
+        });
         facts.owned.retain(|c| !monitor_classes.contains(c));
-        facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
-        let handled = objects::calls_needing_handles(class, facts);
+        facts.flows = phase("representation: flows", || {
+            hierarchy::flows(class, &facts.field_level, &Default::default())
+        });
+        let handled = phase("representation: handles", || objects::calls_needing_handles(class, facts));
         if handled.is_empty() {
             break;
         }
@@ -434,14 +443,15 @@ fn representation(class: &Class, facts: &mut Facts) {
     if let Some(throwable) = class.type_index("java.lang.Throwable") {
         facts.owned.retain(|c| class.type_index(c).is_none_or(|t| !class.hierarchy.is_subtype(t, throwable)));
     }
-    let borrowing = borrowing::borrowing(class, facts, &reach);
+    let borrowing = phase("representation: borrowing", || borrowing::borrowing(class, facts, &reach));
     facts.mutating = borrowing.mutating;
     facts.self_methods = borrowing.methods;
     facts.plain_constructors = borrowing.plain_constructors;
     facts.not_plain = borrowing.not_plain;
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
-    (facts.celled, facts.monitored) = objects::celled_classes(class, facts, &monitor_classes, &created);
+    (facts.celled, facts.monitored) =
+        phase("representation: celled", || objects::celled_classes(class, facts, &monitor_classes, &created));
     // A class without objects of a celled tree counts as celled, not immutable.
     facts.immutable.retain(|c| !facts.celled.contains(c));
 }
