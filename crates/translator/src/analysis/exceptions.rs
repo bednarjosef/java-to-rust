@@ -381,10 +381,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
 
     // What the callers of each method observe: what the callers of its callers observe, and
     // what the `try`s around its calls catch. A call may run any method of an override group, so
-    // the methods of a group observe the same. A method is looked at again whenever what it
-    // observes grows, until nothing does; that only grows, so the order does not change the
-    // outcome.
+    // the methods of a group observe the same: what one observes is kept once for its group, at
+    // its first method (`at`). A method is looked at again whenever what it observes grows, until
+    // nothing does; that only grows, so the order does not change the outcome.
     let started = std::time::Instant::now();
+    let at: Vec<usize> =
+        (0..class.methods.len()).map(|m| h.group_members(m).first().copied().unwrap_or(m)).collect();
     let mut seen: Vec<Seen> = vec![Seen::default(); class.methods.len()];
     let mut queued = vec![true; class.methods.len()];
     let mut queue: VecDeque<usize> = (0..class.methods.len()).collect();
@@ -399,7 +401,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         let mut grown = Vec::new();
         for p in &points[m] {
             let Raise::Call(callees) = &p.raise else { continue };
-            let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
+            let mut here = if bugs_only[m] { Seen::default() } else { seen[at[m]].clone() };
             for f in &p.frames {
                 for &t in &f.catches {
                     here.types.insert(t);
@@ -407,21 +409,18 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 here.all |= f.finally;
             }
             for &c in callees {
-                if grow(&mut seen[c], &here) {
+                if grow(&mut seen[at[c]], &here) {
                     grown.push(c);
                 }
             }
         }
-        let own = seen[m].clone();
-        for &g in h.group_members(m) {
-            if g != m && grow(&mut seen[g], &own) {
-                grown.push(g);
-            }
-        }
         for c in grown {
-            if !queued[c] {
-                queued[c] = true;
-                queue.push_back(c);
+            let members = h.group_members(c);
+            for &g in if members.is_empty() { std::slice::from_ref(&c) } else { members } {
+                if !queued[g] {
+                    queued[g] = true;
+                    queue.push_back(g);
+                }
             }
         }
     }
@@ -436,14 +435,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     for (m, p) in points.iter().enumerate().flat_map(|(m, ps)| ps.iter().map(move |p| (m, p))) {
         let Raise::Text(shown) = &p.raise else { continue };
         let program = shown.iter().filter(|&&c| !from_jdk(&class.types[class.methods[c].class]));
-        if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[m])) {
+        if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[at[m]])) {
             reject(p.pos, "catching an exception that this toString may throw not supported yet");
         }
     }
 
     // A static initializer never returns a `Result`: what it raises ends the program (see `seen`).
     let mut throwing: HashSet<usize> = (0..class.methods.len())
-        .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[m]))))
+        .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[at[m]]))))
         .collect();
     // The methods that throw themselves, not only through an override.
     let own = throwing.clone();
@@ -482,7 +481,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 let Raise::Runtime { checked, id, .. } = p.raise else { continue };
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
-                    || (!bugs_only[m] && observed(&Kind::Runtime(name), &seen[m]));
+                    || (!bugs_only[m] && observed(&Kind::Runtime(name), &seen[at[m]]));
                 // Only a standard class has the constructor from a message that the runtime
                 // builds its objects with (`lower::exceptions`).
                 let raised_class = class
@@ -703,7 +702,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         if initializer[m]
             && !guarded[m]
             && !escapes[m].is_empty()
-            && linkage.iter().any(|k| observed(k, &seen[m]))
+            && linkage.iter().any(|k| observed(k, &seen[at[m]]))
         {
             reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
