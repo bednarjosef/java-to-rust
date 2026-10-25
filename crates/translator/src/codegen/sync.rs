@@ -92,7 +92,7 @@ impl<'a> Gen<'a> {
             }
             ExprKind::This if self.this_form != ThisForm::Shared => false,
             _ => {
-                matches!(lock.ty, Type::Class(..) | Type::StringBuilder)
+                matches!(lock.ty, Type::Class(..) | Type::StringBuilder | Type::Array(_))
                     && self.facts.kept_monitor(self.class, lock.ty)
             }
         }
@@ -119,7 +119,7 @@ impl<'a> Gen<'a> {
     fn monitor_handle(&mut self, object: &'a Expr) -> String {
         let id = object.id;
         let e = self.peel(object);
-        let nullable = matches!(e.ty, Type::Class(..)) && self.nullable(e);
+        let nullable = matches!(e.ty, Type::Class(..) | Type::Array(_)) && self.nullable(e);
         if self.reads_through_borrow(e) {
             let value = self.expr(e).text;
             if nullable {

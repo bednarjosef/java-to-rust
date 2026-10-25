@@ -17,6 +17,7 @@ use crate::Locked;
 use crate::locked::{RawLock, Waited};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::Duration;
 
 /// The monitor of an object: the lock of one that threads share, or the address of one that a
@@ -103,6 +104,53 @@ impl<T: ?Sized> HasMonitor for std::cell::RefCell<T> {
     #[inline]
     fn monitor(&self) -> MonitorOf<'_> {
         MonitorOf::Local(self.as_ptr() as *const u8 as usize)
+    }
+}
+
+/// The monitor of an array that threads share: a lock made the first time a thread takes it, which
+/// stays for the array's life.
+pub(crate) struct LazyMonitor(AtomicPtr<RawLock>);
+
+impl LazyMonitor {
+    pub(crate) const fn new() -> LazyMonitor {
+        LazyMonitor(AtomicPtr::new(std::ptr::null_mut()))
+    }
+
+    fn get(&self) -> &RawLock {
+        let mut lock = self.0.load(Ordering::Acquire);
+        if lock.is_null() {
+            let made = Box::into_raw(Box::new(RawLock::new()));
+            lock = match self.0.compare_exchange(
+                std::ptr::null_mut(),
+                made,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => made,
+                // Another thread made it first.
+                Err(theirs) => {
+                    drop(unsafe { Box::from_raw(made) });
+                    theirs
+                }
+            };
+        }
+        unsafe { &*lock }
+    }
+}
+
+impl Drop for LazyMonitor {
+    fn drop(&mut self) {
+        let lock = *self.0.get_mut();
+        if !lock.is_null() {
+            drop(unsafe { Box::from_raw(lock) });
+        }
+    }
+}
+
+impl<T> HasMonitor for crate::SharedElements<T> {
+    #[inline]
+    fn monitor(&self) -> MonitorOf<'_> {
+        MonitorOf::Shared(self.1.get())
     }
 }
 
