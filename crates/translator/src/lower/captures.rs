@@ -44,6 +44,8 @@ struct Walk<'l, 't> {
     lowering: &'l Lowering<'t>,
     /// The class whose code is walked.
     class: usize,
+    /// The classes nested directly in each class, in the order of their indices.
+    nested_in: &'l [Vec<usize>],
     /// The locals in scope, innermost scope last.
     scopes: Vec<Vec<&'t str>>,
     found: Found<'t>,
@@ -56,10 +58,20 @@ impl<'t> Lowering<'t> {
     pub(super) fn plan_captures(&mut self) -> Result<(), (usize, Error)> {
         self.plan_receivers()?;
         let nested: Vec<usize> = (0..self.types.len()).filter(|&t| self.types[t].nested.is_some()).collect();
+        let mut nested_in = vec![Vec::new(); self.types.len()];
+        for &t in &nested {
+            nested_in[self.types[t].nested.as_ref().expect("a nested class").enclosing].push(t);
+        }
         loop {
             let mut found = Vec::new();
             for &t in &nested {
-                let mut walk = Walk { lowering: self, class: t, scopes: Vec::new(), found: Found::default() };
+                let mut walk = Walk {
+                    lowering: self,
+                    class: t,
+                    nested_in: &nested_in,
+                    scopes: Vec::new(),
+                    found: Found::default(),
+                };
                 // In a census, a class whose code cannot be walked is rejected with its code.
                 let walked = walk.class_code();
                 found.push(walk.found);
@@ -427,7 +439,7 @@ impl<'t> Walk<'_, 't> {
         // A class nested in this one reaches the instances it needs beyond this one's through
         // this one's `outer`.
         let class = self.class;
-        for nested in l.types.iter().filter_map(|t| t.nested.as_ref()).filter(|n| n.enclosing == class) {
+        for nested in self.nested_in[class].iter().filter_map(|&t| l.types[t].nested.as_ref()) {
             for &n in &nested.needs {
                 self.need(n);
             }
