@@ -243,7 +243,9 @@ Rejected:
 - a class with subclasses whose constructor uses `this` as a value or calls an overridable
   method (the whole-object construction of `analysis/whole_objects.rs`, whose zero object is
   built with the enclosing instance and captured locals) when a `super(..)` computes them
-  other than as its constructor's parameters or fields of them;
+  other than as its constructor's parameters, fields of them, or either upcast (an inner class
+  of a subclass passes its own enclosing instance to a superclass that is an inner class of the
+  enclosing class's superclass);
 - an enclosing instance needed in static code (javac rejects it too);
 - `Outer.this` or `Outer.super` from an inner class that itself extends `Outer`: the search for
   the enclosing instance stops at the first subclass of `Outer`, which is then `this`.

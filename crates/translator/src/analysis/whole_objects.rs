@@ -359,11 +359,14 @@ fn own_synthetic(class: &Class, t: usize) -> Vec<(String, Type)> {
 }
 
 /// What a synthetic field of a zero object is built with, from the parameters of a constructor:
-/// a parameter, or a field of one (`deferredAttr.super(..)` passes `outer.deferredAttr`), which
-/// javac reads before `super(..)` too.
+/// a parameter, a field of one (`deferredAttr.super(..)` passes `outer.deferredAttr`), which
+/// javac reads before `super(..)` too, or one converted to the superclass's enclosing class (an
+/// inner class of a subclass whose superclass is an inner class of its enclosing class's
+/// superclass passes its own enclosing instance).
 enum Source {
     Param(usize),
     Field(Box<Source>, String, Type),
+    Cast(Box<Source>, Type, Type),
 }
 
 /// What constructor `m` of a class rewritten passes as the synthetic fields of its class
@@ -382,13 +385,13 @@ fn synthetic_sources(
     let mut out = match call {
         Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved: Some(r) }, .. })) => {
             let inner = synthetic_sources(class, whole, synthetic, *r)?;
-            return passed_on(method, args, &inner);
+            return passed_on(class, method, args, &inner);
         }
         Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, .. }))
             if whole.contains(&class.methods[*r].class) =>
         {
             let inner = synthetic_sources(class, whole, synthetic, *r)?;
-            passed_on(method, args, &inner)?
+            passed_on(class, method, args, &inner)?
         }
         _ => Vec::new(),
     };
@@ -399,7 +402,7 @@ fn synthetic_sources(
             Stmt::Expr(Expr {
                 kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
                 ..
-            }) if matches!(object.kind, ExprKind::This) && name == field => source(method, value),
+            }) if matches!(object.kind, ExprKind::This) && name == field => source(class, method, value),
             _ => None,
         })?;
         out.push(set);
@@ -419,7 +422,7 @@ fn leaf_sources(
     match explicit_call(&method.body).map(|i| &method.body[i]) {
         Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, .. })) => {
             let inner = synthetic_sources(class, whole, synthetic, *r)?;
-            passed_on(method, args, &inner)
+            passed_on(class, method, args, &inner)
         }
         // A constructor that calls another of its class gets its superclass's part from it.
         _ => Some(Vec::new()),
@@ -428,24 +431,36 @@ fn leaf_sources(
 
 /// `inner`, the sources of the constructor that `method` calls with the arguments `args` of its
 /// `this(..)` or `super(..)`, from the parameters of `method`.
-fn passed_on(method: &Method, args: &[Expr], inner: &[Source]) -> Option<Vec<Source>> {
-    fn substitute(method: &Method, args: &[Expr], s: &Source) -> Option<Source> {
+fn passed_on(class: &Class, method: &Method, args: &[Expr], inner: &[Source]) -> Option<Vec<Source>> {
+    fn substitute(class: &Class, method: &Method, args: &[Expr], s: &Source) -> Option<Source> {
         match s {
-            Source::Param(i) => source(method, args.get(*i)?),
+            Source::Param(i) => source(class, method, args.get(*i)?),
             Source::Field(object, name, ty) => {
-                Some(Source::Field(Box::new(substitute(method, args, object)?), name.clone(), *ty))
+                Some(Source::Field(Box::new(substitute(class, method, args, object)?), name.clone(), *ty))
+            }
+            Source::Cast(object, to, ty) => {
+                Some(Source::Cast(Box::new(substitute(class, method, args, object)?), *to, *ty))
             }
         }
     }
-    inner.iter().map(|s| substitute(method, args, s)).collect()
+    inner.iter().map(|s| substitute(class, method, args, s)).collect()
 }
 
 /// `value`, an expression of a constructor `method`, as a `Source`.
-fn source(method: &Method, value: &Expr) -> Option<Source> {
+fn source(class: &Class, method: &Method, value: &Expr) -> Option<Source> {
     match &value.kind {
         ExprKind::Var(v) => method.params.iter().position(|p| p.name == *v).map(Source::Param),
         ExprKind::Field { object, name } => {
-            Some(Source::Field(Box::new(source(method, object)?), name.clone(), value.ty))
+            Some(Source::Field(Box::new(source(class, method, object)?), name.clone(), value.ty))
+        }
+        // An upcast, which cannot fail.
+        ExprKind::Cast(to, object)
+            if class
+                .type_of(object.ty)
+                .zip(class.type_of(*to))
+                .is_some_and(|(from, to)| class.hierarchy.ancestors(from).contains(&to)) =>
+        {
+            Some(Source::Cast(Box::new(source(class, method, object)?), *to, value.ty))
         }
         _ => None,
     }
@@ -473,6 +488,10 @@ impl Rewrite {
             Source::Field(object, name, ty) => {
                 let object = Box::new(self.source(object, params, pos));
                 self.expr(ExprKind::Field { object, name: name.clone() }, pos, *ty)
+            }
+            Source::Cast(object, to, ty) => {
+                let object = Box::new(self.source(object, params, pos));
+                self.expr(ExprKind::Cast(*to, object), pos, *ty)
             }
         }
     }
@@ -563,12 +582,7 @@ impl Rewrite {
             class.methods[m].body.splice(at..at, inits);
             return;
         };
-        let synthetic: HashSet<&str> = class.types[t]
-            .outer
-            .map(|_| "outer")
-            .into_iter()
-            .chain(class.types[t].captures.iter().map(|c| c.field.as_str()))
-            .collect();
+        let synthetic: HashSet<String> = own_synthetic(class, t).into_iter().map(|(f, _)| f).collect();
         let mut body = std::mem::take(&mut class.methods[m].body);
         // The statements before `super(..)` (see `construct`) run on the zero object.
         let prologue: Vec<Stmt> = body.drain(..at.unwrap_or(0)).collect();
@@ -588,7 +602,7 @@ impl Rewrite {
                     || matches!(s, Stmt::Expr(Expr {
                         kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, .. },
                         ..
-                    }) if matches!(object.kind, ExprKind::This) && synthetic.contains(name.as_str()))
+                    }) if matches!(object.kind, ExprKind::This) && synthetic.contains(name))
             })
             .count();
         out.extend(body.drain(..leading));

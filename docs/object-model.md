@@ -317,8 +317,8 @@ constructor calls sees the subclass's fields unset, as in Java; an object field 
 the same.
 
 Rejected: a class with subclasses that needs the whole-object form, whose enclosing instance
-or captured locals a `super(..)` computes other than as a parameter or a field of one (`new
-A().super()`): "constructors of a class with subclasses that use `this` as a value or call
+or captured locals a `super(..)` computes other than as a parameter, a field of one, or one of
+them upcast (`new A().super()`): "constructors of a class with subclasses that use `this` as a value or call
 overridable methods, in a class with an enclosing instance or captured locals that a
 constructor does not pass on as they are".
 
