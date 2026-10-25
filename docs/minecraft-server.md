@@ -154,7 +154,7 @@ each round, a file whose errors (outside imports and annotations) did not go dow
 back, and those edits are not tried again.
 
 On the server taken file by file from the decompile setups that compile best (151 errors in 100
-files), it leaves 100 errors in 59 files; 42 of those are imports and annotations of annotation
+files), it leaves 88 errors in 53 files; 42 of those are imports and annotations of annotation
 packages that no library jar has (`javax.annotation`, `org.jetbrains.annotations`).
 
 What is left is mostly inference that fails inside a lambda or a method reference (a lambda
@@ -202,7 +202,7 @@ dependencies can be built: it stops only at a rejected piece, as any translation
 
 - **The server:** 185 errors in 117 of its 5,037 files with Vineflower and the libraries alone,
   compiled against the original library jars (579 in 282 when decompiled without the libraries;
-  151 in 100 with the files chosen from the four setups by the `best-of` step, and 100 in 59
+  151 in 100 with the files chosen from the four setups by the `best-of` step, and 88 in 53
   after the `repair` step, see
   [below](#2-decompiled-sources-that-do-not-compile)). The largest kinds, with Vineflower alone:
 
@@ -361,7 +361,7 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   Procyon's version compiled on its own against the jars, but in the whole tree most of them
   break the files that use them. The `repair` step then puts back the unchecked casts,
   diamond type arguments and catch variable names that javac's errors show
-  ([above](#repairing-what-the-decompiler-left-out)), which leaves 100 errors in 59 files. What is
+  ([above](#repairing-what-the-decompiler-left-out)), which leaves 88 errors in 53 files. What is
   left is mostly inference inside lambdas and method references, and annotation packages that no
   library jar has; those pieces stay rejected.
 
