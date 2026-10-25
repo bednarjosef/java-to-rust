@@ -137,9 +137,14 @@ public class BytecodeNames {
             }
             entries.putAll(compile(compiler, discarding, diagnostics, standard, with, compilation.getValue()));
         }
-        StringBuilder out = new StringBuilder("{\"java\":\"").append(Runtime.version().feature()).append("\",\"entries\":[");
+        // Written entry by entry: as one string, the names of a program as large as the Minecraft
+        // server and its libraries pass the 2 GB that a Java string may hold.
+        Writer stdout = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out), StandardCharsets.UTF_8), 1 << 16);
+        stdout.write("{\"java\":\"" + Runtime.version().feature() + "\",\"entries\":[");
+        StringBuilder out = new StringBuilder();
         boolean first = true;
         for (Map.Entry<List<Object>, String> e : entries.entrySet()) {
+            out.setLength(0);
             out.append(first ? "" : ",").append('[');
             first = false;
             List<Object> key = e.getKey();
@@ -155,10 +160,9 @@ public class BytecodeNames {
                 string(e.getValue(), out);
             }
             out.append(']');
+            stdout.append(out);
         }
-        out.append("]}\n");
-        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
-        stdout.print(out);
+        stdout.write("]}\n");
         stdout.flush();
     }
 
