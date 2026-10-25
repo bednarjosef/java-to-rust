@@ -101,7 +101,7 @@ struct Point {
 /// What the callers of a method observe: the exceptions under these types, or all of them.
 #[derive(Clone, Default, PartialEq)]
 struct Seen {
-    types: BTreeSet<usize>,
+    types: Bits,
     all: bool,
 }
 
@@ -389,10 +389,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut queued = vec![true; class.methods.len()];
     let mut queue: VecDeque<usize> = (0..class.methods.len()).collect();
     let grow = |seen: &mut Seen, more: &Seen| {
-        let before = (seen.types.len(), seen.all);
-        seen.types.extend(more.types.iter().copied());
+        let before = seen.all;
+        let grew = seen.types.union_grew(&more.types);
         seen.all |= more.all;
-        before != (seen.types.len(), seen.all)
+        grew || before != seen.all
     };
     while let Some(m) = queue.pop_front() {
         queued[m] = false;
@@ -401,7 +401,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             let Raise::Call(callees) = &p.raise else { continue };
             let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
             for f in &p.frames {
-                here.types.extend(f.catches.iter().copied());
+                for &t in &f.catches {
+                    here.types.insert(t);
+                }
                 here.all |= f.finally;
             }
             for &c in callees {
@@ -426,7 +428,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     if crate::timings::enabled() {
         eprintln!("timing: exceptions: observed: {:.3} s", started.elapsed().as_secs_f64());
     }
-    let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
+    let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|t| matches(k, t));
 
     // An object's text whose `toString`, one the program wrote, may throw what a `catch` around
     // the text, or around a call on the way to it, would catch. The JDK's own `toString`s throw
