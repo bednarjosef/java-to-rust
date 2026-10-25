@@ -349,8 +349,9 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
   `if (!(x instanceof C c)) .. else ..` (`if let` with the branches swapped); and
   `if (!(x instanceof C c)) <leave>;` (`let .. else`, where leaving is `return`, `break`,
   `continue` or `throw`). An `if` whose condition is an `||` chain with a negated pattern is
-  turned around into an `&&` chain of the negated operands with its branches swapped
-  (`lower/negated_patterns.rs`). A read anywhere else is rejected: "a pattern variable used here
+  turned around into an `&&` chain of the negated operands with its branches swapped, and a
+  `?:` whose condition is a negated pattern has its branches swapped (`!(o instanceof C c) ?
+  false : f(c)`, as decompilers write `equals`; `lower/negated_patterns.rs`). A read anywhere else is rejected: "a pattern variable used here
   not supported yet". A pattern variable may be assigned, except one of a record or switch
   pattern.
 - A downcast `(Circle) s` is `java::cast(&s, |o| o.as_circle(), ("Circle", java::APP))`, which

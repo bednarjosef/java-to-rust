@@ -26,10 +26,28 @@
 //! ```
 //!
 //! (`exits_into_rest`; one negated pattern alone is `let .. else` in the generator.)
+//!
+//! A conditional whose condition is a negated pattern, as decompilers write `equals`, has its
+//! branches swapped, which keeps what runs: `name` is in scope in the false branch, and the
+//! translation binds a pattern for the branch that its test guards.
+//!
+//! ```text
+//! !(o instanceof T name) ? false : f(name)     o instanceof T name ? f(name) : false
+//! ```
 
 use super::*;
 
 impl<'t> Lowering<'t> {
+    /// `cond ? yes : no`, with its branches swapped when `cond` negates a test with a pattern.
+    pub(super) fn conditional(&self, cond: Expr, yes: Expr, no: Expr) -> ExprKind {
+        match cond.kind {
+            ExprKind::Unary(UnOp::Not, inner) if binds_pattern(&inner) => {
+                ExprKind::Conditional(inner, Box::new(no), Box::new(yes))
+            }
+            kind => ExprKind::Conditional(Box::new(Expr { kind, ..cond }), Box::new(yes), Box::new(no)),
+        }
+    }
+
     /// `if (cond) then else otherwise`, turned around as above when `cond` is an `||` chain with
     /// a negated pattern whose variable a later operand or the else branch reads.
     pub(super) fn if_stmt(&self, cond: Expr, then: Stmt, otherwise: Option<Stmt>) -> Stmt {
@@ -165,5 +183,12 @@ fn exits(stmt: &Stmt) -> bool {
 fn mentions_stmt(stmt: &Stmt, name: &str) -> bool {
     let mut found = false;
     visit_stmt(stmt, &mut |e| found |= mentions(e, name), &mut |_| {});
+    found
+}
+
+/// Whether `e` has a pattern with a variable (`x instanceof T t`).
+fn binds_pattern(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::InstanceOf { binding: Some(_), .. }));
     found
 }
