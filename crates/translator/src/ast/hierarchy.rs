@@ -63,6 +63,13 @@ pub struct Hierarchy {
     /// The answers of `implementation` so far, by group id and class: the analyses and the
     /// generator ask the same ones many times, once for every concrete class under a type.
     implementations: RefCell<IndexMap<(usize, usize), Option<usize>>>,
+    /// `concretes` of each type asked for: a type such as `Object` has thousands, which the
+    /// analyses ask for at each call on one.
+    #[serde(skip)]
+    concretes: RefCell<IndexMap<usize, std::rc::Rc<[usize]>>>,
+    /// `targets` of each override group and type asked for.
+    #[serde(skip)]
+    targets: RefCell<IndexMap<(usize, usize), std::rc::Rc<[usize]>>>,
     /// For each type, one bit per type that it is a subtype of (itself included), `words` words
     /// a type.
     supertype_bits: Vec<u64>,
@@ -159,6 +166,8 @@ impl Hierarchy {
             by_class,
             declared,
             implementations: RefCell::default(),
+            concretes: RefCell::default(),
+            targets: RefCell::default(),
             supertype_bits,
             words,
             names,
@@ -216,8 +225,18 @@ impl Hierarchy {
 
     /// The concrete classes that are `t` or subtypes of `t`, in `Class::types` order.
     pub fn concretes(&self, t: usize) -> Vec<usize> {
+        self.concretes_of(t).to_vec()
+    }
+
+    /// `concretes`, shared.
+    pub fn concretes_of(&self, t: usize) -> std::rc::Rc<[usize]> {
+        if let Some(found) = self.concretes.borrow().get(&t) {
+            return found.clone();
+        }
         let mut out: Vec<usize> = self.subtree(t).into_iter().filter(|&c| self.concrete[c]).collect();
         out.sort_unstable();
+        let out: std::rc::Rc<[usize]> = out.into();
+        self.concretes.borrow_mut().insert(t, out.clone());
         out
     }
 
@@ -274,6 +293,7 @@ impl Hierarchy {
     pub fn make_concrete(&mut self, m: usize) {
         self.method_abstract[m] = false;
         self.implementations.get_mut().clear();
+        self.targets.get_mut().clear();
     }
 
     /// The implementation an object of concrete class `c` runs for a call resolved to `m`: the
@@ -322,11 +342,22 @@ impl Hierarchy {
 
     /// The implementations that a call resolved to `m` on a receiver of static type `t` may run.
     pub fn targets(&self, m: usize, t: usize) -> Vec<usize> {
+        let key = (self.group_ids[m], t);
+        if let Some(found) = self.targets.borrow().get(&key) {
+            return found.to_vec();
+        }
+        let out = self.find_targets(m, t);
+        self.targets.borrow_mut().insert(key, out.as_slice().into());
+        out
+    }
+
+    /// `targets`, found: they depend on `m` only through its override group (`implementation`).
+    fn find_targets(&self, m: usize, t: usize) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         // Each implementation once, in the order first found: a type with thousands of classes
         // below it has thousands of implementations of `toString`.
         let mut found = std::collections::HashSet::new();
-        for c in self.concretes(t) {
+        for &c in self.concretes_of(t).iter() {
             if let Some(i) = self.implementation(m, c)
                 && found.insert(i)
             {
