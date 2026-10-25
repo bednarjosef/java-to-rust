@@ -329,8 +329,9 @@ pub struct Class {
     /// The classes whose objects the receiver of each instance call in code that can run may be,
     /// by the receiver's id, from the points-to facts of `analysis::live_methods` (a whole
     /// program's); sorted. A call that is not here may be on an object of any class its type
-    /// allows.
-    pub receivers: HashMap<ExprId, Vec<usize>>,
+    /// allows. Calls with the same classes share one list: on the Minecraft server thousands of
+    /// calls may be on any of tens of thousands of classes.
+    pub receivers: HashMap<ExprId, std::sync::Arc<[usize]>>,
 }
 
 impl Class {

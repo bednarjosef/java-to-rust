@@ -97,7 +97,7 @@ impl Flow {
 /// until one of them changes: a set of every class of a type is copied into a great many places,
 /// and on the Minecraft server it is thousands of words.
 #[derive(Clone, Debug)]
-pub(super) struct ClassSet {
+pub struct ClassSet {
     /// The index of the first word in `words`.
     start: usize,
     words: Rc<Vec<u64>>,
@@ -130,7 +130,7 @@ impl ClassSet {
         }
     }
 
-    fn insert(&mut self, c: usize) {
+    pub(super) fn insert(&mut self, c: usize) {
         self.cover(c / 64, c / 64 + 1);
         Rc::make_mut(&mut self.words)[c / 64 - self.start] |= 1 << (c % 64);
     }
@@ -172,7 +172,7 @@ impl ClassSet {
         }
     }
 
-    pub(super) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.words.iter().enumerate().flat_map(move |(i, &word)| {
             (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| (self.start + i) * 64 + b)
         })
