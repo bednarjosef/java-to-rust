@@ -21,25 +21,38 @@ pub(crate) fn rewritten_clinit(decl: &TypeDecl) -> bool {
     decl.statics.iter().any(|f| f.name == STATE)
 }
 
+/// The constructors of `ExceptionInInitializerError(Throwable)`, `ExceptionInInitializerError(String)`
+/// and `NoClassDefFoundError(String, Throwable)`, each with its class, when the program declares them.
+pub(super) struct ClinitCtors(Option<[(usize, usize); 3]>);
+
 impl<'t> Lowering<'t> {
+    /// The constructors that a rewritten `<clinit>` calls, found once among `methods` for every
+    /// class's: looking through every method for each class took a large part of lowering the
+    /// Minecraft server. Lowering only adds methods that are not these constructors after.
+    pub(super) fn clinit_ctors(&self, methods: &[Method]) -> ClinitCtors {
+        let throwable = Type::class(THROWABLE);
+        ClinitCtors(
+            self.ctor(methods, EIIE, &[throwable])
+                .zip(self.ctor(methods, EIIE, &[Type::String]))
+                .zip(self.ctor(methods, NCDFE, &[Type::String, throwable]))
+                .map(|((to_eiie, eiie_text), ncdfe)| [to_eiie, eiie_text, ncdfe]),
+        )
+    }
+
     /// Rewrites the `<clinit>` `method` of the class `index` to the state machine of the module
     /// comment, when the program declares the exception classes it needs; the two state fields go
-    /// in `decl`. `methods` holds the constructors that the new code calls.
+    /// in `decl`. `ctors` are the constructors that the new code calls (`clinit_ctors`).
     pub(super) fn guard_clinit(
         &self,
         index: usize,
         method: &mut Method,
         decl: &mut TypeDecl,
-        methods: &[Method],
+        ctors: &ClinitCtors,
     ) {
         let throwable = Type::class(THROWABLE);
-        let (Some(to_eiie), Some(eiie_text), Some(ncdfe), Some(error), Some(any)) = (
-            self.ctor(methods, EIIE, &[throwable]),
-            self.ctor(methods, EIIE, &[Type::String]),
-            self.ctor(methods, NCDFE, &[Type::String, throwable]),
-            self.type_index(ERROR),
-            self.type_index(THROWABLE),
-        ) else {
+        let (Some([to_eiie, eiie_text, ncdfe]), Some(error), Some(any)) =
+            (ctors.0, self.type_index(ERROR), self.type_index(THROWABLE))
+        else {
             return;
         };
         let pos = method.pos;

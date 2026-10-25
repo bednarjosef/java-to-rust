@@ -445,18 +445,26 @@ struct Lowering<'t> {
 /// of its body alone, and the error.
 type CensusError = (usize, Option<Pos>, Option<usize>, Error);
 
+/// What `finish_types` keeps from one enum to the next.
+struct EnumsKept {
+    writes: enums::EnumFieldWrites,
+    uses: enum_tables::EnumFieldUses,
+    clinit_ctors: clinit_errors::ClinitCtors,
+}
+
 impl<'t> Lowering<'t> {
     /// What lowering adds once every declared method is lowered, for a file and a whole program
     /// alike: the `<clinit>` of each class with static initialization, and each enum's constant
     /// bodies and constants. An error comes with the index of the type it is in.
     fn finish_types(&self, types: &mut [TypeDecl], methods: &mut Vec<Method>) -> Result<(), (usize, Error)> {
+        let ctors = self.clinit_ctors(methods);
         for index in (0..types.len()).filter(|&t| self.has_static_init(t)) {
             let mut clinit = self.clinit(index).map_err(|e| (index, e))?;
-            self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
+            self.guard_clinit(index, &mut clinit, &mut types[index], &ctors);
             methods.push(clinit);
         }
-        let mut writes = enums::EnumFieldWrites::default();
-        let mut uses = enum_tables::EnumFieldUses::default();
+        let mut kept =
+            EnumsKept { writes: Default::default(), uses: Default::default(), clinit_ctors: ctors };
         let enum_indices: Vec<usize> =
             (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM").collect();
         // Every enum's constant bodies come first: a body's method may read another enum's fields,
@@ -466,16 +474,16 @@ impl<'t> Lowering<'t> {
             .iter()
             .map(|&index| {
                 self.constant_bodies(index, methods).and_then(|()| {
-                    writes.forget(methods, index);
+                    kept.writes.forget(methods, index);
                     self.constant_body_fields(index)
                 })
             })
             .collect();
         for (index, bodies) in enum_indices.into_iter().zip(made) {
-            let finished = self.finish_enum(index, types, methods, bodies, &mut writes, &mut uses);
+            let finished = self.finish_enum(index, types, methods, bodies, &mut kept);
             // The enum's own methods may have changed.
-            writes.forget(methods, index);
-            uses.forget(methods, index);
+            kept.writes.forget(methods, index);
+            kept.uses.forget(methods, index);
             if let Err(e) = finished {
                 // In a census, an enum that lowering rejects keeps its constants without values.
                 self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
@@ -495,12 +503,11 @@ impl<'t> Lowering<'t> {
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
         bodies: Result<Vec<Vec<Field>>, Error>,
-        writes: &mut enums::EnumFieldWrites,
-        uses: &mut enum_tables::EnumFieldUses,
+        kept: &mut EnumsKept,
     ) -> Result<(), Error> {
         let bodies = bodies?;
         let own_fields = types[index].fields.len();
-        let pure = self.check_enum(index, methods, writes).and_then(|()| {
+        let pure = self.check_enum(index, methods, &mut kept.writes).and_then(|()| {
             self.add_body_fields(&bodies, &mut types[index].fields)?;
             self.enum_constants(index, &types[index].fields, methods, &bodies)
         });
@@ -511,7 +518,7 @@ impl<'t> Lowering<'t> {
             Err(_) => {
                 types[index].fields.truncate(own_fields);
                 self.add_body_fields(&bodies, &mut types[index].fields)?;
-                self.enum_tables(index, types, methods, bodies, uses)?;
+                self.enum_tables(index, types, methods, bodies, &mut kept.uses, &kept.clinit_ctors)?;
                 let names = self.enum_constant_names(index);
                 names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
             }
