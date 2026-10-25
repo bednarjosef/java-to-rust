@@ -119,9 +119,7 @@ impl<'t> Lowering<'t> {
             .filter_map(|o| {
                 let owner = o["owner"].as_str()?;
                 let sig = o["type"].as_str()?;
-                self.methods
-                    .iter()
-                    .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
+                self.method_named(owner, name, sig)
             })
             .collect()
     }
