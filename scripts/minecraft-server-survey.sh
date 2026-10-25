@@ -449,9 +449,20 @@ memory_cap_command() {
   fi
 }
 
+# Waits up to 600 s for the server in the current directory to log that it is done starting, then
+# prints `stop`.
+stop_when_started() {
+  local waited=0
+  until grep -q 'Done (' stdout.txt 2>/dev/null || [ $waited -ge 600 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo stop
+}
+
 # The server's first start in DIR, a new directory with the EULA accepted (as eula.txt), run as
 # COMMAND...: it makes a world and stops at the "stop" that it reads on standard input once
-# loaded, printing the console's log to DIR/stdout.txt. At most 10 minutes.
+# started, printing the console's log to DIR/stdout.txt. At most 10 minutes.
 run_server() {
   local dir=$1
   shift
@@ -460,7 +471,9 @@ run_server() {
   local start code
   start=$(date +%s)
   set +e
-  (cd "$dir" && echo stop | timeout 600 "$@" --nogui > stdout.txt 2> stderr.txt)
+  # `stop` goes in once the server is done starting: the server fails one that comes earlier
+  # ("An unexpected error occurred while trying to execute that command") and keeps running.
+  (cd "$dir" && stop_when_started | timeout 600 "$@" --nogui > stdout.txt 2> stderr.txt)
   code=$?
   set -e
   echo "exit $code after $(($(date +%s) - start)) s" | tee "$dir/run.txt"
