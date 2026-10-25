@@ -256,7 +256,10 @@ repair_tree() {
 repair() {
   repair_tree "$cache/src/server" "$(library_jars | paste -sd:)" "$cache/repair-log.txt" "$(server_jar)"
   if [ -f "$cache/hand-fixes/server.patch" ]; then
-    patch -p1 -N -d "$cache/src/server" < "$cache/hand-fixes/server.patch" > "$cache/hand-fixes/applied.txt"
+    # A hunk that the repair already made is skipped (and saved as a .rej file beside its file),
+    # which patch reports as a failure; applied.txt lists it.
+    patch -p1 -N -d "$cache/src/server" < "$cache/hand-fixes/server.patch" > "$cache/hand-fixes/applied.txt" \
+      || echo "hand fixes: not all applied, see hand-fixes/applied.txt"
     echo "hand fixes: $(grep -c '^patching' "$cache/hand-fixes/applied.txt") files"
   fi
   unpublished_jars | while IFS= read -r lib; do

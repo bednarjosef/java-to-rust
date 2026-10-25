@@ -37,7 +37,16 @@
 // - a cast whose last type argument the decompiler left empty (`(Function<Object, >) a -> x`)
 //   made a cast to the raw type;
 // - an unresolved variable in a catch block renamed to the catch parameter that encloses every
-//   use of the name and is not used itself (the decompiler declared `e` and used `ex`).
+//   use of the name and is not used itself (the decompiler declared `e` and used `ex`);
+// - a parameter whose type the decompiler erased, in a method that then overrides nothing and
+//   leaves its class abstract, written with the type of the method of a supertype that has the
+//   same erasure (`encode(R input, ..)` for `encode(Object input, ..)`);
+// - in an argument, or in an expression whose type variables javac cannot infer, a call's type
+//   arguments that name `Object` (`Either.<Object, R>unbox(e)`, types the decompiler could not
+//   name) left out, and a cast to a type variable erased to `Object` that is a lambda's whole
+//   body (`a -> (T) f.apply(a)`) left out (no checkcast either way);
+// - `new Outer.Inner<>(..)` of an inner class of a generic class that the enclosing class is or
+//   extends, which javac rejects with the raw qualifier, written `new Inner<>(..)`.
 //
 // A file whose errors outside imports and annotations do not go down after a round gets its
 // previous text back. Each edit is written to LOG.
@@ -260,10 +269,30 @@ public class RepairDecompile {
                             edits.addAll(diamonds);
                         } else if (detail != null) {
                             Type found = (Type) detail.getArgs()[0], expected = (Type) detail.getArgs()[1];
-                            Edit edit = witness(cu, path);
+                            // An argument of a call whose type arguments the decompiler gave as
+                            // `Object`: those go first, and inference may then take the argument.
+                            Edit edit = path.getParentPath().getLeaf() instanceof JCTree.JCMethodInvocation call
+                                && call.args.contains(tree) ? objectTypeArguments(cu, call) : null;
+                            if (edit == null) edit = witness(cu, path);
                             if (edit == null) edit = cast(types, cu, tree, path.getParentPath().getLeaf(), found, expected);
                             if (edit != null) edits.add(edit);
+                        } else if (inference(diag)) {
+                            edits.addAll(inferenceHints(types, cu, tree));
                         }
+                    }
+                    case "compiler.err.does.not.override.abstract" -> {
+                        // The class's methods of the abstract method's name, one of which the
+                        // decompiler wrote with an erased parameter type.
+                        JCTree.JCClassDecl decl = tree instanceof JCTree.JCClassDecl c ? c
+                            : tree instanceof JCTree.JCNewClass created ? created.def : null;
+                        if (decl != null && diag.getArgs()[1] instanceof Symbol.MethodSymbol missing)
+                            for (JCTree def : decl.defs)
+                                if (def instanceof JCTree.JCMethodDecl method && method.name == missing.name)
+                                    edits.addAll(overriddenParameters(types, cu, TreePath.getPath(unit, method)));
+                    }
+                    case "compiler.err.improperly.formed.type.inner.raw.param" -> {
+                        Edit edit = innerOfRawQualifier(types, cu, path);
+                        if (edit != null) edits.add(edit);
                     }
                     case "compiler.err.cant.apply.symbol" -> edits.addAll(rawArguments(cu, path));
                     case "compiler.err.non-static.cant.be.ref" -> {
@@ -288,6 +317,133 @@ public class RepairDecompile {
     }
 
     static class Unprintable extends Exception {}
+
+    // Whether an error is one of inference: a call's type variables that javac cannot infer, or
+    // whose bounds disagree.
+    static boolean inference(JCDiagnostic diag) {
+        for (Object arg : diag.getArgs()) {
+            if (!(arg instanceof JCDiagnostic detail)) continue;
+            String code = detail.getCode();
+            if (code.startsWith("compiler.misc.infer.") || code.startsWith("compiler.misc.incompatible.")
+                    && code.endsWith("bounds")) return true;
+            if (inference(detail)) return true;
+        }
+        return false;
+    }
+
+    // Inside the expression of an inference error (`expr`), what the decompiler wrote that
+    // inference then has to meet, left out: a cast to a type variable whose erasure is `Object`
+    // that is a lambda's whole body (`e -> (T) f.apply(e)`, a variable of the enclosing method's
+    // that the decompiler chose for the erased result), and the type arguments of a call that
+    // give `Object` (`Either.<Object, R>unbox(a)`, a type it could not name). Such a cast makes no
+    // checkcast, and type arguments are inference only.
+    static List<Edit> inferenceHints(Types types, JCTree.JCCompilationUnit cu, JCTree expr) {
+        List<Edit> edits = new ArrayList<>();
+        new TreeScanner<Void, Void>() {
+            public Void visitLambdaExpression(LambdaExpressionTree node, Void v) {
+                if (((JCTree.JCLambda) node).body instanceof JCTree.JCTypeCast cast && cast.clazz.type != null
+                        && cast.clazz.type.hasTag(TypeTag.TYPEVAR) && !(cast.clazz.type instanceof Type.CapturedType)
+                        && types.erasure(cast.clazz.type).tsym.getQualifiedName().contentEquals("java.lang.Object")) {
+                    int start = cast.getStartPosition(), body = cast.expr.getStartPosition();
+                    edits.add(new Edit(start, body, "", "no cast " + source(cu, start, body).strip() + " of a lambda's result"));
+                }
+                return super.visitLambdaExpression(node, v);
+            }
+
+            public Void visitMethodInvocation(MethodInvocationTree node, Void v) {
+                Edit edit = objectTypeArguments(cu, (JCTree.JCMethodInvocation) node);
+                if (edit != null) edits.add(edit);
+                return super.visitMethodInvocation(node, v);
+            }
+        }.scan(expr, null);
+        return edits;
+    }
+
+    // The type arguments of `call` left out, where one of them is `Object`.
+    static Edit objectTypeArguments(JCTree.JCCompilationUnit cu, JCTree.JCMethodInvocation call) {
+        if (!(call.meth instanceof JCTree.JCFieldAccess select) || call.typeargs.stream().noneMatch(
+                t -> t.type != null && t.type.hasTag(TypeTag.CLASS)
+                    && t.type.tsym.getQualifiedName().contentEquals("java.lang.Object"))) return null;
+        int after = TreeInfo.getEndPos(select.selected, cu.endPositions);
+        String text = source(cu, after, TreeInfo.getEndPos(select, cu.endPositions));
+        int open = text.indexOf('<'), close = text.lastIndexOf('>');
+        if (open < 0 || close < open) return null;
+        return new Edit(after + open, after + close + 1, "", "no type arguments " + text.substring(open, close + 1) + " naming Object");
+    }
+
+    // For a method (around `path`) that has the name and the erased parameter types of a method of
+    // its supertypes but does not override it, because a parameter's type is the erasure where the
+    // overridden method has a type variable (`encode(Object input, ..)` for `encode(R input, ..)`
+    // in a `MapEncoder.Implementation<R>`): those parameters with the overridden method's types as
+    // the class inherits it. The same method seen through several supertypes counts once; two
+    // methods that disagree get no edit. The erasure, and with it the method's descriptor, stays.
+    static List<Edit> overriddenParameters(Types types, JCTree.JCCompilationUnit cu, TreePath path) throws Unprintable {
+        while (path != null && !(path.getLeaf() instanceof JCTree.JCMethodDecl)) {
+            if (path.getLeaf() instanceof ClassTree) return List.of();
+            path = path.getParentPath();
+        }
+        if (path == null) return List.of();
+        JCTree.JCMethodDecl method = (JCTree.JCMethodDecl) path.getLeaf();
+        if (method.sym == null || !(method.sym.owner instanceof Symbol.ClassSymbol owner)) return List.of();
+        Symbol.MethodSymbol own = method.sym;
+        List<Type> overridden = null;
+        for (Type supertype : types.closure(owner.type)) {
+            if (supertype.tsym == owner) continue;
+            for (Symbol member : supertype.tsym.members().getSymbolsByName(own.name)) {
+                if (!(member instanceof Symbol.MethodSymbol other) || other.isStatic()
+                        || other.params().size() != own.params().size()
+                        || other.getTypeParameters().size() != own.getTypeParameters().size()
+                        || own.overrides(other, owner, types, true)) continue;
+                Type inherited = types.memberType(owner.type, other);
+                if (!types.isSameTypes(types.erasure(inherited).getParameterTypes(),
+                        types.erasure(own.type).getParameterTypes())) continue;
+                // The overridden method's own type variables, as the method names them.
+                List<Type> params = new ArrayList<>();
+                for (Type param : inherited.getParameterTypes())
+                    params.add(types.subst(param, inherited.getTypeArguments(), own.type.getTypeArguments()));
+                // The same method seen through two supertypes is one; two others are ambiguous.
+                if (overridden != null && !types.isSameTypes(com.sun.tools.javac.util.List.from(overridden),
+                        com.sun.tools.javac.util.List.from(params))) return List.of();
+                overridden = params;
+            }
+        }
+        if (overridden == null) return List.of();
+        List<Edit> edits = new ArrayList<>();
+        for (int i = 0; i < method.params.size(); i++) {
+            JCTree.JCVariableDecl param = method.params.get(i);
+            Type wanted = overridden.get(i);
+            if (param.vartype == null || param.vartype.type == null || types.isSameType(param.vartype.type, wanted)) continue;
+            String written = print(cu, wanted, false);
+            int start = TreeInfo.getStartPos(param.vartype), end = TreeInfo.getEndPos(param.vartype, cu.endPositions);
+            edits.add(new Edit(start, end, written, "overridden parameter type " + written + ": " + param.name));
+        }
+        return edits;
+    }
+
+    // For `new Outer.Inner<>(..)` (around `path`), where `Inner` is an inner class of a generic
+    // class `Outer` that the enclosing class is or extends: `new Inner<>(..)`, the same creation
+    // with the enclosing `this` as the outer instance, which the decompiler qualified with the raw
+    // outer class, which javac rejects with type arguments.
+    static Edit innerOfRawQualifier(Types types, JCTree.JCCompilationUnit cu, TreePath path) {
+        while (path != null && !(path.getLeaf() instanceof JCTree.JCNewClass)) {
+            if (path.getLeaf() instanceof StatementTree) return null;
+            path = path.getParentPath();
+        }
+        if (path == null) return null;
+        JCTree.JCNewClass created = (JCTree.JCNewClass) path.getLeaf();
+        if (created.encl != null || !(created.clazz instanceof JCTree.JCTypeApply apply)
+                || !(apply.clazz instanceof JCTree.JCFieldAccess select)
+                || !(TreeInfo.symbol(select) instanceof Symbol.ClassSymbol inner) || inner.isStatic()
+                || !(inner.owner instanceof Symbol.ClassSymbol outer) || outer.type.getTypeArguments().isEmpty()
+                || TreeInfo.symbol(select.selected) != outer) return null;
+        JCTree.JCClassDecl enclosing = enclosingClass(cu, created);
+        if (enclosing == null || enclosing.sym == null || !hasOuterInstance(types, enclosing.sym, outer)) return null;
+        int start = TreeInfo.getStartPos(select.selected), name = TreeInfo.getEndPos(select.selected, cu.endPositions);
+        String qualifier = source(cu, start, TreeInfo.getEndPos(select, cu.endPositions));
+        int dot = qualifier.indexOf('.', name - start);
+        if (dot < 0) return null;
+        return new Edit(start, start + dot + 1, "", "inner class without the raw qualifier " + source(cu, start, start + dot + 1));
+    }
 
     // Each type variable bounded by a member class of its own name (`Mu extends Mu`, which names
     // the variable itself), with the bound written as the member of the class
@@ -444,6 +600,16 @@ public class RepairDecompile {
             if (nested != null) return nested;
         }
         return null;
+    }
+
+    // Whether code of class `c` has an instance of class `outer` as `this`: `c` or a class it is
+    // an inner class of is or extends `outer`.
+    static boolean hasOuterInstance(Types types, Symbol.ClassSymbol c, Symbol.ClassSymbol outer) {
+        for (Symbol at = c; at instanceof Symbol.ClassSymbol k; at = k.owner.enclClass()) {
+            if (k.isSubClass(outer, types)) return true;
+            if (k.isStatic() || k.owner.enclClass() == null) return false;
+        }
+        return false;
     }
 
     // `(Expected) (Erased<?>) expr`, when the found type's erasure is a subtype of the expected
