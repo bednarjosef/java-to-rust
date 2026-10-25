@@ -185,6 +185,11 @@ public class BytecodeNames {
     private final Map<Symbol, JCClassDecl> classes = new HashMap<>();
     /** Where each node of the attributed trees starts, as line and column. */
     private final Map<JCTree, long[]> starts = new IdentityHashMap<>();
+    /**
+     * The local of each {@code ++w} and {@code --w}, with where the update starts, before the
+     * local: a boxed local is unboxed there, which the translation looks the local up by.
+     */
+    private final Map<JCTree, long[]> prefixed = new IdentityHashMap<>();
     /** The members of each class as lowered, which the code generator discards once done. */
     private final Map<JCClassDecl, com.sun.tools.javac.util.List<JCTree>> lowered = new HashMap<>();
     /** The entries: class, line, column, kind and name, to the text or null. */
@@ -240,6 +245,11 @@ public class BytecodeNames {
                                 int start = TreeInfo.getStartPos(tree);
                                 if (start >= 0) {
                                     starts.put(tree, position(unit, start));
+                                }
+                                if (tree instanceof JCUnary u
+                                        && (u.getTag() == JCTree.Tag.PREINC || u.getTag() == JCTree.Tag.PREDEC)
+                                        && TreeInfo.skipParens(u.arg) instanceof JCIdent id) {
+                                    prefixed.put(id, position(unit, start));
                                 }
                                 if (tree instanceof JCClassDecl c) {
                                     classes.put(c.sym, c);
@@ -464,6 +474,10 @@ public class BytecodeNames {
                         }
                         start = position(unit, at.pos);
                     }
+                    put(start, kind, name, text);
+                }
+
+                private void put(long[] start, String kind, String name, String text) {
                     List<Object> key = List.of(outermost, start[0], start[1], kind, name);
                     if (entries.containsKey(key) && !Objects.equals(entries.get(key), text)) {
                         text = null;
@@ -513,7 +527,11 @@ public class BytecodeNames {
                     if (t.sym instanceof VarSymbol v && v.owner.kind == Kinds.Kind.MTH) {
                         // The JDK compiles its modules with the names of their locals (`-g`).
                         if (!t.name.toString().contains("$")) {
-                            entry(t, "local", t.name.toString(), jdkModule ? t.name.toString() : local(v, t));
+                            String text = jdkModule ? t.name.toString() : local(v, t);
+                            entry(t, "local", t.name.toString(), text);
+                            if (prefixed.containsKey(t)) {
+                                put(prefixed.get(t), "local", t.name.toString(), text);
+                            }
                         }
                     } else if (t.sym instanceof VarSymbol v && v.isStatic() && v.getConstValue() == null) {
                         entry(t, "static", t.name.toString(), member(v, c.sym.type));

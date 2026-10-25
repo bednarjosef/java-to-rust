@@ -231,7 +231,11 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
   keeps its fast copy: the check before it proves its accesses, and the other copy fails where
   Java does.
 - **A null dereference** (`Facts::null_checked`) uses the checked `non_null`
-  (`java::try_non_null`, or `try_non_null_message` where the message is read, see below).
+  (`java::try_non_null`, or `try_non_null_message` where the message is read, see below). So
+  does a null box wherever it is converted to a primitive, which the code mostly does not write
+  as a cast (`analysis/unboxing.rs`): an operand, a value returned, assigned, passed or
+  initializing a local, an arm of `?:` or of a switch expression, an index, a size, an element of
+  an array of primitives, and a boxed local that `++` or `+=` updates.
 - **Anything else of a standard class** (`Facts::catching`), such as `new int[n]` with a
   negative size, `System.arraycopy`, or a `compareTo` of a raw `Comparable` whose argument is of
   another class (`comparable.rs`, the bridge's cast), runs inside `java::catching(|| op)`
@@ -434,8 +438,9 @@ written in checked form exactly when it is in the analysis's set.
   condition, `&&`, `||` or `?:`, and not assigned in the guarded code, raises no
   `NullPointerException` there. `o instanceof T` proves `o` non-null and a cast of it to `T` or a
   class above safe; `!` is followed; `if (c) return;` (or `throw`, `break`, `continue`) narrows
-  the statements after it; a local initialized from a value so known is non-null. A cast cannot
-  fail either when every object its value may be is under the target type (`Facts::flows`).
+  the statements after it, in a block or a `switch` case; a local initialized from a value so
+  known is non-null. A cast cannot fail either when every object its value may be is under the
+  target type (`Facts::flows`).
 - **Casts that lowering inserts** (javac's conversion of an erased type variable's value) are not
   counted as `ClassCastException`.
 - **Arguments before the receiver's check**: Java throws the `NullPointerException` of a call on
@@ -546,7 +551,9 @@ generator to tell which. The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
 back, an element with its index when that is a constant (an `int` constant field too, which
 javac writes as its value), a local or a call, an enum's `ordinal()` among them (`[...]` otherwise),
-no `because` for the value of `c ? a : b`, no message for a pattern switch's
+no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
+writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
+the update starts, which `BytecodeNames` notes), no message for a pattern switch's
 `Objects.requireNonNull`, and an assigned value followed back to its source
 (`(s = a).next` fails `because "a" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
@@ -571,7 +578,7 @@ by the body's anonymous class (`java.time.temporal.IsoFields$Field$1.rangeRefine
 binary name the tree gives. Calls of one method that start at the same place, as the calls of a
 chain do (`b.append('0').append(1)`), are told apart by their first argument
 (`ClassFileNames::chained_calls`). Also covered: `String` methods by the overload javac chose,
-unboxing as the call it is (`java.lang.Integer.intValue()`), the JDK's constructors that fail
+the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`) and its methods that do (a null format of
 `String.format`, which `Formatter.parse` asks for its length, a null `CharSequence` of
 `contentEquals`), a static by the class that declares it, an
@@ -609,8 +616,8 @@ instance initializer (copied into every constructor), of a JDK local the transla
 renamed, of the enclosing instance of a nested class where javac's field or parameter for it is
 not certain (a superclass's field, a lambda in a constructor that captures locals too), of a
 local captured by a local class in its constructor's code, a dereference in the code of `java.lang`,
-a failure of the runtime without the checked form (an unboxing the code does not write as a
-call, a library call given null other than a `compareTo`'s argument), any other dereference in the body of a method reference's class, and a
+a failure of the runtime without the checked form (a library call given null other than a
+`compareTo`'s argument), any other dereference in the body of a method reference's class, and a
 field of a field of an enclosing instance.
 
 ## Differences from Java

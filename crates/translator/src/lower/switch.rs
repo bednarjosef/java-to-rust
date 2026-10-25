@@ -111,14 +111,23 @@ impl<'t> Lowering<'t> {
     }
 
     /// Converts the values that these statements of a switch expression yield to its type `ty`
-    /// (a subclass's object to its superclass, an `int` to a `long`).
+    /// (a subclass's object to its superclass, an `int` to a `long`), a box to a primitive by
+    /// the cast that unboxes it, which may throw (`analysis::unboxing`).
     fn convert_yields(&self, stmts: &mut [Stmt], ty: Type) {
         for stmt in stmts {
             match stmt {
                 Stmt::Yield(value) => {
                     let placeholder = self.synth(ExprKind::Null, value.pos, Type::Null);
                     let old = std::mem::replace(value, placeholder);
-                    *value = self.convert(old, ty);
+                    let converted = self.convert(old, ty);
+                    *value = if matches!(converted.ty, Type::Boxed(_))
+                        && (ty.is_numeric() || ty == Type::Boolean)
+                    {
+                        let pos = converted.pos;
+                        self.synth(ExprKind::Cast(ty, Box::new(converted)), pos, ty)
+                    } else {
+                        converted
+                    };
                 }
                 Stmt::Block(body) => self.convert_yields(body, ty),
                 Stmt::If { then, otherwise, .. } => {

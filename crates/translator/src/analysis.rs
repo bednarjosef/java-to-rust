@@ -41,6 +41,7 @@ mod ranges;
 mod statics;
 mod string_identity;
 mod threads;
+pub(crate) mod unboxing;
 mod whole_objects;
 
 use crate::ast::*;

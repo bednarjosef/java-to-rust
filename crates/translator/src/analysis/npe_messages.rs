@@ -209,7 +209,15 @@ impl Messages<'_> {
     /// The messages of the dereferences that expression `x` makes itself, by object.
     fn expr(&self, x: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
         if let ExprKind::Conditional(cond, ..) = &x.kind {
-            self.condition(cond, out);
+            self.unboxing(cond, out);
+        }
+        for value in crate::analysis::unboxing::unboxed_by(self.class, x) {
+            self.unboxing(value, out);
+        }
+        // `w++` of a boxed local reads the local where the update starts.
+        if let Some(v) = crate::analysis::unboxing::updated_box(x) {
+            let read = Expr { kind: ExprKind::Var(v.to_string()), pos: x.pos, ty: x.ty, id: x.id };
+            self.unboxing(&read, out);
         }
         let mut add = |object: &Expr, action: Option<String>| {
             // A message that the expression above gave (a native's).
@@ -256,17 +264,6 @@ impl Messages<'_> {
                 };
                 let call = self.call_of(x, name).or_else(empty).or_else(|| self.jdk_call(x));
                 add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
-            }
-            // Unboxing in the JDK's code, which javac writes as a call of the boxed class's
-            // method (`Integer.intValue()`, also for a wider result), on the failing conversion.
-            ExprKind::Cast(to, value)
-                if self.jdk && !to.is_reference() && matches!(value.ty, Type::Boxed(_)) =>
-            {
-                let primitive = value.ty.unboxed();
-                let action = format!("Cannot invoke \"java.lang.{}.{primitive}Value()\"", value.ty);
-                if let Some(message) = self.message(&action, value) {
-                    out.insert(x.id, Some(message));
-                }
             }
             // The natives of `java.io`, whose C code throws an exception with no message for a null
             // string or array (a path, the name of a file to open, a buffer) and for a null `File`
@@ -731,10 +728,13 @@ impl Messages<'_> {
             self.switch(selector, out);
         }
         if let Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } = s {
-            self.condition(cond, out);
+            self.unboxing(cond, out);
         }
         if let Stmt::For { cond: Some(cond), .. } = s {
-            self.condition(cond, out);
+            self.unboxing(cond, out);
+        }
+        if let Some(value) = crate::analysis::unboxing::unboxed_by_stmt(self.method, s) {
+            self.unboxing(value, out);
         }
         if let Stmt::Throw(e) = s {
             // The value is converted to `Throwable`, a cast that the class file does not have.
@@ -748,14 +748,15 @@ impl Messages<'_> {
         }
     }
 
-    /// The message of the unboxing of a `Boolean` condition, which a `catch` may see: the
-    /// condition of `if`, `while` and the like, and of `?:` (`Gen::condition`).
-    fn condition(&self, cond: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
-        if matches!(cond.ty, Type::Boxed(_)) && cond.ty.unboxed() == Type::Boolean {
-            let action = "Cannot invoke \"java.lang.Boolean.booleanValue()\"";
-            if let Some(message) = self.message(action, cond) {
-                out.insert(cond.id, Some(message));
-            }
+    /// The message of the unboxing of the box `value` (`analysis::unboxing`), which a `catch` may
+    /// see: a `Boolean` condition of `if`, `while` and the like, and of `?:` (`Gen::condition`),
+    /// and any other box where a primitive is wanted (`Gen::boxing_value`). javac writes it as a
+    /// call of the box's method (`Integer.intValue()`, also for a wider primitive).
+    fn unboxing(&self, value: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+        if matches!(value.ty, Type::Boxed(_))
+            && let Some(message) = self.message(&crate::analysis::unboxing::unboxing_action(value), value)
+        {
+            out.entry(value.id).or_insert(Some(message));
         }
     }
 

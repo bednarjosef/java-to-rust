@@ -340,11 +340,8 @@ impl<'a> Gen<'a> {
         id: ExprId,
     ) -> Code {
         let kind = ty.unboxed();
-        let current = if optional {
-            Code::atom(format!("{}({})", self.runtime("non_null"), current.text))
-        } else {
-            current
-        };
+        // A null throws, in the checked form where a `catch` may see it (`analysis::unboxing`).
+        let current = if optional { Code::atom(self.dereference(&[id], &current.text)) } else { current };
         let current = self.unbox_code(current, kind, false);
         let result = crate::types::binary_type(op, kind, right.ty.unboxed()).expect("checked");
         let code = self.binary(op, Operand { code: current, ty: kind }, right, result, id);

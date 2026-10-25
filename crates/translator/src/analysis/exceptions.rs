@@ -38,7 +38,7 @@ mod comparable;
 mod conditions;
 mod entry;
 mod failures;
-use conditions::condition_points;
+use conditions::{condition_points, statement_unboxing_points};
 use failures::format_may_fail;
 mod field_inits;
 pub(super) mod guards;
@@ -1189,9 +1189,18 @@ fn stmt_points(
             }
         }
         Stmt::Block(stmts) => block_points(class, facts, m, stmts, frames, safe, out),
+        // Each case narrows as it goes, as a block does; one that falls through to the next
+        // starts that one without what it narrowed.
+        Stmt::Switch { cases, .. } => {
+            visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, safe, out));
+            for case in cases {
+                block_points(class, facts, m, &case.body, frames, safe, out);
+            }
+        }
         _ => {
             // The expressions of this statement, then its nested statements.
             visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, safe, out));
+            statement_unboxing_points(class, facts, m, s, frames, safe, out);
             for nested in children(s) {
                 stmt_points(class, facts, m, nested, frames, safe, out);
             }

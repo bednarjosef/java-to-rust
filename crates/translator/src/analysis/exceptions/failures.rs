@@ -673,11 +673,6 @@ pub(super) fn runtime_failures(
                 out.push(("java.lang.NegativeArraySizeException", "this array creation", false, x.id));
             }
         }
-        ExprKind::Cast(to, value)
-            if !to.is_reference() && matches!(value.ty, Type::Boxed(_)) && null(value) =>
-        {
-            out.push((NPE, "this unboxing", false, x.id))
-        }
         ExprKind::Builtin(builtin, args) => match builtin {
             // A null class, or a null argument, is dereferenced with the checked form
             // (`Gen::class_method`).
@@ -1092,26 +1087,23 @@ pub(super) fn runtime_failures(
             out.push((NPE, "this compareTo", false, x.id));
         }
     }
-    // A box that may be null is unboxed by arithmetic and comparisons, but not by `==` or `!=`
-    // with an operand that is no primitive (`v == null`), which compares references.
-    // The right operand of `&&` (`||`) runs once the left one is true (false): `v != null && v`
-    // unboxes a `v` that is not null.
-    if let ExprKind::Binary(op, l, r) = &x.kind {
-        for (operand, other) in [(l, r), (r, l)] {
-            let reference =
-                matches!(op, BinOp::Eq | BinOp::Ne) && !(other.ty.is_numeric() || other.ty == Type::Boolean);
-            let checked = std::ptr::eq(operand, r)
-                && matches!(&r.kind, ExprKind::Var(v) if checks_null(l, v, *op == BinOp::And))
-                && matches!(op, BinOp::And | BinOp::Or);
-            if matches!(operand.ty, Type::Boxed(_))
-                && null(operand)
-                && !matches!(x.ty, Type::String)
-                && !reference
-                && !checked
-            {
-                out.push((NPE, "this unboxing", false, x.id));
-            }
+    // A box that may be null throws where it is unboxed (`analysis::unboxing`), in the checked
+    // form. The right operand of `&&` (`||`) runs once the left one is true (false):
+    // `v != null && v` unboxes a `v` that is not null.
+    for operand in crate::analysis::unboxing::unboxed_by(class, x) {
+        let checked = matches!(&x.kind, ExprKind::Binary(op @ (BinOp::And | BinOp::Or), l, r)
+            if std::ptr::eq(operand, &**r)
+                && matches!(&r.kind, ExprKind::Var(v) if checks_null(l, v, *op == BinOp::And)));
+        if null(operand) && !checked {
+            out.push((NPE, "this unboxing", true, operand.id));
         }
+    }
+    if let Some(v) = crate::analysis::unboxing::updated_box(x)
+        && m != usize::MAX
+        && !safe.iter().any(|s| s == v)
+        && crate::analysis::nullable_var(facts, m, v)
+    {
+        out.push((NPE, "this unboxing", true, x.id));
     }
     out
 }

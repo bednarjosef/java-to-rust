@@ -82,7 +82,12 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 {
                     elements.push(updated_element(x));
                 }
-                ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
+                // A box in an array of primitives is unboxed (`analysis::unboxing`), so the
+                // array holds no null.
+                ExprKind::ArrayLit(items)
+                    if nullable_type(x.ty.element())
+                        && items.iter().any(|item| maybe_null(facts, m, item)) =>
+                {
                     elements.push(x.ty.element());
                 }
                 // `Array.newArray` makes an array of any of the array classes that are `Object`s,
@@ -328,6 +333,10 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         ExprKind::Null => true,
         ExprKind::Var(name) => nullable_var(facts, m, name),
         ExprKind::Assign { op: None, target: Place::Var(_), value } => maybe_null(facts, m, value),
+        // `w++` or `w += 1` of a boxed local that may be null is the local's `Option`, which the
+        // update has unboxed (`analysis::unboxing`).
+        ExprKind::IncDec { target: Place::Var(name), .. }
+        | ExprKind::Assign { target: Place::Var(name), .. } => nullable_var(facts, m, name),
         ExprKind::Call { resolved: Some(callee), .. }
         | ExprKind::MethodCall { resolved: Some(callee), .. } => facts.nullable_returns.contains(callee),
         // In `s != null ? s : t` the arm that is just `s` is not null.
