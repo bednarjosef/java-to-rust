@@ -236,6 +236,10 @@ struct Analysis<'a> {
     /// address. An inner loop is solved again on every pass over the outer loop; starting from
     /// its last invariant usually confirms it in one pass instead of rebuilding it.
     heads: FastMap<usize, Env>,
+    /// The methods whose parameter ranges the current method's calls grew, each with its ranges
+    /// before, and a mark for each method that is among them.
+    grown: Vec<(usize, Vec<Interval>)>,
+    grown_marks: Vec<bool>,
 }
 
 impl<'a> Analysis<'a> {
@@ -262,6 +266,8 @@ impl<'a> Analysis<'a> {
             wide_chars: FastSet::default(),
             thresholds: Vec::new(),
             heads: FastMap::default(),
+            grown: Vec::new(),
+            grown_marks: vec![false; n],
         }
     }
 
@@ -301,11 +307,13 @@ impl<'a> Analysis<'a> {
         let mut growth = vec![0; n];
         while let Some(m) = dirty.pop_first() {
             let returned = self.returns[m];
-            let params: Vec<(usize, Vec<Interval>)> =
-                callees_of[m].iter().map(|&c| (c, self.params[c].clone())).collect();
             self.method(m);
-            for (c, before) in params {
-                if self.params[c] != before {
+            // The callees whose parameter ranges grew, in index order.
+            let mut grown = std::mem::take(&mut self.grown);
+            grown.sort_unstable_by_key(|&(c, _)| c);
+            for (c, before) in grown {
+                self.grown_marks[c] = false;
+                if callees_of[m].binary_search(&c).is_ok() && self.params[c] != before {
                     growth[c] += 1;
                     if growth[c] > 4 {
                         for (i, p) in self.class.methods[c].params.iter().enumerate() {
@@ -816,7 +824,14 @@ impl<'a> Analysis<'a> {
                 for (i, p) in self.class.methods[g].params.iter().enumerate() {
                     if p.ty.is_integral() {
                         let v = convert(values[i], args[i].ty, p.ty);
-                        self.params[g][i] = self.params[g][i].join(v);
+                        let joined = self.params[g][i].join(v);
+                        if joined != self.params[g][i] {
+                            if !self.grown_marks[g] {
+                                self.grown_marks[g] = true;
+                                self.grown.push((g, self.params[g].clone()));
+                            }
+                            self.params[g][i] = joined;
+                        }
                     }
                 }
             }
