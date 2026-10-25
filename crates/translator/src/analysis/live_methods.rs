@@ -103,6 +103,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         class,
         values: &values,
         glue: object_values::runtime_called_for_dispatch(class).into_iter().collect(),
+        glue_declared: glue_declared(class),
         supers: supers(class),
         index: class.types.iter().enumerate().map(|(t, d)| (d.name.as_str(), t)).collect(),
         state: RefCell::new(State {
@@ -243,6 +244,7 @@ impl Walk<'_> {
             class,
             values: self.values,
             glue: self.glue.clone(),
+            glue_declared: self.glue_declared.clone(),
             supers: self.supers.clone(),
             index: self.index.clone(),
             state: RefCell::new(State {
@@ -345,6 +347,20 @@ pub(super) fn largest_id(class: &Class) -> usize {
 }
 
 /// Every type above each type, itself included: its superclasses and its interfaces.
+/// The groups that the runtime may call (`runtime_called_for_dispatch`) that each type declares a
+/// method of.
+fn glue_declared(class: &Class) -> Vec<Vec<usize>> {
+    let glue = object_values::runtime_called_for_dispatch(class);
+    let mut declared = vec![Vec::new(); class.types.len()];
+    for (m, method) in class.methods.iter().enumerate() {
+        let group = class.hierarchy.group_id(m);
+        if glue.contains(&group) {
+            declared[method.class].push(group);
+        }
+    }
+    declared
+}
+
 fn supers(class: &Class) -> Vec<Vec<usize>> {
     (0..class.types.len())
         .map(|t| {
@@ -367,6 +383,8 @@ struct Walk<'a> {
     class: &'a Class,
     values: &'a ObjectValues,
     glue: Vec<usize>,
+    /// The groups of `glue` that each type declares a method of (`glue_declared`).
+    glue_declared: Vec<Vec<usize>>,
     supers: Vec<Vec<usize>>,
     index: HashMap<&'a str, usize>,
     state: RefCell<State>,
@@ -673,7 +691,12 @@ impl Walk<'_> {
             if !self.state.borrow_mut().glued.insert(c) {
                 continue;
             }
-            for &g in &self.glue {
+            // A class implements only the groups that a type above it declares a method of: asking
+            // for the others, of thousands of `toString`s and `equals`es, remembered an answer of
+            // none for each class, which ran the Minecraft server's census out of memory.
+            let above: HashSet<usize> =
+                self.supers[c].iter().flat_map(|&t| &self.glue_declared[t]).copied().collect();
+            for &g in self.glue.iter().filter(|g| above.contains(g)) {
                 if let Some(target) = self.values.implementation(self.class, g, c) {
                     self.enter(target, c, STATIC, None);
                 }
