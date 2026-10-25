@@ -65,7 +65,7 @@ pub(super) fn check(class: &Class) -> Result<(), Vec<Error>> {
             );
             errors.extend(found.err());
         }
-        errors.extend(block(&m.body).err());
+        errors.extend(block(&m.body, &mut HashSet::new()).err());
     }
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
@@ -495,21 +495,23 @@ fn exits(stmt: &Stmt) -> bool {
     }
 }
 
-fn block(stmts: &[Stmt]) -> Result<(), Error> {
+/// The statements `stmts` of a block (see `statement`). `done` holds the switch expressions whose
+/// statements have been checked so far, which `statement` checks once each.
+fn block(stmts: &[Stmt], done: &mut HashSet<*const Expr>) -> Result<(), Error> {
     let all: Vec<&Stmt> = stmts.iter().collect();
     for (i, s) in stmts.iter().enumerate() {
-        statement(s, &all[i + 1..])?;
+        statement(s, &all[i + 1..], done)?;
     }
     Ok(())
 }
 
 /// The statement `s`, followed by `rest` in its block: a pattern variable of its own expressions
 /// may be read only where the translation binds it.
-fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
+fn statement(s: &Stmt, rest: &[&Stmt], done: &mut HashSet<*const Expr>) -> Result<(), Error> {
     let rest = rest.to_vec();
-    let nested = |s: &Stmt| match s {
-        Stmt::Block(stmts) => block(stmts),
-        _ => statement(s, &[]),
+    let nested = |s: &Stmt, done: &mut HashSet<*const Expr>| match s {
+        Stmt::Block(stmts) => block(stmts, done),
+        _ => statement(s, &[], done),
     };
     // The patterns of `e`, whose variables `outside` may not read.
     let check = |e: &Expr, outside: &[&Stmt]| -> Result<(), Error> {
@@ -541,9 +543,9 @@ fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
                     return Err(unsupported(p.pos));
                 }
             }
-            nested(then)?;
+            nested(then, done)?;
             if let Some(o) = otherwise {
-                nested(o)?;
+                nested(o, done)?;
             }
         }
         Stmt::While { cond, body } => {
@@ -558,11 +560,11 @@ fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
                     return Err(unsupported(p.pos));
                 }
             }
-            nested(body)?;
+            nested(body, done)?;
         }
         Stmt::DoWhile { body, cond } => {
             check(cond, &rest)?;
-            nested(body)?;
+            nested(body, done)?;
         }
         Stmt::For { init, cond, update, body } => {
             let mut outside: Vec<&Stmt> = rest.clone();
@@ -574,14 +576,14 @@ fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
             for u in update {
                 check(u, &outside)?;
             }
-            block(init)?;
-            nested(body)?;
+            block(init, done)?;
+            nested(body, done)?;
         }
         Stmt::ForEach { array, body, .. } => {
             let mut outside = rest.clone();
             outside.push(body);
             check(array, &outside)?;
-            nested(body)?;
+            nested(body, done)?;
         }
         Stmt::Local { init: Some(e), .. }
         | Stmt::Expr(e)
@@ -589,21 +591,33 @@ fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
         | Stmt::Yield(e)
         | Stmt::Throw(e) => {
             check(e, &rest)?;
+            // The statements of each switch expression in `e`, at any depth. Those of a switch
+            // nested in another's statements are checked with the outer one's and come out the
+            // same each time they are checked: checking them again here (as `switch_bodies`
+            // would) would check the switches nested in them once more at each level.
             let mut found = Ok(());
-            switch_bodies(e, &mut |body| {
-                if found.is_ok() {
-                    found = block(body);
+            visit_expr(e, &mut |x| {
+                if let ExprKind::Switch { cases, .. } = &x.kind
+                    && crate::lower::ordered_call(x).is_none()
+                    && found.is_ok()
+                    && done.insert(x)
+                {
+                    for case in cases {
+                        if found.is_ok() {
+                            found = block(&case.body, done);
+                        }
+                    }
                 }
             });
             found?;
         }
         Stmt::Try { body, catches, finally } => {
-            block(body)?;
+            block(body, done)?;
             for catch in catches {
-                block(&catch.body)?;
+                block(&catch.body, done)?;
             }
             if let Some(finally) = finally {
-                block(finally)?;
+                block(finally, done)?;
             }
         }
         Stmt::Switch { selector, cases } => {
@@ -611,11 +625,11 @@ fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
             outside.extend(cases.iter().flat_map(|c| &c.body));
             check(selector, &outside)?;
             for case in cases {
-                block(&case.body)?;
+                block(&case.body, done)?;
             }
         }
-        Stmt::Labeled { body, .. } => statement(body, &rest)?,
-        Stmt::Block(stmts) => block(stmts)?,
+        Stmt::Labeled { body, .. } => statement(body, &rest, done)?,
+        Stmt::Block(stmts) => block(stmts, done)?,
         Stmt::Local { init: None, .. }
         | Stmt::Return(None, _)
         | Stmt::Break
