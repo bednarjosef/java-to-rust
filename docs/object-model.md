@@ -705,7 +705,13 @@ it) looks at the variant only, so a `String[]` held as an `Object[]` fails it. A
   `Arrays.equals` of two null fields is `true`), which only matters where the builtin
   keeps the array. `Arrays.sort` and `Arrays.fill` of one, which change it in place, run the
   JDK's code for an `Object[]` with the JDK's sources (`Reach::string_array_writes`) and are
-  rejected without them ("a change in place of a `String[]` that is also an `Object[]`");
+  rejected without them ("a change in place of a `String[]` that is also an `Object[]`").
+  Whether `String[]` is an `Object[]` is known only once the program is lowered, so a
+  translation or census that finds such a call in code that can run is made again with those
+  methods reached. When reaching them adds nothing in any round of loading (other code already
+  sorts or fills an `Object[]`), the second takes the units and reach of the first instead of
+  walking again: a translation asks javac for the same classes round by round, and a census
+  keeps the units it holds (`program::load`);
 - an array of an enum that is an `Object[]` holds its constants as `Object`s, cast back where
   read (an `Option` where the element may be null).
 

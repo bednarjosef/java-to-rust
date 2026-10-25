@@ -1338,6 +1338,74 @@ pub fn writes_string_array(node: &Value) -> bool {
             .is_some_and(|a| text(a, "javaType") == "java.lang.String[]")
 }
 
+/// What a walk with `Reach::string_array_writes` visits for `node`, an `Arrays.sort` or
+/// `Arrays.fill` of a `String[]` (`writes_string_array`), besides what its arguments reach: the
+/// JDK's method that it calls and the classes that its name names (`java.util.Arrays`). `None`
+/// for a call whose visit could do more, such as one with a `Class` among its arguments
+/// (`initialize.rs`, `reflection.rs`).
+fn string_array_write_items(node: &Value) -> Option<Vec<Item>> {
+    /// The item of a symbol of the call or of its name: the method, a static one of
+    /// `java.util.Arrays` that `Walk::symbol` visits as any other, or a class; none for a package.
+    fn symbol(symbol: &Value, items: &mut Vec<Item>) -> Option<()> {
+        let (owner, name, ty) = (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"));
+        match text(symbol, "kind") {
+            "METHOD"
+                if owner == "java.util.Arrays"
+                    && matches!(name, "sort" | "fill")
+                    && symbol["static"].as_bool() == Some(true)
+                    && !STANDARD_CALLS.iter().any(|(m, _)| *m == (owner, name, ty))
+                    && module_call(owner, name, ty).is_none()
+                    && redirected_call(owner, name, ty).is_none() =>
+            {
+                items.push(Item::Method((owner.into(), name.into(), ty.into())));
+            }
+            kind if CLASS_KINDS.contains(&kind) => items.push(Item::Class(strip_arguments(ty))),
+            "PACKAGE" => {}
+            _ => return None,
+        }
+        Some(())
+    }
+    /// The items of the call's name and type arguments, which must be names alone.
+    fn names(node: &Value, items: &mut Vec<Item>) -> Option<()> {
+        match node {
+            Value::Array(nodes) => nodes.iter().try_for_each(|n| names(n, items)),
+            Value::Object(fields) => {
+                if !matches!(text(node, "kind"), "IDENTIFIER" | "MEMBER_SELECT")
+                    || literal_class(node).is_some()
+                {
+                    return None;
+                }
+                for (field, child) in fields {
+                    if field == "symbol" {
+                        symbol(child, items)?;
+                    } else {
+                        names(child, items)?;
+                    }
+                }
+                Some(())
+            }
+            _ => Some(()),
+        }
+    }
+    let class = |a: &Value| {
+        let ty = text(a, "javaType");
+        ty == "java.lang.Class" || ty.starts_with("java.lang.Class<")
+    };
+    let mut items = Vec::new();
+    for (field, child) in node.as_object()? {
+        if field == "arguments" {
+            if child.as_array()?.iter().any(class) {
+                return None;
+            }
+        } else if field == "symbol" {
+            symbol(child, &mut items)?;
+        } else {
+            names(child, &mut items)?;
+        }
+    }
+    Some(items)
+}
+
 /// The translator's `System.getProperties()` (`java/overlay/java/lang/TranslatedProperties.java`,
 /// see `lower::system`).
 pub const TRANSLATED_PROPERTIES: JdkMethod =
@@ -2167,6 +2235,12 @@ impl<'t> Rounds<'t> {
         out
     }
 
+    /// Whether these rounds, made without `Reach::string_array_writes`, reached over the units
+    /// so far what they would have with them (`Walk::same_with_string_array_writes`).
+    pub fn same_with_string_array_writes(&self) -> bool {
+        self.sequential.iter().chain(&self.parallel).all(Walk::same_with_string_array_writes)
+    }
+
     /// What reachable code uses, over the units so far.
     pub fn finish(self) -> Reach {
         if let Some(walk) = &self.sequential {
@@ -2298,9 +2372,45 @@ struct Walk<'t> {
     /// those that wait, by that class.
     branches: Vec<(&'t Value, Option<MethodKey>, Option<String>)>,
     waiting_branches: HashMap<String, Vec<usize>>,
+    /// Without `Reach::string_array_writes`: what a walk with them would visit for the
+    /// `Arrays.sort` and `Arrays.fill` of a `String[]` that this one met, besides their arguments
+    /// (`string_array_write_items`), and whether it met one whose visit is not known that way.
+    string_array_write_items: HashSet<Item>,
+    unknown_string_array_write: bool,
 }
 
 impl<'t> Walk<'t> {
+    /// Whether this walk, made without `Reach::string_array_writes`, reached what it would have
+    /// with them: visiting what a walk with them visits for each `Arrays.sort` and `Arrays.fill`
+    /// of a `String[]` that it met (`string_array_write_items`) would change nothing that it
+    /// reached. So it is when other calls reached the JDK's method for an `Object[]` already
+    /// (or, while no unit declares `java.util.Arrays`, took it for an external one that waits
+    /// for the class), and named the class. The walk is then at a fixed point of the walk with
+    /// them too, and as a walk reaches the same in whatever order it visits, that walk reaches
+    /// the same.
+    fn same_with_string_array_writes(&self) -> bool {
+        let reach = &self.reach;
+        let unchanged = |item: &Item| match item {
+            // As `method` visits it: a static method, of a class other than `Enum`, other than
+            // `values` and `valueOf`.
+            Item::Method(key) if self.methods.contains_key(key) && !replaced(&key.0, &key.1, &key.2) => {
+                reach.methods.contains(key)
+                    && !reach.external.contains(key)
+                    && !(reach.dormant.contains(key) && reach.live.contains(&key.0))
+            }
+            Item::Method(key) => {
+                reach.external.contains(key)
+                    && (self.classes.contains_key(&key.0)
+                        || outside(&key.0)
+                        || reach.missing.contains(&key.0))
+            }
+            Item::Class(class) if self.classes.contains_key(class) => reach.classes.contains(class),
+            Item::Class(class) => outside(class) || reach.missing.contains(class),
+            _ => false,
+        };
+        !self.unknown_string_array_write && self.string_array_write_items.iter().all(unchanged)
+    }
+
     /// Writes on standard error, for each prefix in `JAVA_TO_RUST_REACH_WHY` (comma-separated, of
     /// `class.method`), the chain of items that made the first running method it names reachable.
     fn explain(&self) {
@@ -2941,6 +3051,12 @@ impl<'t> Walk<'t> {
                 if runtime_arrays_call(value)
                     && !(self.reach.string_array_writes && writes_string_array(value)) =>
             {
+                if writes_string_array(value) {
+                    match string_array_write_items(value) {
+                        Some(items) => self.string_array_write_items.extend(items),
+                        None => self.unknown_string_array_write = true,
+                    }
+                }
                 self.scan(&value["arguments"])
             }
             // So does a call that the runtime makes on `System.out` or `System.err`
@@ -3517,6 +3633,60 @@ mod tests {
         ]});
         let translated = reach(&[&unit], "Main").unwrap();
         assert!(translated.classes.contains("DualPivot"), "{translated:?}");
+    }
+
+    #[test]
+    fn rounds_reach_the_same_with_string_array_writes_when_other_calls_reach_the_jdks_method() {
+        // `Arrays.sort(a)` of an array of `ty`, written `Arrays.sort` in the source.
+        let sort = |ty: &str| {
+            let symbol = json!({"kind": "METHOD", "owner": "java.util.Arrays", "name": "sort",
+                "type": "(java.lang.Object[])void", "static": true});
+            json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "METHOD_INVOCATION",
+                "symbol": symbol.clone(),
+                "methodSelect": {"kind": "MEMBER_SELECT", "identifier": "sort", "symbol": symbol,
+                    "expression": {"kind": "IDENTIFIER", "name": "Arrays",
+                        "symbol": {"kind": "CLASS", "type": "java.util.Arrays"}}},
+                "typeArguments": [],
+                "arguments": [{"kind": "IDENTIFIER", "javaType": ty}]}})
+        };
+        let arrays = json!({"kind": "CLASS", "symbol": {"type": "java.util.Arrays"}, "members": [
+            {"kind": "METHOD", "name": "sort", "symbol": {"type": "(java.lang.Object[])void", "static": true},
+             "body": {"kind": "BLOCK", "statements": [call("java.util.ComparableTimSort", "sort")]}}]});
+        let rounds_of = |main: Vec<Value>, string_array_writes: bool| {
+            let units = [
+                json!({"typeDecls": [class("Main", &[("main", main)])]}),
+                json!({"typeDecls": [arrays.clone()]}),
+                json!({"typeDecls": [class("java.util.ComparableTimSort", &[("sort", vec![])])]}),
+            ];
+            let mut rounds = Rounds::new("Main");
+            if string_array_writes {
+                rounds = rounds.with_string_array_writes();
+            }
+            let mut asked = Vec::new();
+            for unit in &units {
+                rounds.add(&[unit]).unwrap();
+                asked.push((rounds.missing(), rounds.same_with_string_array_writes()));
+            }
+            let reach = rounds.finish();
+            (asked, (reach.methods, reach.classes, reach.initialized, reach.external, reach.missing))
+        };
+        // Sorting a `Shape[]` reaches the JDK's method, so sorting the `String[]` with it adds
+        // nothing: each round asks for the same classes, and they reach the same.
+        let both = vec![sort("Shape[]"), sort("java.lang.String[]")];
+        let (asked, reached) = rounds_of(both.clone(), false);
+        let (asked_with, reached_with) = rounds_of(both, true);
+        assert!(asked.iter().all(|(_, same)| *same), "{asked:?}");
+        let classes =
+            |asked: &[(Vec<String>, bool)]| asked.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>();
+        assert_eq!(classes(&asked), classes(&asked_with));
+        assert_eq!(classes(&asked)[0], ["java.util.Arrays"]);
+        assert_eq!(reached, reached_with);
+        assert!(reached.0.contains(&("java.util.ComparableTimSort".into(), "sort".into(), "()void".into())));
+        // Alone, the sort of the `String[]` asks for `java.util.Arrays` only with the writes.
+        let (asked, _) = rounds_of(vec![sort("java.lang.String[]")], false);
+        let (asked_with, _) = rounds_of(vec![sort("java.lang.String[]")], true);
+        assert!(!asked[0].1, "{asked:?}");
+        assert_eq!((asked[0].0.len(), &asked_with[0].0[..]), (0, &["java.util.Arrays".to_string()][..]));
     }
 
     #[test]
