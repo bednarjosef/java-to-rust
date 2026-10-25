@@ -26,6 +26,10 @@ pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
         .collect();
     let mut summaries: Vec<Option<Summary>> = (0..class.methods.len()).map(|_| None).collect();
     let mut early = HashSet::new();
+    // The methods seen for the initializer of each class, as the number of that class's turn:
+    // a set for each class without clearing one.
+    let mut seen_in: Vec<u32> = vec![0; class.methods.len()];
+    let mut turn = 0;
     for &t in eager {
         let Some(&clinit) = clinits.get(&t) else { continue };
         let mut unset: HashSet<&str> = (class.types[t].statics.iter())
@@ -38,7 +42,8 @@ pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
         let mut statements = Vec::new();
         flatten(&class.methods[clinit].body, &mut statements);
         // The initializer under way returns at once when code it runs uses its class again.
-        let mut seen: HashSet<usize> = HashSet::from([clinit]);
+        turn += 1;
+        seen_in[clinit] = turn;
         for s in statements {
             if unset.is_empty() {
                 break;
@@ -55,12 +60,13 @@ pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
             mark(&first.reads);
             let mut work = first.runs;
             while let Some(m) = work.pop() {
-                if !seen.insert(m) {
+                if seen_in[m] == turn {
                     continue;
                 }
+                seen_in[m] = turn;
                 let known = summaries[m].get_or_insert_with(|| summary(class, &clinits, m));
                 mark(&known.reads);
-                work.extend(&known.runs);
+                work.extend(known.runs.iter().filter(|&&r| seen_in[r] != turn));
             }
             if let Stmt::Expr(Expr {
                 kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, .. },
