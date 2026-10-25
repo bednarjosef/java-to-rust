@@ -202,6 +202,19 @@ when asked, such as a second top-level class of a file that a later unit came fr
 of these programs does. The `timing: reach` line counts the two apart. With the wait, classes
 are asked for in other rounds, so the units come in another order, which can change the names
 of overloads, the tags of the classes, and which unsupported construct is reported first.
+Reachability, release translator, on a machine with other builds running, before (a method of
+a missing class taken for an external one at once) and after; walks from the start in brackets:
+
+| program | before | after |
+|---|---:|---:|
+| javac (`--census`, 10 rounds) | 5.9 s (5) | 3.5 s (1) |
+| ExtendedAttributes | 1.70 s (5) | 1.23 s (1) |
+| SymbolicLinkCopies | 1.79 s (6) | 1.41 s (2) |
+| PlatformLoggerValues | 1.58 s (2) | 1.00 s (1) |
+| JarManifests | 1.20 s (3) | 1.04 s (1) |
+| the small programs (0.1 to 0.6 s) | 0 to 3 | 0 or 1 |
+
+On the small programs the time is about the same: their walks from the start were short.
 
 Release translator on a loaded machine (load 16 to 23), the before and after runs alternated,
 twice each:
