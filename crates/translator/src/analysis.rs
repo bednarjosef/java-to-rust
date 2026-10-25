@@ -1029,11 +1029,11 @@ pub struct IndexHasher(u64);
 impl std::hash::Hasher for IndexHasher {
     /// A name, eight bytes at a time.
     fn write(&mut self, bytes: &[u8]) {
-        let mut words = bytes.chunks_exact(8);
-        for word in &mut words {
-            self.write_usize(u64::from_le_bytes(word.try_into().expect("eight bytes")) as usize);
+        let (words, rest) = bytes.as_chunks::<8>();
+        for word in words {
+            self.write_usize(u64::from_le_bytes(*word) as usize);
         }
-        for &b in words.remainder() {
+        for &b in rest {
             self.write_usize(b as usize);
         }
     }
