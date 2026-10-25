@@ -206,7 +206,7 @@ fn narrow(
             live.unresolved.len()
         );
     }
-    class.thread_statics = live.thread_statics.clone();
+    class.thread_statics = live.thread_statics.as_ref().map(|t| t.iter().copied().collect());
     let mut lists: std::collections::HashMap<Vec<usize>, std::sync::Arc<[usize]>> = Default::default();
     class.receivers = live
         .receivers

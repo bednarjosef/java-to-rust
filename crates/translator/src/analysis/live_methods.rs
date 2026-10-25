@@ -50,10 +50,11 @@
 //! exceptions among them (`Class::raised`), so a clause whose classes have none yet waits, and the
 //! method is walked again once one of them does.
 
+use super::FastSet as HashSet;
 use super::object_values::{self, ClassSet, Flow, ObjectValues, STATIC};
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 mod known;
@@ -109,25 +110,25 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         index: class.types.iter().enumerate().map(|(t, d)| (d.name.as_str(), t)).collect(),
         state: RefCell::new(State {
             work: Vec::new(),
-            seen: HashSet::new(),
+            seen: HashSet::default(),
             waiting: HashMap::new(),
-            waited: HashSet::new(),
+            waited: HashSet::default(),
             contexts: HashMap::new(),
             catching: HashMap::new(),
-            glued: HashSet::new(),
+            glued: HashSet::default(),
             known: known::Knowledge::default(),
             unknown: None,
             live: LiveMethods {
-                methods: HashSet::new(),
-                initialized: HashSet::new(),
-                instantiated: HashSet::new(),
-                constructed: HashSet::new(),
-                touched: HashSet::new(),
+                methods: HashSet::default(),
+                initialized: HashSet::default(),
+                instantiated: HashSet::default(),
+                constructed: HashSet::default(),
+                touched: HashSet::default(),
                 unresolved: Vec::new(),
                 thread_statics: None,
                 receivers: HashMap::new(),
             },
-            built: HashSet::new(),
+            built: HashSet::default(),
         }),
         memos: RefCell::default(),
     };
@@ -251,25 +252,25 @@ impl Walk<'_> {
             index: self.index.clone(),
             state: RefCell::new(State {
                 work: Vec::new(),
-                seen: HashSet::new(),
+                seen: HashSet::default(),
                 waiting: HashMap::new(),
-                waited: HashSet::new(),
+                waited: HashSet::default(),
                 contexts: HashMap::new(),
                 catching: HashMap::new(),
-                glued: HashSet::new(),
+                glued: HashSet::default(),
                 known: main.known.clone(),
                 unknown: None,
                 live: LiveMethods {
-                    methods: HashSet::new(),
-                    initialized: HashSet::new(),
+                    methods: HashSet::default(),
+                    initialized: HashSet::default(),
                     instantiated: main.live.instantiated.clone(),
                     constructed: main.live.constructed.clone(),
-                    touched: HashSet::new(),
+                    touched: HashSet::default(),
                     unresolved: Vec::new(),
                     thread_statics: None,
                     receivers: HashMap::new(),
                 },
-                built: HashSet::new(),
+                built: HashSet::default(),
             }),
             memos: RefCell::default(),
         };
@@ -367,7 +368,7 @@ fn glue_declared(class: &Class) -> Vec<Vec<usize>> {
 fn supers(class: &Class) -> Vec<Vec<usize>> {
     (0..class.types.len())
         .map(|t| {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             let mut work = vec![t];
             while let Some(s) = work.pop() {
                 if seen.insert(s) {
@@ -586,7 +587,7 @@ impl Walk<'_> {
     /// The expressions of the `catch` clauses of method `m` that catch no class with objects yet
     /// (see the module's comment), which cannot run; the method waits for each type they catch.
     fn dead_catches(&self, m: usize) -> HashSet<ExprId> {
-        let mut dead = HashSet::new();
+        let mut dead = HashSet::default();
         let mut waiting = Vec::new();
         {
             let state = self.state.borrow();

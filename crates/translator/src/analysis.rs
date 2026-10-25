@@ -68,7 +68,7 @@ pub fn thread_statics(class: &Class) -> Option<HashSet<usize>> {
     if !threads::threaded(class) {
         return None;
     }
-    live_methods::live_methods(class).ok()?.thread_statics
+    live_methods::live_methods(class).ok()?.thread_statics.map(|t| t.into_iter().collect())
 }
 
 #[derive(Default)]
@@ -996,7 +996,7 @@ pub(crate) fn held_value<'c>(class: &'c Class, m: usize, e: &'c Expr) -> &'c Exp
 
 /// A hash of indices, which need no protection from chosen keys.
 #[derive(Default)]
-pub(crate) struct IndexHasher(u64);
+pub struct IndexHasher(u64);
 
 impl std::hash::Hasher for IndexHasher {
     fn write(&mut self, bytes: &[u8]) {
@@ -1015,3 +1015,4 @@ impl std::hash::Hasher for IndexHasher {
 }
 
 pub(crate) type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IndexHasher>>;
+pub type FastSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<IndexHasher>>;
