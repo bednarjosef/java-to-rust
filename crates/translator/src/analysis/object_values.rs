@@ -232,7 +232,7 @@ pub struct ObjectValues {
     /// The analysis for the calls that can run (see the module's comment).
     dispatch: bool,
     /// While the analysis runs, the places that the current visit has read.
-    reads: RefCell<Option<Vec<Read>>>,
+    reads: RefCell<Option<HashSet<Read>>>,
 }
 
 /// A place whose flow a visit reads, so that the visit runs again when the place changes.
@@ -433,10 +433,12 @@ impl ObjectValues {
         Some(Update::Var(m, ctx, slot, flow))
     }
 
-    /// Notes that the running visit reads `place`.
+    /// Notes that the running visit reads `place`, each place once: an expression is evaluated
+    /// again for each expression around it, and a call on a receiver that may be any class reads
+    /// the returns of thousands of methods.
     fn read(&self, place: impl FnOnce() -> Read) {
         if let Some(reads) = self.reads.borrow_mut().as_mut() {
-            reads.push(place());
+            reads.insert(place());
         }
     }
 
@@ -739,7 +741,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         contexts,
         types,
         dispatch,
-        reads: RefCell::new(Some(Vec::new())),
+        reads: RefCell::new(Some(HashSet::new())),
     };
     // The visits, each of a method in one of its contexts or (`usize::MAX`) of the code outside
     // methods, run again whenever a place that they read changes, until none does. As every
@@ -788,7 +790,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             usize::MAX => visit_outside_methods(&values, class),
             _ => visit(&values, class, m, ctx, &class.methods[m].body),
         };
-        let reads = values.reads.borrow_mut().replace(Vec::new()).unwrap_or_default();
+        let reads = values.reads.borrow_mut().replace(HashSet::new()).unwrap_or_default();
         if timings && (updates.len() > 200_000 || reads.len() > 200_000) {
             let name = match m {
                 usize::MAX => "the code outside methods".to_string(),
