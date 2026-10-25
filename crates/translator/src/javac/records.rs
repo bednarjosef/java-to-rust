@@ -72,18 +72,23 @@ pub(super) fn completed_records(unit: &Value, survey: &Survey) -> Vec<Value> {
 }
 
 /// Whether `complete_unit` may change the compilation unit: it has no package, it declares a
-/// record, or it declares a local enum or interface (`in_body` once inside a method or a block),
-/// which is hoisted.
+/// record, or a statement list inside a method or a block declares an enum or interface
+/// (`take_local_types`), which is hoisted. Anything else that is an enum or interface, such as
+/// the symbol of a name, is not one.
 pub(super) fn changes(unit: &Value) -> bool {
     fn has_record_or_local(v: &Value, in_body: bool) -> bool {
         match v {
             Value::Object(fields) => {
                 let kind = fields.get("kind").and_then(Value::as_str);
+                let in_body = in_body || matches!(kind, Some("METHOD" | "BLOCK"));
+                let local = |s: &Value| matches!(text(s, "kind"), "ENUM" | "INTERFACE");
                 kind == Some("RECORD")
-                    || in_body && matches!(kind, Some("ENUM" | "INTERFACE"))
-                    || fields
-                        .values()
-                        .any(|x| has_record_or_local(x, in_body || matches!(kind, Some("METHOD" | "BLOCK"))))
+                    || in_body
+                        && fields
+                            .get("statements")
+                            .and_then(Value::as_array)
+                            .is_some_and(|s| s.iter().any(local))
+                    || fields.values().any(|x| has_record_or_local(x, in_body))
             }
             Value::Array(items) => items.iter().any(|x| has_record_or_local(x, in_body)),
             _ => false,
