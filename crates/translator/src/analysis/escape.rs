@@ -74,9 +74,9 @@
 //! summaries known, a few rounds per method, and is then cut down until every method in it is
 //! still a factory with the factories that remain.
 
+use super::FastMap;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 
 /// What the analysis found (see the module's comment).
@@ -208,28 +208,6 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     found.factories = analysis.factories.into_iter().collect();
     found
 }
-
-/// A hash of indices, which need no protection from chosen keys.
-#[derive(Default)]
-struct IndexHasher(u64);
-
-impl Hasher for IndexHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.write_usize(b as usize);
-        }
-    }
-
-    fn write_usize(&mut self, n: usize) {
-        self.0 = (self.0.rotate_left(5) ^ n as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<IndexHasher>>;
 
 /// The parameters of a method, `this` first for an instance method or a constructor.
 fn arity(m: &Method) -> usize {

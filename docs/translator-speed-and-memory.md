@@ -107,7 +107,9 @@ which it is reached. They only change how the work is ordered:
   in borrowing, codegen's call chains and the exception analysis.
 - **A list of what is left to do.** The points-to analysis (`object_values`) records which facts
   each method's visit read, and when a fact grows it visits again only the methods that read it,
-  instead of every method in the next round. The exception analysis does the same.
+  instead of every method in the next round. The exception analysis does the same. A method's
+  variables in one context are read only by its own visit there, so they need no record: a
+  change to them runs that visit again.
 - **One scan instead of one per class.** Several analyses (objects that are owned, eager statics,
   ranges, the static fields of the exception guards, enum field writes in lowering) scanned the
   whole program once for each class or field; they now scan it once and keep an index.
@@ -116,6 +118,11 @@ which it is reached. They only change how the work is ordered:
   built once. The generator did the same for names and enum variants, and lowering for the class
   or method that a name or symbol names (`type_index`, `method_index`, which searched javac's
   3,141 classes and 27,000 methods on every lookup and were most of lowering's time). The
+  same went for a method of a class by name and signature, and for the methods of a class
+  (`method_named`, `methods_of`): each call redirected to the translator's own code, each
+  reflection table (once for every supertype of every class), each overridden method and each
+  for-each loop's iterator method searched the Minecraft server's 180,000 methods, about 70% of a
+  lowering attempt. The
   implementation that a call runs on a class is kept once found (`Hierarchy::implementation`),
   as the analyses and the generator ask for it once for every concrete class under a type.
 
@@ -286,7 +293,11 @@ of that code, plus the few methods being worked on at a time. In order:
    string. Likely five to ten times smaller than JSON.
 5. **Compact data in the translator.** Typed structures read straight from that format instead of
    `serde_json` values; names and types interned as 32-bit ids; tree nodes in large blocks
-   instead of one allocation each.
+   instead of one allocation each. Done for the points-to analysis for dispatch, which follows
+   each instance method once for every concrete class under its own and took the Minecraft
+   server's census from 8.5 GB past 16 GB: a set of classes keeps only the words from its lowest
+   class to its highest, a method's variables in a context are a vector with a slot for each,
+   not a map from names, and its maps keyed by indices use a cheap hash.
 6. **Output written as it is made**, straight to each crate's files, instead of one string of
    millions of lines.
 7. **Reaching less.** Dispatch of `toString`, `equals` and `hashCode` from library code reaches
