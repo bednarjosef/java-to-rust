@@ -163,7 +163,7 @@ impl Walk<'_> {
             let next = self.state.borrow_mut().work.pop();
             let Some((m, ctx)) = next else { break };
             walks += 1;
-            if timings && walks.is_multiple_of(100_000) {
+            if timings && walks.is_multiple_of(10_000) {
                 let state = self.state.borrow();
                 let waiting: usize = state.waiting.values().map(Vec::len).sum();
                 let words: usize = state.live.receivers.values().map(ClassSet::words).sum();
@@ -571,6 +571,17 @@ impl Walk<'_> {
             | ExprKind::ThisCall { args, .. }
             | ExprKind::SuperInit { args, .. } => {
                 let targets = self.values.targets(self.class, m, ctx, x);
+                if targets.len() > 100_000 && crate::timings::enabled() {
+                    let name = format!(
+                        "{}.{}",
+                        self.class.types[self.class.methods[m].class].name, self.class.methods[m].name
+                    );
+                    eprintln!(
+                        "timing: live walk: a call in {name} on {ctx} runs {} methods{}",
+                        targets.len(),
+                        crate::timings::memory()
+                    );
+                }
                 if let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
                     && !self.class.methods[*r].is_static
                 {
