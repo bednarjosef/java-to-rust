@@ -131,7 +131,7 @@ pub struct Facts {
     /// `&Option<Rc<..>>`, which the caller lends.
     pub borrowed_optional_objects: HashSet<(usize, usize)>,
     /// String variables and parameters, as (method, name), that can hold null.
-    pub nullable_vars: HashSet<(usize, String)>,
+    pub nullable_vars: MethodLocals,
     /// Methods whose string or object return value can be null.
     pub nullable_returns: HashSet<usize>,
     /// String and object fields, as (class, field), that can hold null: `Option`s.
@@ -1044,3 +1044,39 @@ impl std::hash::Hasher for IndexHasher {
 
 pub(crate) type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IndexHasher>>;
 pub type FastSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<IndexHasher>>;
+
+/// A set of locals and parameters, as (method, name), that is asked about without making a
+/// `String` for the name.
+#[derive(Clone, Default)]
+pub struct MethodLocals {
+    by_method: FastMap<usize, HashSet<String>>,
+    len: usize,
+}
+
+impl MethodLocals {
+    pub fn contains(&self, m: usize, name: &str) -> bool {
+        self.by_method.get(&m).is_some_and(|names| names.contains(name))
+    }
+
+    pub fn insert(&mut self, m: usize, name: String) -> bool {
+        let added = self.by_method.entry(m).or_default().insert(name);
+        self.len += added as usize;
+        added
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Extend<(usize, String)> for MethodLocals {
+    fn extend<I: IntoIterator<Item = (usize, String)>>(&mut self, items: I) {
+        for (m, name) in items {
+            self.insert(m, name);
+        }
+    }
+}

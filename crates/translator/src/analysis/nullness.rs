@@ -18,6 +18,14 @@ use std::collections::HashSet;
 /// parameters are distinct.
 pub fn analyze(class: &Class, facts: &mut Facts) {
     let read: Vec<HashSet<String>> = class.methods.iter().map(read_locals).collect();
+    let mut ctors: Vec<Vec<usize>> = vec![Vec::new(); class.types.len()];
+    for (m, method) in class.methods.iter().enumerate().filter(|(_, m)| m.is_ctor) {
+        ctors[method.class].push(m);
+    }
+    // The override groups, by id, whose parameters (with the parameter's index) or return values
+    // are recorded as nullable for every method of the group.
+    let mut nullable_groups: HashSet<(usize, usize)> = HashSet::new();
+    let mut nullable_group_returns: HashSet<usize> = HashSet::new();
     loop {
         let before = (
             facts.nullable_vars.len(),
@@ -159,7 +167,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         }
         for (t, decl) in class.types.iter().enumerate() {
             for f in decl.fields.iter().filter(|f| may_be_unset(f.ty) || starts_null_enum(f)) {
-                if !set_by_construction(class, facts, t, &f.name) {
+                if !set_by_construction(class, facts, &ctors[t], t, &f.name) {
                     fields.push((decl.name.clone(), f.name.clone()));
                 }
             }
@@ -186,15 +194,19 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         facts.nullable_vars.extend(declared);
         // The methods of an override group share their parameters' and return value's nullness,
         // so that a call may run any of them.
-        let params: Vec<(usize, usize)> = params
-            .into_iter()
-            .flat_map(|(m, i)| class.hierarchy.group(m).into_iter().map(move |g| (g, i)))
-            .collect();
-        facts
-            .nullable_vars
-            .extend(params.into_iter().map(|(m, i)| (m, class.methods[m].params[i].name.clone())));
-        let returns: Vec<usize> = returns.into_iter().flat_map(|m| class.hierarchy.group(m)).collect();
-        facts.nullable_returns.extend(returns);
+        // Each group once: the facts only grow.
+        for (m, i) in params {
+            if nullable_groups.insert((class.hierarchy.group_id(m), i)) {
+                for &g in class.hierarchy.group_members(m) {
+                    facts.nullable_vars.insert(g, class.methods[g].params[i].name.clone());
+                }
+            }
+        }
+        for m in returns {
+            if nullable_group_returns.insert(class.hierarchy.group_id(m)) {
+                facts.nullable_returns.extend(class.hierarchy.group_members(m));
+            }
+        }
         facts.nullable_fields.extend(fields);
         facts.nullable_statics.extend(statics);
         facts.placeholder_statics.extend(placeholders);
@@ -289,7 +301,7 @@ fn starts_null_enum(f: &Field) -> bool {
 
 /// Whether every constructor of class `t` sets the field `name` to a value that is not null
 /// before anything can read it.
-fn set_by_construction(class: &Class, facts: &Facts, t: usize, name: &str) -> bool {
+fn set_by_construction(class: &Class, facts: &Facts, ctors: &[usize], t: usize, name: &str) -> bool {
     let decl = &class.types[t];
     let i = decl.fields.iter().position(|f| f.name == name).expect("a field of the class");
     let init = decl.fields[i].init.as_ref();
@@ -297,7 +309,7 @@ fn set_by_construction(class: &Class, facts: &Facts, t: usize, name: &str) -> bo
         // A string field's initializer, or the empty string that stands in for it, is not null.
         return init.is_some_and(|e| !maybe_null(facts, usize::MAX, e));
     }
-    class.methods.iter().enumerate().filter(|(_, m)| m.is_ctor && m.class == t).all(|(index, m)| {
+    ctors.iter().map(|&index| (index, &class.methods[index])).all(|(index, m)| {
         if delegates(&m.body) {
             return true;
         }
@@ -314,7 +326,7 @@ fn set_by_construction(class: &Class, facts: &Facts, t: usize, name: &str) -> bo
 
 /// Whether the string variable or parameter `name` of method `m` can hold null.
 pub fn nullable_var(facts: &Facts, m: usize, name: &str) -> bool {
-    facts.nullable_vars.contains(&(m, name.to_string()))
+    facts.nullable_vars.contains(m, name)
 }
 
 /// The types whose values can be null: references, and enums and charsets, `Copy` values, which
