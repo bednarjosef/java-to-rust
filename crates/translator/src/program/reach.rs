@@ -1842,7 +1842,8 @@ pub fn module_call(owner: &str, name: &str, signature: &str) -> Option<(&'static
 /// calls instead (`REDIRECTED_CALLS`), where a variable-arity parameter is written as an array
 /// (javac writes `T...`).
 pub fn redirected_call(owner: &str, name: &str, signature: &str) -> Option<(&'static str, &'static str)> {
-    let signature = signature.replace("...", "[]");
+    let signature: std::borrow::Cow<str> =
+        if signature.contains("...") { signature.replace("...", "[]").into() } else { signature.into() };
     REDIRECTED_CALLS
         .iter()
         .find(|((o, n, s), _)| (*o, *n, *s) == (owner, name, &*signature))
@@ -2655,6 +2656,11 @@ impl<'t> Walk<'t> {
                         }
                     }
                 }
+                // A stale walk is made again from `main` (`Rounds::add`), which keeps nothing of
+                // it but the declarations: walking it on would be wasted.
+                if self.stale {
+                    return;
+                }
             }
             // What reflection's lookups find among the classes found so far (`reflection.rs`).
             if !self.reflect() {
@@ -3006,13 +3012,27 @@ impl<'t> Walk<'t> {
     /// without objects waits for the class to have some (`objectless`).
     fn scan(&mut self, value: &'t Value) {
         match value {
-            Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
-            Value::Object(_)
-                if CLASS_KINDS.contains(&text(value, "kind"))
-                    && self.classes.contains_key(&class_name(value)) => {}
-            // An `if` that tests a property that is never set runs only its `else` branch.
-            Value::Object(_) if text(value, "kind") == "BLOCK" && !unset_property_ifs(value).is_empty() => {
-                let dead = unset_property_ifs(value);
+            Value::Object(fields) => self.scan_object(value, fields),
+            Value::Array(items) => items.iter().for_each(|item| self.scan(item)),
+            _ => {}
+        }
+    }
+
+    /// `scan` of an object node. Its kind is read once, and each test of a node's shape is made
+    /// only for the kinds that it can hold for (calls, for most): each finds nothing for any other.
+    fn scan_object(&mut self, value: &'t Value, fields: &'t crate::value::Map) {
+        let kind = text(value, "kind");
+        let call = kind == "METHOD_INVOCATION";
+        if matches!(kind, "ANNOTATION" | "TYPE_ANNOTATION") {
+            return;
+        }
+        if CLASS_KINDS.contains(&kind) && self.classes.contains_key(&class_name(value)) {
+            return;
+        }
+        // An `if` that tests a property that is never set runs only its `else` branch.
+        if kind == "BLOCK" {
+            let dead = unset_property_ifs(value);
+            if !dead.is_empty() {
                 for s in value["statements"].as_array().into_iter().flatten() {
                     if dead.iter().any(|d| std::ptr::eq(*d, s)) {
                         self.scan(&s["elseStatement"]);
@@ -3020,165 +3040,158 @@ impl<'t> Walk<'t> {
                         self.scan(s);
                     }
                 }
+                return;
             }
-            // `Runtime.version().feature()`, a constant of the translation (`lower::system`),
-            // which makes no version.
-            Value::Object(_) if release_query(value) => {}
-            // The branch that never runs is not reached, and neither is the condition, which the
-            // lowering drops: a flag's class need not exist.
-            Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
-                self.scan(branch);
-            }
-            // The `then` branch of an `if` that tests for a class without objects waits until
-            // the class has some (`Reach::without_objects`).
-            Value::Object(_) if let Some(class) = self.objectless(value) => {
-                self.scan(&value["condition"]);
-                self.scan(&value["elseStatement"]);
-                let branch = (&value["thenStatement"], self.scanning.clone(), self.lookup_class.clone());
-                self.waiting_branches.entry(class.clone()).or_default().push(self.branches.len());
-                self.branches.push(branch);
-                self.reach.without_objects.insert(class);
-            }
-            Value::Object(_) if let Some((array, length)) = component_array(value) => {
-                self.scan(array);
-                self.scan(length);
-            }
-            // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
-            // reaches only what its arguments do.
-            // So does an in-place one of a `String[]`, unless it reaches the JDK's
-            // (`Reach::string_array_writes`).
-            Value::Object(_)
-                if runtime_arrays_call(value)
-                    && !(self.reach.string_array_writes && writes_string_array(value)) =>
-            {
-                if writes_string_array(value) {
-                    match string_array_write_items(value) {
-                        Some(items) => self.string_array_write_items.extend(items),
-                        None => self.unknown_string_array_write = true,
-                    }
+        }
+        // `Runtime.version().feature()`, a constant of the translation (`lower::system`),
+        // which makes no version.
+        if call && release_query(value) {
+            return;
+        }
+        // The branch that never runs is not reached, and neither is the condition, which the
+        // lowering drops: a flag's class need not exist.
+        if matches!(kind, "IF" | "CONDITIONAL_EXPRESSION")
+            && let Some(branch) = live_branch(value, self.sequential)
+        {
+            return self.scan(branch);
+        }
+        // The `then` branch of an `if` that tests for a class without objects waits until
+        // the class has some (`Reach::without_objects`).
+        if kind == "IF"
+            && let Some(class) = self.objectless(value)
+        {
+            self.scan(&value["condition"]);
+            self.scan(&value["elseStatement"]);
+            let branch = (&value["thenStatement"], self.scanning.clone(), self.lookup_class.clone());
+            self.waiting_branches.entry(class.clone()).or_default().push(self.branches.len());
+            self.branches.push(branch);
+            self.reach.without_objects.insert(class);
+            return;
+        }
+        if call && let Some((array, length)) = component_array(value) {
+            self.scan(array);
+            return self.scan(length);
+        }
+        // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
+        // reaches only what its arguments do.
+        // So does an in-place one of a `String[]`, unless it reaches the JDK's
+        // (`Reach::string_array_writes`).
+        if call && runtime_arrays_call(value) && !(self.reach.string_array_writes && writes_string_array(value)) {
+            if writes_string_array(value) {
+                match string_array_write_items(value) {
+                    Some(items) => self.string_array_write_items.extend(items),
+                    None => self.unknown_string_array_write = true,
                 }
-                self.scan(&value["arguments"])
             }
-            // So does a call that the runtime makes on `System.out` or `System.err`
-            // (`direct_stream_call`).
-            Value::Object(_) if runtime_stream_call(value) => self.scan(&value["arguments"]),
-            // An access of a buffer through a view handle calls the translator's method, and the
-            // handle, which is a constant, is no field of the translation (`lower/handles.rs`).
-            Value::Object(_) if !buffer_view_access(value).is_empty() => {
-                for (name, signature) in buffer_view_access(value) {
+            return self.scan(&value["arguments"]);
+        }
+        // So does a call that the runtime makes on `System.out` or `System.err`
+        // (`direct_stream_call`).
+        if call && runtime_stream_call(value) {
+            return self.scan(&value["arguments"]);
+        }
+        // An access of a buffer through a view handle calls the translator's method, and the
+        // handle, which is a constant, is no field of the translation (`lower/handles.rs`).
+        if call {
+            let views = buffer_view_access(value);
+            if !views.is_empty() {
+                for (name, signature) in views {
                     self.work.push(Item::Method((TRANSLATED_BUFFER_VIEWS.into(), name, signature)));
                 }
                 self.scan(&value["methodSelect"]);
-                self.scan(&value["arguments"]);
+                return self.scan(&value["arguments"]);
             }
-            // An access of a segment through a value layout's handle calls the translator's
-            // method, with the layout, and makes no handle.
-            Value::Object(_) if let Some((name, signature)) = segment_access(value) => {
-                self.work.push(Item::Method((TRANSLATED_SEGMENTS.into(), name.into(), signature)));
-                self.scan(&value["methodSelect"]["expression"]["methodSelect"]["expression"]);
-                self.scan(&value["arguments"]);
+        }
+        // An access of a segment through a value layout's handle calls the translator's
+        // method, with the layout, and makes no handle.
+        if call && let Some((name, signature)) = segment_access(value) {
+            self.work.push(Item::Method((TRANSLATED_SEGMENTS.into(), name.into(), signature)));
+            self.scan(&value["methodSelect"]["expression"]["methodSelect"]["expression"]);
+            return self.scan(&value["arguments"]);
+        }
+        // An object created from a class name (`by_name`) reaches the constructors of the
+        // classes that the name can be, not reflection.
+        if kind == "TYPE_CAST"
+            && let Some(name) = created_by_name(value)
+        {
+            self.created_by_name(value);
+            self.scan(&value["type"]);
+            return self.scan(name);
+        }
+        // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
+        // does not show.
+        if kind == "ENHANCED_FOR_LOOP" && !text(&value["expression"], "javaType").ends_with(']') {
+            for (class, name, signature) in ITERATION {
+                self.work.push(Item::Method((class.to_string(), name.to_string(), signature.to_string())));
             }
-            // An object created from a class name (`by_name`) reaches the constructors of the
-            // classes that the name can be, not reflection.
-            Value::Object(_) if let Some(name) = created_by_name(value) => {
-                self.created_by_name(value);
-                self.scan(&value["type"]);
-                self.scan(name);
+        }
+        if kind == "TRY" && value["resources"].as_array().is_some_and(|r| !r.is_empty()) {
+            let (class, name, signature) = CLOSE;
+            self.work.push(Item::Method((class.to_string(), name.to_string(), signature.to_string())));
+        }
+        if kind == "VARIABLE" {
+            self.stub_type(text(&value["symbol"], "type"));
+        }
+        if call {
+            self.initialization(value);
+            // A class that `Class.forName` names exists, and is initialized if the call says
+            // so (`lower::by_name`).
+            if let Some((class, initialize)) = class_for_name(value) {
+                self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
             }
-            Value::Object(fields) => {
-                // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
-                // does not show.
-                if text(value, "kind") == "ENHANCED_FOR_LOOP"
-                    && !text(&value["expression"], "javaType").ends_with(']')
-                {
-                    for (class, name, signature) in ITERATION {
-                        self.work.push(Item::Method((
-                            class.to_string(),
-                            name.to_string(),
-                            signature.to_string(),
-                        )));
-                    }
-                }
-                if text(value, "kind") == "TRY"
-                    && value["resources"].as_array().is_some_and(|r| !r.is_empty())
-                {
-                    let (class, name, signature) = CLOSE;
-                    self.work.push(Item::Method((
-                        class.to_string(),
-                        name.to_string(),
-                        signature.to_string(),
-                    )));
-                }
-                if text(value, "kind") == "VARIABLE" {
-                    self.stub_type(text(&value["symbol"], "type"));
-                }
-                self.initialization(value);
-                // A class that `Class.forName` names exists, and is initialized if the call says
-                // so (`lower::by_name`).
-                if let Some((class, initialize)) = class_for_name(value) {
-                    self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
-                }
-                self.reflective(value);
-                self.reflection_scan(value);
-                if recreated_exception(value).is_some() {
-                    self.recreates_exceptions();
-                }
-                if let Some(methods) = regex_call(value) {
-                    for (class, method, signature) in methods {
-                        self.work.push(Item::Method((
-                            (*class).into(),
-                            (*method).into(),
-                            (*signature).into(),
-                        )));
-                    }
-                }
-                if let Some(field) = field_offset_named(value) {
-                    self.work.push(Item::Field(field));
-                }
-                let field_of = |class: &str, name: &str| {
-                    self.classes.get(class).is_some_and(|(decl, _)| {
-                        members(decl).any(|m| text(m, "kind") == "VARIABLE" && text(m, "name") == name)
-                    })
-                };
-                if let Some(field) = named_field_handle(value, field_of) {
-                    self.work.push(Item::Field(field));
-                }
-                if let Some(field) = own_field_handle(value)
-                    && let Some(class) = self.lookup_class.clone()
-                {
-                    self.work.push(Item::Field((class, field)));
-                }
-                if text(value, "kind") == "STRING_LITERAL"
-                    && let Some(literal) = value["value"].as_str()
-                {
-                    self.named(literal);
-                }
-                // A lambda creates an object of a class that implements its interface with the
-                // interface's abstract method.
-                let descriptor = &value["descriptor"];
-                if matches!(text(value, "kind"), "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE")
-                    && descriptor.is_object()
-                {
-                    let target = text(descriptor, "target").to_string();
-                    self.work.push(Item::Class(target.clone()));
-                    self.live(target);
-                    let (owner, name) = (text(descriptor, "owner"), text(descriptor, "name"));
-                    self.work.push(Item::Method((
-                        owner.into(),
-                        name.into(),
-                        text(descriptor, "type").into(),
-                    )));
-                }
-                for (field, child) in fields {
-                    if field == "symbol" {
-                        self.symbol(child);
-                    } else {
-                        self.scan(child);
-                    }
+            self.reflective(value);
+        }
+        if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS" | "MEMBER_REFERENCE" | "STRING_LITERAL" | "MEMBER_SELECT")
+        {
+            self.reflection_scan(value);
+        }
+        if kind == "TRY" && recreated_exception(value).is_some() {
+            self.recreates_exceptions();
+        }
+        if call {
+            if let Some(methods) = regex_call(value) {
+                for (class, method, signature) in methods {
+                    self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
             }
-            Value::Array(items) => items.iter().for_each(|item| self.scan(item)),
-            _ => {}
+            if let Some(field) = field_offset_named(value) {
+                self.work.push(Item::Field(field));
+            }
+            let field_of = |class: &str, name: &str| {
+                self.classes.get(class).is_some_and(|(decl, _)| {
+                    members(decl).any(|m| text(m, "kind") == "VARIABLE" && text(m, "name") == name)
+                })
+            };
+            if let Some(field) = named_field_handle(value, field_of) {
+                self.work.push(Item::Field(field));
+            }
+            if let Some(field) = own_field_handle(value)
+                && let Some(class) = self.lookup_class.clone()
+            {
+                self.work.push(Item::Field((class, field)));
+            }
+        }
+        if kind == "STRING_LITERAL"
+            && let Some(literal) = value["value"].as_str()
+        {
+            self.named(literal);
+        }
+        // A lambda creates an object of a class that implements its interface with the
+        // interface's abstract method.
+        let descriptor = &value["descriptor"];
+        if matches!(kind, "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE") && descriptor.is_object() {
+            let target = text(descriptor, "target").to_string();
+            self.work.push(Item::Class(target.clone()));
+            self.live(target);
+            let (owner, name) = (text(descriptor, "owner"), text(descriptor, "name"));
+            self.work.push(Item::Method((owner.into(), name.into(), text(descriptor, "type").into())));
+        }
+        for (field, child) in fields {
+            if *field == "symbol" {
+                self.symbol(child);
+            } else {
+                self.scan(child);
+            }
         }
     }
 
@@ -3190,8 +3203,8 @@ impl<'t> Walk<'t> {
     }
 
     fn symbol(&mut self, symbol: &Value) {
-        let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
-        let member = (owner.as_str(), name.as_str(), text(symbol, "type"));
+        let (owner, name) = (text(symbol, "owner"), text(symbol, "name"));
+        let member = (owner, name, text(symbol, "type"));
         for (_, (class, method, signature)) in STANDARD_CALLS.iter().filter(|(m, _)| *m == member) {
             self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
         }
@@ -3211,7 +3224,7 @@ impl<'t> Walk<'t> {
         match text(symbol, "kind") {
             "METHOD"
                 if owner == "java.lang.String"
-                    && matches!(name.as_str(), "toUpperCase" | "toLowerCase")
+                    && matches!(name, "toUpperCase" | "toLowerCase")
                     && text(symbol, "type") == "(java.util.Locale)java.lang.String" =>
             {
                 let (class, method, signature) = LOCALE_LANGUAGE;
@@ -3232,7 +3245,7 @@ impl<'t> Walk<'t> {
             // The annotations that reflection finds (`ANNOTATION_VALUES`).
             "METHOD"
                 if name == "getAnnotation" && owner == "java.lang.Class"
-                    || crate::lower::is_member_annotation_call(&owner, &name) =>
+                    || crate::lower::is_member_annotation_call(owner, name) =>
             {
                 for (class, method, signature) in ANNOTATION_VALUES {
                     self.work.push(Item::Method((class.into(), method.into(), signature.into())));
@@ -3251,36 +3264,36 @@ impl<'t> Walk<'t> {
             }
             // The coders of a charset (`CHARSET_CODERS`).
             "METHOD"
-                if let Some((class, to, signature)) = charset_coder(&owner, &name, text(symbol, "type"))
-                    .or_else(|| charset_coding(&owner, &name, text(symbol, "type"))) =>
+                if let Some((class, to, signature)) = charset_coder(owner, name, text(symbol, "type"))
+                    .or_else(|| charset_coding(owner, name, text(symbol, "type"))) =>
             {
                 self.work.push(Item::Method((class.into(), to.into(), signature.into())));
             }
             // `sun.misc.Unsafe`'s accesses of memory by address (`TRANSLATED_UNSAFE_MEMORY`).
-            "METHOD" if sun_misc_memory(&owner, &name, text(symbol, "type")).is_some() => {
+            "METHOD" if sun_misc_memory(owner, name, text(symbol, "type")).is_some() => {
                 let signature = text(symbol, "type").to_string();
                 if name == "invokeCleaner" {
                     let (check, check_signature) = CLEANER_CHECK;
                     let check = (TRANSLATED_UNSAFE_MEMORY.into(), check.into(), check_signature.into());
                     self.work.push(Item::Method(check));
                 }
-                self.work.push(Item::Method((TRANSLATED_UNSAFE_MEMORY.into(), name, signature)));
+                self.work.push(Item::Method((TRANSLATED_UNSAFE_MEMORY.into(), name.into(), signature)));
             }
             // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
-            "METHOD" if let Some((class, to)) = redirected_call(&owner, &name, text(symbol, "type")) => {
+            "METHOD" if let Some((class, to)) = redirected_call(owner, name, text(symbol, "type")) => {
                 let signature = text(symbol, "type").to_string();
                 self.work.push(Item::Method((class.into(), to.into(), signature)));
             }
             // The translator's code for what `JavaLangAccess` does (see `lower.rs`).
             "METHOD"
                 if owner == "jdk.internal.access.JavaLangAccess"
-                    && TRANSLATED_LANG_ACCESS.contains(&name.as_str()) =>
+                    && TRANSLATED_LANG_ACCESS.contains(&name) =>
             {
                 let signature = text(symbol, "type").to_string();
-                self.work.push(Item::Method((TRANSLATED_LANG_ACCESS_CLASS.into(), name, signature)));
+                self.work.push(Item::Method((TRANSLATED_LANG_ACCESS_CLASS.into(), name.into(), signature)));
             }
             // Formatted where it is called, and printed by `PRINT_FORMATTED`.
-            "METHOD" if owner == "java.io.PrintStream" && matches!(name.as_str(), "printf" | "format") => {
+            "METHOD" if owner == "java.io.PrintStream" && matches!(name, "printf" | "format") => {
                 let (class, method, signature) = PRINT_FORMATTED;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
                 if formats_in_locale(text(symbol, "type")) {
@@ -3296,14 +3309,14 @@ impl<'t> Walk<'t> {
             }
             "METHOD" | "CONSTRUCTOR" => {
                 self.stub_method(symbol);
-                self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
+                self.work.push(Item::Method((owner.into(), name.into(), text(symbol, "type").into())));
             }
             // `System.out`, `String.CASE_INSENSITIVE_ORDER` and the like as a value: the
             // translator's object.
-            "FIELD" if let Some((class, field)) = redirected_field(&owner, &name) => {
+            "FIELD" if let Some((class, field)) = redirected_field(owner, name) => {
                 self.work.push(Item::Field((class.into(), field.into())));
             }
-            "FIELD" | "ENUM_CONSTANT" => self.work.push(Item::Field((owner, name))),
+            "FIELD" | "ENUM_CONSTANT" => self.work.push(Item::Field((owner.into(), name.into()))),
             kind if CLASS_KINDS.contains(&kind) => {
                 self.work.push(Item::Class(strip_arguments(text(symbol, "type"))))
             }
@@ -3354,6 +3367,9 @@ fn supertype(ty: &Value) -> Option<String> {
 
 /// A type without its type arguments: `java.util.ArrayList<E>.Itr` is `java.util.ArrayList.Itr`.
 pub(super) fn strip_arguments(ty: &str) -> String {
+    if !ty.contains(['<', '>']) {
+        return ty.to_string();
+    }
     let mut depth = 0;
     ty.chars()
         .filter(|&c| {

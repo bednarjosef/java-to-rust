@@ -160,15 +160,13 @@ impl<'t> Walk<'t> {
         match text(node, "kind") {
             "METHOD_INVOCATION" | "NEW_CLASS" => {
                 let symbol = &node["symbol"];
-                let callee: MethodKey = (
-                    strip_arguments(text(symbol, "owner")),
-                    text(symbol, "name").into(),
-                    text(symbol, "type").into(),
-                );
+                let callee = || -> MethodKey {
+                    (strip_arguments(text(symbol, "owner")), text(symbol, "name").into(), text(symbol, "type").into())
+                };
                 for (index, argument) in node["arguments"].as_array().into_iter().flatten().enumerate() {
                     if is_class_value(argument) {
                         let value = self.class_value(argument);
-                        self.class_values.entry((callee.clone(), index)).or_default().insert(value);
+                        self.class_values.entry((callee(), index)).or_default().insert(value);
                     }
                 }
             }
