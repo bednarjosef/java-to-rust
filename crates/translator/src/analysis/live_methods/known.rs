@@ -231,7 +231,7 @@ impl Walk<'_> {
     /// The parameters and locals of method `m` (see the module's comment).
     pub(super) fn env(&self, m: usize) -> Env {
         let method = &self.class.methods[m];
-        let mut env = Env::new();
+        let mut env = Env::default();
         {
             let state = self.state.borrow();
             for (i, p) in method.params.iter().enumerate() {
@@ -325,7 +325,7 @@ impl Walk<'_> {
     /// The value of `e` in method `m` (`STATIC`: in an initializer), when it is known.
     pub(super) fn known(&self, m: usize, e: &Expr) -> Option<i128> {
         if m == STATIC {
-            return self.known_in(STATIC, e, &Env::new());
+            return self.known_in(STATIC, e, &Env::default());
         }
         let env = std::mem::take(&mut self.state.borrow_mut().known.env);
         let value = self.known_in(m, e, &env);
@@ -460,7 +460,7 @@ impl Walk<'_> {
         if !matches!(value.kind, ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Bool(_)) {
             return None;
         }
-        self.known_in(STATIC, value, &Env::new())
+        self.known_in(STATIC, value, &Env::default())
     }
 
     /// Whether some method of the group of method `r` only returns a literal.

@@ -50,11 +50,11 @@
 //! exceptions among them (`Class::raised`), so a clause whose classes have none yet waits, and the
 //! method is walked again once one of them does.
 
+use super::FastMap as HashMap;
 use super::FastSet as HashSet;
 use super::object_values::{self, ClassSet, Flow, ObjectValues, STATIC};
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 mod known;
@@ -126,10 +126,10 @@ pub fn live_methods_unless(
             queued: HashSet::default(),
             seen: HashSet::default(),
             rescans: [0; 4],
-            waiting: HashMap::new(),
+            waiting: HashMap::default(),
             waited: HashSet::default(),
-            contexts: HashMap::new(),
-            catching: HashMap::new(),
+            contexts: HashMap::default(),
+            catching: HashMap::default(),
             glued: HashSet::default(),
             known: known::Knowledge::default(),
             unknown: None,
@@ -141,7 +141,7 @@ pub fn live_methods_unless(
                 touched: HashSet::default(),
                 unresolved: Vec::new(),
                 thread_statics: None,
-                receivers: HashMap::new(),
+                receivers: HashMap::default(),
             },
             built: HashSet::default(),
             stopped: false,
@@ -305,10 +305,10 @@ impl Walk<'_> {
                 queued: HashSet::default(),
                 seen: HashSet::default(),
                 rescans: [0; 4],
-                waiting: HashMap::new(),
+                waiting: HashMap::default(),
                 waited: HashSet::default(),
-                contexts: HashMap::new(),
-                catching: HashMap::new(),
+                contexts: HashMap::default(),
+                catching: HashMap::default(),
                 glued: HashSet::default(),
                 known: main.known.clone(),
                 unknown: None,
@@ -320,7 +320,7 @@ impl Walk<'_> {
                     touched: HashSet::default(),
                     unresolved: Vec::new(),
                     thread_statics: None,
-                    receivers: HashMap::new(),
+                    receivers: HashMap::default(),
                 },
                 built: HashSet::default(),
                 stopped: false,
