@@ -309,9 +309,9 @@ fn analyse(
     // the generator that no stub takes away ends it. The generator reports every error it finds,
     // which are stubbed together.
     let tolerated: std::cell::RefCell<Vec<Error>> = Default::default();
-    // The facts that the analyses find before their first check, kept while no stub changes the
-    // program: a pass that only tolerates more errors finds them again the same.
-    let represented: std::cell::RefCell<Option<analysis::Facts>> = Default::default();
+    // The facts that depend on the program alone, kept while no stub changes the program: a pass
+    // that only tolerates more errors finds them again the same.
+    let represented: std::cell::RefCell<Option<analysis::Represented>> = Default::default();
     let passes: [Pass; 4] = [
         &|class| crate::timings::phase("census: string identity", || analysis::string_identity(class)),
         &|class| crate::timings::phase("census: whole objects", || analysis::whole_objects_all(class)),
@@ -319,8 +319,8 @@ fn analyse(
         &|class| {
             let tolerated = tolerated.borrow();
             let mut facts = crate::timings::phase("census: analyses", || {
-                let found =
-                    represented.borrow_mut().get_or_insert_with(|| analysis::represented(class)).clone();
+                let mut represented = represented.borrow_mut();
+                let found = represented.get_or_insert_with(|| analysis::represented(class));
                 analysis::analyze_from(class, &tolerated, found)
             })?;
             // Each message that is not certain stubs its code, as a translation rejects it.

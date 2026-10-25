@@ -3429,6 +3429,90 @@ fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
     );
 }
 
+#[test]
+fn a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round() {
+    // Each round of the analyses ends at the first check that rejects code, which is stubbed
+    // before the next round: a pattern variable, then `synchronized` on a string (the checks that
+    // come before the range analysis and nullness), then a `toString` whose exception is caught
+    // (exceptions), then the message of a `NullPointerException` (after the analyses).
+    let dir = write_sources("census_rounds", &[("Main.java", MAIN)]);
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let census = census(&program);
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 11 pieces; 6 (54.5%) translate, 5 rejected.",
+            "a parameter of a method that the runtime calls\n          at Main.java:51:16\n",
+            "`synchronized` on a string not supported yet\n          at Main.java:10:9\n",
+            "a pattern variable used here not supported yet\n          at Main.java:6:18\n",
+            "a toString that throws an exception that is caught not supported yet\n          at Main.java:58:5\n",
+            "the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:19:30\n",
+        ],
+    );
+    const MAIN: &str = r#"public class Main {
+    static final String LOCK = "lock";
+    static int n;
+
+    static boolean blank(Object o) {
+        return !(o instanceof String s) || s.isBlank();
+    }
+
+    static void count() {
+        synchronized (LOCK) {
+            n++;
+        }
+    }
+
+    static int len(String s, boolean b) {
+        try {
+            if (b) s = null;
+        } finally {
+            System.out.print(s.length());
+        }
+        return 0;
+    }
+
+    static void compare(Comparable<String> c) {
+        System.out.println(c.compareTo("x"));
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        System.out.println(blank(args.length > 2 ? (Object) 1 : " "));
+        Thread t = new Thread(Main::count);
+        t.start();
+        t.join();
+        System.out.println(n);
+        compare(new Name());
+        try {
+            System.out.println("level " + Level.LOW);
+        } catch (IllegalStateException e) {
+            System.out.println("no level");
+        }
+        String u = args.length > 3 ? "a" : null;
+        try {
+            System.out.println(u.length() + len(u, false));
+        } catch (NullPointerException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+}
+
+class Name implements Comparable<String> {
+    public int compareTo(String s) {
+        return s == "x" ? 0 : 1;
+    }
+}
+
+enum Level {
+    LOW;
+
+    public String toString() {
+        throw new IllegalStateException("no text");
+    }
+}
+"#;
+}
+
 /// Two source roots that are modules of the JDK, as javac's `jdk.compiler` and `java.compiler`
 /// are: javac patches one module at most in a compilation, so the class files whose names the
 /// messages of a `NullPointerException` show come from one compilation for each.

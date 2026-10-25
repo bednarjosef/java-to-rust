@@ -309,13 +309,20 @@ pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
 /// monitors): a census goes on past those of them that no stub can take away, such as a field's
 /// type (`program/census.rs`).
 pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, Vec<Error>> {
-    analyze_from(class, tolerated, represented(class))
+    analyze_from(class, tolerated, &mut represented(class))
 }
 
-/// The facts that the analyses find before their first check, which depend on the program alone
-/// and not on the errors tolerated: a census that only tolerates more errors of the same program
-/// finds them once (`program/census.rs`).
-pub fn represented(class: &Class) -> Facts {
+/// The facts that depend on the program alone and not on the errors tolerated, which a census
+/// that only tolerates more errors of the same program finds once (`program/census.rs`): those
+/// that the analyses find before their first check, and the range analysis's, found when the
+/// analyses first get past the checks, none of which reads them.
+pub struct Represented {
+    facts: Facts,
+    ranges: Option<Facts>,
+}
+
+/// The facts that the analyses find before their first check.
+pub fn represented(class: &Class) -> Represented {
     let mut facts = Facts {
         fields_structs: hierarchy::fields_structs(class),
         field_owners: hierarchy::field_owners(class),
@@ -324,23 +331,57 @@ pub fn represented(class: &Class) -> Facts {
     };
     use crate::timings::phase;
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
-    phase("analysis: ranges", || ranges::analyze(class, &mut facts));
     phase("analysis: representation", || representation(class, &mut facts));
-    facts
+    Represented { facts, ranges: None }
 }
 
 /// `analyze_tolerating`, from the facts that `represented` found for `class`.
-pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Result<Facts, Vec<Error>> {
+///
+/// The checks run first, in their order, each as soon as the facts it reads are known: the
+/// validation reads the representation's facts, the pattern variables the code alone, strings
+/// and boxes as `Object`s the flows of objects, what threads share the boxes compared by identity
+/// (`boxing`, from the code), and the monitors the representation's flags. The facts that none of
+/// them reads (ranges, fixed fields, statics, early reads, nullness) are found after them, so a
+/// census round that a check ends, which stubs that check's code and runs the analyses again,
+/// does not find them. Each step sees the same facts as when the checks were among them: the
+/// checks read none of the facts found after them, and the steps after them see the checks' own
+/// facts (`identity_checks`, `faithful_boxes`) only where they did before. None of these steps
+/// changes the program or keeps state that another reads.
+pub fn analyze_from(
+    class: &Class,
+    tolerated: &[Error],
+    found: &mut Represented,
+) -> Result<Facts, Vec<Error>> {
     let checked = |result: Result<(), Vec<Error>>| {
         let mut errors = result.err().unwrap_or_default();
         errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
         if errors.is_empty() { Ok(()) } else { Err(errors) }
     };
     use crate::timings::phase;
+    let mut facts = found.facts.clone();
     checked(phase("analysis: validate", || validate(class, &facts)))?;
+    patterns::check(class)?;
+    let (identity_checks, object_values) =
+        phase("analysis: object values", || patterns::check_object_values(class, &facts));
+    checked(object_values)?;
+    phase("analysis: boxing", || boxing::analyze(class, &mut facts));
+    if facts.threaded {
+        checked(phase("analysis: threads", || threads::check(class, &facts)))?;
+    }
+    checked(phase("analysis: monitors", || monitors::check(class, &facts)))?;
+    // The facts that the checks above do not read, from those that they found set aside.
+    let faithful_boxes = std::mem::take(&mut facts.faithful_boxes);
+    let ranges = found.ranges.get_or_insert_with(|| {
+        let mut ranges = Facts::default();
+        phase("analysis: ranges", || ranges::analyze(class, &mut ranges));
+        ranges
+    });
+    facts.no_overflow = ranges.no_overflow.clone();
+    facts.safe_division = ranges.safe_division.clone();
+    facts.ascii_chars = ranges.ascii_chars.clone();
+    facts.index_ranges = ranges.index_ranges.clone();
     facts.fixed_fields =
         phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, facts.threaded));
-    patterns::check(class)?;
     facts.eager_init = statics::eager_classes(class);
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
@@ -350,15 +391,8 @@ pub fn analyze_from(class: &Class, tolerated: &[Error], mut facts: Facts) -> Res
     facts.early_static_reads =
         phase("analysis: early static reads", || early_reads::early_reads(class, &facts.eager_init));
     phase("analysis: nullness", || nullness::analyze(class, &mut facts));
-    let (identity_checks, object_values) =
-        phase("analysis: object values", || patterns::check_object_values(class, &facts));
-    checked(object_values)?;
     facts.identity_checks = identity_checks;
-    phase("analysis: boxing", || boxing::analyze(class, &mut facts));
-    if facts.threaded {
-        checked(phase("analysis: threads", || threads::check(class, &facts)))?;
-    }
-    checked(phase("analysis: monitors", || monitors::check(class, &facts)))?;
+    facts.faithful_boxes = faithful_boxes;
     facts.class_monitors = monitors::class_monitors(class, &facts);
     phase("analysis: borrowing", || {
         borrowed_params(class, &mut facts);
