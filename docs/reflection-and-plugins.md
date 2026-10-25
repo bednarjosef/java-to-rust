@@ -238,7 +238,10 @@ handles.
   extends `Proxy`, implements the interfaces, and has a method for `hashCode`, `equals`,
   `toString` and each method of the interfaces, which calls the handler with the proxy, the
   method's `Method` from the reflection table (`Object`'s three are in it too) and the arguments
-  boxed. Its result is cast or unboxed with Java's `ClassCastException` and
+  boxed. A method of a generic superinterface has the types that the interface gives it
+  (`test(String)` in an interface that extends `Predicate<String>`), and javac adds the bridge;
+  but a method whose types do not box is not in the reflection table (see above), so the
+  class's initialization throws `NoSuchMethodError` for it. Its result is cast or unboxed with Java's `ClassCastException` and
   `NullPointerException`, and a checked exception the method does not declare is wrapped in an
   `UndeclaredThrowableException`. The patched `Proxy` (`java/patches/java/lang/reflect/Proxy.java`)
   calls `java/overlay/java/lang/reflect/TranslatedProxies.java`, which checks the interfaces as
