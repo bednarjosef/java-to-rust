@@ -51,6 +51,24 @@ pub(super) struct LambdaInfo<'t> {
     pub receiver: Option<(&'t str, Node<'t>)>,
 }
 
+/// Where each lambda is in `Lowering::lambdas`, the first of each key as a search in order finds
+/// it: lowering asks about lambdas everywhere, and the Minecraft server has tens of thousands.
+#[derive(Default)]
+pub(super) struct LambdaIndex {
+    by_class: crate::analysis::FastMap<usize, usize>,
+    by_method: crate::analysis::FastMap<usize, usize>,
+    by_node: crate::analysis::FastMap<*const Value, usize>,
+}
+
+impl LambdaIndex {
+    fn add(&mut self, lambda: &LambdaInfo, index: usize) {
+        self.by_class.entry(lambda.class).or_insert(index);
+        self.by_method.entry(lambda.ctor).or_insert(index);
+        self.by_method.entry(lambda.method).or_insert(index);
+        self.by_node.entry(lambda.node.0 as *const Value).or_insert(index);
+    }
+}
+
 impl<'t> Lowering<'t> {
     /// Declares the lambdas and method references in the code of `member`, a member of class
     /// `class` (`method`, the member's index into `methods` when it is a method), in the order of
@@ -131,6 +149,7 @@ impl<'t> Lowering<'t> {
         });
         let lambda =
             LambdaInfo { node, class: index, ctor, method: ctor + 1, params, code, member, receiver: None };
+        self.lambda_index.add(&lambda, self.lambdas.len());
         self.lambdas.push(lambda);
         Ok(())
     }
@@ -177,22 +196,27 @@ impl<'t> Lowering<'t> {
     /// The synthetic local and the receiver of the method reference `node`, when its receiver is
     /// computed (see `plan_receivers`).
     pub(super) fn lambda_receiver(&self, node: Node<'t>) -> Option<(&'t str, Node<'t>)> {
-        self.lambdas.iter().find(|l| std::ptr::eq(l.node.0, node.0)).and_then(|l| l.receiver)
+        self.lambda_of_node(node).and_then(|l| l.receiver)
     }
 
     /// The lambda whose class is `t`.
     pub(super) fn lambda_of_type(&self, t: usize) -> Option<&LambdaInfo<'t>> {
-        self.lambdas.iter().find(|l| l.class == t)
+        self.lambda_index.by_class.get(&t).map(|&l| &self.lambdas[l])
     }
 
     /// The lambda whose constructor or method is `m`.
     pub(super) fn lambda_of_method(&self, m: usize) -> Option<&LambdaInfo<'t>> {
-        self.lambdas.iter().find(|l| l.ctor == m || l.method == m)
+        self.lambda_index.by_method.get(&m).map(|&l| &self.lambdas[l])
+    }
+
+    /// The lambda or method reference `node`.
+    fn lambda_of_node(&self, node: Node<'t>) -> Option<&LambdaInfo<'t>> {
+        self.lambda_index.by_node.get(&(node.0 as *const Value)).map(|&l| &self.lambdas[l])
     }
 
     /// The class of the lambda or method reference `node`.
     pub(super) fn lambda_class(&self, node: Node<'t>) -> Option<usize> {
-        self.lambdas.iter().find(|l| std::ptr::eq(l.node.0, node.0)).map(|l| l.class)
+        self.lambda_of_node(node).map(|l| l.class)
     }
 
     /// The code of the class `t` when it is a lambda's: the names of its method's parameters,
@@ -260,7 +284,7 @@ impl<'t> Lowering<'t> {
     /// A lambda or method reference as an expression: a new object of its class, given what it
     /// captures, converted to the interface.
     pub(super) fn lambda(&self, node: Node<'t>) -> Result<ExprKind, Error> {
-        let Some(l) = self.lambdas.iter().find(|l| std::ptr::eq(l.node.0, node.0)) else {
+        let Some(l) = self.lambda_of_node(node) else {
             return unsupported(node, "lambdas");
         };
         let ty = self.ty(node, node.java_type())?;

@@ -120,6 +120,7 @@ impl<'t> Lowering<'t> {
             aliases: Default::default(),
             functional: Default::default(),
             lambdas: Vec::new(),
+            lambda_index: Default::default(),
             capture_refs: Default::default(),
             capture_sites: Default::default(),
             member_outers: Vec::new(),
