@@ -105,6 +105,7 @@ impl<'t> Lowering<'t> {
             field_updates: Default::default(),
             handle_calls: Default::default(),
             handle_slots: Default::default(),
+            static_writes: Default::default(),
             static_qualifiers: Default::default(),
             calls: Default::default(),
             chained_calls: Default::default(),
