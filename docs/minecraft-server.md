@@ -157,6 +157,25 @@ bytecode the class file already has:
   a use has an unused parameter, and nothing inside the block declares the parameter's name
   again. A use inside a nested catch whose own parameter is unused could read either
   parameter, so that name is left alone.
+- **A parameter type the decompiler erased** in a method that then overrides nothing, so javac
+  says its class does not implement an abstract method (`encode(Object input, ..)` in a
+  `MapEncoder.Implementation<R>` of DataFixerUpper's `RecordCodecBuilder`, whose method is
+  `encode(R input, ..)`): written with the parameter type of the supertype's method that has the
+  same erased parameters, as the class inherits it (`R`), with the method's own type variables.
+  The erasure, and with it the method's descriptor, stays. Two such methods that disagree get no
+  edit.
+- **Hints that inference has to meet, left out,** in an expression whose type variables javac
+  cannot infer, or whose bounds disagree: type arguments that name `Object`, which the
+  decompiler writes for a type it could not name (`Either.<Object, R>unbox(a)`; also in an
+  argument, before a cast is tried), and a cast to a type variable erased to `Object` that is a
+  lambda's whole body (`e -> (T) f.apply(e)` in `MapCodec` and `MapDecoder`, where the decompiler
+  named the erased result with a type variable of the enclosing method). Type arguments are
+  inference only, and a cast to such a type variable has no `checkcast`.
+- **The raw qualifier of an inner class** in `new Outer.Inner<>(..)`, where `Inner` is an inner
+  class of a generic class `Outer` that the enclosing class is or extends (`new
+  ListCodec.DecoderState<>(ops)` inside `ListCodec<E>`): javac rejects a diamond on an inner
+  class of a raw type, and `new Inner<>(..)` is the same creation with the enclosing `this` as
+  the outer instance.
 
 Classes are named as the file can name them: by simple name when the file imports them or they
 are in its package or in `java.lang`, otherwise qualified. A type that source cannot write (a
@@ -182,7 +201,8 @@ is fixed by hand: a type argument written out (`EntityReference.<LivingEntity>st
 variable, or a method CFR wrote with `SwitchBootstraps` written as `instanceof` tests. The fixes
 are Minecraft's code, so they live in the cache only, as `hand-fixes/server.patch` (with
 `hand-fixes/orig/`, the repaired text of each file before its fix, and `make-patch.sh`, which
-diffs the two), and the `repair` step applies the patch after its own edits. What is left after
+diffs the two), and the `repair` step applies the patch after its own edits. A hunk that the
+repair already made is skipped, and `hand-fixes/applied.txt` lists it. What is left after
 it: the annotations of packages no jar has, four data fixes of DataFixerUpper's optics (which
 run only to upgrade a world saved by an older version) and the registry dump of the data
 generator.
@@ -249,7 +269,7 @@ dependencies can be built: it stops only at a rejected piece, as any translation
   | Guava | 2,023 errors in 320 of its 608 files |
   | netty-handler | 526 errors in 28 files |
   | netty-common | 140 errors in 28 files |
-  | DataFixerUpper | 172 errors in 57 of its 164 files (145 after the `library-best-of` and `repair` steps) |
+  | DataFixerUpper | 172 errors in 57 of its 164 files (97 after the `library-best-of` and `repair` steps, 24 of them outside imports and annotations, all in its optics and point-free functions, which run only in data fixes) |
   | authlib, Gson | 107 errors each |
   | netty-codec-compression | 101 errors |
   | most others | a few |
@@ -423,9 +443,11 @@ These are plans. Work on several of them is under way but not merged yet.
    (it writes `jdk-src/modules.txt`), then the decompile, best-of, library-best-of and repair
    steps, then the census. Then compare its rejections with the last census's and with javac's,
    and list the new kinds.
-2. The decompiled code javac still rejects: 46 errors in the server and 33 in DataFixerUpper
-   (outside imports and annotations) after the best-of and repair steps, mostly inference inside
-   lambdas and method references.
+2. The decompiled code javac still rejects: 45 errors in the server, which the hand fixes cover,
+   and 24 in DataFixerUpper's optics (outside imports and annotations) after the best-of and
+   repair steps, mostly inference inside lambdas and method references. Most of the server's
+   need type arguments that no declared type gives (`MethodInfo.<Params>paramsTypedCodec()`,
+   `RecordCodecBuilder.<Pair<P, P>>create(..)` whose result a call unwraps).
 3. The census's speed: the last one lowered the whole program five times, about 370 s each,
    because a failed try with Rust generics starts lowering over. Planned: cheaper retries.
 4. The translator's refusals still open from the last census, by kind:
