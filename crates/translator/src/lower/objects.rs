@@ -32,6 +32,8 @@ pub(super) struct Indices<'t> {
     methods: usize,
     /// The first method with each name and signature, by javac's name of its class.
     methods_by_owner: HashMap<String, HashMap<(&'t str, &'t str), usize>>,
+    /// The methods of each class, by the class's index, in `Lowering::methods` order.
+    methods_of: Vec<Vec<usize>>,
 }
 
 impl<'t> Indices<'t> {
@@ -47,6 +49,10 @@ impl<'t> Indices<'t> {
         for (m, info) in methods.iter().enumerate().skip(self.methods) {
             let owner = self.methods_by_owner.entry(types[info.owner].javac.clone()).or_default();
             owner.entry((info.name, info.sig)).or_insert(m);
+            if self.methods_of.len() <= info.owner {
+                self.methods_of.resize(info.owner + 1, Vec::new());
+            }
+            self.methods_of[info.owner].push(m);
         }
         self.methods = methods.len();
     }
@@ -249,6 +255,21 @@ impl<'t> Lowering<'t> {
         let mut indices = self.indices.borrow_mut();
         indices.add_methods(&self.types, &self.methods);
         indices.methods_by_owner.get(symbol.owner)?.get(&(symbol.name, symbol.ty)).copied()
+    }
+
+    /// The first method or constructor named `name` with signature `sig` of the class that javac
+    /// names `class`.
+    pub(super) fn method_named(&self, class: &str, name: &str, sig: &str) -> Option<usize> {
+        let mut indices = self.indices.borrow_mut();
+        indices.add_methods(&self.types, &self.methods);
+        indices.methods_by_owner.get(class)?.get(&(name, sig)).copied()
+    }
+
+    /// The methods and constructors of class `t`, in `Lowering::methods` order.
+    pub(super) fn methods_of(&self, t: usize) -> Vec<usize> {
+        let mut indices = self.indices.borrow_mut();
+        indices.add_methods(&self.types, &self.methods);
+        indices.methods_of.get(t).cloned().unwrap_or_default()
     }
 
     /// The declaration of a class: its instance fields and static fields, in source order.
@@ -462,9 +483,7 @@ impl<'t> Lowering<'t> {
             }
         };
         // A parameter of a type variable's type is of its erasure, which its declaration tells.
-        let callee = self.methods.iter().position(|m| {
-            self.types[m.owner].javac == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
-        });
+        let callee = self.method_named(symbol.owner, symbol.name, symbol.ty);
         let param = |ty: &str| {
             erased(ty)
                 .or_else(|| {

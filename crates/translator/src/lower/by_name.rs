@@ -42,8 +42,10 @@ impl<'t> Lowering<'t> {
         let var = || self.synth(ExprKind::Var(class_name.clone()), pos, Type::String);
         let mut cases = Vec::new();
         for t in (0..self.types.len()).filter(|&t| self.is_created_by_name(t, Some(target))) {
-            let ctor =
-                self.methods.iter().position(|m| m.owner == t && m.name == "<init>" && m.sig == "()void");
+            let ctor = self
+                .methods_of(t)
+                .into_iter()
+                .find(|&m| self.methods[m].name == "<init>" && self.methods[m].sig == "()void");
             let class = Type::class(&self.types[t].name);
             let mut created = self.synth(ExprKind::New { class: t, args: Vec::new(), ctor }, pos, class);
             if t != target {
@@ -390,8 +392,10 @@ impl<'t> Lowering<'t> {
         // A standard class of the translator (`lower::exceptions`), with its constructors, where
         // the program has it.
         let class = self.type_index(NULL)?;
-        let ctor =
-            self.methods.iter().position(|m| m.owner == class && m.name == "<init>" && m.sig == sig)?;
+        let ctor = self
+            .methods_of(class)
+            .into_iter()
+            .find(|&m| self.methods[m].name == "<init>" && self.methods[m].sig == sig)?;
         let args = message
             .map(|m| self.synth(ExprKind::Str(m.to_string()), pos, Type::String))
             .into_iter()

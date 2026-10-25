@@ -1287,10 +1287,7 @@ impl<'t> Lowering<'t> {
                 && args.first().is_some_and(|a| a.ty == Type::String))
             && let Some((class, to)) = crate::program::redirected_call(symbol.owner, symbol.name, symbol.ty)
         {
-            let resolved = self
-                .methods
-                .iter()
-                .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == symbol.ty);
+            let resolved = self.template_method(class, to, symbol.ty);
             if resolved.is_none() {
                 return unsupported(
                     node,
@@ -1432,10 +1429,7 @@ impl<'t> Lowering<'t> {
                 if crate::program::TRANSLATED_LANG_ACCESS.contains(&name) =>
             {
                 let class = crate::program::TRANSLATED_LANG_ACCESS_CLASS;
-                let resolved = self
-                    .methods
-                    .iter()
-                    .position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == symbol.ty);
+                let resolved = self.template_method(class, name, symbol.ty);
                 if resolved.is_none() {
                     return unsupported(node, &format!("`JavaLangAccess.{name}` outside a whole program"));
                 }
@@ -1445,11 +1439,8 @@ impl<'t> Lowering<'t> {
             // There are no virtual threads: a thread's carrier is the thread itself
             // (`ThreadLocalRandom` keeps its seeds in the carrier).
             ("jdk.internal.access.JavaLangAccess", "currentCarrierThread") => {
-                let resolved = self.methods.iter().position(|m| {
-                    self.types[m.owner].javac == "java.lang.Thread"
-                        && m.name == "currentThread"
-                        && m.sig == "()java.lang.Thread"
-                });
+                let resolved =
+                    self.template_method("java.lang.Thread", "currentThread", "()java.lang.Thread");
                 return Ok(ExprKind::Call { name: "currentThread".to_string(), args, resolved });
             }
             // Any other method of the JVM's `JavaLangAccess`, whose object is null in a

@@ -97,10 +97,7 @@ impl<'t> Lowering<'t> {
             Type::Double => ("java.util.function.IntToDoubleFunction", "applyAsDouble", "(int)double"),
             _ => ("java.util.function.IntFunction", "apply", "(int)R"),
         };
-        let resolved = self
-            .methods
-            .iter()
-            .position(|m| self.types[m.owner].javac == interface && m.name == name && m.sig == sig);
+        let resolved = self.template_method(interface, name, sig);
         if resolved.is_none() {
             return unsupported(call, "`Arrays.setAll` with this generator");
         }

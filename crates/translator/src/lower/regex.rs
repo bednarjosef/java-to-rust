@@ -41,10 +41,7 @@ impl<'t> Lowering<'t> {
             crate::program::REGEX_CALLS.iter().find(|(m, _)| *m == name).expect("a regular expression call");
         let mut resolved = Vec::new();
         for &(owner, method, sig) in calls.iter() {
-            let found = self
-                .methods
-                .iter()
-                .position(|m| self.types[m.owner].javac == owner && m.name == method && m.sig == sig);
+            let found = self.method_named(owner, method, sig);
             let Some(m) = found else { return Ok(None) };
             resolved.push(m);
         }

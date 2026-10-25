@@ -311,10 +311,7 @@ impl<'t> Lowering<'t> {
         }
         if (symbol.owner, symbol.name) == ("java.lang.System", "getProperties") {
             let (owner, name, signature) = crate::program::TRANSLATED_PROPERTIES;
-            let resolved = self
-                .methods
-                .iter()
-                .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == signature);
+            let resolved = self.method_named(owner, name, signature);
             if resolved.is_none() {
                 return unsupported(node, "`System.getProperties` outside a whole program");
             }

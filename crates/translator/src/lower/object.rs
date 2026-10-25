@@ -685,11 +685,7 @@ impl<'t> Lowering<'t> {
     /// of the class whose method they implement (javac lists these with the class): they override
     /// that method too, which gives the class its implementation.
     fn inherited_implementations(&self, methods: &mut [Method]) {
-        let find = |owner: &str, name: &str, sig: &str| {
-            self.methods
-                .iter()
-                .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
-        };
+        let find = |owner: &str, name: &str, sig: &str| self.method_named(owner, name, sig);
         for t in &self.types {
             let Some(list) = t.node.get("symbol").and_then(|s| s.0["inherits"].as_array()) else { continue };
             for entry in list {

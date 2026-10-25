@@ -156,10 +156,7 @@ impl<'t> Lowering<'t> {
         (class, to, sig): (&str, &str, &str),
         args: Vec<Expr>,
     ) -> Result<ExprKind, Error> {
-        let resolved = self
-            .methods
-            .iter()
-            .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == sig);
+        let resolved = self.template_method(class, to, sig);
         if resolved.is_none() {
             return unsupported(node, &format!("`Charset.{name}` outside a whole program"));
         }

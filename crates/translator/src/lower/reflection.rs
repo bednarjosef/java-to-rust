@@ -610,7 +610,7 @@ impl<'t> Lowering<'t> {
                     if !creatable || !reflected(t, "<init>") {
                         continue;
                     }
-                    for m in (0..self.methods.len()).filter(|&m| self.methods[m].owner == t) {
+                    for m in self.methods_of(t) {
                         if self.methods[m].name == "<init>" && self.callable(node, m)? {
                             out.push(Entry { found_on: t, member: Member::Method(m) });
                         }
@@ -619,7 +619,7 @@ impl<'t> Lowering<'t> {
                 LookupKind::Method => {
                     let mut seen: HashSet<(&str, &str)> = HashSet::new();
                     for (depth, owner) in self.supertypes_of(t)?.into_iter().enumerate() {
-                        for m in (0..self.methods.len()).filter(|&m| self.methods[m].owner == owner) {
+                        for m in self.methods_of(owner) {
                             let info = &self.methods[m];
                             let public = info.node.has_flag("PUBLIC")
                                 || self.types[owner].node.kind() == "INTERFACE"
@@ -775,7 +775,7 @@ impl<'t> Lowering<'t> {
     /// The method `name` with signature `sig` of the translator's class `class`, which the
     /// program has when it uses it.
     pub(super) fn template_method(&self, class: &str, name: &str, sig: &str) -> Option<usize> {
-        self.methods.iter().position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == sig)
+        self.method_named(class, name, sig)
     }
 }
 
