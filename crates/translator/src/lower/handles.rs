@@ -1251,10 +1251,7 @@ impl<'t> Lowering<'t> {
         args: &[Node<'t>],
         (interface, declarer, name, sig): (&str, &str, &'static str, &str),
     ) -> Result<Expr, Error> {
-        let apply = self
-            .methods
-            .iter()
-            .position(|m| self.types[m.owner].javac == declarer && m.name == name && m.sig == sig);
+        let apply = self.method_named(declarer, name, sig);
         let Some(apply) = apply else {
             return unsupported(node, &format!("a field updater's loop without `{declarer}.{name}`"));
         };
@@ -1429,10 +1426,7 @@ impl<'t> Lowering<'t> {
         // (`program::segment_access`), with the layout after the segment.
         if let Some((name, signature)) = crate::program::segment_access(node.0) {
             let class = crate::program::TRANSLATED_SEGMENTS;
-            let resolved = self
-                .methods
-                .iter()
-                .position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == signature);
+            let resolved = self.method_named(class, name, &signature);
             if resolved.is_none() {
                 return unsupported(
                     node,
@@ -1592,10 +1586,7 @@ impl<'t> Lowering<'t> {
         let (name, signature) = crate::program::buffer_view_method(method, kind, java)
             .expect("a view's access is a get or a set");
         let class = crate::program::TRANSLATED_BUFFER_VIEWS;
-        let resolved = self
-            .methods
-            .iter()
-            .position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == signature);
+        let resolved = self.method_named(class, &name, &signature);
         if resolved.is_none() {
             return unsupported(node, "a view of a byte buffer through a handle outside a whole program");
         }

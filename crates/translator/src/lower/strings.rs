@@ -72,11 +72,7 @@ impl<'t> Lowering<'t> {
             .expect("a method of `String` that streams");
         let mut resolved = Vec::new();
         for &(owner, name, sig) in calls.iter() {
-            let Some(m) = self
-                .methods
-                .iter()
-                .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
-            else {
+            let Some(m) = self.method_named(owner, name, sig) else {
                 return error(
                     node.pos(),
                     format!(
@@ -400,10 +396,7 @@ impl<'t> Lowering<'t> {
         let format = self.format_call(node, args, &arg_nodes, None)?;
         let text = self.synth(format, node.pos(), Type::String);
         let (owner, name, signature) = crate::program::PRINT_FORMATTED;
-        let resolved = self
-            .methods
-            .iter()
-            .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == signature);
+        let resolved = self.method_named(owner, name, signature);
         if resolved.is_none() {
             return unsupported(node, "`printf` of this `PrintStream`");
         }
