@@ -464,9 +464,22 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut unchecked_npe_tries = HashSet::new();
     let mut npe_catchers: Vec<(ExprId, Option<usize>, usize)> = Vec::new();
     let mut raised_classes = BTreeSet::new();
+    // What the calls of the same methods raise, gathered once: a call of an override group's
+    // method has thousands of them.
+    let mut raised_by_calls: super::FastMap<&[usize], BTreeSet<Kind>> = Default::default();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
-            for k in raised(p, &escapes) {
+            let gathered;
+            let kinds = match &p.raise {
+                Raise::Call(callees) => {
+                    raised_by_calls.entry(callees.as_slice()).or_insert_with(|| raised(p, &escapes))
+                }
+                _ => {
+                    gathered = raised(p, &escapes);
+                    &gathered
+                }
+            };
+            for k in kinds.iter().cloned() {
                 let catcher = p.frames.iter().rev().find(|f| f.catches.iter().any(|&t| matches(&k, t)));
                 if let Some(f) = catcher {
                     live_tries.insert(f.id);
