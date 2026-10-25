@@ -770,14 +770,16 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     while let Some(v) = queue.pop_front() {
         queued[v] = false;
         runs += 1;
-        if timings && runs.is_multiple_of(1_000_000) {
+        if timings && runs.is_multiple_of(100_000) {
             let entries: usize = readers.values().map(BTreeSet::len).sum();
             let (words, held) = values.class_set_words();
             eprintln!(
                 "timing: points-to: {runs} runs, {} queued, {} read places with {entries} readers, \
-                 class sets of {words} words in {held}{}",
+                 class sets of {words} words in {held}, {} variable lists, {} implementations known{}",
                 queue.len(),
                 readers.len(),
+                values.vars.len(),
+                values.types.implementations.borrow().len(),
                 crate::timings::memory()
             );
         }
@@ -786,7 +788,20 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             usize::MAX => visit_outside_methods(&values, class),
             _ => visit(&values, class, m, ctx, &class.methods[m].body),
         };
-        for read in values.reads.borrow_mut().replace(Vec::new()).unwrap_or_default() {
+        let reads = values.reads.borrow_mut().replace(Vec::new()).unwrap_or_default();
+        if timings && (updates.len() > 200_000 || reads.len() > 200_000) {
+            let name = match m {
+                usize::MAX => "the code outside methods".to_string(),
+                _ => format!("{}.{}", class.types[class.methods[m].class].name, class.methods[m].name),
+            };
+            eprintln!(
+                "timing: points-to: a visit of {name} on {ctx} made {} updates and {} reads{}",
+                updates.len(),
+                reads.len(),
+                crate::timings::memory()
+            );
+        }
+        for read in reads {
             readers.entry(read).or_default().insert(v);
         }
         for changed in apply(&mut values, updates) {
