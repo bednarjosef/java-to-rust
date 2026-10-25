@@ -97,44 +97,50 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             _ => false,
         })
         .collect();
-    // A method that calls a method on `this` that cannot borrow cannot borrow either.
-    loop {
-        let losing: Vec<usize> = methods
-            .iter()
-            .copied()
-            .filter(|&m| {
-                let Home::Class(c) = homes[m] else { return false };
-                !always(c)
-                    && scans[m]
+    // A method that calls a method on `this` that cannot borrow cannot borrow either: each
+    // method that loses its place is checked again in the methods that call it.
+    let targets: HashMap<usize, Vec<usize>> = methods
+        .iter()
+        .filter_map(|&m| {
+            let Home::Class(c) = homes[m] else { return None };
+            (!always(c)).then(|| {
+                (
+                    m,
+                    scans[m]
                         .this_calls
                         .iter()
-                        .any(|&call| this_target(class, call, Some(c)).is_some_and(|t| !methods.contains(&t)))
+                        .filter_map(|&call| this_target(class, call, Some(c)))
+                        .collect(),
+                )
             })
-            .collect();
-        if losing.is_empty() {
-            break;
+        })
+        .collect();
+    let mut callers: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (&m, ts) in &targets {
+        for &t in ts {
+            callers.entry(t).or_default().push(m);
         }
-        for m in losing {
-            methods.remove(&m);
+    }
+    let mut losing: Vec<usize> =
+        targets.iter().filter(|(_, ts)| ts.iter().any(|t| !methods.contains(t))).map(|(&m, _)| m).collect();
+    while let Some(m) = losing.pop() {
+        if methods.remove(&m) {
+            losing.extend(callers.get(&m).into_iter().flatten().filter(|c| methods.contains(c)));
         }
     }
     // A call may run any method of an override group, so the group changes its object, or writes
     // or touches other objects, when one of its methods does; and so does a method that calls one.
-    let spread = |set: &HashSet<usize>| -> HashSet<usize> { set.iter().flat_map(|&m| h.group(m)).collect() };
-    let mut mutating: HashSet<usize> = (0..scans.len()).filter(|&m| scans[m].writes_this).collect();
-    loop {
-        mutating = spread(&mutating);
-        let added: Vec<usize> = (0..scans.len())
-            .filter(|m| {
-                !mutating.contains(m)
-                    && scans[*m].calls.iter().any(|&(c, on_this)| on_this && mutating.contains(&c))
-            })
-            .collect();
-        if added.is_empty() {
-            break;
+    let mut this_callers = vec![Vec::new(); scans.len()];
+    let mut all_callers = vec![Vec::new(); scans.len()];
+    for (m, scan) in scans.iter().enumerate() {
+        for &(c, on_this) in &scan.calls {
+            if on_this {
+                this_callers[c].push(m);
+            }
+            all_callers[c].push(m);
         }
-        mutating.extend(added);
     }
+    let mutating = closed(h, &this_callers, (0..scans.len()).filter(|&m| scans[m].writes_this));
     // A call on `this` in a constructor of `t` (or its field initializers) keeps the object a plain
     // value when it runs a method that borrows the struct being built: one emitted on `t`'s own
     // struct or on the fields struct of `t` or a superclass.
@@ -173,8 +179,10 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     // Immutable and owned objects have no `RefCell` to borrow.
     let shared = |c: &str| !facts.immutable.contains(c) && !facts.owned.contains(c);
     let isolated = (0..scans.len()).filter(|&m| !reach[m].iter().any(|c| shared(name(c)))).collect();
-    let mut writers: HashSet<usize> = (0..scans.len())
-        .filter(|&m| {
+    let writers = closed(
+        h,
+        &all_callers,
+        (0..scans.len()).filter(|&m| {
             let method = &class.methods[m];
             let own_shared = || {
                 let t = method.class;
@@ -183,18 +191,8 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             };
             (scans[m].writes_this && !method.is_ctor && own_shared())
                 || scans[m].writes.iter().any(|c| shared(c))
-        })
-        .collect();
-    loop {
-        writers = spread(&writers);
-        let added: Vec<usize> = (0..scans.len())
-            .filter(|m| !writers.contains(m) && scans[*m].calls.iter().any(|(c, _)| writers.contains(c)))
-            .collect();
-        if added.is_empty() {
-            break;
-        }
-        writers.extend(added);
-    }
+        }),
+    );
     // A method of an immutable class changes nothing: its object has no `RefCell` to borrow
     // mutably, whatever the other methods of its group do.
     let mutating =
@@ -203,6 +201,19 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     let isolated =
         isolated.iter().copied().filter(|&m| h.group(m).iter().all(|g| isolated.contains(g))).collect();
     Borrowing { methods, mutating, plain_constructors, not_plain, isolated, writers }
+}
+
+/// The least set holding `seeds` with every method of the override group of each member, since a
+/// call may run any of them, and every method that `callers` lists for a member.
+fn closed(h: &Hierarchy, callers: &[Vec<usize>], seeds: impl Iterator<Item = usize>) -> HashSet<usize> {
+    let mut set = HashSet::new();
+    let mut queue: Vec<usize> = seeds.collect();
+    while let Some(m) = queue.pop() {
+        if set.insert(m) {
+            queue.extend(h.group_members(m).iter().chain(&callers[m]).filter(|n| !set.contains(*n)));
+        }
+    }
+    set
 }
 
 /// A call on `this`: of a method (as the call names it), or of `toString` by turning `this` into
