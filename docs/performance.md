@@ -180,16 +180,41 @@ from `main`: declare them all, survey them all for the records' members, walk, a
 reached code for the check that streams stay sequential. A round now does that for its new units
 only (`reach::Rounds`): an item that needed a class no unit declared waits for that class, and
 a new unit's overriders of a method whose overriders may run are reached as they would have
-been. Two cases are not incremental. When the members written into a record walked before
-differ with the new units, `load` walks every unit again; it did not happen in
-`ScannerGrades`, whose rounds were timed one by one. When a method was taken for an external one, because its class was missing, and made
-its overriders reachable, and then turns out to be dormant (`Walk::stale`), that walk starts
-again from `main` over the units it has declared. `ScannerGrades` and `TextAdventure` do that
-two or three times in their 11 rounds (`AbstractCollection.isEmpty`, `CalendarNameProvider`,
-`CalendarSystem`), `StreamPipeline`, `PriorityScheduler` and `ListOperations` once; the
-number varies between runs with the order of the work, but the result does not. Every round
-of every target and corpus program was checked equal, `Reach` and classes asked for, to a walk
-from scratch over the same units, and the translations are byte for byte those before.
+been. A method of a class that no unit declares waits for javac's answer: it is taken for an
+external one (whose overriders may run) only once javac was asked for the class and gave no unit
+that declares it (`Walk::asked`), which can take a round more. So do the other decisions that
+depend on whether a class is declared: whether an `instanceof` of a class without objects
+guards a branch (`objectless`, which looks at the class's supertypes) and whether a class is an
+exception's (`recreatable`). Nothing is then decided on a class that may still come, and each
+round reaches what a walk from scratch over its units, with the same classes asked for, reaches;
+`JAVA_TO_RUST_REACH_CHECK=1` makes `load` check that after every round, and it holds in every
+round of javac's translation and of 18 whole programs of the corpus. Before, such a method was
+taken for an external one at once, and when a later unit declared its class and it turned out
+dormant, its overriders had been reached for nothing (`Walk::stale`) and the walk started again
+from `main`: four times in javac's 10 rounds, two or three times in those of `ScannerGrades` and
+`TextAdventure`; and an `instanceof` or exception decided without a supertype stayed decided, so
+the result depended on the order the units came in (javac's translation reached
+`UnixDomainSocketAddress.getPath`, which a walk over all its units does not). A walk still starts
+again from `main` in two cases: when the members written into a record walked before differ with
+the new units, `load` walks every unit again (once in javac's rounds and in some of the corpus
+programs); and a stale walk can still happen when a unit declares a class that javac had none of
+when asked, such as a second top-level class of a file that a later unit came from, which none
+of these programs does. The `timing: reach` line counts the two apart. With the wait, classes
+are asked for in other rounds, so the units come in another order, which can change the names
+of overloads, the tags of the classes, and which unsupported construct is reported first.
+Reachability, release translator, on a machine with other builds running, before (a method of
+a missing class taken for an external one at once) and after; walks from the start in brackets:
+
+| program | before | after |
+|---|---:|---:|
+| javac (`--census`, 10 rounds) | 5.9 s (5) | 3.5 s (1) |
+| ExtendedAttributes | 1.70 s (5) | 1.23 s (1) |
+| SymbolicLinkCopies | 1.79 s (6) | 1.41 s (2) |
+| PlatformLoggerValues | 1.58 s (2) | 1.00 s (1) |
+| JarManifests | 1.20 s (3) | 1.04 s (1) |
+| the small programs (0.1 to 0.6 s) | 0 to 3 | 0 or 1 |
+
+On the small programs the time is about the same: their walks from the start were short.
 
 Release translator on a loaded machine (load 16 to 23), the before and after runs alternated,
 twice each:
@@ -228,17 +253,9 @@ three runs each on a machine with other builds running:
 
 Further speed-ups, not done:
 
-- The restarts of a stale walk are now about half of what is left of reachability on the large
-  programs (a round without one takes 0.06 to 0.35 s, one with one 0.5 to 0.6 s). Holding a
-  method of a missing class back until its class comes, instead of taking it for external
-  meanwhile, would avoid them, but it changes what the rounds in between ask for, and so the
-  units' order and the output. Most stale walks come from overriders that arrive in the same
-  round as the class of the method they override, and leaving those to that method's own visit
-  avoids the restart (javac's walks from the start go from 5 to 2, its reachability from 5.2 to
-  3.5 s), but it changes what is reached too: a walk that does not start again keeps decisions
-  that depended on the units declared at the time, such as an `instanceof` guard that is not
-  applied while its class or a supertype is undeclared (`objectless`), so `ExtendedAttributes`
-  then reaches `FileInputStream.getChannel` and asks for two more classes.
+- The walk from scratch when the members written into a record change is what is left of the
+  restarts. Declaring again only the units whose records changed, and visiting again the
+  methods of theirs that were reached, would make it incremental too.
 - javac is now most of a large program's translation (9 to 15 s of `ScannerGrades`), and at
   least 2.4 s and 0.9 GB of any. A cache of javac's trees per JDK unit would have to be keyed
   by the whole JDK tree (a unit's attributed tree depends on the declarations of others), and
