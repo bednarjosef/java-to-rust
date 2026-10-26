@@ -8,7 +8,7 @@ pub use records::Completion;
 mod run_cache;
 
 pub use bytecode_names::{
-    BytecodeNames, CHECKED_JAVA, JdkTemps, NameKind, jdk_temps, program_names, source_names,
+    BytecodeNames, CHECKED_JAVA, JdkTemps, NameKind, NameRoots, jdk_temps, program_names, source_names,
 };
 
 use crate::ast::{Error, Pos};
