@@ -485,11 +485,24 @@ impl<'a> Gen<'a> {
     }
 
     fn in_package_name(&self, c: usize) -> String {
-        modules::split(&self.class.types[c].name).1.replace(['.', '$'], "")
+        let (element, arrays) = self.element_name(c);
+        modules::split(element).1.replace(['.', '$'], "") + &arrays
     }
 
     fn full_variant_name(&self, c: usize) -> String {
-        self.class.types[c].name.split(['.', '$']).map(capitalized).collect()
+        let (element, arrays) = self.element_name(c);
+        element.split(['.', '$']).map(capitalized).collect::<String>() + &arrays
+    }
+
+    /// The name of type `t`, or of its elements' class for an array type, with `Array` for each
+    /// dimension: `Bucket[]` is named as `Bucket` and `Array`.
+    fn element_name(&self, t: usize) -> (&str, String) {
+        let name = &self.class.types[t].name;
+        if self.class.array_of(t).is_none() {
+            return (name, String::new());
+        }
+        let element = name.trim_end_matches("[]");
+        (element, "Array".repeat((name.len() - element.len()) / 2))
     }
 
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
@@ -505,10 +518,11 @@ impl<'a> Gen<'a> {
 
     /// The name of type `t` in the names of its conversions: its simple name, or with its outer
     /// classes when another type has that simple name too (`ImageReaderNode` and
-    /// `ConcurrentHashMapNode`), or with its package as well when that is shared too.
+    /// `ConcurrentHashMapNode`, or `ArrayCacheByteBucketArray` for an array), or with its package
+    /// as well when that is shared too.
     fn distinct_name(&self, t: usize) -> String {
         let simple = self.simple_name(t);
-        if !self.shared_names.contains(&simple) || self.class.array_of(t).is_some() {
+        if !self.shared_names.contains(&simple) {
             return simple;
         }
         let in_package = self.in_package_name(t);
@@ -522,7 +536,7 @@ impl<'a> Gen<'a> {
     pub(super) fn shared_names(&self) -> HashSet<String> {
         let mut seen = HashSet::new();
         let mut shared = HashSet::new();
-        for t in (0..self.class.types.len()).filter(|&t| self.class.array_of(t).is_none()) {
+        for t in 0..self.class.types.len() {
             for name in [self.simple_name(t), format!("{}\0", self.in_package_name(t))] {
                 if !seen.insert(name.clone()) {
                     shared.insert(name.trim_end_matches('\0').to_string());
@@ -536,11 +550,8 @@ impl<'a> Gen<'a> {
     /// `shapes.Circle`, `IntArray` for the arrays `int[]` that become `Object`s.
     fn simple_name(&self, t: usize) -> String {
         if self.class.array_of(t).is_some() {
-            let name = &self.class.types[t].name;
-            let element = name.trim_end_matches("[]");
-            let simple = element.rsplit(['.', '$']).next().unwrap_or_default();
-            let dimensions = (name.len() - element.len()) / 2;
-            return capitalized(simple) + &"Array".repeat(dimensions);
+            let (element, arrays) = self.element_name(t);
+            return capitalized(element.rsplit(['.', '$']).next().unwrap_or_default()) + &arrays;
         }
         self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default().to_string()
     }
