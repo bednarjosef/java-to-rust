@@ -58,7 +58,10 @@ included (docs/collector.md).
   narrow with wrapping arithmetic in the small type.
 - `if`, `while`, `do`, `for`, for-each over arrays, labelled `break` and `continue`, the
   conditional operator, `switch` statements and expressions on integers, chars, strings and enums
-  (case labels may be constant expressions, folded as javac folds them), and `System.exit`.
+  (case labels may be constant expressions, folded as javac folds them), and `System.exit`. An
+  `if` whose condition is a constant expression (`if (ENABLE_BLINDING)` of a `static final
+  boolean`) keeps only the branch that runs, since Java's rules for which locals are assigned
+  take the condition as known and Rust's do not.
 - Integer overflow wraps as in Java; division by zero throws `ArithmeticException`; float
   arithmetic and printing follow Java's rules (`Double.toString` and `Float.toString` exactly).
 - Annotations and annotation types are left out, since they do nothing at run time. The class

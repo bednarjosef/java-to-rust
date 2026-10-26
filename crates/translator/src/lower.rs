@@ -877,14 +877,23 @@ impl<'t> Lowering<'t> {
                     None => condition,
                 }
             }
-            "IF" => self.if_stmt(
-                self.expr(node.child("condition")?)?,
-                self.single_stmt(node.child("thenStatement")?)?,
-                match node.get("elseStatement") {
-                    Some(n) => Some(self.single_stmt(n)?),
-                    None => None,
+            // Java takes a constant condition as known where it decides which locals are assigned
+            // (JLS 16): only the branch that runs is kept, so that Rust knows it too.
+            "IF" => match constant_condition(node.child("condition")?) {
+                Some(true) => Stmt::Block(vec![self.single_stmt(node.child("thenStatement")?)?]),
+                Some(false) => match node.get("elseStatement") {
+                    Some(n) => Stmt::Block(vec![self.single_stmt(n)?]),
+                    None => Stmt::Block(Vec::new()),
                 },
-            ),
+                None => self.if_stmt(
+                    self.expr(node.child("condition")?)?,
+                    self.single_stmt(node.child("thenStatement")?)?,
+                    match node.get("elseStatement") {
+                        Some(n) => Some(self.single_stmt(n)?),
+                        None => None,
+                    },
+                ),
+            },
             "WHILE_LOOP" => Stmt::While {
                 cond: self.expr(node.child("condition")?)?,
                 body: Box::new(self.single_stmt(node.child("statement")?)?),
@@ -1637,4 +1646,31 @@ fn binary_op(node: Node, kind: &str) -> Result<BinOp, Error> {
         "GREATER_THAN_EQUAL" => BinOp::Ge,
         _ => return unsupported(node, &kind_words(kind)),
     })
+}
+
+/// The value of the condition `node` when it is a constant expression (JLS 15.29) of `true` and
+/// `false`, constant variables named simply or by their class, parentheses, `!`, `&&` and `||`.
+fn constant_condition(node: Node) -> Option<bool> {
+    match node.kind() {
+        "BOOLEAN_LITERAL" => node.0["value"].as_bool(),
+        "PARENTHESIZED" => constant_condition(node.get("expression")?),
+        "LOGICAL_COMPLEMENT" => constant_condition(node.get("expression")?).map(|b| !b),
+        "CONDITIONAL_AND" => Some(constant_condition(node.get("leftOperand")?)? && constant_condition(node.get("rightOperand")?)?),
+        "CONDITIONAL_OR" => Some(constant_condition(node.get("leftOperand")?)? || constant_condition(node.get("rightOperand")?)?),
+        "IDENTIFIER" | "MEMBER_SELECT" => {
+            if node.kind() == "MEMBER_SELECT" {
+                let class = node.get("expression")?.symbol()?;
+                if !matches!(class.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD" | "ANNOTATION_TYPE") {
+                    return None;
+                }
+            }
+            let symbol = node.symbol()?;
+            match (symbol.ty, symbol.constant?) {
+                ("boolean", "true" | "1") => Some(true),
+                ("boolean", "false" | "0") => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
