@@ -309,7 +309,9 @@ pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
 /// monitors): a census goes on past those of them that no stub can take away, such as a field's
 /// type (`program/census.rs`).
 pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, Vec<Error>> {
-    analyze_from(class, tolerated, &mut represented(class))
+    let mut facts = analyze_from(class, tolerated, &mut represented(class))?;
+    find_stack_objects(class, &mut facts);
+    Ok(facts)
 }
 
 /// The facts that depend on the program alone and not on the errors tolerated, which a census
@@ -335,7 +337,8 @@ pub fn represented(class: &Class) -> Represented {
     Represented { facts, ranges: None }
 }
 
-/// `analyze_tolerating`, from the facts that `represented` found for `class`.
+/// `analyze_tolerating`, from the facts that `represented` found for `class`, without the stack
+/// objects (`find_stack_objects`).
 ///
 /// The checks run first, in their order, each as soon as the facts it reads are known: the
 /// validation reads the representation's facts, the pattern variables the code alone, strings
@@ -415,10 +418,16 @@ pub fn analyze_from(
     if !facts.raised_classes.is_empty() {
         facts.flows = hierarchy::flows(class, &facts.field_level, &facts.raised_classes);
     }
-    if std::env::var_os("JAVA_TO_RUST_HEAP_ONLY").is_none() {
-        facts.stack_objects = phase("analysis: stack objects", || escape::stack_objects(class));
-    }
     Ok(facts)
+}
+
+/// The objects that stay on the stack (`Facts::stack_objects`), the last of the facts, which no
+/// check reads: a census finds them after its last check of the analyses (`program/census.rs`).
+pub fn find_stack_objects(class: &Class, facts: &mut Facts) {
+    if std::env::var_os("JAVA_TO_RUST_HEAP_ONLY").is_none() {
+        facts.stack_objects =
+            crate::timings::phase("analysis: stack objects", || escape::stack_objects(class));
+    }
 }
 
 /// How the objects of each class are represented and which methods borrow them: the facts from

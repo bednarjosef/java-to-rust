@@ -100,17 +100,32 @@ pub fn generate_modules(class: &Class, facts: &Facts) -> Result<ModuleTree, Erro
 pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Error>> {
     SHARED_STRINGS.set(class.shared_strings);
     // The enums of class types get the items that the code uses, which writing the code finds:
-    // the program is written again until it asks for no item that was not written.
+    // the program is written again until it asks for no item that was not written. Only the
+    // enum items read which items are wanted, so what the rest asks for is the same in every
+    // round: after the first, the rounds write only the enum items until those ask for nothing
+    // new, and then the whole program once more.
     let mut wanted = Needs::new();
+    let mut whole = true;
     for round in 1.. {
         let start = std::time::Instant::now();
-        let (tree, needs, rejected, closures) = generate_with(class, facts, &wanted);
+        let (tree, needs, rejected, closures) = generate_with(class, facts, &wanted, !whole);
         if crate::timings::enabled() {
             let new = needs.iter().filter(|n| !wanted.contains(n)).count();
             eprintln!(
-                "timing: codegen: round {round}: {:.3} s, {new} items asked for anew",
+                "timing: codegen: round {round}{}: {:.3} s, {new} items asked for anew",
+                if whole { "" } else { " (enum items)" },
                 start.elapsed().as_secs_f64()
             );
+        }
+        if !whole {
+            // What the enum items reject, or the program once they ask for nothing new, is
+            // found by writing the whole program with the same items.
+            if !rejected.is_empty() || needs.is_subset(&wanted) {
+                whole = true;
+                continue;
+            }
+            wanted.extend(needs);
+            continue;
         }
         if !rejected.is_empty() {
             return Err(rejected);
@@ -126,6 +141,7 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
             return Ok(tree);
         }
         wanted.extend(needs);
+        whole = false;
     }
     unreachable!("the rounds end")
 }
@@ -169,6 +185,7 @@ fn generate_with(
     class: &Class,
     facts: &Facts,
     wanted: &Needs,
+    only_enums: bool,
 ) -> (ModuleTree, Needs, Vec<Error>, Vec<Error>) {
     let live = live_types(class, facts);
     let modules = modules::enter(class);
@@ -262,6 +279,7 @@ fn generate_with(
         slot_param: String::new(),
         on_stack: false,
         stack_forms: HashSet::new(),
+        only_enums,
     };
     g.shared_names = g.shared_names();
     g.stack_forms = g.stack_forms();
@@ -278,6 +296,9 @@ fn generate_with(
         header
     };
     let tree = g.program(&live, header);
+    if only_enums {
+        return (tree, g.needs.take(), g.rejected, Vec::new());
+    }
     g.check_dereferences();
     g.check_casts();
     g.check_catching();
@@ -493,6 +514,9 @@ struct Gen<'a> {
     on_stack: bool,
     /// The constructors and factories that get a form on the stack (see `stack_objects`).
     stack_forms: HashSet<usize>,
+    /// Whether only the enum items of class types are written, to find what they ask for
+    /// (`generate_all`).
+    only_enums: bool,
 }
 
 impl<'a> Gen<'a> {
