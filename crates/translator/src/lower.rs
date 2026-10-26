@@ -474,6 +474,8 @@ struct Lowering<'t> {
     library_annotations: std::collections::HashSet<String>,
     /// What each method asks about its caller (see `callers`).
     callers: callers::Callers,
+    /// The reflection tables made so far (`reflection::table`).
+    reflection_tables: RefCell<std::collections::HashMap<reflection::TableKey, Vec<reflection::Entry<'t>>>>,
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
