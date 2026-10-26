@@ -1160,9 +1160,16 @@ impl<'a> Gen<'a> {
                     self.need(Need::Convert(s, t));
                     Some(format!("{handle}.{}()", self.to_name(t)))
                 }
-                (None, Some(c)) => {
-                    self.variant_of(t, c).map(|variant| format!("{variant}({handle}.clone())"))
-                }
+                (None, Some(c)) => Some(match self.variant_of(t, c) {
+                    Some(variant) => format!("{variant}({handle}.clone())"),
+                    // No object of the class is created (none is a value of the enum), so the
+                    // call never runs, as `as_enum` writes it.
+                    None => {
+                        let ty = struct_name(&self.class.types[t].name);
+                        let never = super::dispatch::absent(self, c);
+                        format!("{{ let _ = {handle}; None::<{ty}>.unwrap_or_else(|| {never}) }}")
+                    }
+                }),
                 (None, None) => None,
             };
             if let Some(obj) = obj {

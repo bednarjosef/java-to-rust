@@ -303,6 +303,9 @@ impl<'a> Gen<'a> {
                 } else {
                     // The method of the receiver's class, which an interface's method is not.
                     let target = self.dispatch(receiver, *index, *is_super);
+                    if self.runs_nowhere(receiver, target) {
+                        return self.no_object_runs(receiver, target, *index).text;
+                    }
                     self.method_call(receiver, target, args)
                 };
                 // A method that throws returns its array in a `Result`.
