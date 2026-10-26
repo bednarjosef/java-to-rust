@@ -35,7 +35,7 @@ plainer form only where it proves the meaning is the same:
 
 | Java | Faithful form | Plainer forms, where an analysis allows |
 |---|---|---|
-| object | `Arc<RefCell<C>>` | `Arc<C>` when objects never change after construction (`analysis/objects.rs`); a plain struct with `&self`/`&mut self` methods when objects are never shared (`analysis/owned.rs`, `analysis/borrowing.rs`) |
+| object | `Arc<RefCell<C>>` | `Arc<C>` when objects never change after construction (`analysis/objects.rs`); a plain struct with `&self`/`&mut self` methods when objects are never shared (`analysis/owned.rs`, `analysis/borrowing.rs`); made in a slot on its method's stack instead of the heap when it never leaves that method (`analysis/escape.rs`) |
 | reference that may be null | `Option<..>` | the plain value where nullness analysis proves it is never null (`analysis/nullness.rs`) |
 | `int` arithmetic | `wrapping_add`, `java::rem`, ... | `+ - * / %` where range analysis proves no overflow and a nonzero divisor (`analysis/ranges.rs`) |
 | array | `java::Array<T>`, a shared cell | `Vec<T>` (or `Vec<Vec<T>>`) when no other name can see it (`analysis/arrays.rs`) |
@@ -431,9 +431,11 @@ Beyond the rejections listed in each section above:
 
 - In a single file, every library class the runtime does not supply (collections, streams,
   `Scanner`, `java.io` beyond the standard streams). Translate the program whole instead.
-- Escape analysis (objects that never leave a method as stack values), and objects held in one
-  place as owned fields, `Box`es or `Vec` elements: see [thorough-mode.md](thorough-mode.md) and
-  [natural-rust.md](natural-rust.md).
+- Objects held in one place as owned fields, `Box`es or `Vec` elements: see
+  [thorough-mode.md](thorough-mode.md) and [natural-rust.md](natural-rust.md). An object that
+  never leaves its method is already made on its stack
+  ([collector.md](collector.md#objects-on-the-stack)).
 - `ArrayList` as a `Vec` and sequential streams as iterators: [lists-and-streams.md](lists-and-streams.md).
 - Not measured yet: the share of values that became owned or plain, the remaining `Option`s and
-  null checks, dynamic calls, and memory.
+  null checks, and dynamic calls. The time and peak memory of the benchmarks are in
+  [native-speed.md](native-speed.md).
