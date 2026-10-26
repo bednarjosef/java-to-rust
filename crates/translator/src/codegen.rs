@@ -359,6 +359,7 @@ fn generate_with(
         only_enums: only_enums.cloned(),
         class_values: Default::default(),
         class_value_names: Vec::new(),
+        class_details: false,
     };
     g.conversion_names = setup.conversion_names.get_or_insert_with(|| g.conversion_names().into()).clone();
     g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
@@ -621,6 +622,9 @@ struct Gen<'a> {
     class_values: std::collections::BTreeSet<usize>,
     /// The name of each class's constant, made when the first is named (`class_value_names`).
     class_value_names: Vec<String>,
+    /// Whether the code asks a class for its modifiers or its nesting, which the constants then
+    /// carry (`class_value`).
+    class_details: bool,
 }
 
 impl<'a> Gen<'a> {

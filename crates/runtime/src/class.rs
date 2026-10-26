@@ -28,6 +28,22 @@ enum Kind {
     Primitive,
 }
 
+/// Where a class is declared, as `isMemberClass`, `isLocalClass` and `isAnonymousClass` tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nest {
+    TopLevel,
+    Member,
+    Local,
+    Anonymous,
+}
+
+const PUBLIC: u16 = 0x1;
+const FINAL: u16 = 0x10;
+const INTERFACE: u16 = 0x200;
+const ABSTRACT: u16 = 0x400;
+const ANNOTATION: u16 = 0x2000;
+const ENUM: u16 = 0x4000;
+
 /// A `java.lang.Class`.
 #[derive(Clone, Copy)]
 pub struct Class {
@@ -42,6 +58,12 @@ pub struct Class {
     /// as `is_instance` takes them; empty for an array and a primitive type, which
     /// `is_assignable_from` answers by their kind.
     names: Names,
+    /// What `getModifiers` gives: the translator's for a class of the program (`declared`),
+    /// public and the like for the runtime's.
+    modifiers: u16,
+    nest: Nest,
+    /// The class that declares this one (`getEnclosingClass`), `None` for a top-level class.
+    enclosing: Option<fn() -> Class>,
 }
 
 impl Class {
@@ -52,47 +74,83 @@ impl Class {
         superclass: Option<fn() -> Class>,
         names: Names,
     ) -> Class {
-        Class { name, simple, kind: Kind::Class, superclass, component: None, names }
+        Class::made(name, simple, Kind::Class, superclass, None, names, PUBLIC)
     }
 
     /// An enum, whose superclass is `Enum`.
     pub const fn enumeration(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class { name, simple, kind: Kind::Enum, superclass: Some(|| Class::ENUM), component: None, names }
+        Class::made(name, simple, Kind::Enum, Some(|| Class::ENUM), None, names, PUBLIC | FINAL | ENUM)
     }
 
     /// An interface, which has no superclass.
     pub const fn interface(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class { name, simple, kind: Kind::Interface, superclass: None, component: None, names }
+        Class::made(name, simple, Kind::Interface, None, None, names, PUBLIC | INTERFACE | ABSTRACT)
     }
 
     /// An annotation type, an interface that `isAnnotation()`.
     pub const fn annotation(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class { name, simple, kind: Kind::Annotation, superclass: None, component: None, names }
+        Class::made(
+            name,
+            simple,
+            Kind::Annotation,
+            None,
+            None,
+            names,
+            PUBLIC | INTERFACE | ABSTRACT | ANNOTATION,
+        )
     }
 
     /// An array class, `[Ljava.lang.String;`, whose superclass is `Object`.
     pub const fn array(name: &'static str, simple: &'static str, component: fn() -> Class) -> Class {
-        Class {
-            name,
-            simple,
-            kind: Kind::Class,
-            superclass: Some(|| Class::OBJECT),
-            component: Some(component),
-            names: &[],
-        }
+        // `getModifiers` answers from the component's.
+        Class::made(name, simple, Kind::Class, Some(|| Class::OBJECT), Some(component), &[], 0)
     }
 
     const fn primitive(name: &'static str) -> Class {
-        Class { name, simple: name, kind: Kind::Primitive, superclass: None, component: None, names: &[] }
+        Class::made(name, name, Kind::Primitive, None, None, &[], PUBLIC | FINAL | ABSTRACT)
     }
 
+    /// A class of the runtime that is final, as most of the standard classes are.
     const fn standard(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::new(name, simple, Some(|| Class::OBJECT), names)
+        Class::made(name, simple, Kind::Class, Some(|| Class::OBJECT), None, names, PUBLIC | FINAL)
+    }
+
+    /// One of the runtime's abstract classes.
+    const fn abstract_standard(name: &'static str, simple: &'static str, names: Names) -> Class {
+        Class::made(name, simple, Kind::Class, Some(|| Class::OBJECT), None, names, PUBLIC | ABSTRACT)
+    }
+
+    const fn made(
+        name: &'static str,
+        simple: &'static str,
+        kind: Kind,
+        superclass: Option<fn() -> Class>,
+        component: Option<fn() -> Class>,
+        names: Names,
+        modifiers: u16,
+    ) -> Class {
+        Class {
+            name,
+            simple,
+            kind,
+            superclass,
+            component,
+            names,
+            modifiers,
+            nest: Nest::TopLevel,
+            enclosing: None,
+        }
+    }
+
+    /// The class as the program declares it: what `getModifiers` gives, where it is declared and
+    /// the class that declares it.
+    pub const fn declared(self, modifiers: u16, nest: Nest, enclosing: Option<fn() -> Class>) -> Class {
+        Class { modifiers, nest, enclosing, ..self }
     }
 
     /// A box of a number, whose superclass is `Number`.
     const fn number(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::new(name, simple, Some(|| Class::NUMBER), names)
+        Class::made(name, simple, Kind::Class, Some(|| Class::NUMBER), None, names, PUBLIC | FINAL)
     }
 
     pub const OBJECT: Class = Class::new(OBJECT, "Object", None, &[OBJECT]);
@@ -129,13 +187,17 @@ impl Class {
             OBJECT,
         ],
     );
-    pub const ENUM: Class =
-        Class::standard("java.lang.Enum", "Enum", &["java.lang.Enum", COMPARE, SERIAL, CONSTABLE, OBJECT]);
+    pub const ENUM: Class = Class::abstract_standard(
+        "java.lang.Enum",
+        "Enum",
+        &["java.lang.Enum", COMPARE, SERIAL, CONSTABLE, OBJECT],
+    );
     pub const COMPARABLE: Class = Class::interface(COMPARE, "Comparable", &[COMPARE, OBJECT]);
-    pub const RECORD: Class = Class::standard("java.lang.Record", "Record", &["java.lang.Record", OBJECT]);
+    pub const RECORD: Class =
+        Class::abstract_standard("java.lang.Record", "Record", &["java.lang.Record", OBJECT]);
     /// `Runtime.class` and `System.class`, classes without objects in a translation.
     pub const RUNTIME: Class =
-        Class::standard("java.lang.Runtime", "Runtime", &["java.lang.Runtime", OBJECT]);
+        Class::new("java.lang.Runtime", "Runtime", Some(|| Class::OBJECT), &["java.lang.Runtime", OBJECT]);
     pub const SYSTEM: Class = Class::standard("java.lang.System", "System", &["java.lang.System", OBJECT]);
     pub const CHAR_SEQUENCE: Class =
         Class::interface("java.lang.CharSequence", "CharSequence", &["java.lang.CharSequence", OBJECT]);
@@ -179,7 +241,7 @@ impl Class {
         "Boolean",
         &["java.lang.Boolean", SERIAL, COMPARE, CONSTABLE, OBJECT],
     );
-    pub const NUMBER: Class = Class::standard(NUMBER, "Number", &[NUMBER, SERIAL, OBJECT]);
+    pub const NUMBER: Class = Class::abstract_standard(NUMBER, "Number", &[NUMBER, SERIAL, OBJECT]);
     pub const INT: Class = Class::primitive("int");
     pub const LONG_PRIMITIVE: Class = Class::primitive("long");
     pub const DOUBLE_PRIMITIVE: Class = Class::primitive("double");
@@ -189,6 +251,39 @@ impl Class {
     pub const CHAR: Class = Class::primitive("char");
     pub const BOOLEAN_PRIMITIVE: Class = Class::primitive("boolean");
     pub const VOID: Class = Class::primitive("void");
+
+    /// `getModifiers()`: an array's are its component's access, abstract and final.
+    pub fn get_modifiers(&self) -> i32 {
+        match self.get_component_type() {
+            Some(component) => (component.get_modifiers() & 0x7) | i32::from(ABSTRACT | FINAL),
+            None => i32::from(self.modifiers),
+        }
+    }
+
+    /// `isAnonymousClass()`.
+    pub fn is_anonymous_class(&self) -> bool {
+        self.nest == Nest::Anonymous
+    }
+
+    /// `isLocalClass()`.
+    pub fn is_local_class(&self) -> bool {
+        self.nest == Nest::Local
+    }
+
+    /// `isMemberClass()`.
+    pub fn is_member_class(&self) -> bool {
+        self.nest == Nest::Member
+    }
+
+    /// `getEnclosingClass()`.
+    pub fn get_enclosing_class(&self) -> Option<Class> {
+        self.enclosing.map(|f| f())
+    }
+
+    /// `getDeclaringClass()`: a member class's enclosing class, `null` for any other.
+    pub fn get_declaring_class(&self) -> Option<Class> {
+        self.enclosing.filter(|_| self.nest == Nest::Member).map(|f| f())
+    }
 
     /// `getName()`.
     pub fn get_name(&self) -> crate::JString {

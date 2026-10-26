@@ -329,7 +329,89 @@ impl<'t> Lowering<'t> {
             captures: self.captures_of(index)?,
             origin: self.origin(index),
             cloneable: self.is_cloneable(index),
+            modifiers: self.class_modifiers(index),
+            enclosing: self.reflected_enclosing(index),
         })
+    }
+
+    /// The class that declares class `index` as `Class.getEnclosingClass()` gives it
+    /// (`TypeDecl::enclosing`): the class whose code declares an inner, local or anonymous class,
+    /// or the outer class of a static member; none for a lambda's.
+    fn reflected_enclosing(&self, index: usize) -> Option<usize> {
+        if let Some(nested) = self.nesting(index) {
+            return (nested.kind != NestKind::Lambda).then_some(nested.enclosing);
+        }
+        if let Some(&(_, outer)) = self.member_outers.iter().find(|(member, _)| *member == index) {
+            return Some(outer);
+        }
+        let (outer, _) = self.types[index].name.rsplit_once('.')?;
+        self.type_index(outer)
+    }
+
+    /// What `Class.getModifiers()` gives for class `index`: the modifiers written on it, with
+    /// those that javac adds (an interface is abstract, a nested enum, record or interface is
+    /// static, a member of an interface public and static, an enum `ENUM` and final unless a
+    /// constant has a body, and abstract with abstract methods, a record final); none for an
+    /// anonymous class, and final and
+    /// synthetic for a lambda's, as the JVM's hidden class is.
+    fn class_modifiers(&self, index: usize) -> u16 {
+        const PUBLIC: u16 = 0x1;
+        const PRIVATE: u16 = 0x2;
+        const PROTECTED: u16 = 0x4;
+        const STATIC: u16 = 0x8;
+        const FINAL: u16 = 0x10;
+        const INTERFACE: u16 = 0x200;
+        const ABSTRACT: u16 = 0x400;
+        const SYNTHETIC: u16 = 0x1000;
+        const ENUM: u16 = 0x4000;
+        let nesting = self.nesting(index).map(|n| n.kind);
+        match nesting {
+            Some(NestKind::Lambda) => return FINAL | SYNTHETIC,
+            Some(NestKind::Anonymous) => return 0,
+            _ => {}
+        }
+        let node = self.types[index].node;
+        let mut modifiers = [
+            ("PUBLIC", PUBLIC),
+            ("PRIVATE", PRIVATE),
+            ("PROTECTED", PROTECTED),
+            ("STATIC", STATIC),
+            ("FINAL", FINAL),
+            ("ABSTRACT", ABSTRACT),
+        ]
+        .into_iter()
+        .filter(|(flag, _)| node.has_flag(flag))
+        .fold(0, |all, (_, bit)| all | bit);
+        let enclosing = self.reflected_enclosing(index);
+        let nested = enclosing.is_some();
+        match node.kind() {
+            "INTERFACE" => modifiers |= INTERFACE | ABSTRACT | if nested { STATIC } else { 0 },
+            "ENUM" => {
+                let bodies = node.list("members").any(|m| {
+                    enums::is_enum_constant(m)
+                        && m.get("initializer").and_then(|i| i.get("classBody")).is_some()
+                });
+                let abstract_methods =
+                    node.list("members").any(|m| m.kind() == "METHOD" && m.has_flag("ABSTRACT"));
+                modifiers |= ENUM
+                    | if bodies { 0 } else { FINAL }
+                    | if bodies && abstract_methods { ABSTRACT } else { 0 }
+                    | if nested { STATIC } else { 0 };
+            }
+            "RECORD" => modifiers |= FINAL | if nested { STATIC } else { 0 },
+            _ => {}
+        }
+        let local = nesting == Some(NestKind::Local);
+        if !local && enclosing.is_some_and(|e| self.types[e].node.kind() == "INTERFACE") {
+            modifiers |= PUBLIC | STATIC;
+        }
+        if !nested {
+            modifiers &= !(PRIVATE | PROTECTED | STATIC);
+        }
+        if local {
+            modifiers &= !(PUBLIC | PRIVATE | PROTECTED);
+        }
+        modifiers
     }
 
     /// A field, with its initializer when `with_init`.

@@ -300,7 +300,7 @@ impl<'a> Gen<'a> {
         let name = rust_string(&self.java_class_name(c, false));
         let simple = rust_string(&self.java_class_name(c, true));
         let names = self.names_list(c);
-        match kind {
+        let value = match kind {
             TypeKind::Interface => format!("java::Class::interface({name}, {simple}, {names})"),
             TypeKind::Enum => format!("java::Class::enumeration({name}, {simple}, {names})"),
             _ => {
@@ -311,7 +311,24 @@ impl<'a> Gen<'a> {
                 };
                 format!("java::Class::new({name}, {simple}, Some(|| {superclass}), {names})")
             }
+        };
+        if !self.class_details {
+            return value;
         }
+        // Its modifiers and nesting, which only a program that asks for them carries.
+        let decl = &self.class.types[c];
+        let (modifiers, enclosing) = (decl.modifiers, decl.enclosing);
+        let nest = match (&decl.origin, enclosing) {
+            (Origin::Anonymous { .. }, _) => "Anonymous",
+            (Origin::Local { .. }, _) => "Local",
+            (Origin::Member, Some(_)) => "Member",
+            _ => "TopLevel",
+        };
+        let enclosing = match enclosing {
+            Some(e) => format!("Some(|| {})", self.decl_class(e)),
+            None => "None".to_string(),
+        };
+        format!("{value}.declared({modifiers:#x}, java::Nest::{nest}, {enclosing})")
     }
 
     /// `ClassMethod(op)(class, args..)`.
@@ -343,6 +360,22 @@ impl<'a> Gen<'a> {
             ClassOp::GetPackageName => "get_package_name",
             ClassOp::DescriptorString => "descriptor_string",
             ClassOp::IsAnnotation => "is_annotation",
+            ClassOp::GetModifiers => {
+                self.class_details = true;
+                "get_modifiers"
+            }
+            ClassOp::IsAnonymousClass | ClassOp::IsLocalClass | ClassOp::IsMemberClass => {
+                self.class_details = true;
+                match op {
+                    ClassOp::IsAnonymousClass => "is_anonymous_class",
+                    ClassOp::IsLocalClass => "is_local_class",
+                    _ => "is_member_class",
+                }
+            }
+            ClassOp::GetEnclosingClass | ClassOp::GetDeclaringClass => {
+                self.class_details = true;
+                if op == ClassOp::GetEnclosingClass { "get_enclosing_class" } else { "get_declaring_class" }
+            }
             ClassOp::DesiredAssertionStatus => {
                 return Code::new(format!("{{ let _ = {class}; false }}"), LOWEST);
             }
