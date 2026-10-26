@@ -380,8 +380,11 @@ fn analyse(
                 let found = represented.get_or_insert_with(|| analysis::represented(class));
                 analysis::analyze_from(class, &tolerated, found)
             })?;
-            // Each message that is not certain stubs its code, as a translation rejects it.
+            // Each message that is not certain stubs its code, as a translation rejects it. The
+            // objects on the stack, which take long to find and which the messages do not read,
+            // are found once the messages pass.
             names.messages(class, &mut facts)?;
+            analysis::find_stack_objects(class, &mut facts);
             codegen::catch_panics(true);
             let tree = crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
             codegen::catch_panics(false);
