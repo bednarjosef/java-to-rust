@@ -1757,7 +1757,7 @@ fn merge_runs(h: &mut Heap) {
     }
 }
 
-/// Runs a collection now (for tests and `System.gc()`).
+/// Runs a collection now, for tests (`System.gc()` does nothing, see `system::gc`).
 pub fn collect_now() {
     let g = lock();
     if heap(&g).base != 0 {

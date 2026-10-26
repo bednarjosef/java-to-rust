@@ -97,7 +97,8 @@ pub fn max_memory() -> i64 {
     4096 << 20
 }
 
-/// `Runtime.gc()`: there is no collector to run, so this does nothing.
+/// `Runtime.gc()`: does nothing. The collector (`gc.rs`) runs on its own when the program has
+/// allocated enough, which the specification of `gc()` allows.
 pub fn gc() {}
 
 /// `Runtime.halt(status)`: exits at once. Shutdown hooks are not run, which translated programs
