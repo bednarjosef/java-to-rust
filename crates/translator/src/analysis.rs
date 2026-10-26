@@ -263,6 +263,10 @@ pub struct Facts {
     /// `null_checked` whose message is known: Java's text, or `None` for an exception without
     /// one (such as `Objects.requireNonNull`'s). Filled in only when `npe_message_read` is set.
     pub npe_messages: HashMap<ExprId, Option<String>>,
+    /// The dereferences of `npe_message_needed` whose message is approximated
+    /// (`Program::approximate_messages`), with the position of the method each is in (`None` for a
+    /// field's initializer).
+    pub npe_approximated: Vec<(Pos, Option<Pos>)>,
     /// The operations whose failure, which has no checked form of its own, a `catch` or a
     /// `finally` may see: they run inside `java::catching`. With their positions.
     pub catching: HashMap<ExprId, Pos>,

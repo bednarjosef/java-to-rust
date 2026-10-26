@@ -62,6 +62,11 @@ pub struct Program {
     /// with `-g`, as the Minecraft server's were): the message of a `NullPointerException` shows
     /// a local by its name, as it shows the JDK's (`javac::program_names`).
     pub named_locals: bool,
+    /// The message of a `NullPointerException` that a `catch` may read, where the translator is
+    /// not certain of the JVM's wording, is approximated rather than the code rejected: the JVM's
+    /// words for what failed without where the null came from, or no message where even that is
+    /// not certain (`analysis::npe_messages`). A census lists each such place.
+    pub approximate_messages: bool,
     /// For a census only: its translation is written, and each piece of rejected code in it ends
     /// the program with the rejection's message, where a census otherwise leaves a rejected
     /// initializer out (`lower::census_lower_program`, `census::Stubs`).
@@ -255,8 +260,10 @@ fn translate_reached(
         let reached: Vec<String> = units.iter().map(|u| u.file.clone()).collect();
         let mut names = phase("class files", || class_file_names(program, &reached))?;
         names.add_jdk_temps(jdk_temps);
-        phase("messages", || analysis::npe_messages(&class, &mut facts, &names))
-            .map_err(|mut errors| located(errors.remove(0)))?;
+        phase("messages", || {
+            analysis::npe_messages(&class, &mut facts, &names, program.approximate_messages)
+        })
+        .map_err(|mut errors| located(errors.remove(0)))?;
     }
     phase("codegen", || codegen::generate_modules(&class, &facts)).map_err(located).map(Translated::Done)
 }

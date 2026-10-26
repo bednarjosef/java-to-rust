@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [--keep-going]
-                    [--named-locals]
+                    [--named-locals] [--approximate-messages]
                     [<File.java>]... [-o <output.rs> | --crate <directory> [--crates <n>]
                      | --survey [--survey-json <file>]
                      | --census [--census-json <file>] [--save-tree <file>]
@@ -106,7 +106,9 @@ fn emit(output: Option<(&str, &str)>, input: &str, files: &[SourceFile]) -> Resu
 /// (`--census-json` also writes it as JSON). With `--keep-going`, javac goes on past compile
 /// errors: code whose only errors name classes missing from the roots throws
 /// `NoClassDefFoundError` where it runs, as Java's would, and other code with an error is rejected
-/// (`Program::keep_going`). With `-o` or `--crate`, a census writes its translation too, a trial
+/// (`Program::keep_going`). With `--approximate-messages`, the message of a `NullPointerException`
+/// whose wording is not certain is approximated rather than the code rejected
+/// (`Program::approximate_messages`). With `-o` or `--crate`, a census writes its translation too, a trial
 /// one in which each rejected piece of code ends the program with the rejection
 /// (`Program::ends_rejected`). `--modules-json` writes the modules of the translation (of a
 /// census: with every rejected piece stubbed) and what their items name
@@ -138,6 +140,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
             "--census" => census = true,
             "--keep-going" => program.keep_going = true,
             "--named-locals" => program.named_locals = true,
+            "--approximate-messages" => program.approximate_messages = true,
             "--modules-json" => modules_json = Some(value()?),
             "--save-tree" => save_tree = Some(value()?),
             "--from-tree" => from_tree = Some(value()?),

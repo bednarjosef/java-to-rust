@@ -220,7 +220,7 @@ fn analysed(
         super::print_notes(class, &files);
     }
     let mut modules = None;
-    let (mut unfollowed, mut charset_names) = (Vec::new(), Vec::new());
+    let (mut unfollowed, mut charset_names, mut approximated) = (Vec::new(), Vec::new(), Vec::new());
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
             let names = Names {
@@ -228,14 +228,26 @@ fn analysed(
                 files: &files,
                 jdk_temps: RefCell::new(jdk_temps),
                 found: RefCell::new(None),
+                approximated: RefCell::new(Vec::new()),
             };
-            analyse(&mut class, &units, &files, &mut rejections, &mut modules, &names, program.ends_rejected)
+            let fatal = analyse(
+                &mut class,
+                &units,
+                &files,
+                &mut rejections,
+                &mut modules,
+                &names,
+                program.ends_rejected,
+            );
+            approximated = approximated_messages(names.approximated.into_inner());
+            fatal
         });
         unfollowed = unfollowed_handles(&class);
         charset_names = computed_charset_names(&class);
     }
     std::panic::set_hook(hook);
-    let tally = Tally::new(&scan.pieces, &files, rejections, fatal, [unfollowed, charset_names]);
+    let listed = [unfollowed, charset_names, approximated];
+    let tally = Tally::new(&scan.pieces, &files, rejections, fatal, listed);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
     Census { report, json, modules }
 }
@@ -339,6 +351,8 @@ struct Names<'a> {
     jdk_temps: RefCell<javac::JdkTemps>,
     /// The names, or why the class files could not be compiled for them, once looked for.
     found: RefCell<Option<Found>>,
+    /// The dereferences whose message the last pass approximated (`Facts::npe_approximated`).
+    approximated: RefCell<Vec<(Pos, Option<Pos>)>>,
 }
 
 /// The names of the class files, or, where they cannot be compiled, none but those of the JDK's
@@ -350,8 +364,10 @@ struct Found {
 
 impl Names<'_> {
     /// The messages of `facts`'s dereferences (`analysis::npe_messages`), where a `catch` reads
-    /// one; each that is not certain is an error.
+    /// one; each that is not certain is an error, or with `Program::approximate_messages` is
+    /// approximated (`approximated`).
     fn messages(&self, class: &Class, facts: &mut analysis::Facts) -> Result<(), Vec<Error>> {
+        self.approximated.borrow_mut().clear();
         if facts.npe_message_read.is_none() {
             return Ok(());
         }
@@ -379,7 +395,11 @@ impl Names<'_> {
             *found = Some(Found { names, without });
         }
         let Found { names, without } = found.as_ref().expect("found above");
-        let found = crate::timings::phase("census: messages", || analysis::npe_messages(class, facts, names));
+        let approximate = self.program.approximate_messages;
+        let found = crate::timings::phase("census: messages", || {
+            analysis::npe_messages(class, facts, names, approximate)
+        });
+        *self.approximated.borrow_mut() = std::mem::take(&mut facts.npe_approximated);
         found.map_err(|errors| match without {
             // A message of the program's own code, which names no method of the JDK's.
             Some(why) => errors
@@ -821,6 +841,18 @@ fn computed_charset_names(class: &Class) -> Vec<Rejection> {
     found
 }
 
+/// The dereferences whose `NullPointerException` message is approximated
+/// (`Program::approximate_messages`), each in the method it is in.
+fn approximated_messages(places: Vec<(Pos, Option<Pos>)>) -> Vec<Rejection> {
+    places
+        .into_iter()
+        .map(|(pos, anchor)| {
+            let message = "the message of the `NullPointerException` of this dereference".to_string();
+            Rejection { unit: pos.unit.map(|u| u as usize), anchor, error: Error { pos, message } }
+        })
+        .collect()
+}
+
 /// Gives the rejections that have a position but no unit (an error that lowering met outside the
 /// code of a class, or one that no stub took away) the unit with code at that position, when one
 /// unit alone has code there.
@@ -892,7 +924,7 @@ struct Tally {
     fatal: Option<(String, String)>,
     /// Code that translates but throws `UnsupportedOperationException` where Java goes on, each
     /// of a `Listed` kind: the piece each is in, if any, its message and its place.
-    listed: [BTreeSet<(Option<usize>, String, String)>; 2],
+    listed: [BTreeSet<(Option<usize>, String, String)>; 3],
 }
 
 /// The kinds of code that translate but throw `UnsupportedOperationException` where Java goes
@@ -903,10 +935,12 @@ enum Listed {
     Handles = 0,
     /// The lookups of a charset by a name known only at run time (`computed_charset_names`).
     CharsetNames = 1,
+    /// The `NullPointerException` messages that are approximated (`approximated_messages`).
+    Messages = 2,
 }
 
 impl Listed {
-    const ALL: [Listed; 2] = [Listed::Handles, Listed::CharsetNames];
+    const ALL: [Listed; 3] = [Listed::Handles, Listed::CharsetNames, Listed::Messages];
 
     /// What the report says of the pieces with code of this kind.
     fn heading(self) -> &'static str {
@@ -920,14 +954,20 @@ impl Listed {
                  charset name known only at run time names a charset of the JDK that the translation \
                  does not have, where Java finds it"
             }
+            Listed::Messages => {
+                "pieces that translate into code whose NullPointerException, which a catch may read, has \
+                 an approximated message (--approximate-messages): the JVM's words for what failed \
+                 without where the null came from, or none"
+            }
         }
     }
 
     /// How the report starts each of its rows.
     fn row(self) -> &'static str {
         match self {
-            Listed::Handles => "throws",
-            Listed::CharsetNames => "may throw",
+            Listed::Handles => "throws UnsupportedOperationException:",
+            Listed::CharsetNames => "may throw UnsupportedOperationException:",
+            Listed::Messages => "approximates",
         }
     }
 }
@@ -938,13 +978,13 @@ impl Tally {
         files: &[String],
         rejections: Vec<Rejection>,
         fatal: Option<Rejection>,
-        listed: [Vec<Rejection>; 2],
+        listed: [Vec<Rejection>; 3],
     ) -> Self {
         let mut tally = Tally {
             errors: vec![BTreeSet::new(); pieces.len()],
             elsewhere: BTreeSet::new(),
             fatal: fatal.map(|f| (f.error.message.clone(), place(files, &f))),
-            listed: [BTreeSet::new(), BTreeSet::new()],
+            listed: [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()],
         };
         for rejection in rejections {
             let entry = (rejection.error.message.clone(), place(files, &rejection));
@@ -1143,12 +1183,7 @@ impl Tally {
         let whose = part.map_or("Code in no piece".to_string(), |part| format!("{} code", part.title()));
         _ = writeln!(out, "\n{whose}: {}", kind.heading());
         for (message, n, places) in rows {
-            _ = writeln!(
-                out,
-                "  {} UnsupportedOperationException: {message}, {n} piece{}",
-                kind.row(),
-                if n == 1 { "" } else { "s" }
-            );
+            _ = writeln!(out, "  {} {message}, {n} piece{}", kind.row(), if n == 1 { "" } else { "s" });
             _ = writeln!(out, "          at {}", places.join(", "));
         }
     }
@@ -1227,6 +1262,7 @@ impl Tally {
             "missingClasses": missing_classes,
             "unfollowedHandles": listed(Listed::Handles),
             "charsetNames": listed(Listed::CharsetNames),
+            "approximatedMessages": listed(Listed::Messages),
             "pieces": pieces.iter().zip(&self.errors).enumerate().map(|(i, (p, errors))| json!({
                 "source": p.part.name(),
                 "class": p.class,
@@ -1238,6 +1274,7 @@ impl Tally {
                     .collect::<Vec<_>>(),
                 "unfollowedHandles": of_piece(Listed::Handles, i),
                 "charsetNames": of_piece(Listed::CharsetNames, i),
+                "approximatedMessages": of_piece(Listed::Messages, i),
             })).collect::<Vec<_>>(),
             "elsewhere": self.elsewhere.iter().map(|(message, place)| json!({"message": message, "place": place}))
                 .collect::<Vec<_>>(),

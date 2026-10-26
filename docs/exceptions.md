@@ -704,6 +704,14 @@ a failure of the runtime without the checked form (a library call given null oth
 `compareTo`'s argument), any other dereference in the body of a method reference's class, and a
 field of a field of an enclosing instance.
 
+**Approximated** instead with `--approximate-messages` (`Program::approximate_messages`): such a
+message is the JVM's words for what failed without where the null came from (`Cannot invoke
+"String.length()"`), as the JVM writes it where it does not follow the null, or, where even
+those are not certain, no message. When the exception is thrown, and what catches it, stay
+Java's. A census lists each such dereference apart from the rejections ("approximates the message
+of the `NullPointerException` of this dereference"). Without the flag, as in the tests, the code
+is rejected.
+
 ## Differences from Java
 
 - Java gives the `IllegalArgumentException` of a self-suppression the exception itself as its
