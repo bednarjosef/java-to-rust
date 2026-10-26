@@ -10,7 +10,7 @@ mod modules;
 mod reach;
 mod survey;
 
-pub use census::{Census, census_program};
+pub use census::{Census, census_program, round_by_round};
 pub use modules::{Contents as ModuleContents, loader_name, loader_resources};
 pub use reach::{
     ANNOTATION_VALUES, CHANGED_PROPERTY, CLASS_KINDS, CLEANER_CHECK, FORMAT_IN_LOCALE, FieldUpdate,
