@@ -109,6 +109,15 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
                 &mut |s| at.stmt(s, &mut messages.borrow_mut()),
             );
         }
+        // The initializers of the instance fields, which every constructor that does not start
+        // with `this(..)` runs: as code of the class's first constructor, as they read nothing of
+        // a constructor's own.
+        let first = class.methods.iter().find(|m| m.class == method.class && m.name == "<init>");
+        if first.is_some_and(|c| std::ptr::eq(c, method)) {
+            for init in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
+                visit_expr(init, &mut |x| at.expr(x, &mut messages.borrow_mut()));
+            }
+        }
     }
     let mut messages = messages.into_inner();
     messages.retain(|id, _| facts.null_checked.contains_key(id));

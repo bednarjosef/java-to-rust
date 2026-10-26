@@ -602,6 +602,10 @@ program's class files cannot be compiled at all, a census finds the messages wit
 names alone: only the code whose message needs a name of the program's class files is
 rejected, with why.
 
+The initializers of instance fields, which the translation keeps with the fields and runs in each
+constructor, get their messages as code of the class's first constructor, as in the class file
+every constructor that calls `super(...)` has a copy of them at the same lines.
+
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
 its locals (`because "original" is null`), by their Java names where lowering renamed them
 (`ClassFileNames::renamed_locals`). A call of the JDK's is named by the erasure of its
