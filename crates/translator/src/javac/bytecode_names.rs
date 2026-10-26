@@ -131,8 +131,10 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
         java("BytecodeNames", &["--add-opens", "jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED"]);
     let cannot_run = |e: std::io::Error| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")).1;
     let failed = |stderr: &[u8]| {
+        // Without the JVM's notes of the options it picked up (`JAVA_TOOL_OPTIONS`).
         let stderr = String::from_utf8_lossy(stderr);
-        fail(format!("compiling the program for its class files failed: {}", stderr.trim())).1
+        let errors: Vec<&str> = stderr.lines().filter(|l| !l.starts_with("Picked up ")).collect();
+        fail(format!("compiling the program for its class files failed: {}", errors.join("\n").trim())).1
     };
     let unreadable = |e: serde_json::Error| fail(format!("unreadable names of the class files: {e}")).1;
     if let Some(source) = source.filter(|_| files.is_empty()) {
