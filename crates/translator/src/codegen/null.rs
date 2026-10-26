@@ -44,6 +44,13 @@ impl<'a> Gen<'a> {
         {
             return self.nullable(value);
         }
+        // So is an assignment of a value that is not null to a variable that may be (see
+        // `Gen::expr_of`): its value is the assigned one.
+        if let ExprKind::Assign { op: None, target: Place::Var(target), value } = &e.kind
+            && self.optional_var(self.method, e.ty, target)
+        {
+            return self.nullable(value);
+        }
         maybe_null(self.facts, self.method, e)
     }
 
