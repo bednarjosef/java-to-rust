@@ -419,8 +419,24 @@ impl<'a> Gen<'a> {
     }
 
     /// `let x: i32 = <value>;` for each parameter of method `index` that its value is not already.
+    /// A value that names a parameter bound before it means the bridge's variable of that name,
+    /// which the binding hides: such a value is computed first, before any parameter is bound
+    /// (a method reference's `(a, b) -> m(a, b)` called by a bridge whose parameters are `x, a`).
     fn bind_params(&mut self, index: usize, values: &[String]) {
-        for (param, value) in self.typed_params(index, true).iter().zip(values) {
+        let params = self.typed_params(index, true);
+        let names: Vec<&str> = params
+            .iter()
+            .map(|p| p.split_once(": ").map_or(p.as_str(), |(name, _)| name).trim_start_matches("mut "))
+            .collect();
+        let mut values = values.to_vec();
+        for (i, value) in values.iter_mut().enumerate() {
+            if names[..i.min(names.len())].iter().any(|name| names_variable(value, name)) {
+                let temp = self.temp(&format!("{}_value", names[i].trim_start_matches('_')));
+                self.line(&format!("let {temp} = {value};"));
+                *value = temp;
+            }
+        }
+        for (param, value) in params.iter().zip(&values) {
             let name = param.split_once(": ").map_or(param.as_str(), |(name, _)| name);
             if name == value {
                 continue;
@@ -551,6 +567,16 @@ impl<'a> Gen<'a> {
         self.chars = s.chars;
         self.exhaustive = s.exhaustive;
     }
+}
+
+/// Whether the code `code` names the variable `name`: `name` that is neither part of a longer
+/// name nor a field or a path (`x.name`, `m::name`).
+fn names_variable(code: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    code.match_indices(name).any(|(i, _)| {
+        !code[..i].ends_with(|c: char| ident(c) || c == '.' || c == ':')
+            && !code[i + name.len()..].starts_with(ident)
+    })
 }
 
 /// The local that a capture's value `x` or `x.clone()` is.
