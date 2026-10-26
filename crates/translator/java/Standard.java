@@ -287,12 +287,23 @@ final class StackTraceElement {
         return declaringClass + "." + methodName + "(" + place + ")";
     }
 
-    // Java's `equals` of two elements, which `Throwable` compares (it has no `equals(Object)`).
+    // Java's `equals` and `hashCode`, with no class loader, module or module version. `Throwable`
+    // compares its frames with `sameFrame`, which a program without `Object`s translates too.
+    public boolean equals(Object obj) {
+        return obj == this || obj instanceof StackTraceElement && sameFrame((StackTraceElement) obj);
+    }
+
     boolean sameFrame(StackTraceElement e) {
         return e.lineNumber == lineNumber
                 && e.declaringClass.equals(declaringClass)
                 && (methodName == null ? e.methodName == null : methodName.equals(e.methodName))
                 && (fileName == null ? e.fileName == null : fileName.equals(e.fileName));
+    }
+
+    public int hashCode() {
+        int result = 31 * declaringClass.hashCode() + methodName.hashCode();
+        result = 31 * 31 * 31 * 31 * result + (fileName == null ? 0 : fileName.hashCode());
+        return 31 * result + lineNumber;
     }
 }
 

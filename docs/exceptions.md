@@ -488,8 +488,8 @@ nothing and returns the exception, and `setStackTrace(frames)` stores a copy (wi
 stack is the same: `Thread.getStackTrace()` is empty, and `Thread.dumpStack()` prints its
 `java.lang.Exception: Stack trace` without frames.
 `StackTraceElement` is the translator's (`Standard.java`): its constructor from class, method,
-file and line (with Java's null checks), its getters and `toString`, without class loader and
-module, and without `equals` and `hashCode`.
+file and line (with Java's null checks), its getters, `toString`, `equals` and `hashCode`, without
+class loader and module (Java's `equals` and `hashCode` of an element without them).
 
 `printStackTrace()`, `printStackTrace(PrintStream)` and `printStackTrace(PrintWriter)` print what
 Java's `printStackTrace` and `printEnclosedTrace` print for those traces: the exception's
