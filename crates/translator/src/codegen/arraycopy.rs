@@ -48,7 +48,9 @@ impl<'a> Gen<'a> {
             }
         }
         self.need(Need::CopyAcross(t));
-        let across = format!("{}(src, {p}, dest, {q}, {n})", self.runtime("try_arraycopy_across"));
+        // Named, so that objects held by reference (`&&Object`) are dereferenced to the enum.
+        let name = struct_name(&self.class.types[t].name);
+        let across = format!("{}::<{name}>(src, {p}, dest, {q}, {n})", self.runtime("try_arraycopy_across"));
         let body = if call.checked {
             across
         } else {
