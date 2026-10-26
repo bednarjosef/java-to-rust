@@ -208,9 +208,11 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     for &c in &facts.raised_classes {
         live[c] = true;
     }
-    // A class that only ever types a null reference still needs its struct for the type.
+    // A class that only ever types a null reference still needs its struct for the type, and so
+    // does an abstract class without subclasses for its fields (`hierarchy::fields_structs`).
     for t in mentioned(class) {
-        live[t] |= class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t);
+        live[t] |= !class.hierarchy.has_subtypes(t)
+            && (class.hierarchy.is_concrete(t) || facts.fields_structs.contains(&t));
     }
     // The lambdas of closure types are closures, not objects.
     for &t in &facts.closure_types {
