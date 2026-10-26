@@ -230,14 +230,13 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     live
 }
 
-/// Which classes' instance methods can run: those of a class that the program creates objects of,
-/// or that the runtime raises, and of its superclasses. A class of the program that is neither
-/// still has its methods emitted, as its type may be named, but nothing calls them.
+/// Which classes' instance methods can run: those of a class that code which can run creates
+/// objects of, or that the runtime raises, and of its superclasses. Code can run when it is static
+/// or of a class whose methods can run, so an object that only the methods of a class without
+/// objects create (the `Runnable` of JNA's `W32WindowUtils.setWindowAlpha`, where no
+/// `W32WindowUtils` is made) is never made either. A class of the program that is neither still
+/// has its methods emitted, as its type may be named, but nothing calls them.
 pub(super) fn running_types(class: &Class, facts: &Facts) -> Vec<bool> {
-    let mut created = crate::analysis::instantiated(class);
-    for &c in &facts.raised_classes {
-        created[c] = true;
-    }
     let mut runs: Vec<bool> = class
         .types
         .iter()
@@ -247,10 +246,40 @@ pub(super) fn running_types(class: &Class, facts: &Facts) -> Vec<bool> {
                 || !matches!(t.origin, Origin::Member | Origin::Local { .. })
         })
         .collect();
-    for t in (0..created.len()).filter(|&t| created[t]) {
-        runs[t] = true;
-        for a in class.hierarchy.ancestors(t) {
-            runs[a] = true;
+    // The classes that each piece of code creates objects of: the static code, and by class its
+    // instance methods, constructors and instance field initializers.
+    let news = |e: &Expr, out: &mut Vec<usize>| {
+        visit_expr(e, &mut |x| {
+            if let ExprKind::New { class: c, .. } = &x.kind {
+                out.push(*c);
+            }
+        })
+    };
+    let mut static_news = Vec::new();
+    let mut instance_news: Vec<Vec<usize>> = vec![Vec::new(); class.types.len()];
+    for m in &class.methods {
+        let out = if m.is_static { &mut static_news } else { &mut instance_news[m.class] };
+        for s in &m.body {
+            visit_stmt(s, &mut |e| news(e, out), &mut |_| {});
+        }
+    }
+    for (t, decl) in class.types.iter().enumerate() {
+        for f in decl.statics.iter().filter_map(|f| f.init.as_ref()) {
+            news(f, &mut static_news);
+        }
+        for f in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
+            news(f, &mut instance_news[t]);
+        }
+    }
+    let mut created: Vec<usize> = static_news;
+    created.extend(facts.raised_classes.iter().copied());
+    created.extend((0..runs.len()).filter(|&t| runs[t]).flat_map(|t| instance_news[t].iter().copied()));
+    while let Some(t) = created.pop() {
+        for c in std::iter::once(t).chain(class.hierarchy.ancestors(t)) {
+            if !runs[c] {
+                runs[c] = true;
+                created.extend(instance_news[c].iter().copied());
+            }
         }
     }
     runs
