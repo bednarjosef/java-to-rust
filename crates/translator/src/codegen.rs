@@ -165,6 +165,18 @@ fn generate_with(
     let modules = modules::enter(class);
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
     let (fn_names, group_names) = method_names(class, &homes);
+    // The methods that may be emitted in the `impl` of each class's struct (`emitted_in`), in
+    // index order.
+    let mut struct_methods: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, m) in class.methods.iter().enumerate() {
+        let t = match homes[i] {
+            _ if m.is_static => continue,
+            _ if m.is_ctor => m.class,
+            Home::Class(c) | Home::Fields(c) => c,
+            _ => continue,
+        };
+        struct_methods.entry(t).or_default().push(i);
+    }
     let static_fn_names =
         (0..fn_names.len()).filter(|&i| class.methods[i].is_static).map(|i| fn_names[i].clone()).collect();
     let mut g = Gen {
@@ -185,6 +197,7 @@ fn generate_with(
         wanted: wanted.clone(),
         needs: std::cell::RefCell::new(Needs::new()),
         homes,
+        struct_methods,
         super_targets: super_targets(class),
         this_struct: 0,
         method: 0,
@@ -309,6 +322,8 @@ struct Gen<'a> {
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,
+    /// The methods that may be emitted in the `impl` of each class's struct, in index order.
+    struct_methods: HashMap<usize, Vec<usize>>,
     /// The names of the static methods, which are free functions in the namespace of locals.
     static_fn_names: HashSet<String>,
     /// The names of the variants of the enum of each type (see `dispatch::variant`), once made.
