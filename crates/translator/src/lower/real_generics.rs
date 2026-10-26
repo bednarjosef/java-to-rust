@@ -51,7 +51,7 @@ pub(super) enum Owner {
 /// Lowers with every candidate, then without those that fail, until none does; an error with
 /// real generics is retried with all of them erased. A lowering that finds arrays that meet an
 /// `Object[]` is retried with them as `Object[]`s first (see `covariant`).
-pub(super) fn retry<E>(
+pub(super) fn retry<E: std::fmt::Debug>(
     mut run: impl FnMut(Option<&Real>, &super::covariant::Covariant) -> Result<(Class, Real, Real), E>,
 ) -> Result<Class, E> {
     let mut real: Option<Real> = None;
@@ -85,10 +85,10 @@ pub(super) fn retry<E>(
                 real = Some(used.without(&failed))
             }
             Err(e) if real.as_ref().is_some_and(Real::is_empty) => return Err(e),
-            Err(_) => {
+            Err(e) => {
                 if crate::timings::enabled() {
                     eprintln!(
-                        "timing: lowering attempt {attempt} is lowered again without Rust generics, for an error"
+                        "timing: lowering attempt {attempt} is lowered again without Rust generics, for an error: {e:?}"
                     );
                 }
                 real = Some(Real::default())

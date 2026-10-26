@@ -12,9 +12,10 @@
 //! - Each **body** crate depends on the header alone and defines those functions, with
 //!   `#[unsafe(no_mangle)]`, for the modules given to it. A module of a body crate re-exports its
 //!   header module (`pub use header::a::b::*`) and has the module's own `use` lines, so the moved
-//!   code names everything as it did. A method's code moves into a private trait that the body
-//!   crate implements for the header's type (`impl Bodies0 for X { fn body_m(&self, ..) {..} }`),
-//!   where `self` and `Self` mean what they did; its function calls it.
+//!   code names everything as it did, and the header's `recursion_limit`. A method's code moves
+//!   into a private trait that the body crate implements for the header's type (`impl Bodies0 for
+//!   X { fn body_m(&self, ..) {..} }`), where `self` and `Self` mean what they did; the trait is
+//!   `Sized`, as `X` is, for a signature that names `Option<Self>`. Its function calls it.
 //! - The **app** crate is the binary: it depends on all of them, so that the linker finds the
 //!   bodies, and its `main` calls the header's.
 //!
@@ -111,12 +112,24 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     let mut used = std::collections::HashSet::new();
     let mut splits = Vec::new();
     for module in &mut tree.modules {
-        let text = module.items_text();
-        module.items = Vec::new();
-        let split = split_module(&text, &module.path, &mut used)
-            .map_err(|e| format!("splitting the module of package `{}`: {e}", module.package))?;
+        // Item by item: a parsed module's syntax tree is many times its text, and the largest
+        // modules of a program like the Minecraft server are hundreds of megabytes.
+        let mut split = Split { header: String::new(), body: String::new(), moved: 0 };
+        let mut externs = String::new();
+        let mut traits = 0;
+        for item in std::mem::take(&mut module.items) {
+            let part = split_module(&item.text, &module.path, &mut used, &mut traits)
+                .map_err(|e| format!("splitting the module of package `{}`: {e}", module.package))?;
+            split.header.push_str(&part.split.header);
+            split.body.push_str(&part.split.body);
+            split.moved += part.split.moved;
+            externs.push_str(&part.externs);
+            proc_macro2::extra::invalidate_current_thread_spans();
+        }
+        if !externs.is_empty() {
+            split.header.push_str(&format!("\nunsafe extern \"Rust\" {{\n{externs}}}\n"));
+        }
         splits.push(split);
-        proc_macro2::extra::invalidate_current_thread_spans();
     }
     // Each body crate takes the next modules until it has its share of the code.
     let total: usize = splits.iter().map(|s| s.moved).sum();
@@ -142,6 +155,13 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
             format!("{uses}{}", std::mem::take(&mut splits.borrow_mut()[m].header))
         })
     );
+    // The proofs that statics are `Send` go as deep in the body crates as in the header.
+    let limit: String = tree
+        .header
+        .lines()
+        .filter(|l| l.starts_with("#![recursion_limit"))
+        .map(|l| format!("{l}\n"))
+        .collect();
     let mut bodies = Vec::new();
     for c in 0..crates {
         let text = nest(tree, &|m| {
@@ -157,7 +177,7 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
         });
         let text = format!(
             "//! Code of the translated program (see the header crate).\n\
-             #![allow(warnings)]\n\n{text}"
+             #![allow(warnings)]\n{limit}\n{text}"
         );
         bodies.push(vec![SourceFile { path: "lib.rs".into(), text }]);
     }
@@ -279,11 +299,21 @@ fn sig_start(sig: &syn::Signature) -> usize {
     .unwrap_or(0)
 }
 
+/// One item's split, and the declarations of its moved functions for the module's
+/// `extern "Rust"` block.
+struct Part {
+    split: Split,
+    externs: String,
+}
+
+/// Splits `text`, items of the module at `path`; `traits` numbers the module's traits of moved
+/// methods.
 fn split_module(
     text: &str,
     path: &[String],
     used: &mut std::collections::HashSet<String>,
-) -> Result<Split, String> {
+    traits: &mut usize,
+) -> Result<Part, String> {
     let file = syn::parse_file(text).map_err(|e| {
         // The code around the error, which a translator's fault in the generated text names.
         let at = e.span().start();
@@ -295,7 +325,6 @@ fn split_module(
     let mut externs = String::new();
     let mut body = String::new();
     let mut moved = 0;
-    let mut traits = 0;
     for item in &file.items {
         match item {
             syn::Item::Struct(s) => {
@@ -328,8 +357,10 @@ fn split_module(
                 let whole = braces.span.join().byte_range();
                 let range = whole.start + 1..whole.end - 1;
                 let inner = &text[range.clone()];
-                let published =
-                    replace_word(&replace_word(inner, "pub static", "static"), "static", "pub static");
+                let private = ["pub(crate) static", "pub(super) static", "pub static"]
+                    .iter()
+                    .fold(inner.to_string(), |text, visible| replace_word(&text, visible, "static"));
+                let published = replace_word(&private, "static", "pub static");
                 edits.push(Edit { start: range.start, end: range.end, text: published });
             }
             syn::Item::Fn(f) => {
@@ -372,7 +403,7 @@ fn split_module(
                 let mut decls = String::new();
                 let mut impls = String::new();
                 let mut functions = String::new();
-                let bodies = format!("Bodies{traits}");
+                let bodies = format!("Bodies{}", *traits);
                 for impl_item in &imp.items {
                     let syn::ImplItem::Fn(f) = impl_item else {
                         if let syn::ImplItem::Const(c) = impl_item
@@ -452,9 +483,9 @@ fn split_module(
                 }
                 if !decls.is_empty() {
                     body.push_str(&format!(
-                        "trait {bodies} {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
+                        "trait {bodies}: Sized {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
                     ));
-                    traits += 1;
+                    *traits += 1;
                 }
             }
             // A `use` among the items is the moved code's too.
@@ -477,10 +508,7 @@ fn split_module(
         last = edit.end;
     }
     header.push_str(&text[last..]);
-    if !externs.is_empty() {
-        header.push_str(&format!("\nunsafe extern \"Rust\" {{\n{externs}}}\n"));
-    }
-    Ok(Split { header, body, moved })
+    Ok(Part { split: Split { header, body, moved }, externs })
 }
 
 /// The text of a function's return type (` -> T`), or nothing.
@@ -536,4 +564,23 @@ fn trait_params(sig: &syn::Signature, text: &str) -> String {
         .map(|(k, ty)| format!("p{k}: {ty}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The statics of a `thread_local!` in a package's module, which the generator declares
+    /// `pub(crate)`, are public in the header, as those of the root module are.
+    #[test]
+    fn thread_local_statics_of_any_visibility_become_public() {
+        let text = "thread_local! {\n    pub(crate) static A__INITIALIZED: Cell<bool> = const { Cell::new(false) };\n    static B: Cell<i32> = const { Cell::new(0) };\n    pub static C: Cell<i32> = const { Cell::new(0) };\n}\n";
+        let split = split_module(text, &["p".to_string()], &mut std::collections::HashSet::new(), &mut 0)
+            .unwrap()
+            .split;
+        for name in ["A__INITIALIZED", "B", "C"] {
+            assert!(split.header.contains(&format!("    pub static {name}:")), "{}", split.header);
+        }
+        assert!(!split.header.contains("pub(crate)"), "{}", split.header);
+    }
 }
