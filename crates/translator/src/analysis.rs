@@ -15,6 +15,8 @@
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
+mod alongside;
+pub use alongside::one_after_another;
 mod arrays;
 mod borrowing;
 mod boxing;
@@ -309,14 +311,12 @@ pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
 /// monitors): a census goes on past those of them that no stub can take away, such as a field's
 /// type (`program/census.rs`).
 pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, Vec<Error>> {
-    let mut facts = analyze_from(class, tolerated, &mut represented(class))?;
-    find_stack_objects(class, &mut facts);
-    Ok(facts)
+    Ok(analyze_from(class, tolerated, &mut None)?.with_stack_objects())
 }
 
 /// The facts that depend on the program alone and not on the errors tolerated, which a census
 /// that only tolerates more errors of the same program finds once (`program/census.rs`): those
-/// that the analyses find before their first check, and the range analysis's, found when the
+/// that the analyses find before their first check, and the range analysis's, kept once the
 /// analyses first get past the checks, none of which reads them.
 pub struct Represented {
     facts: Facts,
@@ -324,110 +324,195 @@ pub struct Represented {
 }
 
 /// The facts that the analyses find before their first check.
-pub fn represented(class: &Class) -> Represented {
-    let mut facts = Facts {
-        fields_structs: hierarchy::fields_structs(class),
-        field_owners: hierarchy::field_owners(class),
-        closure_types: closures::closure_types(class),
-        ..Facts::default()
-    };
+fn represented(class: &Class) -> Represented {
     use crate::timings::phase;
-    facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
+    let mut facts = phase("analysis: structs", || {
+        let mut facts = Facts {
+            fields_structs: hierarchy::fields_structs(class),
+            field_owners: hierarchy::field_owners(class),
+            closure_types: closures::closure_types(class),
+            ..Facts::default()
+        };
+        facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
+        facts
+    });
     phase("analysis: representation", || representation(class, &mut facts));
     Represented { facts, ranges: None }
 }
 
-/// `analyze_tolerating`, from the facts that `represented` found for `class`, without the stack
-/// objects (`find_stack_objects`).
+/// The facts of `analyze_from`, and the objects that stay on the stack, found alongside them.
+pub struct Analysed {
+    pub facts: Facts,
+    stack_objects: alongside::Done<Option<escape::StackObjects>>,
+}
+
+impl Analysed {
+    /// The facts with the objects that stay on the stack (`Facts::stack_objects`), the last of
+    /// the facts, which no check reads: a census takes them after its last check of the analyses,
+    /// the messages of `NullPointerException`s (`program/census.rs`). None with
+    /// `JAVA_TO_RUST_HEAP_ONLY` set.
+    pub fn with_stack_objects(self) -> Facts {
+        let mut facts = self.facts;
+        if let Some(found) = self.stack_objects.take() {
+            facts.stack_objects = found;
+        }
+        facts
+    }
+}
+
+/// What the analyses find from the code alone, after the checks (`analyze_from`).
+struct FromCode {
+    ranges: Facts,
+    fixed_fields: HashSet<(usize, String)>,
+    eager_init: HashSet<usize>,
+    entry_init: HashSet<usize>,
+    early_static_reads: HashSet<ExprId>,
+    /// `Facts::ascii_length`, from the ranges' `ascii_chars`.
+    ascii_length: alongside::Done<HashSet<ExprId>>,
+}
+
+/// `analyze_tolerating`, from the facts that `represented` found for `class` (which it finds
+/// first when `found` has none), and the objects that stay on the stack.
 ///
 /// The checks run first, in their order, each as soon as the facts it reads are known: the
 /// validation reads the representation's facts, the pattern variables the code alone, strings
 /// and boxes as `Object`s the flows of objects, what threads share the boxes compared by identity
 /// (`boxing`, from the code), and the monitors the representation's flags. The facts that none of
-/// them reads (ranges, fixed fields, statics, early reads, nullness) are found after them, so a
-/// census round that a check ends, which stubs that check's code and runs the analyses again,
-/// does not find them. Each step sees the same facts as when the checks were among them: the
-/// checks read none of the facts found after them, and the steps after them see the checks' own
-/// facts (`identity_checks`, `faithful_boxes`) only where they did before. None of these steps
-/// changes the program or keeps state that another reads.
+/// them reads (ranges, fixed fields, statics, early reads, nullness) come after them, so a check
+/// that rejects the program ends the analyses before them. Each step sees the same facts as when
+/// the checks were among them: the checks read none of the facts found after them, and the steps
+/// after them see the checks' own facts (`identity_checks`, `faithful_boxes`) only where they did
+/// before. None of these steps changes the program or keeps state that another reads.
+///
+/// So the steps that read none of each other's facts run at once, on threads of their own
+/// (`alongside`): from the start, alongside the representation and the checks, the ranges, fixed
+/// fields, statics, early reads and ASCII strings (`ascii_length`), which read the code and the
+/// ranges alone, and the objects on the stack, which read the code alone, until the caller takes
+/// them; once the representation and the pattern variables are checked, nullness, which reads the
+/// representation's facts and the statics, and then the borrowed parameters, which read nullness
+/// alone, alongside the object values and the checks after them. Nothing after them but the
+/// generator reads the borrowed parameters and ASCII strings. Each step's result is taken where
+/// the steps ran one after another, so the analyses find what they found then, and stop at the
+/// same error or panic.
 pub fn analyze_from(
     class: &Class,
     tolerated: &[Error],
-    found: &mut Represented,
-) -> Result<Facts, Vec<Error>> {
+    found: &mut Option<Represented>,
+) -> Result<Analysed, Vec<Error>> {
     let checked = |result: Result<(), Vec<Error>>| {
         let mut errors = result.err().unwrap_or_default();
         errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
         if errors.is_empty() { Ok(()) } else { Err(errors) }
     };
     use crate::timings::phase;
-    let mut facts = found.facts.clone();
-    checked(phase("analysis: validate", || validate(class, &facts)))?;
-    patterns::check(class)?;
-    let (identity_checks, object_values) =
-        phase("analysis: object values", || patterns::check_object_values(class, &facts));
-    checked(object_values)?;
-    phase("analysis: boxing", || boxing::analyze(class, &mut facts));
-    if facts.threaded {
-        checked(phase("analysis: threads", || threads::check(class, &facts)))?;
-    }
-    checked(phase("analysis: monitors", || monitors::check(class, &facts)))?;
-    // The facts that the checks above do not read, from those that they found set aside.
-    let faithful_boxes = std::mem::take(&mut facts.faithful_boxes);
-    let ranges = found.ranges.get_or_insert_with(|| {
-        let mut ranges = Facts::default();
-        phase("analysis: ranges", || ranges::analyze(class, &mut ranges));
-        ranges
-    });
-    facts.no_overflow = ranges.no_overflow.clone();
-    facts.safe_division = ranges.safe_division.clone();
-    facts.ascii_chars = ranges.ascii_chars.clone();
-    facts.index_ranges = ranges.index_ranges.clone();
-    facts.fixed_fields =
-        phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, facts.threaded));
-    facts.eager_init = statics::eager_classes(class);
-    facts.entry_init = statics::entry_inits(class, &facts.eager_init);
-    facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
-        [main] => Some(main.class),
-        _ => None,
-    };
-    facts.early_static_reads =
-        phase("analysis: early static reads", || early_reads::early_reads(class, &facts.eager_init));
-    phase("analysis: nullness", || nullness::analyze(class, &mut facts));
-    facts.identity_checks = identity_checks;
-    facts.faithful_boxes = faithful_boxes;
-    facts.class_monitors = monitors::class_monitors(class, &facts);
-    phase("analysis: borrowing", || {
-        borrowed_params(class, &mut facts);
-        (facts.borrowed_objects, facts.borrowed_optional_objects) = borrowed_objects(class, &facts);
-    });
-    ascii_strings(class, &mut facts);
-    phase("analysis: arrays", || arrays::analyze(class, &mut facts));
-    phase("analysis: indexing", || indexing::analyze(class, &mut facts));
-    phase("analysis: moves", || moves::analyze(class, &mut facts));
-    phase("analysis: exceptions", || exceptions::analyze(class, &mut facts))?;
-    // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
-    if threads::handles_uncaught(class) {
-        for new in &class.raised {
-            if let ExprKind::New { class: c, .. } = new.kind {
-                facts.raised_classes.insert(c);
+    use alongside::Alongside;
+    std::thread::scope(|scope| {
+        let stack_objects = Alongside::start(scope, || {
+            std::env::var_os("JAVA_TO_RUST_HEAP_ONLY")
+                .is_none()
+                .then(|| phase("analysis: stack objects", || escape::stack_objects(class)))
+        });
+        let ranges = found.as_mut().and_then(|found| found.ranges.take());
+        let from_code = Alongside::start(scope, move || {
+            let ranges = ranges.unwrap_or_else(|| {
+                let mut ranges = Facts::default();
+                phase("analysis: ranges", || ranges::analyze(class, &mut ranges));
+                ranges
+            });
+            // Whether the program starts threads, as the representation finds it.
+            let threaded = threads::threaded(class);
+            let fixed_fields =
+                phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, threaded));
+            let (eager_init, entry_init) = phase("analysis: statics", || {
+                let eager = statics::eager_classes(class);
+                let entry = statics::entry_inits(class, &eager);
+                (eager, entry)
+            });
+            let early_static_reads =
+                phase("analysis: early static reads", || early_reads::early_reads(class, &eager_init));
+            let ascii_length = alongside::Done::of(|| {
+                let mut facts = Facts { ascii_chars: ranges.ascii_chars.clone(), ..Facts::default() };
+                phase("analysis: ascii", || ascii_strings(class, &mut facts));
+                facts.ascii_length
+            });
+            FromCode { ranges, fixed_fields, eager_init, entry_init, early_static_reads, ascii_length }
+        });
+        let found = found.get_or_insert_with(|| represented(class));
+        // The representation finds no boxes compared by identity (`boxing`, below), and a panic
+        // of a check may have left some.
+        found.facts.faithful_boxes.clear();
+        checked(phase("analysis: validate", || validate(class, &found.facts)))?;
+        patterns::check(class)?;
+        // The facts as the steps after the checks find them: the representation's, with those
+        // found from the code; the checks' own (`faithful_boxes`) are set aside until nullness
+        // is done.
+        let mut facts = found.facts.clone();
+        let nullness = Alongside::start(scope, move || {
+            let FromCode { ranges, fixed_fields, eager_init, entry_init, early_static_reads, ascii_length } =
+                from_code.join();
+            facts.no_overflow = ranges.no_overflow.clone();
+            facts.safe_division = ranges.safe_division.clone();
+            facts.ascii_chars = ranges.ascii_chars.clone();
+            facts.index_ranges = ranges.index_ranges.clone();
+            facts.fixed_fields = fixed_fields;
+            facts.eager_init = eager_init;
+            facts.entry_init = entry_init;
+            facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
+                [main] => Some(main.class),
+                _ => None,
+            };
+            facts.early_static_reads = early_static_reads;
+            phase("analysis: nullness", || nullness::analyze(class, &mut facts));
+            let borrowing = alongside::Done::of(|| {
+                phase("analysis: borrowing", || {
+                    borrowed_params(class, &mut facts);
+                    (facts.borrowed_objects, facts.borrowed_optional_objects) =
+                        borrowed_objects(class, &facts);
+                })
+            });
+            (facts, ranges, borrowing, ascii_length)
+        });
+        let (identity_checks, object_values) =
+            phase("analysis: object values", || patterns::check_object_values(class, &found.facts));
+        checked(object_values)?;
+        // The representation's facts have no boxes compared by identity; what threads share reads
+        // them.
+        phase("analysis: boxing", || boxing::analyze(class, &mut found.facts));
+        let checks = (|| {
+            if found.facts.threaded {
+                checked(phase("analysis: threads", || threads::check(class, &found.facts)))?;
+            }
+            checked(phase("analysis: monitors", || monitors::check(class, &found.facts)))
+        })();
+        let faithful_boxes = std::mem::take(&mut found.facts.faithful_boxes);
+        checks?;
+        let (mut facts, ranges, borrowing, ascii_length) = nullness.join();
+        found.ranges = Some(ranges);
+        facts.identity_checks = identity_checks;
+        facts.faithful_boxes = faithful_boxes;
+        facts.class_monitors = monitors::class_monitors(class, &facts);
+        borrowing.take();
+        facts.ascii_length = ascii_length.take();
+        phase("analysis: arrays", || arrays::analyze(class, &mut facts));
+        phase("analysis: indexing", || indexing::analyze(class, &mut facts));
+        phase("analysis: moves", || moves::analyze(class, &mut facts));
+        phase("analysis: exceptions", || exceptions::analyze(class, &mut facts))?;
+        // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
+        if threads::handles_uncaught(class) {
+            for new in &class.raised {
+                if let ExprKind::New { class: c, .. } = new.kind {
+                    facts.raised_classes.insert(c);
+                }
             }
         }
-    }
-    // The exceptions that the runtime raises are values of `Throwable` too.
-    if !facts.raised_classes.is_empty() {
-        facts.flows = hierarchy::flows(class, &facts.field_level, &facts.raised_classes);
-    }
-    Ok(facts)
-}
-
-/// The objects that stay on the stack (`Facts::stack_objects`), the last of the facts, which no
-/// check reads: a census finds them after its last check of the analyses (`program/census.rs`).
-pub fn find_stack_objects(class: &Class, facts: &mut Facts) {
-    if std::env::var_os("JAVA_TO_RUST_HEAP_ONLY").is_none() {
-        facts.stack_objects =
-            crate::timings::phase("analysis: stack objects", || escape::stack_objects(class));
-    }
+        // The exceptions that the runtime raises are values of `Throwable` too.
+        if !facts.raised_classes.is_empty() {
+            facts.flows = phase("analysis: raised flows", || {
+                hierarchy::flows(class, &facts.field_level, &facts.raised_classes)
+            });
+        }
+        Ok(Analysed { facts, stack_objects: stack_objects.finish() })
+    })
 }
 
 /// How the objects of each class are represented and which methods borrow them: the facts from

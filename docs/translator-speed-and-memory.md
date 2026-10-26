@@ -39,8 +39,9 @@ What this shows:
 - **The size of a translation is set by how much of the JDK the program reaches**, not by the
   program: all four are 100 to 160 lines. `Scanner` and text formatting reach locales, calendars
   and regular expressions, 592 units.
-- **The translator runs on one core.** CPU time is about wall time (10.4 s against 9.3 s for
-  StreamPipeline).
+- **The translator runs mostly on one core.** Only some steps of the analyses run alongside each
+  other (`performance.md`, steps of the analyses alongside each other); when measured, before
+  they did, CPU time was about wall time (10.4 s against 9.3 s for StreamPipeline).
 - **Lowering is repeated whole.** Each attempt of the Rust generics lowers the whole program again:
   four times for StreamPipeline.
 
