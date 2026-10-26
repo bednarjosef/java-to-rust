@@ -453,7 +453,8 @@ written in checked form exactly when it is in the analysis's set.
   null, and of a store into a null array or out of its bounds, only once the arguments (the
   stored value) are computed. Where one may have an effect, lowering computes it first into a
   local, and the receiver (the array) before it unless it is a local that nothing there assigns
-  (`lower/argument_order.rs`); the message names the receiver itself.
+  (`lower/argument_order.rs`); the message names the receiver itself, and an argument that the
+  call unboxes from its local is the value that javac unboxes as it computes it.
 - **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
   `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`, and the
   `NullPointerException` message facts below.
@@ -542,7 +543,8 @@ the initializers the constructor runs read the field (`this.this$0.chk`), also w
 constructor is a method of a class that builds whole objects (`analysis/whole_objects.rs`);
 javac's own locals are named too (the `s$` of a string `switch`, the iterator
 `i$` of a for-each loop, whose calls start at the collection as javac's do, at its parenthesis
-if it has one). A variable of a
+if it has one); a local with a `$` in its name that javac did not make (it makes them
+synthetic) is the source's, as decompiled code has them (`rec$`). A variable of a
 `finally` block has a slot in each copy of the block that javac writes for a way out of the
 `try`: the copy for an exception keeps the exception in a slot first, so its variables are
 further along, by as much as the local variable table of the class file (compiled with `-g`,
@@ -564,11 +566,14 @@ javac writes as its value), a local or a call, an enum's `ordinal()` among them 
 no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
 writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
 the update starts, which `BytecodeNames` notes), no message for a pattern switch's
-`Objects.requireNonNull`, and an assigned value followed back to its source, whatever it is
+`Objects.requireNonNull`, an element that lowering reads once for several reads of it (`lower/element_reads.rs`)
+as the element, and an assigned value followed back to its source, whatever it is
 stored in (`(s = a).next` fails `because "a" is null`, `(this.f = g()).next` `because the return
 value of "Main.g()" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
-(`program::MODULE_CALLS`), an enum's `toString()` as the enum's, `c.cast(x)` (a block that
+(`program::MODULE_CALLS`), `c.isAssignableFrom(d)` as itself (a null `d` fails in the JVM's
+native code, which gives no message), `c.getEnumConstants()` (a block that checks `c` first) as
+itself, an enum's `toString()` as the enum's, `c.cast(x)` (a block that
 checks `x`) as `java.lang.Class.cast(Object)`, `subSequence` (lowered as `substring`) as
 itself, and a `CharSequence`'s `isEmpty()` (lowered as a zero `length()`) as itself; the
 elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no message, as
@@ -578,7 +583,9 @@ reference's class holds and its call may first keep in a local, is never null th
 one name that start at the same place, as calls of a chain do
 (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told apart by where their
 first argument starts, which `BytecodeNames` adds to the name (`stream@3:30`, `stream@`), and
-calls without arguments by the class of their receiver too (`stream@#java.util.List`). The start
+calls without arguments by the class of their receiver too (`stream@#java.util.List`); for a
+varargs parameter that is the first of the arguments that lowering packs into an array, and a
+call that passes none has no arguments. The start
 of a first argument is taken before lowering, as lowering replaces a method reference or a lambda
 (`codec.xmap(A::of, A::to).xmap(B::new, B::value)`).
 

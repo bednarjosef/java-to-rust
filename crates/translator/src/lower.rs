@@ -80,6 +80,7 @@ mod system;
 mod varargs;
 pub use annotation_values::is_member_annotation_call;
 pub(crate) use argument_order::{ARGUMENT, RECEIVER, held_local, ordered_call};
+pub(crate) use classes::ENUM_CONSTANTS;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;

@@ -341,6 +341,11 @@ public class BytecodeNames {
      * that is a method reference or a lambda, whose new tree has no start of its own.
      */
     private final Map<JCMethodInvocation, long[]> firstArguments = new IdentityHashMap<>();
+    /**
+     * The calls that pass no arguments, as attributed: lowering gives a call of a varargs method
+     * that passes none an empty array.
+     */
+    private final Set<JCMethodInvocation> noArguments = Collections.newSetFromMap(new IdentityHashMap<>());
     /** The members of each class as lowered, which the code generator discards once done. */
     private final Map<JCClassDecl, com.sun.tools.javac.util.List<JCTree>> lowered = new HashMap<>();
     /** The entries: class, line, column, kind and name, to the text or null. */
@@ -426,6 +431,8 @@ public class BytecodeNames {
                                     if (first >= 0) {
                                         firstArguments.put(call, position(unit, first));
                                     }
+                                } else if (tree instanceof JCMethodInvocation call) {
+                                    noArguments.add(call);
                                 }
                                 if (tree instanceof JCUnary u
                                         && (u.getTag() == JCTree.Tag.PREINC || u.getTag() == JCTree.Tag.PREDEC)
@@ -709,11 +716,12 @@ public class BytecodeNames {
 
                 @Override
                 public void visitIdent(JCIdent t) {
-                    // The names with a `$` are javac's own (`arr$`), the temps.
+                    // The synthetic names with a `$` are javac's own (`arr$`), the temps; a
+                    // decompiler writes others in the source (`rec$`).
                     if (t.sym instanceof VarSymbol v && v.owner.kind == Kinds.Kind.MTH) {
                         // The JDK compiles its modules with the names of their locals (`-g`), and so
                         // were the program's class files with `--named-locals`.
-                        if (!t.name.toString().contains("$")) {
+                        if (!t.name.toString().contains("$") || (v.flags() & Flags.SYNTHETIC) == 0) {
                             String text = jdkModule ? t.name.toString() : local(v, t);
                             entry(t, "local", t.name.toString(), text);
                             if (prefixed.containsKey(t)) {
@@ -766,15 +774,16 @@ public class BytecodeNames {
                         // by where their first argument starts: `stream@3:30`, `stream@`. Calls
                         // without one are apart by the class of the receiver too:
                         // `stream@#java.util.List`.
-                        long[] first = t.args.isEmpty() ? null : starts.get(written(t.args.head));
-                        if (first == null && !t.args.isEmpty()) {
+                        boolean none = t.args.isEmpty() || noArguments.contains(t);
+                        long[] first = none ? null : starts.get(written(t.args.head));
+                        if (first == null && !none) {
                             first = firstArguments.get(t);
                         }
-                        if (t.args.isEmpty() || first != null) {
+                        if (none || first != null) {
                             String where = first == null ? "" : first[0] + ":" + first[1];
                             entry(at, "call", m.name + "@" + where, member(m, site));
                         }
-                        if (t.args.isEmpty() && types.erasure(site).tsym instanceof ClassSymbol receiver) {
+                        if (none && types.erasure(site).tsym instanceof ClassSymbol receiver) {
                             entry(at, "call", m.name + "@#" + receiver.flatname, member(m, site));
                         }
                     }
