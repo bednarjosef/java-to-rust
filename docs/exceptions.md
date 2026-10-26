@@ -610,9 +610,12 @@ primitive or `switch` patterns, or a binding that outlives its statement (`if (!
 String s)) return;`), has no known slots for its temporaries, and a null message of one is not
 certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
-for which the JDK's code throws an exception without a message. The receiver of an unbound method reference has no message, as the
-JVM's hidden frame gives none; a bound one's, checked where the reference is created, is never
-null in the reference's class. The translator's own `java.lang` classes (`Standard.java`) have no
+for which the JDK's code throws an exception without a message. A null that the class the JVM makes for a method reference dereferences has no message, as
+its hidden frame gives none: the receiver of an unbound reference, or an argument it unboxes
+(`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`). javac writes a method of its
+own instead for a reference that packs varargs, calls through `super`, or makes an array or an
+object of an inner or local class, so the rule leaves those out. A bound reference's receiver,
+checked where the reference is created, is never null in the reference's class. The translator's own `java.lang` classes (`Standard.java`) have no
 known message from their code; where the JDK's code has a dereference that may fail, they throw
 the JDK's message themselves. The overlays of `java.lang` (`Module`, `ModuleLayer`,
 `TranslatedModules`, `TranslatedProperties`) get the messages of their own code.
