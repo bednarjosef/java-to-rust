@@ -1068,6 +1068,19 @@ public class JavaTree {
                 // A raw or unrelated qualifier: the declared type stands.
             }
         }
+        // A return type that is a type variable of the qualifier's class, which a raw qualifier
+        // (`Entry::getValue`) leaves as its erasure: javac's inferred type of the reference has
+        // it (`Integer`, which `comparingInt` unboxes).
+        var inferred = ((com.sun.tools.javac.tree.JCTree.JCMemberReference) reference).referentType;
+        if (referent.getTypeParameters().isEmpty() && member instanceof ExecutableType executable
+                && referent.getReturnType().getKind() == javax.lang.model.type.TypeKind.TYPEVAR
+                && inferred != null && inferred.getReturnType().getKind() == javax.lang.model.type.TypeKind.DECLARED) {
+            StringBuilder text = new StringBuilder("(");
+            for (int i = 0; i < executable.getParameterTypes().size(); i++) {
+                text.append(i == 0 ? "" : ",").append(typeText(executable.getParameterTypes().get(i)));
+            }
+            return text.append(')').append(typeText(types.erasure(inferred.getReturnType()))).toString();
+        }
         if (referent.getTypeParameters().isEmpty() || !(member instanceof ExecutableType executable)) {
             return typeText(member);
         }
