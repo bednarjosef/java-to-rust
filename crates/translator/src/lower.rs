@@ -472,6 +472,9 @@ struct Lowering<'t> {
     /// The methods of enums that only the bodies of their constants declare, each implementing a
     /// method of an interface that the enum leaves to it (see `constant_bodies::body_methods`).
     body_methods: std::collections::HashSet<usize>,
+    /// The result type of those of `body_methods` that the bodies declare with different result
+    /// types, narrowing the interface's: the interface's (see `constant_bodies::body_methods`).
+    body_returns: std::collections::HashMap<usize, &'t str>,
     /// The methods of enums that a constant's body declares and that override nothing, which only
     /// that body's code calls (see `constant_bodies::body_methods`).
     body_helpers: std::collections::HashSet<usize>,
@@ -605,7 +608,7 @@ impl<'t> Lowering<'t> {
             Type::Void
         } else {
             let ret_node = node.child("returnType")?;
-            self.signature_type(ret_node, ret_node.java_type())?
+            self.signature_type(ret_node, self.return_java_type(index, ret_node))?
         };
         self.ret.set(ret);
         let params: Vec<Node> = node.list("parameters").collect();

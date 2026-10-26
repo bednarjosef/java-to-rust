@@ -112,18 +112,28 @@ Naming:
   the first number after it that is free (`StandardTableColumnKeySet2`), in its statics, monitor
   and static initialization too.
 - A variant is named after its class's simple name (`Shape::Circle`, and `ShapeView::Circle`
-  in the view), with the outer classes' names when two variants of one enum would share one.
-  Runtime variants are `String`, `Integer`, ..., `IntArray`, `StringBuilder` and so on. The
+  in the view), with the outer classes' names when two variants of one enum would share one,
+  and with the package's too when those still meet; names that meet even then (`CSS.Value` and
+  `CSSValue` of one package) are numbered after the first (`CSSValue2`). Runtime variants are `String`, `Integer`, ..., `IntArray`, `StringBuilder` and so on. The
   view is `<Name>View`, or `<Name>Variants` when the program has a class of the first name.
 - Accessors are `base()`, `base_mut()` and `view()`; conversions `to_<type>()` and
-  `as_<type>()`. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
+  `as_<type>()`, the type's name in snake case: its simple name, with its outer classes where
+  another type has the same name either way (`CSS.Value` beside `CSSValue`), with its package
+  where that is shared too. The names are unique in the program, as every enum's conversions
+  meet on `Object`: where two types still come to one name (`WinDef.LONG` and `Long`), all but
+  the one with fewest dots take the first free number (`as_long`, `as_long_2`). A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
   the class methods above gets a suffix (`base_2`, `clone_2`).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.
 - Instance methods are named once per override group within the class trees the group reaches,
   so every implementation has the name its callers use; overload suffixes count the groups of a
-  name (`codegen/names.rs`).
+  name (`codegen/names.rs`). A type also has its interfaces' methods, whose trees are their
+  own, so groups that each kept a bare name in their trees can still meet on a type that has
+  both (fastutil's `Reference2FloatMap`, with `put(K, float)` of its function interface and
+  `put(K, V)` of `Map`); the one found later is then numbered (`put_2`). Overloads take their parameters' type names (`print_i32`), and
+  where those meet, as a `String[]` passed on as an `Object[]` is held as one, a number
+  (`new_object_array_string_2`); constructors only need to differ from their own class's.
 - A field named `base` in a class that embeds a `base` is renamed `base_`.
 - A program class named like a standard class or interface the translator supplies is
   rejected ("a class named like the standard class ...").

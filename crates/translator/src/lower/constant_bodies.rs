@@ -12,6 +12,12 @@ use enums::{is_enum_constant, pure, subst};
 /// A constant's ordinal, and the statements of its body's override of a method.
 type Override = (usize, Vec<Stmt>);
 
+/// The parameters of a javac signature, `(int)` of `(int)void`: a body's method overrides the
+/// enum's of the same name and parameters, whatever type it narrows the result to.
+fn params_of(sig: &str) -> &str {
+    sig.find(')').map_or(sig, |end| &sig[..=end])
+}
+
 /// Whether a case's statements always leave it, so that it needs no `break`.
 fn leaves(body: &[Stmt]) -> bool {
     matches!(body.last(), Some(Stmt::Return(..) | Stmt::Break | Stmt::Continue))
@@ -30,7 +36,8 @@ impl<'t> Lowering<'t> {
     /// none of the enum's own, as one that implements an interface's: the constants that do not
     /// override it run the interface's default method (`interface_default`), which Java requires
     /// when the interface's is abstract. It is declared with the first body's declaration, for its
-    /// signature. A method that implements no interface's is a helper of its body, declared as a
+    /// signature, but with the interface's result type where bodies narrow it differently
+    /// (`body_returns`). A method that implements no interface's is a helper of its body, declared as a
     /// method of the enum with the body's code (`body_helpers`).
     pub(super) fn body_methods(&mut self, class: usize) {
         let constants: Vec<Node<'t>> =
@@ -39,15 +46,30 @@ impl<'t> Lowering<'t> {
             let Some(body) = constant.get("initializer").and_then(|i| i.get("classBody")) else { continue };
             for member in body.list("members").filter(|m| m.kind() == "METHOD" && m.str("name") != "<init>") {
                 let (name, sig) = (member.str("name"), member.symbol().map_or("", |s| s.ty));
-                let declared =
-                    self.methods.iter().any(|m| m.owner == class && m.name == name && m.sig == sig);
+                let declared = self
+                    .methods
+                    .iter()
+                    .position(|m| m.owner == class && m.name == name && params_of(m.sig) == params_of(sig));
                 // `Object`'s and `Enum`'s methods are no interface's.
                 let overrides = member.get("symbol").and_then(|s| s.0["overrides"].as_array());
-                let of_interface = overrides.into_iter().flatten().any(|o| {
-                    !matches!(o["owner"].as_str(), None | Some("java.lang.Object" | "java.lang.Enum"))
+                let interface_sig = overrides.into_iter().flatten().find_map(|o| match o["owner"].as_str() {
+                    None | Some("java.lang.Object" | "java.lang.Enum") => None,
+                    Some(_) => o["type"].as_str(),
                 });
+                let of_interface = interface_sig.is_some();
                 let overrides_none = overrides.is_none_or(|o| o.is_empty());
-                if declared || member.has_flag("STATIC") || !of_interface && !overrides_none {
+                // Bodies that narrow the interface's result differently (`Double readNumber` and
+                // `Number readNumber` of Gson's `ToNumberPolicy`) share one method, which returns
+                // the interface's type.
+                if let Some(first) = declared
+                    && self.body_methods.contains(&first)
+                    && self.methods[first].sig != sig
+                    && let Some(interface_sig) = interface_sig
+                {
+                    let ret = &interface_sig[params_of(interface_sig).len()..];
+                    self.body_returns.insert(first, ret);
+                }
+                if declared.is_some() || member.has_flag("STATIC") || !of_interface && !overrides_none {
                     continue;
                 }
                 self.methods.push(MethodInfo { owner: class, node: member, name, sig });
@@ -60,6 +82,13 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+    }
+
+    /// javac's name of the result type of method `index`, whose return type node is `ret`: the
+    /// declared one, but the interface's for a method of `body_methods` that the bodies narrow
+    /// differently (`body_returns`).
+    pub(super) fn return_java_type(&self, index: usize, ret: Node<'t>) -> &'t str {
+        self.body_returns.get(&index).copied().unwrap_or_else(|| ret.java_type())
     }
 
     /// The method of `body_methods` of the enum named `e` that implements the interface's method
@@ -325,8 +354,10 @@ impl<'t> Lowering<'t> {
                 let symbol = member.symbol();
                 let sig = symbol.as_ref().map_or("", |s| s.ty);
                 let name = member.str("name");
-                let Some(base) =
-                    self.methods.iter().position(|m| m.owner == class && m.name == name && m.sig == sig)
+                let Some(base) = self
+                    .methods
+                    .iter()
+                    .position(|m| m.owner == class && m.name == name && params_of(m.sig) == params_of(sig))
                 else {
                     return unsupported(
                         member,
