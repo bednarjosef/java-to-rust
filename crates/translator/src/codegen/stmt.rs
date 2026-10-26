@@ -235,7 +235,10 @@ impl<'a> Gen<'a> {
             }
         }
         match cond {
+            // `for (..; true; ..)` never leaves but by `break`, as `loop` does, so the loop is an
+            // expression of any type, as a method's last statement.
             None => self.line("loop {"),
+            Some(Expr { kind: ExprKind::Bool(true), .. }) => self.line("loop {"),
             Some(cond) => {
                 let cond_text = self.condition(cond);
                 self.line(&format!("while {cond_text} {{"));
