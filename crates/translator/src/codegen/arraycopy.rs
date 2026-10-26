@@ -40,11 +40,13 @@ impl<'a> Gen<'a> {
     pub(super) fn object_copy_arms(&mut self, t: usize, variants: &[usize], call: CopyCall) -> Vec<String> {
         let arrays: Vec<(usize, Type)> =
             variants.iter().filter_map(|&c| self.element_of(c).map(|element| (c, element))).collect();
+        // `String`'s variant, found once for all the pairs.
+        let string = variants.iter().copied().find(|&c| self.binary_name(c) == "java.lang.String");
         let mut arms = Vec::new();
         for &(s, es) in &arrays {
             for &(d, ed) in &arrays {
                 if s == d || (primitive_name(es).is_none() && primitive_name(ed).is_none()) {
-                    arms.push(self.array_pair_arm(t, variants, (s, d), (es, ed), call));
+                    arms.push(self.array_pair_arm(t, string, (s, d), (es, ed), call));
                 }
             }
         }
@@ -73,11 +75,12 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The arm for a source array of class `s` and a destination array of class `d`.
+    /// The arm for a source array of class `s` and a destination array of class `d`, where
+    /// `string` is the variant of `String` among the classes, if it is one.
     fn array_pair_arm(
         &mut self,
         t: usize,
-        variants: &[usize],
+        string: Option<usize>,
         (s, d): (usize, usize),
         (es, ed): (Type, Type),
         call: CopyCall,
@@ -88,7 +91,7 @@ impl<'a> Gen<'a> {
             let [p, q, n] = call.names;
             (format!("({vs}(src), {vd}(dest))"), format!("{copy}(src, {p}, dest, {q}, {n})"))
         } else {
-            self.object_copy_between(t, variants, (s, d), (es, ed), call)
+            self.object_copy_between(t, string, (s, d), (es, ed), call)
         };
         format!("{pattern} => {body},")
     }
@@ -106,7 +109,7 @@ impl<'a> Gen<'a> {
     fn object_copy_between(
         &mut self,
         t: usize,
-        variants: &[usize],
+        string: Option<usize>,
         (s, d): (usize, usize),
         (es, ed): (Type, Type),
         call: CopyCall,
@@ -114,7 +117,6 @@ impl<'a> Gen<'a> {
         let CopyCall { pos, checked, names: [p, q, n] } = call;
         let (vs, vd) = (self.view_pattern(t, s), self.view_pattern(t, d));
         let is_object = |ty: &Type| matches!(ty, Type::Class(name, _) if *name == OBJECT);
-        let string = variants.iter().copied().find(|&c| self.binary_name(c) == "java.lang.String");
         let object = struct_name(&self.class.types[t].name);
         let copy = self.runtime("try_arraycopy_with");
         let uncaught = self.runtime("uncaught");
