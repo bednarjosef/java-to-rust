@@ -1392,6 +1392,12 @@ impl<'t> Lowering<'t> {
                     ),
                 );
             }
+            // The arguments of a variable arity are packed for the JDK's method where it is lowered,
+            // and for the translator's otherwise.
+            let args = match self.method_index(&symbol) {
+                Some(_) => args,
+                None => self.packed_args_of(node, resolved.expect("checked above"), args)?,
+            };
             let mut args = self.convert_generic_args(node, resolved, args)?;
             args.extend(self.caller_arg(node, resolved)?);
             return Ok(ExprKind::Call { name: to.to_string(), args, resolved });
