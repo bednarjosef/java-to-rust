@@ -67,6 +67,19 @@ impl<'t> Lowering<'t> {
             let declared = Stmt::Local { ty, name, init: Some(init), pos };
             body = Stmt::Block(vec![declared, body]);
             (ty, name) = (*element, each);
+        } else if *element != ty {
+            // An element of one class that the variable holds as another, an enum's constant as
+            // an interface it implements (`for (Reader r : Policy.values())`), is converted to the
+            // variable's type.
+            let pos = variable.pos();
+            let each = self.fresh_name(&name);
+            let value = self.synth(ExprKind::Var(each.clone()), pos, *element);
+            let init = self.convert(value, ty);
+            if matches!(init.kind, ExprKind::Cast(..)) {
+                let declared = Stmt::Local { ty, name, init: Some(init), pos };
+                body = Stmt::Block(vec![declared, body]);
+                (ty, name) = (*element, each);
+            }
         }
         let looped = Stmt::ForEach { ty, name, array, body: Box::new(body) };
         Ok(match label {
