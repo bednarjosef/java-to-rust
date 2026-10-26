@@ -94,7 +94,9 @@ program where such a lookup can happen, so they can be checked before the progra
   `Method`, `Field` and `Constructor` are the translator's own classes
   (`java/Reflection.java`). Each holds a slot in the table, and `Method.invoke`, `Field.get` and
   `set` (with their typed forms) and `Constructor.newInstance` are a `switch` over the slots,
-  each case a direct call, read or write. Arguments are checked and unboxed as Java does: a wrong
+  each case a direct call, read or write. The table and these switches are in 32 parts by
+  `slot & 31`, each part a function of its own, so that a big program's table (the Minecraft server's holds about 100,000
+  methods) makes functions of a few thousand cases that rustc compiles one by one. Arguments are checked and unboxed as Java does: a wrong
   type is an `IllegalArgumentException` and a null receiver a `NullPointerException`, and an
   exception of the called code is wrapped in an `InvocationTargetException` (by
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final

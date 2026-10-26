@@ -4,8 +4,9 @@
 // syntax tree of this file with `JavaTree`, and lowering gives its classes their real package and
 // adds them, with the members a program uses, to the programs that use them, as it adds the
 // standard exception classes (see `lower/exceptions.rs`). Each member has a slot in the table;
-// the natives `table0`, `invoke0`, `get0`, `set0` and `newInstance0` are written by lowering for
-// each program: the table's members, and a `switch` over the slots that calls the member of each.
+// the natives `tablePart`, `invokePart`, `getPart`, `setPart` and `newInstancePart` are written by
+// lowering for each program, each for one part of the slots: the part's members, and a `switch` over
+// its slots that calls the member of each.
 // A lookup by a name that is not in the table throws Java's exception, with a message that says
 // so. An exception that the member throws is wrapped in an `InvocationTargetException`, as in
 // Java, except by `Class.newInstance`, which throws it as it is. One deviation: a final field is
@@ -192,9 +193,140 @@ final class Method {
         return table;
     }
 
-    private static native Method[] table0();
+    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
+    // on, in order, each written by lowering as its own array.
+    private static Method[] table0() {
+        Method[][] parts = {
+            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
+            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
+            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
+            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
+            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
+            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
+            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
+            tablePart28(), tablePart29(), tablePart30(), tablePart31()
+        };
+        int length = 0;
+        for (Method[] part : parts) {
+            length += part.length;
+        }
+        Method[] table = new Method[length];
+        for (int p = 0; p < 32; p++) {
+            for (int i = 0; i < parts[p].length; i++) {
+                table[i * 32 + p] = parts[p][i];
+            }
+        }
+        return table;
+    }
 
-    private static native Object invoke0(int slot, Object obj, Object[] args);
+    private static Method[] tablePart0() { return tablePart(0); }
+    private static Method[] tablePart1() { return tablePart(1); }
+    private static Method[] tablePart2() { return tablePart(2); }
+    private static Method[] tablePart3() { return tablePart(3); }
+    private static Method[] tablePart4() { return tablePart(4); }
+    private static Method[] tablePart5() { return tablePart(5); }
+    private static Method[] tablePart6() { return tablePart(6); }
+    private static Method[] tablePart7() { return tablePart(7); }
+    private static Method[] tablePart8() { return tablePart(8); }
+    private static Method[] tablePart9() { return tablePart(9); }
+    private static Method[] tablePart10() { return tablePart(10); }
+    private static Method[] tablePart11() { return tablePart(11); }
+    private static Method[] tablePart12() { return tablePart(12); }
+    private static Method[] tablePart13() { return tablePart(13); }
+    private static Method[] tablePart14() { return tablePart(14); }
+    private static Method[] tablePart15() { return tablePart(15); }
+    private static Method[] tablePart16() { return tablePart(16); }
+    private static Method[] tablePart17() { return tablePart(17); }
+    private static Method[] tablePart18() { return tablePart(18); }
+    private static Method[] tablePart19() { return tablePart(19); }
+    private static Method[] tablePart20() { return tablePart(20); }
+    private static Method[] tablePart21() { return tablePart(21); }
+    private static Method[] tablePart22() { return tablePart(22); }
+    private static Method[] tablePart23() { return tablePart(23); }
+    private static Method[] tablePart24() { return tablePart(24); }
+    private static Method[] tablePart25() { return tablePart(25); }
+    private static Method[] tablePart26() { return tablePart(26); }
+    private static Method[] tablePart27() { return tablePart(27); }
+    private static Method[] tablePart28() { return tablePart(28); }
+    private static Method[] tablePart29() { return tablePart(29); }
+    private static Method[] tablePart30() { return tablePart(30); }
+    private static Method[] tablePart31() { return tablePart(31); }
+
+    private static native Method[] tablePart(int part);
+
+    // The calls of the table's members, in 32 parts: slot `s` is in part `s & 31`, whose native
+    // lowering writes as a `switch` over the slots of the part, so that no function of a big
+    // program's translation holds them all.
+    private static Object invoke0(int slot, Object obj, Object[] args) {
+        return switch (slot & 31) {
+            case 0 -> invokePart0(slot, obj, args);
+            case 1 -> invokePart1(slot, obj, args);
+            case 2 -> invokePart2(slot, obj, args);
+            case 3 -> invokePart3(slot, obj, args);
+            case 4 -> invokePart4(slot, obj, args);
+            case 5 -> invokePart5(slot, obj, args);
+            case 6 -> invokePart6(slot, obj, args);
+            case 7 -> invokePart7(slot, obj, args);
+            case 8 -> invokePart8(slot, obj, args);
+            case 9 -> invokePart9(slot, obj, args);
+            case 10 -> invokePart10(slot, obj, args);
+            case 11 -> invokePart11(slot, obj, args);
+            case 12 -> invokePart12(slot, obj, args);
+            case 13 -> invokePart13(slot, obj, args);
+            case 14 -> invokePart14(slot, obj, args);
+            case 15 -> invokePart15(slot, obj, args);
+            case 16 -> invokePart16(slot, obj, args);
+            case 17 -> invokePart17(slot, obj, args);
+            case 18 -> invokePart18(slot, obj, args);
+            case 19 -> invokePart19(slot, obj, args);
+            case 20 -> invokePart20(slot, obj, args);
+            case 21 -> invokePart21(slot, obj, args);
+            case 22 -> invokePart22(slot, obj, args);
+            case 23 -> invokePart23(slot, obj, args);
+            case 24 -> invokePart24(slot, obj, args);
+            case 25 -> invokePart25(slot, obj, args);
+            case 26 -> invokePart26(slot, obj, args);
+            case 27 -> invokePart27(slot, obj, args);
+            case 28 -> invokePart28(slot, obj, args);
+            case 29 -> invokePart29(slot, obj, args);
+            case 30 -> invokePart30(slot, obj, args);
+            default -> invokePart31(slot, obj, args);
+        };
+    }
+    private static Object invokePart0(int slot, Object obj, Object[] args) { return invokePart(0, slot, obj, args); }
+    private static Object invokePart1(int slot, Object obj, Object[] args) { return invokePart(1, slot, obj, args); }
+    private static Object invokePart2(int slot, Object obj, Object[] args) { return invokePart(2, slot, obj, args); }
+    private static Object invokePart3(int slot, Object obj, Object[] args) { return invokePart(3, slot, obj, args); }
+    private static Object invokePart4(int slot, Object obj, Object[] args) { return invokePart(4, slot, obj, args); }
+    private static Object invokePart5(int slot, Object obj, Object[] args) { return invokePart(5, slot, obj, args); }
+    private static Object invokePart6(int slot, Object obj, Object[] args) { return invokePart(6, slot, obj, args); }
+    private static Object invokePart7(int slot, Object obj, Object[] args) { return invokePart(7, slot, obj, args); }
+    private static Object invokePart8(int slot, Object obj, Object[] args) { return invokePart(8, slot, obj, args); }
+    private static Object invokePart9(int slot, Object obj, Object[] args) { return invokePart(9, slot, obj, args); }
+    private static Object invokePart10(int slot, Object obj, Object[] args) { return invokePart(10, slot, obj, args); }
+    private static Object invokePart11(int slot, Object obj, Object[] args) { return invokePart(11, slot, obj, args); }
+    private static Object invokePart12(int slot, Object obj, Object[] args) { return invokePart(12, slot, obj, args); }
+    private static Object invokePart13(int slot, Object obj, Object[] args) { return invokePart(13, slot, obj, args); }
+    private static Object invokePart14(int slot, Object obj, Object[] args) { return invokePart(14, slot, obj, args); }
+    private static Object invokePart15(int slot, Object obj, Object[] args) { return invokePart(15, slot, obj, args); }
+    private static Object invokePart16(int slot, Object obj, Object[] args) { return invokePart(16, slot, obj, args); }
+    private static Object invokePart17(int slot, Object obj, Object[] args) { return invokePart(17, slot, obj, args); }
+    private static Object invokePart18(int slot, Object obj, Object[] args) { return invokePart(18, slot, obj, args); }
+    private static Object invokePart19(int slot, Object obj, Object[] args) { return invokePart(19, slot, obj, args); }
+    private static Object invokePart20(int slot, Object obj, Object[] args) { return invokePart(20, slot, obj, args); }
+    private static Object invokePart21(int slot, Object obj, Object[] args) { return invokePart(21, slot, obj, args); }
+    private static Object invokePart22(int slot, Object obj, Object[] args) { return invokePart(22, slot, obj, args); }
+    private static Object invokePart23(int slot, Object obj, Object[] args) { return invokePart(23, slot, obj, args); }
+    private static Object invokePart24(int slot, Object obj, Object[] args) { return invokePart(24, slot, obj, args); }
+    private static Object invokePart25(int slot, Object obj, Object[] args) { return invokePart(25, slot, obj, args); }
+    private static Object invokePart26(int slot, Object obj, Object[] args) { return invokePart(26, slot, obj, args); }
+    private static Object invokePart27(int slot, Object obj, Object[] args) { return invokePart(27, slot, obj, args); }
+    private static Object invokePart28(int slot, Object obj, Object[] args) { return invokePart(28, slot, obj, args); }
+    private static Object invokePart29(int slot, Object obj, Object[] args) { return invokePart(29, slot, obj, args); }
+    private static Object invokePart30(int slot, Object obj, Object[] args) { return invokePart(30, slot, obj, args); }
+    private static Object invokePart31(int slot, Object obj, Object[] args) { return invokePart(31, slot, obj, args); }
+
+    private static native Object invokePart(int part, int slot, Object obj, Object[] args);
 }
 
 final class Field {
@@ -394,12 +526,213 @@ final class Field {
         return table;
     }
 
-    private static native Field[] table0();
+    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
+    // on, in order, each written by lowering as its own array.
+    private static Field[] table0() {
+        Field[][] parts = {
+            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
+            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
+            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
+            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
+            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
+            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
+            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
+            tablePart28(), tablePart29(), tablePart30(), tablePart31()
+        };
+        int length = 0;
+        for (Field[] part : parts) {
+            length += part.length;
+        }
+        Field[] table = new Field[length];
+        for (int p = 0; p < 32; p++) {
+            for (int i = 0; i < parts[p].length; i++) {
+                table[i * 32 + p] = parts[p][i];
+            }
+        }
+        return table;
+    }
 
-    private static native Object get0(int slot, Object obj);
+    private static Field[] tablePart0() { return tablePart(0); }
+    private static Field[] tablePart1() { return tablePart(1); }
+    private static Field[] tablePart2() { return tablePart(2); }
+    private static Field[] tablePart3() { return tablePart(3); }
+    private static Field[] tablePart4() { return tablePart(4); }
+    private static Field[] tablePart5() { return tablePart(5); }
+    private static Field[] tablePart6() { return tablePart(6); }
+    private static Field[] tablePart7() { return tablePart(7); }
+    private static Field[] tablePart8() { return tablePart(8); }
+    private static Field[] tablePart9() { return tablePart(9); }
+    private static Field[] tablePart10() { return tablePart(10); }
+    private static Field[] tablePart11() { return tablePart(11); }
+    private static Field[] tablePart12() { return tablePart(12); }
+    private static Field[] tablePart13() { return tablePart(13); }
+    private static Field[] tablePart14() { return tablePart(14); }
+    private static Field[] tablePart15() { return tablePart(15); }
+    private static Field[] tablePart16() { return tablePart(16); }
+    private static Field[] tablePart17() { return tablePart(17); }
+    private static Field[] tablePart18() { return tablePart(18); }
+    private static Field[] tablePart19() { return tablePart(19); }
+    private static Field[] tablePart20() { return tablePart(20); }
+    private static Field[] tablePart21() { return tablePart(21); }
+    private static Field[] tablePart22() { return tablePart(22); }
+    private static Field[] tablePart23() { return tablePart(23); }
+    private static Field[] tablePart24() { return tablePart(24); }
+    private static Field[] tablePart25() { return tablePart(25); }
+    private static Field[] tablePart26() { return tablePart(26); }
+    private static Field[] tablePart27() { return tablePart(27); }
+    private static Field[] tablePart28() { return tablePart(28); }
+    private static Field[] tablePart29() { return tablePart(29); }
+    private static Field[] tablePart30() { return tablePart(30); }
+    private static Field[] tablePart31() { return tablePart(31); }
 
-    // Gives the value written: the lowering writes it as an expression, whose value has a type.
-    private static native Object set0(int slot, Object obj, Object value);
+    private static native Field[] tablePart(int part);
+
+    // The reads of the table's fields, in 32 parts: slot `s` is in part `s & 31`, whose native
+    // lowering writes as a `switch` over the slots of the part, so that no function of a big
+    // program's translation holds them all.
+    private static Object get0(int slot, Object obj) {
+        return switch (slot & 31) {
+            case 0 -> getPart0(slot, obj);
+            case 1 -> getPart1(slot, obj);
+            case 2 -> getPart2(slot, obj);
+            case 3 -> getPart3(slot, obj);
+            case 4 -> getPart4(slot, obj);
+            case 5 -> getPart5(slot, obj);
+            case 6 -> getPart6(slot, obj);
+            case 7 -> getPart7(slot, obj);
+            case 8 -> getPart8(slot, obj);
+            case 9 -> getPart9(slot, obj);
+            case 10 -> getPart10(slot, obj);
+            case 11 -> getPart11(slot, obj);
+            case 12 -> getPart12(slot, obj);
+            case 13 -> getPart13(slot, obj);
+            case 14 -> getPart14(slot, obj);
+            case 15 -> getPart15(slot, obj);
+            case 16 -> getPart16(slot, obj);
+            case 17 -> getPart17(slot, obj);
+            case 18 -> getPart18(slot, obj);
+            case 19 -> getPart19(slot, obj);
+            case 20 -> getPart20(slot, obj);
+            case 21 -> getPart21(slot, obj);
+            case 22 -> getPart22(slot, obj);
+            case 23 -> getPart23(slot, obj);
+            case 24 -> getPart24(slot, obj);
+            case 25 -> getPart25(slot, obj);
+            case 26 -> getPart26(slot, obj);
+            case 27 -> getPart27(slot, obj);
+            case 28 -> getPart28(slot, obj);
+            case 29 -> getPart29(slot, obj);
+            case 30 -> getPart30(slot, obj);
+            default -> getPart31(slot, obj);
+        };
+    }
+    private static Object getPart0(int slot, Object obj) { return getPart(0, slot, obj); }
+    private static Object getPart1(int slot, Object obj) { return getPart(1, slot, obj); }
+    private static Object getPart2(int slot, Object obj) { return getPart(2, slot, obj); }
+    private static Object getPart3(int slot, Object obj) { return getPart(3, slot, obj); }
+    private static Object getPart4(int slot, Object obj) { return getPart(4, slot, obj); }
+    private static Object getPart5(int slot, Object obj) { return getPart(5, slot, obj); }
+    private static Object getPart6(int slot, Object obj) { return getPart(6, slot, obj); }
+    private static Object getPart7(int slot, Object obj) { return getPart(7, slot, obj); }
+    private static Object getPart8(int slot, Object obj) { return getPart(8, slot, obj); }
+    private static Object getPart9(int slot, Object obj) { return getPart(9, slot, obj); }
+    private static Object getPart10(int slot, Object obj) { return getPart(10, slot, obj); }
+    private static Object getPart11(int slot, Object obj) { return getPart(11, slot, obj); }
+    private static Object getPart12(int slot, Object obj) { return getPart(12, slot, obj); }
+    private static Object getPart13(int slot, Object obj) { return getPart(13, slot, obj); }
+    private static Object getPart14(int slot, Object obj) { return getPart(14, slot, obj); }
+    private static Object getPart15(int slot, Object obj) { return getPart(15, slot, obj); }
+    private static Object getPart16(int slot, Object obj) { return getPart(16, slot, obj); }
+    private static Object getPart17(int slot, Object obj) { return getPart(17, slot, obj); }
+    private static Object getPart18(int slot, Object obj) { return getPart(18, slot, obj); }
+    private static Object getPart19(int slot, Object obj) { return getPart(19, slot, obj); }
+    private static Object getPart20(int slot, Object obj) { return getPart(20, slot, obj); }
+    private static Object getPart21(int slot, Object obj) { return getPart(21, slot, obj); }
+    private static Object getPart22(int slot, Object obj) { return getPart(22, slot, obj); }
+    private static Object getPart23(int slot, Object obj) { return getPart(23, slot, obj); }
+    private static Object getPart24(int slot, Object obj) { return getPart(24, slot, obj); }
+    private static Object getPart25(int slot, Object obj) { return getPart(25, slot, obj); }
+    private static Object getPart26(int slot, Object obj) { return getPart(26, slot, obj); }
+    private static Object getPart27(int slot, Object obj) { return getPart(27, slot, obj); }
+    private static Object getPart28(int slot, Object obj) { return getPart(28, slot, obj); }
+    private static Object getPart29(int slot, Object obj) { return getPart(29, slot, obj); }
+    private static Object getPart30(int slot, Object obj) { return getPart(30, slot, obj); }
+    private static Object getPart31(int slot, Object obj) { return getPart(31, slot, obj); }
+
+    private static native Object getPart(int part, int slot, Object obj);
+
+    // The writes, in the same parts. Each gives the value written: lowering writes it as an
+    // expression, whose value has a type.
+    private static Object set0(int slot, Object obj, Object value) {
+        return switch (slot & 31) {
+            case 0 -> setPart0(slot, obj, value);
+            case 1 -> setPart1(slot, obj, value);
+            case 2 -> setPart2(slot, obj, value);
+            case 3 -> setPart3(slot, obj, value);
+            case 4 -> setPart4(slot, obj, value);
+            case 5 -> setPart5(slot, obj, value);
+            case 6 -> setPart6(slot, obj, value);
+            case 7 -> setPart7(slot, obj, value);
+            case 8 -> setPart8(slot, obj, value);
+            case 9 -> setPart9(slot, obj, value);
+            case 10 -> setPart10(slot, obj, value);
+            case 11 -> setPart11(slot, obj, value);
+            case 12 -> setPart12(slot, obj, value);
+            case 13 -> setPart13(slot, obj, value);
+            case 14 -> setPart14(slot, obj, value);
+            case 15 -> setPart15(slot, obj, value);
+            case 16 -> setPart16(slot, obj, value);
+            case 17 -> setPart17(slot, obj, value);
+            case 18 -> setPart18(slot, obj, value);
+            case 19 -> setPart19(slot, obj, value);
+            case 20 -> setPart20(slot, obj, value);
+            case 21 -> setPart21(slot, obj, value);
+            case 22 -> setPart22(slot, obj, value);
+            case 23 -> setPart23(slot, obj, value);
+            case 24 -> setPart24(slot, obj, value);
+            case 25 -> setPart25(slot, obj, value);
+            case 26 -> setPart26(slot, obj, value);
+            case 27 -> setPart27(slot, obj, value);
+            case 28 -> setPart28(slot, obj, value);
+            case 29 -> setPart29(slot, obj, value);
+            case 30 -> setPart30(slot, obj, value);
+            default -> setPart31(slot, obj, value);
+        };
+    }
+    private static Object setPart0(int slot, Object obj, Object value) { return setPart(0, slot, obj, value); }
+    private static Object setPart1(int slot, Object obj, Object value) { return setPart(1, slot, obj, value); }
+    private static Object setPart2(int slot, Object obj, Object value) { return setPart(2, slot, obj, value); }
+    private static Object setPart3(int slot, Object obj, Object value) { return setPart(3, slot, obj, value); }
+    private static Object setPart4(int slot, Object obj, Object value) { return setPart(4, slot, obj, value); }
+    private static Object setPart5(int slot, Object obj, Object value) { return setPart(5, slot, obj, value); }
+    private static Object setPart6(int slot, Object obj, Object value) { return setPart(6, slot, obj, value); }
+    private static Object setPart7(int slot, Object obj, Object value) { return setPart(7, slot, obj, value); }
+    private static Object setPart8(int slot, Object obj, Object value) { return setPart(8, slot, obj, value); }
+    private static Object setPart9(int slot, Object obj, Object value) { return setPart(9, slot, obj, value); }
+    private static Object setPart10(int slot, Object obj, Object value) { return setPart(10, slot, obj, value); }
+    private static Object setPart11(int slot, Object obj, Object value) { return setPart(11, slot, obj, value); }
+    private static Object setPart12(int slot, Object obj, Object value) { return setPart(12, slot, obj, value); }
+    private static Object setPart13(int slot, Object obj, Object value) { return setPart(13, slot, obj, value); }
+    private static Object setPart14(int slot, Object obj, Object value) { return setPart(14, slot, obj, value); }
+    private static Object setPart15(int slot, Object obj, Object value) { return setPart(15, slot, obj, value); }
+    private static Object setPart16(int slot, Object obj, Object value) { return setPart(16, slot, obj, value); }
+    private static Object setPart17(int slot, Object obj, Object value) { return setPart(17, slot, obj, value); }
+    private static Object setPart18(int slot, Object obj, Object value) { return setPart(18, slot, obj, value); }
+    private static Object setPart19(int slot, Object obj, Object value) { return setPart(19, slot, obj, value); }
+    private static Object setPart20(int slot, Object obj, Object value) { return setPart(20, slot, obj, value); }
+    private static Object setPart21(int slot, Object obj, Object value) { return setPart(21, slot, obj, value); }
+    private static Object setPart22(int slot, Object obj, Object value) { return setPart(22, slot, obj, value); }
+    private static Object setPart23(int slot, Object obj, Object value) { return setPart(23, slot, obj, value); }
+    private static Object setPart24(int slot, Object obj, Object value) { return setPart(24, slot, obj, value); }
+    private static Object setPart25(int slot, Object obj, Object value) { return setPart(25, slot, obj, value); }
+    private static Object setPart26(int slot, Object obj, Object value) { return setPart(26, slot, obj, value); }
+    private static Object setPart27(int slot, Object obj, Object value) { return setPart(27, slot, obj, value); }
+    private static Object setPart28(int slot, Object obj, Object value) { return setPart(28, slot, obj, value); }
+    private static Object setPart29(int slot, Object obj, Object value) { return setPart(29, slot, obj, value); }
+    private static Object setPart30(int slot, Object obj, Object value) { return setPart(30, slot, obj, value); }
+    private static Object setPart31(int slot, Object obj, Object value) { return setPart(31, slot, obj, value); }
+
+    private static native Object setPart(int part, int slot, Object obj, Object value);
 }
 
 final class Constructor<T> {
@@ -560,9 +893,140 @@ final class Constructor<T> {
         return table;
     }
 
-    private static native Constructor<?>[] table0();
+    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
+    // on, in order, each written by lowering as its own array.
+    private static Constructor<?>[] table0() {
+        Constructor<?>[][] parts = {
+            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
+            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
+            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
+            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
+            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
+            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
+            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
+            tablePart28(), tablePart29(), tablePart30(), tablePart31()
+        };
+        int length = 0;
+        for (Constructor<?>[] part : parts) {
+            length += part.length;
+        }
+        Constructor<?>[] table = new Constructor<?>[length];
+        for (int p = 0; p < 32; p++) {
+            for (int i = 0; i < parts[p].length; i++) {
+                table[i * 32 + p] = parts[p][i];
+            }
+        }
+        return table;
+    }
 
-    private static native Object newInstance0(int slot, Object[] args);
+    private static Constructor<?>[] tablePart0() { return tablePart(0); }
+    private static Constructor<?>[] tablePart1() { return tablePart(1); }
+    private static Constructor<?>[] tablePart2() { return tablePart(2); }
+    private static Constructor<?>[] tablePart3() { return tablePart(3); }
+    private static Constructor<?>[] tablePart4() { return tablePart(4); }
+    private static Constructor<?>[] tablePart5() { return tablePart(5); }
+    private static Constructor<?>[] tablePart6() { return tablePart(6); }
+    private static Constructor<?>[] tablePart7() { return tablePart(7); }
+    private static Constructor<?>[] tablePart8() { return tablePart(8); }
+    private static Constructor<?>[] tablePart9() { return tablePart(9); }
+    private static Constructor<?>[] tablePart10() { return tablePart(10); }
+    private static Constructor<?>[] tablePart11() { return tablePart(11); }
+    private static Constructor<?>[] tablePart12() { return tablePart(12); }
+    private static Constructor<?>[] tablePart13() { return tablePart(13); }
+    private static Constructor<?>[] tablePart14() { return tablePart(14); }
+    private static Constructor<?>[] tablePart15() { return tablePart(15); }
+    private static Constructor<?>[] tablePart16() { return tablePart(16); }
+    private static Constructor<?>[] tablePart17() { return tablePart(17); }
+    private static Constructor<?>[] tablePart18() { return tablePart(18); }
+    private static Constructor<?>[] tablePart19() { return tablePart(19); }
+    private static Constructor<?>[] tablePart20() { return tablePart(20); }
+    private static Constructor<?>[] tablePart21() { return tablePart(21); }
+    private static Constructor<?>[] tablePart22() { return tablePart(22); }
+    private static Constructor<?>[] tablePart23() { return tablePart(23); }
+    private static Constructor<?>[] tablePart24() { return tablePart(24); }
+    private static Constructor<?>[] tablePart25() { return tablePart(25); }
+    private static Constructor<?>[] tablePart26() { return tablePart(26); }
+    private static Constructor<?>[] tablePart27() { return tablePart(27); }
+    private static Constructor<?>[] tablePart28() { return tablePart(28); }
+    private static Constructor<?>[] tablePart29() { return tablePart(29); }
+    private static Constructor<?>[] tablePart30() { return tablePart(30); }
+    private static Constructor<?>[] tablePart31() { return tablePart(31); }
+
+    private static native Constructor<?>[] tablePart(int part);
+
+    // The constructions of the table's constructors, in 32 parts: slot `s` is in part `s & 31`, whose native
+    // lowering writes as a `switch` over the slots of the part, so that no function of a big
+    // program's translation holds them all.
+    private static Object newInstance0(int slot, Object[] args) {
+        return switch (slot & 31) {
+            case 0 -> newInstancePart0(slot, args);
+            case 1 -> newInstancePart1(slot, args);
+            case 2 -> newInstancePart2(slot, args);
+            case 3 -> newInstancePart3(slot, args);
+            case 4 -> newInstancePart4(slot, args);
+            case 5 -> newInstancePart5(slot, args);
+            case 6 -> newInstancePart6(slot, args);
+            case 7 -> newInstancePart7(slot, args);
+            case 8 -> newInstancePart8(slot, args);
+            case 9 -> newInstancePart9(slot, args);
+            case 10 -> newInstancePart10(slot, args);
+            case 11 -> newInstancePart11(slot, args);
+            case 12 -> newInstancePart12(slot, args);
+            case 13 -> newInstancePart13(slot, args);
+            case 14 -> newInstancePart14(slot, args);
+            case 15 -> newInstancePart15(slot, args);
+            case 16 -> newInstancePart16(slot, args);
+            case 17 -> newInstancePart17(slot, args);
+            case 18 -> newInstancePart18(slot, args);
+            case 19 -> newInstancePart19(slot, args);
+            case 20 -> newInstancePart20(slot, args);
+            case 21 -> newInstancePart21(slot, args);
+            case 22 -> newInstancePart22(slot, args);
+            case 23 -> newInstancePart23(slot, args);
+            case 24 -> newInstancePart24(slot, args);
+            case 25 -> newInstancePart25(slot, args);
+            case 26 -> newInstancePart26(slot, args);
+            case 27 -> newInstancePart27(slot, args);
+            case 28 -> newInstancePart28(slot, args);
+            case 29 -> newInstancePart29(slot, args);
+            case 30 -> newInstancePart30(slot, args);
+            default -> newInstancePart31(slot, args);
+        };
+    }
+    private static Object newInstancePart0(int slot, Object[] args) { return newInstancePart(0, slot, args); }
+    private static Object newInstancePart1(int slot, Object[] args) { return newInstancePart(1, slot, args); }
+    private static Object newInstancePart2(int slot, Object[] args) { return newInstancePart(2, slot, args); }
+    private static Object newInstancePart3(int slot, Object[] args) { return newInstancePart(3, slot, args); }
+    private static Object newInstancePart4(int slot, Object[] args) { return newInstancePart(4, slot, args); }
+    private static Object newInstancePart5(int slot, Object[] args) { return newInstancePart(5, slot, args); }
+    private static Object newInstancePart6(int slot, Object[] args) { return newInstancePart(6, slot, args); }
+    private static Object newInstancePart7(int slot, Object[] args) { return newInstancePart(7, slot, args); }
+    private static Object newInstancePart8(int slot, Object[] args) { return newInstancePart(8, slot, args); }
+    private static Object newInstancePart9(int slot, Object[] args) { return newInstancePart(9, slot, args); }
+    private static Object newInstancePart10(int slot, Object[] args) { return newInstancePart(10, slot, args); }
+    private static Object newInstancePart11(int slot, Object[] args) { return newInstancePart(11, slot, args); }
+    private static Object newInstancePart12(int slot, Object[] args) { return newInstancePart(12, slot, args); }
+    private static Object newInstancePart13(int slot, Object[] args) { return newInstancePart(13, slot, args); }
+    private static Object newInstancePart14(int slot, Object[] args) { return newInstancePart(14, slot, args); }
+    private static Object newInstancePart15(int slot, Object[] args) { return newInstancePart(15, slot, args); }
+    private static Object newInstancePart16(int slot, Object[] args) { return newInstancePart(16, slot, args); }
+    private static Object newInstancePart17(int slot, Object[] args) { return newInstancePart(17, slot, args); }
+    private static Object newInstancePart18(int slot, Object[] args) { return newInstancePart(18, slot, args); }
+    private static Object newInstancePart19(int slot, Object[] args) { return newInstancePart(19, slot, args); }
+    private static Object newInstancePart20(int slot, Object[] args) { return newInstancePart(20, slot, args); }
+    private static Object newInstancePart21(int slot, Object[] args) { return newInstancePart(21, slot, args); }
+    private static Object newInstancePart22(int slot, Object[] args) { return newInstancePart(22, slot, args); }
+    private static Object newInstancePart23(int slot, Object[] args) { return newInstancePart(23, slot, args); }
+    private static Object newInstancePart24(int slot, Object[] args) { return newInstancePart(24, slot, args); }
+    private static Object newInstancePart25(int slot, Object[] args) { return newInstancePart(25, slot, args); }
+    private static Object newInstancePart26(int slot, Object[] args) { return newInstancePart(26, slot, args); }
+    private static Object newInstancePart27(int slot, Object[] args) { return newInstancePart(27, slot, args); }
+    private static Object newInstancePart28(int slot, Object[] args) { return newInstancePart(28, slot, args); }
+    private static Object newInstancePart29(int slot, Object[] args) { return newInstancePart(29, slot, args); }
+    private static Object newInstancePart30(int slot, Object[] args) { return newInstancePart(30, slot, args); }
+    private static Object newInstancePart31(int slot, Object[] args) { return newInstancePart(31, slot, args); }
+
+    private static native Object newInstancePart(int part, int slot, Object[] args);
 
     // What follows is shared by the three classes.
 
