@@ -64,6 +64,10 @@ pub struct Class {
     nest: Nest,
     /// The class that declares this one (`getEnclosingClass`), `None` for a top-level class.
     enclosing: Option<fn() -> Class>,
+    /// The interfaces that the class implements, or that an interface extends, directly and in
+    /// the order the source names them (`getInterfaces`); an array's are `Cloneable` and
+    /// `Serializable`, which `get_interface` answers by its kind.
+    interfaces: fn() -> &'static [Class],
 }
 
 impl Class {
@@ -139,6 +143,7 @@ impl Class {
             modifiers,
             nest: Nest::TopLevel,
             enclosing: None,
+            interfaces: || &[],
         }
     }
 
@@ -148,17 +153,37 @@ impl Class {
         Class { modifiers, nest, enclosing, ..self }
     }
 
+    /// The class with the interfaces it implements, or extends, directly (`getInterfaces`).
+    pub const fn implementing(self, interfaces: fn() -> &'static [Class]) -> Class {
+        Class { interfaces, ..self }
+    }
+
     /// A box of a number, whose superclass is `Number`.
     const fn number(name: &'static str, simple: &'static str, names: Names) -> Class {
         Class::made(name, simple, Kind::Class, Some(|| Class::NUMBER), None, names, PUBLIC | FINAL)
     }
+
+    const SERIALIZABLE: Class = Class::interface(SERIAL, "Serializable", &[SERIAL, OBJECT]);
+    const CLONEABLE: Class =
+        Class::interface("java.lang.Cloneable", "Cloneable", &["java.lang.Cloneable", OBJECT]);
+    const CONSTABLE: Class = Class::interface(CONSTABLE, "Constable", &[CONSTABLE, OBJECT]);
+    const CONSTANT_DESC: Class = Class::interface(DESC, "ConstantDesc", &[DESC, OBJECT]);
 
     pub const OBJECT: Class = Class::new(OBJECT, "Object", None, &[OBJECT]);
     pub const STRING: Class = Class::standard(
         "java.lang.String",
         "String",
         &["java.lang.String", SERIAL, COMPARE, "java.lang.CharSequence", CONSTABLE, DESC, OBJECT],
-    );
+    )
+    .implementing(|| {
+        &[
+            Class::SERIALIZABLE,
+            Class::COMPARABLE,
+            Class::CHAR_SEQUENCE,
+            Class::CONSTABLE,
+            Class::CONSTANT_DESC,
+        ]
+    });
     pub const STRING_BUILDER: Class = Class::standard(
         "java.lang.StringBuilder",
         "StringBuilder",
@@ -171,7 +196,8 @@ impl Class {
             "java.lang.Appendable",
             OBJECT,
         ],
-    );
+    )
+    .implementing(|| &[Class::SERIALIZABLE, Class::COMPARABLE, Class::CHAR_SEQUENCE]);
     pub const CLASS: Class = Class::standard(
         "java.lang.Class",
         "Class",
@@ -191,7 +217,8 @@ impl Class {
         "java.lang.Enum",
         "Enum",
         &["java.lang.Enum", COMPARE, SERIAL, CONSTABLE, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::CONSTABLE, Class::COMPARABLE, Class::SERIALIZABLE]);
     pub const COMPARABLE: Class = Class::interface(COMPARE, "Comparable", &[COMPARE, OBJECT]);
     pub const RECORD: Class =
         Class::abstract_standard("java.lang.Record", "Record", &["java.lang.Record", OBJECT]);
@@ -205,43 +232,52 @@ impl Class {
         "java.lang.Integer",
         "Integer",
         &["java.lang.Integer", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
     pub const LONG: Class = Class::number(
         "java.lang.Long",
         "Long",
         &["java.lang.Long", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
     pub const DOUBLE: Class = Class::number(
         "java.lang.Double",
         "Double",
         &["java.lang.Double", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
     pub const FLOAT: Class = Class::number(
         "java.lang.Float",
         "Float",
         &["java.lang.Float", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
     pub const SHORT: Class = Class::number(
         "java.lang.Short",
         "Short",
         &["java.lang.Short", NUMBER, SERIAL, COMPARE, CONSTABLE, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE]);
     pub const BYTE: Class = Class::number(
         "java.lang.Byte",
         "Byte",
         &["java.lang.Byte", NUMBER, SERIAL, COMPARE, CONSTABLE, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE]);
     pub const CHARACTER: Class = Class::standard(
         "java.lang.Character",
         "Character",
         &["java.lang.Character", SERIAL, COMPARE, CONSTABLE, OBJECT],
-    );
+    )
+    .implementing(|| &[Class::SERIALIZABLE, Class::COMPARABLE, Class::CONSTABLE]);
     pub const BOOLEAN: Class = Class::standard(
         "java.lang.Boolean",
         "Boolean",
         &["java.lang.Boolean", SERIAL, COMPARE, CONSTABLE, OBJECT],
-    );
-    pub const NUMBER: Class = Class::abstract_standard(NUMBER, "Number", &[NUMBER, SERIAL, OBJECT]);
+    )
+    .implementing(|| &[Class::SERIALIZABLE, Class::COMPARABLE, Class::CONSTABLE]);
+    pub const NUMBER: Class = Class::abstract_standard(NUMBER, "Number", &[NUMBER, SERIAL, OBJECT])
+        .implementing(|| &[Class::SERIALIZABLE]);
     pub const INT: Class = Class::primitive("int");
     pub const LONG_PRIMITIVE: Class = Class::primitive("long");
     pub const DOUBLE_PRIMITIVE: Class = Class::primitive("double");
@@ -273,6 +309,19 @@ impl Class {
     /// `isMemberClass()`.
     pub fn is_member_class(&self) -> bool {
         self.nest == Nest::Member
+    }
+
+    /// How many interfaces `getInterfaces()` gives.
+    pub fn get_interface_count(&self) -> i32 {
+        if self.is_array() { 2 } else { (self.interfaces)().len() as i32 }
+    }
+
+    /// The `index`th of the interfaces that `getInterfaces()` gives.
+    pub fn get_interface(&self, index: i32) -> Class {
+        match self.is_array() {
+            true => [Class::CLONEABLE, Class::SERIALIZABLE][index as usize],
+            false => (self.interfaces)()[index as usize],
+        }
     }
 
     /// `getEnclosingClass()`.

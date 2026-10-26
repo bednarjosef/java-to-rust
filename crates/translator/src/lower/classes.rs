@@ -137,6 +137,7 @@ impl<'t> Lowering<'t> {
             ("getInterfaces", []) if is_literal(receiver) && self.named_class(receiver) => {
                 return Ok(Some(self.literal_interfaces(node, receiver)?));
             }
+            ("getInterfaces", []) => return Ok(Some(self.class_interfaces(node, receiver)?)),
             ("isAnnotationPresent", [annotation]) => {
                 return Ok(Some(self.annotation_present(node, receiver, *annotation)?));
             }
@@ -421,6 +422,56 @@ impl<'t> Lowering<'t> {
         // A `Class[]` may be an `Object[]` (`covariant`), whose elements convert to `Object`.
         let element = self.covariant_array(Type::array(Type::JavaClass)).element();
         Ok(ExprKind::ArrayLit(interfaces.into_iter().map(|i| self.convert(i, element)).collect()))
+    }
+
+    /// `c.getInterfaces()` of any class `c`: a new array filled from the interfaces that the class
+    /// value lists (`ClassOp::InterfaceCount` and `InterfaceAt`), one by one, so that the array is
+    /// one of the program's like any other, a `Class[]` that may be a covariant `Object[]`.
+    fn class_interfaces(&self, node: Node<'t>, receiver: Node<'t>) -> Result<ExprKind, Error> {
+        let class = self.expr(receiver)?;
+        let pos = node.pos();
+        let array = self.covariant_array(Type::array(Type::JavaClass));
+        let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let op = |op: ClassOp, args: Vec<Expr>, ty: Type| {
+            self.synth(ExprKind::Builtin(Builtin::ClassMethod(op), args), pos, ty)
+        };
+        let (c, out, i) =
+            (self.fresh_name("class"), self.fresh_name("interfaces"), self.fresh_name("interface"));
+        let count = op(ClassOp::InterfaceCount, vec![var(&c, Type::JavaClass)], Type::Int);
+        let new = self.synth(ExprKind::NewArray(vec![count]), pos, array);
+        let length = self.synth(ExprKind::Length(Box::new(var(&out, array))), pos, Type::Int);
+        let cond = self.synth(
+            ExprKind::Binary(BinOp::Lt, Box::new(var(&i, Type::Int)), Box::new(length)),
+            pos,
+            Type::Boolean,
+        );
+        let update = self.synth(
+            ExprKind::IncDec { target: Place::Var(i.clone()), increment: true, prefix: false },
+            pos,
+            Type::Int,
+        );
+        let at =
+            op(ClassOp::InterfaceAt, vec![var(&c, Type::JavaClass), var(&i, Type::Int)], Type::JavaClass);
+        let element = array.element();
+        let value = self.convert(at, element);
+        let target = Place::Index(Box::new(var(&out, array)), Box::new(var(&i, Type::Int)));
+        let store = self.synth(ExprKind::Assign { op: None, target, value: Box::new(value) }, pos, element);
+        let zero = self.synth(ExprKind::Int(0), pos, Type::Int);
+        let body = vec![
+            Stmt::Local { ty: Type::JavaClass, name: c, init: Some(class), pos },
+            Stmt::Local { ty: array, name: out.clone(), init: Some(new), pos },
+            Stmt::For {
+                init: vec![Stmt::Local { ty: Type::Int, name: i, init: Some(zero), pos }],
+                cond: Some(cond),
+                update: vec![update],
+                body: Box::new(Stmt::Expr(store)),
+            },
+            Stmt::Yield(var(&out, array)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
     }
 
     /// `T.class`, a class literal as a value.

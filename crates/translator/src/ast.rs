@@ -595,6 +595,16 @@ pub fn runtime_type(name: &str) -> Option<Type> {
     runtime_values().into_iter().find(|(n, _)| *n == name).map(|(_, t)| t)
 }
 
+/// An interface that a type names in its `implements` clause (an interface's `extends`).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum Interface {
+    /// A type of the program, an index into the types.
+    Type(usize),
+    /// An interface that the translation has no type of, such as `Serializable`, a marker that
+    /// lowering leaves out, by its name.
+    Named(String),
+}
+
 /// A class of the file: its fields. Methods and constructors are in `Class::methods`.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct TypeDecl {
@@ -637,6 +647,10 @@ pub struct TypeDecl {
     /// the class whose code declares a local or anonymous class; `None` for a top-level class.
     #[serde(default)]
     pub enclosing: Option<usize>,
+    /// The interfaces that the type implements (an interface: extends) directly, in the order
+    /// its source names them, as `Class.getInterfaces()` gives them.
+    #[serde(default)]
+    pub interfaces: Vec<Interface>,
 }
 
 /// A local variable that a local or anonymous class captures.
@@ -1241,6 +1255,10 @@ pub enum ClassOp {
     IsMemberClass,
     GetEnclosingClass,
     GetDeclaringClass,
+    /// `[class]`: how many interfaces `getInterfaces()` gives, and `[class, index]`: the
+    /// `index`th of them, which a loop lowered from the call reads (`TypeDecl::interfaces`).
+    InterfaceCount,
+    InterfaceAt,
 }
 
 impl ClassOp {

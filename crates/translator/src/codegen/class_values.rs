@@ -312,6 +312,10 @@ impl<'a> Gen<'a> {
                 format!("java::Class::new({name}, {simple}, Some(|| {superclass}), {names})")
             }
         };
+        let value = match self.class_interfaces {
+            true => format!("{value}.implementing(|| const {{ &[{}] }})", self.interface_values(c)),
+            false => value,
+        };
         if !self.class_details {
             return value;
         }
@@ -331,10 +335,44 @@ impl<'a> Gen<'a> {
         format!("{value}.declared({modifiers:#x}, java::Nest::{nest}, {enclosing})")
     }
 
+    /// The class values of the interfaces that class `c` implements directly, which only a
+    /// program that asks for them carries: an interface the translation has no type of is a class
+    /// value of its name that extends nothing.
+    fn interface_values(&mut self, c: usize) -> String {
+        let mut values = Vec::new();
+        for interface in self.class.types[c].interfaces.clone() {
+            values.push(match interface {
+                Interface::Type(i) => self.decl_class(i),
+                Interface::Named(name) if name == COMPARABLE => "java::Class::COMPARABLE".to_string(),
+                Interface::Named(name) if name == CHAR_SEQUENCE => "java::Class::CHAR_SEQUENCE".to_string(),
+                Interface::Named(name) => {
+                    let simple = name.rsplit('.').next().unwrap_or(&name);
+                    let (name, simple) = (rust_string(&name), rust_string(simple));
+                    format!("java::Class::interface({name}, {simple}, &[{name}, {}])", rust_string(OBJECT))
+                }
+            });
+        }
+        values.join(", ")
+    }
+
     /// `ClassMethod(op)(class, args..)`.
     pub(super) fn class_method(&mut self, op: ClassOp, args: &'a [Expr]) -> Code {
         if op == ClassOp::IsAssignableFrom {
             return self.class_assignable(&args[0], &args[1]);
+        }
+        // Of a null class, the checked form, which a `catch` sees, as `getInterfaces()` is a
+        // call of the program's code.
+        if op == ClassOp::InterfaceCount && self.nullable(&args[0]) {
+            self.class_interfaces = true;
+            let class = self.class_option(&args[0]);
+            let checked = self.dereference(&[args[0].id], "class_");
+            return Code::new(
+                format!(
+                    "{{ let class_ = {class}; {}.get_interface_count() }}",
+                    Code::new(checked, LOWEST).at(ATOM)
+                ),
+                LOWEST,
+            );
         }
         let class = if self.nullable(&args[0]) {
             format!("{}({})", self.runtime("non_null"), self.expr(&args[0]).text)
@@ -371,6 +409,15 @@ impl<'a> Gen<'a> {
                     ClassOp::IsLocalClass => "is_local_class",
                     _ => "is_member_class",
                 }
+            }
+            ClassOp::InterfaceCount => {
+                self.class_interfaces = true;
+                "get_interface_count"
+            }
+            ClassOp::InterfaceAt => {
+                self.class_interfaces = true;
+                let index = self.value(&args[1], Type::Int).text;
+                return Code::atom(format!("{class}.get_interface({index})"));
             }
             ClassOp::GetEnclosingClass | ClassOp::GetDeclaringClass => {
                 self.class_details = true;
