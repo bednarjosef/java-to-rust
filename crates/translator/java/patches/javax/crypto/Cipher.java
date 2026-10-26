@@ -15,29 +15,32 @@ import sun.security.jca.TranslatedServices;
  */
 class Cipher {
     // Nothing in the security properties disables an algorithm, and no provider is asked.
-    @Edit(from = "if (!CryptoAlgorithmConstraints", to = "failure);", replace = """
-            List<Transform> transforms = getTransforms(transformation);
-            Exception failure = null;
-            for (Transform tr : transforms) {
-                CipherSpi spi = TranslatedServices.cipher(tr.transform);
-                if (spi == null) {
-                    continue;
-                }
+    @Edit(from = "if (!CryptoAlgorithmConstraints", to = "failure);", replace = "return made(transformation);")
+    public static final Cipher getInstance(String transformation);
+
+    /**
+     * The cipher of the first of the transformation's forms that a provider of the JDK has and
+     * that takes its mode and padding, as {@code getInstance} chooses among the providers' ones.
+     */
+    @Add
+    private static Cipher made(String transformation) throws NoSuchAlgorithmException, NoSuchPaddingException {
+        Exception last = null;
+        for (Transform form : getTransforms(transformation)) {
+            CipherSpi spi = TranslatedServices.cipher(form.transform);
+            if (spi != null) {
                 try {
-                    tr.setModePadding(spi);
+                    form.setModePadding(spi);
                     return new Cipher(spi, transformation);
                 } catch (Exception e) {
-                    failure = e;
+                    last = e;
                 }
             }
-            if (failure instanceof NoSuchPaddingException nspe) {
-                throw nspe;
-            }
-            throw new NoSuchAlgorithmException
-                    ("Cannot find any provider supporting " + transformation,
-                    failure);
-            """)
-    public static final Cipher getInstance(String transformation);
+        }
+        if (last instanceof NoSuchPaddingException padding) {
+            throw padding;
+        }
+        throw new NoSuchAlgorithmException("Cannot find any provider supporting " + transformation, last);
+    }
 
     @Replace
     protected Cipher(CipherSpi cipherSpi, Provider provider, String transformation) {
