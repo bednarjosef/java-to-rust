@@ -359,6 +359,14 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
                 || (!narrowed(b, false) && maybe_null(facts, m, b))
         }
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
+        // The arm of a pattern switch after the check of its selector is null where the arm's
+        // value may be; the variable checked (`[v, v]`, see `Builtin::NullChecked`) is not.
+        ExprKind::Builtin(Builtin::NullChecked(_), args)
+            if args.len() == 2
+                && !matches!((&args[0].kind, &args[1].kind), (ExprKind::Var(a), ExprKind::Var(b)) if a == b) =>
+        {
+            maybe_null(facts, m, &args[1])
+        }
         // A copy of a `String[]` as an `Object[]` or back is null where the array is.
         ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) => {
             maybe_null(facts, m, &args[0])
