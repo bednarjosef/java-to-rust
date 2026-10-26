@@ -133,6 +133,10 @@ impl Class {
         Class::standard("java.lang.Enum", "Enum", &["java.lang.Enum", COMPARE, SERIAL, CONSTABLE, OBJECT]);
     pub const COMPARABLE: Class = Class::interface(COMPARE, "Comparable", &[COMPARE, OBJECT]);
     pub const RECORD: Class = Class::standard("java.lang.Record", "Record", &["java.lang.Record", OBJECT]);
+    /// `Runtime.class` and `System.class`, classes without objects in a translation.
+    pub const RUNTIME: Class =
+        Class::standard("java.lang.Runtime", "Runtime", &["java.lang.Runtime", OBJECT]);
+    pub const SYSTEM: Class = Class::standard("java.lang.System", "System", &["java.lang.System", OBJECT]);
     pub const CHAR_SEQUENCE: Class =
         Class::interface("java.lang.CharSequence", "CharSequence", &["java.lang.CharSequence", OBJECT]);
     pub const INTEGER: Class = Class::number(

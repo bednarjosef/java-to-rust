@@ -379,6 +379,10 @@ fn generate_with(
 }
 
 /// How deep rustc follows a trait such as `Send` through the fields of nested types.
+/// The classes without objects in a translation, which are no type of it, whose class literals
+/// are the runtime's classes (`java::Class::RUNTIME`, `java::Class::SYSTEM`).
+pub const OBJECTLESS_CLASSES: [&str; 2] = ["java.lang.Runtime", "java.lang.System"];
+
 const RECURSION_LIMIT: u32 = 1024;
 
 /// The crate root's allocator: the runtime's, which caches small blocks (runtime `allocator.rs`),

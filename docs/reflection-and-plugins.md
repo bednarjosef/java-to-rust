@@ -77,6 +77,8 @@ program where such a lookup can happen, so they can be checked before the progra
 - **Constant names** are resolved when translating. `Class.forName("com.foo.Bar")` is that
   class, and `getName`, `getSimpleName`, `getCanonicalName`, `getPackageName`, `getSuperclass`,
   `getInterfaces` and `getEnumConstants` of a class literal are worked out then too.
+  `Runtime.class` and `System.class`, classes that have no objects and so are no types of a
+  translation, are the runtime's classes of those names (`java::Class::RUNTIME`, `SYSTEM`).
   `isAssignableFrom` of any two classes tests the names of the classes and interfaces above the
   second, which each class value carries. A computed name becomes a `switch` over the binary
   names of the classes that code can find by name.

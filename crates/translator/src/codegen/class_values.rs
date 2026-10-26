@@ -200,6 +200,8 @@ impl<'a> Gen<'a> {
                     rust_string(&simple)
                 )
             }
+            Type::Class("java.lang.Runtime", _) => constant("RUNTIME"),
+            Type::Class("java.lang.System", _) => constant("SYSTEM"),
             Type::Class(name, _) if self.class.annotation_classes.contains(name) => {
                 let simple = name.rsplit('.').next().unwrap_or(name);
                 let names = format!(
