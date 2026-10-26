@@ -190,10 +190,12 @@ Rules the generator keeps:
   completes normally set it with a statement of their own: the code after the `finally` takes
   the value from the `Ok` that it passes on (`let (a_value,) = attempt?;`). A statement of its
   own counts as setting the local when it is an `if` that sets it in both branches, or a `try`
-  without `finally` that sets it in its block and in each `catch` clause that completes
-  normally, as the inner `try` of a try-with-resources does (its clause throws again), so a
-  local set in a try-with-resources in one branch of an `if` and directly in the other is
-  carried out. A `try` that starts
+  that sets it in its block and in each `catch` clause that completes normally (with a `finally`,
+  one that nothing but an exception leaves early), as the two `try` statements of a
+  try-with-resources do (the inner one's clause throws again, the outer one closes the resource in
+  its `finally`): so a local set in a try-with-resources that has a `catch`
+  (`PlayerSafetyServiceTextFilter`'s certificate), or in one branch of an `if` and directly in the
+  other, is carried out. A `try` that starts
   where the local already holds a value, as Rust sees it (a statement before it sets it whenever
   it completes, such as a loop whose condition assigns it: `while (null != (key =
   s.readObject()))` in `Component.readObject`), needs nothing. Set anywhere else (only inside an

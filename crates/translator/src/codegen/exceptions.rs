@@ -411,6 +411,16 @@ fn sets(s: &Stmt, name: &str) -> bool {
                 && (sets_at_top(body, name) || !completes_all(body))
                 && catches.iter().all(|c| sets_at_top(&c.body, name) || !completes_all(&c.body))
         }
+        // A `try` with a `finally` that nothing but an exception leaves early, whose blocks carry
+        // the local through the `finally` (`carried_through_finally`), as the closing of a
+        // try-with-resources does: where every block that completes normally sets it.
+        Stmt::Try { body, catches, finally: Some(_) } => {
+            !declares_within(body, name)
+                && leaves_early(body, catches) == (false, false)
+                && std::iter::once(&body[..])
+                    .chain(catches.iter().map(|c| &c.body[..]))
+                    .all(|b| sets_at_top(b, name) || !completes_all(b))
+        }
         _ => false,
     }
 }
