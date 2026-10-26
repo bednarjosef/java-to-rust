@@ -865,6 +865,45 @@ impl<'t> Lowering<'t> {
             && super::boxing::boxed_type(&self.types[t].javac).is_none()
     }
 
+    /// Whether class `t` of the program is comparable through an interface it implements, which
+    /// implements `java.lang.Comparable` itself or through the interfaces it extends
+    /// (`ScheduledFutureTask` through `Delayed extends Comparable<Delayed>`), and through none of
+    /// its superclasses, whose `compareTo` would be the one it overrides.
+    fn comparable_through_interface(&self, t: usize) -> Result<bool, Error> {
+        fn comparable_interface(this: &Lowering, i: usize) -> Result<bool, Error> {
+            if this.implements_directly(i, "java.lang.Comparable") {
+                return Ok(true);
+            }
+            for j in this.interfaces(i)? {
+                if comparable_interface(this, j)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        let decl = &self.types[t];
+        if decl.node.kind() == "INTERFACE" || super::boxing::boxed_type(&decl.javac).is_some() {
+            return Ok(false);
+        }
+        let mut class = Some(t);
+        let mut through = false;
+        while let Some(c) = class {
+            if self.implements_comparable(c) {
+                return Ok(false);
+            }
+            for i in self.interfaces(c)? {
+                if comparable_interface(self, i)? {
+                    if c != t {
+                        return Ok(false);
+                    }
+                    through = true;
+                }
+            }
+            class = self.superclass(c)?;
+        }
+        Ok(through)
+    }
+
     /// Whether type `t` of the program names the JDK interface `interface` in its `implements`
     /// clause (an interface's `extends` clause).
     fn implements_directly(&self, t: usize, interface: &str) -> bool {
@@ -929,13 +968,19 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
-        // `compareTo(C)` of a class that implements `Comparable`.
+        // `compareTo(C)` of a class that implements `Comparable`, or of a class that is comparable
+        // through an interface (`Delayed extends Comparable<Delayed>`) and declares its own.
         if let Some(c) = at.comparable {
-            for t in (0..self.types.len()).filter(|&t| self.implements_comparable(t)) {
+            for t in 0..self.types.len() {
+                let direct = self.implements_comparable(t);
+                if !direct && !self.comparable_through_interface(t)? {
+                    continue;
+                }
                 let declared = methods.iter().take(at.equals).position(|m| {
                     m.class == t && m.name == "compareTo" && !m.is_static && m.params.len() == 1
                 });
                 match declared {
+                    None if !direct => {}
                     Some(i) if !Self::same_signature(&methods[i], &methods[c.compare_to]) => {
                         wanted.push((i, c.compare_to));
                     }
