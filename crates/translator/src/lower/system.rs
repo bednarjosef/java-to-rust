@@ -17,6 +17,11 @@
 //! - `REJECTED` keys, whose value the translation cannot match, are rejected: the command line of
 //!   the run, and `user.timezone`, which the JDK sets once `TimeZone` first runs.
 //!
+//! `System.setProperty` and `clearProperty` are the translator's
+//! (`java/overlay/java/lang/TranslatedProperties.java`), which keeps the changes; in a program that
+//! calls them, every `System.getProperty` reads through `TranslatedProperties.read`, which answers
+//! a changed key with its new value and any other as above.
+//!
 //! A key that is a string literal, a constant, or a local of the method that is declared once
 //! with a string literal and never assigned again (`FileSystems` names its key so) has its value
 //! in the translation; any other key is a `switch` over the keys of a plain run.
@@ -207,9 +212,9 @@ impl<'t> Lowering<'t> {
     ) -> Result<Option<ExprKind>, Error> {
         // `Boolean.getBoolean(key)`, true when the property is `"true"`. The JVM sets no property
         // to `"true"` (`java -XshowSettings:properties` lists none), only `-D` on the command line
-        // does, which a translated program has no equivalent of, and the translation has no
-        // `System.setProperty`: so it is false for every key, null included, as for a program run
-        // without options, but `HEADLESS`'s, which is true. `jdk.compat.DecimalFormat`, which
+        // does, which a translated program has no equivalent of: so it is false for every key,
+        // null included, as for a program run without options, but `HEADLESS`'s, which is true.
+        // (A key that the program itself sets with `System.setProperty` is false too.) `jdk.compat.DecimalFormat`, which
         // `DigitList` reads, is such a key. A key whose evaluation has effects is still evaluated.
         if (symbol.owner, symbol.name) == ("java.lang.Boolean", "getBoolean") {
             let Some(key) = args.first_mut() else { return unsupported(node, "this `Boolean.getBoolean`") };
@@ -323,6 +328,56 @@ impl<'t> Lowering<'t> {
         ) {
             return Ok(None);
         }
+        // In a program that changes properties, through the record of the changes; the saved
+        // ones stay as the program started.
+        let (owner, name, signature) = crate::program::CHANGED_PROPERTY;
+        if symbol.owner == "java.lang.System"
+            && let Some(read) = self.method_named(owner, name, signature)
+        {
+            return self.changed_property(node, args, read).map(Some);
+        }
+        self.property_read(node, args).map(Some)
+    }
+
+    /// `System.getProperty(key)` or `getProperty(key, default)` in a program that changes
+    /// properties (`System.setProperty`): `TranslatedProperties.read(key, value, default)`, where
+    /// `value` is the key's value unchanged. A key that is not a literal or a variable is read
+    /// once, into a local.
+    fn changed_property(&self, node: Node<'t>, args: &mut [Expr], read: usize) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let null = || self.synth(ExprKind::Null, pos, Type::String);
+        let default = match args.get_mut(1) {
+            Some(default) => std::mem::replace(default, null()),
+            None => null(),
+        };
+        let key = std::mem::replace(&mut args[0], null());
+        let string = |kind| self.synth(kind, pos, Type::String);
+        let (local, key) = match &key.kind {
+            ExprKind::Str(_) | ExprKind::Var(_) => (None, key),
+            _ => {
+                let name = self.fresh_name("key");
+                let local = Stmt::Local { ty: Type::String, name: name.clone(), init: Some(key), pos };
+                (Some(local), string(ExprKind::Var(name)))
+            }
+        };
+        let again = |key: &Expr| match &key.kind {
+            ExprKind::Str(s) => string(ExprKind::Str(s.clone())),
+            ExprKind::Var(name) => string(ExprKind::Var(name.clone())),
+            _ => unreachable!("the key is a literal or a variable"),
+        };
+        let value = self.property_read(node, &mut [again(&key)])?;
+        let args = self.convert_args(Some(read), vec![key, string(value), default])?;
+        let call = ExprKind::Call { name: "read".to_string(), args, resolved: Some(read) };
+        let Some(local) = local else { return Ok(call) };
+        let body = vec![local, Stmt::Yield(string(call))];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
+    }
+
+    /// `System.getProperty(key)` or `getProperty(key, default)` as a plain run answers it.
+    fn property_read(&self, node: Node<'t>, args: &mut [Expr]) -> Result<ExprKind, Error> {
         let key = match args.first().map(|arg| &arg.kind) {
             Some(ExprKind::Str(key)) => Some(key.clone()),
             _ => {
@@ -331,7 +386,7 @@ impl<'t> Lowering<'t> {
             }
         };
         let Some(key) = key else {
-            return self.computed_property(node, args).map(Some);
+            return self.computed_property(node, args);
         };
         let property = match property(&key) {
             Ok(property) => property,
@@ -349,13 +404,13 @@ impl<'t> Lowering<'t> {
             );
         }
         if let Some(value) = self.property_value(node, property) {
-            return Ok(Some(value));
+            return Ok(value);
         }
         // An unknown key: the default if there is one, else null.
-        Ok(Some(match args.get_mut(1) {
+        Ok(match args.get_mut(1) {
             Some(default) => std::mem::replace(&mut default.kind, ExprKind::Null),
             None => ExprKind::Null,
-        }))
+        })
     }
 }
 

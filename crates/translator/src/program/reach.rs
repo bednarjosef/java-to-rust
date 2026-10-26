@@ -1451,6 +1451,15 @@ fn string_array_write_items(node: &Value) -> Option<Vec<Item>> {
 pub const TRANSLATED_PROPERTIES: JdkMethod =
     ("java.lang.TranslatedProperties", "all", "()java.util.Properties");
 
+/// The translator's read of a property in a program that changes properties with
+/// `System.setProperty` or `clearProperty`, which are the translator's too (`REDIRECTED_CALLS`,
+/// see `lower::system`).
+pub const CHANGED_PROPERTY: JdkMethod = (
+    "java.lang.TranslatedProperties",
+    "read",
+    "(java.lang.String,java.lang.String,java.lang.String)java.lang.String",
+);
+
 /// The translator's methods that make an annotation that `getAnnotation` finds and read its
 /// members (`java/overlay/sun/reflect/annotation/TranslatedAnnotations.java`, see
 /// `lower::annotation_values`).
@@ -1589,6 +1598,16 @@ pub fn charset_coding(owner: &str, name: &str, signature: &str) -> Option<JdkMet
 /// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
 /// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
 pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    // The properties a program changes, which its reads of properties then see
+    // (`java/lang/TranslatedProperties.java`, `CHANGED_PROPERTY`).
+    (
+        ("java.lang.System", "setProperty", "(java.lang.String,java.lang.String)java.lang.String"),
+        ("java.lang.TranslatedProperties", "setProperty"),
+    ),
+    (
+        ("java.lang.System", "clearProperty", "(java.lang.String)java.lang.String"),
+        ("java.lang.TranslatedProperties", "clearProperty"),
+    ),
     // The version of the JDK, which the JVM makes from the numbers of its build; the
     // translator's parses `java.runtime.version`, which a plain run of that JDK has
     // (`java/lang/TranslatedRuntime.java`).

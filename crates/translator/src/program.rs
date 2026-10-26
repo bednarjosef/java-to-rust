@@ -13,18 +13,18 @@ mod survey;
 pub use census::{Census, census_program};
 pub use modules::{Contents as ModuleContents, loader_name, loader_resources};
 pub use reach::{
-    ANNOTATION_VALUES, CLASS_KINDS, CLEANER_CHECK, FORMAT_IN_LOCALE, FieldUpdate, GENERIC_TYPES, IN_MODULE,
-    LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS, NATIVE_ACCESS_CALLS, NATIVE_ACCESS_MODULES,
-    PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, SUN_MISC_UNSAFE, TRANSLATED_BUFFER_VIEWS,
-    TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_MODULES, TRANSLATED_NESTED,
-    TRANSLATED_PROPERTIES, TRANSLATED_SEGMENTS, TRANSLATED_UNSAFE_MEMORY, UNSET_PROPERTIES,
-    buffer_view_access, buffer_view_method, caller_query, charset_coder, charset_coding, class_bound,
-    class_for_name, class_name, component_array, computed_for_name, created_by_name, direct_stream_call,
-    field_offset_named, is_ensure_initialized, literal_class, live_branch, lookup, module_call,
-    module_for_name, provided, recreated_exception, redirected_call, redirected_field, release_query,
-    segment_access, standard_stream_field, stream_of_call, sun_misc_forwarded, sun_misc_memory,
-    unsafe_field_access, unsafe_field_update, unset_property_ifs, untranslated, updater_function,
-    writes_string_array,
+    ANNOTATION_VALUES, CHANGED_PROPERTY, CLASS_KINDS, CLEANER_CHECK, FORMAT_IN_LOCALE, FieldUpdate,
+    GENERIC_TYPES, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS, NATIVE_ACCESS_CALLS,
+    NATIVE_ACCESS_MODULES, PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, SUN_MISC_UNSAFE,
+    TRANSLATED_BUFFER_VIEWS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_MODULES,
+    TRANSLATED_NESTED, TRANSLATED_PROPERTIES, TRANSLATED_SEGMENTS, TRANSLATED_UNSAFE_MEMORY,
+    UNSET_PROPERTIES, buffer_view_access, buffer_view_method, caller_query, charset_coder, charset_coding,
+    class_bound, class_for_name, class_name, component_array, computed_for_name, created_by_name,
+    direct_stream_call, field_offset_named, is_ensure_initialized, literal_class, live_branch, lookup,
+    module_call, module_for_name, provided, recreated_exception, redirected_call, redirected_field,
+    release_query, segment_access, standard_stream_field, stream_of_call, sun_misc_forwarded,
+    sun_misc_memory, unsafe_field_access, unsafe_field_update, unset_property_ifs, untranslated,
+    updater_function, writes_string_array,
 };
 pub use survey::Survey;
 

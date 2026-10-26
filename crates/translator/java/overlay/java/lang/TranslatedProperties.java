@@ -1,5 +1,7 @@
 package java.lang;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -7,9 +9,20 @@ import java.util.Properties;
  * run, each read with {@code System.getProperty}, which the translation answers as it answers any
  * read of a property (see {@code lower::system}). A key that the JDK does not set has no entry.
  * The object is made once, so that every caller sees the same one, as with the JVM's.
+ *
+ * <p>And the translator's {@code System.setProperty} and {@code clearProperty}, which keep what
+ * they change here. A program that calls one of them reads every property through {@link #read},
+ * which answers a changed key with its new value.
  */
 final class TranslatedProperties {
     private static Properties all;
+
+    /**
+     * The keys that {@code setProperty} and {@code clearProperty} have changed, with their new
+     * values, null for a cleared one. (A {@code LinkedHashMap}, so that its calls reach only that
+     * class's methods.)
+     */
+    private static final LinkedHashMap<String, String> CHANGED = new LinkedHashMap<>();
 
     private TranslatedProperties() {}
 
@@ -64,9 +77,62 @@ final class TranslatedProperties {
             put(p, "user.home", System.getProperty("user.home"));
             put(p, "user.language", System.getProperty("user.language"));
             put(p, "user.name", System.getProperty("user.name"));
+            for (Map.Entry<String, String> change : CHANGED.entrySet()) {
+                if (change.getValue() == null) {
+                    p.remove(change.getKey());
+                } else {
+                    p.setProperty(change.getKey(), change.getValue());
+                }
+            }
             all = p;
         }
         return all;
+    }
+
+    /**
+     * {@code System.getProperty(key, def)} where properties change: {@code value} is what the
+     * translation answers for a key that no call has changed.
+     */
+    static synchronized String read(String key, String value, String def) {
+        if (CHANGED.containsKey(key)) {
+            value = CHANGED.get(key);
+        }
+        return value != null ? value : def;
+    }
+
+    /** {@code System.setProperty(key, value)}: the property's value before. */
+    static synchronized String setProperty(String key, String value) {
+        return change(key, value, false);
+    }
+
+    /** {@code System.clearProperty(key)}: the property's value before. */
+    static synchronized String clearProperty(String key) {
+        return change(key, null, true);
+    }
+
+    // The key is checked here, before it is read, which the read's switch over the keys of a plain
+    // run then knows is not null.
+    private static String change(String key, String value, boolean clearing) {
+        if (key == null) {
+            throw new NullPointerException("key can't be null");
+        }
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key can't be empty");
+        }
+        if (value == null && !clearing) {
+            throw new NullPointerException();
+        }
+        String before = read(key, System.getProperty(key), null);
+        CHANGED.put(key, value);
+        Properties p = all;
+        if (p != null) {
+            if (value == null) {
+                p.remove(key);
+            } else {
+                p.setProperty(key, value);
+            }
+        }
+        return before;
     }
 
     private static void put(Properties p, String key, String value) {

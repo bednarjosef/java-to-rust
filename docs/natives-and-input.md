@@ -240,8 +240,9 @@ an operand of `&&`, and the lowering lowers only the other branch:
   crtDebug = false;` in javac's `CRTable`): javac writes no code for the branch either, so the
   messages of its null dereferences, which `BytecodeNames` finds no code for, are not needed.
 - `Boolean.getBoolean(key)` is `false` for every key (`lower/system.rs`): the JVM sets none of its
-  own properties to `"true"`, only `-D` does, and a translation has no `System.setProperty` for
-  it. A key whose evaluation has effects is still evaluated.
+  own properties to `"true"`, only `-D` does. A key whose evaluation has effects is still
+  evaluated. A key that the program sets to `"true"` with `System.setProperty` still gives
+  `false`, where Java gives `true`.
 
 ### Archived fields
 
