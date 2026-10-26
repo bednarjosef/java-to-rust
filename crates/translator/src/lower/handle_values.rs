@@ -49,7 +49,8 @@
 //! other method, a call such as `unreflect` or `invokeWithArguments`, or arguments that it cannot
 //! tell or that may fail to make a handle) evaluates its receiver and arguments and then throws an
 //! `UnsupportedOperationException` that says so (`unfollowed`). The code sees a JDK whose lookup
-//! fails, which netty expects of some and catches, going without that handle. Anything else is
+//! fails, which netty expects of some and catches, going without that handle. A census lists
+//! each such call (`program::census`, by `UNFOLLOWED_MESSAGE`). Anything else is
 //! rejected: a handle that may be one of several, and any use of a handle value but these
 //! (`slots`): an assignment, a `return`, an argument of a method's handle parameter, a comparison
 //! with `null`, and the receiver of a handle's method.
@@ -68,7 +69,11 @@ const METHOD_HANDLES: &str = "java.lang.invoke.MethodHandles";
 /// The exception that a call of a handle's method that lowering does not follow throws
 /// (`unfollowed`), whose constructor of a message the code that calls one uses
 /// (`exceptions::Uses`).
-pub(super) const UNFOLLOWED: &str = "java.lang.UnsupportedOperationException";
+pub const UNFOLLOWED: &str = "java.lang.UnsupportedOperationException";
+
+/// What the message of that exception says after the call's name, which a census finds it by
+/// (`program::census`).
+pub const UNFOLLOWED_MESSAGE: &str = "of a handle or arguments that the translation does not follow";
 
 /// The types of handles, whose values are tokens.
 pub(super) const HANDLE_TYPES: [&str; 4] = [VAR_HANDLE, METHOD_HANDLE, LOOKUP, METHOD_TYPE];
@@ -931,7 +936,7 @@ impl<'t> Lowering<'t> {
         let what = format!("`{short}.{}`", symbol.name);
         let held = if followed { self.held(node) } else { None };
         let Some(held) = held else {
-            return self.unfollowed(node, symbol, &what).map(Some);
+            return self.unfollowed(node, symbol, &what, followed).map(Some);
         };
         if held.is_empty() || held.contains(&Known::Null) {
             return unsupported(node, &format!("{what} that may give null"));
@@ -992,10 +997,17 @@ impl<'t> Lowering<'t> {
     }
 
     /// A call of the method `what` of a lookup or a `MethodHandle` that lowering does not follow
-    /// (a handle of a method other than one that makes handles, or one it cannot tell): its
-    /// receiver and arguments evaluated, then an `UnsupportedOperationException` that says so,
-    /// which the code can catch, as netty catches a lookup that fails and goes without the handle.
-    fn unfollowed(&self, node: Node<'t>, symbol: &Symbol<'t>, what: &str) -> Result<ExprKind, Error> {
+    /// (a handle of a method other than one that makes handles, or, for a method that lowering
+    /// `follows`, arguments that it cannot tell or that may fail to make a handle): its receiver
+    /// and arguments evaluated, then an `UnsupportedOperationException` that says so, which the
+    /// code can catch, as netty catches a lookup that fails and goes without the handle.
+    fn unfollowed(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        what: &str,
+        follows: bool,
+    ) -> Result<ExprKind, Error> {
         let pos = node.pos();
         let receiver =
             node.get("methodSelect").and_then(|s| s.get("expression")).filter(|_| !symbol.is_static);
@@ -1009,14 +1021,12 @@ impl<'t> Lowering<'t> {
                 before.push(Stmt::Local { ty: value.ty, name, init: Some(value), pos });
             }
         }
-        let message = format!("{what} of a handle or arguments that the translation does not follow");
+        let may_fail = if follows { ", or that may fail" } else { "" };
+        let message = format!("{what} {UNFOLLOWED_MESSAGE}{may_fail}");
         let ty = self.ty(node, node.java_type())?;
         match self.standard_thrown(UNFOLLOWED, Some(&message), before, ty, pos) {
             Some(thrown) => Ok(thrown.kind),
-            None => unsupported(
-                node,
-                &format!("{what} of a handle or arguments that the translation does not follow"),
-            ),
+            None => unsupported(node, &message),
         }
     }
 

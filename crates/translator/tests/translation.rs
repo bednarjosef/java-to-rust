@@ -3334,6 +3334,45 @@ fn a_superclass_with_errors_leaves_the_names_of_the_classes_that_extend_it() {
 }
 
 #[test]
+fn the_census_lists_handle_calls_that_throw_where_the_translation_does_not_follow_them() {
+    let java = "package p;\nimport java.lang.invoke.*;\npublic class Main {\n    static MethodHandle find() {\n        try {\n            return MethodHandles.publicLookup().findVirtual(Thread.class, \"isVirtual\", MethodType.methodType(boolean.class));\n        } catch (Throwable e) {\n            return null;\n        }\n    }\n    static boolean lengths(MethodHandle h) throws Throwable {\n        return (int) MethodHandles.dropArguments(h, 0, int.class).invokeExact(1) > 0;\n    }\n    public static void main(String[] a) throws Throwable {\n        System.out.println(find() == null);\n        if (a.length > 0) {\n            System.out.println(lengths(find()));\n        }\n    }\n}\n";
+    let dir = write_sources("census_unfollowed_handles", &[("p/Main.java", java)]);
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    // The calls translate, into code that throws where Java runs them: none is a rejection, and
+    // the census lists each, by what was not followed, with its place.
+    let census = census(&program);
+    let not_followed = "of a handle or arguments that the translation does not follow";
+    assert_contains(
+        &census.report,
+        &[
+            "Program: 3 pieces; 3 (100.0%) translate, 0 rejected.",
+            "Program code: pieces that translate into code that throws UnsupportedOperationException for a \
+             handle call that the translation does not follow, where Java runs it",
+            &format!(
+                "  throws UnsupportedOperationException: `Lookup.findVirtual` {not_followed}, or that may \
+                 fail, 1 piece\n          at p/Main.java:6:20"
+            ),
+            &format!(
+                "  throws UnsupportedOperationException: `MethodHandles.dropArguments` {not_followed}, 1 \
+                 piece\n          at p/Main.java:12:22"
+            ),
+        ],
+    );
+    let rows = census.json["unfollowedHandles"].as_array().expect("unfollowedHandles");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let find =
+        rows.iter().find(|r| r["message"].as_str().is_some_and(|m| m.starts_with("`Lookup.findVirtual`")));
+    let find = find.expect("findVirtual is listed");
+    assert_eq!((&find["source"], &find["pieces"]), (&"program".into(), &1.into()), "{find}");
+    assert_eq!(find["places"][0], "p/Main.java:6:20", "{find}");
+    assert_eq!(census.json["rejections"].as_array().map(Vec::len), Some(0));
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let piece = pieces.iter().find(|p| p["name"] == "find").expect("find is a piece");
+    assert_eq!(piece["errors"].as_array().map(Vec::len), Some(0));
+    assert_eq!(piece["unfollowedHandles"][0]["place"], "p/Main.java:6:20", "{piece}");
+}
+
+#[test]
 fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_census_lists_it() {
     let dir = write_sources(
         "missing_class",
