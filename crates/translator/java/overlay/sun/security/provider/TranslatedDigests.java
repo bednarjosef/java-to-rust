@@ -40,6 +40,16 @@ public final class TranslatedDigests {
         }
     }
 
+    /** Whether {@link #spi} makes a digest of the algorithm named {@code algorithm}. */
+    public static boolean available(String algorithm) {
+        try {
+            spi(algorithm);
+            return true;
+        } catch (NoSuchAlgorithmException e) {
+            return false;
+        }
+    }
+
     /** Whether {@code spi} is one of the digests that {@link #spi} makes, which are SUN's. */
     public static boolean ofSun(MessageDigestSpi spi) {
         return spi instanceof DigestBase;
