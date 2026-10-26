@@ -250,17 +250,19 @@ impl<'t> Lowering<'t> {
     pub(super) fn lambda_decl(&self, t: usize) -> Option<Result<TypeDecl, Error>> {
         let l = self.lambda_of_type(t)?;
         let decl = || {
+            // A census's stub of the class implements nothing.
+            let implements = match self.lambda_interface(l) {
+                Err(_) if self.stubbing.get() => Vec::new(),
+                interface => vec![interface?],
+            };
             Ok(TypeDecl {
                 name: self.types[t].name.clone(),
                 package: String::new(),
                 kind: TypeKind::Class,
                 is_abstract: false,
                 extends: None,
-                // A census's stub of the class implements nothing.
-                implements: match self.lambda_interface(l) {
-                    Err(_) if self.stubbing.get() => Vec::new(),
-                    interface => vec![interface?],
-                },
+                interfaces: implements.iter().copied().map(Interface::Type).collect(),
+                implements,
                 fields: self.synthetic_fields(t)?,
                 statics: Vec::new(),
                 enum_constants: None,

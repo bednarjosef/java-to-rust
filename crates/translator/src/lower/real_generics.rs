@@ -243,6 +243,7 @@ impl<'t> Lowering<'t> {
                 cloneable: false,
                 modifiers: 0,
                 enclosing: None,
+                interfaces: Vec::new(),
             });
         }
     }

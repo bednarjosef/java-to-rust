@@ -331,6 +331,7 @@ impl<'t> Lowering<'t> {
             cloneable: self.is_cloneable(index),
             modifiers: self.class_modifiers(index),
             enclosing: self.reflected_enclosing(index),
+            interfaces: self.named_interfaces(index),
         })
     }
 

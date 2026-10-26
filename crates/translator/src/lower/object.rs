@@ -736,6 +736,7 @@ impl<'t> Lowering<'t> {
             cloneable: false,
             modifiers: 0,
             enclosing: None,
+            interfaces: Vec::new(),
         };
         // The program's enums are comparable, and so are its classes that implement `Comparable`.
         if let Some(c) = at.comparable {

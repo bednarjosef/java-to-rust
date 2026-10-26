@@ -741,6 +741,15 @@ impl Messages<'_> {
                     }
                     // `c.isAssignableFrom(d)` of a null class `c`, a call of `Class`; a null `d`
                     // fails in the JVM's native code, which gives no message.
+                    // `c.getInterfaces()` of a null `c`, which the count of its interfaces reads
+                    // first (`lower::classes`).
+                    Builtin::ClassMethod(ClassOp::InterfaceCount) => {
+                        let call = match self.jdk {
+                            true => Some("java.lang.Class.getInterfaces()".to_string()),
+                            false => self.call(x.pos, "getInterfaces"),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                    }
                     Builtin::ClassMethod(ClassOp::IsAssignableFrom) => {
                         let call = match self.jdk {
                             true => Some("java.lang.Class.isAssignableFrom(java.lang.Class)".to_string()),

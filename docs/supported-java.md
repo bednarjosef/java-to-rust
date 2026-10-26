@@ -334,7 +334,11 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   `getDeclaringClass` answer from what the class value carries in a program that asks for them:
   the modifiers javac gives the class, implicit ones included, and where it is declared
   (`TypeDecl::modifiers` and `enclosing`). An enum constant with a body has its enum's class, so
-  it answers as the enum. A class held as an `Object` is `Object`'s `Class` variant, and one held as a
+  it answers as the enum. `getInterfaces()` of a class that is no class literal is a new array
+  filled from the interfaces that the class value carries in such a program, in the order the
+  source names them (`TypeDecl::interfaces`), the runtime's classes with the JDK's lists and an
+  array with `Cloneable` and `Serializable`; an interface that the translation has no type of
+  (`Serializable`, `Cloneable`, a marker) is a class value of its name, which extends nothing. A class held as an `Object` is `Object`'s `Class` variant, and one held as a
   `java.lang.reflect.Type` is `Type`'s.
 - `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
   type arguments, each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,

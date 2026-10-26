@@ -54,6 +54,20 @@ impl<'t> Lowering<'t> {
         Ok(out)
     }
 
+    /// The interfaces that type `t` names in its `implements` clause, or an interface in its
+    /// `extends` clause, as `Class.getInterfaces()` gives them (`TypeDecl::interfaces`): all of
+    /// them, the program's types and the ones that `interfaces` leaves out by name.
+    pub(super) fn named_interfaces(&self, t: usize) -> Vec<Interface> {
+        let named = |clause: Node<'t>| {
+            let raw = super::captures::raw(clause.java_type());
+            match self.type_index(&raw) {
+                Some(i) => Interface::Type(i),
+                None => Interface::Named(raw),
+            }
+        };
+        self.types[t].node.list("implementsClause").map(named).collect()
+    }
+
     /// `value instanceof T` and `value instanceof T name` on a value of the program's types.
     pub(super) fn instance_of(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         // A record pattern has no type of its own.

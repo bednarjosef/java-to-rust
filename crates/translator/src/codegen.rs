@@ -360,6 +360,7 @@ fn generate_with(
         class_values: Default::default(),
         class_value_names: Vec::new(),
         class_details: false,
+        class_interfaces: false,
     };
     g.conversion_names = setup.conversion_names.get_or_insert_with(|| g.conversion_names().into()).clone();
     g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
@@ -625,6 +626,9 @@ struct Gen<'a> {
     /// Whether the code asks a class for its modifiers or its nesting, which the constants then
     /// carry (`class_value`).
     class_details: bool,
+    /// Whether the code asks a class for its interfaces (`ClassOp::InterfaceCount`), which the
+    /// constants then carry (`class_value`).
+    class_interfaces: bool,
 }
 
 impl<'a> Gen<'a> {
