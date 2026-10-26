@@ -102,8 +102,16 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
     // The enums of class types get the items that the code uses, which writing the code finds:
     // the program is written again until it asks for no item that was not written.
     let mut wanted = Needs::new();
-    loop {
+    for round in 1.. {
+        let start = std::time::Instant::now();
         let (tree, needs, rejected, closures) = generate_with(class, facts, &wanted);
+        if crate::timings::enabled() {
+            let new = needs.iter().filter(|n| !wanted.contains(n)).count();
+            eprintln!(
+                "timing: codegen: round {round}: {:.3} s, {new} items asked for anew",
+                start.elapsed().as_secs_f64()
+            );
+        }
         if !rejected.is_empty() {
             return Err(rejected);
         }
@@ -119,6 +127,7 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
         }
         wanted.extend(needs);
     }
+    unreachable!("the rounds end")
 }
 
 thread_local! {
