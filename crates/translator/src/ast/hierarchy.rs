@@ -184,6 +184,23 @@ impl Hierarchy {
         a == b || self.supertype_bits[a * self.words + b / 64] & (1u64 << (b % 64)) != 0
     }
 
+    /// `a` and every type `b` that `is_subtype(a, b)`, in index order but `a` first.
+    pub fn subtype_of(&self, a: usize) -> Vec<usize> {
+        let row = &self.supertype_bits[a * self.words..(a + 1) * self.words];
+        let mut out = vec![a];
+        for (w, &bits) in row.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let b = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b != a {
+                    out.push(b);
+                }
+            }
+        }
+        out
+    }
+
     /// `t` and every type it is a subtype of, through classes and interfaces, each once.
     pub fn supertypes(&self, t: usize) -> Vec<usize> {
         let mut out = vec![t];
