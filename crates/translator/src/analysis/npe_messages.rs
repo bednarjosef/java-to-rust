@@ -47,7 +47,18 @@ const MAX_DETAIL: usize = 5;
 
 /// Fills in `Facts::npe_messages`, and rejects the program where a message that a `catch` may
 /// read (`Facts::npe_message_needed`) is not certain.
-pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> Result<(), Vec<Error>> {
+///
+/// With `approximate` (`Program::approximate_messages`), a message that is not certain is
+/// approximated instead: the JVM's words for what failed without where the null came from, as it
+/// writes them where it does not follow the null, or no message where even those are not certain.
+/// The dereferences that a `catch` may read the approximated message of are
+/// `Facts::npe_approximated`.
+pub fn npe_messages(
+    class: &Class,
+    facts: &mut Facts,
+    names: &BytecodeNames,
+    approximate: bool,
+) -> Result<(), Vec<Error>> {
     let first_needed = || {
         facts
             .npe_message_needed
@@ -64,6 +75,7 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         return Err(vec![Error { pos, message }]);
     }
     let messages = RefCell::new(HashMap::new());
+    let approximated = RefCell::new(HashSet::new());
     for method in &class.methods {
         let Some(outermost) = outermost(class, method.class) else { continue };
         // The JDK's classes are compiled with the names of their locals (`-g`), so the JVM shows
@@ -126,6 +138,7 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
             elements,
             declared: Default::default(),
             proxied: Default::default(),
+            approximated: approximate.then_some(&approximated),
         };
         for s in &method.body {
             visit_stmt(
@@ -152,6 +165,15 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         .filter(|id| !messages.contains_key(id))
         .filter_map(|id| facts.null_checked.get(id).map(|p| (*p, *id)))
         .collect();
+    if approximate {
+        let mut approximated = approximated.into_inner();
+        for (_, id) in missing.drain(..) {
+            messages.insert(id, None);
+            approximated.insert(id);
+        }
+        approximated.retain(|id| facts.npe_message_needed.contains(id));
+        facts.npe_approximated = approximated_places(class, facts, &approximated);
+    }
     if missing.is_empty() {
         facts.npe_messages = messages;
         return Ok(());
@@ -180,6 +202,32 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         Error { pos, message }
     });
     Err(errors.collect())
+}
+
+/// The position of each dereference of `ids` (`Facts::null_checked`), with that of the method it
+/// is in (`None` for a field's initializer), in order.
+fn approximated_places(class: &Class, facts: &Facts, ids: &HashSet<ExprId>) -> Vec<(Pos, Option<Pos>)> {
+    let mut found = Vec::new();
+    let mut see = |x: &Expr, anchor: Option<Pos>| {
+        if ids.contains(&x.id)
+            && let Some(&pos) = facts.null_checked.get(&x.id)
+        {
+            found.push((pos, anchor));
+        }
+    };
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| see(x, Some(method.pos))), &mut |_| {});
+        }
+    }
+    for decl in &class.types {
+        for init in decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()) {
+            visit_expr(init, &mut |x| see(x, None));
+        }
+    }
+    found.sort_by_key(|(pos, _)| (pos.unit, pos.line, pos.column));
+    found.dedup_by_key(|(pos, _)| *pos);
+    found
 }
 
 /// Whether `decl` is `java.lang.Object`.
@@ -253,6 +301,8 @@ struct Messages<'a> {
     declared: std::cell::OnceCell<Declared>,
     /// Whether the method is that of a method reference's class that the JVM makes (`proxied`).
     proxied: std::cell::OnceCell<bool>,
+    /// With `Program::approximate_messages`: the objects whose message is approximated.
+    approximated: Option<&'a RefCell<HashSet<ExprId>>>,
 }
 
 /// A field as the class file has it.
@@ -332,8 +382,17 @@ impl Messages<'_> {
                 out.insert(object.id, None);
                 return;
             }
-            if let Some(message) = action.and_then(|a| self.message(&a, object)) {
-                out.insert(object.id, Some(message));
+            let Some(action) = action else { return };
+            match self.message(&action, object) {
+                Some(message) => {
+                    out.insert(object.id, Some(message));
+                }
+                // Where the null came from is not certain: what failed alone.
+                None if let Some(approximated) = self.approximated => {
+                    approximated.borrow_mut().insert(object.id);
+                    out.insert(object.id, Some(action));
+                }
+                None => {}
             }
         };
         match &x.kind {
