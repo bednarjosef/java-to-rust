@@ -56,7 +56,9 @@ Which classes those are comes from three places:
 - **Constant names** (`Class.forName("com.foo.Bar")`, `X.class.getMethod("run")`) are resolved
   when translating; the call becomes a direct call and needs no table at all.
 - **Fixed lists**: `META-INF/services` files and the `provides` clauses of `module-info.java` say
-  which classes `ServiceLoader` finds; the translator reads them.
+  which classes `ServiceLoader` finds, and the reflection metadata that libraries ship for
+  GraalVM's native-image which classes and members they look up by name; the translator reads
+  them.
 - **Names computed at run time** (from a configuration file, a command-line option, a string
   built in code) are found by a **recording run**: the program runs once on the JVM with a small
   agent that records every class, method and field looked up by name, and the translation takes
@@ -118,6 +120,17 @@ program where such a lookup can happen, so they can be checked before the progra
   `$VALUES` array that javac adds is not a field of the table. `AccessibleObject.setAccessible`
   of an array of members checks the array for null and does nothing else, as every member of
   the table is accessible (`lower/libraries.rs`).
+- **Libraries' reflection metadata.** A root's `META-INF/native-image/**/reflect-config.json`
+  (or the `reflection` part of `reachability-metadata.json`), which libraries ship for GraalVM's
+  native-image, lists the classes that the library finds by name and the members it looks up:
+  log4j-core its plugins and their builders, which it finds by names read from a file, netty its
+  channel handlers, whose methods `ChannelHandlerMask` looks up. Each entry counts as the string
+  literals of reachable code do: its class is named, so that a lookup on a `Class` value that is
+  not a class literal and a computed `Class.forName` can find it, and the names of the members
+  it lists (for a flag such as `allDeclaredMethods`, those the class declares) are names that a
+  computed name can be. An entry applies only to a class that reachable code reaches otherwise,
+  once the class of its condition (`typeReachable`) is reached too, and never to a class that is
+  not translated (`program/reach/native_image.rs`, kept in `Reach::configured`).
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
   and `NoSuchMethodException` or `NoSuchFieldException` for a member the table does not hold.
