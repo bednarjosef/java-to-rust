@@ -28,8 +28,11 @@ stops at them. The translator also brings classes of its own, written in Java
 
 ## How a native call is translated
 
-A native method's declaration has no body and is never lowered. javac's symbols say whether a
-method is `native`. A call of a native of a translated class becomes the runtime function that
+A native method's declaration has no body, and it is lowered only when a call may dispatch to it:
+an instance native that the runtime lacks and that reach finds, through the method it implements
+or overrides (`VMManagementImpl`'s natives implement `VMManagement`'s methods). Its body is the call of
+the native as `Native::Missing` (`native_dispatch` in `lower/program.rs`). javac's symbols say
+whether a method is `native`. A call of a native of a translated class becomes the runtime function that
 `ast::declared_native` names for its class, name and javac signature (`crates/translator/src/ast/natives.rs`,
 lowered in `lower/natives.rs`). `ast::runtime_native` adds the stream natives of `java.io`, which
 take the descriptor of the stream's object, and the tables `FILE_SYSTEM`, `UNIX_CALLS` and

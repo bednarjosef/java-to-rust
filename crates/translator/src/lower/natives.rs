@@ -185,6 +185,21 @@ impl<'t> Lowering<'t> {
         Ok(Some(Builtin::Native(native)))
     }
 
+    /// The body of native instance method `index`, which a call of a method it implements may run
+    /// (`native_dispatch`): the call of the native, which the runtime does not implement, on
+    /// `this` and the parameters.
+    pub(super) fn native_body(&self, index: usize, params: &[Param], ret: Type) -> Vec<Stmt> {
+        let info = &self.methods[index];
+        let pos = info.node.pos();
+        let owner = &self.types[info.owner].javac;
+        let what = Box::leak(format!("{owner}.{}{}", info.name, info.sig).into_boxed_str());
+        let this = self.synth(ExprKind::This, pos, self.self_type(info.owner));
+        let mut args = vec![this];
+        args.extend(params.iter().map(|p| self.synth(ExprKind::Var(p.name.clone()), pos, p.ty)));
+        let call = self.synth(ExprKind::Builtin(Builtin::Native(Native::Missing { what }), args), pos, ret);
+        vec![if ret == Type::Void { Stmt::Expr(call) } else { Stmt::Return(Some(call), pos) }]
+    }
+
     /// `System.getLogger(name).log(System.Logger.Level.L, message)` in a translation without the
     /// JDK's sources, where `System.Logger` is not translated (with them, a logger is an object of
     /// `java/lang/TranslatedSystemLogger.java`). The default logger of `java Main`, backed by
