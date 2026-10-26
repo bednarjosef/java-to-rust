@@ -351,9 +351,10 @@ Design: [natives-and-input.md](natives-and-input.md).
 - `System.out` and `System.err` printing is buffered with Java's 128-byte buffers
   (`java::println!`); `System.err` flushes `System.out` first so the two stay in order.
 - With the JDK's sources, `System.out`, `System.err` and `System.in` can be values, wrapped in
-  the JDK's streams, readers and writers or the program's own subclasses. Without them, using one
-  as a value is rejected. `PrintStream`, `InputStreamReader` and `OutputStreamWriter` are
-  stand-ins that use the runtime's charsets.
+  the JDK's streams, readers and writers or the program's own subclasses, and `System.setOut`
+  and `setErr` replace them: the program's calls on `System.out` then run the new stream's
+  methods. Without them, using one as a value is rejected. `PrintStream`, `InputStreamReader`
+  and `OutputStreamWriter` are stand-ins that use the runtime's charsets.
 - Native methods of translated JDK classes are hand-written in the runtime and chosen by class,
   name and signature (`ast/natives.rs`); any other native is rejected with its name. This covers
   the clocks, `identityHashCode`, the bit conversions of floats, file descriptors and files
@@ -363,15 +364,21 @@ Design: [natives-and-input.md](natives-and-input.md).
 - `System.getProperty` gives what a plain `java Main` run gives (`lower/system.rs`): machine
   values at run time, other keys fixed from the JDK the translator ran with, and
   `java.awt.headless` `"true"`, as with `-Djava.awt.headless=true`.
-  `sun.java.command` and `user.timezone` as constants are rejected. `System.getenv(name)` reads
-  the environment; `System.getenv()` as a map is not translated yet.
+  `sun.java.command` and `user.timezone` as constants are rejected. `System.setProperty` and
+  `clearProperty` keep their changes, which every `getProperty` of a program that calls them
+  reads (`java/overlay/java/lang/TranslatedProperties.java`). `System.getenv(name)` reads the
+  environment, and in a whole program `System.getenv()` is the JDK's map of it.
+- `Runtime` is no value: its methods are translated on `Runtime.getRuntime()` or a local that
+  holds it, and any other use of one is rejected. Its shutdown hooks run on the first exit, as
+  Java's do, but not on a signal ([multi-threading.md](multi-threading.md), 6).
 - A translation is headless, unlike a JVM on a machine with a display: AWT's natives are not
   translated, so `GraphicsEnvironment.isHeadless()` is always true, and a program that would
   open a window there (the Minecraft server without `nogui`) runs as it does on a server
   without one. The tests run Java with `-Djava.awt.headless=true` to compare.
-- There is no security manager (`System.getSecurityManager()` is null), no garbage collector
-  (`gc()` does nothing, `Runtime`'s memory figures are fixed values), no virtual threads, and no
-  network connections: sockets stay rejected.
+- There is no security manager (`System.getSecurityManager()` is null), no virtual threads, and
+  no network connections: sockets stay rejected. The collector runs on its own
+  ([collector.md](collector.md)): `gc()` does nothing, and `Runtime`'s memory figures are fixed
+  values.
 
 ## Whole programs
 
