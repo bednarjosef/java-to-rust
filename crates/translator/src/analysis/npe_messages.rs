@@ -707,7 +707,9 @@ impl Messages<'_> {
                         let (name, params) = match (native, &args[1..]) {
                             (Native::MonitorNotify { all: true }, _) => ("notifyAll", ""),
                             (Native::MonitorNotify { all: false }, _) => ("notify", ""),
-                            (_, [timeout]) if matches!(timeout.kind, ExprKind::Long(0)) && timeout.pos == x.pos => {
+                            (_, [timeout])
+                                if matches!(timeout.kind, ExprKind::Long(0)) && timeout.pos == x.pos =>
+                            {
                                 ("wait", "")
                             }
                             (_, [_]) => ("wait", "long"),
@@ -739,7 +741,9 @@ impl Messages<'_> {
                     // as the call site's own types make it (`VarHandle.set(Main, int)`).
                     Builtin::NullChecked(Some(name)) => {
                         let call = match self.jdk {
-                            true if *name == crate::lower::ENUM_CONSTANTS => Some(format!("java.lang.Class.{name}()")),
+                            true if *name == crate::lower::ENUM_CONSTANTS => {
+                                Some(format!("java.lang.Class.{name}()"))
+                            }
                             true => self.named_call(x, name).flatten(),
                             false => self.call(x.pos, name),
                         };
@@ -1879,9 +1883,7 @@ fn builder_method(op: BuilderOp) -> Option<&'static str> {
 /// Whether `cases` are those of `System.getProperty(key)` of a computed key (`lower::system`),
 /// which always have the case of `java.class.path`, and the default last.
 fn property_switch(cases: &[Case]) -> bool {
-    let class_path = |c: &Case| {
-        matches!(&c.labels[..], [CaseLabel::Value(Expr { kind: ExprKind::Str(key), .. })] if key == "java.class.path")
-    };
+    let class_path = |c: &Case| matches!(&c.labels[..], [CaseLabel::Value(Expr { kind: ExprKind::Str(key), .. })] if key == "java.class.path");
     matches!(cases.last().map(|c| &c.labels[..]), Some([CaseLabel::Default])) && cases.iter().any(class_path)
 }
 

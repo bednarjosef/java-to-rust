@@ -193,8 +193,12 @@ fn analysed(
     let mut modules = None;
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
-            let names =
-                Names { program, files: &files, jdk_temps: RefCell::new(jdk_temps), found: RefCell::new(None) };
+            let names = Names {
+                program,
+                files: &files,
+                jdk_temps: RefCell::new(jdk_temps),
+                found: RefCell::new(None),
+            };
             analyse(&mut class, &units, &files, &mut rejections, &mut modules, &names, program.ends_rejected)
         });
     }
@@ -321,7 +325,8 @@ impl Names<'_> {
         }
         let mut found = self.found.borrow_mut();
         if found.is_none() {
-            let names = crate::timings::phase("census: class files", || class_file_names(self.program, self.files));
+            let names =
+                crate::timings::phase("census: class files", || class_file_names(self.program, self.files));
             // Without the class files (the program does not compile, as decompiled code may
             // not), the messages are found with the names of the JDK's code alone, which do not
             // come from them: each that needs a name of the program's class files is not

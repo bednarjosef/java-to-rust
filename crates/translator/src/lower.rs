@@ -80,11 +80,11 @@ mod system;
 mod varargs;
 pub use annotation_values::is_member_annotation_call;
 pub(crate) use argument_order::{ARGUMENT, RECEIVER, held_local, ordered_call};
-pub(crate) use classes::ENUM_CONSTANTS;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::{panic_carried, panic_message, panic_place, quiet_panics};
+pub(crate) use classes::ENUM_CONSTANTS;
 pub(crate) use clinit_errors::{STATE, rewritten_clinit};
 pub(crate) use enum_tables::{ORDINAL as TABLE_ORDINAL, tabled_field};
 pub use exceptions::{
