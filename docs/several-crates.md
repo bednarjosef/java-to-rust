@@ -140,10 +140,12 @@ along classes. It splits declarations from code, as C splits headers from source
   given to it, each with `#[unsafe(no_mangle)]`. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names
   everything as it did, `crate::..` paths included: the body crate has every module, and a module
-  without moved code is the re-export alone. A method's code moves into a private trait that the
-  body crate implements for the header's type (`impl Bodies0 for Circle { fn body_area(&self) ..
-  }`), so that `self`, `Self` and calls of the type's other methods mean what they did; the
-  exported function calls the trait's method. The trait's methods are named `body_<name>`, so
+  without moved code is the re-export alone. It has the header's `recursion_limit`, which a
+  threaded program raises for the proofs that its statics are `Send`. A method's code moves into
+  a private trait that the body crate implements for the header's type (`impl Bodies0 for Circle
+  { fn body_area(&self) .. }`), so that `self`, `Self` and calls of the type's other methods mean
+  what they did; the trait is `Sized`, as the type is, for a signature that names `Option<Self>`.
+  The exported function calls the trait's method. The trait's methods are named `body_<name>`, so
   that a call of the original name finds the header's method, never the trait's.
 - **The binary** depends on the header and every body crate (`use body_0 as _;` makes rustc
   link each) and its `main` calls the header's.
@@ -165,7 +167,13 @@ trial translation (`--census --crate DIR --crates N`, each rejected piece ending
 its rejection), which is how the Minecraft server's trial is built ([minecraft-server.md](minecraft-server.md),
 the `trial` step). Every program of `targets/` builds and prints what Java prints split into
 three body crates, and the whole-program test `a_program_split_into_crates_matches_java` builds
-one so.
+one so. javac's census translation split into 16 body crates builds (a debug build, one job: about
+150 s, rustc at 5.2 GB at its peak in a body crate of 11 MB, 2.3 GB for the 18 MB header) and
+compiles a program.
+
+The split parses each item of a module (a class with its `impl`s) by itself with `syn` and drops
+its text once split: a syntax tree is many times its text, and the Minecraft server's crate root
+alone is 2.3 million lines (its `Object` enum 650,000).
 
 What it costs: a call of a moved function from another crate goes through the header's wrapper and
 cannot be inlined without link-time optimization. The release profile's fat LTO inlines across
