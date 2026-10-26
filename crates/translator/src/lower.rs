@@ -365,6 +365,9 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The array types that an `Object` is tested for or cast to (`object_array`), which an array
+    /// that becomes an `Object` meets where it may be one (`covariant::meets_through_object`).
+    object_tests: std::cell::RefCell<Vec<Type>>,
     /// The expressions that erasure's checked cast of a generic member's value wraps (see
     /// `generics::erased_use`), by id.
     erased_casts: RefCell<std::collections::HashSet<ExprId>>,

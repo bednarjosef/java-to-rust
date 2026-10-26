@@ -49,11 +49,18 @@ fn checked_copy<T: Clone, A: Elements<T>>(
     let fits = items.iter().take_while(|v| class.refuses(v).is_none()).count();
     dest.store_from(to, &items[..fits]);
     if fits < n {
-        let source = src.element_class().map_or("java.lang.Object", |c| c.element);
-        let message = format!(
-            "arraycopy: element type mismatch: can not cast one of the elements of {source}[] to the type of the destination array, {}",
-            class.element
-        );
+        // HotSpot tells whether `dest`'s element type is below `src`'s, which an array without a
+        // class (an `Object[]`) always is.
+        let source = src.element_class();
+        let name = source.map_or("java.lang.Object", |c| c.element);
+        let message = if source.is_none_or(|s| (s.class)().is_assignable_from((class.class)())) {
+            format!(
+                "arraycopy: element type mismatch: can not cast one of the elements of {name}[] to the type of the destination array, {}",
+                class.element
+            )
+        } else {
+            format!("arraycopy: type mismatch: can not copy {name}[] into {}[]", class.element)
+        };
         return Err(Exception::new("java.lang.ArrayStoreException", message));
     }
     Ok(())

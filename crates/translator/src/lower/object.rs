@@ -840,6 +840,11 @@ impl<'t> Lowering<'t> {
         let mut arrays = self.object_arrays.borrow_mut();
         if matches!(ty, Type::Array(_) | Type::StringBuilder | Type::JavaClass) && !arrays.contains(&ty) {
             arrays.push(ty);
+            drop(arrays);
+            let tests = self.object_tests.borrow().clone();
+            for tested in tests {
+                self.meets_through_object(ty, tested);
+            }
         }
     }
 
@@ -852,6 +857,13 @@ impl<'t> Lowering<'t> {
         }
         if innermost != ty && matches!(innermost, Type::Class(_, args) if !args.is_empty()) {
             return unsupported(node, "an array of a generic class's instantiation as an `Object`");
+        }
+        if matches!(ty, Type::Array(_)) && !self.object_tests.borrow().contains(&ty) {
+            self.object_tests.borrow_mut().push(ty);
+            let arrays = self.object_arrays.borrow().clone();
+            for array in arrays {
+                self.meets_through_object(array, ty);
+            }
         }
         self.note_object_array(ty);
         Ok(())

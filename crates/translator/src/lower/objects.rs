@@ -101,6 +101,7 @@ impl<'t> Lowering<'t> {
             entry: None,
             standard: Default::default(),
             object_arrays: Default::default(),
+            object_tests: Default::default(),
             erased_casts: Default::default(),
             field_updates: Default::default(),
             handle_calls: Default::default(),

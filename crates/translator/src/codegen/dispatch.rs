@@ -1164,11 +1164,25 @@ impl<'a> Gen<'a> {
                 };
                 format!("{{ {bounds} {reference} }}")
             };
-            arms.push(format!("{pattern}(a) => {{ let element = {stored}; {set}(a, {i}, element) }}"));
+            // An `Object[]` may be an array of another class (`covariant`, also one that
+            // `Array.newInstance` made): one that cannot hold the value refuses it, after the
+            // index is checked.
+            let store = if element == Type::class(OBJECT) {
+                format!(
+                    "{}(a, {i}, element).map_err(|_| {exception}::new(\"java.lang.IllegalArgumentException\", \"array element type mismatch\"))",
+                    self.runtime("try_checked_set")
+                )
+            } else {
+                format!("{set}(a, {i}, element)")
+            };
+            arms.push(format!("{pattern}(a) => {{ let element = {stored}; {store} }}"));
         }
         arms.push(format!("_ => {{ {}; }}", fail("Argument is not an array")));
+        // The value's type is spelled out, as a `null` (`None`) may first be read where its type
+        // is not yet known.
         let code = Code::atom(format!(
-            "{{ let ({a}, {i}, {v}) = ({array_text}, {index}, {value_text}); (|| -> Result<(), {exception}> {{ \
+            "{{ let ({a}, {i}, {v}): (_, _, Option<{object_type}>) = ({array_text}, {index}, {value_text}); \
+             (|| -> Result<(), {exception}> {{ \
              match {object_type}::view({non_null}({a}.as_ref())?) {{ {} }} }})() }}",
             arms.join(" ")
         ));
