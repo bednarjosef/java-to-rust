@@ -5,7 +5,7 @@
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
 # Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, repair, jdk-sources,
-# parse, census, summary, and on their own (not run by default) trial and java-run.
+# parse, census, summary, and on their own (not run by default) trial-write, trial and java-run.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -34,8 +34,11 @@
 #                    running out (default 6G; empty for none, or where systemd-run is missing)
 # TRIAL_CRATES       with a number, the census also writes its trial translation (each rejected
 #                    piece ends the program with the rejection) to $MINECRAFT_CACHE/trial, as a
-#                    workspace with that many body crates (--crates); the trial step builds and
-#                    runs it (default: none)
+#                    workspace with that many body crates (--crates), and saves the translation
+#                    to $MINECRAFT_CACHE/trial-tree.bin (--save-tree), from which the trial-write
+#                    step writes the trial again without a census, after a change to how a
+#                    translation is written or split; the trial step builds and runs it (default:
+#                    none)
 # TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G),
 #                    with CARGO_BUILD_JOBS crates built at once (default 10)
 # TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
@@ -430,7 +433,7 @@ census() {
   mapfile -t cap < <(memory_cap_command "$memory_cap")
   if [ -n "${TRIAL_CRATES:-}" ]; then
     rm -rf "$cache/trial"
-    trial=(--crate "$cache/trial" --crates "$TRIAL_CRATES")
+    trial=(--crate "$cache/trial" --crates "$TRIAL_CRATES" --save-tree "$cache/trial-tree.bin")
   fi
   set +e
   "${slot[@]}" "${cap[@]}" "$translator" --timings --main "$main" "$cache/src/server/${main//.//}.java" \
@@ -483,6 +486,16 @@ run_server() {
   set -e
   echo "exit $code after $(($(date +%s) - start)) s" | tee "$dir/run.txt"
   tail -n 5 "$dir/stdout.txt" "$dir/stderr.txt"
+}
+
+# Writes the trial translation again from the one the census saved (TRIAL_CRATES), with the
+# translator as it is now.
+trial-write() {
+  [ -f "$cache/trial-tree.bin" ] || { echo "no saved trial translation (run the census with TRIAL_CRATES)" >&2; exit 1; }
+  [ -n "${TRIAL_CRATES:-}" ] || { echo "TRIAL_CRATES is needed" >&2; exit 1; }
+  rm -rf "$cache/trial"
+  "${slot[@]}" "$translator" --timings --main "$(cat "$cache/jar/META-INF/main-class")" \
+    --from-tree "$cache/trial-tree.bin" --crate "$cache/trial" --crates "$TRIAL_CRATES"
 }
 
 # Builds the census's trial translation (TRIAL_CRATES) in trial-target and runs the server with it
@@ -538,9 +551,9 @@ steps=("$@")
 for step in "${steps[@]}"; do
   case $step in
     extract | decompile | best-of | libraries | library-sources | library-best-of | repair | jdk-sources | parse \
-      | census | summary | trial | java-run) "$step" ;;
+      | census | summary | trial-write | trial | java-run) "$step" ;;
     *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of, repair," \
-      "jdk-sources, parse, census, summary, trial, java-run)" >&2
+      "jdk-sources, parse, census, summary, trial-write, trial, java-run)" >&2
       exit 2 ;;
   esac
 done
