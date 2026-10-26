@@ -254,7 +254,10 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
   and `catching` returns it as an `Err`. A panic of anything else still unwinds.
 - **A null argument of `compareTo`** on a `String` or a box is checked like a dereference:
   `try_non_null_message` gives Java's message for the argument's class, and the `Result` of
-  `compare_to` passes it on with `?`. A raw `Comparable`'s call of any class's `compareTo` with a
+  `compare_to` passes it on with `?`. So is a null prefix of `startsWith(String)` or suffix of
+  `endsWith`, whose length `String.startsWith(String, int)` asks for (`because "prefix" is
+  null`); with an offset, a negative one returns before the prefix is read, and the call runs
+  inside `java::catching`. A raw `Comparable`'s call of any class's `compareTo` with a
   null argument runs inside `java::catching`, and the receiver's arm raises Java's message for its
   class, an enum's `Cannot invoke "Object.getClass()"` included (`dispatch.rs`, `compare_arm`).
 
@@ -639,7 +642,8 @@ chain do (`b.append('0').append(1)`), are told apart by their first argument
 the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`) and its methods that do (a null format of
 `String.format`, which `Formatter.parse` asks for its length, a null `CharSequence` of
-`contentEquals`), a static by the class that declares it, an
+`contentEquals`, a null prefix or suffix of `startsWith` and `endsWith`), a static by the class
+that declares it, an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
 the field it is, a string `switch`'s temporary and a for-each loop's iterator as `<localN>` from
 the slots javac would give (`javac::jdk_temps`), in an argument too, counting the slots of

@@ -483,6 +483,17 @@ impl Messages<'_> {
                             "Cannot invoke \"java.lang.CharSequence.length()\" because \"cs\" is null";
                         out.entry(text[0].id).or_insert(Some(message.to_string()));
                     }
+                    // A null prefix of `startsWith(String)` or suffix of `endsWith` fails in
+                    // `String.startsWith(String, int)`, which asks for its length (`-g`, so the
+                    // parameter has its name).
+                    if let (Builtin::String(op @ (StringOp::StartsWith | StringOp::EndsWith)), [_, other]) =
+                        (builtin, &args[..])
+                    {
+                        let param = if *op == StringOp::StartsWith { "prefix" } else { "suffix" };
+                        let message =
+                            format!("Cannot invoke \"String.length()\" because \"{param}\" is null");
+                        out.entry(other.id).or_insert(Some(message));
+                    }
                     // A null argument of `compareTo` fails in `String.compareTo`, which reads its
                     // `value` (`-g`, so the parameter has its name).
                     if let (Builtin::String(StringOp::CompareTo), Some(other)) = (builtin, args.get(1)) {
