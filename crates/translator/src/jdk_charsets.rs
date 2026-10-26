@@ -24,6 +24,8 @@ struct Data {
 #[derive(Deserialize)]
 pub struct JdkCharset {
     pub name: String,
+    /// The name that `getEncoding` of a reader gives (`Cp1252`).
+    pub historical: String,
     pub aliases: Vec<String>,
     /// For a single-byte charset, the char of each byte (U+FFFD where a byte has none).
     pub decode: Option<Vec<u16>>,

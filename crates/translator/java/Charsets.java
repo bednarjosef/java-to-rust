@@ -10,11 +10,14 @@
 //
 // A charset is a table only when this JDK's coders behave as one: every byte decodes to one
 // char, alone or among others; every char encodes to one byte or is unmappable, alone or among
-// others; and a surrogate pair or a lone surrogate becomes one replacement byte. The table holds
+// others; a surrogate pair or a lone surrogate becomes one replacement byte; and no char but the
+// one that the replacement byte decodes to encodes to that byte. The table holds
 // what each byte decodes to (U+FFFD for a byte without a char) and the chars whose encoding is
 // not the inverse of that, the first byte of each char winning: a char that encodes to another
 // byte, and one that does not encode at all.
 
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
@@ -38,7 +41,10 @@ public class Charsets {
                 out.append(",\n");
             }
             first = false;
-            out.append("{\"name\":").append(quote(cs.name())).append(",\"aliases\":[");
+            out.append("{\"name\":").append(quote(cs.name()));
+            // The historical name, which `getEncoding` of a reader gives.
+            String historical = new InputStreamReader(InputStream.nullInputStream(), cs).getEncoding();
+            out.append(",\"historical\":").append(quote(historical)).append(",\"aliases\":[");
             boolean firstAlias = true;
             for (String alias : new TreeSet<>(cs.aliases())) {
                 out.append(firstAlias ? "" : ",").append(quote(alias));
@@ -126,6 +132,11 @@ public class Charsets {
             encode[c] = mapped ? bytes[0] & 0xff : -1;
             if (encode[c] != inverse[c]) {
                 table.overrides.add(new int[] {c, encode[c]});
+            }
+            // Only the char of the replacement byte encodes to it, so that a whole program's
+            // coders (`TranslatedCoders`) can tell an unmappable char by the replacement.
+            if (encode[c] == (table.replacement & 0xff) && c != table.decode[table.replacement & 0xff]) {
+                return null;
             }
         }
         // Each char encodes the same among others, surrogates included.

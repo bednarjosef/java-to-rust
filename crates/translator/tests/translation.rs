@@ -3426,7 +3426,7 @@ fn a_constant_name_of_a_jdk_charset_without_a_table_is_rejected_and_a_computed_o
     assert_contains(
         &rust,
         &[
-            "java::ByteCharset::new(\"windows-1252\", &[\"cp1252\"",
+            "java::ByteCharset::new(\"windows-1252\", \"Cp1252\", &[\"cp1252\"",
             "\"Shift_JIS\"",
             "java::register_charsets(&CHARSETS, &[",
         ],

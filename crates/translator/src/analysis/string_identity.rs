@@ -565,7 +565,9 @@ pub(crate) fn made(builtin: Builtin) -> Made {
         | Builtin::ClassName { simple: false }
         | Builtin::ClassLiteralName { simple: false, .. }
         | Builtin::ClassMethod(ClassOp::GetName | ClassOp::GetPackageName)
-        | Builtin::Charset(CharsetOp::Name | CharsetOp::DisplayName | CharsetOp::ToString) => Made::Interned,
+        | Builtin::Charset(
+            CharsetOp::Name | CharsetOp::DisplayName | CharsetOp::HistoricalName | CharsetOp::ToString,
+        ) => Made::Interned,
         Builtin::String(
             StringOp::Identity
             | StringOp::Join

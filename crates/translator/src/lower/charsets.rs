@@ -15,6 +15,11 @@ use super::*;
 
 const CHARSET: &str = "java.nio.charset.Charset";
 
+/// The translator's class of the coders of the charsets
+/// (`java/overlay/sun/nio/cs/TranslatedCoders.java`), whose `historicalName` is
+/// `CharsetOp::HistoricalName`.
+const TRANSLATED_CODERS: &str = "sun.nio.cs.TranslatedCoders";
+
 /// The JDK's classes of the charsets that the runtime has, with the charset of each.
 const STANDARD_CHARSET_CLASSES: &[(&str, CharsetOp)] = &[
     ("sun.nio.cs.UTF_8", CharsetOp::Utf8),
@@ -58,7 +63,11 @@ pub(super) fn compares_charsets(node: Node) -> bool {
 pub(super) fn is_charset_op(node: Node) -> bool {
     let Some(symbol) = node.symbol() else { return false };
     match node.kind() {
-        "METHOD_INVOCATION" => symbol.kind == "METHOD" && is_charset_type(symbol.owner),
+        "METHOD_INVOCATION" => {
+            symbol.kind == "METHOD"
+                && (is_charset_type(symbol.owner)
+                    || (symbol.owner == TRANSLATED_CODERS && symbol.name == "historicalName"))
+        }
         "IDENTIFIER" | "MEMBER_SELECT" => {
             symbol.kind == "FIELD"
                 && (symbol.owner == "java.nio.charset.StandardCharsets"
@@ -126,6 +135,7 @@ impl<'t> Lowering<'t> {
             return self.charset_call(node, symbol.name, method, operands);
         }
         let op = match (symbol.name, args.len(), receiver.is_some()) {
+            ("historicalName", 1, false) if symbol.owner == TRANSLATED_CODERS => CharsetOp::HistoricalName,
             ("forName", 1, false) => CharsetOp::ForName,
             ("isSupported", 1, false) => CharsetOp::IsSupported,
             ("defaultCharset", 0, false) => CharsetOp::DefaultCharset,

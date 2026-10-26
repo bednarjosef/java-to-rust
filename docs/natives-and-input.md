@@ -482,7 +482,12 @@ formatted at the call and printed through the package-private `formattedText`.
 `Charset` and `StandardCharsets` are runtime classes, so reachability does not enter the JDK's
 charset lookup (whose provider search reaches `GB18030`, which reads a JVM property). The JDK's
 decoders and encoders of the six standard charsets are translated all the same and made by
-`java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and `newEncoder()`.
+`java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and `newEncoder()`. For a
+single-byte charset of the JDK that the program carries as a table
+([supported-java.md](supported-java.md), charsets), it makes the JDK's `SingleByte.Decoder` and
+`Encoder` from what the charset decodes each byte to and `getBytes` encodes each char to.
+`corpus/whole-program/CharsetTableCoders.java` runs them, and a reader and a writer of such
+charsets, and matches Java.
 `Charset.decode(ByteBuffer)`, `encode(CharBuffer)` and `encode(String)` are routed to the same coders
 (`program::CHARSET_CODINGS`), with `REPLACE` for malformed input, so they never throw, as in Java.
 `corpus/whole-program/CharsetCodings.java` runs them on valid and malformed UTF-8, on ISO-8859-1
@@ -497,7 +502,9 @@ text outside the charset, and on `Charset.encode(String)`, and matches Java.
 reason as `PrintStream`: the JDK's decode and encode through `StreamDecoder` and `StreamEncoder`.
 Their constructors check a null charset, decoder or encoder as the JDK's do (`NullPointerException`
 with `charset`, `charset decoder` or `charset encoder`), and `getEncoding` gives the name kept
-when the stream was made, so no dereference of theirs needs a message of its own.
+when the stream was made, so no dereference of theirs needs a message of its own. That name is
+the charset's historical one (`Cp1252` for windows-1252), as the JDK's class of the charset has
+it, which the runtime keeps with each charset (`TranslatedCoders.historicalName`).
 
 - The patched `InputStreamReader` reads into a buffer of 8192 bytes, reading again in one call
   only while the stream has bytes available, and decodes with `new String(bytes, off, len,
@@ -510,9 +517,9 @@ when the stream was made, so no dereference of theirs needs a message of its own
 
 ### What differs from Java
 
-- `InputStreamReader` and `OutputStreamWriter` take UTF-8, US-ASCII, ISO-8859-1, UTF-16BE and
-  UTF-16LE; any other charset (UTF-16 with a byte-order mark among them) throws
-  `UnsupportedOperationException` when the reader or writer is created.
+- `InputStreamReader` and `OutputStreamWriter` take UTF-8, US-ASCII, ISO-8859-1, UTF-16BE,
+  UTF-16LE and the single-byte charsets that the program carries; UTF-16, with its byte-order
+  mark, throws `UnsupportedOperationException` when the reader or writer is created.
 - `InputStreamReader` may ask its stream for a different number of bytes per read than the JDK's,
   which only an `InputStream` subclass that counts its calls can see.
 - `printf` and `format` on a `PrintStream` subclass print the formatted text with one `print`

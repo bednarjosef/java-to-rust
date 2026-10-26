@@ -32,6 +32,8 @@ pub enum Charset {
 /// coders: what each byte decodes to, and what each char encodes to.
 pub struct ByteCharset {
     name: &'static str,
+    /// The name that `getEncoding` of a reader or writer gives (`Cp1252`).
+    historical: &'static str,
     aliases: &'static [&'static str],
     /// The 256 chars of the bytes, in order; U+FFFD where a byte has none.
     decode: &'static str,
@@ -53,12 +55,13 @@ struct Coding {
 impl ByteCharset {
     pub const fn new(
         name: &'static str,
+        historical: &'static str,
         aliases: &'static [&'static str],
         decode: &'static str,
         overrides: &'static [(u16, i16)],
         replacement: u8,
     ) -> ByteCharset {
-        ByteCharset { name, aliases, decode, overrides, replacement, coding: OnceLock::new() }
+        ByteCharset { name, historical, aliases, decode, overrides, replacement, coding: OnceLock::new() }
     }
 
     fn coding(&self) -> &Coding {
@@ -235,6 +238,20 @@ impl Charset {
             Charset::Utf16Be => "UTF-16BE",
             Charset::Utf16Le => "UTF-16LE",
             Charset::Bytes(table) => table.name,
+        }
+    }
+
+    /// The historical name of the charset, which `getEncoding` of an `InputStreamReader` or an
+    /// `OutputStreamWriter` gives (`HistoricallyNamedCharset.historicalName()`).
+    pub fn historical_name(self) -> &'static str {
+        match self {
+            Charset::Utf8 => "UTF8",
+            Charset::UsAscii => "ASCII",
+            Charset::Latin1 => "ISO8859_1",
+            Charset::Utf16 => "UTF-16",
+            Charset::Utf16Be => "UnicodeBigUnmarked",
+            Charset::Utf16Le => "UnicodeLittleUnmarked",
+            Charset::Bytes(table) => table.historical,
         }
     }
 

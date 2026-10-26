@@ -80,6 +80,10 @@ impl<'a> Gen<'a> {
                 let recv = self.charset(&args[0]);
                 Code::atom(format!("{}::from({recv}.display_name())", self.runtime("JString")))
             }
+            CharsetOp::HistoricalName => {
+                let recv = self.charset(&args[0]);
+                Code::atom(format!("{}::from({recv}.historical_name())", self.runtime("JString")))
+            }
             CharsetOp::ToString => {
                 let recv = self.charset(&args[0]);
                 Code::atom(format!("{}::from({recv}.to_string())", self.runtime("JString")))
@@ -121,8 +125,9 @@ impl<'a> Gen<'a> {
                 charset.overrides.iter().map(|(c, b)| format!("({c}, {b})")).collect();
             let decode = jdk_charsets::decode_literal(charset.decode.as_deref().unwrap_or_default());
             self.line(&format!(
-                "{table}::new({}, &[{}], {decode}, &[{}], {}),",
+                "{table}::new({}, {}, &[{}], {decode}, &[{}], {}),",
                 code::rust_string(&charset.name),
+                code::rust_string(&charset.historical),
                 aliases.join(", "),
                 overrides.join(", "),
                 charset.replacement
