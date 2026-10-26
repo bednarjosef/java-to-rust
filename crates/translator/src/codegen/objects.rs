@@ -209,10 +209,11 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
         live[c] = true;
     }
     // A class that only ever types a null reference still needs its struct for the type, and so
-    // does an abstract class without subclasses for its fields (`hierarchy::fields_structs`).
+    // does a class with a fields struct (`hierarchy::fields_structs`) for its enum's `base()`,
+    // even where none of its subclasses has objects either (log4j's `BuiltConfiguration`).
     for t in mentioned(class) {
-        live[t] |= !class.hierarchy.has_subtypes(t)
-            && (class.hierarchy.is_concrete(t) || facts.fields_structs.contains(&t));
+        live[t] |= facts.fields_structs.contains(&t)
+            || !class.hierarchy.has_subtypes(t) && class.hierarchy.is_concrete(t);
     }
     // The lambdas of closure types are closures, not objects.
     for &t in &facts.closure_types {
