@@ -128,6 +128,16 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     .map(String::from);
     let mut used = vec![HashSet::from(taken); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
+    // A class's static initialization is a function of its package's module too
+    // (`statics::init_name`): `LogManager`'s `init_log_manager` beside its static
+    // `initLogManager()`, which is then `init_log_manager_2`.
+    for decl in &class.types {
+        let local = decl.name.strip_prefix(&format!("{}.", decl.package)).unwrap_or(&decl.name);
+        let init = format!("init_{}", snake_case(&local.replace('.', "")));
+        let module = module_used.entry(decl.package.as_str()).or_default();
+        module.insert(format!("{init}_slow"));
+        module.insert(init);
+    }
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());
         module_used.entry(class.types[m.class].package.as_str()).or_default().insert("main".to_string());
