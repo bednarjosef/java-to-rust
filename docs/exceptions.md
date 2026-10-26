@@ -586,7 +586,9 @@ since its code generator can fail on code with errors; the code of a file with a
 a class the code generator failed on, has no names, and its messages are not certain. An error
 in an annotation or an import does not count (an annotation type the program was compiled
 without, such as `org.intellij.lang.annotations.MagicConstant`): javac leaves the annotation out
-of the class file, and a use of what a missing import names is an error of its own. Where the
+of the class file, and a use of what a missing import names is an error of its own. The classes
+of a file with an error count as already erased: javac erases a class's superclasses before the
+class, and their code with errors would fail the classes that extend them too. Where the
 program's class files cannot be compiled at all, a census finds the messages with the JDK's
 names alone: only the code whose message needs a name of the program's class files is
 rejected, with why.

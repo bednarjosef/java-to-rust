@@ -253,6 +253,14 @@ public class BytecodeNames {
                 failed.add(d.getSource().toUri());
             }
         }
+        // Generating a class first erases the types of its superclasses, and the code of one with
+        // errors can fail that: the classes of those files count as erased already, which leaves
+        // the classes that extend them their names.
+        for (Map.Entry<String, ClassSymbol> top : names.topLevel.entrySet()) {
+            if (failed.contains(names.files.get(top.getKey()))) {
+                erased(top.getValue());
+            }
+        }
         int stopped = 0;
         for (Map.Entry<String, ClassSymbol> top : new ArrayList<>(names.topLevel.entrySet())) {
             if (failed.contains(names.files.get(top.getKey()))) {
@@ -271,6 +279,14 @@ public class BytecodeNames {
         }
         names.entries.keySet().removeIf(key -> failed.contains(names.files.get((String) key.get(0))));
         return names.entries;
+    }
+
+    /** Marks class {@code c} and its member classes as erased, which javac then skips. */
+    private static void erased(ClassSymbol c) {
+        c.flags_field |= Flags.TYPE_TRANSLATED;
+        for (Symbol m : c.members().getSymbols(m -> m instanceof ClassSymbol)) {
+            erased((ClassSymbol) m);
+        }
     }
 
     /** Whether {@code root} is the root of a module of the JDK's: its {@code module-info.java} names one. */

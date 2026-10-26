@@ -3270,6 +3270,30 @@ fn a_missing_annotation_leaves_the_names_of_the_class_files_of_its_file() {
 }
 
 #[test]
+fn a_superclass_with_errors_leaves_the_names_of_the_classes_that_extend_it() {
+    // javac's code generator erases the types of `Base` before `Main`'s, and fails on its call
+    // with too few arguments: `Main`'s names do not depend on it.
+    let dir = write_sources(
+        "superclass_errors_names",
+        &[
+            ("p/Base.java", "package p;\npublic class Base {\n    void f(int a, int b) {}\n    void g() { f(); }\n}\n"),
+            (
+                "p/Main.java",
+                "package p;\npublic class Main extends Base {\n    static String name(Main m) { return m.toString(); }\n    public static void main(String[] a) {\n        try {\n            name(null);\n        } catch (NullPointerException e) {\n            System.out.println(e.getMessage());\n        }\n    }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        keep_going: true,
+        ..Default::default()
+    };
+    let rust = java_to_rust::translate_program(&program).expect("Base's error is not reached");
+    assert_contains(&rust, &["Cannot invoke \\\"Object.toString()\\\" because \\\"<parameter1>\\\" is null"]);
+}
+
+#[test]
 fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_census_lists_it() {
     let dir = write_sources(
         "missing_class",
