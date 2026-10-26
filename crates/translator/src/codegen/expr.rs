@@ -696,6 +696,17 @@ impl<'a> Gen<'a> {
         )
     }
 
+    /// Code that never gives a value (a throw), whose Rust type `!` has no methods and implements
+    /// no trait, as Java's value of type `ty`: a block that declares it so, which the code can call
+    /// a method on or cast. A statement's (`void`) stays as it is.
+    pub(super) fn never_of(&mut self, text: String, ty: Type) -> Code {
+        if ty == Type::Void {
+            return Code::never(text);
+        }
+        let ty_text = self.ty_name(ty);
+        Code::atom(format!("{{ let value: {ty_text} = {text}; value }}"))
+    }
+
     pub(super) fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {

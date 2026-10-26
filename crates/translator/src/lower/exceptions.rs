@@ -720,6 +720,23 @@ impl Uses {
                         {
                             self.handle_fields.insert(argument as *const Value);
                         }
+                        // A call of a handle's method that lowering does not follow throws
+                        // (`handle_values::unfollowed`).
+                        if matches!(
+                            owner.as_str(),
+                            "java.lang.invoke.MethodHandles"
+                                | "java.lang.invoke.MethodHandles.Lookup"
+                                | "java.lang.invoke.MethodHandle"
+                        ) {
+                            let unfollowed = super::handle_values::UNFOLLOWED.to_string();
+                            self.classes.insert(unfollowed.clone());
+                            self.instantiated.insert(unfollowed.clone());
+                            self.members.insert((
+                                unfollowed,
+                                "<init>".into(),
+                                "(java.lang.String)void".into(),
+                            ));
+                        }
                         // A lookup of reflection calls the translator's `Method`, `Field` or
                         // `Constructor` (`reflection.rs`).
                         if owner == "java.lang.Class" && !self.handle_fields.contains(&(v as *const Value)) {

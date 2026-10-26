@@ -472,7 +472,9 @@ impl<'a> Gen<'a> {
                 format!("#[allow(unused_assignments)]\n{pad}let mut yielded{index}: Option<_> = None;");
             body = format!("{pad}{declare}\n{body}");
         }
-        Code::atom(format!("{{\n{body}{}}}", "    ".repeat(indent)))
+        let text = format!("{{\n{body}{}}}", "    ".repeat(indent));
+        // A switch that yields nothing, as one that only throws, has the type `!`.
+        if yield_count(cases) > 0 { Code::atom(text) } else { self.never_of(text, ty) }
     }
 
     /// No case falls through and none leaves early: `match`, with `_ => {}` when there is no default.
