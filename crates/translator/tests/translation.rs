@@ -3693,8 +3693,12 @@ fn a_census_gives_the_value_of_a_native_that_the_runtime_lacks_the_type_of_the_c
             "package p;\npublic class Main {\n    static native int level();\n    static native String name();\n    static boolean loaded = Boolean.getBoolean(\"x\");\n    static int size(String s) {\n        return s.length();\n    }\n    public static void main(String[] a) {\n        if (loaded) {\n            int l = level();\n            System.out.println(l >= 0 ? size(name()) : 0);\n        }\n    }\n}\n",
         )],
     );
-    let program =
-        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ends_rejected: true, ..Default::default() };
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
     let rust = census(&program).modules.expect("a translation").one_file();
     assert_contains(
         &rust,
@@ -3716,8 +3720,12 @@ fn a_census_calls_a_native_that_the_runtime_lacks_through_the_interface_it_imple
             "package p;\npublic class Main {\n    interface Management {\n        long total();\n    }\n    static class Impl implements Management {\n        public native long total();\n    }\n    static long count(Management m) {\n        return m.total();\n    }\n    public static void main(String[] a) {\n        System.out.println(a.length > 3 ? count(new Impl()) : 0);\n    }\n}\n",
         )],
     );
-    let program =
-        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ends_rejected: true, ..Default::default() };
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
     let census = census(&program);
     assert_contains(&census.report, &["p.Main.Impl.total"]);
     let rust = census.modules.expect("a translation").one_file();
