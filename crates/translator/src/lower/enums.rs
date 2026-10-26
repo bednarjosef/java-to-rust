@@ -251,8 +251,10 @@ impl<'t> Lowering<'t> {
         receiver: Option<Node<'t>>,
         args: &mut Vec<Expr>,
     ) -> Result<Option<ExprKind>, Error> {
+        // The enum's implicit `values()` and `valueOf(String)`, not static methods of those names
+        // that it declares itself (netty's `HttpStatusClass.valueOf(int)`).
         if let Some(class) = self.enum_index(symbol.owner) {
-            if symbol.is_static && symbol.name == "values" {
+            if symbol.is_static && symbol.name == "values" && symbol.ty.starts_with("()") {
                 let ty = Type::enum_type(&self.types[class].name);
                 // The constants as `Object`s where the enum's arrays are `Object[]`s (`covariant`).
                 let element = self.covariant_array(Type::array(ty)).element();
@@ -264,7 +266,7 @@ impl<'t> Lowering<'t> {
                     .collect();
                 return Ok(Some(ExprKind::ArrayLit(values)));
             }
-            if symbol.is_static && symbol.name == "valueOf" {
+            if symbol.is_static && symbol.name == "valueOf" && symbol.ty.starts_with("(java.lang.String)") {
                 return Ok(Some(ExprKind::Builtin(Builtin::EnumValueOf, std::mem::take(args))));
             }
         }
