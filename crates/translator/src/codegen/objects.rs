@@ -115,29 +115,54 @@ pub(super) fn struct_name(name: &str) -> String {
 const STD_NAMES: [&str; 13] =
     ["Option", "Some", "None", "Result", "Ok", "Err", "String", "Vec", "Box", "Rc", "RefCell", "Cell", "Ref"];
 
-/// The thread-local cell, or the `const`, that holds static field `field` of class `decl`. Two
-/// statics whose names differ only in case (`SEED` and `seed`) would get the same name: the later
-/// of them in the class gets the first number after it that no other static's name has (`SEED_3`
-/// when a field `seed_2` is `SEED_2`).
-pub(super) fn cell_name(decl: &TypeDecl, field: &str) -> String {
-    let (path, local) = modules::split(&decl.name);
-    let upper = |f: &str| format!("{}_{}", local.replace('.', "_"), snake_case(f)).to_uppercase();
-    let bases: Vec<String> = decl.statics.iter().map(|f| upper(&f.name)).collect();
+/// The name of the thread-local cell, or the `const`, that holds each static field of class
+/// `decl` in its module, by the field's name. Two statics whose names differ only in case (`SEED` and `seed`) would get the
+/// same name: the later of them in the class gets the first number after it that no other
+/// static's name has (`SEED_3` when a field `seed_2` is `SEED_2`).
+fn cell_names(decl: &TypeDecl) -> HashMap<String, String> {
+    let (_, local) = modules::split(&decl.name);
+    let bases: Vec<String> = decl.statics.iter().map(|f| cell_base(local, &f.name)).collect();
     let mut used: HashSet<String> = bases.iter().cloned().collect();
-    for (i, f) in decl.statics.iter().enumerate() {
-        let name = if bases[..i].contains(&bases[i]) {
-            let free = (2..).map(|n| format!("{}_{n}", bases[i])).find(|n| !used.contains(n));
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut names = HashMap::new();
+    for (f, base) in decl.statics.iter().zip(&bases) {
+        let name = if !seen.insert(base) {
+            let free = (2..).map(|n| format!("{base}_{n}")).find(|n| !used.contains(n));
             let name = free.expect("a free name");
             used.insert(name.clone());
             name
         } else {
-            bases[i].clone()
+            base.clone()
         };
-        if f.name == field {
-            return path + &name;
+        // The first static of a name is the one a lookup of it finds.
+        names.entry(f.name.clone()).or_insert(name);
+    }
+    names
+}
+
+/// The name of the cell of static `field` of the class named `local` in its module, before any
+/// number that tells it from another's.
+fn cell_base(local: &str, field: &str) -> String {
+    format!("{}_{}", local.replace('.', "_"), snake_case(field)).to_uppercase()
+}
+
+impl Gen<'_> {
+    /// The thread-local cell, or the `const`, that holds static field `field` of class `t`, by its
+    /// path from the module being written (`cell_names`, found once for each class); a name that
+    /// is no static of the class is named as one would be.
+    pub(super) fn cell_name(&self, t: usize, field: &str) -> String {
+        let names = self.cell_names.borrow().get(&t).cloned();
+        let names = names.unwrap_or_else(|| {
+            let names = std::rc::Rc::new(cell_names(&self.class.types[t]));
+            self.cell_names.borrow_mut().insert(t, names.clone());
+            names
+        });
+        let (path, local) = modules::split(&self.class.types[t].name);
+        match names.get(field) {
+            Some(name) => path + name,
+            None => path + &cell_base(local, field),
         }
     }
-    path + &upper(field)
 }
 
 /// The value a field has before its constructor runs: Java's default, or a placeholder that the
@@ -1387,7 +1412,7 @@ impl<'a> Gen<'a> {
     /// A read of the cell of a static, which initializes its class first. A static that starts
     /// empty holds its value once its class is initialized: it is that value, unless `optional`.
     fn static_cell_read(&mut self, class: usize, name: &str, ty: Type, optional: bool) -> Code {
-        let cell = cell_name(&self.class.types[class], name);
+        let cell = self.cell_name(class, name);
         let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
         let read = if !optional && self.facts.placeholder_statics.contains(&(class, name.to_string())) {
             format!("{}({read})", self.runtime("non_null"))
@@ -1824,7 +1849,7 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
-        let cell = cell_name(&self.class.types[*class], name);
+        let cell = self.cell_name(*class, name);
         let init = self.init_call(*class);
         let mut lines = Vec::new();
         match how {
@@ -1942,7 +1967,7 @@ impl<'a> Gen<'a> {
                 Slot::Field { obj, field, plain: false, on_enum, cell, volatile }
             }
             Place::Static { class, name } => {
-                Slot::Static { cell: cell_name(&self.class.types[*class], name), plain: is_cell(ty) }
+                Slot::Static { cell: self.cell_name(*class, name), plain: is_cell(ty) }
             }
             Place::Var(_) => unreachable!("variables are assigned by `assignment`"),
             Place::Index(..) => unreachable!("array elements are assigned by `index_set`"),

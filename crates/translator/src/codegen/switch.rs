@@ -187,7 +187,7 @@ impl<'a> Gen<'a> {
             ExprKind::Str(s) => byte_string(s.as_bytes()),
             ExprKind::Units(units) => byte_string(&super::strings::wtf8_of(units)),
             ExprKind::EnumConstant { class, ordinal } => self.constant_path(*class, *ordinal),
-            ExprKind::Static { class, name } => cell_name(&self.class.types[*class], name),
+            ExprKind::Static { class, name } => self.cell_name(*class, name),
             _ => unreachable!("lowering keeps only constant case labels"),
         }
     }

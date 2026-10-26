@@ -341,6 +341,18 @@ impl<'a> Gen<'a> {
     /// starts the crate root.
     pub(super) fn program(&mut self, live: &[bool], header: String) -> ModuleTree {
         let packages = all_packages(self.class);
+        // The types of each package, and the methods of its types, in index order.
+        let mut members: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
+        for (index, decl) in self.class.types.iter().enumerate() {
+            members.entry(decl.package.as_str()).or_default().0.push(index);
+        }
+        for (index, m) in self.class.methods.iter().enumerate() {
+            members.entry(self.class.types[m.class].package.as_str()).or_default().1.push(index);
+        }
+        self.package_types =
+            members.iter().map(|(p, (types, _))| (p.to_string(), std::rc::Rc::new(types.clone()))).collect();
+        self.package_methods =
+            members.into_iter().map(|(p, (_, methods))| (p.to_string(), std::rc::Rc::new(methods))).collect();
         let mut tree = ModuleTree { header, modules: Vec::new(), footer: ALLOCATOR.to_string() };
         self.module("", Vec::new(), live, &packages, &mut tree.modules);
         tree
@@ -368,23 +380,27 @@ impl<'a> Gen<'a> {
                 items.push((origin, start, named));
             }
         };
-        for (index, decl) in class.types.iter().enumerate() {
-            if live[index] && decl.package == package && !self.only_enums {
+        let types = self.package_types.get(package).cloned().unwrap_or_default();
+        for &index in types.iter() {
+            let decl = &class.types[index];
+            if live[index] && !self.only_enums {
                 let start = self.out.len();
                 self.type_items(index);
                 item(self, Origin::Class(decl.name.clone()), start);
             }
         }
-        for (index, decl) in class.types.iter().enumerate() {
-            if self.wanted.contains(&Need::Enum(index)) && decl.package == package {
+        for &index in types.iter() {
+            let decl = &class.types[index];
+            if self.wanted.contains(&Need::Enum(index)) {
                 let start = self.out.len();
                 self.type_enum_items(index);
                 item(self, Origin::ClassEnum(decl.name.clone()), start);
             }
         }
         if !self.only_enums {
-            for (index, decl) in class.types.iter().enumerate() {
-                if decl.enum_constants.is_some() && decl.package == package {
+            for &index in types.iter() {
+                let decl = &class.types[index];
+                if decl.enum_constants.is_some() {
                     let start = self.out.len();
                     self.enum_items(index);
                     item(self, Origin::Enum(decl.name.clone()), start);
@@ -396,8 +412,10 @@ impl<'a> Gen<'a> {
             let start = self.out.len();
             self.class_monitors();
             item(self, Origin::Monitors, start);
-            for (index, m) in class.methods.iter().enumerate() {
-                if self.emitted_free(index) && class.types[m.class].package == package {
+            let methods = self.package_methods.get(package).cloned().unwrap_or_default();
+            for &index in methods.iter() {
+                let m = &class.methods[index];
+                if self.emitted_free(index) {
                     let start = self.out.len();
                     self.gap();
                     self.method(index);
