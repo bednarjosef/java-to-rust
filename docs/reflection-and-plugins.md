@@ -289,14 +289,17 @@ handles.
   the JDK's is rejected, as it may annotate the classes the runtime has in place of the JDK's),
   each making the annotation from the declared values and the
   defaults, the same annotations of the table's methods, fields and constructors
-  (`getAnnotation`, `isAnnotationPresent`, `getAnnotations`, `getDeclaredAnnotations`), a
-  `switch` over the slot of the member (both in `lower/annotation_values.rs`; a declaration's
-  annotation is made once, so every call gives the same object, as in Java; a member may be an
-  annotation, and one that is an array of annotations or of arrays is rejected),
+  (`getAnnotation`, `isAnnotationPresent`, `getAnnotations`, `getDeclaredAnnotations`, and
+  `getParameterAnnotations`, an array per parameter), a `switch` over the slot of the member
+  (both in `lower/annotation_values.rs`; a declaration's annotation is made once, so every call
+  gives the same object, as in Java; a member may be an annotation or a constant, and one that
+  is an array of annotations or of arrays is rejected; the annotations that are not kept at run
+  time, such as `@Override`, `@Serial` and `@SuppressWarnings`, are never among them),
   the annotation objects that the JDK's
   `AnnotationParser.annotationForMap` makes (javac's `AnnotationProxyMaker`), which are the
   patched `AnnotationInvocationHandler` itself (`lower/annotation_objects.rs`; a member's call
-  is `TranslatedAnnotations.member`, which answers it as the proxy does), the three annotations that
+  is `TranslatedAnnotations.member`, which answers it as the proxy does, and `instanceof` of an
+  annotation type tests the type that the object holds), the three annotations that
   `AbstractProcessor` reads of its processor's class (`@SupportedOptions`,
   `@SupportedAnnotationTypes`, `@SupportedSourceVersion`): its overlay reads them through the
   native `TranslatedProcessorAnnotations.values0`, which the translator writes from the program's

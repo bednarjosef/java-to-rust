@@ -3187,7 +3187,7 @@ impl<'a> Gen<'a> {
 pub(super) type Needs = BTreeSet<Need>;
 
 /// The value of an object of class `c` where the program creates none, so the code never runs.
-fn absent(g: &Gen, c: usize) -> String {
+pub(super) fn absent(g: &Gen, c: usize) -> String {
     format!("unreachable!(\"no object of {} is created\")", g.class.types[c].name)
 }
 

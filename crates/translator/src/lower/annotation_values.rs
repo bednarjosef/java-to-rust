@@ -30,6 +30,19 @@ use super::*;
 use crate::program::LookupKind;
 
 const RETENTION: &str = "java.lang.annotation.Retention";
+
+/// The JDK's annotation types that are not kept at run time (`@Retention(SOURCE)` or `CLASS`), so
+/// that reflection never finds them, whether or not their declarations are in the program.
+const NOT_AT_RUN_TIME: [&str; 8] = [
+    "java.io.Serial",
+    "java.lang.Override",
+    "java.lang.SuppressWarnings",
+    "java.lang.annotation.Native",
+    "jdk.internal.javac.NoPreview",
+    "jdk.internal.javac.ParticipatesInPreview",
+    "jdk.internal.javac.PreviewFeature",
+    "jdk.internal.reflect.CallerSensitiveAdapter",
+];
 const INHERITED: &str = "java.lang.annotation.Inherited";
 const ANNOTATION: &str = "java.lang.annotation.Annotation";
 const TARGET: &str = "java.lang.annotation.Target";
@@ -51,6 +64,7 @@ pub fn is_member_annotation_call(owner: &str, name: &str) -> bool {
             | "isAnnotationPresent"
             | "getAnnotations"
             | "getDeclaredAnnotations"
+            | "getParameterAnnotations"
     )
 }
 
@@ -289,7 +303,19 @@ impl<'t> Lowering<'t> {
     /// The value `value` as a `ty`, the type of a member or of its array's elements: a constant
     /// widened to it as javac does (`7` for a `long`).
     fn element_value(&self, value: Node<'t>, ty: Type) -> Result<Expr, Error> {
-        let lowered = self.expr(value)?;
+        // A constant field (`elementType = Appender.ELEMENT_TYPE`) is its value, as the class file
+        // has it: the field itself may be one that no code reads, which the translation leaves out.
+        let lowered = match value.symbol().filter(|s| s.kind == "FIELD" && s.is_static) {
+            Some(symbol)
+                if matches!(value.kind(), "IDENTIFIER" | "MEMBER_SELECT")
+                    && let Some(text) = symbol.constant =>
+            {
+                let constant_ty = self.signature_type(value, symbol.ty)?;
+                let kind = self.constant_literal(value, constant_ty, text)?;
+                self.synth(kind, value.pos(), constant_ty)
+            }
+            _ => self.expr(value)?,
+        };
         if (ty.is_numeric() || ty == Type::Boolean) && lowered.ty != ty {
             let pos = lowered.pos;
             return Ok(self.synth(ExprKind::Cast(ty, Box::new(lowered)), pos, ty));
@@ -317,6 +343,8 @@ impl<'t> Lowering<'t> {
             "java.lang.reflect.Constructor" => (LookupKind::Constructor, "CONSTRUCTOR"),
             _ => return Ok(None),
         };
+        // `getParameterAnnotations()`: an array of each parameter's annotations.
+        let parameters = symbol.name == "getParameterAnnotations";
         let what = format!("`{}.{}`", class.rsplit('.').next().unwrap_or_default(), symbol.name);
         let make = &crate::program::ANNOTATION_VALUES[0];
         let (Some(make), Some(annotation_type)) = (
@@ -356,6 +384,27 @@ impl<'t> Lowering<'t> {
                 continue;
             }
             seen.insert(key.clone(), None);
+            if parameters {
+                let element = ty.element();
+                let mut arrays = Vec::new();
+                for (i, param) in decl.list("parameters").enumerate() {
+                    let holder = format!("{key} parameter {i}");
+                    let mut made = Vec::new();
+                    for (name, at) in self.declared_annotations(node, param, "PARAMETER", None, &what)? {
+                        let decl = self.annotation_types[name];
+                        let object =
+                            self.annotation_object(node, make, &holder, name, decl, at, annotation_type)?;
+                        made.push(self.convert(object, element.element()));
+                    }
+                    arrays.push(self.synth(ExprKind::ArrayLit(made), pos, element));
+                }
+                if arrays.iter().all(|a| matches!(&a.kind, ExprKind::ArrayLit(made) if made.is_empty())) {
+                    continue;
+                }
+                seen.insert(key, Some(cases.len()));
+                cases.push((vec![slot], self.synth(ExprKind::ArrayLit(arrays), pos, ty)));
+                continue;
+            }
             let mut made = Vec::new();
             for (name, at) in self.declared_annotations(node, decl, target, wanted, &what)? {
                 let decl = self.annotation_types[name];
@@ -375,15 +424,23 @@ impl<'t> Lowering<'t> {
             seen.insert(key, Some(cases.len()));
             cases.push((vec![slot], value));
         }
-        let none = match symbol.name {
-            "isAnnotationPresent" => ExprKind::Bool(false),
-            "getAnnotation" | "getDeclaredAnnotation" => ExprKind::Null,
-            _ => ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]),
-        };
-        let none = self.synth(none, pos, ty);
         let member = self.expr(receiver)?;
         let local = self.fresh_name("member");
         let var = self.synth(ExprKind::Var(local.clone()), pos, member.ty);
+        let none = match symbol.name {
+            "isAnnotationPresent" => ExprKind::Bool(false),
+            "getAnnotation" | "getDeclaredAnnotation" => ExprKind::Null,
+            // An empty array for each parameter, which the member's parameter types count.
+            "getParameterAnnotations" => {
+                let types =
+                    ExprKind::Field { object: Box::new(self.copy(&var)), name: "parameterTypes".to_string() };
+                let types = self.synth(types, pos, Type::array(Type::JavaClass));
+                let count = self.synth(ExprKind::Length(Box::new(types)), pos, Type::Int);
+                ExprKind::NewArray(vec![count, self.synth(ExprKind::Int(0), pos, Type::Int)])
+            }
+            _ => ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]),
+        };
+        let none = self.synth(none, pos, ty);
         let field = ExprKind::Field { object: Box::new(var), name: "slot".to_string() };
         let mut switch: Vec<Case> = cases
             .into_iter()
@@ -423,7 +480,7 @@ impl<'t> Lowering<'t> {
         let mut out: Vec<(&'t str, Node<'t>)> = Vec::new();
         for at in modifiers.list("annotations") {
             let name = at.child("annotationType")?.java_type();
-            if wanted.is_some_and(|w| w != name) {
+            if wanted.is_some_and(|w| w != name) || NOT_AT_RUN_TIME.contains(&name) {
                 continue;
             }
             let Some(&annotation) = self.annotation_types.get(name) else {

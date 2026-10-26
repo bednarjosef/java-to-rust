@@ -570,7 +570,7 @@ impl<'a> Gen<'a> {
                     if self.is_object_method(target) {
                         return self.identity_call(receiver, target, args);
                     }
-                    if self.homes[target] == Home::Nowhere {
+                    if self.runs_nowhere(receiver, target) {
                         return self.no_object_runs(receiver, target, index);
                     }
                     self.method_call(receiver, target, args)
@@ -588,7 +588,22 @@ impl<'a> Gen<'a> {
     /// receiver's class has no objects, as a census leaves a class whose constructors cannot run
     /// (JNA's `W32WindowUtils`), so the receiver is null, which Java's call throws for. Its code
     /// was never emitted.
-    fn no_object_runs(&mut self, receiver: &'a Expr, target: usize, index: usize) -> Code {
+    /// Whether method `target` never runs on `receiver`: no object runs it, or it takes the handle
+    /// of another class's objects than the receiver's. A method is emitted on one class when only
+    /// that class's objects run it (`hierarchy::home`), so the program creates no object of the
+    /// receiver's class.
+    pub(super) fn runs_nowhere(&self, receiver: &Expr, target: usize) -> bool {
+        match self.homes[target] {
+            Home::Nowhere => true,
+            Home::Class(c) => {
+                !self.facts.self_methods.contains(&target)
+                    && self.struct_class(receiver).is_some_and(|s| s != c)
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn no_object_runs(&mut self, receiver: &'a Expr, target: usize, index: usize) -> Code {
         let m = &self.class.methods[target];
         let message = format!("no object runs {}.{}", self.class.types[m.class].name, m.name);
         let checked = self.receiver_ref(receiver);

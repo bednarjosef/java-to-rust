@@ -37,7 +37,7 @@ impl<'a> Gen<'a> {
                     }
                     None => {
                         let code = self.returned(value);
-                        self.ok(code.text)
+                        self.ok(last_expression(value, code.text))
                     }
                 };
                 self.line(&text);
@@ -69,7 +69,7 @@ impl<'a> Gen<'a> {
         let conflicts = self.stmt_conflicts(stmt);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         let code = self.returned(value);
-        let text = self.ok(code.text);
+        let text = self.ok(last_expression(value, code.text));
         self.line(&text);
         self.guarded = outer;
     }
@@ -93,13 +93,13 @@ impl<'a> Gen<'a> {
             let conflicts = self.stmt_conflicts(last);
             let outer = std::mem::replace(&mut self.guarded, conflicts);
             let code = self.value(folded, ty);
-            self.line(&code.text);
+            self.line(&last_expression(folded, code.text));
             self.guarded = outer;
             return;
         }
         self.stmts(init, false);
         let code = if self.optional_yield { self.optional(value) } else { self.value(value, ty) };
-        self.line(&code.text);
+        self.line(&last_expression(value, code.text));
     }
 
     /// The body of an `if` or a loop. In tail position (`tail`), a branch that is the value of
@@ -163,4 +163,21 @@ impl<'a> Gen<'a> {
         }
         self.line("}");
     }
+}
+
+/// The text of `value` as the last expression of a block: in parentheses where it starts with
+/// a `match`, an `if` or a block and goes on past it (`match .. { .. } || b`), which Rust would
+/// otherwise take for a statement followed by a closure or an operator's operand.
+fn last_expression(value: &Expr, text: String) -> String {
+    let block_first = ["match ", "if ", "loop ", "{", "unsafe {", "'"].iter().any(|k| text.starts_with(k));
+    let goes_on = matches!(
+        value.kind,
+        ExprKind::Binary(..)
+            | ExprKind::Cast(..)
+            | ExprKind::MethodCall { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index(..)
+            | ExprKind::InstanceOf { .. }
+    );
+    if block_first && goes_on { format!("({text})") } else { text }
 }
