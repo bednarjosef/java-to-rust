@@ -276,13 +276,50 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         let mut from_program: Vec<Bits> = vec![Bits::default(); n];
         let mut callers: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
+        // The calls that may run several methods (the implementations of a virtual call), by
+        // their set of methods: what escapes the methods of a set is kept as one union, grown as
+        // theirs grow, so that a call reads one set rather than each of its methods. What escapes
+        // a method only grows, so the union of what has escaped each is what escapes them now.
+        let mut set_of: HashMap<&[usize], usize> = HashMap::new();
+        let mut set_callers: Vec<Vec<usize>> = Vec::new();
+        let mut sets_with: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let call_sets: Vec<Vec<usize>> = points
+            .iter()
+            .enumerate()
+            .map(|(m, ps)| {
+                ps.iter()
+                    .map(|p| match &p.raise {
+                        Raise::Call(called) if called.len() > 1 => {
+                            let set = *set_of.entry(&called[..]).or_insert_with(|| {
+                                for &c in called {
+                                    sets_with[c].push(set_callers.len());
+                                }
+                                set_callers.push(Vec::new());
+                                set_callers.len() - 1
+                            });
+                            if set_callers[set].last() != Some(&m) {
+                                set_callers[set].push(m);
+                            }
+                            set
+                        }
+                        _ => usize::MAX,
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut set_escapes: Vec<Bits> = vec![Bits::default(); set_callers.len()];
+        let mut set_from_program: Vec<Bits> = vec![Bits::default(); set_callers.len()];
+        let mut called_by = vec![usize::MAX; n];
         for (m, ps) in points.iter().enumerate() {
-            for p in ps {
+            for (i, p) in ps.iter().enumerate() {
                 if let Raise::Call(called) = &p.raise {
                     for &c in called {
-                        if callers[c].last() != Some(&m) {
-                            callers[c].push(m);
+                        if called_by[c] != m {
+                            called_by[c] = m;
                             callees[m].push(c);
+                        }
+                        if call_sets[m][i] == usize::MAX && callers[c].last() != Some(&m) {
+                            callers[c].push(m);
                         }
                     }
                 }
@@ -298,9 +335,17 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 let caught = &masks[caught_by[m][i]];
                 out.union_except(&own[m][i], caught);
                 if let Raise::Call(called) = &p.raise {
-                    for &c in called {
-                        out.union_except(&escapes[c], caught);
-                        program.union_except(&from_program[c], caught);
+                    match call_sets[m][i] {
+                        usize::MAX => {
+                            for &c in called {
+                                out.union_except(&escapes[c], caught);
+                                program.union_except(&from_program[c], caught);
+                            }
+                        }
+                        set => {
+                            out.union_except(&set_escapes[set], caught);
+                            program.union_except(&set_from_program[set], caught);
+                        }
                     }
                 }
             }
@@ -327,6 +372,17 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
             }
             if out != escapes[m] || program != from_program[m] {
+                for &set in &sets_with[m] {
+                    let grew = set_escapes[set].union_grew(&out);
+                    if set_from_program[set].union_grew(&program) || grew {
+                        for &c in &set_callers[set] {
+                            if !queued[c] {
+                                queued[c] = true;
+                                queue.push_back(c);
+                            }
+                        }
+                    }
+                }
                 escapes[m] = out;
                 from_program[m] = program;
                 for &c in &callers[m] {
@@ -389,7 +445,30 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         (0..class.methods.len()).map(|m| h.group_members(m).first().copied().unwrap_or(m)).collect();
     let mut seen: Vec<Seen> = vec![Seen::default(); class.methods.len()];
     let mut queued = vec![true; class.methods.len()];
-    let mut queue: VecDeque<usize> = (0..class.methods.len()).collect();
+    // Callers first, as what is observed goes from callers to callees: the components of the
+    // calls, whose order is callees first, reversed.
+    let mut called_by = vec![usize::MAX; class.methods.len()];
+    let callees: Vec<Vec<usize>> = points
+        .iter()
+        .enumerate()
+        .map(|(m, ps)| {
+            let mut out = Vec::new();
+            for p in ps {
+                let Raise::Call(called) = &p.raise else { continue };
+                for &c in called {
+                    if called_by[c] != m {
+                        called_by[c] = m;
+                        out.push(c);
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+    let mut queue: VecDeque<usize> = closure::components(&callees).1.into_iter().rev().flatten().collect();
+    // The groups that a call has grown already: a virtual call's implementations share one.
+    let mut grown_at = vec![0; class.methods.len()];
+    let mut visit = 0;
     let grow = |seen: &mut Seen, more: &Seen| {
         let before = seen.all;
         let grew = seen.types.union_grew(&more.types);
@@ -401,6 +480,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         let mut grown = Vec::new();
         for p in &points[m] {
             let Raise::Call(callees) = &p.raise else { continue };
+            visit += 1;
             let mut here = if bugs_only[m] { Seen::default() } else { seen[at[m]].clone() };
             for f in &p.frames {
                 for &t in &f.catches {
@@ -409,6 +489,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 here.all |= f.finally;
             }
             for &c in callees {
+                if grown_at[at[c]] == visit {
+                    continue;
+                }
+                grown_at[at[c]] = visit;
                 if grow(&mut seen[at[c]], &here) {
                     grown.push(c);
                 }
