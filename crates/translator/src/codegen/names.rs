@@ -142,6 +142,7 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
         used[m.class].insert("main".to_string());
         module_used.entry(class.types[m.class].package.as_str()).or_default().insert("main".to_string());
     }
+    let mut constructors: Vec<HashSet<String>> = vec![HashSet::new(); class.types.len()];
     let mut group_names: HashMap<usize, String> = HashMap::new();
     let mut names: Vec<String> = Vec::with_capacity(class.methods.len());
     // The methods of each name, in index order: the overloads of a method are among them.
@@ -159,7 +160,6 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             names.push(name.clone());
             continue;
         }
-        // Constructors are named inside their class's `impl`, so they need not be unique.
         let root = h.root(m.class);
         let overloads = if instance {
             let mut groups: Vec<usize> = by_name[m.name.as_str()]
@@ -201,7 +201,11 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             }
         }
         names.push(if m.is_ctor {
-            base
+            // Constructors are named inside their class's `impl`, so they need only be unique
+            // among their class's: overloads whose parameters come to the same names
+            // (`StringArray(String[], String)` and `StringArray(Object[], String)` of JNA, as a
+            // `String[]` passed on as an `Object[]` is held as one) are numbered after the first.
+            unique(base, &mut constructors[m.class])
         } else if m.is_static {
             // Static methods are functions of their package's module, shared by its classes.
             let module = module_used.entry(class.types[m.class].package.as_str()).or_default();
