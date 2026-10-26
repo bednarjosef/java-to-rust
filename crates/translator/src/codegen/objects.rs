@@ -1379,12 +1379,17 @@ impl<'a> Gen<'a> {
         let obj = self.object(object);
         // A class without objects, such as an abstract class none of whose subclasses the program
         // creates, is an empty enum, which may have no struct with the field: the read never runs.
+        // It still has the field's type, for code that calls a method on it (`.map(..)`).
         if let Some(t) = self.enum_of(object)
             && self.enum_variants(t).is_empty()
         {
-            let name = struct_name(&self.class.types[t].name);
-            let never = format!("<_ as std::borrow::Borrow<{name}>>::borrow(&object)");
-            return Code::atom(format!("{{ let object = {obj}; match {never}.view() {{}} }}"));
+            let nullable = self.facts.field_nullable(object.ty, name);
+            let field_ty = self.field_ty_name(ty, nullable);
+            let class = struct_name(&self.class.types[t].name);
+            let never = format!("<_ as std::borrow::Borrow<{class}>>::borrow(&object)");
+            return Code::atom(format!(
+                "{{ let object = {obj}; let value: {field_ty} = match {never}.view() {{}}; value }}"
+            ));
         }
         if self.celled_object(object) {
             let borrow = match self.enum_of(object) {
