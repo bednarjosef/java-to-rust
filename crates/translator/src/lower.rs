@@ -485,7 +485,9 @@ struct Lowering<'t> {
     /// declarations: an annotation does nothing when the program runs, but a value of one is not
     /// translated, and `isAnnotationPresent` reads them (`annotation_presence`).
     annotation_types: std::collections::HashMap<String, Node<'t>>,
-    /// In a whole program, the annotation types that are the library's (the JDK's).
+    /// In a whole program, the annotation types that are the JDK's, which may annotate the
+    /// classes that the runtime has in place of the JDK's: another library's annotate only
+    /// classes that are translated, as the program's do.
     library_annotations: std::collections::HashSet<String>,
     /// What each method asks about its caller (see `callers`).
     callers: callers::Callers,

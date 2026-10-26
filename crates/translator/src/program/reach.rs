@@ -821,7 +821,7 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
 }
 
 /// Whether the class with qualified name `class` is one of the JDK's.
-fn in_jdk(class: &str) -> bool {
+pub fn in_jdk(class: &str) -> bool {
     ["java", "javax", "jdk", "sun", "com.sun"]
         .iter()
         .any(|root| class.strip_prefix(root).is_some_and(|rest| rest.starts_with('.')))
