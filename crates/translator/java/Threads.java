@@ -601,16 +601,24 @@ class ClassLoader {
         return this == SYSTEM || this == PLATFORM ? held(this.name, name) : null;
     }
 
-    // Java opens the stream of the URL that `getResource` finds; only a loader of the program
-    // that overrides `getResource` or `findResource` can give one, whose stream the translation
-    // does not have.
+    // Java's opens the stream of the URL that `getResource` finds, and gives null where that
+    // fails: a file of the class path's (`Module.openFile`). Only a loader of the program that
+    // overrides `getResource` or `findResource` can give another URL, whose stream the
+    // translation does not have.
     public java.io.InputStream getResourceAsStream(String name) {
         java.net.URL url = getResource(name);
-        if (url != null) {
+        if (url == null) {
+            return null;
+        }
+        if (!url.getProtocol().equals("file")) {
             throw new UnsupportedOperationException("the stream of " + url
                     + ": code that is not in the translation cannot run");
         }
-        return null;
+        try {
+            return Module.openFile(url);
+        } catch (java.io.IOException e) {
+            return null;
+        }
     }
 
     public static java.net.URL getSystemResource(String name) {
@@ -621,10 +629,18 @@ class ClassLoader {
         return SYSTEM.getResourceAsStream(name);
     }
 
-    // The resource `name` that the loader `loader` (`bootstrap`, `platform` or `app`) finds, which
-    // is not in the translation and throws; null for a name that it does not find, as in Java.
+    // The resource `name` that the loader `loader` (`bootstrap`, `platform` or `app`) finds, or
+    // null for a name that it does not find, as in Java. A file of a directory of the class path
+    // is read from there, as Java reads it; any other that the translator found in a root, a
+    // module's resource or a class file, is not in the translation and throws.
     private static java.net.URL held(String loader, String name) {
         String holder = holder0(loader, name);
+        if (loader.equals("app") && (holder == null || holder.equals("the class path"))) {
+            java.util.ArrayList<java.net.URL> found = Module.classPathResources(name, false);
+            if (!found.isEmpty()) {
+                return found.get(0);
+            }
+        }
         if (holder != null) {
             throw new UnsupportedOperationException("the resource " + name + " of " + holder
                     + ": code that is not in the translation cannot run");

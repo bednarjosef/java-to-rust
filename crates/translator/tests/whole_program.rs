@@ -392,11 +392,12 @@ fn a_program_using_collections_has_only_reachable_units_attributed() {
     assert!(elapsed.as_secs() < 120, "the translation took {elapsed:?}:\n{stderr}");
 }
 
-/// A translated program has no resources: `Class.getResourceAsStream` ends it, naming the
-/// resource, as `Character.getName` does when it reads `uniName.dat`, a data file of the JDK that
-/// is generated when the JDK is built and is not in its sources.
+/// A resource of a class of the JDK is not in the translation: `Character.getName` reads
+/// `uniName.dat`, a data file of the JDK that is generated when the JDK is built and is not in
+/// its sources, and the program ends there, naming it (`TranslatedModules.classResource`). The
+/// program's own resources are read from its roots (`corpus/whole-program/ClassPathResources`).
 #[test]
-fn reading_a_resource_ends_the_program() {
+fn a_resource_of_the_jdk_ends_the_program() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
         return;
@@ -406,15 +407,8 @@ fn reading_a_resource_ends_the_program() {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&sources).unwrap();
     let java = "public class Main {
-    public static void main(String[] args) throws Exception {
-        java.io.InputStream in = Main.class.getResourceAsStream(\"table.dat\");
-        if (in != null) {
-            in.close();
-        }
-        String image = args.length > 3 ? \"icon.png\" : null;
-        if (args.length > 5) {
-            System.out.println(Main.class.getResourceAsStream(image) == null);
-        }
+    public static void main(String[] args) {
+        System.out.println(Character.getName('A'));
     }
 }
 ";
@@ -430,13 +424,7 @@ fn reading_a_resource_ends_the_program() {
         .unwrap();
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
     let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
-    // A name that may be null is printed as Java prints it.
-    for wanted in [
-        "is not part of the translated program",
-        "\"table.dat\"",
-        "String::from(\"Main\")",
-        ".unwrap_or(java::wtf8(\"null\"))",
-    ] {
+    for wanted in ["is not part of the translated program", "\"uniName.dat\""] {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
 }

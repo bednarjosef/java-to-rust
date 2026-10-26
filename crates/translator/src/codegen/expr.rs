@@ -804,13 +804,8 @@ impl<'a> Gen<'a> {
                 self.never_of(throw, ty)
             }
             Builtin::MissingResource => {
-                let class = self.value(&args[0], Type::String).text;
-                // A name that may be null is written as Java would print it.
-                let name = if self.nullable(&args[1]) {
-                    format!("{}.unwrap_or({}(\"null\"))", self.option_ref(&args[1]), self.runtime("wtf8"))
-                } else {
-                    self.value(&args[1], Type::String).text
-                };
+                let (class, name) =
+                    (self.value(&args[0], Type::String).text, self.value(&args[1], Type::String).text);
                 let message =
                     "java.lang.InternalError: the resource {} of {} is not part of the translated program";
                 let format = format!("format!({message:?}, {name}, {class})");

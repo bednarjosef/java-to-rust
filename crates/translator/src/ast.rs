@@ -1020,11 +1020,10 @@ pub enum Builtin {
     /// (`AtomicIntegerFieldUpdater` and its kin) throws for a null object (`lower::handles`),
     /// through `java::catching`. It never completes.
     UpdaterRefused,
-    /// `[class, name]`: `Class.getResourceAsStream(name)` and `getResource(name)`. A translated
-    /// program has no resources (the JDK's data files are not in its source), so the program ends
-    /// with an `InternalError` that nothing catches. `class` is the name of the class, a string
-    /// literal. `Class.getProtectionDomain()` is one too, of the name `(its protection domain)`.
-    /// A class file is not one: it is `null` (`lower::classes`).
+    /// `[class, what]`: `Class.getProtectionDomain()`, the code source that the class was loaded
+    /// from, which is not in the translation: the program ends with an `InternalError` that
+    /// nothing catches, naming `what` (`(its protection domain)`) of the class, whose name
+    /// `class` is (`lower::classes`).
     MissingResource,
     /// `[]`: runs the static initialization of the class, as its first use would, for
     /// `Class.forName` with a name that the code spells out (`lower::by_name`).

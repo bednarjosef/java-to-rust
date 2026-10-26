@@ -1,5 +1,7 @@
 package java.lang;
 
+import java.io.File;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 
@@ -22,9 +24,11 @@ import java.util.LinkedHashMap;
  *
  * <p>What would need code or data that is not in the translation throws
  * {@code UnsupportedOperationException} when it runs, saying so: a module's descriptor and
- * annotations, defining modules, native access and final field mutation. A resource that a
- * root holds is not in the translation either, so {@link #getResourceAsStream} of one throws, and
- * of any other name gives null, as Java does.
+ * annotations, defining modules, native access and final field mutation. The unnamed module's
+ * resources are read from the directories of the class path, its roots, when the program runs
+ * ({@link #classPathResources}), as Java reads them; a named module's resource is not in the
+ * translation, so {@link #getResourceAsStream} of one throws, and of any other name gives null,
+ * as Java does.
  */
 // Not an `AnnotatedElement`: a module's annotations are not in the translation.
 @Edit(find = "implements AnnotatedElement", replace = "")
@@ -569,6 +573,13 @@ class Module {
         if (name.startsWith("/")) {
             name = name.substring(1);
         }
+        if (!isNamed()) {
+            // The unnamed module's are the class path's, as in Java.
+            ArrayList<URL> found = classPathResources(name, false);
+            if (!found.isEmpty()) {
+                return openFile(found.get(0));
+            }
+        }
         if (holds0(isNamed() ? this.name : "", name)) {
             throw notInTranslation("the resource " + name + " of " + this);
         }
@@ -590,6 +601,89 @@ class Module {
         }
         return null;
     }
+
+    /**
+     * The URLs of the file or directory {@code name} in the directories of the class path, the
+     * unnamed module's roots, where Java's {@code URLClassPath} finds it: the first directory's
+     * that has it, or with {@code all} each one's.
+     */
+    @Add
+    static ArrayList<URL> classPathResources(String name, boolean all) {
+        ArrayList<URL> found = new ArrayList<>();
+        String path = classPath0();
+        for (String dir : path.isEmpty() ? new String[0] : path.split("\n")) {
+            URL url = inDirectory(dir, name);
+            if (url != null) {
+                found.add(url);
+                if (!all) {
+                    break;
+                }
+            }
+        }
+        return found;
+    }
+
+    /**
+     * The URL of the file or directory {@code name} in the directory {@code dir}, or null where it
+     * is not there: a name that leaves the directory, with {@code ..} or as an absolute path, is
+     * not there, as in Java's {@code URLClassPath}.
+     */
+    @Add
+    private static URL inDirectory(String dir, String name) {
+        try {
+            if (name.startsWith("/")) {
+                return null;
+            }
+            File file = new File(dir, name);
+            if (name.contains("..") && !file.getCanonicalPath().startsWith(new File(dir).getCanonicalPath())) {
+                return null;
+            }
+            if (!file.exists()) {
+                return null;
+            }
+            // A directory's URL ends in `/` only where its name does, as Java's does.
+            String url = file.toURI().toString();
+            if (!name.isEmpty() && !name.endsWith("/") && url.endsWith("/")) {
+                url = url.substring(0, url.length() - 1);
+            }
+            return new URL(url);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The stream of the {@code file:} URL {@code url}, as Java's {@code FileURLConnection} gives
+     * it: the file's bytes, or a directory's names sorted, a line each. (Not through
+     * {@code url.openStream()}, which would reach every protocol's connection, jar files with
+     * their signatures among them.)
+     */
+    @Add
+    static InputStream openFile(URL url) throws IOException {
+        File file;
+        try {
+            file = new File(url.toURI());
+        } catch (java.net.URISyntaxException | IllegalArgumentException e) {
+            throw new java.io.FileNotFoundException(url.toString());
+        }
+        if (file.isDirectory()) {
+            String[] names = file.list();
+            if (names == null) {
+                throw new java.io.FileNotFoundException(file.getPath());
+            }
+            java.util.Arrays.sort(names);
+            StringBuilder listing = new StringBuilder();
+            for (String name : names) {
+                listing.append(name).append('\n');
+            }
+            return new java.io.ByteArrayInputStream(listing.toString().getBytes());
+        }
+        return new java.io.BufferedInputStream(new java.io.FileInputStream(file));
+    }
+
+    /** The directories of the class path, the unnamed module's roots, a line each. */
+    @Add
+    private static native String classPath0();
 
     /** The names of the translation's named modules, in the order of their roots. */
     @Add

@@ -75,11 +75,12 @@ None of this exists yet.
   Dagger) generate or change code at compile time. Running javac with the project's processors
   and translating what it produces covers them, because the translator reads javac's own
   attributed trees. Processors that are loaded at run time are a different matter (see limits).
-- **Resources.** Files on the class path (configuration, templates, data, images) read with
-  `Class.getResourceAsStream` end the program today (a class file is `null`: the translation
-  has none), and a class loader's lookup that finds one in a root throws (one that finds none is
-  `null` or empty, as in Java). A project needs them embedded into the binary
-  (`include_bytes!`) or installed next to it, chosen per project.
+- **Resources.** Files on the class path (configuration, templates, data, images) are read
+  from the source roots where the translator found them, when the program runs, as Java reads a
+  class path directory: the binary runs where those roots are. A project whose resources are in
+  a jar gives them as a root of their own, unpacked (as the Minecraft survey does). A binary to
+  run elsewhere needs them embedded (`include_bytes!`) or installed next to it, which is not
+  done. A named module's resources are not read: a lookup that finds one throws.
 - **Several entry points.** A project with several `main` classes becomes one binary each,
   sharing the crates. A library without a `main` needs its public API as the starting points
   of reachability, and keeps its signatures as written (the "program, not a library" relaxation

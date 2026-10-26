@@ -617,7 +617,7 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 // resources its class loaders find (`lower/modules.rs`), the providers of a
                 // service (`lower/reflection.rs`) and a processor's annotations
                 // (`lower/processors.rs`).
-                | ("java.lang.Module", "modules0" | "moduleOf0" | "declares0" | "holds0")
+                | ("java.lang.Module", "modules0" | "moduleOf0" | "declares0" | "holds0" | "classPath0")
                 | ("java.lang.ClassLoader", "holder0")
                 | ("java.util.ServiceLoader", "providers0" | "create0")
                 | ("javax.annotation.processing.TranslatedProcessorAnnotations", "values0")

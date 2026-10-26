@@ -180,6 +180,10 @@ pub struct Contents {
     pub resources: Vec<String>,
     /// The class files that Java would have of its sources: `a/b/C.class` for `a/b/C.java`.
     pub classes: Vec<String>,
+    /// Its roots, as absolute paths: the directory of a named module, and those of the class
+    /// path for the unnamed module, in their order. Its resources are read from them at run
+    /// time, as Java reads the class path's directories (`ClassLoader.classPath0`).
+    pub roots: Vec<PathBuf>,
 }
 
 /// The contents of the modules among `roots`, in their order, then of the unnamed module if a
@@ -193,11 +197,13 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
         let source = std::fs::read_to_string(root.join("module-info.java")).ok();
         let declared = source.as_deref().and_then(full_declaration);
         let (packages, resources, classes) = root_contents(root);
+        let absolute = std::path::absolute(root).unwrap_or_else(|_| root.clone());
         match declared {
             Some(mut module) => {
                 module.packages = packages;
                 module.resources = resources;
                 module.classes = classes;
+                module.roots = vec![absolute];
                 named.push(module);
             }
             None => {
@@ -205,6 +211,7 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
                 unnamed.packages.extend(packages);
                 unnamed.resources.extend(resources);
                 unnamed.classes.extend(classes);
+                unnamed.roots.push(absolute);
             }
         }
     }

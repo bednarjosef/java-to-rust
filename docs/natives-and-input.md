@@ -352,17 +352,20 @@ A translated program is closed: it knows all its classes. So:
 - `MethodHandles.lookup().ensureInitialized(c)` initializes `c`'s class. Reachability takes as
   initialized the classes whose literals reachable code passes to it, directly or through one
   method's parameter (`program/reach/initialize.rs`, `Reach::ensured`).
-- `Class.getResourceAsStream` and `getResource` end the program with an `InternalError` naming
-  the resource (`Builtin::MissingResource`): data files such as `uniName.dat` (`Character.getName`),
-  `currency.data` and the ICU normalizer data are generated when the JDK is built and are not in
-  its sources. A class file, a name that certainly ends in `.class` (a literal, or a
-  concatenation whose last operand is one), is `null` instead, a resource that is not there: the
-  translation has no class files, since its classes were translated from their source.
+- `Class.getResourceAsStream` and `getResource` are Java's in a translation with the JDK's
+  sources (`TranslatedModules.classResource`, `MODULE_CALLS`): the name is taken from the
+  class's package unless it starts with `/`, and the class's loader looks it up. A class file is
+  `null`, a resource that is not there: the translation has no class files, since its classes
+  were translated from their source. A resource of a class of the JDK's own modules ends the
+  program with an `InternalError` naming it: data files such as `uniName.dat`
+  (`Character.getName`), `currency.data` and the ICU normalizer data are generated when the JDK
+  is built and are not in its sources. Without the JDK's sources, every such call but one of a
+  class file ends the program so (`Builtin::MissingResource`).
 - A class loader's `getResource`, `getResources` and `getResourceAsStream` (and the
   `getSystem…` forms) look the name up among the roots' files and their sources' class files as
-  Java's loaders would: `null` or an empty enumeration when none has it, and an
-  `UnsupportedOperationException` when one does (see
-  [reflection-and-plugins.md](reflection-and-plugins.md)).
+  Java's loaders would. The class path's files and directories are read from the roots when the
+  program runs; a named module's resource, or a class file, throws
+  `UnsupportedOperationException` (see [reflection-and-plugins.md](reflection-and-plugins.md)).
 
 ### Strings and characters in the JDK's code
 

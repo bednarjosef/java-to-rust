@@ -12,7 +12,9 @@
 //! - `moduleOf0(pn)`: the named module with the package `pn`, or null;
 //! - `declares0(name)`: what the named module declares and holds, a line of words each, as the
 //!   comment of `declares0` says;
-//! - `holds0(module, name)`: whether the root of the module (`""` the unnamed one) has the file.
+//! - `holds0(module, name)`: whether the root of the module (`""` the unnamed one) has the file;
+//! - `classPath0()`: the directories of the class path, the unnamed module's roots, a line each,
+//!   where `Module.classPathResources` reads the class path's resources when the program runs.
 //!
 //! The translator's `ClassLoader` (`java/Threads.java`) has one such native, `holder0(loader,
 //! name)`: the module that holds the resource `name` that the loader (`bootstrap`, `platform` or
@@ -181,6 +183,10 @@ impl<'t> Lowering<'t> {
                     .collect();
                 switch(var(0), cases, null())
             }
+            ("classPath0", 0) => {
+                let roots = reach.modules.iter().filter(|m| m.name.is_empty()).flat_map(|m| &m.roots);
+                string(&roots.map(|r| r.to_string_lossy()).collect::<Vec<_>>().join("\n"))
+            }
             _ => {
                 let class = symbol.owner.rsplit('.').next().unwrap_or_default();
                 return unsupported(node, &format!("`{class}.{}`", symbol.name));
@@ -243,6 +249,7 @@ mod tests {
             packages: vec!["".into(), "p".into()],
             resources: vec![],
             classes: vec![],
+            roots: vec![],
         };
         assert_eq!(
             declared_lines(&m),
