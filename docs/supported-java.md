@@ -404,7 +404,9 @@ Design: [natives-and-input.md](natives-and-input.md).
   program, and `Class.getModule()`, `Module` and `ModuleLayer.boot()` answer from the declared
   modules (`program/modules.rs`). Defining a new module layer throws.
 - Each package becomes a Rust module (`com.example.util` is `com::example::util`; the JDK's
-  `java.util` is `java_::util`). `--crate DIR` writes a file per package, `-o FILE` one file.
+  `java.util` is `java_::util`). `--crate DIR` writes a file per package, `-o FILE` one file, and
+  `--crate DIR --crates N` a workspace of a header crate and `N` body crates that build in
+  parallel ([several-crates.md](several-crates.md)).
 - `--census` translates past every rejection, stubbing each rejected method, and reports what is
   rejected and why, grouped by message, separately for program and library code
   (`program/census.rs`). It lists apart, as code that translates, the code that throws
@@ -413,8 +415,8 @@ Design: [natives-and-input.md](natives-and-input.md).
   from outside the translated sources (`program/survey.rs`). Both have `-json` forms.
   `scripts/jdk-coverage.py` runs the census over the target programs and writes
   [jdk-coverage.md](jdk-coverage.md).
-- `--modules-json FILE` writes the module tree and what each item names, the input for planning
-  a split into crates ([several-crates.md](several-crates.md)).
+- `--modules-json FILE` writes the module tree and what each item names, the dependency graph
+  that shows which groups of classes could be split off ([several-crates.md](several-crates.md)).
 
 ## Idiomatic output
 
