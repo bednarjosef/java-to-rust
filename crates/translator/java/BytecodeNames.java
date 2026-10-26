@@ -336,6 +336,11 @@ public class BytecodeNames {
      * local: a boxed local is unboxed there, which the translation looks the local up by.
      */
     private final Map<JCTree, long[]> prefixed = new IdentityHashMap<>();
+    /**
+     * Where the first argument of each call starts, as attributed: lowering replaces an argument
+     * that is a method reference or a lambda, whose new tree has no start of its own.
+     */
+    private final Map<JCMethodInvocation, long[]> firstArguments = new IdentityHashMap<>();
     /** The members of each class as lowered, which the code generator discards once done. */
     private final Map<JCClassDecl, com.sun.tools.javac.util.List<JCTree>> lowered = new HashMap<>();
     /** The entries: class, line, column, kind and name, to the text or null. */
@@ -415,6 +420,12 @@ public class BytecodeNames {
                                 int start = TreeInfo.getStartPos(tree);
                                 if (start >= 0) {
                                     starts.put(tree, position(unit, start));
+                                }
+                                if (tree instanceof JCMethodInvocation call && !call.args.isEmpty()) {
+                                    int first = TreeInfo.getStartPos(call.args.head);
+                                    if (first >= 0) {
+                                        firstArguments.put(call, position(unit, first));
+                                    }
                                 }
                                 if (tree instanceof JCUnary u
                                         && (u.getTag() == JCTree.Tag.PREINC || u.getTag() == JCTree.Tag.PREDEC)
@@ -756,6 +767,9 @@ public class BytecodeNames {
                         // without one are apart by the class of the receiver too:
                         // `stream@#java.util.List`.
                         long[] first = t.args.isEmpty() ? null : starts.get(written(t.args.head));
+                        if (first == null && !t.args.isEmpty()) {
+                            first = firstArguments.get(t);
+                        }
                         if (t.args.isEmpty() || first != null) {
                             String where = first == null ? "" : first[0] + ":" + first[1];
                             entry(at, "call", m.name + "@" + where, member(m, site));

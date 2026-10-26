@@ -564,8 +564,9 @@ javac writes as its value), a local or a call, an enum's `ordinal()` among them 
 no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
 writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
 the update starts, which `BytecodeNames` notes), no message for a pattern switch's
-`Objects.requireNonNull`, and an assigned value followed back to its source
-(`(s = a).next` fails `because "a" is null`). A call is named as javac wrote it where the
+`Objects.requireNonNull`, and an assigned value followed back to its source, whatever it is
+stored in (`(s = a).next` fails `because "a" is null`, `(this.f = g()).next` `because the return
+value of "Main.g()" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
 (`program::MODULE_CALLS`), an enum's `toString()` as the enum's, `c.cast(x)` (a block that
 checks `x`) as `java.lang.Class.cast(Object)`, `subSequence` (lowered as `substring`) as
@@ -577,7 +578,9 @@ reference's class holds and its call may first keep in a local, is never null th
 one name that start at the same place, as calls of a chain do
 (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told apart by where their
 first argument starts, which `BytecodeNames` adds to the name (`stream@3:30`, `stream@`), and
-calls without arguments by the class of their receiver too (`stream@#java.util.List`).
+calls without arguments by the class of their receiver too (`stream@#java.util.List`). The start
+of a first argument is taken before lowering, as lowering replaces a method reference or a lambda
+(`codec.xmap(A::of, A::to).xmap(B::new, B::value)`).
 
 **Libraries, local names and errors.** The classes that the program's code uses from its
 library roots compile with it (`--sourcepath-root`), and get names too, as their code is
@@ -598,6 +601,10 @@ class, and their code with errors would fail the classes that extend them too. W
 program's class files cannot be compiled at all, a census finds the messages with the JDK's
 names alone: only the code whose message needs a name of the program's class files is
 rejected, with why.
+
+The initializers of instance fields, which the translation keeps with the fields and runs in each
+constructor, get their messages as code of the class's first constructor, as in the class file
+every constructor that calls `super(...)` has a copy of them at the same lines.
 
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
 its locals (`because "original" is null`), by their Java names where lowering renamed them
