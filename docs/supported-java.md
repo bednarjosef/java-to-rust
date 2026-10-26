@@ -325,8 +325,17 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   supported yet: making a type that mentions one throws `UnsupportedOperationException`.
   `getGenericInterfaces`, `getTypeParameters` and the generic types of methods and fields are
   still rejected.
-- `Class.forName` of a constant name is that class; of a computed name, a `switch` over the
-  classes code can find by name. An unknown name throws `ClassNotFoundException`.
+- `Class.forName` of a constant name is that class, and of an array's descriptor
+  (`"[La.B;"`) that array's class; of a computed name, a `switch` over the classes code can find
+  by name. An unknown name throws `ClassNotFoundException`.
+- **Handles**: `Unsafe` offsets, field updaters and `VarHandle`s of fields and array elements,
+  and the `MethodHandle`s of the handle factories, are the accesses they name, followed through
+  constants, locals, fields and calls ([multi-threading.md](multi-threading.md), 5.3). A call of
+  a lookup's or a `MethodHandle`'s method that the translation does not follow (a handle of any
+  other method, `invokeWithArguments`, combinators such as `filterArguments`) throws
+  `UnsupportedOperationException` where it runs, as a JDK that lacks the method would fail, and
+  code that falls back on a failed lookup, as netty does, takes its fallback; a census lists each
+  such call. A handle used as a value any other way is rejected.
 - Reflection over the program's classes (`getMethod`, `getField`, `Method.invoke`,
   `Constructor.newInstance`, ...) goes through a table of members built into the translation for
   the names that reachable lookups can find (`lower/reflection.rs`). `ServiceLoader` finds the
