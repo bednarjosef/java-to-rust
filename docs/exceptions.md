@@ -642,7 +642,8 @@ chain do (`b.append('0').append(1)`), are told apart by their first argument
 the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`) and its methods that do (a null format of
 `String.format`, which `Formatter.parse` asks for its length, a null `CharSequence` of
-`contentEquals`, a null prefix or suffix of `startsWith` and `endsWith`), a static by the class
+`contentEquals`, a null prefix or suffix of `startsWith` and `endsWith`), a method of a null
+`Charset` (`name()`) as the call names it, in the JDK's code too, a static by the class
 that declares it, a call through `super` by the superclass (javac's `binaryQualifier` of the type
 of `super`), an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as

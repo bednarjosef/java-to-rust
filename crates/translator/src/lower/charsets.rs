@@ -86,6 +86,10 @@ impl<'t> Lowering<'t> {
         if node.kind() == "NEW_CLASS" {
             return unsupported(node, "this charset");
         }
+        // A method of a charset that may be null is named in its message as javac names it.
+        if node.kind() == "METHOD_INVOCATION" {
+            self.note_call(node, &symbol, node.child("methodSelect")?);
+        }
         if let Some(op) = standard_class(symbol.owner).filter(|_| node.kind() != "METHOD_INVOCATION") {
             return Ok(ExprKind::Builtin(Builtin::Charset(op), Vec::new()));
         }
