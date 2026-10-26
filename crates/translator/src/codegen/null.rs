@@ -44,6 +44,11 @@ impl<'a> Gen<'a> {
         {
             return self.nullable(value);
         }
+        // A copy of a `String[]` as an `Object[]` or back is null where the array is, which a
+        // narrowed variable is not (see `array_conversion`).
+        if let ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) = &e.kind {
+            return self.nullable(&args[0]);
+        }
         // So is an assignment of a value that is not null to a variable that may be (see
         // `Gen::expr_of`): its value is the assigned one.
         if let ExprKind::Assign { op: None, target: Place::Var(target), value } = &e.kind
