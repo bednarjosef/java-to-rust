@@ -181,7 +181,7 @@ impl<'a> Gen<'a> {
         }
         if ty == Type::Float {
             // `f += d` on a double rounds once, after the addition.
-            if value.ty == Type::Double {
+            if value.ty.unboxed() == Type::Double {
                 return None;
             }
             return Some(format!("{name} {compound} {}", self.value(value, ty).text));
@@ -208,7 +208,7 @@ impl<'a> Gen<'a> {
             _ => {}
         }
         // Computed in the promoted type, then narrowed.
-        let result = crate::types::binary_type(op, ty, value.ty).expect("checked");
+        let result = crate::types::binary_type(op, ty, value.ty.unboxed()).expect("checked");
         let current = Operand { code: Code::atom(name), ty };
         let right = self.operand(value);
         let code = self.binary(op, current, right, result, id);
