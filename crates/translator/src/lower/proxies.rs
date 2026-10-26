@@ -57,11 +57,15 @@ impl<'t> Lowering<'t> {
         let ret = self.ty(node, symbol.ty.rsplit(')').next().unwrap_or_default())?;
         Ok(Some(match symbol.name {
             "interfaces0" => {
+                // Where the program holds a `Class[][]` as an `Object[]` (see `covariant`), each
+                // list is made as the program makes a `Class[]` and becomes an `Object`.
+                let row = match ret.element() {
+                    row @ Type::Array(_) => row,
+                    _ => self.ty(node, "java.lang.Class<?>[]")?,
+                };
                 let lists = proxies
                     .iter()
-                    .map(|(_, interfaces, _)| {
-                        array(interfaces.iter().map(|&i| literal(i)).collect(), ret.element())
-                    })
+                    .map(|(_, interfaces, _)| array(interfaces.iter().map(|&i| literal(i)).collect(), row))
                     .collect();
                 array(lists, ret).kind
             }

@@ -45,9 +45,9 @@
 //! throw), and a `MethodHandle` read before arguments that do something must be one that can be read
 //! again after them.
 //!
-//! A call of a lookup's or a `MethodHandle`'s method that lowering does not follow (a handle of any
-//! other method, a call such as `unreflect` or `invokeWithArguments`, or arguments that it cannot
-//! tell or that may fail to make a handle) evaluates its receiver and arguments and then throws an
+//! A call of a lookup's, a `MethodHandle`'s or a `MethodType`'s method that lowering does not
+//! follow (a handle of any other method, a call such as `unreflect`, `invokeWithArguments` or
+//! `insertParameterTypes`, or arguments that it cannot tell or that may fail to make a handle) evaluates its receiver and arguments and then throws an
 //! `UnsupportedOperationException` that says so (`unfollowed`). The code sees a JDK whose lookup
 //! fails, which netty expects of some and catches, going without that handle. A census lists
 //! each such call (`program::census`, by `UNFOLLOWED_MESSAGE`). Anything else is
@@ -924,9 +924,13 @@ impl<'t> Lowering<'t> {
             _ => false,
         };
         // The other methods of the lookups and of `MethodHandle` that make or call a method's
-        // handle (`unreflect`, `asType`, `invokeWithArguments`), which lowering does not follow.
+        // handle (`unreflect`, `asType`, `invokeWithArguments`), which lowering does not follow,
+        // and every other method of `MethodType`, whose value is a token
+        // (`insertParameterTypes`, `parameterCount`, as `HBShaper` of `java.desktop` builds the
+        // type of an upcall).
         let returns = erased(lambdas::signature(symbol.ty).1);
         let makes = followed
+            || symbol.owner == METHOD_TYPE
             || matches!(symbol.owner, METHOD_HANDLES | LOOKUP | METHOD_HANDLE)
                 && (is_handle_type(returns) || symbol.name.starts_with("invoke"));
         if !makes {
