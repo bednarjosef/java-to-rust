@@ -395,6 +395,17 @@ impl<'t> Lowering<'t> {
         if right.ty == number && extends_number(&left) {
             return (self.convert(left, number), right);
         }
+        // A class that implements `CharSequence`, which `interfaces` leaves out, compared with a
+        // `CharSequence` is one (netty's `AsciiString.compareTo`, `this == string`).
+        let char_sequence = Type::class(CHAR_SEQUENCE);
+        let implements =
+            |e: &Expr| self.class_of(e.ty).is_some_and(|c| self.is_char_sequence(c).unwrap_or(false));
+        if left.ty == char_sequence && right.ty != char_sequence && implements(&right) {
+            return (left, self.convert(right, char_sequence));
+        }
+        if right.ty == char_sequence && left.ty != char_sequence && implements(&left) {
+            return (self.convert(left, char_sequence), right);
+        }
         let (Some(a), Some(b)) = (self.class_of(left.ty), self.class_of(right.ty)) else {
             return (left, right);
         };
