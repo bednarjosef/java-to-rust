@@ -742,9 +742,6 @@ impl Unit {
     }
 }
 
-/// Stamps on the positions of the code of each class the unit it is in (`Pos::unit`): those of
-/// the methods, of the expressions in them and of the fields' initializers. `units` is the unit
-/// of each type, `None` for the types that lowering provides.
 /// Prints the assumptions of the translation (`ast::Note`) to standard error, each at its file
 /// (`files`, by unit), line and column.
 pub(crate) fn print_notes(class: &crate::ast::Class, files: &[String]) {
@@ -754,8 +751,12 @@ pub(crate) fn print_notes(class: &crate::ast::Class, files: &[String]) {
     }
 }
 
+/// Stamps on the positions of the code of each class the unit it is in (`Pos::unit`): those of
+/// the methods, of the statements and expressions in them (those of switch expressions too) and
+/// of the fields' initializers. `units` is the unit of each type, `None` for the types that
+/// lowering provides. It can stamp code again: what it stamps depends on the classes alone.
 pub(crate) fn stamp_units(class: &mut crate::ast::Class, units: &[Option<usize>]) {
-    use crate::ast::{rewrite_expr, rewrite_stmt};
+    use crate::ast::{ExprKind, rewrite_expr, rewrite_stmt};
     let unit_of = |t: usize| units.get(t).copied().flatten().and_then(|u| u32::try_from(u).ok());
     for note in &mut class.notes {
         note.pos.unit = note.method.and_then(|m| unit_of(class.methods[m].class));
@@ -763,7 +764,15 @@ pub(crate) fn stamp_units(class: &mut crate::ast::Class, units: &[Option<usize>]
     for method in &mut class.methods {
         let unit = unit_of(method.class);
         method.pos.unit = unit;
-        method.body.iter_mut().for_each(|s| rewrite_stmt(s, &mut |x| x.pos.unit = unit));
+        for s in &mut method.body {
+            stamp_statements(s, unit);
+            rewrite_stmt(s, &mut |x| {
+                x.pos.unit = unit;
+                if let ExprKind::Switch { cases, .. } = &mut x.kind {
+                    cases.iter_mut().flat_map(|c| &mut c.body).for_each(|s| stamp_statements(s, unit));
+                }
+            });
+        }
     }
     for (t, decl) in class.types.iter_mut().enumerate() {
         let unit = unit_of(t);
@@ -773,6 +782,44 @@ pub(crate) fn stamp_units(class: &mut crate::ast::Class, units: &[Option<usize>]
                 rewrite_expr(init, &mut |x| x.pos.unit = unit);
             }
         }
+    }
+}
+
+/// Stamps `unit` on the positions of statement `s` and of the statements in it, not those of
+/// their expressions: a local's declaration, a `return`, a `catch` clause.
+fn stamp_statements(s: &mut crate::ast::Stmt, unit: Option<u32>) {
+    use crate::ast::Stmt;
+    let each = |stmts: &mut [Stmt]| stmts.iter_mut().for_each(|s| stamp_statements(s, unit));
+    match s {
+        Stmt::Local { pos, .. } | Stmt::Return(_, pos) => pos.unit = unit,
+        Stmt::Block(stmts) => each(stmts),
+        Stmt::If { then, otherwise, .. } => {
+            stamp_statements(then, unit);
+            if let Some(o) = otherwise {
+                stamp_statements(o, unit);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::Labeled { body, .. } => stamp_statements(body, unit),
+        Stmt::For { init, body, .. } => {
+            each(init);
+            stamp_statements(body, unit);
+        }
+        Stmt::Switch { cases, .. } => cases.iter_mut().for_each(|c| each(&mut c.body)),
+        Stmt::Try { body, catches, finally } => {
+            each(body);
+            for catch in catches {
+                catch.pos.unit = unit;
+                each(&mut catch.body);
+            }
+            if let Some(finally) = finally {
+                each(finally);
+            }
+        }
+        Stmt::Expr(_) | Stmt::Break | Stmt::Continue | Stmt::BreakLabel(_) | Stmt::ContinueLabel(_) => {}
+        Stmt::Yield(_) | Stmt::Throw(_) => {}
     }
 }
 

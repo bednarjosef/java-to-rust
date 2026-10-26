@@ -3202,6 +3202,43 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
 }
 
 #[test]
+fn a_census_stubs_only_the_code_of_the_file_with_the_rejection() {
+    // The generator rejects the local `tasks` of `A.drain` at line 4, column 9, where `B.fine`
+    // declares a local and `Main.main` makes a call too.
+    let dir = write_sources(
+        "census_one_file",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(A.drain(a.length > 5) != null);\n        B.fine();\n    }\n}\n",
+            ),
+            (
+                "p/A.java",
+                "package p;\nclass A {\n    static Object drain(boolean fail) {\n        Object tasks;\n        try {\n            if (!fail) {\n                tasks = new Object();\n            } else {\n                throw new IllegalStateException(\"no\");\n            }\n        } catch (IllegalStateException e) {\n            tasks = e;\n        }\n        return tasks;\n    }\n}\n",
+            ),
+            (
+                "p/B.java",
+                "package p;\nclass B {\n    static void fine() {\n        Object o = \"b\";\n        System.out.println(o);\n    }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let census = census(&program);
+    assert_eq!(census.json["totals"]["program"]["rejected"], 1);
+    let rust = census.modules.expect("a translation").one_file();
+    assert_contains(
+        &rust,
+        &["java::not_translated(\"p.A.drain: a local of type `Object` declared without a value"],
+    );
+    assert_lacks(&rust, &["java::not_translated(\"p.B.fine", "java::not_translated(\"p.Main.main"]);
+}
+
+#[test]
 fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
     let dir = write_sources(
         "census_keep_going",
