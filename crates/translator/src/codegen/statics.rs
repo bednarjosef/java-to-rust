@@ -60,7 +60,11 @@ impl<'a> Gen<'a> {
         if self.module_types().any(|t| t.statics.iter().any(|f| f.constant)) {
             self.gap();
         }
-        for (decl, f) in self.module_types().flat_map(|t| t.statics.iter().map(move |f| (t, f))) {
+        for (t, f) in self
+            .module_type_indexes()
+            .into_iter()
+            .flat_map(|t| class.types[t].statics.iter().map(move |f| (t, f)))
+        {
             if !f.constant {
                 continue;
             }
@@ -71,7 +75,7 @@ impl<'a> Gen<'a> {
                 (_, Some(init)) => (self.ty_name(f.ty), self.value(init, f.ty).text),
                 (_, None) => unreachable!("a constant has a value"),
             };
-            let cell = cell_name(decl, &f.name);
+            let cell = self.cell_name(t, &f.name);
             self.line(&format!("{}const {cell}: {ty} = {value};", self.vis()));
         }
         let here: Vec<usize> = self.module_type_indexes();
@@ -159,7 +163,7 @@ impl<'a> Gen<'a> {
             Some(e) if !self.facts.eager_init.contains(&t) => self.field_value(e, f.ty, stored),
             _ => self.placeholder(f.ty, stored),
         };
-        let cell = cell_name(&self.class.types[t], &f.name);
+        let cell = self.cell_name(t, &f.name);
         let ty = self.field_ty_name(f.ty, stored);
         let constant = init == "None"
             || init == "java::JString::new()"
@@ -217,7 +221,7 @@ impl<'a> Gen<'a> {
     pub(super) fn init_fast_path(&mut self, t: usize, name: &str, ret: &str) {
         let decl = &self.class.types[t];
         let started = if crate::lower::rewritten_clinit(decl) {
-            format!("{}.get() == 1", cell_name(decl, crate::lower::STATE))
+            format!("{}.get() == 1", self.cell_name(t, crate::lower::STATE))
         } else if self.facts.process_statics(t) {
             format!("{}.done()", flag(&decl.name))
         } else {
@@ -280,7 +284,7 @@ impl<'a> Gen<'a> {
         if !field.constant {
             return None;
         }
-        let cell = cell_name(&self.class.types[class], name);
+        let cell = self.cell_name(class, name);
         Some(Code::atom(if ty == Type::String { self.string_literal(&cell) } else { cell }))
     }
 }

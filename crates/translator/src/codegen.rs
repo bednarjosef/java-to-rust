@@ -211,6 +211,9 @@ fn generate_with(
         fn_names,
         static_fn_names,
         variant_names: Default::default(),
+        cell_names: Default::default(),
+        package_types: HashMap::new(),
+        package_methods: HashMap::new(),
         reps: Default::default(),
         variant_lists: Default::default(),
         checked_value_ofs: Default::default(),
@@ -358,6 +361,12 @@ struct Gen<'a> {
     static_fn_names: HashSet<String>,
     /// The names of the variants of the enum of each type (see `dispatch::variant`), once made.
     variant_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashMap<usize, String>>>>,
+    /// The names of the cells of each type's statics, by field (see `objects::cell_names`), once
+    /// made.
+    cell_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashMap<String, String>>>>,
+    /// The types of each package, and the methods of its types, in index order (`Gen::program`).
+    package_types: HashMap<String, std::rc::Rc<Vec<usize>>>,
+    package_methods: HashMap<String, std::rc::Rc<Vec<usize>>>,
     /// How the values of each type are represented, and the variants of its enum, once found.
     reps: std::cell::RefCell<HashMap<usize, hierarchy::Rep>>,
     variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<Vec<usize>>>>,

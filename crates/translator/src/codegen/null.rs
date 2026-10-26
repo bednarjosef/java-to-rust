@@ -211,7 +211,7 @@ impl<'a> Gen<'a> {
                     format!("{}.{test}()", self.object_place(other))
                 }
                 ExprKind::Static { class, name } if self.init_call(*class).is_none() => {
-                    let cell = cell_name(&self.class.types[*class], name);
+                    let cell = self.cell_name(*class, name);
                     format!("{cell}.with_borrow(Option::{test})")
                 }
                 _ if matches!(other.ty, Type::Class(..) | Type::Array(_)) => {
