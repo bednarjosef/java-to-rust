@@ -4,9 +4,9 @@
 //! here, from the declarations alone.
 
 use super::*;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::{Arc, Mutex};
 
 /// A hash of type and method indices, which need no protection from chosen keys: the default
 /// hash took a tenth of a translation of javac, in `declared` and `implementations`.
@@ -31,10 +31,11 @@ impl Hasher for IndexHasher {
 
 type IndexMap<K, V> = HashMap<K, V, BuildHasherDefault<IndexHasher>>;
 
-/// The supertypes, subtypes and overrides of the program's types and methods.
 /// The targets of each override group and type asked for (`Hierarchy::targets`).
-type Targets = IndexMap<(usize, usize), std::rc::Rc<[usize]>>;
+type Targets = IndexMap<(usize, usize), Arc<[usize]>>;
 
+/// The supertypes, subtypes and overrides of the program's types and methods. The answers it
+/// keeps are behind locks, so that analyses can ask on several threads at once.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Hierarchy {
     /// Direct subtypes of each type: classes extending it, interfaces extending it, classes
@@ -65,14 +66,14 @@ pub struct Hierarchy {
     declared: IndexMap<(usize, usize), Vec<usize>>,
     /// The answers of `implementation` so far, by group id and class: the analyses and the
     /// generator ask the same ones many times, once for every concrete class under a type.
-    implementations: RefCell<IndexMap<(usize, usize), Option<usize>>>,
+    implementations: Mutex<IndexMap<(usize, usize), Option<usize>>>,
     /// `concretes` of each type asked for: a type such as `Object` has thousands, which the
     /// analyses ask for at each call on one.
     #[serde(skip)]
-    concretes: RefCell<IndexMap<usize, std::rc::Rc<[usize]>>>,
+    concretes: Mutex<IndexMap<usize, Arc<[usize]>>>,
     /// `targets` of each override group and type asked for.
     #[serde(skip)]
-    targets: RefCell<Targets>,
+    targets: Mutex<Targets>,
     /// For each type, one bit per type that it is a subtype of (itself included), `words` words
     /// a type.
     supertype_bits: Vec<u64>,
@@ -168,9 +169,9 @@ impl Hierarchy {
             groups,
             by_class,
             declared,
-            implementations: RefCell::default(),
-            concretes: RefCell::default(),
-            targets: RefCell::default(),
+            implementations: Mutex::default(),
+            concretes: Mutex::default(),
+            targets: Mutex::default(),
             supertype_bits,
             words,
             names,
@@ -232,14 +233,14 @@ impl Hierarchy {
     }
 
     /// `concretes`, shared.
-    pub fn concretes_of(&self, t: usize) -> std::rc::Rc<[usize]> {
-        if let Some(found) = self.concretes.borrow().get(&t) {
+    pub fn concretes_of(&self, t: usize) -> Arc<[usize]> {
+        if let Some(found) = self.concretes.lock().unwrap().get(&t) {
             return found.clone();
         }
         let mut out: Vec<usize> = self.subtree(t).into_iter().filter(|&c| self.concrete[c]).collect();
         out.sort_unstable();
-        let out: std::rc::Rc<[usize]> = out.into();
-        self.concretes.borrow_mut().insert(t, out.clone());
+        let out: Arc<[usize]> = out.into();
+        self.concretes.lock().unwrap().insert(t, out.clone());
         out
     }
 
@@ -295,8 +296,8 @@ impl Hierarchy {
     /// (`program/census.rs`).
     pub fn make_concrete(&mut self, m: usize) {
         self.method_abstract[m] = false;
-        self.implementations.get_mut().clear();
-        self.targets.get_mut().clear();
+        self.implementations.get_mut().unwrap().clear();
+        self.targets.get_mut().unwrap().clear();
     }
 
     /// The implementation an object of concrete class `c` runs for a call resolved to `m`: the
@@ -304,11 +305,11 @@ impl Hierarchy {
     /// method of one of its interfaces. `None` when there is none in the program.
     pub fn implementation(&self, m: usize, c: usize) -> Option<usize> {
         let id = self.group_ids[m];
-        if let Some(&found) = self.implementations.borrow().get(&(id, c)) {
+        if let Some(&found) = self.implementations.lock().unwrap().get(&(id, c)) {
             return found;
         }
         let found = self.find_implementation(id, c);
-        self.implementations.borrow_mut().insert((id, c), found);
+        self.implementations.lock().unwrap().insert((id, c), found);
         found
     }
 
@@ -346,11 +347,11 @@ impl Hierarchy {
     /// The implementations that a call resolved to `m` on a receiver of static type `t` may run.
     pub fn targets(&self, m: usize, t: usize) -> Vec<usize> {
         let key = (self.group_ids[m], t);
-        if let Some(found) = self.targets.borrow().get(&key) {
+        if let Some(found) = self.targets.lock().unwrap().get(&key) {
             return found.to_vec();
         }
         let out = self.find_targets(m, t);
-        self.targets.borrow_mut().insert(key, out.as_slice().into());
+        self.targets.lock().unwrap().insert(key, out.as_slice().into());
         out
     }
 

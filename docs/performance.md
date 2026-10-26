@@ -315,6 +315,34 @@ and the translations and census reports of the whole-program corpus are byte for
 `a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round` (`tests/translation.rs`)
 has a round for each kind; its first two rounds run none of the steps moved after the checks.
 
+**Steps of the analyses alongside each other.** A census cannot take fewer rounds without
+changing what it finds. Each round stubs what the first check to reject code finds in the
+program as the rounds before left it, and a stub changes the facts of the rest of the program: a
+stubbed constructor can leave a field null, and then dereferences elsewhere need the messages
+they did not need before. So the errors that a later check, the messages or the generator find
+in the same round, even in code the stubs do not touch, need not be those that the next round
+finds; and every check reads facts that the steps before it find, so none can move ahead of
+another. What a round can do is find its facts sooner. The steps that read none of each other's
+facts run at once, on threads of their own (`analysis/alongside.rs`): from the start of a round,
+alongside the representation and the checks, the ranges, fixed fields, statics, early reads and
+ASCII strings, which read the code and the ranges alone, and the objects on the stack, which the
+census takes once the messages of `NullPointerException`s pass; once the representation and the
+pattern variables are checked, nullness and then the borrowed parameters, alongside the object
+values and the checks after them. Each step's result is taken where the step ran before, so a
+round finds the same facts and stops at the same error or panic (a panic carries its place in
+the translator to the thread that takes it), and the result of a step that a check before it
+ends the round without is dropped. The type hierarchy keeps its answers behind locks, and the
+translator allocates from one arena of glibc's, as with one thread: with an arena per thread,
+javac's census took a third more memory. A round that a check ends gains nothing; one that gets
+past the checks no longer waits for these steps, which on the Minecraft server took about 75 s
+of each such round of about 390 s (ranges 16 s, early reads 11 s, nullness 18 s, borrowing
+10 s, objects on the stack 19 s, and the ASCII strings, untimed then). On javac's census from
+its checkpoint, a round of the analyses goes from 5.9 to 6.2 s to 4.4 to 4.8 s, and the peak
+memory from 0.50 to 0.51 or 0.52 GB.
+`a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another`
+(`tests/translation.rs`) compares a census of five rounds, the generator's among them, with the
+steps run alongside each other and one after another.
+
 **Generator rounds that write only what is new.** The enums of class types get the items the
 code asks for (conversions, dispatch, bodies of methods), which only writing the code finds, so
 the generator (`codegen::generate_all`) writes the whole program, then writes the enum items

@@ -232,6 +232,18 @@ thread_local! {
     static PANIC_PLACE: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
 }
 
+/// Where in the translator the last panic of this thread happened, taken: for a panic that
+/// another thread goes on with (`panic_carried`).
+pub fn panic_place() -> Option<String> {
+    PANIC_PLACE.with(|p| p.take())
+}
+
+/// Makes `place` where the last panic of this thread happened: one of another thread, which this
+/// one goes on with (`std::panic::resume_unwind`, which does not run the hook).
+pub fn panic_carried(place: Option<String>) {
+    PANIC_PLACE.with(|p| p.set(place));
+}
+
 /// Makes panics quiet, as rejections in a census are: each is reported with the rest, not
 /// printed, with the place in the translator where it happened (`panic_message`).
 pub fn quiet_panics() {

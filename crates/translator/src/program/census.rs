@@ -392,16 +392,14 @@ fn analyse(
         &unresolved_calls,
         &|class| {
             let tolerated = tolerated.borrow();
-            let mut facts = crate::timings::phase("census: analyses", || {
-                let mut represented = represented.borrow_mut();
-                let found = represented.get_or_insert_with(|| analysis::represented(class));
-                analysis::analyze_from(class, &tolerated, found)
+            let mut analysed = crate::timings::phase("census: analyses", || {
+                analysis::analyze_from(class, &tolerated, &mut represented.borrow_mut())
             })?;
             // Each message that is not certain stubs its code, as a translation rejects it. The
-            // objects on the stack, which take long to find and which the messages do not read,
-            // are found once the messages pass.
-            names.messages(class, &mut facts)?;
-            analysis::find_stack_objects(class, &mut facts);
+            // objects on the stack, which the messages do not read, are taken once the messages
+            // pass.
+            names.messages(class, &mut analysed.facts)?;
+            let facts = analysed.with_stack_objects();
             codegen::catch_panics(true);
             let tree = crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
             codegen::catch_panics(false);

@@ -3514,27 +3514,9 @@ fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
     );
 }
 
-#[test]
-fn a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round() {
-    // Each round of the analyses ends at the first check that rejects code, which is stubbed
-    // before the next round: a pattern variable, then `synchronized` on a string (the checks that
-    // come before the range analysis and nullness), then a `toString` whose exception is caught
-    // (exceptions), then the message of a `NullPointerException` (after the analyses).
-    let dir = write_sources("census_rounds", &[("Main.java", MAIN)]);
-    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
-    let census = census(&program);
-    assert_contains(
-        &census.report,
-        &[
-            "  Program: 11 pieces; 6 (54.5%) translate, 5 rejected.",
-            "a parameter of a method that the runtime calls\n          at Main.java:51:16\n",
-            "`synchronized` on a string not supported yet\n          at Main.java:10:9\n",
-            "a pattern variable used here not supported yet\n          at Main.java:6:18\n",
-            "a toString that throws an exception that is caught not supported yet\n          at Main.java:58:5\n",
-            "the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:19:30\n",
-        ],
-    );
-    const MAIN: &str = r#"public class Main {
+/// A program whose census takes a round of the analyses for each kind of check that rejects code
+/// (`a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round`).
+const ROUNDS: &str = r#"public class Main {
     static final String LOCK = "lock";
     static int n;
 
@@ -3593,6 +3575,88 @@ enum Level {
 
     public String toString() {
         throw new IllegalStateException("no text");
+    }
+}
+"#;
+
+#[test]
+fn a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round() {
+    // Each round of the analyses ends at the first check that rejects code, which is stubbed
+    // before the next round: a pattern variable, then `synchronized` on a string (the checks that
+    // come before the range analysis and nullness), then a `toString` whose exception is caught
+    // (exceptions), then the message of a `NullPointerException` (after the analyses).
+    let dir = write_sources("census_rounds", &[("Main.java", ROUNDS)]);
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let census = census(&program);
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 11 pieces; 6 (54.5%) translate, 5 rejected.",
+            "a parameter of a method that the runtime calls\n          at Main.java:51:16\n",
+            "`synchronized` on a string not supported yet\n          at Main.java:10:9\n",
+            "a pattern variable used here not supported yet\n          at Main.java:6:18\n",
+            "a toString that throws an exception that is caught not supported yet\n          at Main.java:58:5\n",
+            "the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:19:30\n",
+        ],
+    );
+}
+
+#[test]
+fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
+    // The analyses run the steps that read none of each other's facts alongside each other
+    // (`analysis::analyze_from`). Over the rounds of a census (a pattern variable, `synchronized`
+    // on a string, a `toString` whose exception is caught, the message of a
+    // `NullPointerException`, then a local that the generator rejects), the census is the same
+    // as with the steps run one after another, its translation too.
+    let dir = write_sources(
+        "census_alongside",
+        &[(
+            "Main.java",
+            &format!(
+                "{}{DRAIN}",
+                ROUNDS.replace(
+                    "compare(new Name());",
+                    "compare(new Name());\n        System.out.println(Drain.drain(args.length > 4) != null);"
+                )
+            ),
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let alongside = census(&program);
+    let one_after_another = java_to_rust::analysis::one_after_another(|| census(&program));
+    assert_eq!(alongside.report, one_after_another.report);
+    assert_eq!(alongside.json, one_after_another.json);
+    let rust = alongside.modules.expect("a translation").one_file();
+    assert_eq!(rust, one_after_another.modules.expect("a translation").one_file());
+    assert_contains(
+        &alongside.report,
+        &[
+            "`synchronized` on a string not supported yet",
+            "a pattern variable used here not supported yet",
+            "a toString that throws an exception that is caught not supported yet",
+            "the message of the `NullPointerException` of this dereference not supported yet",
+            "a local of type `Object` declared without a value",
+        ],
+    );
+    const DRAIN: &str = r#"
+class Drain {
+    static Object drain(boolean fail) {
+        Object tasks;
+        try {
+            if (!fail) {
+                tasks = new Object();
+            } else {
+                throw new IllegalStateException("no");
+            }
+        } catch (IllegalStateException e) {
+            tasks = e;
+        }
+        return tasks;
     }
 }
 "#;
