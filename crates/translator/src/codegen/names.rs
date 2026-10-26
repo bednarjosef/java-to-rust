@@ -124,6 +124,11 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     }
     let mut group_names: HashMap<usize, String> = HashMap::new();
     let mut names: Vec<String> = Vec::with_capacity(class.methods.len());
+    // The methods of each name, in index order: the overloads of a method are among them.
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (o, other) in class.methods.iter().enumerate() {
+        by_name.entry(other.name.as_str()).or_default().push(o);
+    }
     for (i, m) in class.methods.iter().enumerate() {
         let instance = !m.is_ctor && !m.is_static;
         if m.is_main {
@@ -137,11 +142,12 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
         // Constructors are named inside their class's `impl`, so they need not be unique.
         let root = h.root(m.class);
         let overloads = if instance {
-            let mut groups: Vec<usize> = (0..class.methods.len())
+            let mut groups: Vec<usize> = by_name[m.name.as_str()]
+                .iter()
+                .copied()
                 .filter(|&o| {
                     let other = &class.methods[o];
-                    other.name == m.name
-                        && (other.class == m.class || (!other.is_static && h.root(other.class) == root))
+                    other.class == m.class || (!other.is_static && h.root(other.class) == root)
                 })
                 .map(|o| h.group_id(o))
                 .collect();
@@ -149,7 +155,7 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             groups.dedup();
             groups.len()
         } else {
-            class.methods.iter().filter(|o| o.name == m.name && o.class == m.class).count()
+            by_name[m.name.as_str()].iter().filter(|&&o| class.methods[o].class == m.class).count()
         };
         let mut base = if m.is_ctor { "new".to_string() } else { snake_case(&m.name) };
         if overloads > 1 {
@@ -162,10 +168,10 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
                 o.params.len() == m.params.len() && o.params.iter().zip(&m.params).all(|(a, b)| a.ty == b.ty)
             };
             if instance
-                && class.methods.iter().enumerate().any(|(o, other)| {
+                && by_name[m.name.as_str()].iter().any(|&o| {
+                    let other = &class.methods[o];
                     o != i
                         && other.class == m.class
-                        && other.name == m.name
                         && h.group_id(o) != h.group_id(i)
                         && !other.is_static
                         && same_params(other)
@@ -197,6 +203,13 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             name
         });
     }
+    // The methods emitted on each struct (`Home::Class` or `Home::Fields` of a class).
+    let mut on_struct: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (o, home) in homes.iter().enumerate() {
+        if let Home::Class(d) | Home::Fields(d) = *home {
+            on_struct.entry(d).or_default().push(o);
+        }
+    }
     for i in 0..class.methods.len() {
         let m = &class.methods[i];
         // A class's struct may hold the methods of both homes (`JarFileFields` has ZipFile's
@@ -208,8 +221,9 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             _ if m.is_ctor => false,
             Home::Class(c) | Home::Fields(c) => {
                 c != m.class
-                    && (0..class.methods.len())
-                        .any(|o| o != i && same_struct(homes[o], c) && names[o] == names[i])
+                    && on_struct[&c]
+                        .iter()
+                        .any(|&o| o != i && same_struct(homes[o], c) && names[o] == names[i])
             }
             Home::Enum(t) => {
                 (m.name == "toString" && m.params.is_empty())
