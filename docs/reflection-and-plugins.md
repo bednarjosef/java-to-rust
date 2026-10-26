@@ -268,7 +268,9 @@ handles.
   `Proxy.newProxyInstance` is rejected.
 - **Annotations read by reflection**, method handles and `java.lang.invoke` are still
   rejected, except a class's `getAnnotation(A.class)`, a chain of tests of the class against
-  those whose declarations have `A`, each making the annotation from the declared values and the
+  those whose declarations have `A` (of the program's or a library's annotation types; one of
+  the JDK's is rejected, as it may annotate the classes the runtime has in place of the JDK's),
+  each making the annotation from the declared values and the
   defaults, the same annotations of the table's methods, fields and constructors
   (`getAnnotation`, `isAnnotationPresent`, `getAnnotations`, `getDeclaredAnnotations`), a
   `switch` over the slot of the member (both in `lower/annotation_values.rs`; a declaration's

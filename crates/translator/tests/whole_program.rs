@@ -916,6 +916,59 @@ fn programs_and_libraries_that_are_modules() {
     );
 }
 
+/// `getAnnotation` of an annotation type of a library that is not the JDK's, as gson's `Excluder`
+/// reads its `@Since` of every class it adapts: the library's classes are translated, so which
+/// of them have it is known, as for the program's own annotation types.
+#[test]
+fn annotations_of_a_library_are_read() {
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-library-annotations");
+    let _ = std::fs::remove_dir_all(&work);
+    let files = [
+        (
+            "lib/org/lib/Since.java",
+            "package org.lib;\nimport java.lang.annotation.*;\n@Retention(RetentionPolicy.RUNTIME)\n@Target({ElementType.TYPE, ElementType.FIELD})\npublic @interface Since {\n    double value();\n}\n",
+        ),
+        (
+            "lib/org/lib/Excluder.java",
+            "package org.lib;\npublic class Excluder {\n    public static String since(Class<?> c) {\n        Since s = c.getAnnotation(Since.class);\n        return s == null ? \"always\" : \"since \" + s.value();\n    }\n}\n",
+        ),
+        ("lib/org/lib/Versioned.java", "package org.lib;\n@Since(1.5)\npublic class Versioned {\n}\n"),
+        (
+            "app/p/Main.java",
+            "package p;\nimport org.lib.*;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Excluder.since(Versioned.class) + \" \" + Excluder.since(Main.class));\n    }\n}\n",
+        ),
+    ];
+    for (path, java) in files {
+        let path = work.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, java).unwrap();
+    }
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "p.Main", "--source"])
+        .arg(work.join("app"))
+        .arg("--library")
+        .arg(work.join("lib"))
+        .arg("--library")
+        .arg(&java_base)
+        .arg("--crate")
+        .arg(work.join("crate"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let built = Command::new("cargo")
+        .args(["run", "-q", "--manifest-path"])
+        .arg(work.join("crate/Cargo.toml"))
+        .env("CARGO_TARGET_DIR", work.join("target"))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    assert_eq!(String::from_utf8_lossy(&built.stdout), "since 1.5 always\n");
+}
+
 /// `System.loadLibrary` and `System.load` (`java/lang/TranslatedLibraries.java`), which Java lets
 /// code of a module without native access call only after a warning naming where the caller's
 /// class was loaded from: translated in a module of the JDK that has native access (here a root
