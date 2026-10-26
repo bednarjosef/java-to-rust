@@ -411,6 +411,10 @@ fn reading_a_resource_ends_the_program() {
         if (in != null) {
             in.close();
         }
+        String image = args.length > 3 ? \"icon.png\" : null;
+        if (args.length > 5) {
+            System.out.println(Main.class.getResourceAsStream(image) == null);
+        }
     }
 }
 ";
@@ -426,7 +430,13 @@ fn reading_a_resource_ends_the_program() {
         .unwrap();
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
     let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
-    for wanted in ["is not part of the translated program", "\"table.dat\"", "String::from(\"Main\")"] {
+    // A name that may be null is printed as Java prints it.
+    for wanted in [
+        "is not part of the translated program",
+        "\"table.dat\"",
+        "String::from(\"Main\")",
+        ".unwrap_or(java::wtf8(\"null\"))",
+    ] {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
 }
