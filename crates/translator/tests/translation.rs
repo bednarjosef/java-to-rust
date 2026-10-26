@@ -4263,6 +4263,23 @@ fn intern_is_the_string_itself_and_string_identity_follows_the_sources() {
     assert_lacks(&rust, &["java::JStr::", "java::same_str"]);
 }
 
+#[test]
+fn a_string_static_compared_with_a_string_that_may_be_null_borrows_its_text() {
+    // Swing's `BasicDesktopPaneUI.Actions` compares `getName()` with its action names, statics
+    // that are not final: the static's text and the name's are both `Option<&Wtf8>`.
+    let rust = translate(
+        "class A {
+            static String CLOSE = \"close\";
+            public static void main(String[] a) {
+                String key = a.length > 0 ? \"close\" : null;
+                System.out.println(CLOSE == key);
+                if (a.length > 5) { CLOSE = \"shut\"; }
+            }
+        }",
+    );
+    assert_contains(&rust, &["Some::<&java::Wtf8>(&"]);
+}
+
 /// Stand-ins for JDK classes with natives, in packages that java.base does not export, so that
 /// javac reads them from the library root rather than from the JDK.
 const NATIVE_STAND_INS: &[(&str, &str)] = &[

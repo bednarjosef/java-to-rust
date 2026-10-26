@@ -101,11 +101,14 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// `e` as an argument for an `Option<&str>` parameter.
+    /// `e` as an argument for an `Option<&str>` parameter. A string that is not null is borrowed
+    /// as a `&java::Wtf8` by name, as `Some(&s)` of a `java::JString` would be an
+    /// `Option<&JString>` where nothing asks for the text (`Some(&S) == key.as_deref()`).
     pub(super) fn option_arg(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::Null => "None".to_string(),
             _ if self.nullable(e) => self.option_ref(e),
+            _ if e.ty == Type::String => format!("Some::<&java::Wtf8>({})", self.str_ref(e)),
             _ => format!("Some({})", self.str_ref(e)),
         }
     }
