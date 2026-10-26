@@ -119,8 +119,9 @@ included (docs/collector.md).
   UTF-16BE and UTF-16LE (`charset.rs`). A `Charset` is an ordinary value; `forName` resolves
   aliases and case as Java does, and `defaultCharset()` is UTF-8 (JEP 400). An unknown or
   malformed name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with
-  Java's message, which a `catch` sees. A constant name of another charset (`windows-1252`),
-  `Charset.aliases()` and a `Charset` array element that may be null are rejected. In a whole program
+  Java's message, which a `catch` sees. So does the name of any other charset, which Java has
+  (`windows-1252`), and `isSupported` is false for it. `Charset.aliases()` and a `Charset` array
+  element that starts out null are rejected. In a whole program
   `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings compares what Java compares: by text where both sides can only be interned
@@ -301,8 +302,10 @@ program can tell. In a whole program `java.util.concurrent` (atomics, `Concurren
 `ForkJoinPool`, `LockSupport`) and `ThreadLocal` are the JDK's translated code.
 `wait(millis, nanos)` waits a millisecond longer for any nanoseconds, as `Object`'s does.
 
-Rejected: the monitor (`synchronized`, `wait`, `notify`) of a string, a box, an array or another
-value that has no identity in the translation (`lower/sync.rs`).
+An array's monitor is kept too, made the first time a thread takes it
+([multi-threading.md](multi-threading.md), 3.1). Rejected: the monitor (`synchronized`, `wait`,
+`notify`) of a string, a box or another value that has no identity in the translation
+(`lower/sync.rs`).
 
 ## Class values and reflection
 
