@@ -4157,7 +4157,8 @@ mod tests {
         assert_eq!(untranslated("java.lang.reflect.Modifier"), None);
         assert_eq!(untranslated("java.lang.reflect.ParameterizedType"), None);
         assert_eq!(untranslated("java.security.PrivateKey"), None);
-        assert_eq!(untranslated("java.security.KeyPair"), Some("security"));
+        assert_eq!(untranslated("java.security.KeyPair"), None);
+        assert_eq!(untranslated("java.security.KeyStore"), Some("security"));
         assert_eq!(untranslated("java.util.ArrayList"), None);
         // Reachability stops at method handles, and goes into `Array`.
         let unit = json!({"typeDecls": [
