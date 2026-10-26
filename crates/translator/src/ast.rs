@@ -629,6 +629,14 @@ pub struct TypeDecl {
     /// The class or a superclass implements `Cloneable`, directly or through an interface, so
     /// that `Object`'s `clone` copies its objects rather than throwing.
     pub cloneable: bool,
+    /// What `Class.getModifiers()` gives: the modifiers javac writes for the class, its implicit
+    /// ones included (`lower/objects.rs`).
+    #[serde(default)]
+    pub modifiers: u16,
+    /// The class that declares this one (`getEnclosingClass()`): a member class's outer class, or
+    /// the class whose code declares a local or anonymous class; `None` for a top-level class.
+    #[serde(default)]
+    pub enclosing: Option<usize>,
 }
 
 /// A local variable that a local or anonymous class captures.
@@ -1224,12 +1232,28 @@ pub enum ClassOp {
     /// `isAnnotation()`: false, as a translation has no class values of annotation types (their
     /// class literals are rejected, and no object's class is one).
     IsAnnotation,
+    /// `getModifiers()`, and the nesting of the class: `isAnonymousClass()`, `isLocalClass()`,
+    /// `isMemberClass()`, `getEnclosingClass()` and `getDeclaringClass()` (`TypeDecl::modifiers`
+    /// and `TypeDecl::enclosing`).
+    GetModifiers,
+    IsAnonymousClass,
+    IsLocalClass,
+    IsMemberClass,
+    GetEnclosingClass,
+    GetDeclaringClass,
 }
 
 impl ClassOp {
     /// Whether the result can be `null`.
     pub fn nullable(self) -> bool {
-        matches!(self, ClassOp::GetSuperclass | ClassOp::GetComponentType | ClassOp::GetCanonicalName)
+        matches!(
+            self,
+            ClassOp::GetSuperclass
+                | ClassOp::GetComponentType
+                | ClassOp::GetCanonicalName
+                | ClassOp::GetEnclosingClass
+                | ClassOp::GetDeclaringClass
+        )
     }
 }
 

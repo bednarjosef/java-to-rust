@@ -269,6 +269,8 @@ impl<'t> Lowering<'t> {
                 captures: self.captures_of(t)?,
                 origin: self.origin(t),
                 cloneable: false,
+                modifiers: 0x1010,
+                enclosing: None,
             })
         };
         self.current.set(t);

@@ -241,6 +241,8 @@ impl<'t> Lowering<'t> {
                 captures: Vec::new(),
                 origin: Origin::Member,
                 cloneable: false,
+                modifiers: 0,
+                enclosing: None,
             });
         }
     }

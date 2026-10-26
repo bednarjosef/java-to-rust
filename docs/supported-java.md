@@ -330,7 +330,11 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   equal by binary name, with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
   `isArray`, `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value
   carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests.
-  A class held as an `Object` is `Object`'s `Class` variant, and one held as a
+  `getModifiers`, `isMemberClass`, `isLocalClass`, `isAnonymousClass`, `getEnclosingClass` and
+  `getDeclaringClass` answer from what the class value carries in a program that asks for them:
+  the modifiers javac gives the class, implicit ones included, and where it is declared
+  (`TypeDecl::modifiers` and `enclosing`). An enum constant with a body has its enum's class, so
+  it answers as the enum. A class held as an `Object` is `Object`'s `Class` variant, and one held as a
   `java.lang.reflect.Type` is `Type`'s.
 - `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
   type arguments, each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,
