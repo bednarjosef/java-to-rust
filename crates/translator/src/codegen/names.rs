@@ -41,13 +41,23 @@ pub(super) fn snake_case(name: &str) -> String {
 /// in a subclass, whose struct may hold its superclass's fields as `base`. Fields whose names
 /// differ only in case (javac's `Names.module` and `Names.Module`) are numbered after the first.
 pub(super) fn field_name(decl: &TypeDecl, name: &str) -> String {
-    let field = snake_case(name);
-    let field = if field == "base" && decl.extends.is_some() { "base_".to_string() } else { field };
-    let mut same = decl.fields.iter().filter(|f| snake_case(&f.name) == snake_case(name));
+    let snake = snake_case(name);
+    let field = if snake == "base" && decl.extends.is_some() { "base_".to_string() } else { snake.clone() };
+    // Two names whose snake cases are the same are the same without underscores and `$`, in
+    // lower case: the snake case of the others is not made.
+    let mut same = decl
+        .fields
+        .iter()
+        .filter(|f| f.name == name || (folded(&f.name).eq(folded(name)) && snake_case(&f.name) == snake));
     match same.position(|f| f.name == name) {
         Some(n) if n > 0 => format!("{field}_{}", n + 1),
         _ => field,
     }
+}
+
+/// The characters of `name` without underscores and `$`, in lower case.
+fn folded(name: &str) -> impl Iterator<Item = char> + '_ {
+    name.chars().filter(|&c| c != '_' && c != '$').flat_map(char::to_lowercase)
 }
 
 pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
