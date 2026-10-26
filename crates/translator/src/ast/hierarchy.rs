@@ -512,6 +512,8 @@ impl Class {
             Type::Boolean,
             Type::String,
             Type::StringBuilder,
+            // The element of a `Class[]` that becomes an `Object` (`Class[]`).
+            Type::JavaClass,
         ];
         let known = primitives.into_iter().chain(runtime_values().into_iter().map(|(_, t)| t));
         if let Some(ty) = known.into_iter().find(|t| t.to_string() == name) {
