@@ -791,7 +791,11 @@ impl Messages<'_> {
     /// The message of `action` on `object`, which is null: with where it came from, if the JVM
     /// shows that.
     fn message(&self, action: &str, object: &Expr) -> Option<String> {
-        let object = self.unwrapped(object)?;
+        let mut object = self.unwrapped(object)?;
+        // `(s = f()).m()`: the value that is stored, of which the class file keeps a copy.
+        while let ExprKind::Assign { op: None, value, .. } = &object.kind {
+            object = self.unwrapped(value)?;
+        }
         if let Some(call) = self.called(object) {
             return Some(format!("{action} because the return value of \"{call}\" is null"));
         }
@@ -839,9 +843,10 @@ impl Messages<'_> {
                 }
                 v.to_string()
             }
-            // `(s = a).next`: the class file keeps a copy of the value it stores (`dup`), which the
-            // JVM follows back to where the value came from.
-            ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
+            // `(s = a).next`, `(this.f = a).next`, `(C.s = a).next`: the class file keeps a copy
+            // of the value it stores (`dup`, `dup_x1`, `dup_x2`), which the JVM follows back to
+            // where the value came from.
+            ExprKind::Assign { op: None, value, .. } => return self.source(value, detail),
             // The iterator of a for-each loop, javac's own local `i$`; in the JDK's code, the walk
             // of its slots (`jdk_temps`).
             ExprKind::Var(_) if let Some(at) = self.iterator(e) => {
