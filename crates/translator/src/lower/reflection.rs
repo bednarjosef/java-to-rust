@@ -637,6 +637,9 @@ impl<'t> Lowering<'t> {
             };
             self.synth(kind, pos, params[at])
         };
+        // The table's array may be an `Object[]` (`covariant`), as when the program passes the
+        // members to `AccessibleObject.setAccessible(array, flag)`.
+        let element = self.covariant_array(Type::array(self.self_type(t))).element();
         let mut made = Vec::new();
         for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
             let found_on = literal(entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t)));
@@ -705,7 +708,7 @@ impl<'t> Lowering<'t> {
                 }
             };
             let new = ExprKind::New { class: t, args, ctor: Some(ctor) };
-            made.push(self.synth(new, pos, self.self_type(t)));
+            made.push(self.convert(self.synth(new, pos, self.self_type(t)), element));
         }
         if made.is_empty() {
             return Ok(ExprKind::NewArray(vec![int(0)]));
