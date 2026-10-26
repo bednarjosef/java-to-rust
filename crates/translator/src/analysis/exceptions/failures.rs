@@ -166,6 +166,7 @@ fn sequence_failures_of(name: &str, builder: bool) -> Option<&'static [&'static 
 /// it is not known exactly.
 fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) -> &'static [&'static str] {
     const SIOOBE: &str = "java.lang.StringIndexOutOfBoundsException";
+    const UOE: &str = "java.lang.UnsupportedOperationException";
     let held = |i: usize| crate::analysis::held_value(class, m, &args[i]);
     match builtin {
         Builtin::String(op) => match op {
@@ -188,12 +189,13 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             {
                 &[]
             }
-            // A charset's name that is not one, and a range outside the text or the array.
+            // A charset's name that is not one, or that of a charset of the JDK that the program
+            // does not have, and a range outside the text or the array.
             StringOp::GetBytes | StringOp::FromBytes => {
                 let named = args.last().is_some_and(|a| a.ty == Type::String);
                 match (named, args.len() > 2) {
-                    (true, true) => &["java.io.UnsupportedEncodingException", SIOOBE],
-                    (true, false) => &["java.io.UnsupportedEncodingException"],
+                    (true, true) => &["java.io.UnsupportedEncodingException", UOE, SIOOBE],
+                    (true, false) => &["java.io.UnsupportedEncodingException", UOE],
                     (false, _) => &[SIOOBE],
                 }
             }
@@ -486,14 +488,16 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | CodePointOp::Digit,
         ) => &[],
         // A name that is not a charset's, or a malformed one, or for null an
-        // `IllegalArgumentException` (`charset.rs`).
+        // `IllegalArgumentException`, and for a charset of the JDK that the program does not have
+        // an `UnsupportedOperationException` (`charset.rs`).
         Builtin::Charset(CharsetOp::ForName) => &[
             "java.nio.charset.UnsupportedCharsetException",
             "java.nio.charset.IllegalCharsetNameException",
             "java.lang.IllegalArgumentException",
+            UOE,
         ],
         Builtin::Charset(CharsetOp::IsSupported) => {
-            &["java.nio.charset.IllegalCharsetNameException", "java.lang.IllegalArgumentException"]
+            &["java.nio.charset.IllegalCharsetNameException", "java.lang.IllegalArgumentException", UOE]
         }
         Builtin::Charset(_) => &[],
         // What an object's `toString` throws is a point of its own (`text_objects`).

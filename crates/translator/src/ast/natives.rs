@@ -252,8 +252,8 @@ pub enum Native {
     CurrentPid,
     /// `ProcessHandleImpl.isAlive0(pid)`: the process's start time, or -1 when it does not exist.
     ProcessStartTime,
-    /// `Reference.hasReferencePendingList()`: a translated program has no garbage collector that
-    /// discovers references, so no reference is ever pending.
+    /// `Reference.hasReferencePendingList()`: a translated program's collector traces a
+    /// referent as any other field and discovers no references, so none is ever pending.
     NoPendingReferences,
     /// `Reference.waitForReferencePendingList()`: waits for ever, as no reference becomes pending.
     WaitForPendingReferences,

@@ -298,7 +298,9 @@ Specific cases:
 
 - **Charset names**: `Charset.forName` and `isSupported` raise `UnsupportedCharsetException` and
   `IllegalCharsetNameException` (standard classes, with the name as the message) and, for a null
-  name, `IllegalArgumentException`, which a `catch` sees as Java's does.
+  name, `IllegalArgumentException`, which a `catch` sees as Java's does. For the name of a
+  charset of the JDK that the translation does not have, they, `getBytes` and `new String` raise
+  `UnsupportedOperationException` (see [supported-java.md](supported-java.md)).
 
 What the analysis has no class for (`"?"` in `analysis/exceptions/failures.rs`) is rejected
 wherever a handler would see it: "catching an exception that ... may throw not supported yet".

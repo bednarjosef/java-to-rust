@@ -10,8 +10,9 @@ package java.io;
  * has bytes available, and decodes them with {@code new String(bytes, off, len, charset)}, which
  * the runtime does and which replaces malformed input as the JDK's decoder does. Bytes at the end
  * of the buffer that may begin a character wait for the next read. It decodes UTF-8, US-ASCII,
- * ISO-8859-1, UTF-16BE and UTF-16LE; any other charset is an
- * {@code UnsupportedOperationException} when the reader is created.
+ * ISO-8859-1, UTF-16BE, UTF-16LE and the single-byte charsets of the JDK that the program carries
+ * as tables; UTF-16, with its byte order mark, is an {@code UnsupportedOperationException} when
+ * the reader is created.
  */
 class InputStreamReader {
     @Add
@@ -70,7 +71,7 @@ class InputStreamReader {
         }
         this.in = in;
         this.charset = cs;
-        this.encoding = historicalName(cs.name());
+        this.encoding = sun.nio.cs.TranslatedCoders.historicalName(cs);
         this.unit = unitOf(cs.name());
         this.bigEndian = cs.name().equals("UTF-16BE");
     }
@@ -110,27 +111,11 @@ class InputStreamReader {
             case "UTF-16BE":
             case "UTF-16LE":
                 return 2;
-            default:
+            case "UTF-16":
                 throw new UnsupportedOperationException("reading " + name + " text is not supported by the translation");
-        }
-    }
-
-    /** The historical name of the charset, as the JDK's {@code getEncoding} gives it. */
-    @Add
-    static String historicalName(String name) {
-        switch (name) {
-            case "UTF-8":
-                return "UTF8";
-            case "US-ASCII":
-                return "ASCII";
-            case "ISO-8859-1":
-                return "ISO8859_1";
-            case "UTF-16BE":
-                return "UnicodeBigUnmarked";
-            case "UTF-16LE":
-                return "UnicodeLittleUnmarked";
             default:
-                return name;
+                // Any other charset that a program has is a table of one byte per character.
+                return 1;
         }
     }
 

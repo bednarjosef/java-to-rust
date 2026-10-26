@@ -3373,6 +3373,67 @@ fn the_census_lists_handle_calls_that_throw_where_the_translation_does_not_follo
 }
 
 #[test]
+fn the_census_lists_charset_names_known_only_at_run_time() {
+    let java = "package p;\nimport java.nio.charset.Charset;\npublic class Main {\n    static boolean has(String name) {\n        return Charset.isSupported(name);\n    }\n    static byte[] bytes(String s, String charset) throws Exception {\n        return s.getBytes(charset);\n    }\n    public static void main(String[] a) throws Exception {\n        System.out.println(Charset.forName(\"windows-1252\").name() + \" \" + has(\"KOI8-R\"));\n        System.out.println(bytes(\"x\", \"UTF-8\").length + \" \" + new String(new byte[] {65}, \"cp1252\"));\n    }\n}\n";
+    let dir = write_sources("census_charset_names", &[("p/Main.java", java)]);
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    // A computed name may name a charset of the JDK that the translation does not have, where
+    // the program throws: no rejection, but listed with its place. A constant name is not.
+    let census = census(&program);
+    assert_contains(
+        &census.report,
+        &[
+            "Program: 3 pieces; 3 (100.0%) translate, 0 rejected.",
+            "Program code: pieces that translate into code that throws UnsupportedOperationException \
+             where a charset name known only at run time names a charset of the JDK that the \
+             translation does not have, where Java finds it",
+            "  may throw UnsupportedOperationException: `Charset.isSupported` of a charset name known \
+             only at run time, 1 piece\n          at p/Main.java:5:16",
+            "  may throw UnsupportedOperationException: `String.getBytes` of a charset name known only \
+             at run time, 1 piece\n          at p/Main.java:8:16",
+        ],
+    );
+    let rows = census.json["charsetNames"].as_array().expect("charsetNames");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(census.json["rejections"].as_array().map(Vec::len), Some(0));
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let has = pieces.iter().find(|p| p["name"] == "has").expect("has is a piece");
+    assert_eq!(has["charsetNames"][0]["place"], "p/Main.java:5:16", "{has}");
+    let main = pieces.iter().find(|p| p["name"] == "main").expect("main is a piece");
+    assert_eq!(main["charsetNames"].as_array().map(Vec::len), Some(0), "{main}");
+}
+
+#[test]
+fn a_constant_name_of_a_jdk_charset_without_a_table_is_rejected_and_a_computed_one_throws() {
+    for call in
+        ["Charset.forName(\"Shift_JIS\")", "\"x\".getBytes(\"sjis\")", "new String(new byte[0], \"GBK\")"]
+    {
+        let java = format!(
+            "import java.nio.charset.Charset;\npublic class Main {{\n    public static void main(String[] a) throws Exception {{\n        System.out.println({call});\n    }}\n}}\n"
+        );
+        let error = java_to_rust::translate(&java).expect_err("a charset of the JDK without a table");
+        assert!(
+            error
+                .message
+                .ends_with("a charset of the JDK that the translation does not have, not supported yet"),
+            "{call}: {error}"
+        );
+    }
+    // A computed name: the program carries the tables and the names of the JDK's other charsets.
+    let rust = translate(
+        "import java.nio.charset.Charset;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Charset.forName(a[0]));\n    }\n}\n",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::ByteCharset::new(\"windows-1252\", \"Cp1252\", &[\"cp1252\"",
+            "\"Shift_JIS\"",
+            "java::register_charsets(&CHARSETS, &[",
+        ],
+    );
+}
+
+#[test]
 fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_census_lists_it() {
     let dir = write_sources(
         "missing_class",

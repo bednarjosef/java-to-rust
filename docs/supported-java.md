@@ -119,13 +119,24 @@ included (docs/collector.md).
   `String.format` and `printf` are the JDK's `Formatter` in that locale (a whole program; without
   the JDK's sources they are rejected).
 - **Charsets**: `getBytes` and `new String(bytes, ..)` for UTF-8, US-ASCII, ISO-8859-1, UTF-16,
-  UTF-16BE and UTF-16LE (`charset.rs`). A `Charset` is an ordinary value; `forName` resolves
-  aliases and case as Java does, and `defaultCharset()` is UTF-8 (JEP 400). An unknown or
-  malformed name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with
-  Java's message, which a `catch` sees. So does the name of any other charset, which Java has
-  (`windows-1252`), and `isSupported` is false for it. `Charset.aliases()` and a `Charset` array
-  element that starts out null are rejected. In a whole program
-  `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
+  UTF-16BE and UTF-16LE (`charset.rs`), and for the JDK's single-byte charsets (windows-1252
+  and the other Windows code pages, the ISO-8859 ones, KOI8-R, the IBM and Mac code pages: 103
+  on JDK 26). Those are tables of the JDK that the translator was built with, taken from its own
+  coders (`java/Charsets.java`, `jdk_charsets.rs`), and the translator asks the JDK it runs
+  with again where that is another one. A program that looks a charset up by name carries the
+  tables it may need: the ones its constant names name, or all of them where it computes a
+  name. A `Charset` is an ordinary value; `forName` resolves aliases and case as Java does, and
+  gives the same value for each name of a charset, and `defaultCharset()` is UTF-8 (JEP 400).
+  An unknown or malformed name throws `UnsupportedCharsetException` or
+  `IllegalCharsetNameException` with Java's message, which a `catch` sees. A charset that Java
+  has but that is none of these (Shift_JIS, GBK, UTF-32 and the other multi-byte ones, and
+  x-IBM1129, which encodes a second char to its replacement byte) is rejected where a constant
+  names it; where the program computes its name, it carries the names of those charsets too,
+  and `forName`, `isSupported`, `getBytes` and `new String` throw
+  `UnsupportedOperationException` for one, which the census lists. `Charset.aliases()` and a
+  `Charset` array element that starts out null are rejected. In a whole program
+  `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets and, made from
+  the tables, the JDK's `SingleByte` coders of the others
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings compares what Java compares: by text where both sides can only be interned
   strings, as null against null where no string can be on both sides, and otherwise by the
@@ -410,8 +421,10 @@ Design: [natives-and-input.md](natives-and-input.md).
 - `--census` translates past every rejection, stubbing each rejected method, and reports what is
   rejected and why, grouped by message, separately for program and library code
   (`program/census.rs`). It lists apart, as code that translates, the code that throws
-  `NoClassDefFoundError` for a class missing from the roots (`--keep-going`) and the handle
-  calls that throw `UnsupportedOperationException` because the translation does not follow them. `--survey` is a quicker syntactic view of what the reachable code needs
+  `NoClassDefFoundError` for a class missing from the roots (`--keep-going`), the handle calls
+  that throw `UnsupportedOperationException` because the translation does not follow them, and
+  the charset names known only at run time, which throw it for a charset of the JDK that the
+  translation does not have. `--survey` is a quicker syntactic view of what the reachable code needs
   from outside the translated sources (`program/survey.rs`). Both have `-json` forms.
   `scripts/jdk-coverage.py` runs the census over the target programs and writes
   [jdk-coverage.md](jdk-coverage.md).

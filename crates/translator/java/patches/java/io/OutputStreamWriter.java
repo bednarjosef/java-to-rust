@@ -11,7 +11,9 @@ package java.io;
  * {@code flush} and on {@code close}, as the JDK's encoder does: the same bytes reach the stream
  * in the same calls, and what is still buffered when the program ends is lost in both. A lone
  * surrogate is written as the charset's replacement ({@code ?}, or U+FFFD in UTF-16), and so is a
- * character that the charset has no byte for. It encodes UTF-8, US-ASCII, ISO-8859-1, UTF-16BE and UTF-16LE; any other charset is an
+ * character that the charset has no byte for. It encodes UTF-8, US-ASCII, ISO-8859-1, UTF-16BE,
+ * UTF-16LE and the single-byte charsets of the JDK that the program carries as tables, each
+ * character as {@code getBytes} encodes it; UTF-16, with its byte order mark, is an
  * {@code UnsupportedOperationException} when the writer is created.
  */
 class OutputStreamWriter {
@@ -28,9 +30,15 @@ class OutputStreamWriter {
     @Add
     private final String encoding;
 
-    /** 0 for UTF-8, 1 for US-ASCII, 2 for ISO-8859-1, 3 for UTF-16BE, 4 for UTF-16LE. */
+    /**
+     * 0 for UTF-8, 1 for US-ASCII, 2 for ISO-8859-1, 3 for UTF-16BE, 4 for UTF-16LE, 5 for a
+     * single-byte charset that the program carries as a table.
+     */
     @Add
     private final int kind;
+
+    @Add
+    private final Charset charset;
 
     @Add
     private byte[] buf = new byte[INITIAL_CAPACITY];
@@ -62,7 +70,8 @@ class OutputStreamWriter {
             throw new NullPointerException("charset");
         }
         this.out = out;
-        this.encoding = InputStreamReader.historicalName(cs.name());
+        this.charset = cs;
+        this.encoding = sun.nio.cs.TranslatedCoders.historicalName(cs);
         this.kind = kindOf(cs.name());
     }
 
@@ -103,8 +112,11 @@ class OutputStreamWriter {
                 return 3;
             case "UTF-16LE":
                 return 4;
-            default:
+            case "UTF-16":
                 throw new UnsupportedOperationException("writing " + name + " text is not supported by the translation");
+            default:
+                // Any other charset that a program has is a table of one byte per character.
+                return 5;
         }
     }
 
@@ -195,7 +207,7 @@ class OutputStreamWriter {
         if (buf.length >= MAX_CAPACITY) {
             return;
         }
-        int perChar = kind == 0 ? 3 : kind >= 3 ? 2 : 1;
+        int perChar = kind == 0 ? 3 : kind == 3 || kind == 4 ? 2 : 1;
         int capacity = (int) Math.min((long) chars * perChar, MAX_CAPACITY);
         if (capacity > buf.length) {
             writeBytes();
@@ -214,7 +226,7 @@ class OutputStreamWriter {
     /** What the charset writes for a malformed or unmappable character. */
     @Add
     private void replacement() throws IOException {
-        if (kind >= 3) {
+        if (kind == 3 || kind == 4) {
             unit(0xFFFD);
         } else {
             room(1);
@@ -262,6 +274,15 @@ class OutputStreamWriter {
                 if (cp < (kind == 1 ? 0x80 : 0x100)) {
                     room(1);
                     buf[count++] = (byte) cp;
+                } else {
+                    replacement();
+                }
+            }
+            case 5 -> {
+                if (cp < 0x10000) {
+                    byte[] one = String.valueOf((char) cp).getBytes(charset);
+                    room(1);
+                    buf[count++] = one[0];
                 } else {
                     replacement();
                 }

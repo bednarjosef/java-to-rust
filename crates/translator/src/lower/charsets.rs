@@ -15,6 +15,11 @@ use super::*;
 
 const CHARSET: &str = "java.nio.charset.Charset";
 
+/// The translator's class of the coders of the charsets
+/// (`java/overlay/sun/nio/cs/TranslatedCoders.java`), whose `historicalName` is
+/// `CharsetOp::HistoricalName`.
+const TRANSLATED_CODERS: &str = "sun.nio.cs.TranslatedCoders";
+
 /// The JDK's classes of the charsets that the runtime has, with the charset of each.
 const STANDARD_CHARSET_CLASSES: &[(&str, CharsetOp)] = &[
     ("sun.nio.cs.UTF_8", CharsetOp::Utf8),
@@ -34,6 +39,7 @@ fn constant(charset: java_runtime::Charset) -> CharsetOp {
         java_runtime::Charset::Utf16 => CharsetOp::Utf16,
         java_runtime::Charset::Utf16Be => CharsetOp::Utf16Be,
         java_runtime::Charset::Utf16Le => CharsetOp::Utf16Le,
+        java_runtime::Charset::Bytes(_) => unreachable!("`Charset::known` finds only the runtime's own"),
     }
 }
 
@@ -57,7 +63,11 @@ pub(super) fn compares_charsets(node: Node) -> bool {
 pub(super) fn is_charset_op(node: Node) -> bool {
     let Some(symbol) = node.symbol() else { return false };
     match node.kind() {
-        "METHOD_INVOCATION" => symbol.kind == "METHOD" && is_charset_type(symbol.owner),
+        "METHOD_INVOCATION" => {
+            symbol.kind == "METHOD"
+                && (is_charset_type(symbol.owner)
+                    || (symbol.owner == TRANSLATED_CODERS && symbol.name == "historicalName"))
+        }
         "IDENTIFIER" | "MEMBER_SELECT" => {
             symbol.kind == "FIELD"
                 && (symbol.owner == "java.nio.charset.StandardCharsets"
@@ -125,6 +135,7 @@ impl<'t> Lowering<'t> {
             return self.charset_call(node, symbol.name, method, operands);
         }
         let op = match (symbol.name, args.len(), receiver.is_some()) {
+            ("historicalName", 1, false) if symbol.owner == TRANSLATED_CODERS => CharsetOp::HistoricalName,
             ("forName", 1, false) => CharsetOp::ForName,
             ("isSupported", 1, false) => CharsetOp::IsSupported,
             ("defaultCharset", 0, false) => CharsetOp::DefaultCharset,
@@ -140,6 +151,9 @@ impl<'t> Lowering<'t> {
             return unsupported(node, "`equals` with other than a charset");
         }
         let operands: Vec<Expr> = operands.into_iter().map(|n| self.expr(n)).collect::<Result<_, _>>()?;
+        if matches!(op, CharsetOp::ForName | CharsetOp::IsSupported) {
+            check_name(node, &operands[0])?;
+        }
         // `forName` of a constant name of a charset the runtime has, such as the value of a
         // property that the translation fixes (`lower::system`), is that charset, which cannot fail.
         if op == CharsetOp::ForName
@@ -236,6 +250,65 @@ pub(super) fn children<'t>(node: Node<'t>) -> Vec<Node<'t>> {
         }
     }
     out
+}
+
+/// Rejects `name`, the charset name of a lookup, where it is a constant that names a charset of
+/// the JDK that the translation has neither in the runtime nor as a table (`jdk_charsets`):
+/// Shift_JIS, GBK, UTF-32 and the other multi-byte ones. A computed name that names one throws
+/// `UnsupportedOperationException` when the program runs (`runtime/src/charset.rs`), which the
+/// census lists (`lookups`).
+pub(super) fn check_name(node: Node, name: &Expr) -> Result<(), Error> {
+    if let ExprKind::Str(text) = &name.kind
+        && let Some(charset) = crate::jdk_charsets::missing(text)
+    {
+        let message = format!("`{}`, a charset of the JDK that the translation does not have,", charset.name);
+        return unsupported(node, &message);
+    }
+    Ok(())
+}
+
+/// A lookup of a charset by name in the lowered program.
+pub struct Lookup<'c> {
+    /// The call that looks the charset up.
+    pub call: &'c Expr,
+    /// What it is, as Java names it: `Charset.forName`, `String.getBytes`, ...
+    pub what: &'static str,
+    /// The name it looks up.
+    pub name: &'c Expr,
+    /// The position of the method it is in; `None` in a field's initializer.
+    pub method: Option<Pos>,
+}
+
+/// Calls `f` on each lookup of a charset by name in `class`: `Charset.forName` and `isSupported`,
+/// and `getBytes` and `new String` with the name of a charset.
+pub fn lookups<'c>(class: &'c Class, f: &mut dyn FnMut(Lookup<'c>)) {
+    let mut see = |call: &'c Expr, method: Option<Pos>| {
+        let ExprKind::Builtin(builtin, args) = &call.kind else { return };
+        let (what, name) = match builtin {
+            Builtin::Charset(CharsetOp::ForName) => ("Charset.forName", args.first()),
+            Builtin::Charset(CharsetOp::IsSupported) => ("Charset.isSupported", args.first()),
+            Builtin::String(StringOp::GetBytes) | Builtin::Kept(StringOp::GetBytes) => {
+                ("String.getBytes", args.iter().skip(1).find(|a| a.ty == Type::String))
+            }
+            Builtin::String(StringOp::FromBytes) | Builtin::Kept(StringOp::FromBytes) => {
+                ("new String", args.iter().skip(1).find(|a| a.ty == Type::String))
+            }
+            _ => return,
+        };
+        if let Some(name) = name {
+            f(Lookup { call, what, name, method })
+        }
+    };
+    for method in &class.methods {
+        for stmt in &method.body {
+            visit_stmt_exprs(stmt, &mut |e| see(e, Some(method.pos)));
+        }
+    }
+    for decl in &class.types {
+        for init in decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()) {
+            visit_expr(init, &mut |e| see(e, None));
+        }
+    }
 }
 
 fn null_charset<T>(node: Node) -> Result<T, Error> {

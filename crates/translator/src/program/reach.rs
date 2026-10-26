@@ -537,7 +537,8 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     // A saved property is a property (`lower/system.rs`).
     ("jdk.internal.misc.VM", "getSavedProperty", "(java.lang.String)java.lang.String"),
-    // Nothing is garbage collected, so a file's descriptor needs no cleaner (`lower/natives.rs`).
+    // No reference is ever cleared or enqueued (`lower/references.rs`), so no cleaner runs: a
+    // file's descriptor needs none (`lower/natives.rs`).
     ("java.io.FileCleanable", "register", "(java.io.FileDescriptor)void"),
     // Nor a direct buffer's memory: no thread waits for buffers to be collected.
     ("java.nio.BufferCleaner", "startCleaningThreadIfNeeded", "()void"),
@@ -545,8 +546,9 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Blocker", "begin", "()boolean"),
     ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
     ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
-    // A translated program has no native library to load, and no garbage collector whose
-    // collections a cleaner thread would wait for (`lower/libraries.rs`).
+    // A translated program has no native library to load, and its collector never clears or
+    // enqueues a reference, so a cleaner thread would have nothing to wait for
+    // (`lower/libraries.rs`).
     (
         "jdk.internal.ref.CleanerImpl",
         "start",

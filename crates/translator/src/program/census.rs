@@ -35,8 +35,10 @@
 //!
 //! Code that translates but knowingly behaves otherwise than Java's is listed apart from the
 //! rejections: the pieces that throw `NoClassDefFoundError` for a missing class, as Java would
-//! (`Piece::missing_class`), and the calls of a handle's method that lowering does not follow,
-//! which throw `UnsupportedOperationException` where Java runs them (`unfollowed_handles`).
+//! (`Piece::missing_class`), the calls of a handle's method that lowering does not follow,
+//! which throw `UnsupportedOperationException` where Java runs them (`unfollowed_handles`), and
+//! the lookups of a charset by a name known only at run time, which throw it for a charset of the
+//! JDK that the translation does not have (`charset_names`).
 
 use super::checkpoint;
 use super::survey::{self, Part, Piece};
@@ -198,7 +200,7 @@ fn analysed(
         super::print_notes(class, &files);
     }
     let mut modules = None;
-    let mut unfollowed = Vec::new();
+    let (mut unfollowed, mut charset_names) = (Vec::new(), Vec::new());
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
             let names = Names {
@@ -210,9 +212,10 @@ fn analysed(
             analyse(&mut class, &units, &files, &mut rejections, &mut modules, &names, program.ends_rejected)
         });
         unfollowed = unfollowed_handles(&class);
+        charset_names = computed_charset_names(&class);
     }
     std::panic::set_hook(hook);
-    let tally = Tally::new(&scan.pieces, &files, rejections, fatal, unfollowed);
+    let tally = Tally::new(&scan.pieces, &files, rejections, fatal, [unfollowed, charset_names]);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
     Census { report, json, modules }
 }
@@ -699,18 +702,16 @@ fn unfollowed_handles(class: &Class) -> Vec<Rejection> {
         return Vec::new();
     };
     let mut found = Vec::new();
-    let mut see = |e: &Expr, anchor: Option<Pos>| {
-        visit_expr(e, &mut |x| {
-            if let ExprKind::New { class, args, .. } = &x.kind
-                && *class == exception
-                && let [Expr { kind: ExprKind::Str(message), .. }] = args.as_slice()
-                && message.contains(lower::UNFOLLOWED_MESSAGE)
-            {
-                let unit = x.pos.unit.map(|u| u as usize);
-                let error = Error { pos: x.pos, message: message.clone() };
-                found.push(Rejection { unit, anchor, error });
-            }
-        })
+    let mut see = |x: &Expr, anchor: Option<Pos>| {
+        if let ExprKind::New { class, args, .. } = &x.kind
+            && *class == exception
+            && let [Expr { kind: ExprKind::Str(message), .. }] = args.as_slice()
+            && message.contains(lower::UNFOLLOWED_MESSAGE)
+        {
+            let unit = x.pos.unit.map(|u| u as usize);
+            let error = Error { pos: x.pos, message: message.clone() };
+            found.push(Rejection { unit, anchor, error });
+        }
     };
     for method in &class.methods {
         for stmt in &method.body {
@@ -718,8 +719,27 @@ fn unfollowed_handles(class: &Class) -> Vec<Rejection> {
         }
     }
     for decl in &class.types {
-        decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()).for_each(|e| see(e, None));
+        for init in decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()) {
+            visit_expr(init, &mut |e| see(e, None));
+        }
     }
+    found
+}
+
+/// The lookups of a charset by a name that the program computes (`lower::charset_lookups`), which
+/// throw `UnsupportedOperationException` where the name is that of a charset of the JDK that the
+/// translation has neither in the runtime nor as a table (`jdk_charsets::missing`), where Java
+/// finds it: each at the call, in the method it is in.
+fn computed_charset_names(class: &Class) -> Vec<Rejection> {
+    let mut found = Vec::new();
+    lower::charset_lookups(class, &mut |lookup| {
+        if !matches!(lookup.name.kind, ExprKind::Str(_)) {
+            let pos = lookup.call.pos;
+            let message = format!("`{}` of a charset name known only at run time", lookup.what);
+            let unit = pos.unit.map(|u| u as usize);
+            found.push(Rejection { unit, anchor: lookup.method, error: Error { pos, message } });
+        }
+    });
     found
 }
 
@@ -792,10 +812,46 @@ struct Tally {
     elsewhere: BTreeSet<(String, String)>,
     /// The error that ended the census early, with its place.
     fatal: Option<(String, String)>,
-    /// The calls of a handle's method that lowering does not follow, which throw
-    /// `UnsupportedOperationException` (`unfollowed_handles`): the piece each is in, if any, its
-    /// message and its place.
-    unfollowed: BTreeSet<(Option<usize>, String, String)>,
+    /// Code that translates but throws `UnsupportedOperationException` where Java goes on, each
+    /// of a `Listed` kind: the piece each is in, if any, its message and its place.
+    listed: [BTreeSet<(Option<usize>, String, String)>; 2],
+}
+
+/// The kinds of code that translate but throw `UnsupportedOperationException` where Java goes
+/// on, which the census lists apart from the rejections: the index of each in `Tally::listed`.
+#[derive(Clone, Copy)]
+enum Listed {
+    /// The calls of a handle's method that lowering does not follow (`unfollowed_handles`).
+    Handles = 0,
+    /// The lookups of a charset by a name known only at run time (`computed_charset_names`).
+    CharsetNames = 1,
+}
+
+impl Listed {
+    const ALL: [Listed; 2] = [Listed::Handles, Listed::CharsetNames];
+
+    /// What the report says of the pieces with code of this kind.
+    fn heading(self) -> &'static str {
+        match self {
+            Listed::Handles => {
+                "pieces that translate into code that throws UnsupportedOperationException for a handle \
+                 call that the translation does not follow, where Java runs it"
+            }
+            Listed::CharsetNames => {
+                "pieces that translate into code that throws UnsupportedOperationException where a \
+                 charset name known only at run time names a charset of the JDK that the translation \
+                 does not have, where Java finds it"
+            }
+        }
+    }
+
+    /// How the report starts each of its rows.
+    fn row(self) -> &'static str {
+        match self {
+            Listed::Handles => "throws",
+            Listed::CharsetNames => "may throw",
+        }
+    }
 }
 
 impl Tally {
@@ -804,13 +860,13 @@ impl Tally {
         files: &[String],
         rejections: Vec<Rejection>,
         fatal: Option<Rejection>,
-        unfollowed: Vec<Rejection>,
+        listed: [Vec<Rejection>; 2],
     ) -> Self {
         let mut tally = Tally {
             errors: vec![BTreeSet::new(); pieces.len()],
             elsewhere: BTreeSet::new(),
             fatal: fatal.map(|f| (f.error.message.clone(), place(files, &f))),
-            unfollowed: BTreeSet::new(),
+            listed: [BTreeSet::new(), BTreeSet::new()],
         };
         for rejection in rejections {
             let entry = (rejection.error.message.clone(), place(files, &rejection));
@@ -819,19 +875,21 @@ impl Tally {
                 None => tally.elsewhere.insert(entry),
             };
         }
-        for call in unfollowed {
-            let piece = attribute(pieces, &call);
-            tally.unfollowed.insert((piece, call.error.message.clone(), place(files, &call)));
+        for (set, calls) in tally.listed.iter_mut().zip(listed) {
+            for call in calls {
+                let piece = attribute(pieces, &call);
+                set.insert((piece, call.error.message.clone(), place(files, &call)));
+            }
         }
         tally
     }
 
-    /// The calls of a handle's method not followed (`unfollowed`) in the pieces of one part that
-    /// translate, or with no part in no piece: each message, the number of pieces, and the places
-    /// of all of its calls, the messages of the most pieces first.
-    fn unfollowed_handles(&self, pieces: &[Piece], part: Option<Part>) -> Vec<(&str, usize, Vec<&str>)> {
+    /// The code of kind `kind` (`listed`) in the pieces of one part that translate, or with no
+    /// part in no piece: each message, the number of pieces, and the places of all of its calls,
+    /// the messages of the most pieces first.
+    fn listed(&self, kind: Listed, pieces: &[Piece], part: Option<Part>) -> Vec<(&str, usize, Vec<&str>)> {
         let mut rows: BTreeMap<&str, (BTreeSet<usize>, Vec<&str>)> = BTreeMap::new();
-        for (piece, message, place) in &self.unfollowed {
+        for (piece, message, place) in &self.listed[kind as usize] {
             let here = match piece {
                 Some(p) => Some(pieces[*p].part) == part && self.errors[*p].is_empty(),
                 None => part.is_none(),
@@ -966,9 +1024,13 @@ impl Tally {
                     _ = writeln!(out, "          at {}", examples.join(", "));
                 }
             }
-            self.report_unfollowed(&mut out, pieces, Some(part));
+            for kind in Listed::ALL {
+                self.report_listed(&mut out, kind, pieces, Some(part));
+            }
         }
-        self.report_unfollowed(&mut out, pieces, None);
+        for kind in Listed::ALL {
+            self.report_listed(&mut out, kind, pieces, None);
+        }
         if !self.elsewhere.is_empty() {
             _ = writeln!(out, "\nRejected outside the pieces of code:");
             for (message, place) in &self.elsewhere {
@@ -994,23 +1056,19 @@ impl Tally {
         out
     }
 
-    /// The calls of a handle's method that lowering does not follow, in the pieces of `part` (in
-    /// no piece: `None`), for the report.
-    fn report_unfollowed(&self, out: &mut String, pieces: &[Piece], part: Option<Part>) {
-        let rows = self.unfollowed_handles(pieces, part);
+    /// The code of kind `kind` in the pieces of `part` (in no piece: `None`), for the report.
+    fn report_listed(&self, out: &mut String, kind: Listed, pieces: &[Piece], part: Option<Part>) {
+        let rows = self.listed(kind, pieces, part);
         if rows.is_empty() {
             return;
         }
         let whose = part.map_or("Code in no piece".to_string(), |part| format!("{} code", part.title()));
-        _ = writeln!(
-            out,
-            "\n{whose}: pieces that translate into code that throws UnsupportedOperationException for a \
-             handle call that the translation does not follow, where Java runs it"
-        );
+        _ = writeln!(out, "\n{whose}: {}", kind.heading());
         for (message, n, places) in rows {
             _ = writeln!(
                 out,
-                "  throws UnsupportedOperationException: {message}, {n} piece{}",
+                "  {} UnsupportedOperationException: {message}, {n} piece{}",
+                kind.row(),
                 if n == 1 { "" } else { "s" }
             );
             _ = writeln!(out, "          at {}", places.join(", "));
@@ -1052,27 +1110,36 @@ impl Tally {
                 })
             })
             .collect();
-        let unfollowed: Vec<Value> = Part::ALL
-            .iter()
-            .map(|&part| Some(part))
-            .chain([None])
-            .flat_map(|part| {
-                self.unfollowed_handles(pieces, part).into_iter().map(move |(message, n, places)| {
-                    json!({
-                        "source": part.map(Part::name),
-                        "message": message,
-                        "pieces": n,
-                        "places": places,
+        let listed = |kind: Listed| -> Vec<Value> {
+            Part::ALL
+                .iter()
+                .map(|&part| Some(part))
+                .chain([None])
+                .flat_map(|part| {
+                    self.listed(kind, pieces, part).into_iter().map(move |(message, n, places)| {
+                        json!({
+                            "source": part.map(Part::name),
+                            "message": message,
+                            "pieces": n,
+                            "places": places,
+                        })
                     })
                 })
+                .collect()
+        };
+        let by_piece: Vec<BTreeMap<usize, Vec<Value>>> = Listed::ALL
+            .iter()
+            .map(|&kind| {
+                let mut by_piece: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
+                for (piece, message, place) in &self.listed[kind as usize] {
+                    if let Some(piece) = piece {
+                        by_piece.entry(*piece).or_default().push(json!({"message": message, "place": place}));
+                    }
+                }
+                by_piece
             })
             .collect();
-        let mut by_piece: BTreeMap<usize, Vec<Value>> = BTreeMap::new();
-        for (piece, message, place) in &self.unfollowed {
-            if let Some(piece) = piece {
-                by_piece.entry(*piece).or_default().push(json!({"message": message, "place": place}));
-            }
-        }
+        let of_piece = |kind: Listed, i: usize| by_piece[kind as usize].get(&i).cloned().unwrap_or_default();
         json!({
             "main": main,
             "complete": self.fatal.is_none(),
@@ -1080,7 +1147,8 @@ impl Tally {
             "totals": totals,
             "rejections": rejections,
             "missingClasses": missing_classes,
-            "unfollowedHandles": unfollowed,
+            "unfollowedHandles": listed(Listed::Handles),
+            "charsetNames": listed(Listed::CharsetNames),
             "pieces": pieces.iter().zip(&self.errors).enumerate().map(|(i, (p, errors))| json!({
                 "source": p.part.name(),
                 "class": p.class,
@@ -1090,7 +1158,8 @@ impl Tally {
                 "missingClass": p.missing_class,
                 "errors": errors.iter().map(|(message, place)| json!({"message": message, "place": place}))
                     .collect::<Vec<_>>(),
-                "unfollowedHandles": by_piece.get(&i).cloned().unwrap_or_default(),
+                "unfollowedHandles": of_piece(Listed::Handles, i),
+                "charsetNames": of_piece(Listed::CharsetNames, i),
             })).collect::<Vec<_>>(),
             "elsewhere": self.elsewhere.iter().map(|(message, place)| json!({"message": message, "place": place}))
                 .collect::<Vec<_>>(),

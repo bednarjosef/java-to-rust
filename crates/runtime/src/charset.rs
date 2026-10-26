@@ -1,10 +1,16 @@
 //! Java's standard charsets, for `String.getBytes` and `new String(bytes, ..)`. Encoding and
 //! decoding follow the JDK (`sun.nio.cs` and `String.decodeUTF8_UTF16`), including how each
 //! charset replaces what it cannot encode or decode, so that the output matches Java's bytes.
+//!
+//! Besides the six that the runtime has, a program may carry the JDK's single-byte charsets
+//! (windows-1252, the ISO-8859 ones, KOI8-R, the IBM code pages, ...) as tables
+//! (`ByteCharset`), which the translator took from the JDK it was built with and which the
+//! program gives the runtime as it starts (`register_charsets`).
 
 use crate::string::string_hash;
 use crate::{Array, from_vec, throw};
 use std::fmt;
+use std::sync::OnceLock;
 
 const REPLACEMENT: char = '\u{FFFD}';
 
@@ -18,6 +24,117 @@ pub enum Charset {
     Utf16,
     Utf16Be,
     Utf16Le,
+    /// A single-byte charset of the JDK, which the program carries.
+    Bytes(&'static ByteCharset),
+}
+
+/// A single-byte charset of the JDK, as a table that the translator took from the JDK's own
+/// coders: what each byte decodes to, and what each char encodes to.
+pub struct ByteCharset {
+    name: &'static str,
+    /// The name that `getEncoding` of a reader or writer gives (`Cp1252`).
+    historical: &'static str,
+    aliases: &'static [&'static str],
+    /// The 256 chars of the bytes, in order; U+FFFD where a byte has none.
+    decode: &'static str,
+    /// The chars whose byte is not the first byte that decodes to them: another byte, or -1 for
+    /// a char that the charset cannot encode.
+    overrides: &'static [(u16, i16)],
+    /// The byte that replaces what cannot be encoded.
+    replacement: u8,
+    coding: OnceLock<Coding>,
+}
+
+/// The tables of a `ByteCharset` as the coders read them, made on first use.
+struct Coding {
+    decode: [char; 256],
+    /// Each char that encodes, with its byte, by char.
+    encode: Vec<(u16, u8)>,
+}
+
+impl ByteCharset {
+    pub const fn new(
+        name: &'static str,
+        historical: &'static str,
+        aliases: &'static [&'static str],
+        decode: &'static str,
+        overrides: &'static [(u16, i16)],
+        replacement: u8,
+    ) -> ByteCharset {
+        ByteCharset { name, historical, aliases, decode, overrides, replacement, coding: OnceLock::new() }
+    }
+
+    fn coding(&self) -> &Coding {
+        self.coding.get_or_init(|| {
+            let mut decode = [REPLACEMENT; 256];
+            for (b, c) in self.decode.chars().enumerate().take(256) {
+                decode[b] = c;
+            }
+            let mut encode: Vec<(u16, u8)> = Vec::with_capacity(256);
+            for (b, &c) in decode.iter().enumerate() {
+                if c != REPLACEMENT && !encode.iter().any(|&(e, _)| u32::from(e) == c as u32) {
+                    encode.push((c as u32 as u16, b as u8));
+                }
+            }
+            encode.retain(|(c, _)| !self.overrides.iter().any(|(o, _)| o == c));
+            encode.extend(self.overrides.iter().filter(|(_, b)| *b >= 0).map(|&(c, b)| (c, b as u8)));
+            encode.sort_unstable();
+            Coding { decode, encode }
+        })
+    }
+
+    fn named(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name) || self.aliases.iter().any(|a| a.eq_ignore_ascii_case(name))
+    }
+
+    /// One byte per char: the table's, or the replacement for a char that it cannot encode, a
+    /// surrogate pair and a lone surrogate, as the JDK's `SingleByte` encoder replaces them.
+    fn encode(&self, s: &crate::Wtf8) -> Vec<u8> {
+        let encode = &self.coding().encode;
+        let byte = |c: u32| {
+            let c = u16::try_from(c).ok().filter(|c| !(0xD800..0xE000).contains(c))?;
+            encode.binary_search_by_key(&c, |&(e, _)| e).ok().map(|at| encode[at].1)
+        };
+        s.code_points().map(|c| byte(c).unwrap_or(self.replacement)).collect()
+    }
+
+    fn decode(&self, bytes: &[i8]) -> String {
+        let decode = &self.coding().decode;
+        bytes.iter().map(|&b| decode[b as u8 as usize]).collect()
+    }
+}
+
+/// Two tables are the same charset only if they are the same table, as Java has one object for
+/// each charset.
+impl PartialEq for ByteCharset {
+    fn eq(&self, other: &ByteCharset) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for ByteCharset {}
+
+impl fmt::Debug for ByteCharset {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+/// What the program tells the runtime of the JDK's charsets as it starts (`register_charsets`).
+struct ProgramCharsets {
+    /// The single-byte charsets that it carries.
+    tables: &'static [ByteCharset],
+    /// The names and aliases of the JDK's charsets that the translation has neither in the
+    /// runtime nor as a table, where the program computes a charset's name.
+    missing: &'static [&'static str],
+}
+
+static PROGRAM_CHARSETS: OnceLock<ProgramCharsets> = OnceLock::new();
+
+/// Gives the runtime the charsets that the program carries and the names of those it does not
+/// have, before anything looks one up.
+pub fn register_charsets(tables: &'static [ByteCharset], missing: &'static [&'static str]) {
+    let _ = PROGRAM_CHARSETS.set(ProgramCharsets { tables, missing });
 }
 
 /// `toString()` is the canonical name, so a charset prints as Java prints it.
@@ -76,19 +193,39 @@ const NAMES: &[(&[&str], Charset)] = &[
 ];
 
 impl Charset {
+    /// The charset of `name`: one of the runtime's, or one that the program carries.
     fn lookup(name: &str) -> Option<Charset> {
+        Charset::builtin(name).or_else(|| {
+            let program = PROGRAM_CHARSETS.get()?;
+            program.tables.iter().find(|c| c.named(name)).map(Charset::Bytes)
+        })
+    }
+
+    /// The charset of `name`, or else, for the name of a charset of the JDK that the program does
+    /// not have, an `UnsupportedOperationException`: Java has the charset, so neither its
+    /// exception for an unknown name nor `false` would be Java's answer.
+    fn lookup_known(name: &str) -> Option<Charset> {
+        let charset = Charset::lookup(name);
+        let missing = PROGRAM_CHARSETS.get().map_or(&[][..], |p| p.missing);
+        if charset.is_none() && missing.iter().any(|m| m.eq_ignore_ascii_case(name)) {
+            let message = format!("{name}, a charset of the JDK that the translation does not have");
+            throw("java.lang.UnsupportedOperationException", &message);
+        }
+        charset
+    }
+
+    fn builtin(name: &str) -> Option<Charset> {
         NAMES
             .iter()
             .find(|(names, _)| names.iter().any(|n| n.eq_ignore_ascii_case(name)))
             .map(|&(_, charset)| charset)
     }
 
-    /// The charset that `forName(name)` finds, without failing: `None` where the name is not
-    /// one of a charset that the runtime has. The translator finds the charset of a constant name
-    /// with it.
+    /// The charset of the runtime's six that `forName(name)` finds, without failing: `None` where
+    /// the name is not one of theirs. The translator finds the charset of a constant name with it.
     pub fn known(name: &crate::Wtf8) -> Option<Charset> {
         let name = &*name.to_string_lossy();
-        Charset::lookup(name)
+        Charset::builtin(name)
     }
 
     /// `name()`: the canonical name, which `toString()` gives too.
@@ -100,6 +237,21 @@ impl Charset {
             Charset::Utf16 => "UTF-16",
             Charset::Utf16Be => "UTF-16BE",
             Charset::Utf16Le => "UTF-16LE",
+            Charset::Bytes(table) => table.name,
+        }
+    }
+
+    /// The historical name of the charset, which `getEncoding` of an `InputStreamReader` or an
+    /// `OutputStreamWriter` gives (`HistoricallyNamedCharset.historicalName()`).
+    pub fn historical_name(self) -> &'static str {
+        match self {
+            Charset::Utf8 => "UTF8",
+            Charset::UsAscii => "ASCII",
+            Charset::Latin1 => "ISO8859_1",
+            Charset::Utf16 => "UTF-16",
+            Charset::Utf16Be => "UnicodeBigUnmarked",
+            Charset::Utf16Le => "UnicodeLittleUnmarked",
+            Charset::Bytes(table) => table.historical,
         }
     }
 
@@ -120,19 +272,21 @@ impl Charset {
 
     /// `Charset.forName(name)`: a null name is an `IllegalArgumentException`, a malformed name an
     /// `IllegalCharsetNameException` and an unknown one an `UnsupportedCharsetException`, each
-    /// with the name as its message.
+    /// with the name as its message; one of the JDK's that the program does not have is an
+    /// `UnsupportedOperationException` (`lookup_known`).
     pub fn for_name(name: Option<&crate::Wtf8>) -> Charset {
         let name = name.map(|name| name.to_string_lossy());
         let name = name.as_deref();
         let name = Charset::legal_name(name);
-        Charset::lookup(name).unwrap_or_else(|| throw("java.nio.charset.UnsupportedCharsetException", name))
+        Charset::lookup_known(name)
+            .unwrap_or_else(|| throw("java.nio.charset.UnsupportedCharsetException", name))
     }
 
     /// `Charset.isSupported(name)`, which checks the name as `for_name` does.
     pub fn is_supported(name: Option<&crate::Wtf8>) -> bool {
         let name = name.map(|name| name.to_string_lossy());
         let name = name.as_deref();
-        Charset::lookup(Charset::legal_name(name)).is_some()
+        Charset::lookup_known(Charset::legal_name(name)).is_some()
     }
 
     /// The name, checked as Java checks it: letters and digits, and `-+:_.` after the first
@@ -151,12 +305,15 @@ impl Charset {
     /// `UnsupportedEncodingException` for an unknown name.
     pub fn for_encoding_name(name: &crate::Wtf8) -> Charset {
         let name = &*name.to_string_lossy();
-        Charset::lookup(name).unwrap_or_else(|| throw("java.io.UnsupportedEncodingException", name))
+        Charset::lookup_known(name).unwrap_or_else(|| throw("java.io.UnsupportedEncodingException", name))
     }
 
     /// The bytes of `s` in this charset. What it cannot encode becomes `?` (one per character,
     /// so an emoji is one `?`), as Java replaces it.
     pub fn encode(self, s: &crate::Wtf8) -> Vec<u8> {
+        if let Charset::Bytes(table) = self {
+            return table.encode(s);
+        }
         let s = &*s.to_string_lossy();
         match self {
             Charset::Utf8 => s.as_bytes().to_vec(),
@@ -169,12 +326,16 @@ impl Charset {
             }
             Charset::Utf16Be => s.encode_utf16().flat_map(u16::to_be_bytes).collect(),
             Charset::Utf16Le => s.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            Charset::Bytes(_) => unreachable!("a table encodes above"),
         }
     }
 
     /// The text of `bytes` in this charset, with each malformed sequence replaced by U+FFFD as
     /// Java replaces it.
     pub fn decode(self, bytes: &[i8]) -> String {
+        if let Charset::Bytes(table) = self {
+            return table.decode(bytes);
+        }
         let bytes: Vec<u8> = bytes.iter().map(|&b| b as u8).collect();
         match self {
             Charset::Utf8 => decode_utf8(&bytes),
@@ -185,6 +346,7 @@ impl Charset {
             Charset::Utf16 => decode_utf16(&bytes, true, true),
             Charset::Utf16Be => decode_utf16(&bytes, true, false),
             Charset::Utf16Le => decode_utf16(&bytes, false, false),
+            Charset::Bytes(_) => unreachable!("a table decodes above"),
         }
     }
 }

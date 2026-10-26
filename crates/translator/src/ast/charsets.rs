@@ -27,6 +27,9 @@ pub enum CharsetOp {
     Name,
     /// `charset.displayName()`; the charset is the first argument.
     DisplayName,
+    /// `TranslatedCoders.historicalName(charset)`, the translator's: the name that `getEncoding`
+    /// of a reader or a writer gives (`Cp1252`); the charset is the first argument.
+    HistoricalName,
     /// `charset.toString()`; the charset is the first argument.
     ToString,
     /// `charset.hashCode()`; the charset is the first argument.

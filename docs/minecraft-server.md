@@ -67,8 +67,9 @@ directory with one) and prints, in plain text:
 - the rejection messages whose pieces went down the most and up the most, and the new ones, each
   with its old and new count (a message's pieces as the census counts them, `--top N` of each,
   20 by default).
-- the handle calls that the translation does not follow and makes throw (below), by pieces, old
-  and new, and the messages whose pieces changed.
+- the handle calls that the translation does not follow and makes throw, and the charset names
+  known only at run time (both below), each by pieces, old and new, and the messages whose
+  pieces changed.
 
 The `summary` step runs it with the roots of `census-by-origin.py`, against `census-previous/`
 (or `PREVIOUS_CENSUS`, such as a census kept by hand under another name), and writes the result
@@ -335,6 +336,15 @@ the number of pieces and the place of every call:
 ``throws UnsupportedOperationException: `Lookup.findVirtual` of a handle or arguments that the
 translation does not follow, or that may fail, N pieces``. `census.json` has them under
 `unfollowedHandles`, and each piece's under its own `unfollowedHandles`.
+
+So are the lookups of a charset by a name known only at run time (`Charset.forName`,
+`isSupported`, `getBytes` and `new String` with a name): the name may be that of a charset of
+the JDK that the translation has neither in the runtime nor as a table (Shift_JIS, GBK, UTF-32),
+for which the program throws `UnsupportedOperationException` where Java finds the charset
+([supported-java.md](supported-java.md), charsets). Their section reads ``may throw
+UnsupportedOperationException: `Charset.forName` of a charset name known only at run time, N
+pieces``, and `census.json` has them under `charsetNames`, the whole program's and each
+piece's.
 
 A translation with `--keep-going` does the same, so a program whose library has optional
 dependencies can be built: it stops only at a rejected piece, as any translation does.

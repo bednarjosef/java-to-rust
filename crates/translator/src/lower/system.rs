@@ -63,7 +63,7 @@ pub const HEADLESS: (&str, &str) = ("java.awt.headless", "true");
 /// The properties of the JDK on the path (`java -XshowSettings:properties -version`), read once;
 /// `None` when it cannot be run. A value listed on several lines (`java.library.path`) is a path
 /// of the parts.
-fn jdk_properties() -> Option<&'static HashMap<String, String>> {
+pub(crate) fn jdk_properties() -> Option<&'static HashMap<String, String>> {
     static PROPERTIES: OnceLock<Option<HashMap<String, String>>> = OnceLock::new();
     PROPERTIES
         .get_or_init(|| {

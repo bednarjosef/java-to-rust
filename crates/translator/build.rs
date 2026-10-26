@@ -8,7 +8,12 @@
 //! JDK's sources, as `functional.json`, and the tree of `java/Threads.java`, the translator's
 //! `java.lang.Thread`, as `threads.json` (compiled with `java/ThreadLocalStub.java`, the name of a
 //! JDK class it uses), and the tree of `java/Reflection.java`, the translator's
-//! `java.lang.reflect.Method`, `Field` and `Constructor`, as `reflection.json`.
+//! `java.lang.reflect.Method`, `Field` and `Constructor`, as `reflection.json`. Last, runs
+//! `java/Charsets.java`, which prints this JDK's charsets and the tables of its single-byte ones,
+//! as `charsets.json` (see `jdk_charsets.rs`). Those are this JDK's, so the build runs again
+//! when the `java` on `PATH` is replaced, as an upgrade replaces it; and the translator asks the
+//! JDK it runs with again where that is another JDK, which an upgrade with older file times or a
+//! change of `PATH` can leave.
 
 use std::process::Command;
 
@@ -26,6 +31,8 @@ fn main() {
     println!("cargo:rerun-if-changed=java/Threads.java");
     println!("cargo:rerun-if-changed=java/ThreadLocalStub.java");
     println!("cargo:rerun-if-changed=java/Reflection.java");
+    println!("cargo:rerun-if-changed=java/Charsets.java");
+    rerun_if_jdk_changes();
     let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
     let mut javac = Command::new("javac");
     javac.args(["-d", &out, "-Xlint:none"]);
@@ -38,6 +45,7 @@ fn main() {
             "java/BytecodeNames.java",
             "java/JdkPatch.java",
             "java/MissingClasses.java",
+            "java/Charsets.java",
         ])
         .status()
         .expect("building the translator needs javac (a JDK, version 21 or newer) on PATH");
@@ -67,5 +75,31 @@ fn main() {
         );
         std::fs::write(std::path::Path::new(&out).join(json), tree.stdout)
             .expect("the build directory is writable");
+    }
+    let charsets = Command::new("java")
+        .args(["-cp", &out, "Charsets"])
+        .output()
+        .expect("building the translator needs java (a JDK) on PATH");
+    assert!(charsets.status.success(), "Charsets failed: {}", String::from_utf8_lossy(&charsets.stderr));
+    std::fs::write(std::path::Path::new(&out).join("charsets.json"), charsets.stdout)
+        .expect("the build directory is writable");
+}
+
+/// Makes Cargo run this script again when the `java` that `PATH` finds (through its links) or
+/// that JDK's `release` file is replaced, as an upgrade replaces them. Not on a change of `PATH`
+/// itself, which differs between shells and would rebuild the translator for nothing.
+fn rerun_if_jdk_changes() {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let Some(java) = std::env::split_paths(&path).map(|dir| dir.join("java")).find(|java| java.is_file())
+    else {
+        return;
+    };
+    let Ok(java) = std::fs::canonicalize(java) else { return };
+    println!("cargo:rerun-if-changed={}", java.display());
+    if let Some(home) = java.parent().and_then(|bin| bin.parent()) {
+        let release = home.join("release");
+        if release.is_file() {
+            println!("cargo:rerun-if-changed={}", release.display());
+        }
     }
 }
