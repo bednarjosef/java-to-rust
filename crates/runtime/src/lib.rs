@@ -327,6 +327,7 @@ pub fn string_length(s: &Wtf8) -> i32 {
 
 /// Java's `System.exit`.
 pub fn exit(code: i32) -> ! {
+    thread::run_shutdown_hooks();
     // What `System.out` still buffers is lost, as Java loses it.
     drain_stdout();
     std::process::exit(code)

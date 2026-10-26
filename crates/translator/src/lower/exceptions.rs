@@ -687,6 +687,19 @@ impl Uses {
                         {
                             self.fields.insert(("java.lang.Thread".into(), "tid".into()));
                         }
+                        // A shutdown hook is the translator's `Thread`'s (`lower.rs`).
+                        if owner == "java.lang.Runtime"
+                            && matches!(
+                                text(symbol, "name").as_str(),
+                                "addShutdownHook" | "removeShutdownHook"
+                            )
+                        {
+                            self.members.insert((
+                                "java.lang.Thread".into(),
+                                text(symbol, "name"),
+                                text(symbol, "type"),
+                            ));
+                        }
                         // The carrier thread is the current one (`lower.rs`).
                         if (owner.as_str(), text(symbol, "name").as_str())
                             == ("jdk.internal.access.JavaLangAccess", "currentCarrierThread")
@@ -920,9 +933,14 @@ impl Standard {
                 let (class, name, signature) = INHERIT_THREAD_LOCALS;
                 uses.members.insert((class.into(), name.into(), signature.into()));
             }
-            // The runtime runs `dispatchUncaught()` once a handler is set (see `lower/natives.rs`).
-            if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "installUncaught0") {
-                uses.members.insert(("java.lang.Thread".into(), "dispatchUncaught".into(), "()void".into()));
+            // The runtime runs `dispatchUncaught()` once a handler is set, and `runShutdownHooks()`
+            // once a hook is added (see `lower/natives.rs`).
+            for (install, run) in
+                [("installUncaught0", "dispatchUncaught"), ("installShutdown0", "runShutdownHooks")]
+            {
+                if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == install) {
+                    uses.members.insert(("java.lang.Thread".into(), run.into(), "()void".into()));
+                }
             }
             if longer_traces(&uses.members) {
                 for (name, signature) in [UNCAUGHT_TRACE, UNCAUGHT_EXCEPTION] {

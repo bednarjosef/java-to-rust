@@ -412,6 +412,7 @@ and the members a program uses are added to it. It holds `Thread`, `Thread.Uncau
   `currentThread`, `sleep` (millis, and millis with nanos), `yield`, `onSpinWait`, `holdsLock`,
   `getName`/`setName`, `isDaemon`/`setDaemon` (`IllegalThreadStateException` after start),
   `getId`/`threadId`, `getPriority`/`setPriority` (stored, no effect), `getThreadGroup`,
+  the shutdown hooks of `Runtime` (section 6),
   `getState`, `isVirtual` (always false), the context class loader, the uncaught-exception
   handlers, `toString` (`Thread[#3,main,5,main]`), and the stack without frames, as an
   exception's (see [exceptions.md](exceptions.md)): `getStackTrace` is empty, Java's shared empty
@@ -468,7 +469,8 @@ group enumeration.
 | `Unsafe.park`, `unpark` | a permit per record (a mutex and a condition variable); `std::thread::park` has no handle before `spawn` returns |
 | `Object.wait`, `notify`, `notifyAll`, `holdsLock` | the monitor functions of section 3 (`monitor.rs`, `locked.rs`) |
 | `installUncaught0`, `uncaught0`, `printUncaught0` | the uncaught-exception hook (section 6) |
-| `System.exit`, `Runtime.halt` | flush the output, `process::exit` |
+| `installShutdown0` | `java::set_shutdown_hook`: the function that runs `Thread.runShutdownHooks()`, which lowering adds as the native's argument |
+| `System.exit`, `Runtime.halt` | `exit` runs the shutdown hooks; both flush the output, `process::exit` |
 
 ### 5.3 Field and array handles
 
@@ -602,8 +604,17 @@ field that is not `volatile` asks for more (section 7).
   handler chain, and the program then exits with 1.
 - **Daemon threads** are not counted, so the process exits while they run, as in Java.
   `System.exit(n)` and `Runtime.halt(n)` from any thread flush and end every thread at once.
-  Translated programs have no shutdown hooks. A deadlocked thread keeps the process alive, as in
-  Java.
+  A deadlocked thread keeps the process alive, as in Java.
+- **Shutdown hooks**: `Runtime.getRuntime().addShutdownHook(t)` and `removeShutdownHook(t)` are
+  calls of the translator's `Thread.addShutdownHook` and `removeShutdownHook`, which keep the
+  hooks, with the JDK's checks and messages. Once a hook is added, the runtime has
+  `runShutdownHooks()`, and runs it on the first exit, as Java's shutdown sequence: `main`
+  returning (after the other non-daemon threads), `System.exit`, an uncaught exception that ends
+  `main`, a failing static initializer. Every hook starts, and the exit waits until all of them
+  have ended; no hook can be added or removed from then on (`Shutdown in progress`).
+  `Runtime.halt` runs none, as in Java. A signal (`SIGINT`, `SIGTERM`) ends the process without
+  running them, where Java runs them; and an exit while the hooks run ends the process at once,
+  where Java's blocks.
 - `InterruptedException`, `IllegalMonitorStateException` and `IllegalThreadStateException` are
   standard classes of `Standard.java`.
 

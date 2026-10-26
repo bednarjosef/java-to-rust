@@ -9,6 +9,7 @@ pub fn throw_initializer(e: impl fmt::Display + 'static) -> ! {
         "Exception in thread \"main\" java.lang.ExceptionInInitializerError\nCaused by: {}\n",
         crate::uncaught_text(&e)
     ));
+    crate::thread::run_shutdown_hooks();
     crate::drain_stdout();
     std::process::exit(1)
 }

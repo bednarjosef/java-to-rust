@@ -323,7 +323,8 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::InstallUncaught
             | Native::UncaughtException
             | Native::PrintUncaught
-            | Native::InstallTrace,
+            | Native::InstallTrace
+            | Native::InstallShutdown,
         ) => &[],
         // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
         // interrupt, which `runtime_failures` adds).

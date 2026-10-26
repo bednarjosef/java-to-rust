@@ -7,7 +7,7 @@
 // exception's has none; its state and virtual threads are left out. The interrupt status is the runtime's, by the thread's id, so that
 // `sleep`, `join` and `wait` observe it. An uncaught exception goes to the thread's handler once
 // the program has set a handler (`installUncaught0`); until then the runtime prints it, as the
-// thread group would.
+// thread group would. `Runtime`'s shutdown hooks are kept here too.
 package threads;
 
 class Thread {
@@ -367,6 +367,78 @@ class Thread {
         currentThread().dispatchUncaughtException(uncaught0());
     }
 
+    // The hooks of `Runtime.addShutdownHook` and `removeShutdownHook`, whose calls are calls of
+    // the methods below (`lower.rs`): threads that start as the program exits, which the exit
+    // waits for. Null once that has begun.
+    private static Thread[] shutdownHooks = new Thread[0];
+
+    static synchronized void addShutdownHook(Thread hook) {
+        if (shutdownHooks == null) {
+            throw new IllegalStateException("Shutdown in progress");
+        }
+        if (hook.isAlive()) {
+            throw new IllegalArgumentException("Hook already running");
+        }
+        for (Thread registered : shutdownHooks) {
+            if (registered == hook) {
+                throw new IllegalArgumentException("Hook previously registered");
+            }
+        }
+        Thread[] hooks = new Thread[shutdownHooks.length + 1];
+        System.arraycopy(shutdownHooks, 0, hooks, 0, shutdownHooks.length);
+        hooks[shutdownHooks.length] = hook;
+        shutdownHooks = hooks;
+        installShutdown0();
+    }
+
+    static synchronized boolean removeShutdownHook(Thread hook) {
+        if (shutdownHooks == null) {
+            throw new IllegalStateException("Shutdown in progress");
+        }
+        if (hook == null) {
+            throw new NullPointerException();
+        }
+        for (int i = 0; i < shutdownHooks.length; i++) {
+            if (shutdownHooks[i] == hook) {
+                Thread[] hooks = new Thread[shutdownHooks.length - 1];
+                System.arraycopy(shutdownHooks, 0, hooks, 0, i);
+                System.arraycopy(shutdownHooks, i + 1, hooks, i, hooks.length - i);
+                shutdownHooks = hooks;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The hooks, taken once: no hook can be added or removed after this.
+    private static synchronized Thread[] takeShutdownHooks() {
+        Thread[] hooks = shutdownHooks;
+        shutdownHooks = null;
+        return hooks;
+    }
+
+    // What the runtime runs, once, as the program exits: every hook starts, and the exit waits
+    // until all of them have ended.
+    private static void runShutdownHooks() {
+        Thread[] hooks = takeShutdownHooks();
+        for (Thread hook : hooks) {
+            try {
+                hook.start();
+            } catch (IllegalThreadStateException startedAlready) {
+            }
+        }
+        for (Thread hook : hooks) {
+            boolean ended = false;
+            while (!ended) {
+                try {
+                    hook.join();
+                    ended = true;
+                } catch (InterruptedException ignored) {
+                }
+            }
+        }
+    }
+
     static Object scopedValueBindings() {
         return currentThread().scopedValueBindings;
     }
@@ -423,6 +495,10 @@ class Thread {
     private static native boolean clearInterrupt0();
 
     private static native void installUncaught0();
+
+    // Gives the runtime `runShutdownHooks()`, which it runs as the program exits (see
+    // `lower/natives.rs`).
+    private static native void installShutdown0();
 
     private static native Throwable uncaught0();
 

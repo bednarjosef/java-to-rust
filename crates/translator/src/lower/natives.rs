@@ -156,6 +156,10 @@ impl<'t> Lowering<'t> {
                         self.uncaught_dispatch(node, args);
                         Native::InstallUncaught
                     }
+                    Some(Native::InstallShutdown) => {
+                        args.push(self.thread_call(node, "runShutdownHooks"));
+                        Native::InstallShutdown
+                    }
                     // The array and the value are `Object`s, as an array is where it is one.
                     Some(native @ (Native::ReflectArrayLength | Native::ReflectArraySet)) => {
                         let all = std::mem::take(args).into_iter().enumerate();
@@ -391,14 +395,16 @@ impl<'t> Lowering<'t> {
     /// exception nothing catches ends: `Thread.dispatchUncaught()`, added as the argument of the
     /// native (`InstallUncaught`) so that every analysis sees the call and what it reaches.
     fn uncaught_dispatch(&self, node: Node<'t>, args: &mut Vec<Expr>) {
-        let dispatch = self.methods.iter().position(|m| {
-            self.types[m.owner].javac == "java.lang.Thread"
-                && m.name == "dispatchUncaught"
-                && m.sig == "()void"
+        args.push(self.thread_call(node, "dispatchUncaught"));
+    }
+
+    /// The call of the translator's static `void Thread.name()`.
+    fn thread_call(&self, node: Node<'t>, name: &str) -> Expr {
+        let resolved = self.methods.iter().position(|m| {
+            self.types[m.owner].javac == "java.lang.Thread" && m.name == name && m.sig == "()void"
         });
-        let call =
-            ExprKind::Call { name: "dispatchUncaught".to_string(), args: Vec::new(), resolved: dispatch };
-        args.push(self.synth(call, node.pos(), Type::Void));
+        let call = ExprKind::Call { name: name.to_string(), args: Vec::new(), resolved };
+        self.synth(call, node.pos(), Type::Void)
     }
 
     /// `Blocker.begin()`, `begin(blocking)` and `end(attempted)`, which the JDK's file streams and

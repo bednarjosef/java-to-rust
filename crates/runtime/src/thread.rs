@@ -232,6 +232,24 @@ pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + 
     }
 }
 
+/// What the translation of a program that adds a shutdown hook gives the runtime
+/// (`Thread.installShutdown0()`): a function that starts the hooks and waits until they end.
+static SHUTDOWN_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// `Thread.installShutdown0()`: the program runs `run` as it exits.
+pub fn set_shutdown_hook(run: fn()) {
+    *lock(&SHUTDOWN_HOOK) = Some(run);
+}
+
+/// The start of the program's exit, Java's shutdown sequence: the shutdown hooks run, on the
+/// first exit only. Every way out but `Runtime.halt` comes here.
+pub(crate) fn run_shutdown_hooks() {
+    let run = lock(&SHUTDOWN_HOOK).take();
+    if let Some(run) = run {
+        run()
+    }
+}
+
 /// The payload with which a thread that an exception ends unwinds to its start, once the message
 /// is printed.
 struct Uncaught;
@@ -326,6 +344,7 @@ pub(crate) fn end_dispatched() -> ! {
         std::panic::resume_unwind(Box::new(Uncaught))
     }
     await_threads();
+    run_shutdown_hooks();
     crate::flush();
     std::process::exit(1)
 }
@@ -623,6 +642,7 @@ impl Drop for MainThread {
         // A panic is a translation bug: the program ends with it.
         if !std::thread::panicking() {
             await_threads();
+            run_shutdown_hooks();
         }
         crate::drain_stdout();
     }
