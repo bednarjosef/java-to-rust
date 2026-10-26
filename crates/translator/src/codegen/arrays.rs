@@ -524,8 +524,17 @@ pub(super) fn name_part(ty: Type) -> String {
         Type::Boxed(_) => ty.to_string().to_lowercase(),
         Type::StringBuilder => "stringbuilder".to_string(),
         Type::String => "string".to_string(),
-        // A type of the runtime, such as `java::Class`, by its own name.
-        _ => rust_type(ty).rsplit("::").next().unwrap_or_default().to_lowercase(),
+        Type::Void => "void".to_string(),
+        // A type of the runtime, such as `java::Class`, by its own name, of the characters that
+        // a Rust name may have.
+        _ => rust_type(ty)
+            .rsplit("::")
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .to_lowercase(),
     }
 }
 
@@ -549,5 +558,23 @@ pub(super) fn zero_value(ty: Type) -> &'static str {
         Type::Double => "0.0",
         Type::Boolean => "false",
         _ => unreachable!("lowering rejects arrays of nullable elements"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A method told apart by its return type (`names::method_names`) may return nothing: its name
+    // takes `void`, as xerces's two `createChunk`s of `DeferredDocumentImpl` do once their array
+    // parameters are of one type.
+    #[test]
+    fn name_parts_are_rust_names() {
+        assert_eq!(name_part(Type::Void), "void");
+        assert_eq!(name_part(Type::array(Type::Int)), "i32_array");
+        for ty in [Type::Void, Type::Int, Type::Boolean, Type::array(Type::Double)] {
+            let part = name_part(ty);
+            assert!(part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'), "{part}");
+        }
     }
 }
