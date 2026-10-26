@@ -72,7 +72,9 @@ included (docs/collector.md).
   declarations (`lower/annotation_presence.rs`), and so are `getAnnotation(A.class)` of a class
   and the annotations of reflection's methods, fields and constructors, annotations whose members
   give the declared values and defaults (`lower/annotation_values.rs`). Type annotations (`java.lang.@Nullable String`,
-  `@Flags int`) are dropped from the types javac prints (`typeText` in `java/JavaTree.java`).
+  `@Flags int`) are dropped from the types javac prints (`typeText` in `java/JavaTree.java`),
+  also from the wildcard of a captured type (`capture#1 of ? extends java.lang.@Nullable Object`,
+  a value read through `Stream<? extends @Nullable Object>`), which javac's `stripMetadata` keeps.
 
 ## Strings, builders, characters and formatting
 
