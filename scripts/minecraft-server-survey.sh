@@ -73,12 +73,35 @@ extract() {
   (cd "$cache/jar" && unzip -q "$jar")
   echo "main class: $(cat "$cache/jar/META-INF/main-class")"
   echo "$(find "$cache/jar/META-INF/libraries" -name '*.jar' | wc -l) library jars"
-  # The server's resources, the files of its jar other than its classes and its META-INF: the
-  # data packs, assets and version.json, which the translated server reads from this root of the
-  # class path as Java reads them from the jar.
+  # The resources of the server and its libraries, the files of their jars other than classes,
+  # which the translated server reads from these roots of the class path as Java reads them from
+  # the jars: the server's data packs, assets and version.json (without its META-INF), and the
+  # libraries' service declarations (`META-INF/services`, how slf4j finds log4j) and data, such
+  # as log4j's index of its plugins. A jar's manifest and signatures are left out.
   rm -rf "$cache/resources" && mkdir -p "$cache/resources/server"
   unzip -q "$(server_jar)" -x '*.class' 'META-INF/*' -d "$cache/resources/server"
-  echo "$(find "$cache/resources/server" -type f | wc -l) resource files"
+  # Numbered in the order of the class path that java-run gives, which ServiceLoader keeps.
+  local library index=0
+  while IFS= read -r library; do
+    index=$((index + 1))
+    local dir=$cache/resources/libraries/$(printf %02d $index)-$(basename "$library" .jar)
+    mkdir -p "$dir"
+    unzip -qq "$library" -x '*.class' 'META-INF/MANIFEST.MF' 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' \
+      'META-INF/*.EC' -d "$dir" || true
+    [ -n "$(find "$dir" -type f -print -quit)" ] || rm -rf "$dir"
+  done < <(library_jars)
+  echo "$(find "$cache/resources" -type f | wc -l) resource files"
+}
+
+# The resource roots of the class path, as --library arguments: the server's, then each
+# library's, in the order of the class path.
+resource_args() {
+  [ -d "$cache/resources/server" ] && printf -- '--library\n%s\n' "$cache/resources/server"
+  local dir
+  for dir in "$cache"/resources/libraries/*/; do
+    [ -d "$dir" ] && printf -- '--library\n%s\n' "${dir%/}"
+  done
+  return 0
 }
 
 # Fetches a jar from Maven Central into the cache, unless it is there, and checks its SHA-1.
@@ -428,9 +451,9 @@ census() {
   fi
   mkdir -p "$out"
   [ -f "$jdk_sources/modules.txt" ] || { echo "no $jdk_sources/modules.txt (run the jdk-sources step)" >&2; exit 1; }
-  local -a libraries resources=()
+  local -a libraries resources
   mapfile -t libraries < <(library_args)
-  [ -d "$cache/resources/server" ] && resources=(--library "$cache/resources/server")
+  mapfile -t resources < <(resource_args)
   local main
   main=$(cat "$cache/jar/META-INF/main-class")
   # --timings prints each phase's time and the peak memory of the translator and of javac.

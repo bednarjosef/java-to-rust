@@ -17,7 +17,7 @@ the machine running out of memory.
 
 | step | what it does | time |
 |---|---|---|
-| `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required. Then unpacks the server jar's resources, every file but its classes and its `META-INF` (the data packs under `data/`, `assets/`, `version.json`: 9,889 files, 47 MB), into `resources/server` | seconds |
+| `extract` | unpacks the bundler jar: the real server jar is `META-INF/versions/26.3/server-26.3.jar`, with 39 library jars under `META-INF/libraries`; `META-INF/main-class` names `net.minecraft.server.Main`. Java 25 is required. Then unpacks the jars' resources, every file but their classes: the server jar's without its `META-INF` (the data packs under `data/`, `assets/`, `version.json`: 9,889 files, 47 MB) into `resources/server`, and each library jar's without its manifest and signatures (`META-INF/services`, through which slf4j finds log4j, log4j's index of its plugins, native libraries: 229 files) into `resources/libraries/<n>-<jar>`, numbered in the order of the class path | seconds |
 | `decompile` | Vineflower 1.12.0 (`-dgs=1 -rsy=1`, `-Xmx3g`) on `net/minecraft` and `com/mojang`, with every library jar given to it as a library (`-e`, [below](#decompiling-with-the-libraries)): 5,037 files, 546,535 lines. Also Vineflower without the libraries, and CFR and Procyon on the files that have errors. Since 26.1 the jar is not obfuscated, so the names are Mojang's | 3 min 12 s for Vineflower with the libraries on a busy machine (34 s without them on a quiet one) |
 | `best-of` | `src/server` from the four decompiles, taking each file from Vineflower with the libraries except where another setup's file gives the whole server fewer javac errors ([below](#2-decompiled-sources-that-do-not-compile)) | 5 compiles of the server, about 1.5 min each |
 | `libraries` | each library jar decompiled the same way, with the other library jars as libraries, one at a time, except the three that only load a native library: 7,375 files, 2.03 million lines (fastutil alone is 2,411 generated files) | 8 min 40 s without the libraries; they add about 4 s per jar |
@@ -33,8 +33,9 @@ the machine running out of memory.
 | `java-run` | not run by default. The same run of the server on Java, from the jars, in `java-run/`: what the trial's run is compared with | |
 
 The census gives the translator only `Main.java` as a source file. The rest of the server is a
-`--library` root like the libraries and the JDK modules, and so is `resources/server`, from
-which the translated server reads its resources as Java reads them from the jar
+`--library` root like the libraries and the JDK modules, and so are the resource roots, from
+which the translated server reads its resources as Java reads them from the jars, and whose
+service declarations the translation's `ServiceLoader` finds
 ([reflection-and-plugins.md](reflection-and-plugins.md)). Each library's root is its published
 sources where `library-sources` has them, and its decompiled code otherwise. This way javac reads and
 attributes only the classes that the code reachable from `main` uses, not all 5,037 server files
