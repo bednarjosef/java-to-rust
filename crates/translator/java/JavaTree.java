@@ -1214,6 +1214,19 @@ public class JavaTree {
     }
 
     /**
+     * {@code text} without the type annotations that {@code stripMetadata} leaves in it: those of
+     * the wildcard of a captured type variable ({@code capture#1 of ? extends
+     * java.lang.@org.jspecify.annotations.Nullable Object}), which it does not map.
+     */
+    private static String withoutAnnotations(String text) {
+        return text.indexOf('@') < 0 ? text : ANNOTATION.matcher(text).replaceAll("");
+    }
+
+    /** A type annotation as javac prints it in a type, with the space after it. */
+    private static final java.util.regex.Pattern ANNOTATION =
+        java.util.regex.Pattern.compile("@[\\p{javaJavaIdentifierStart}][\\p{javaJavaIdentifierPart}.]*(\\([^()]*\\))? ");
+
+    /**
      * A type as javac prints it, without its type annotations, with local and anonymous classes
      * named by {@link #className}, and a class that javac could not find (with {@code --keep-going},
      * see {@link MissingClasses}) as {@code java.lang.Object}: only {@code null} is of such a type.
@@ -1231,7 +1244,7 @@ public class JavaTree {
         }
         boolean erroneous = keepGoing && ((com.sun.tools.javac.code.Type) t).isErroneous();
         if (!erroneous && !mentionsLocal(t)) {
-            return t.toString();
+            return withoutAnnotations(t.toString());
         } else if (t.getKind() == TypeKind.ERROR) {
             return "java.lang.Object";
         } else if (t instanceof ArrayType a) {
@@ -1247,7 +1260,7 @@ public class JavaTree {
             return w.getExtendsBound() != null ? "? extends " + typeText(w.getExtendsBound())
                     : "? super " + typeText(w.getSuperBound());
         }
-        return t.toString();
+        return withoutAnnotations(t.toString());
     }
 
     /**

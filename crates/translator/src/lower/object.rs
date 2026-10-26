@@ -1246,8 +1246,10 @@ impl<'t> Lowering<'t> {
             None => self.this(node),
         };
         // An array's methods are `Object`'s, and so are a builder's `equals` and `hashCode`: it
-        // becomes an `Object` to call them.
-        let receiver = if matches!(receiver.ty, Type::Array(_) | Type::StringBuilder) {
+        // becomes an `Object` to call them. So does an enum's constant, whose `toString` javac
+        // names as `Object`'s in `Object::toString` over a stream of them; as an `Object` it
+        // calls the enum's own.
+        let receiver = if matches!(receiver.ty, Type::Array(_) | Type::StringBuilder | Type::Enum(_)) {
             self.object_array(node, receiver.ty)?;
             self.convert(receiver, Type::class(OBJECT))
         } else {

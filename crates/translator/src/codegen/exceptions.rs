@@ -402,6 +402,15 @@ fn sets(s: &Stmt, name: &str) -> bool {
             !declares(init, name)
                 && (init.iter().any(|s| sets(s, name)) || cond.as_ref().is_some_and(|c| always_sets(c, name)))
         }
+        // A `try` without `finally`, whose block carries the local out in its `Ok` value
+        // (`carried_out`) and whose `catch` clauses run in the arms of the `match` on it: where
+        // the block and each clause set it or never complete normally (the inner `try` of a
+        // try-with-resources, whose clause throws again).
+        Stmt::Try { body, catches, finally: None } => {
+            !declares_within(body, name)
+                && (sets_at_top(body, name) || !completes_all(body))
+                && catches.iter().all(|c| sets_at_top(&c.body, name) || !completes_all(&c.body))
+        }
         _ => false,
     }
 }
