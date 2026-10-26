@@ -163,6 +163,10 @@ fn run_program(args: &[String]) -> Result<(), String> {
             let Some(tree) = census.modules else {
                 return Err("the census ended early, so it has no translation to write".to_string());
             };
+            // The program is gone by now, but the allocator keeps the memory it had, which the
+            // large texts of the write do not reuse: given back, they fit where it was.
+            drop((census.report, census.json));
+            release_free_memory();
             let name = crate_name(&program.main);
             return phase("census: write", || write_translation(tree, name, crates, flag, path));
         }
@@ -201,6 +205,20 @@ fn write_translation(
         return workspace.write(Path::new(path), &name).map_err(|e| format!("{path}: {e}"));
     }
     emit(Some((flag, path)), &name, &tree.files(layout(flag)))
+}
+
+/// Gives the memory that the allocator holds free back to the system (glibc's `malloc_trim`),
+/// as `--timings` then shows as what the translator holds now.
+fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: `malloc_trim` only gives back pages that no allocation holds.
+        unsafe { malloc_trim(0) };
+        java_to_rust::timings::phase("census: memory given back", || ());
+    }
 }
 
 /// The name of a whole program's project: its main class's simple name.
