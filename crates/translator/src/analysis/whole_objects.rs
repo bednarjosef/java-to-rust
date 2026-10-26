@@ -235,7 +235,13 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
             class.methods[m].params.iter().map(|p| Param { name: p.name.clone(), ty: p.ty }).collect();
         let passed = sources[&m].iter().map(|source| rewrite.source(source, &params, pos)).collect();
         let new = rewrite.expr(ExprKind::New { class: t, args: passed, ctor: Some(zero) }, pos, ty);
-        let obj = || "obj".to_string();
+        // The object's local, named apart from the constructor's parameters (xpath's
+        // `XObject(Object obj)`).
+        let name = (0..)
+            .map(|n| if n == 0 { "obj".to_string() } else { format!("obj{n}") })
+            .find(|n| params.iter().all(|p| p.name != *n))
+            .expect("a free name");
+        let obj = || name.clone();
         let args = params.iter().map(|p| rewrite.expr(ExprKind::Var(p.name.clone()), pos, p.ty)).collect();
         let receiver = Box::new(rewrite.expr(ExprKind::Var(obj()), pos, ty));
         let call = ExprKind::MethodCall {
