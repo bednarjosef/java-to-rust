@@ -13,8 +13,22 @@ package java.io;
  * through it too, and both must stay in order.
  */
 final class StandardOutput extends OutputStream {
-    static final PrintStream out = new PrintStream(new StandardOutput(1), true);
-    static final PrintStream err = new PrintStream(new StandardOutput(2), true);
+    static volatile PrintStream out = new PrintStream(new StandardOutput(1), true);
+    static volatile PrintStream err = new PrintStream(new StandardOutput(2), true);
+
+    /**
+     * {@code System.setOut}: a program that calls it reads {@code System.out} as {@link #out}
+     * everywhere, its printing calls too ({@code Reach::replaced_streams}). As in Java, null is
+     * kept.
+     */
+    static void setOut(PrintStream stream) {
+        out = stream;
+    }
+
+    /** {@code System.setErr}, as {@link #setOut}. */
+    static void setErr(PrintStream stream) {
+        err = stream;
+    }
 
     /** 1 for standard output, 2 for standard error. */
     private final int fd;

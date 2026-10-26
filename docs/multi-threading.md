@@ -488,7 +488,8 @@ private static final int ABASE = U.arrayBaseOffset(Node[].class), ASHIFT = 31 - 
 name:
 
 - **A field handle** is a static final whose value is `objectFieldOffset(C.class, "f")` (or of
-  `getDeclaredField`, or assigned once in a static block). It is no field of the translation. A
+  `getDeclaredField`, or assigned once in a static block, or made by a static helper of a class
+  and a name, as JCTools' `UnsafeAccess.fieldOffset` in netty). It is no field of the translation. A
   read or write through it, in any memory mode, is a read or write of `o.f`; the field may be one
   of another class (`ThreadLocalRandom`'s offsets into `Thread`) as long as the object is of that
   class. Static fields (`staticFieldOffset`, `staticFieldBase`) work the same way.
@@ -503,8 +504,9 @@ name:
   accesses are the translator's methods in `java/overlay/java/nio/TranslatedBufferViews.java`,
   with the handle's checks and byte order) are handles too, as is a `MethodHandle` constant of a constructor.
 - **Field updater constants** (`AtomicIntegerFieldUpdater.newUpdater(C.class, "f")`, the `long`
-  one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`) are handles of a
-  field for which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
+  one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`, cast to a raw
+  updater or held in a static block's local first, as netty does) are handles of a field for
+  which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
   accessible to the class that makes it). `get`, `set`, `lazySet`, the compare-and-set forms,
   `getAndSet` and `getAndAdd` are the field's access or update; `getAndIncrement`,
   `incrementAndGet`, `addAndGet` and their kin are its `getAndAdd`, with the new value computed

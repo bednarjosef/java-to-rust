@@ -312,8 +312,15 @@ A translated program is closed: it knows all its classes. So:
   `TranslatedDigests`); so are secure random numbers: `SecureRandom` and the `SUN` provider's
   generators and seed sources, which `new SecureRandom()` and `SecureRandom.getInstance(String)`
   make by name (`java/patches/java/security/SecureRandom.java`, `TranslatedRandoms`), as
-  `UUID.randomUUID` does. A `Provider` and the methods that name one are not. Neither are keys
-  and specs, except their plain interfaces, which the program's own classes implement (see
+  `UUID.randomUUID` does; and so is what a Minecraft server's login needs: RSA key pairs, key
+  factories, ciphers and signatures of the `SunRsaSign` provider, the AES cipher and key
+  generator of `SunJCE` (`javax.crypto` is translated, `com.sun.crypto.provider` too), and the
+  DER encoding of keys (`sun.security.util`'s `Der*`, `ObjectIdentifier`, `KnownOIDs`,
+  `AlgorithmId`, `X509Key`, `PKCS8Key`), which `KeyPairGenerator`, `KeyFactory`, `Signature`,
+  `Cipher` and `KeyGenerator.getInstance(String)` make by name (their patches and
+  `TranslatedServices`). `AlgorithmParameters.getInstance(String)` finds no algorithm's
+  parameters. A `Provider` and the methods that name one are not translated. Neither are other
+  keys and specs, except their plain interfaces, which the program's own classes implement (see
   [object-model.md](object-model.md) 1.9). The security APIs' exceptions (`KeyException`,
   `SignatureException`, `CertificateException`, `InvalidKeySpecException` and the like) are
   translated: plain constructors, which library code throws and catches as its own.
@@ -439,6 +446,14 @@ field reads a static field of a holder class that the translator adds to the JDK
   descriptor table (`fd.rs`). `available` on a pipe or terminal answers the bytes waiting
   (`FIONREAD`). Descriptor 0 is read without a buffer in between, so each read returns what the
   JVM's would, and standard output is flushed before a read so that a prompt shows.
+
+`System.setOut` and `System.setErr` set those fields (`REDIRECTED_CALLS`; null is kept, as in
+Java). A program that calls one of them has no direct calls on that stream: reachability notes
+each direct call it meets, and once it meets the `set` call it reaches `PrintStream`'s method for
+each of them (`Reach::replaced_streams`), and lowering makes them calls on the field's object. So
+`System.out.println(x)` after `System.setOut(new LoggedPrintStream(..))`, as a Minecraft server's
+`Bootstrap` sets it, runs the subclass's `println`. What the runtime prints itself, such as the
+stack trace of an uncaught exception, still goes to the process's standard error.
 
 The JVM's `System.out` is a `PrintStream` over a 128-byte `BufferedOutputStream` over a
 `FileOutputStream`. The translation does not build that chain, because the direct calls and the

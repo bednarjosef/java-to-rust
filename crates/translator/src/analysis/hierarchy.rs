@@ -270,23 +270,39 @@ pub fn flows(
             visit_expr(init, &mut |x| note(x, t));
         }
     }
-    // Each class that reaches a type moves on along its edges, once.
+    // Each class that reaches a type moves on along its edges, once: to the targets that it is
+    // a subtype of, found among the edges' targets or among its supertypes, whichever are fewer
+    // (`Object` has an edge to the target of every cast from it, and a class few supertypes).
     let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(s, t) in &edges {
         out[s].push(t);
     }
     let mut work: Vec<(usize, usize)> =
         flows.iter().enumerate().flat_map(|(s, f)| f.iter().map(move |&c| (s, c))).collect();
-    let spread = |flows: &mut Vec<FastSet<usize>>, out: &Vec<Vec<usize>>, work: &mut Vec<(usize, usize)>| {
+    let mut supertypes: Vec<Option<Vec<usize>>> = vec![None; n];
+    let spread = |flows: &mut Vec<FastSet<usize>>,
+                  out: &Vec<Vec<usize>>,
+                  edges: &FastSet<(usize, usize)>,
+                  supertypes: &mut Vec<Option<Vec<usize>>>,
+                  work: &mut Vec<(usize, usize)>| {
         while let Some((s, c)) = work.pop() {
-            for &t in &out[s] {
-                if h.is_subtype(c, t) && flows[t].insert(c) {
-                    work.push((t, c));
+            let ups = supertypes[c].get_or_insert_with(|| h.subtype_of(c));
+            if out[s].len() <= ups.len() {
+                for &t in &out[s] {
+                    if h.is_subtype(c, t) && flows[t].insert(c) {
+                        work.push((t, c));
+                    }
+                }
+            } else {
+                for &t in ups.iter() {
+                    if edges.contains(&(s, t)) && flows[t].insert(c) {
+                        work.push((t, c));
+                    }
                 }
             }
         }
     };
-    spread(&mut flows, &out, &mut work);
+    spread(&mut flows, &out, &edges, &mut supertypes, &mut work);
     // A `System.arraycopy` between `Object`s reads the elements of any array that is an `Object`
     // as `Object`s, and stores `Object`s as the elements of any such array where they pass the
     // check: the element class of each array class among `Object`'s values flows both ways with
@@ -316,7 +332,7 @@ pub fn flows(
                     }
                 }
             }
-            spread(&mut flows, &out, &mut work);
+            spread(&mut flows, &out, &edges, &mut supertypes, &mut work);
         }
     }
     flows

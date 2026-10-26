@@ -3,6 +3,7 @@
 //! later (`records`).
 
 mod bytecode_names;
+mod enum_bodies;
 mod records;
 pub use records::Completion;
 mod run_cache;

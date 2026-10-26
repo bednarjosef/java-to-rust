@@ -21,7 +21,8 @@ impl<'t> Lowering<'t> {
         let stream = receiver
             .and_then(|r| r.symbol())
             .filter(|s| s.kind == "FIELD" && s.owner == "java.lang.System")
-            .map(|s| s.name);
+            .map(|s| s.name)
+            .filter(|&s| !self.replaced_stream(s));
         // A `Runtime` with no state of its own: the receiver is `Runtime.getRuntime()` or a name
         // that holds one, and neither needs evaluating.
         let on_runtime = receiver

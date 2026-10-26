@@ -284,7 +284,13 @@ fn split_module(
     path: &[String],
     used: &mut std::collections::HashSet<String>,
 ) -> Result<Split, String> {
-    let file = syn::parse_file(text).map_err(|e| format!("{e} at {:?}", e.span().start()))?;
+    let file = syn::parse_file(text).map_err(|e| {
+        // The code around the error, which a translator's fault in the generated text names.
+        let at = e.span().start();
+        let line = text.lines().nth(at.line.saturating_sub(1)).unwrap_or_default();
+        let around: String = line.chars().skip(at.column.saturating_sub(120)).take(240).collect();
+        format!("{e} at line {}, column {}: {around}", at.line, at.column)
+    })?;
     let mut edits = Vec::new();
     let mut externs = String::new();
     let mut body = String::new();

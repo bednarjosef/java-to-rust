@@ -307,6 +307,10 @@ impl<'t> Lowering<'t> {
     }
 }
 
+/// The kind of a node that stands for a node of the program in a tree that lowering writes
+/// (`Lowering::stand_in`).
+const STAND_IN: &str = "STAND_IN";
+
 fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
     error(node.pos(), format!("{what} not supported yet"))
 }
@@ -373,6 +377,8 @@ struct Lowering<'t> {
     /// The binary name of the anonymous class of the enum constant's body whose method is being
     /// lowered (`constant_bodies`), which javac names that body's own methods by (`note_call`).
     body_class: RefCell<Option<String>>,
+    /// The nodes of the program that a tree lowering writes stands for (`stand_in`), by number.
+    stand_ins: RefCell<Vec<Node<'t>>>,
     /// The Java name of each local that `local_names` renamed (see `Class::class_file`).
     renamed_locals:
         RefCell<std::collections::HashMap<(String, Pos), std::collections::HashMap<String, String>>>,
@@ -879,14 +885,23 @@ impl<'t> Lowering<'t> {
                     None => condition,
                 }
             }
-            "IF" => self.if_stmt(
-                self.expr(node.child("condition")?)?,
-                self.single_stmt(node.child("thenStatement")?)?,
-                match node.get("elseStatement") {
-                    Some(n) => Some(self.single_stmt(n)?),
-                    None => None,
+            // Java takes a constant condition as known where it decides which locals are assigned
+            // (JLS 16): only the branch that runs is kept, so that Rust knows it too.
+            "IF" => match constant_condition(node.child("condition")?) {
+                Some(true) => Stmt::Block(vec![self.single_stmt(node.child("thenStatement")?)?]),
+                Some(false) => match node.get("elseStatement") {
+                    Some(n) => Stmt::Block(vec![self.single_stmt(n)?]),
+                    None => Stmt::Block(Vec::new()),
                 },
-            ),
+                None => self.if_stmt(
+                    self.expr(node.child("condition")?)?,
+                    self.single_stmt(node.child("thenStatement")?)?,
+                    match node.get("elseStatement") {
+                        Some(n) => Some(self.single_stmt(n)?),
+                        None => None,
+                    },
+                ),
+            },
             "WHILE_LOOP" => Stmt::While {
                 cond: self.expr(node.child("condition")?)?,
                 body: Box::new(self.single_stmt(node.child("statement")?)?),
@@ -941,6 +956,10 @@ impl<'t> Lowering<'t> {
         let kind = match node.kind() {
             _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
+            STAND_IN => {
+                return self
+                    .expr(self.stand_ins.borrow()[node.0["standsFor"].as_u64().unwrap_or(0) as usize]);
+            }
             "INT_LITERAL" => ExprKind::Int(self.number(node)?),
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
             "DOUBLE_LITERAL" => ExprKind::Double(self.number(node)?),
@@ -1404,9 +1423,12 @@ impl<'t> Lowering<'t> {
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
             return Ok(ExprKind::Builtin(builtin, args));
         }
-        let system_out = receiver
-            .and_then(|r| r.symbol())
-            .is_some_and(|s| s.kind == "FIELD" && s.owner == "java.lang.System" && s.name == "out");
+        let system_out = receiver.and_then(|r| r.symbol()).is_some_and(|s| {
+            s.kind == "FIELD"
+                && s.owner == "java.lang.System"
+                && s.name == "out"
+                && !self.replaced_stream("out")
+        });
         if let Some(kind) = self.enum_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }
@@ -1639,4 +1661,35 @@ fn binary_op(node: Node, kind: &str) -> Result<BinOp, Error> {
         "GREATER_THAN_EQUAL" => BinOp::Ge,
         _ => return unsupported(node, &kind_words(kind)),
     })
+}
+
+/// The value of the condition `node` when it is a constant expression (JLS 15.29) of `true` and
+/// `false`, constant variables named simply or by their class, parentheses, `!`, `&&` and `||`.
+fn constant_condition(node: Node) -> Option<bool> {
+    match node.kind() {
+        "BOOLEAN_LITERAL" => node.0["value"].as_bool(),
+        "PARENTHESIZED" => constant_condition(node.get("expression")?),
+        "LOGICAL_COMPLEMENT" => constant_condition(node.get("expression")?).map(|b| !b),
+        "CONDITIONAL_AND" => Some(
+            constant_condition(node.get("leftOperand")?)? && constant_condition(node.get("rightOperand")?)?,
+        ),
+        "CONDITIONAL_OR" => Some(
+            constant_condition(node.get("leftOperand")?)? || constant_condition(node.get("rightOperand")?)?,
+        ),
+        "IDENTIFIER" | "MEMBER_SELECT" => {
+            if node.kind() == "MEMBER_SELECT" {
+                let class = node.get("expression")?.symbol()?;
+                if !matches!(class.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD" | "ANNOTATION_TYPE") {
+                    return None;
+                }
+            }
+            let symbol = node.symbol()?;
+            match (symbol.ty, symbol.constant?) {
+                ("boolean", "true" | "1") => Some(true),
+                ("boolean", "false" | "0") => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }

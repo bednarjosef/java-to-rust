@@ -58,7 +58,11 @@ included (docs/collector.md).
   narrow with wrapping arithmetic in the small type.
 - `if`, `while`, `do`, `for`, for-each over arrays, labelled `break` and `continue`, the
   conditional operator, `switch` statements and expressions on integers, chars, strings and enums
-  (case labels may be constant expressions, folded as javac folds them), and `System.exit`.
+  (case labels may be constant expressions, folded as javac folds them; an `Integer` or
+  `Character` selector is unboxed, throwing on null), and `System.exit`. An
+  `if` whose condition is a constant expression (`if (ENABLE_BLINDING)` of a `static final
+  boolean`) keeps only the branch that runs, since Java's rules for which locals are assigned
+  take the condition as known and Rust's do not.
 - Integer overflow wraps as in Java; division by zero throws `ArithmeticException`; float
   arithmetic and printing follow Java's rules (`Double.toString` and `Float.toString` exactly).
 - Annotations and annotation types are left out, since they do nothing at run time. The class
@@ -191,14 +195,17 @@ Design: [object-model.md](object-model.md).
   `match self`. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
   message. An enum value that may be null is an `Option` of the enum. Using a constant does not
   initialize the enum by itself, unlike Java; reading its fields or calling its methods does.
-  A body's methods that override nothing are methods of the enum. Rejected in a constant's body:
-  static fields, blocks and member classes, and fields whose name or type clashes with the
-  enum's.
+  A body's methods that override nothing are methods of the enum. A body's instance field of an
+  object type gives the enum the table form, and its static fields are the enum's
+  (`javac/enum_bodies.rs`), initialized after every constant rather than as its constant is
+  built. Rejected in a constant's body: blocks and member classes, and fields whose name or type
+  clashes with the enum's or, for a static field, another body's.
 - A **record** is a class with the members Java gives it (written into javac's tree by
   `javac/records.rs`): canonical or compact constructor, accessors, `toString`, `equals` and
   `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case null`, record patterns,
   nested records) is an `if let` chain, exhaustive over a sealed hierarchy or enum without
-  `default`. Rejected: a generic record in a record pattern. An accessor written in the record
+  `default`. The components of a generic record's pattern have the erasures its fields hold;
+  rejected: a record pattern of a record that is a Rust generic. An accessor written in the record
   runs at each use of a pattern variable, not once. `java.lang.Record` is a type like `Object`: a
   value of it holds any of the program's records.
 - Local records, enums and interfaces declared in a method or an initializer block move to the

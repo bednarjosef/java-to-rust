@@ -30,6 +30,12 @@ impl<'t> Lowering<'t> {
         let sequential = self.reach.is_some_and(|r| r.sequential);
         crate::program::live_branch(node.0, sequential).map(|v| (!v.is_null()).then_some(Node(v)))
     }
+
+    /// Whether the program replaces the standard stream `stream` (`out` or `err`), whose printing
+    /// calls then go to the object of the field, not to the runtime (`Reach::replaced_streams`).
+    pub(super) fn replaced_stream(&self, stream: &str) -> bool {
+        self.reach.is_some_and(|r| r.replaced_streams.contains(stream))
+    }
 }
 
 /// Lowers the reachable part of a program made of these compilation units, whose entry point is

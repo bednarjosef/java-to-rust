@@ -14,7 +14,9 @@
 //! assignment to it in a static block, which is then left out (`Random` writes
 //! `seedOffset = unsafe.objectFieldOffset(Random.class.getDeclaredField("seed"))` in a `try`);
 //! the class may be a class literal or a local of the block that holds one, and the call may also
-//! be written as the offset argument itself. The field may be one of another class, such as the
+//! be written as the offset argument itself, or made by a static helper of a class and a name
+//! (`offset_helper_call`: JCTools' `UnsafeAccess.fieldOffset(Queue.class, "producerIndex")` in
+//! netty), whose class `sun.misc.Unsafe`'s warning names. The field may be one of another class, such as the
 //! `threadLocalRandomProbe` of `Thread` that `ThreadLocalRandom` reads, as long as the object
 //! of the access is of that class. A read or write through the handle is a read or write of the
 //! field itself, so the call above lowers to `this.constant`. That is Java's meaning in a program
@@ -101,7 +103,8 @@
 //! other use of a `VarHandle` is rejected.
 //!
 //! A field updater constant (a static final whose value is `AtomicIntegerFieldUpdater`'s,
-//! `AtomicLongFieldUpdater`'s or `AtomicReferenceFieldUpdater`'s `newUpdater`) is a handle of
+//! `AtomicLongFieldUpdater`'s or `AtomicReferenceFieldUpdater`'s `newUpdater`, perhaps cast to a
+//! raw updater, or a static block's local that holds one, as netty writes them) is a handle of
 //! its field when `newUpdater` would succeed for it (`updater_declaration`); its `get`, `set`,
 //! `lazySet`, compare-and-set forms, `getAndSet` and `getAndAdd` are `Unsafe`'s at the field's
 //! offset, which the updater's methods make, and its increments and `addAndGet` its `getAndAdd`.
@@ -544,6 +547,11 @@ impl<'t> Lowering<'t> {
     /// when it is that assignment in a static block (see `static_value`), which is left out.
     pub(super) fn handle_definition(&self, node: Node<'t>) -> Option<(usize, Node<'t>)> {
         let e = node.get("expression").filter(|_| node.kind() == "EXPRESSION_STATEMENT")?;
+        self.handle_definition_of(e)
+    }
+
+    /// The class and declaration of the field handle that the assignment `e` gives its value.
+    fn handle_definition_of(&self, e: Node<'t>) -> Option<(usize, Node<'t>)> {
         let symbol = e.get("variable").filter(|_| e.kind() == "ASSIGNMENT").and_then(|v| plain(v).symbol());
         let symbol = symbol.filter(|s| s.kind == "FIELD" && s.is_static)?;
         self.static_field(&symbol).filter(|&(owner, member)| self.is_handle(owner, member))
@@ -552,9 +560,10 @@ impl<'t> Lowering<'t> {
     /// Whether `stmt`, a statement of `block`, declares a local that the block uses only to make
     /// handles, whose definitions are left out (`handle_definition`), so that the local is left
     /// out with them: a `Field` whose value is `getDeclaredField`, used only as the argument of
-    /// `staticFieldOffset(f)`, `staticFieldBase(f)` or `objectFieldOffset(f)`, or a
+    /// `staticFieldOffset(f)`, `staticFieldBase(f)` or `objectFieldOffset(f)`, a
     /// `MethodHandles.Lookup` whose value is `MethodHandles.lookup()`, used only in the values of
-    /// `VarHandle` constants (`SharedThreadContainer` finds its handles so).
+    /// `VarHandle` constants (`SharedThreadContainer` finds its handles so), or a field updater
+    /// whose value is `newUpdater`, used only in the values of updater constants.
     pub(super) fn handle_field_local(&self, block: Node<'t>, stmt: Node<'t>) -> bool {
         let Some(ty) = stmt.symbol().filter(|_| stmt.kind() == "VARIABLE").map(|s| s.ty) else {
             return false;
@@ -576,6 +585,27 @@ impl<'t> Lowering<'t> {
                         .find_map(|m| call_of(n, m));
                     in_handles +=
                         usize::from(handle.is_some_and(|args| args.first().is_some_and(|a| named(*a))));
+                });
+            }
+            // An updater that a static block makes in a local, then gives its constant.
+            _ if let Some(kind) = updater_kind(ty) => {
+                let made = self.updater_value(init, kind, Some(block)).is_some_and(|(v, _)| {
+                    v.symbol().is_some_and(|s| v.kind() == "METHOD_INVOCATION" && s.name == "newUpdater")
+                });
+                if !made {
+                    return false;
+                }
+                walk(block.0, &mut |n| {
+                    uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
+                    let constant = n.kind() == "ASSIGNMENT"
+                        && self
+                            .handle_definition_of(n)
+                            .is_some_and(|(owner, member)| self.updater_declaration(owner, member).is_some());
+                    if let Some(value) = n.get("expression").filter(|_| constant) {
+                        walk(value.0, &mut |v| {
+                            in_handles += usize::from(v.kind() == "IDENTIFIER" && v.str("name") == name)
+                        });
+                    }
                 });
             }
             "java.lang.invoke.MethodHandles.Lookup" | METHOD_TYPE => {
@@ -618,6 +648,12 @@ impl<'t> Lowering<'t> {
     /// or of `getDeclaredField` of a class and a name), is the offset of. `block` is the static
     /// block it is in, if any.
     fn field_offset(&self, value: Node<'t>, block: Option<Node<'t>>) -> Option<(usize, &'t str)> {
+        if self.offset_helper_call(value).is_some() {
+            let args: Vec<Node<'t>> = plain(value).list("arguments").collect();
+            let field = plain(*args.get(1)?);
+            let name = field.0["value"].as_str().filter(|_| field.kind() == "STRING_LITERAL")?;
+            return Some((self.offset_class(*args.first()?, block)?, name));
+        }
         let Some(args) = call_of(value, OFFSET_OF) else {
             let field = call_of(value, OFFSET_OF_FIELD).or_else(|| call_of(value, SUN_OFFSET_OF_FIELD))?;
             return self.declared_field(*field.first()?, block);
@@ -625,6 +661,42 @@ impl<'t> Lowering<'t> {
         let field = plain(*args.get(1)?);
         let name = field.0["value"].as_str().filter(|_| field.kind() == "STRING_LITERAL")?;
         Some((self.offset_class(*args.first()?, block)?, name))
+    }
+
+    /// When `value` calls a static method of the program whose one `return` gives
+    /// `objectFieldOffset(c.getDeclaredField(name))` of its two parameters `c` and `name`, as
+    /// JCTools' `UnsafeAccess.fieldOffset(Class, String)` does: that `objectFieldOffset` call and
+    /// the method's class. The call is the offset of the field its arguments name.
+    pub(super) fn offset_helper_call(&self, value: Node<'t>) -> Option<(Node<'t>, usize)> {
+        let value = plain(value);
+        let symbol = value.symbol().filter(|s| value.kind() == "METHOD_INVOCATION" && s.is_static)?;
+        let index = self.method_index(&symbol)?;
+        let method = self.methods[index].node;
+        let params: Vec<&str> = method.list("parameters").map(|p| p.str("name")).collect();
+        let [class, name] = params[..] else { return None };
+        let mut returns = Vec::new();
+        walk(method.get("body")?.0, &mut |n| {
+            if n.kind() == "RETURN" {
+                returns.push(n);
+            }
+        });
+        let [returned] = returns[..] else { return None };
+        let offset = plain(returned.get("expression")?);
+        let get = plain(
+            *call_of(offset, OFFSET_OF_FIELD).or_else(|| call_of(offset, SUN_OFFSET_OF_FIELD))?.first()?,
+        );
+        let found = get.symbol().filter(|_| get.kind() == "METHOD_INVOCATION")?;
+        let parameter = |n: Option<Node>, p: &str| {
+            n.map(plain).is_some_and(|n| {
+                n.kind() == "IDENTIFIER"
+                    && n.str("name") == p
+                    && n.symbol().is_some_and(|s| s.kind == "PARAMETER")
+            })
+        };
+        let of_parameters = (found.owner, found.name) == ("java.lang.Class", "getDeclaredField")
+            && parameter(get.get("methodSelect").and_then(|m| m.get("expression")), class)
+            && parameter(get.list("arguments").next(), name);
+        of_parameters.then_some((offset, self.methods[index].owner))
     }
 
     /// The class and the name of the field that `get` is: a call of `getDeclaredField` of a class
@@ -1090,10 +1162,32 @@ impl<'t> Lowering<'t> {
     /// (in the same outermost class when it is private, in the same package when it is neither
     /// public nor protected; a protected one, whose updater checks the class of its objects
     /// against `owner`'s, is not followed).
+    /// The expression that gives an updater of kind `kind` its value `value`: `value` itself, or
+    /// what it casts to an updater of that kind (netty casts the updaters of generic classes to
+    /// raw ones), or the value of the static block `block`'s local it reads (`Recycler` makes
+    /// `STATE_UPDATER` so), with the block that is in.
+    fn updater_value(
+        &self,
+        value: Node<'t>,
+        kind: Kind,
+        block: Option<Node<'t>>,
+    ) -> Option<(Node<'t>, Option<Node<'t>>)> {
+        match value.kind() {
+            "TYPE_CAST" if updater_kind(value.java_type()) == Some(kind) => {
+                self.updater_value(plain(value.get("expression")?), kind, block)
+            }
+            "IDENTIFIER" => {
+                let (value, block) = self.defined(value, block)?;
+                self.updater_value(plain(value), kind, block)
+            }
+            _ => Some((value, block)),
+        }
+    }
+
     fn updater_declaration(&self, owner: usize, member: Node<'t>) -> Option<(usize, &'t str)> {
         let kind = member.symbol().and_then(|s| updater_kind(s.ty))?;
         let (value, block) = self.static_value(owner, member)?;
-        let value = plain(value);
+        let (value, block) = self.updater_value(plain(value), kind, block)?;
         let symbol =
             value.symbol().filter(|s| value.kind() == "METHOD_INVOCATION" && s.name == "newUpdater")?;
         (updater_kind(symbol.owner)? == kind).then_some(())?;

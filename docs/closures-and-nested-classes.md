@@ -366,7 +366,10 @@ object model's variants, dispatch and bridges take it with no new case.
 
 The class's one method takes javac's substituted types: a lambda of `Function<Integer, Integer>`
 is `apply(Integer)` returning `Integer`, with the bridge `apply(Object)` that any class
-implementing the generic interface gets.
+implementing the generic interface gets. A generic method of the interface, which only a method
+reference implements (`<A> Palette<A> create(int, List<A>)` of the Minecraft server's
+`Palette.Factory`, made by `SingleValuePalette::create`), has its own type variables erased in
+`substituted`, since the lambda's class has nowhere to declare them.
 
 A method reference's body is one call, built as javac tree JSON (`METHOD_INVOCATION`,
 `NEW_CLASS` or `NEW_ARRAY` on parameters `a`, `b`, ..) and lowered like a written call, so it

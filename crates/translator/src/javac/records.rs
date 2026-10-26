@@ -41,9 +41,11 @@ pub(super) fn survey(units: &[&Value]) -> Survey {
     survey
 }
 
-/// Completes the records of one compilation unit, with the survey of all of them.
+/// Completes the records of one compilation unit, with the survey of all of them, after moving
+/// its local types and its enum constants' bodies' static fields (`enum_bodies`) where they belong.
 pub(super) fn complete_unit(unit: &mut Value, survey: &Survey) {
     hoist_local_types(unit);
+    super::enum_bodies::hoist_body_statics(unit);
     visit_records(unit, &mut |record| complete_record(record, survey));
 }
 
@@ -105,8 +107,9 @@ struct RecordCompletion {
 
 /// Whether `complete_unit` may change the compilation unit: it has no package, it declares a
 /// record, or a statement list inside a method or a block declares an enum or interface
-/// (`take_local_types`), which is hoisted. Anything else that is an enum or interface, such as
-/// the symbol of a name, is not one.
+/// (`take_local_types`), which is hoisted, or an enum constant's body declares a static field
+/// (`enum_bodies`). Anything else that is an enum or interface, such as the symbol of a name, is
+/// not one.
 pub(super) fn changes(unit: &Value) -> bool {
     fn has_record_or_local(v: &Value, in_body: bool) -> bool {
         match v {
@@ -126,7 +129,9 @@ pub(super) fn changes(unit: &Value) -> bool {
             _ => false,
         }
     }
-    unit["packageName"].is_null() || has_record_or_local(unit, false)
+    unit["packageName"].is_null()
+        || has_record_or_local(unit, false)
+        || super::enum_bodies::has_body_statics(unit)
 }
 
 /// An interface: the names and types of its methods without parameters, and the interfaces it

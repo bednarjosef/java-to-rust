@@ -1023,6 +1023,13 @@ public class JavaTree {
             return;
         }
         ExecutableType substituted = (ExecutableType) types.asMemberOf(target, method);
+        // A generic method (`<A> Palette<A> create(int, List<A>)`), which a method reference can
+        // implement: the lambda's class has nowhere to declare its type variables, so they are
+        // their erasures, as in the method the JVM's lambda class implements.
+        if (substituted instanceof com.sun.tools.javac.code.Type.ForAll generic) {
+            var javacTypes = com.sun.tools.javac.code.Types.instance(context);
+            substituted = (ExecutableType) javacTypes.subst(generic.qtype, generic.tvars, javacTypes.erasure(generic.tvars));
+        }
         out.append(",\"descriptor\":{\"owner\":");
         string(className((TypeElement) method.getEnclosingElement()), out);
         out.append(",\"target\":");

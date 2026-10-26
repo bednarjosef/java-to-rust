@@ -167,11 +167,16 @@ impl<'t> Lowering<'t> {
         Ok(Stmt::Labeled { label: node.str("label").to_string(), body: Box::new(body) })
     }
 
-    /// The selector, which must be one of the types that Rust matches on directly.
+    /// The selector, which must be one of the types that Rust matches on directly. A box of one
+    /// is unboxed, as Java does, which throws on null.
     fn selector(&self, node: Node<'t>) -> Result<Expr, Error> {
         let selector = self.expr(node.child("expression")?)?;
         match selector.ty {
             Type::Int | Type::Char | Type::Byte | Type::Short | Type::String | Type::Enum(_) => Ok(selector),
+            Type::Boxed(Type::Int | Type::Char | Type::Byte | Type::Short) => {
+                let (ty, pos) = (selector.ty.unboxed(), selector.pos);
+                Ok(self.synth(ExprKind::Cast(ty, Box::new(selector)), pos, ty))
+            }
             _ => unsupported(node, "a switch on this type"),
         }
     }

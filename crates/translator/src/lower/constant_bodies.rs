@@ -185,18 +185,6 @@ impl<'t> Lowering<'t> {
                     return unsupported(member, "static fields in an enum constant's body");
                 }
                 let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
-                if !matches!(
-                    ty,
-                    Type::Int
-                        | Type::Long
-                        | Type::Double
-                        | Type::Float
-                        | Type::Char
-                        | Type::Boolean
-                        | Type::String
-                ) {
-                    return unsupported(member, "fields of this type in an enum constant's body");
-                }
                 let init = member.get("initializer").map(|i| self.expr(i)).transpose()?;
                 let init = init.map(|e| self.convert(e, ty));
                 let name = member.str("name").to_string();
@@ -267,22 +255,24 @@ impl<'t> Lowering<'t> {
         Some(match declared.and_then(|b| b.init.as_ref()) {
             Some(init) if pure(init, false) => Ok(subst(init, &[])),
             Some(init) => error(init.pos, "enum field initializers that are not constants"),
-            None => Ok(self.zero(field.ty, field.pos)),
+            None => self.zero(field.ty, field.pos),
         })
     }
 
-    /// The zero of a type of a field that an enum constant's body declares.
-    fn zero(&self, ty: Type, pos: Pos) -> Expr {
+    /// The zero of a type of a field that an enum constant's body declares. A field of another
+    /// type leaves the pure form, and the enum takes the table form, whose tables start out null.
+    fn zero(&self, ty: Type, pos: Pos) -> Result<Expr, Error> {
         let kind = match ty {
+            Type::Int => ExprKind::Int(0),
             Type::Long => ExprKind::Long(0),
             Type::Double => ExprKind::Double(0.0),
             Type::Float => ExprKind::Float(0.0),
             Type::Char => ExprKind::Char(0),
             Type::Boolean => ExprKind::Bool(false),
             Type::String => ExprKind::Str(String::new()),
-            _ => ExprKind::Int(0),
+            _ => return error(pos, "an enum constant's body field of this type in the pure form"),
         };
-        self.synth(kind, pos, ty)
+        Ok(self.synth(kind, pos, ty))
     }
 
     /// Declares the lambdas and method references in the methods of the constants' bodies of enum
