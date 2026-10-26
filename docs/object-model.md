@@ -474,7 +474,9 @@ equality and Java's hash for a string or a box (`Double` and `Float` compare `to
 `Double.equals` does); `==` and the ordinal for an enum constant (Java's hash there is an identity
 hash, which no program can depend on). The same call on a single class without an enum is the
 identity directly (`identity_call`). `String.equals(Object)` and `Integer.equals(Object)` with
-an `Object` argument are `Object`'s `equals` on the receiver converted to `Object`. An interface
+an `Object` argument are `Object`'s `equals` on the receiver converted to `Object`, and so is a
+call that javac names as `Object`'s on an enum's constant (`Object::toString` over a stream of
+them), which then reaches the enum's own method, a constant body's too. An interface
 that declares `equals` or `hashCode` again (`Comparator`) dispatches a class without its own to
 `Object`'s. `Object.toString()` is the enum's `java_string()`, which calls each class's
 `toString` and makes the text of the classes without one.
