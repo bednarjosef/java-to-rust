@@ -573,7 +573,8 @@ value of "Main.g()" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
 (`program::MODULE_CALLS`), `c.isAssignableFrom(d)` as itself (a null `d` fails in the JVM's
 native code, which gives no message), `c.getEnumConstants()` (a block that checks `c` first) as
-itself, an enum's `toString()` as the enum's, `c.cast(x)` (a block that
+itself, `n.byteValue()` and `n.shortValue()` of a `Number` (lowered as the narrowed
+`intValue()`) as themselves, an enum's `toString()` as the enum's, `c.cast(x)` (a block that
 checks `x`) as `java.lang.Class.cast(Object)`, `subSequence` (lowered as `substring`) as
 itself, and a `CharSequence`'s `isEmpty()` (lowered as a zero `length()`) as itself; the
 elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no message, as
@@ -591,7 +592,10 @@ of a first argument is taken before lowering, as lowering replaces a method refe
 
 **Libraries, local names and errors.** The classes that the program's code uses from its
 library roots compile with it (`--sourcepath-root`), and get names too, as their code is
-translated with the program's; a root of a module of the JDK's is left out (the JDK's own
+translated with the program's, and so do the files of the library roots that the translation
+reached (`--reached`, on standard input), as it reaches classes that no code names
+(`Class.forName("com.google.gson.internal.bind.JavaTimeTypeAdapters")`), which javac would
+not compile; a root of a module of the JDK's is left out (the JDK's own
 compiled module serves, and the JDK's code is named as below), and no `module-info.java` of the
 other roots is seen, so that all compile in the unnamed module, as the classes do on the class
 path. A program whose class files were compiled with `-g` (`--named-locals`,
@@ -635,7 +639,9 @@ primitive or `switch` patterns, or a binding that outlives its statement (`if (!
 String s)) return;`), has no known slots for its temporaries, and a null message of one is not
 certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
-for which the JDK's code throws an exception without a message. A null that the class the JVM makes for a method reference dereferences has no message, as
+for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)`,
+which the JVM's native code throws without one. A native that the runtime does not have takes
+null (a JNI native gets it as it is) and raises nothing: it is only where it never runs. A null that the class the JVM makes for a method reference dereferences has no message, as
 its hidden frame gives none: the receiver of an unbound reference, or an argument it unboxes
 (`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`). javac writes a method of its
 own instead for a reference that packs varargs, calls through `super`, or makes an array or an

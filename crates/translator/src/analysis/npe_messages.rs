@@ -322,6 +322,21 @@ impl Messages<'_> {
                     format!("Cannot invoke \"java.util.Iterator.{name}()\" because \"<local5>\" is null");
                 out.insert(receiver.id, Some(message));
             }
+            // `n.byteValue()` or `n.shortValue()` of a `Number`, which lowering narrows from
+            // `intValue()` (`lower::object::number_call`).
+            ExprKind::Cast(to @ (Type::Byte | Type::Short), inner)
+                if let ExprKind::MethodCall { receiver, name, resolved: Some(r), .. } = &inner.kind
+                    && name == "intValue"
+                    && inner.pos == x.pos
+                    && self.class.types[self.class.methods[*r].class].name == NUMBER =>
+            {
+                let method = if *to == Type::Byte { "byteValue" } else { "shortValue" };
+                let call = match self.jdk {
+                    true => Some(format!("java.lang.Number.{method}()")),
+                    false => self.call(x.pos, method),
+                };
+                add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
+            }
             ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. }
                 if !self.class.methods[*r].is_static =>
             {
@@ -684,6 +699,11 @@ impl Messages<'_> {
                         if let Some(class) = args.get(1) {
                             out.entry(class.id).or_insert(None);
                         }
+                    }
+                    // `Thread.holdsLock(null)`, which the JVM's native code throws without a
+                    // message.
+                    Builtin::Native(Native::HoldsLock) => {
+                        out.insert(args[0].id, None);
                     }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {

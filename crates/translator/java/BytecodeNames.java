@@ -28,7 +28,11 @@ import javax.tools.*;
  * generation included, and prints what javac's code generator gave its code.
  *
  * <p>Usage: {@code java BytecodeNames [--patch-module MODULE=ROOT]... [--sourcepath-root DIR]...
- * [--named-locals] [--keep-going] FILE...}, or the source on standard input for one file. The
+ * [--named-locals] [--keep-going] [--reached] FILE...}, or the source on standard input for one
+ * file. With {@code --reached}, standard input lists the files that the translation reached,
+ * one per line, as paths or relative to the root they are in: those under a root of
+ * {@code --sourcepath-root} compile too, as the translation may reach a class that no code
+ * names (by {@code Class.forName}), which javac would not compile. The
  * files under the root of a module that the JDK has too, such as javac's {@code jdk.compiler},
  * compile as part of that module, as the JDK compiles them; with several such roots, each
  * module's files compile on their own, against the JDK's other modules. The classes that the
@@ -118,6 +122,7 @@ public class BytecodeNames {
             }
         });
         List<File> files = new ArrayList<>();
+        boolean reached = false;
         // The roots of the JDK's own modules, such as javac's `jdk.compiler`, by module: their
         // packages compile only as part of that module.
         Map<String, File> patches = new LinkedHashMap<>();
@@ -128,6 +133,8 @@ public class BytecodeNames {
                 if (!jdkModuleRoot(root)) {
                     roots.add(root.getPath());
                 }
+            } else if (args[i].equals("--reached")) {
+                reached = true;
             } else if (args[i].equals("--named-locals")) {
                 namedLocals = true;
             } else if (args[i].equals("--keep-going")) {
@@ -141,6 +148,9 @@ public class BytecodeNames {
             } else {
                 files.add(new File(args[i]));
             }
+        }
+        if (reached) {
+            files.addAll(reachedFiles(roots, files));
         }
         // javac patches one module at most when it compiles without a module source path ("too
         // many patched modules"; given more, it reads a file of one module both as given and as
@@ -287,6 +297,46 @@ public class BytecodeNames {
         for (Symbol m : c.members().getSymbols(m -> m instanceof ClassSymbol)) {
             erased((ClassSymbol) m);
         }
+    }
+
+    /**
+     * The files that standard input lists (see {@code --reached}) that are under one of
+     * {@code roots} and not among {@code given}.
+     */
+    private static List<File> reachedFiles(List<String> roots, List<File> given) throws IOException {
+        Set<java.nio.file.Path> known = new HashSet<>();
+        for (File f : given) {
+            known.add(f.getAbsoluteFile().toPath().normalize());
+        }
+        List<java.nio.file.Path> under = new ArrayList<>();
+        for (String root : roots) {
+            under.add(new File(root).getAbsoluteFile().toPath().normalize());
+        }
+        List<File> found = new ArrayList<>();
+        String text = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
+        for (String line : text.split("\n")) {
+            if (!line.endsWith(".java") || line.endsWith("module-info.java")) {
+                continue;
+            }
+            java.nio.file.Path path = java.nio.file.Path.of(line);
+            java.nio.file.Path file = null;
+            java.nio.file.Path normal = path.toAbsolutePath().normalize();
+            if (normal.toFile().isFile() && under.stream().anyMatch(normal::startsWith)) {
+                file = normal;
+            } else if (!path.isAbsolute()) {
+                for (java.nio.file.Path root : under) {
+                    java.nio.file.Path candidate = root.resolve(path).normalize();
+                    if (candidate.toFile().isFile()) {
+                        file = candidate;
+                        break;
+                    }
+                }
+            }
+            if (file != null && file.toFile().isFile() && known.add(file)) {
+                found.add(file.toFile());
+            }
+        }
+        return found;
     }
 
     /** Whether {@code root} is the root of a module of the JDK's: its {@code module-info.java} names one. */
