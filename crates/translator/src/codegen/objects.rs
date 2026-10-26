@@ -2339,6 +2339,14 @@ impl<'a> Gen<'a> {
         let Some((Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved }, .. }), rest)) =
             stmts.split_first()
         else {
+            // A `super(..)` that names a missing class is a throw in its place, with the rest of
+            // the body left out (`java/MissingClasses.java`): the superclass's part is never made.
+            if hierarchy::embedded(self.facts, self.class, t).is_some()
+                && let Some((throw @ Stmt::Throw(_), rest)) = stmts.split_first()
+            {
+                self.stmts(std::slice::from_ref(throw), false);
+                return (Some("unreachable!()".to_string()), rest);
+            }
             return (None, stmts);
         };
         match (hierarchy::embedded(self.facts, self.class, t), resolved) {
