@@ -3249,6 +3249,27 @@ fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
 }
 
 #[test]
+fn a_missing_annotation_leaves_the_names_of_the_class_files_of_its_file() {
+    // javac reports an error for `@Missing`, which leaves the code as it is: the message of the
+    // `NullPointerException` still names what the class file names.
+    let dir = write_sources(
+        "missing_annotation_names",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    @Missing\n    static int kind = 1;\n    static String name(Main m) { return m.toString(); }\n    public static void main(String[] a) {\n        try {\n            name(null);\n        } catch (NullPointerException e) {\n            System.out.println(e.getMessage());\n        }\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        keep_going: true,
+        ..Default::default()
+    };
+    let rust = java_to_rust::translate_program(&program).expect("only the annotation is missing");
+    assert_contains(&rust, &["Cannot invoke \\\"Object.toString()\\\" because \\\"<parameter1>\\\" is null"]);
+}
+
+#[test]
 fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_census_lists_it() {
     let dir = write_sources(
         "missing_class",

@@ -39,7 +39,8 @@ import javax.tools.*;
  * libraries are taken to be compiled with {@code -g}, as the Minecraft server's are: the JVM
  * names their locals as the JDK's. With {@code --keep-going}, compile errors do not stop it:
  * the classes are generated past them (decompiled code can have errors), and the outermost
- * classes of each file with an error have no entries, their names being uncertain.
+ * classes of each file with an error have no entries, their names being uncertain (an error in an
+ * annotation or an import does not count: it leaves the code as it is).
  * Prints one line, {@code {"java":"26","entries":[[CLASS,LINE,COLUMN,KIND,NAME,TEXT],...]}}:
  * the Java version, then for each use in the source (by the outermost class it is in, and the
  * line and column where it starts) of
@@ -242,9 +243,13 @@ public class BytecodeNames {
         // errors are generated, one by one, as the code generator can fail on code with errors
         // (its names are not certain, so it has no entries).
         task.analyze();
+        // An error in an annotation or an import (an annotation type the program is compiled
+        // without, such as `org.intellij.lang.annotations.MagicConstant`) leaves the code as it
+        // is: javac drops the annotation, and a use of what an import names fails on its own.
         Set<URI> failed = new HashSet<>();
         for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
-            if (d.getKind() == Diagnostic.Kind.ERROR && d.getSource() != null) {
+            if (d.getKind() == Diagnostic.Kind.ERROR && d.getSource() != null
+                    && !names.outsideCode(d.getSource().toUri(), d.getStartPosition())) {
                 failed.add(d.getSource().toUri());
             }
         }
@@ -323,6 +328,21 @@ public class BytecodeNames {
     private final Map<String, URI> files = new HashMap<>();
     /** The outermost classes, by flat name, in the order javac attributed them. */
     private final Map<String, ClassSymbol> topLevel = new LinkedHashMap<>();
+    /** The spans of the annotations and imports of each source file, by its URI. */
+    private final Map<URI, List<long[]>> notCode = new HashMap<>();
+
+    /** Whether position {@code at} of file {@code file} is in an annotation or an import. */
+    private boolean outsideCode(URI file, long at) {
+        if (at < 0) {
+            return false;
+        }
+        for (long[] span : notCode.getOrDefault(file, List.of())) {
+            if (span[0] <= at && at < span[1]) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private BytecodeNames(JavacTaskImpl task) throws ReflectiveOperationException {
         types = Types.instance(task.getContext());
@@ -367,9 +387,14 @@ public class BytecodeNames {
             public void finished(TaskEvent e) {
                 if (e.getKind() == TaskEvent.Kind.ANALYZE) {
                     JCCompilationUnit unit = (JCCompilationUnit) e.getCompilationUnit();
+                    List<long[]> spans = new ArrayList<>();
                     new TreeScanner() {
                         @Override
                         public void scan(JCTree tree) {
+                            if (tree instanceof JCAnnotation || tree instanceof JCImport) {
+                                int end = TreeInfo.getEndPos(tree, unit.endPositions);
+                                spans.add(new long[] {TreeInfo.getStartPos(tree), end});
+                            }
                             if (tree != null) {
                                 int start = TreeInfo.getStartPos(tree);
                                 if (start >= 0) {
@@ -391,6 +416,7 @@ public class BytecodeNames {
                             super.scan(tree);
                         }
                     }.scan(unit);
+                    notCode.put(unit.getSourceFile().toUri(), spans);
                 } else if (e.getKind() == TaskEvent.Kind.GENERATE) {
                     JCClassDecl c = classes.get((Symbol) e.getTypeElement());
                     if (c != null) {
