@@ -338,7 +338,10 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   filled from the interfaces that the class value carries in such a program, in the order the
   source names them (`TypeDecl::interfaces`), the runtime's classes with the JDK's lists and an
   array with `Cloneable` and `Serializable`; an interface that the translation has no type of
-  (`Serializable`, `Cloneable`, a marker) is a class value of its name, which extends nothing. A class held as an `Object` is `Object`'s `Class` variant, and one held as a
+  (`Serializable`, `Cloneable`, a marker) is a class value of its name, which extends nothing.
+  `getSigners()` is `null`, as for a class without signers: a translated class comes from no jar,
+  even where Java's came from a signed one (the Minecraft server's `ModCheck` then reports the
+  server as very likely modified). A class held as an `Object` is `Object`'s `Class` variant, and one held as a
   `java.lang.reflect.Type` is `Type`'s.
 - `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
   type arguments, each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,
