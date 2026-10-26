@@ -114,7 +114,10 @@ included (docs/collector.md).
 - **`String.format`** is Java's `Formatter` in the US locale for `%b %h %s %c %d %o %x %e %f %g
   %n %%` with indexes, flags, width and precision, rounding half up from the shortest decimal as
   Java does. Arguments keep their Java type (`java::Arg::Long(n)`), so a mismatch throws
-  `IllegalFormatConversionException`. `%t` and `%a` are rejected in a constant format.
+  `IllegalFormatConversionException`. `%t` and `%a` are rejected in a constant format, and so
+  is an array argument other than the `Object[]` of all of them. With a `Locale`,
+  `String.format` and `printf` are the JDK's `Formatter` in that locale (a whole program; without
+  the JDK's sources they are rejected).
 - **Charsets**: `getBytes` and `new String(bytes, ..)` for UTF-8, US-ASCII, ISO-8859-1, UTF-16,
   UTF-16BE and UTF-16LE (`charset.rs`). A `Charset` is an ordinary value; `forName` resolves
   aliases and case as Java does, and `defaultCharset()` is UTF-8 (JEP 400). An unknown or
