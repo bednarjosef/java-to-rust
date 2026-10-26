@@ -526,9 +526,11 @@ fn uncertain_package_lookups_are_rejected() {
 }
 
 /// What a translation's secure random numbers cannot do throws (see
-/// `corpus/whole-program/SecureRandoms.java` for what they do): `DRBG`, whose mechanisms read
-/// the security properties, and a seed source that is not a file, which would open a connection
-/// (the translation's `java.security.egd` is unset, but the seed generator's code reads it).
+/// `corpus/whole-program/SecureRandoms.java` for what they do): `DRBG`, whose class the SUN
+/// provider registers but the translation leaves out, so its lookup fails as one of a class
+/// missing from the class path does, and a seed source that is not a file, which would open a
+/// connection (the translation's `java.security.egd` is unset, but the seed generator's code
+/// reads it).
 #[test]
 fn what_secure_randoms_cannot_do_throws() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
@@ -559,7 +561,11 @@ public class Main {
         .unwrap();
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
     let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
-    for wanted in ["DRBG SecureRandom not supported yet", "not a file, which the translation does not read"] {
+    for wanted in [
+        "\"sun.security.provider.DRBG\"",
+        ", which is not in the translation",
+        "not a file, which the translation does not read",
+    ] {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
 }
