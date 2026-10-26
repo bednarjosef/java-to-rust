@@ -1177,11 +1177,12 @@ impl<'t> Lowering<'t> {
         // `printf` returns its stream, which the translation has no type for; it is a statement.
         let ty = match kind {
             ExprKind::Builtin(Builtin::Print, _) if node.kind() == "METHOD_INVOCATION" => Type::Void,
-            // A `CharSequence` conditional of strings stays a string (see `CONDITIONAL_EXPRESSION`).
+            // A `CharSequence` conditional of strings, or of a string and null, stays a string (see
+            // `CONDITIONAL_EXPRESSION`).
             ExprKind::Conditional(_, ref yes, ref no)
                 if node.java_type() == "java.lang.CharSequence"
-                    && yes.ty == Type::String
-                    && no.ty == Type::String =>
+                    && matches!(yes.ty, Type::String | Type::Null)
+                    && matches!(no.ty, Type::String | Type::Null) =>
             {
                 Type::String
             }
