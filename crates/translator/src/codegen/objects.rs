@@ -1140,8 +1140,10 @@ impl<'a> Gen<'a> {
     }
 
     /// `e` as the receiver of a method, borrowed; `this` is already a reference.
-    pub(super) fn receiver_ref(&mut self, e: &'a Expr) -> String {
-        let e = self.peel(e);
+    pub(super) fn receiver_ref(&mut self, receiver: &'a Expr) -> String {
+        // The object is dereferenced as `receiver`, with a cast that `peel` passes over, which
+        // may be the expression whose `NullPointerException` a `catch` sees.
+        let e = self.peel(receiver);
         match &e.kind {
             ExprKind::This => self.this_name().to_string(),
             // A variable narrowed by a null check is a reference already.
@@ -1153,10 +1155,10 @@ impl<'a> Gen<'a> {
                 if matches!(e.ty, Type::Class(..)) && self.nullable(e) =>
             {
                 let (_, place) = self.object_parts(e);
-                let text = self.object(e);
+                let text = self.object(receiver);
                 if place { text } else { format!("&{text}") }
             }
-            _ => format!("&{}", self.object(e)),
+            _ => format!("&{}", self.object(receiver)),
         }
     }
 
