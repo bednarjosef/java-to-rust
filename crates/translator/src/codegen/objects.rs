@@ -1619,7 +1619,18 @@ impl<'a> Gen<'a> {
             return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
-        let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
+        let Type::Class(class, _) = receiver.ty else {
+            // Lowering gives a call of a class's method a receiver of the class's type, which a
+            // value that the runtime holds in its own type (a handle's token, a class) is not.
+            let message = format!(
+                "a call of `{}.{}` on a value of type `{}` not supported yet",
+                self.class.types[self.class.methods[index].class].name,
+                self.class.methods[index].name,
+                receiver.ty
+            );
+            self.rejected.push(Error { pos: receiver.pos, message });
+            return Code::atom("unreachable!()".to_string());
+        };
         // The receiver is borrowed before the arguments run, so arguments that may reach an object
         // of the class run first.
         if args.iter().any(|a| has_effects(a) || reads_class(self.class, a, class)) {

@@ -345,8 +345,9 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
 - **Handles**: `Unsafe` offsets, field updaters and `VarHandle`s of fields and array elements,
   and the `MethodHandle`s of the handle factories, are the accesses they name, followed through
   constants, locals, fields and calls ([multi-threading.md](multi-threading.md), 5.3). A call of
-  a lookup's or a `MethodHandle`'s method that the translation does not follow (a handle of any
-  other method, `invokeWithArguments`, combinators such as `filterArguments`) throws
+  a lookup's, a `MethodHandle`'s or a `MethodType`'s method that the translation does not follow
+  (a handle of any other method, `invokeWithArguments`, combinators such as `filterArguments`,
+  `MethodType.insertParameterTypes`) throws
   `UnsupportedOperationException` where it runs, as a JDK that lacks the method would fail, and
   code that falls back on a failed lookup, as netty does, takes its fallback; a census lists each
   such call. A handle used as a value any other way is rejected.
