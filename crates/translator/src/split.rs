@@ -112,12 +112,24 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     let mut used = std::collections::HashSet::new();
     let mut splits = Vec::new();
     for module in &mut tree.modules {
-        let text = module.items_text();
-        module.items = Vec::new();
-        let split = split_module(&text, &module.path, &mut used)
-            .map_err(|e| format!("splitting the module of package `{}`: {e}", module.package))?;
+        // Item by item: a parsed module's syntax tree is many times its text, and the largest
+        // modules of a program like the Minecraft server are hundreds of megabytes.
+        let mut split = Split { header: String::new(), body: String::new(), moved: 0 };
+        let mut externs = String::new();
+        let mut traits = 0;
+        for item in std::mem::take(&mut module.items) {
+            let part = split_module(&item.text, &module.path, &mut used, &mut traits)
+                .map_err(|e| format!("splitting the module of package `{}`: {e}", module.package))?;
+            split.header.push_str(&part.split.header);
+            split.body.push_str(&part.split.body);
+            split.moved += part.split.moved;
+            externs.push_str(&part.externs);
+            proc_macro2::extra::invalidate_current_thread_spans();
+        }
+        if !externs.is_empty() {
+            split.header.push_str(&format!("\nunsafe extern \"Rust\" {{\n{externs}}}\n"));
+        }
         splits.push(split);
-        proc_macro2::extra::invalidate_current_thread_spans();
     }
     // Each body crate takes the next modules until it has its share of the code.
     let total: usize = splits.iter().map(|s| s.moved).sum();
@@ -287,11 +299,21 @@ fn sig_start(sig: &syn::Signature) -> usize {
     .unwrap_or(0)
 }
 
+/// One item's split, and the declarations of its moved functions for the module's
+/// `extern "Rust"` block.
+struct Part {
+    split: Split,
+    externs: String,
+}
+
+/// Splits `text`, items of the module at `path`; `traits` numbers the module's traits of moved
+/// methods.
 fn split_module(
     text: &str,
     path: &[String],
     used: &mut std::collections::HashSet<String>,
-) -> Result<Split, String> {
+    traits: &mut usize,
+) -> Result<Part, String> {
     let file = syn::parse_file(text).map_err(|e| {
         // The code around the error, which a translator's fault in the generated text names.
         let at = e.span().start();
@@ -303,7 +325,6 @@ fn split_module(
     let mut externs = String::new();
     let mut body = String::new();
     let mut moved = 0;
-    let mut traits = 0;
     for item in &file.items {
         match item {
             syn::Item::Struct(s) => {
@@ -382,7 +403,7 @@ fn split_module(
                 let mut decls = String::new();
                 let mut impls = String::new();
                 let mut functions = String::new();
-                let bodies = format!("Bodies{traits}");
+                let bodies = format!("Bodies{}", *traits);
                 for impl_item in &imp.items {
                     let syn::ImplItem::Fn(f) = impl_item else {
                         if let syn::ImplItem::Const(c) = impl_item
@@ -464,7 +485,7 @@ fn split_module(
                     body.push_str(&format!(
                         "trait {bodies}: Sized {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
                     ));
-                    traits += 1;
+                    *traits += 1;
                 }
             }
             // A `use` among the items is the moved code's too.
@@ -487,10 +508,7 @@ fn split_module(
         last = edit.end;
     }
     header.push_str(&text[last..]);
-    if !externs.is_empty() {
-        header.push_str(&format!("\nunsafe extern \"Rust\" {{\n{externs}}}\n"));
-    }
-    Ok(Split { header, body, moved })
+    Ok(Part { split: Split { header, body, moved }, externs })
 }
 
 /// The text of a function's return type (` -> T`), or nothing.
@@ -557,7 +575,9 @@ mod tests {
     #[test]
     fn thread_local_statics_of_any_visibility_become_public() {
         let text = "thread_local! {\n    pub(crate) static A__INITIALIZED: Cell<bool> = const { Cell::new(false) };\n    static B: Cell<i32> = const { Cell::new(0) };\n    pub static C: Cell<i32> = const { Cell::new(0) };\n}\n";
-        let split = split_module(text, &["p".to_string()], &mut std::collections::HashSet::new()).unwrap();
+        let split = split_module(text, &["p".to_string()], &mut std::collections::HashSet::new(), &mut 0)
+            .unwrap()
+            .split;
         for name in ["A__INITIALIZED", "B", "C"] {
             assert!(split.header.contains(&format!("    pub static {name}:")), "{}", split.header);
         }
