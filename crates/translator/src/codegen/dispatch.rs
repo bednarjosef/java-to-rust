@@ -127,6 +127,60 @@ pub(super) enum Need {
     CopyAcross(usize),
 }
 
+/// The items of `wanted` written in the `impl` of the enum of each type (`type_enum_items`), in
+/// their order.
+pub(super) fn impl_needs(wanted: &Needs, homes: &[Home]) -> HashMap<usize, Vec<Need>> {
+    let mut out: HashMap<usize, Vec<Need>> = HashMap::new();
+    for &need in wanted {
+        let t = match need {
+            Need::Base(s)
+            | Need::BaseMut(s)
+            | Need::Convert(s, _)
+            | Need::Narrow(s, _)
+            | Need::Dispatch(s, _)
+            | Need::Among(s, _, _) => s,
+            Need::Body(i) => match homes[i] {
+                Home::Enum(t) => t,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        out.entry(t).or_default().push(need);
+    }
+    out
+}
+
+/// The types whose enum items read whether `need` is wanted (`Gen::type_enum_items`): the type
+/// it is of, and for a method's body, the type on whose enum it is written or, for a closure
+/// type, whose trait has it.
+pub(super) fn need_types(class: &Class, homes: &[Home], need: Need) -> Vec<usize> {
+    match need {
+        Need::Body(i) => {
+            let mut types = vec![class.methods[i].class];
+            if let Home::Enum(t) = homes[i] {
+                types.push(t);
+            }
+            types
+        }
+        Need::Convert(s, t) | Need::Narrow(s, t) => vec![s, t],
+        Need::Enum(t)
+        | Need::Base(t)
+        | Need::BaseMut(t)
+        | Need::Dispatch(t, _)
+        | Need::Among(t, _, _)
+        | Need::Display(t)
+        | Need::NullableText(t)
+        | Need::JavaString(t)
+        | Need::RuntimeClass(t)
+        | Need::RuntimeClassName(t)
+        | Need::RuntimeTypeNames(t)
+        | Need::IdentityHash(t)
+        | Need::CastSource(t)
+        | Need::CopyKind(t)
+        | Need::CopyAcross(t) => vec![t],
+    }
+}
+
 /// `text` as the operand of a method call or field access: in parentheses unless it is a path,
 /// a call or a field.
 pub(super) fn operand(text: &str) -> String {
@@ -215,8 +269,14 @@ impl<'a> Gen<'a> {
 
     /// The concrete classes whose objects the enum of type `t` holds, in `Class::types` order.
     pub(super) fn enum_variants(&self, t: usize) -> Vec<usize> {
+        if let Some(found) = self.enum_variant_lists.borrow().get(&t) {
+            return found.to_vec();
+        }
         // An enum's constants exist without `new`.
-        self.variants(t).iter().copied().filter(|&c| self.live[c] || self.holds_value(c)).collect()
+        let found: Vec<usize> =
+            self.variants(t).iter().copied().filter(|&c| self.live[c] || self.holds_value(c)).collect();
+        self.enum_variant_lists.borrow_mut().insert(t, found.clone().into());
+        found
     }
 
     /// The path of the variant of class `c` in the enum of `t`: `Shape::Circle`. A variant is
@@ -1644,41 +1704,52 @@ impl<'a> Gen<'a> {
             .any(|i| self.facts.writers.contains(&i))
     }
 
-    /// The enum of type `t` and the items of it that the code uses.
+    /// The enum of type `t` and the items of it that the code uses. In a round of enum items
+    /// alone (`Gen::only_enums`), the items asked for anew, as those find what they ask for: all
+    /// of them when the enum itself is.
     pub(super) fn type_enum_items(&mut self, t: usize) {
         if self.facts.closure_types.contains(&t) {
             return self.closure_alias(t);
         }
-        let name = struct_name(&self.class.types[t].name);
-        let view = self.view_name(t);
+        let all = self.only_enums.as_ref().is_none_or(|only| only.needs.contains(&Need::Enum(t)));
+        let anew = |g: &Self, need: Need| {
+            all || g.only_enums.as_ref().is_some_and(|only| only.needs.contains(&need))
+        };
         let variants = self.enum_variants(t);
-        let shorts: Vec<String> = variants
-            .iter()
-            .map(|&c| self.variant(t, c).rsplit("::").next().unwrap_or_default().to_string())
-            .collect();
-        let vis = self.vis();
-        self.gap();
-        self.line("#[derive(Clone, Copy)]");
-        self.line("#[repr(transparent)]");
-        self.line(&format!("{vis}struct {name}({vis}java::Thin);"));
-        self.gap();
-        if variants.is_empty() {
-            self.line(&format!("{vis}enum {view} {{}}"));
-        } else {
-            // Each variant's discriminant is its class number, so that `view()` keeps the number
-            // it reads instead of mapping it to another, and its arms differ in nothing else.
-            self.line("#[repr(u16)]");
-            self.line(&format!("{vis}enum {view}<'a> {{"));
-            self.indent += 1;
-            for (&c, short) in variants.iter().zip(&shorts) {
-                let payload = self.payload(c);
-                self.line(&format!("{short}(&'a {payload}) = {},", self.class_tag(c)));
+        let name = struct_name(&self.class.types[t].name);
+        if all {
+            let view = self.view_name(t);
+            let shorts: Vec<String> = variants
+                .iter()
+                .map(|&c| self.variant(t, c).rsplit("::").next().unwrap_or_default().to_string())
+                .collect();
+            let vis = self.vis();
+            self.gap();
+            self.line("#[derive(Clone, Copy)]");
+            self.line("#[repr(transparent)]");
+            self.line(&format!("{vis}struct {name}({vis}java::Thin);"));
+            self.gap();
+            if variants.is_empty() {
+                self.line(&format!("{vis}enum {view} {{}}"));
+            } else {
+                // Each variant's discriminant is its class number, so that `view()` keeps the
+                // number it reads instead of mapping it to another, and its arms differ in nothing
+                // else.
+                self.line("#[repr(u16)]");
+                self.line(&format!("{vis}enum {view}<'a> {{"));
+                self.indent += 1;
+                for (&c, short) in variants.iter().zip(&shorts) {
+                    let payload = self.payload(c);
+                    self.line(&format!("{short}(&'a {payload}) = {},", self.class_tag(c)));
+                }
+                self.indent -= 1;
+                self.line("}");
             }
-            self.indent -= 1;
-            self.line("}");
+            self.thin_impl(&name, &view, &variants, &shorts);
         }
-        self.thin_impl(&name, &view, &variants, &shorts);
-        let wanted: Vec<Need> = self.wanted.iter().copied().collect();
+        let wanted: Vec<Need> = (self.impl_needs.get(&t).into_iter().flatten().copied())
+            .filter(|&need| anew(self, need))
+            .collect();
         let mark = self.out.len();
         self.gap();
         self.line(&format!("impl {name} {{"));
@@ -1686,13 +1757,13 @@ impl<'a> Gen<'a> {
         let start = self.out.len();
         for need in &wanted {
             match *need {
-                Need::Base(s) if s == t => self.base_fn(t, false),
-                Need::BaseMut(s) if s == t => self.base_fn(t, true),
-                Need::Convert(s, to) if s == t => self.convert_fn(to),
-                Need::Narrow(s, to) if s == t => self.narrow_fn(t, to),
-                Need::Dispatch(s, group) if s == t => self.dispatcher(t, group, None),
-                Need::Among(s, group, key) if s == t => self.dispatcher(t, group, Some(key)),
-                Need::Body(i) if self.homes[i] == Home::Enum(t) => {
+                Need::Base(_) => self.base_fn(t, false),
+                Need::BaseMut(_) => self.base_fn(t, true),
+                Need::Convert(_, to) => self.convert_fn(to),
+                Need::Narrow(_, to) => self.narrow_fn(t, to),
+                Need::Dispatch(_, group) => self.dispatcher(t, group, None),
+                Need::Among(_, group, key) => self.dispatcher(t, group, Some(key)),
+                Need::Body(i) => {
                     self.gap();
                     self.method(i);
                 }
@@ -1705,23 +1776,31 @@ impl<'a> Gen<'a> {
         } else {
             self.line("}");
         }
-        self.identity_impl(t, &variants);
-        self.same_object_impl(t, &variants);
-        self.monitor_impl(t, &variants);
+        if all {
+            self.identity_impl(t, &variants);
+            self.same_object_impl(t, &variants);
+            self.monitor_impl(t, &variants);
+        }
         if self.wanted.contains(&Need::Display(t)) {
-            self.display_impl(t, &variants);
-            if self.enum_text_throws(t) {
-                self.try_text_impl(t, &variants);
+            if anew(self, Need::Display(t)) {
+                self.display_impl(t, &variants);
+                if self.enum_text_throws(t) {
+                    self.try_text_impl(t, &variants);
+                }
             }
-            if self.wanted.contains(&Need::JavaString(t)) {
+            if self.wanted.contains(&Need::JavaString(t))
+                && (anew(self, Need::Display(t)) || anew(self, Need::JavaString(t)))
+            {
                 self.java_string_impl(t, &variants);
             }
         }
-        if self.wanted.contains(&Need::NullableText(t)) {
+        if self.wanted.contains(&Need::NullableText(t)) && anew(self, Need::NullableText(t)) {
             self.nullable_text_impl(t, &variants);
         }
-        self.class_value_impls(t, &variants);
-        self.raised_impl(t);
+        self.class_value_impls(t, &variants, &|g, need| anew(g, need));
+        if all {
+            self.raised_impl(t);
+        }
     }
 
     /// The arms of a `match` on the class number over the variants, each made by `arm` from the
@@ -2962,11 +3041,11 @@ impl<'a> Gen<'a> {
     /// The methods of the enum of `t` that answer for the object's class, each written once here
     /// rather than as a `match` over every variant wherever it is used: `Object`'s enum has a
     /// variant for every class that the program creates, and javac's has thousands.
-    fn class_value_impls(&mut self, t: usize, variants: &[usize]) {
-        if self.wanted.contains(&Need::CopyAcross(t)) {
+    fn class_value_impls(&mut self, t: usize, variants: &[usize], anew: &dyn Fn(&Self, Need) -> bool) {
+        if self.wanted.contains(&Need::CopyAcross(t)) && anew(self, Need::CopyAcross(t)) {
             self.copy_across_impl(t, variants);
         }
-        let wanted = |need: Need| self.wanted.contains(&need);
+        let wanted = |need: Need| self.wanted.contains(&need) && anew(self, need);
         let methods = [
             (Need::RuntimeClass(t), "runtime_class", "java::Class"),
             (Need::RuntimeClassName(t), "runtime_class_name", "&'static str"),

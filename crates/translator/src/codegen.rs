@@ -103,27 +103,43 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
     // the program is written again until it asks for no item that was not written. Only the
     // enum items read which items are wanted, so what the rest asks for is the same in every
     // round: after the first, the rounds write only the enum items until those ask for nothing
-    // new, and then the whole program once more.
+    // new, and then the whole program once more. What an enum item asks for depends on the item
+    // alone, so a round of enum items writes those asked for anew (`Gen::only_enums`): the others
+    // ask for what they asked for before. What does not depend on the wanted items is worked out
+    // once (`Setup`). The last round writes the whole program again rather than reusing the
+    // first one's text: labels are numbered across the program, and enum items written among the
+    // methods move the numbers of those after them.
+    let mut setup = Setup::new(class, facts);
     let mut wanted = Needs::new();
-    let mut whole = true;
+    let mut only_enums: Option<OnlyEnums> = None;
     for round in 1.. {
         let start = std::time::Instant::now();
-        let (tree, needs, rejected, closures) = generate_with(class, facts, &wanted, !whole);
+        let (tree, needs, rejected, closures) =
+            generate_with(class, facts, &mut setup, &wanted, only_enums.as_ref());
         if crate::timings::enabled() {
             let new = needs.iter().filter(|n| !wanted.contains(n)).count();
+            let written =
+                only_enums.as_ref().map(|only| format!(" (enum items of {} types)", only.types.len()));
             eprintln!(
                 "timing: codegen: round {round}{}: {:.3} s, {new} items asked for anew",
-                if whole { "" } else { " (enum items)" },
+                written.unwrap_or_default(),
                 start.elapsed().as_secs_f64()
             );
         }
-        if !whole {
+        let anew = |wanted: &Needs, needs: &Needs| {
+            let needs: Needs = needs.difference(wanted).copied().collect();
+            let types =
+                needs.iter().flat_map(|&need| dispatch::need_types(class, &setup.homes, need)).collect();
+            OnlyEnums { needs, types }
+        };
+        if only_enums.is_some() {
             // What the enum items reject, or the program once they ask for nothing new, is
             // found by writing the whole program with the same items.
             if !rejected.is_empty() || needs.is_subset(&wanted) {
-                whole = true;
+                only_enums = None;
                 continue;
             }
+            only_enums = Some(anew(&wanted, &needs));
             wanted.extend(needs);
             continue;
         }
@@ -140,8 +156,8 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
             }
             return Ok(tree);
         }
+        only_enums = Some(anew(&wanted, &needs));
         wanted.extend(needs);
-        whole = false;
     }
     unreachable!("the rounds end")
 }
@@ -178,38 +194,88 @@ pub fn panicked_in() -> Option<Pos> {
     WRITING.with(|w| w.take())
 }
 
+/// The enum items that a round of them alone writes (`generate_all`): those asked for anew, and
+/// the types they are of (`dispatch::need_types`).
+#[derive(Clone)]
+struct OnlyEnums {
+    needs: Needs,
+    types: HashSet<usize>,
+}
+
+/// What the generator finds of the program before it writes it, the same in every round
+/// (`generate_all`).
+struct Setup {
+    live: Vec<bool>,
+    homes: Vec<Home>,
+    fn_names: Vec<String>,
+    group_names: HashMap<usize, String>,
+    struct_methods: HashMap<usize, Vec<usize>>,
+    static_fn_names: HashSet<String>,
+    receiver_sets: HashMap<u64, std::sync::Arc<[usize]>>,
+    class_tags: Vec<u16>,
+    runs: Vec<bool>,
+    super_targets: HashSet<usize>,
+    /// `Gen::shared_names` and `Gen::stack_forms`, which the first round finds.
+    shared_names: Option<HashSet<String>>,
+    stack_forms: Option<HashSet<usize>>,
+}
+
+impl Setup {
+    fn new(class: &Class, facts: &Facts) -> Setup {
+        // The names of methods are made in the program's modules, before any is written.
+        let _modules = modules::enter(class);
+        let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
+        let (fn_names, group_names) = method_names(class, &homes);
+        // The methods that may be emitted in the `impl` of each class's struct (`emitted_in`),
+        // in index order.
+        let mut struct_methods: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, m) in class.methods.iter().enumerate() {
+            let t = match homes[i] {
+                _ if m.is_static => continue,
+                _ if m.is_ctor => m.class,
+                Home::Class(c) | Home::Fields(c) => c,
+                _ => continue,
+            };
+            struct_methods.entry(t).or_default().push(i);
+        }
+        let static_fn_names = (0..fn_names.len())
+            .filter(|&i| class.methods[i].is_static)
+            .map(|i| fn_names[i].clone())
+            .collect();
+        Setup {
+            live: live_types(class, facts),
+            homes,
+            fn_names,
+            group_names,
+            struct_methods,
+            static_fn_names,
+            receiver_sets: class.receivers.values().map(|s| (dispatch::receiver_key(s), s.clone())).collect(),
+            class_tags: dispatch::class_numbers(class),
+            runs: running_types(class, facts),
+            super_targets: super_targets(class),
+            shared_names: None,
+            stack_forms: None,
+        }
+    }
+}
+
 /// The program, with the enum items `wanted`, and the enum items that it uses; and what in it
 /// cannot be translated, and the methods with a call that throws inside a closure (see
 /// `exceptions::check_closures`).
 fn generate_with(
     class: &Class,
     facts: &Facts,
+    setup: &mut Setup,
     wanted: &Needs,
-    only_enums: bool,
+    only_enums: Option<&OnlyEnums>,
 ) -> (ModuleTree, Needs, Vec<Error>, Vec<Error>) {
-    let live = live_types(class, facts);
+    let live = setup.live.clone();
     let modules = modules::enter(class);
-    let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
-    let (fn_names, group_names) = method_names(class, &homes);
-    // The methods that may be emitted in the `impl` of each class's struct (`emitted_in`), in
-    // index order.
-    let mut struct_methods: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, m) in class.methods.iter().enumerate() {
-        let t = match homes[i] {
-            _ if m.is_static => continue,
-            _ if m.is_ctor => m.class,
-            Home::Class(c) | Home::Fields(c) => c,
-            _ => continue,
-        };
-        struct_methods.entry(t).or_default().push(i);
-    }
-    let static_fn_names =
-        (0..fn_names.len()).filter(|&i| class.methods[i].is_static).map(|i| fn_names[i].clone()).collect();
     let mut g = Gen {
         class,
         facts,
-        fn_names,
-        static_fn_names,
+        fn_names: setup.fn_names.clone(),
+        static_fn_names: setup.static_fn_names.clone(),
         variant_names: Default::default(),
         cell_names: Default::default(),
         object_hash_code: Default::default(),
@@ -218,18 +284,20 @@ fn generate_with(
         package_methods: HashMap::new(),
         reps: Default::default(),
         variant_lists: Default::default(),
+        enum_variant_lists: Default::default(),
         checked_value_ofs: Default::default(),
-        group_names,
-        receiver_sets: class.receivers.values().map(|s| (dispatch::receiver_key(s), s.clone())).collect(),
+        group_names: setup.group_names.clone(),
+        receiver_sets: setup.receiver_sets.clone(),
         shared_names: HashSet::new(),
         live: live.clone(),
-        class_tags: dispatch::class_numbers(class),
-        runs: running_types(class, facts),
+        class_tags: setup.class_tags.clone(),
+        runs: setup.runs.clone(),
         wanted: wanted.clone(),
+        impl_needs: dispatch::impl_needs(wanted, &setup.homes),
         needs: std::cell::RefCell::new(Needs::new()),
-        homes,
-        struct_methods,
-        super_targets: super_targets(class),
+        homes: setup.homes.clone(),
+        struct_methods: setup.struct_methods.clone(),
+        super_targets: setup.super_targets.clone(),
         this_struct: 0,
         method: 0,
         borrowed: HashSet::new(),
@@ -284,10 +352,10 @@ fn generate_with(
         slot_param: String::new(),
         on_stack: false,
         stack_forms: HashSet::new(),
-        only_enums,
+        only_enums: only_enums.cloned(),
     };
-    g.shared_names = g.shared_names();
-    g.stack_forms = g.stack_forms();
+    g.shared_names = setup.shared_names.get_or_insert_with(|| g.shared_names()).clone();
+    g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
     let header = match modules {
         Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         None => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
@@ -301,7 +369,7 @@ fn generate_with(
         header
     };
     let tree = g.program(&live, header);
-    if only_enums {
+    if only_enums.is_some() {
         return (tree, g.needs.take(), g.rejected, Vec::new());
     }
     g.check_dereferences();
@@ -377,6 +445,9 @@ struct Gen<'a> {
     /// How the values of each type are represented, and the variants of its enum, once found.
     reps: std::cell::RefCell<HashMap<usize, hierarchy::Rep>>,
     variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<Vec<usize>>>>,
+    /// The variants of the enum of each type that have objects (`dispatch::enum_variants`), once
+    /// found.
+    enum_variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<[usize]>>>,
     /// The enums whose `valueOf` a `catch` or `finally` sees fail (see `enums::checked_value_of`).
     checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
@@ -394,6 +465,8 @@ struct Gen<'a> {
     runs: Vec<bool>,
     /// The enum items to write, which an earlier pass found used (see `generate`).
     wanted: Needs,
+    /// The items of `wanted` in the `impl` of the enum of each type (`dispatch::impl_needs`).
+    impl_needs: HashMap<usize, Vec<Need>>,
     /// The enum items that the code written so far uses.
     needs: std::cell::RefCell<Needs>,
     /// The methods that a `super.m(...)` call names, which run although a subclass overrides them.
@@ -530,9 +603,9 @@ struct Gen<'a> {
     on_stack: bool,
     /// The constructors and factories that get a form on the stack (see `stack_objects`).
     stack_forms: HashSet<usize>,
-    /// Whether only the enum items of class types are written, to find what they ask for
+    /// The enum items written in a round of them alone, to find what they ask for
     /// (`generate_all`).
-    only_enums: bool,
+    only_enums: Option<OnlyEnums>,
 }
 
 impl<'a> Gen<'a> {

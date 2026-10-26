@@ -383,7 +383,7 @@ impl<'a> Gen<'a> {
         let types = self.package_types.get(package).cloned().unwrap_or_default();
         for &index in types.iter() {
             let decl = &class.types[index];
-            if live[index] && !self.only_enums {
+            if live[index] && self.only_enums.is_none() {
                 let start = self.out.len();
                 self.type_items(index);
                 item(self, Origin::Class(decl.name.clone()), start);
@@ -391,13 +391,15 @@ impl<'a> Gen<'a> {
         }
         for &index in types.iter() {
             let decl = &class.types[index];
-            if self.wanted.contains(&Need::Enum(index)) {
+            if self.wanted.contains(&Need::Enum(index))
+                && self.only_enums.as_ref().is_none_or(|only| only.types.contains(&index))
+            {
                 let start = self.out.len();
                 self.type_enum_items(index);
                 item(self, Origin::ClassEnum(decl.name.clone()), start);
             }
         }
-        if !self.only_enums {
+        if self.only_enums.is_none() {
             for &index in types.iter() {
                 let decl = &class.types[index];
                 if decl.enum_constants.is_some() {

@@ -315,6 +315,23 @@ and the translations and census reports of the whole-program corpus are byte for
 `a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round` (`tests/translation.rs`)
 has a round for each kind; its first two rounds run none of the steps moved after the checks.
 
+**Generator rounds that write only what is new.** The enums of class types get the items the
+code asks for (conversions, dispatch, bodies of methods), which only writing the code finds, so
+the generator (`codegen::generate_all`) writes the whole program, then writes the enum items
+alone until they ask for nothing new, and then the whole program once more with the final set.
+Only the enum items read which items are wanted, and what an item asks for depends on the item
+alone, so a round of enum items now writes only the enums of the types asked for anew, and in
+each only the items asked for anew (`Gen::only_enums`); the rest would ask for what it asked
+for before. What does not depend on the wanted items (the live types, the names of methods, their
+receivers, the homes of methods, the classes' numbers) is worked out once for all the rounds
+(`Setup`), not once per round. The last round still writes everything again: labels are
+numbered across the program, and enum items written among the methods move the numbers of the
+labels after them, so the first round's text cannot be kept. The items asked for in each round
+are the same as before, and javac's census report and whole translation and the 28 targets'
+translations are byte for byte the same. On javac's census from its checkpoint, the generator
+goes from 26.6 s (4.9 s for the first round, ten rounds of enum items at 1.1 to 1.6 s each,
+6.1 s for the last) to 10.4 s (3.8 s, 1.4 s for all ten together, 4.6 s).
+
 Further speed-ups, not done:
 
 - The walk from scratch when the members written into a record change is what is left of the
