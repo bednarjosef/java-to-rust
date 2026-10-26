@@ -791,7 +791,7 @@ impl<'a> Gen<'a> {
             format!(" -> {}", self.object_type_with(name, &args))
         } else if m.ret == Type::Void {
             String::new()
-        } else if self.optional_return() {
+        } else if crate::analysis::nullable_type(m.ret) && self.facts.nullable_returns.contains(&index) {
             format!(" -> Option<{}>", self.ty_name(m.ret))
         } else if self.facts.owned_returns.contains(&index) {
             format!(" -> {}", self.plain_ty(m.ret))
