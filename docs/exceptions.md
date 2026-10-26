@@ -580,7 +580,11 @@ itself, and a `CharSequence`'s `isEmpty()` (lowered as a zero `length()`) as its
 elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no message, as
 `Objects.requireNonNull` gives none, and a null iterator of them is the JDK's `<local5>`, the
 slot of `String.join`'s own loop. The receiver of a bound method reference, which the
-reference's class holds and its call may first keep in a local, is never null there. Calls of
+reference's class holds and its call may first keep in a local, is never null there. A nested
+class's use of a protected member of a superclass in another package goes through javac's
+accessor method in the subclass (`access$000`), which dereferences its own parameter: `because
+"x0" is null` (`<parameter1>` without local names), with the call named as the member's
+(`BytecodeNames`' `accessor` entries). Calls of
 one name that start at the same place, as calls of a chain do
 (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told apart by where their
 first argument starts, which `BytecodeNames` adds to the name (`stream@3:30`, `stream@`), and

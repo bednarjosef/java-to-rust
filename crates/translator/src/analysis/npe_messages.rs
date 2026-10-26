@@ -289,9 +289,32 @@ impl Messages<'_> {
             let read = Expr { kind: ExprKind::Var(v.to_string()), pos: x.pos, ty: x.ty, id: x.id };
             self.unboxing(&read, out);
         }
+        // The object of a protected member of a superclass in another package that a nested
+        // class uses, which javac's accessor method dereferences, as its parameter `x0`.
+        let accessed = match &x.kind {
+            ExprKind::MethodCall { receiver: object, name, .. }
+            | ExprKind::Field { object, name }
+            | ExprKind::Assign { target: Place::Field { object, name }, .. }
+            | ExprKind::IncDec { target: Place::Field { object, name }, .. }
+                if !self.jdk =>
+            {
+                self.names
+                    .get(self.outermost, object.pos, NameKind::Accessor, name)
+                    .map(|text| (object.id, text))
+            }
+            _ => None,
+        };
         let mut add = |object: &Expr, action: Option<String>| {
             // A message that the expression above gave (a native's).
             if out.contains_key(&object.id) {
+                return;
+            }
+            if let Some((id, text)) = accessed
+                && id == object.id
+            {
+                if let Some(action) = action {
+                    out.insert(object.id, Some(format!("{action} because \"{text}\" is null")));
+                }
                 return;
             }
             // The JVM gives no message for the null receiver of an unbound method reference

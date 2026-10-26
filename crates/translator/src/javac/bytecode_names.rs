@@ -27,6 +27,9 @@ pub enum NameKind {
     Call,
     /// A static field: `Main$Box.shared`.
     Static,
+    /// An object whose member of the name javac's accessor method (`access$000`) dereferences,
+    /// named as the accessor's parameter: `x0`, `<parameter1>`.
+    Accessor,
 }
 
 /// The names of a program's code, by the outermost class the code is in (`com.example.Main`),
@@ -260,6 +263,7 @@ fn read_names(json: impl std::io::Read) -> serde_json::Result<BytecodeNames> {
                     "temp" => NameKind::Temp,
                     "call" => NameKind::Call,
                     "static" => NameKind::Static,
+                    "accessor" => NameKind::Accessor,
                     _ => continue,
                 };
                 self.0.set(class, Pos::new(line as usize, column as usize), kind, &name, text.as_deref());

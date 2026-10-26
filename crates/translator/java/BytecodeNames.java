@@ -60,7 +60,11 @@ import javax.tools.*;
  * local;
  * <li>{@code call}: a call of the method {@code NAME}, {@code TEXT} being the method as the class
  * file refers to it, {@code Main$Box.size()};
- * <li>{@code static}: a static field, {@code Main$Box.shared}.
+ * <li>{@code static}: a static field, {@code Main$Box.shared};
+ * <li>{@code accessor}: an object whose member {@code NAME}, a protected one of a superclass in
+ * another package that a nested class uses, javac's accessor method ({@code access$000})
+ * dereferences, {@code TEXT} being how the JVM names the accessor's parameter, {@code x0} or
+ * {@code <parameter1>}; the call of a method there has its {@code call} too.
  * </ul>
  * A variable of a {@code finally} block, which the code generator copies to every exit of its
  * {@code try}, has two slots where the copies differ: U+0001 {@code <localN>} U+0002
@@ -813,6 +817,30 @@ public class BytecodeNames {
 
                 @Override
                 public void visitApply(JCMethodInvocation t) {
+                    // A protected member of a superclass in another package, which a nested
+                    // class reaches through javac's accessor in the class that may use it
+                    // (`Main.access$000(this.mob)` for `this.mob.isPatrolling()`): the
+                    // accessor dereferences its first parameter, `x0`, and calls the member as
+                    // the source would have.
+                    if (TreeInfo.symbol(t.meth) instanceof MethodSymbol m && !t.args.isEmpty()
+                            && accessed(m) instanceof JCFieldAccess accessed) {
+                        JCTree at = written(t.args.head);
+                        entry(at, "accessor", accessed.name.toString(), jdkModule ? "x0" : "<parameter1>");
+                        if (accessed.sym instanceof MethodSymbol original) {
+                            Type site = accessed.selected.type;
+                            String text = member(original, site);
+                            entry(at, "call", original.name.toString(), text);
+                            boolean none = t.args.tail.isEmpty();
+                            long[] first = none ? null : starts.get(written(t.args.tail.head));
+                            if (none || first != null) {
+                                String where = first == null ? "" : first[0] + ":" + first[1];
+                                entry(at, "call", original.name + "@" + where, text);
+                            }
+                            if (none && types.erasure(site).tsym instanceof ClassSymbol receiver) {
+                                entry(at, "call", original.name + "@#" + receiver.flatname, text);
+                            }
+                        }
+                    }
                     if (TreeInfo.symbol(t.meth) instanceof MethodSymbol m && !m.isDynamic()) {
                         Type site = t.meth instanceof JCFieldAccess f ? f.selected.type : c.sym.type;
                         // A call that lowering wrote, such as the `iterator()` of a for-each
@@ -1155,6 +1183,38 @@ public class BytecodeNames {
     }
 
     /** A field or method as a class file refers to it, and the JVM's messages show it. */
+    /**
+     * The member that {@code m} reaches, where it is one of javac's accessors of an instance
+     * member ({@code access$000(x0)}): the {@code x0.member} of its body; else {@code null}.
+     */
+    private JCFieldAccess accessed(MethodSymbol m) {
+        if ((m.flags() & Flags.SYNTHETIC) == 0 || !m.isStatic() || !m.name.toString().startsWith("access$")) {
+            return null;
+        }
+        JCClassDecl owner = classes.get(m.owner);
+        if (owner == null) {
+            return null;
+        }
+        for (JCTree def : owner.defs) {
+            if (def instanceof JCMethodDecl d && d.sym == m && d.body != null && !d.params.isEmpty()) {
+                VarSymbol receiver = d.params.head.sym;
+                JCFieldAccess[] found = {null};
+                new TreeScanner() {
+                    @Override
+                    public void visitSelect(JCFieldAccess f) {
+                        if (found[0] == null && TreeInfo.skipParens(f.selected) instanceof JCIdent id
+                                && id.sym == receiver) {
+                            found[0] = f;
+                        }
+                        super.visitSelect(f);
+                    }
+                }.scan(d.body);
+                return found[0];
+            }
+        }
+        return null;
+    }
+
     private String member(Symbol s, Type site) {
         Symbol q;
         try {
