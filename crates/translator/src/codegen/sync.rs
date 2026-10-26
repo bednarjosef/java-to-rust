@@ -183,5 +183,5 @@ impl<'a> Gen<'a> {
 /// path.
 fn class_monitor(class: &str) -> String {
     let (path, local) = modules::split(class);
-    path + &format!("{}__MONITOR", local.replace('.', "")).to_uppercase()
+    path + &format!("{}__MONITOR", modules::flat_name(class, local)).to_uppercase()
 }

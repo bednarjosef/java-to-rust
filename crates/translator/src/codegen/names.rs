@@ -133,7 +133,7 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     // `initLogManager()`, which is then `init_log_manager_2`.
     for decl in &class.types {
         let local = decl.name.strip_prefix(&format!("{}.", decl.package)).unwrap_or(&decl.name);
-        let init = format!("init_{}", snake_case(&local.replace('.', "")));
+        let init = format!("init_{}", snake_case(&modules::flat_name(&decl.name, local)));
         let module = module_used.entry(decl.package.as_str()).or_default();
         module.insert(format!("{init}_slow"));
         module.insert(init);

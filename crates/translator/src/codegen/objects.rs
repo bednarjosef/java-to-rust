@@ -95,7 +95,7 @@ pub(super) fn needs_clone(ty: Type) -> bool {
 }
 
 /// The Rust name of a class: its name in its package without the dots (`Outer.Inner` is
-/// `OuterInner`), after the path of its
+/// `OuterInner`, see `modules::flat_name`), after the path of its
 /// module when that is not the module being written (see `modules`). A name that the generated
 /// code uses for Rust's own types (`STD_NAMES`), such as javac's class `Option`, takes a `_`.
 pub(super) fn struct_name(name: &str) -> String {
@@ -104,7 +104,7 @@ pub(super) fn struct_name(name: &str) -> String {
         return var.to_string();
     }
     let (path, local) = modules::split(name);
-    let local = local.replace('.', "");
+    let local = modules::flat_name(name, local);
     match STD_NAMES.contains(&local.as_str()) {
         true => format!("{path}{local}_"),
         false => path + &local,

@@ -107,7 +107,10 @@ optimization.
 Naming:
 
 - Structs and enums use the class's struct name (`Outer.Inner` is `OuterInner`); the fields
-  struct appends `Fields`.
+  struct appends `Fields`. Where two classes of a package would get the same name so (Guava's
+  `StandardTable.ColumnKeySet` and `StandardTable.Column.KeySet`), the one with more dots takes
+  the first number after it that is free (`StandardTableColumnKeySet2`), in its statics, monitor
+  and static initialization too.
 - A variant is named after its class's simple name (`Shape::Circle`, and `ShapeView::Circle`
   in the view), with the outer classes' names when two variants of one enum would share one.
   Runtime variants are `String`, `Integer`, ..., `IntArray`, `StringBuilder` and so on. The

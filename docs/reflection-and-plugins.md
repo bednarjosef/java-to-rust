@@ -81,7 +81,10 @@ program where such a lookup can happen, so they can be checked before the progra
   translation, are the runtime's classes of those names (`java::Class::RUNTIME`, `SYSTEM`).
   `isAssignableFrom` of any two classes tests the names of the classes and interfaces above the
   second, which each class value carries. A computed name becomes a `switch` over the binary
-  names of the classes that code can find by name.
+  names of the classes that code can find by name. The value of each class of the program that
+  code names is a constant at the crate root (`const CLASS__COM_FOO_BAR: java::Class`), written
+  once: the reflection table names a class for each of its members and their types, and written
+  out at each of those, with the names above it, the Minecraft server's table had lines of 20 MB.
 - **The reflection table.** `getMethod`, `getDeclaredMethod`, `getField`, `getConstructor`,
   `newInstance` and the rest look members up in a table that the translation builds in. The
   table holds only what lookups of reachable code can find. The classes are those named by
