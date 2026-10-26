@@ -267,7 +267,7 @@ impl<'a> Gen<'a> {
             // updater's `ClassCastException`, always throw: the closure's value is `Infallible`,
             // which ends the code here as Java's throw does.
             if matches!(e.kind, ExprKind::Builtin(Builtin::UnknownClass | Builtin::UpdaterRefused, _)) {
-                return Code::atom(format!("match {} {{}}", caught.text));
+                return self.never_of(format!("match {} {{}}", caught.text), e.ty);
             }
             return caught;
         }
@@ -791,14 +791,14 @@ impl<'a> Gen<'a> {
                 if self.catching_now.contains(&id) {
                     return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
                 }
-                Code::never(throw)
+                self.never_of(throw, ty)
             }
             Builtin::UpdaterRefused => {
                 let throw = format!("{}()", self.runtime("updater_refused"));
                 if self.catching_now.contains(&id) {
                     return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
                 }
-                Code::never(throw)
+                self.never_of(throw, ty)
             }
             Builtin::MissingResource => {
                 let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));

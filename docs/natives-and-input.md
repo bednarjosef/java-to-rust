@@ -331,7 +331,10 @@ A translated program is closed: it knows all its classes. So:
   `Module` are translated, the last two (and `ModuleLayer`) patched (see [reflection-and-plugins.md](reflection-and-plugins.md)).
 - `Class.forName` of a name spelled out as a literal is that class's literal, after its static
   initialization when the call initializes (`program::class_for_name`, `Builtin::InitializeClass`).
-  The loader argument is evaluated for its effects only.
+  The loader argument is evaluated for its effects only. An array's descriptor (`"[La.B;"`) is
+  the array class's literal, without initializing `a.B`. A literal name of no class of the
+  program, or the descriptor of an array of one, throws `ClassNotFoundException` when the call
+  runs.
 - `(T) Class.forName(name).getDeclaredConstructor().newInstance()` with a computed name is a
   `switch` over the classes whose binary names reachable code writes as string literals
   (`program/reach/by_name.rs`, `lower/by_name.rs`); any other name throws a

@@ -87,6 +87,29 @@ pub fn class_for_name(node: &Value) -> Option<(String, bool)> {
     named.then(|| (name.replace('$', "."), initialize))
 }
 
+/// The binary name of the element class (`a.B$C`) of the array that the call `node`,
+/// `Class.forName("[La.B$C;")` or `Class.forName("[La.B$C;", initialize, loader)`, names by a
+/// descriptor spelled out as a string literal, and the array's dimensions. `None` for any other
+/// call or name, a primitive array's too.
+pub fn array_for_name(node: &Value) -> Option<(String, usize)> {
+    let symbol = &node["symbol"];
+    let is_for_name = text(node, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "owner") == "java.lang.Class"
+        && text(symbol, "name") == "forName"
+        && text(symbol, "type").starts_with("(java.lang.String");
+    let arguments = node["arguments"].as_array()?;
+    if !is_for_name || !matches!(arguments.len(), 1 | 3) {
+        return None;
+    }
+    let name = unparenthesized(&arguments[0]);
+    let name = (text(name, "kind") == "STRING_LITERAL").then(|| name["value"].as_str())??;
+    let element = name.trim_start_matches('[');
+    let dimensions = name.len() - element.len();
+    let element = element.strip_prefix('L')?.strip_suffix(';')?;
+    let named = dimensions > 0 && element.split(['.', '$']).all(is_identifier);
+    named.then(|| (element.to_string(), dimensions))
+}
+
 /// The class that declares the method of a call `node` named `name` without arguments, and the
 /// receiver it is called on.
 fn call<'v>(node: &'v Value, name: &str) -> Option<(&'v str, &'v Value)> {
