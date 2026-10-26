@@ -39,17 +39,24 @@ pub fn has_subclasses(class: &Class, t: usize) -> bool {
 
 /// The classes with subclasses that have a fields struct: those that declare instance fields,
 /// have objects of their own, or have a constructor that does something. Its subclasses embed
-/// it as their field `base`.
+/// it as their field `base`. So does an abstract class without subclasses that declares
+/// instance fields: its type is an enum without variants, whose values are always null, and its
+/// fields are read and written through `base()` all the same (as the reflection table's cases
+/// do), which never returns.
 pub fn fields_structs(class: &Class) -> HashSet<usize> {
     let mut out = HashSet::new();
     // Superclasses first, so that a constructor's `super(...)` is known to do something or not.
     let mut order: Vec<usize> = (0..class.types.len()).collect();
     order.sort_by_key(|&t| class.hierarchy.ancestors(t).len());
     for t in order {
+        let decl = &class.types[t];
+        let objectless = decl.kind == TypeKind::Class && !class.hierarchy.is_concrete(t);
         if !has_subclasses(class, t) {
+            if objectless && !decl.fields.is_empty() {
+                out.insert(t);
+            }
             continue;
         }
-        let decl = &class.types[t];
         let trivial = |m: &Method| match &m.body[..] {
             [] => true,
             [Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved }, .. })] => {

@@ -83,7 +83,10 @@ Terms:
   `struct <Name>Fields { base: <Super>Fields, <own fields> }`. A class with subclasses that is
   itself instantiated has a variant holding its fields struct. A superclass without a fields
   struct has a constructor that does nothing; only the effects of the arguments of `super(...)`
-  are written, as statements.
+  are written, as statements. An abstract class without subclasses that declares instance fields
+  has one too: its values are always null, an enum without variants, and a read or write of its
+  fields (in the code, or in the reflection table's cases) goes through a `base()` that never
+  returns, after the null check that throws.
 - **variants of a type**: the classes whose objects become values of it (`hierarchy::flows`): a
   `new`, an upcast from a type whose values they are, a call of a method the type declares on a
   receiver of a subtype, `super.m()`, a pattern binding, and running a method of the type that
