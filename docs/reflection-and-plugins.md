@@ -117,7 +117,10 @@ program where such a lookup can happen, so they can be checked before the progra
   them as gson's `EnumTypeAdapter` does; `get` gives the constant and `set` throws. The
   `$VALUES` array that javac adds is not a field of the table. `AccessibleObject.setAccessible`
   of an array of members checks the array for null and does nothing else, as every member of
-  the table is accessible (`lower/libraries.rs`).
+  the table is accessible (`lower/libraries.rs`). So the deprecated `isAccessible()` is true for
+  every member, where Java's is false until `setAccessible(true)`: the members are the table's,
+  shared by every lookup, so a flag of one lookup's would be every lookup's. Code that asks it
+  before `setAccessible(true)`, as libraries do, does the same either way.
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
   and `NoSuchMethodException` or `NoSuchFieldException` for a member the table does not hold.
