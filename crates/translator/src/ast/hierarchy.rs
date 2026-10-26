@@ -32,6 +32,9 @@ impl Hasher for IndexHasher {
 type IndexMap<K, V> = HashMap<K, V, BuildHasherDefault<IndexHasher>>;
 
 /// The supertypes, subtypes and overrides of the program's types and methods.
+/// The targets of each override group and type asked for (`Hierarchy::targets`).
+type Targets = IndexMap<(usize, usize), std::rc::Rc<[usize]>>;
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Hierarchy {
     /// Direct subtypes of each type: classes extending it, interfaces extending it, classes
@@ -69,7 +72,7 @@ pub struct Hierarchy {
     concretes: RefCell<IndexMap<usize, std::rc::Rc<[usize]>>>,
     /// `targets` of each override group and type asked for.
     #[serde(skip)]
-    targets: RefCell<IndexMap<(usize, usize), std::rc::Rc<[usize]>>>,
+    targets: RefCell<Targets>,
     /// For each type, one bit per type that it is a subtype of (itself included), `words` words
     /// a type.
     supertype_bits: Vec<u64>,

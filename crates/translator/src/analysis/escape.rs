@@ -1376,8 +1376,8 @@ impl Analysis<'_> {
         let mut spread = vec![false; held];
         loop {
             let mut grew = false;
-            for x in 0..held {
-                if escaping.contains(x) && !std::mem::replace(&mut spread[x], true) {
+            for (x, spread) in spread.iter_mut().enumerate() {
+                if escaping.contains(x) && !std::mem::replace(spread, true) {
                     grew |= escaping.union(&holds(&Sources::of(x), None));
                 }
             }
