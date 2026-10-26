@@ -640,8 +640,11 @@ String s)) return;`), has no known slots for its temporaries, and a null message
 certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
 for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)`,
-which the JVM's native code throws without one. A native that the runtime does not have takes
-null (a JNI native gets it as it is) and raises nothing: it is only where it never runs. A null that the class the JVM makes for a method reference dereferences has no message, as
+which the JVM's native code throws without one, `wait`, `notify` and `notifyAll` of a null as
+`Object`'s, and `System.getProperty` of a null key that is not a constant (a `switch` on the key)
+with `System.checkKey`'s own message (`key can't be null`). A native that the runtime does not
+have takes null (a JNI native gets it as it is) and raises nothing: it is only where it never
+runs, and its call is written without its arguments, so a dereference in them is never made. A null that the class the JVM makes for a method reference dereferences has no message, as
 its hidden frame gives none: the receiver of an unbound reference, or an argument it unboxes
 (`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`). javac writes a method of its
 own instead for a reference that packs varargs, calls through `super`, or makes an array or an

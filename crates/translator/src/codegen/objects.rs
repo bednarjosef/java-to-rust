@@ -870,6 +870,25 @@ impl<'a> Gen<'a> {
                 &mut |_| {},
             );
         }
+        // The arguments of a native that the runtime does not have, which is written as code
+        // that never runs (`Native::Missing`).
+        for stmt in self.class.methods.iter().flat_map(|m| &m.body) {
+            visit_stmt(
+                stmt,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Builtin(Builtin::Native(Native::Missing { .. }), args) = &x.kind {
+                            for arg in args {
+                                visit_expr(arg, &mut |a| {
+                                    unwritten.insert(a.id);
+                                });
+                            }
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
         // Each one, first to last, as the generator reports what it rejects (`generate_all`).
         let mut missed: Vec<Pos> = self
             .facts

@@ -3564,6 +3564,24 @@ fn a_census_takes_a_native_that_the_runtime_lacks_to_take_null() {
     assert_lacks(&census.report, &["NullPointerException"]);
 }
 
+#[test]
+fn a_census_takes_the_arguments_of_a_native_that_the_runtime_lacks_as_code_that_never_runs() {
+    // The call of a JNI native is written as code that never runs, without its arguments: the
+    // dereference in an argument, inside a `try` that catches its `NullPointerException`, is no
+    // dereference that the code has to check.
+    let dir = write_sources(
+        "census_native_argument",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    static native long leak(int size);\n    static boolean loaded = Boolean.getBoolean(\"x\");\n    static long plot(String name) {\n        return loaded ? leak(name.length()) : 0;\n    }\n    public static void main(String[] a) {\n        try { System.out.println(plot(a.length > 0 ? a[0] : null)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let census = census(&program);
+    assert_contains(&census.report, &["p.Main.leak"]);
+    assert_lacks(&census.report, &["NullPointerException"]);
+}
+
 /// A program whose census takes a round of the analyses for each kind of check that rejects code
 /// (`a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round`).
 const ROUNDS: &str = r#"public class Main {

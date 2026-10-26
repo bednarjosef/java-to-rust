@@ -700,6 +700,25 @@ impl Messages<'_> {
                             out.entry(class.id).or_insert(None);
                         }
                     }
+                    // `o.wait(..)`, `o.notify()` and `o.notifyAll()` of a null `o`, which javac
+                    // calls as `Object`'s: `wait()` is `wait(0L)` at the call's own position
+                    // (`lower::sync`).
+                    Builtin::Native(native @ (Native::MonitorWait | Native::MonitorNotify { .. })) => {
+                        let (name, params) = match (native, &args[1..]) {
+                            (Native::MonitorNotify { all: true }, _) => ("notifyAll", ""),
+                            (Native::MonitorNotify { all: false }, _) => ("notify", ""),
+                            (_, [timeout]) if matches!(timeout.kind, ExprKind::Long(0)) && timeout.pos == x.pos => {
+                                ("wait", "")
+                            }
+                            (_, [_]) => ("wait", "long"),
+                            _ => ("wait", "long, int"),
+                        };
+                        let call = match self.jdk {
+                            true => Some(format!("Object.{name}({params})")),
+                            false => self.call(x.pos, name),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
+                    }
                     // `Thread.holdsLock(null)`, which the JVM's native code throws without a
                     // message.
                     Builtin::Native(Native::HoldsLock) => {
@@ -735,6 +754,11 @@ impl Messages<'_> {
                     }
                     _ => {}
                 }
+            }
+            // `System.getProperty(key)` of a key that is not a constant, lowered as a switch on
+            // it (`lower::system`): `System.checkKey` throws for a null key, with a message.
+            ExprKind::Switch { selector, cases } if property_switch(cases) => {
+                out.insert(selector.id, Some("key can't be null".to_string()));
             }
             ExprKind::Switch { selector, .. } => self.switch(selector, out),
             _ => {}
@@ -1850,6 +1874,15 @@ fn builder_method(op: BuilderOp) -> Option<&'static str> {
         BuilderOp::GetChars => "getChars",
         BuilderOp::EnsureCapacity => "ensureCapacity",
     })
+}
+
+/// Whether `cases` are those of `System.getProperty(key)` of a computed key (`lower::system`),
+/// which always have the case of `java.class.path`, and the default last.
+fn property_switch(cases: &[Case]) -> bool {
+    let class_path = |c: &Case| {
+        matches!(&c.labels[..], [CaseLabel::Value(Expr { kind: ExprKind::Str(key), .. })] if key == "java.class.path")
+    };
+    matches!(cases.last().map(|c| &c.labels[..]), Some([CaseLabel::Default])) && cases.iter().any(class_path)
 }
 
 /// `e` without the casts that the class file has no instruction for, or that pass the value
