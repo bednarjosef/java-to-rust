@@ -488,7 +488,8 @@ private static final int ABASE = U.arrayBaseOffset(Node[].class), ASHIFT = 31 - 
 name:
 
 - **A field handle** is a static final whose value is `objectFieldOffset(C.class, "f")` (or of
-  `getDeclaredField`, or assigned once in a static block). It is no field of the translation. A
+  `getDeclaredField`, or assigned once in a static block, or made by a static helper of a class
+  and a name, as JCTools' `UnsafeAccess.fieldOffset` in netty). It is no field of the translation. A
   read or write through it, in any memory mode, is a read or write of `o.f`; the field may be one
   of another class (`ThreadLocalRandom`'s offsets into `Thread`) as long as the object is of that
   class. Static fields (`staticFieldOffset`, `staticFieldBase`) work the same way.

@@ -8,7 +8,8 @@
 //! `corpus/projects/`. Translating with the JDK takes a few seconds per program, and the programs
 //! run on `CORPUS_THREADS` threads (one per CPU by default); `CORPUS_FILTER=text` runs only those
 //! whose name contains `text`. A program reads the file `Name.input` next to it (`input` in a
-//! directory) on standard input, and nothing without one.
+//! directory) on standard input, and nothing without one. A program that uses `sun.misc` is
+//! translated with the sources of `jdk.unsupported` too, from the folder next to `java.base`'s.
 //!
 //! As in the corpus test, Java's results and the runs of translations that are the same as in an
 //! earlier run that matched Java are kept in the checks' cache (`check_cache::test_root`).
@@ -177,6 +178,23 @@ fn input_field(p: &Program, fingerprint: &mut Fingerprint) -> Option<()> {
     Some(())
 }
 
+/// The sources of `jdk.unsupported`, next to `java.base`'s, for a program that uses
+/// `sun.misc.Unsafe` or the other classes of `sun.misc`.
+fn unsupported_library(p: &Program, library: &Path) -> Option<PathBuf> {
+    fn uses_sun_misc(dir: &Path) -> bool {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let path = e.path();
+            if path.is_dir() {
+                return uses_sun_misc(&path);
+            }
+            path.extension().is_some_and(|x| x == "java")
+                && std::fs::read_to_string(&path).is_ok_and(|text| text.contains("sun.misc."))
+        })
+    }
+    let root = library.parent()?.join("jdk.unsupported");
+    (root.is_dir() && uses_sun_misc(&p.sources)).then_some(root)
+}
+
 /// The program's run translated with the JDK's sources, or why it does not get that far. A
 /// translation that is the same as in an earlier run that matched Java, with the same runtime,
 /// toolchain and input (`build`, the hash of all but the translation), is not built and run
@@ -199,6 +217,11 @@ fn run_rust(
         .arg(&p.sources)
         .arg("--library")
         .arg(library)
+        .args(
+            unsupported_library(p, library)
+                .into_iter()
+                .flat_map(|l| ["--library".into(), l.into_os_string()]),
+        )
         .arg("--crate")
         .arg(&dir)
         .output()

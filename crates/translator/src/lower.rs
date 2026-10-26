@@ -955,7 +955,8 @@ impl<'t> Lowering<'t> {
             _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
             STAND_IN => {
-                return self.expr(self.stand_ins.borrow()[node.0["standsFor"].as_u64().unwrap_or(0) as usize]);
+                return self
+                    .expr(self.stand_ins.borrow()[node.0["standsFor"].as_u64().unwrap_or(0) as usize]);
             }
             "INT_LITERAL" => ExprKind::Int(self.number(node)?),
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),

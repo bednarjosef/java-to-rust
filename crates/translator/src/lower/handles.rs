@@ -14,7 +14,9 @@
 //! assignment to it in a static block, which is then left out (`Random` writes
 //! `seedOffset = unsafe.objectFieldOffset(Random.class.getDeclaredField("seed"))` in a `try`);
 //! the class may be a class literal or a local of the block that holds one, and the call may also
-//! be written as the offset argument itself. The field may be one of another class, such as the
+//! be written as the offset argument itself, or made by a static helper of a class and a name
+//! (`offset_helper_call`: JCTools' `UnsafeAccess.fieldOffset(Queue.class, "producerIndex")` in
+//! netty), whose class `sun.misc.Unsafe`'s warning names. The field may be one of another class, such as the
 //! `threadLocalRandomProbe` of `Thread` that `ThreadLocalRandom` reads, as long as the object
 //! of the access is of that class. A read or write through the handle is a read or write of the
 //! field itself, so the call above lowers to `this.constant`. That is Java's meaning in a program
@@ -618,6 +620,12 @@ impl<'t> Lowering<'t> {
     /// or of `getDeclaredField` of a class and a name), is the offset of. `block` is the static
     /// block it is in, if any.
     fn field_offset(&self, value: Node<'t>, block: Option<Node<'t>>) -> Option<(usize, &'t str)> {
+        if self.offset_helper_call(value).is_some() {
+            let args: Vec<Node<'t>> = plain(value).list("arguments").collect();
+            let field = plain(*args.get(1)?);
+            let name = field.0["value"].as_str().filter(|_| field.kind() == "STRING_LITERAL")?;
+            return Some((self.offset_class(*args.first()?, block)?, name));
+        }
         let Some(args) = call_of(value, OFFSET_OF) else {
             let field = call_of(value, OFFSET_OF_FIELD).or_else(|| call_of(value, SUN_OFFSET_OF_FIELD))?;
             return self.declared_field(*field.first()?, block);
@@ -625,6 +633,42 @@ impl<'t> Lowering<'t> {
         let field = plain(*args.get(1)?);
         let name = field.0["value"].as_str().filter(|_| field.kind() == "STRING_LITERAL")?;
         Some((self.offset_class(*args.first()?, block)?, name))
+    }
+
+    /// When `value` calls a static method of the program whose one `return` gives
+    /// `objectFieldOffset(c.getDeclaredField(name))` of its two parameters `c` and `name`, as
+    /// JCTools' `UnsafeAccess.fieldOffset(Class, String)` does: that `objectFieldOffset` call and
+    /// the method's class. The call is the offset of the field its arguments name.
+    pub(super) fn offset_helper_call(&self, value: Node<'t>) -> Option<(Node<'t>, usize)> {
+        let value = plain(value);
+        let symbol = value.symbol().filter(|s| value.kind() == "METHOD_INVOCATION" && s.is_static)?;
+        let index = self.method_index(&symbol)?;
+        let method = self.methods[index].node;
+        let params: Vec<&str> = method.list("parameters").map(|p| p.str("name")).collect();
+        let [class, name] = params[..] else { return None };
+        let mut returns = Vec::new();
+        walk(method.get("body")?.0, &mut |n| {
+            if n.kind() == "RETURN" {
+                returns.push(n);
+            }
+        });
+        let [returned] = returns[..] else { return None };
+        let offset = plain(returned.get("expression")?);
+        let get = plain(
+            *call_of(offset, OFFSET_OF_FIELD).or_else(|| call_of(offset, SUN_OFFSET_OF_FIELD))?.first()?,
+        );
+        let found = get.symbol().filter(|_| get.kind() == "METHOD_INVOCATION")?;
+        let parameter = |n: Option<Node>, p: &str| {
+            n.map(plain).is_some_and(|n| {
+                n.kind() == "IDENTIFIER"
+                    && n.str("name") == p
+                    && n.symbol().is_some_and(|s| s.kind == "PARAMETER")
+            })
+        };
+        let of_parameters = (found.owner, found.name) == ("java.lang.Class", "getDeclaredField")
+            && parameter(get.get("methodSelect").and_then(|m| m.get("expression")), class)
+            && parameter(get.list("arguments").next(), name);
+        of_parameters.then_some((offset, self.methods[index].owner))
     }
 
     /// The class and the name of the field that `get` is: a call of `getDeclaredField` of a class

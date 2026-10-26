@@ -190,7 +190,7 @@ impl<'t> Lowering<'t> {
     /// `jdk.internal.misc.Unsafe` defines. Java throws for a record's field and for a field that
     /// is not there, which is rejected.
     pub(super) fn handle_warning(&self, owner: usize, member: Node<'t>) -> Result<Option<Expr>, Error> {
-        let Some(call) = self.sun_offset_call(owner, member) else { return Ok(None) };
+        let Some((call, caller)) = self.sun_offset_call(owner, member) else { return Ok(None) };
         let Some((class, field)) = self.handle_declaration(owner, member) else { return Ok(None) };
         let decl = self.types[class].node;
         if decl.kind() == "RECORD" {
@@ -202,7 +202,11 @@ impl<'t> Lowering<'t> {
         if !declared {
             return unsupported(call, &format!("the offset of `{field}`, which is not a field of the class"));
         }
-        self.memory_access_warning(call, "objectFieldOffset").map(Some)
+        // A helper's call warns as its class's code: its receiver is read there too.
+        let outer = self.current.replace(caller);
+        let warning = self.memory_access_warning(call, "objectFieldOffset");
+        self.current.set(outer);
+        warning.map(Some)
     }
 
     /// Whether the value of the static field `member` of class `owner` is a call of
@@ -211,12 +215,14 @@ impl<'t> Lowering<'t> {
         self.sun_offset_call(owner, member).is_some()
     }
 
-    /// The value of the static field `member` of class `owner`, when it is a call of
-    /// `sun.misc.Unsafe`'s `objectFieldOffset`.
-    fn sun_offset_call(&self, owner: usize, member: Node<'t>) -> Option<Node<'t>> {
-        let call = handles::plain(self.static_value(owner, member)?.0);
+    /// The call of `sun.misc.Unsafe`'s `objectFieldOffset` that gives the static field `member` of
+    /// class `owner` its value, and the class whose code makes it: the value itself, in `owner`,
+    /// or the call in the helper method that the value calls (`offset_helper_call`).
+    fn sun_offset_call(&self, owner: usize, member: Node<'t>) -> Option<(Node<'t>, usize)> {
+        let value = handles::plain(self.static_value(owner, member)?.0);
+        let (call, caller) = self.offset_helper_call(value).unwrap_or((value, owner));
         let symbol = call.symbol().filter(|_| call.kind() == "METHOD_INVOCATION")?;
-        ((symbol.owner, symbol.name, symbol.ty) == SUN_OFFSET_OF_FIELD).then_some(call)
+        ((symbol.owner, symbol.name, symbol.ty) == SUN_OFFSET_OF_FIELD).then_some((call, caller))
     }
 
     /// `Builtin::MemoryAccessWarning` of the receiver of `call`, a call of the method `method`
