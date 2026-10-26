@@ -1099,9 +1099,14 @@ impl<'t> Lowering<'t> {
             ExprKind::MethodCall { receiver, name: m.name.clone(), args, resolved: Some(i), is_super: false };
         let call = self.synth(call, pos, m.ret);
         // A census stub of a method whose types are not supported has `int`s for them, which no
-        // bridge passes a reference on as: the bridge ends the program as the stub does.
-        let stubbed =
-            o.params.iter().zip(&m.params).any(|(p, to)| p.ty.is_reference() && !to.ty.is_reference());
+        // bridge passes a reference on as: the bridge ends the program as the stub does. (An
+        // enum's constant is no reference either, but a method taking one is no stub.)
+        let stub = matches!(
+            &m.body[..],
+            [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
+        );
+        let stubbed = stub
+            && o.params.iter().zip(&m.params).any(|(p, to)| p.ty.is_reference() && !to.ty.is_reference());
         let body = if stubbed {
             let message = match &m.body[..] {
                 [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, args), .. })] => {
