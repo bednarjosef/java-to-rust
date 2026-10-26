@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [--keep-going]
+                    [--named-locals]
                     [<File.java>]... [-o <output.rs> | --crate <directory> [--crates <n>]
                      | --survey [--survey-json <file>]
                      | --census [--census-json <file>] [-o <output.rs> | --crate <directory>]]
@@ -115,6 +116,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
             }
             "--census" => census = true,
             "--keep-going" => program.keep_going = true,
+            "--named-locals" => program.named_locals = true,
             "--modules-json" => modules_json = Some(value()?),
             "--crates" => crates = Some(value()?.parse::<usize>().map_err(|e| format!("--crates: {e}"))?),
             "--census-json" => {

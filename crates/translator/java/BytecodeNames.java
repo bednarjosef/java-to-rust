@@ -27,10 +27,19 @@ import javax.tools.*;
  * compiled without {@code -g} decides: compiles the program as {@code javac} does, code
  * generation included, and prints what javac's code generator gave its code.
  *
- * <p>Usage: {@code java BytecodeNames [--patch-module MODULE=ROOT]... FILE...}, or the source on
- * standard input for one file. The files under the root of a module that the JDK has too, such
- * as javac's {@code jdk.compiler}, compile as part of that module, as the JDK compiles them; with
- * several such roots, each module's files compile on their own, against the JDK's other modules.
+ * <p>Usage: {@code java BytecodeNames [--patch-module MODULE=ROOT]... [--sourcepath-root DIR]...
+ * [--named-locals] [--keep-going] FILE...}, or the source on standard input for one file. The
+ * files under the root of a module that the JDK has too, such as javac's {@code jdk.compiler},
+ * compile as part of that module, as the JDK compiles them; with several such roots, each
+ * module's files compile on their own, against the JDK's other modules. The classes that the
+ * files use from a root of {@code --sourcepath-root} (a library's sources) compile with them,
+ * and have entries too; a root of a module of the JDK's is left out, as the JDK's own compiled
+ * module serves, and the other roots' {@code module-info.java} are not seen, so that all compile
+ * in the unnamed module. With {@code --named-locals}, the class files of the program and its
+ * libraries are taken to be compiled with {@code -g}, as the Minecraft server's are: the JVM
+ * names their locals as the JDK's. With {@code --keep-going}, compile errors do not stop it:
+ * the classes are generated past them (decompiled code can have errors), and the outermost
+ * classes of each file with an error have no entries, their names being uncertain.
  * Prints one line, {@code {"java":"26","entries":[[CLASS,LINE,COLUMN,KIND,NAME,TEXT],...]}}:
  * the Java version, then for each use in the source (by the outermost class it is in, and the
  * line and column where it starts) of
@@ -66,7 +75,18 @@ public class BytecodeNames {
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         StandardJavaFileManager standard = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
         // The class files stay in memory, for the local variable tables of `finally` blocks.
-        JavaFileManager discarding = new ForwardingJavaFileManager<>(standard) {
+        // No `module-info.java` of the source path is seen (see `--sourcepath-root`).
+        JavaFileManager unnamed = new ForwardingJavaFileManager<>(standard) {
+            @Override
+            public JavaFileObject getJavaFileForInput(Location location, String className, JavaFileObject.Kind kind)
+                    throws IOException {
+                if (location == StandardLocation.SOURCE_PATH && className.equals("module-info")) {
+                    return null;
+                }
+                return super.getJavaFileForInput(location, className, kind);
+            }
+        };
+        JavaFileManager discarding = new ForwardingJavaFileManager<>(unnamed) {
             @Override
             public JavaFileObject getJavaFileForOutput(Location location, String className, JavaFileObject.Kind kind,
                     FileObject sibling) {
@@ -100,8 +120,19 @@ public class BytecodeNames {
         // The roots of the JDK's own modules, such as javac's `jdk.compiler`, by module: their
         // packages compile only as part of that module.
         Map<String, File> patches = new LinkedHashMap<>();
+        List<String> roots = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
-            if (args[i].equals("--patch-module") && i + 1 < args.length) {
+            if (args[i].equals("--sourcepath-root") && i + 1 < args.length) {
+                File root = new File(args[++i]);
+                if (!jdkModuleRoot(root)) {
+                    roots.add(root.getPath());
+                }
+            } else if (args[i].equals("--named-locals")) {
+                namedLocals = true;
+            } else if (args[i].equals("--keep-going")) {
+                keepGoing = true;
+                options.addAll(List.of("-XDshould-stop.ifError=GENERATE", "-Xmaxerrs", Integer.toString(Integer.MAX_VALUE)));
+            } else if (args[i].equals("--patch-module") && i + 1 < args.length) {
                 String[] patch = args[++i].split("=", 2);
                 if (patch.length == 2 && java.lang.module.ModuleFinder.ofSystem().find(patch[0]).isPresent()) {
                     patches.put(patch[0], new File(patch[1]));
@@ -114,6 +145,9 @@ public class BytecodeNames {
         // many patched modules"; given more, it reads a file of one module both as given and as
         // a source of the other, and fails an assertion): the files of each module compile on
         // their own, against the JDK's compiled modules, and the others without a patch.
+        if (!roots.isEmpty()) {
+            options.addAll(List.of("-sourcepath", String.join(File.pathSeparator, roots)));
+        }
         Map<String, List<File>> compilations = new LinkedHashMap<>();
         if (patches.size() <= 1) {
             compilations.put(patches.keySet().stream().findFirst().orElse(""), files);
@@ -193,16 +227,63 @@ public class BytecodeNames {
         JavacTaskImpl task = (JavacTaskImpl) compiler.getTask(null, discarding, diagnostics, options, null, sources);
         BytecodeNames names = new BytecodeNames(task);
         task.addTaskListener(names.listener());
-        task.generate();
+        if (!keepGoing) {
+            task.generate();
+            for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
+                if (d.getKind() == Diagnostic.Kind.ERROR) {
+                    System.err.println(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(Locale.ROOT));
+                    System.exit(1);
+                }
+            }
+            CLASS_FILES.clear();
+            return names.entries;
+        }
+        // Past errors: everything is attributed, and then the classes of the files without
+        // errors are generated, one by one, as the code generator can fail on code with errors
+        // (its names are not certain, so it has no entries).
+        task.analyze();
+        Set<URI> failed = new HashSet<>();
         for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
-            if (d.getKind() == Diagnostic.Kind.ERROR) {
-                System.err.println(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(Locale.ROOT));
-                System.exit(1);
+            if (d.getKind() == Diagnostic.Kind.ERROR && d.getSource() != null) {
+                failed.add(d.getSource().toUri());
             }
         }
-        CLASS_FILES.clear();
+        int stopped = 0;
+        for (Map.Entry<String, ClassSymbol> top : new ArrayList<>(names.topLevel.entrySet())) {
+            if (failed.contains(names.files.get(top.getKey()))) {
+                continue;
+            }
+            try {
+                task.generate(List.of(top.getValue()));
+            } catch (RuntimeException | AssertionError e) {
+                stopped++;
+                failed.add(names.files.get(top.getKey()));
+            }
+            CLASS_FILES.clear();
+        }
+        if (stopped > 0) {
+            System.err.println("the code generator failed on " + stopped + " classes");
+        }
+        names.entries.keySet().removeIf(key -> failed.contains(names.files.get((String) key.get(0))));
         return names.entries;
     }
+
+    /** Whether {@code root} is the root of a module of the JDK's: its {@code module-info.java} names one. */
+    private static boolean jdkModuleRoot(File root) throws IOException {
+        File info = new File(root, "module-info.java");
+        if (!info.isFile()) {
+            return false;
+        }
+        String text = java.nio.file.Files.readString(info.toPath(), StandardCharsets.UTF_8)
+            .replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\n]*", "");
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\bmodule\\s+([\\w.]+)").matcher(text);
+        return m.find() && java.lang.module.ModuleFinder.ofSystem().find(m.group(1)).isPresent();
+    }
+
+    /** The program's class files have the names of their locals (`--named-locals`). */
+    private static boolean namedLocals = false;
+    /** Compile errors do not stop it (`--keep-going`). */
+    private static boolean keepGoing = false;
 
     private static void string(String s, StringBuilder out) {
         out.append('"');
@@ -238,6 +319,10 @@ public class BytecodeNames {
     private final Map<JCClassDecl, com.sun.tools.javac.util.List<JCTree>> lowered = new HashMap<>();
     /** The entries: class, line, column, kind and name, to the text or null. */
     private final Map<List<Object>, String> entries = new LinkedHashMap<>();
+    /** The source file of each outermost class, by its flat name. */
+    private final Map<String, URI> files = new HashMap<>();
+    /** The outermost classes, by flat name, in the order javac attributed them. */
+    private final Map<String, ClassSymbol> topLevel = new LinkedHashMap<>();
 
     private BytecodeNames(JavacTaskImpl task) throws ReflectiveOperationException {
         types = Types.instance(task.getContext());
@@ -297,6 +382,10 @@ public class BytecodeNames {
                                 }
                                 if (tree instanceof JCClassDecl c) {
                                     classes.put(c.sym, c);
+                                    if (c.sym != null && c.sym.owner.kind == Kinds.Kind.PCK) {
+                                        files.put(c.sym.flatname.toString(), unit.getSourceFile().toUri());
+                                        topLevel.put(c.sym.flatname.toString(), c.sym);
+                                    }
                                 }
                             }
                             super.scan(tree);
@@ -390,7 +479,7 @@ public class BytecodeNames {
     private void report(JCClassDecl c, com.sun.tools.javac.util.List<JCTree> defs, JCCompilationUnit unit) {
         String outermost = c.sym.outermostClass().flatname.toString();
         // A class of one of the JDK's modules (`--patch-module`), such as javac's.
-        boolean jdkModule = !c.sym.packge().modle.isUnnamed();
+        boolean jdkModule = !c.sym.packge().modle.isUnnamed() || namedLocals;
         for (JCTree def : defs) {
             List<VarSymbol> params = new ArrayList<>();
             // The variables whose slots are not certain, and the parameters that the method assigns.
@@ -569,7 +658,8 @@ public class BytecodeNames {
                 public void visitIdent(JCIdent t) {
                     // The names with a `$` are javac's own (`arr$`), the temps.
                     if (t.sym instanceof VarSymbol v && v.owner.kind == Kinds.Kind.MTH) {
-                        // The JDK compiles its modules with the names of their locals (`-g`).
+                        // The JDK compiles its modules with the names of their locals (`-g`), and so
+                        // were the program's class files with `--named-locals`.
                         if (!t.name.toString().contains("$")) {
                             String text = jdkModule ? t.name.toString() : local(v, t);
                             entry(t, "local", t.name.toString(), text);

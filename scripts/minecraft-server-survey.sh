@@ -408,6 +408,8 @@ summarize_errors() {
 # given: the rest of the server is a library root like the others, so javac reads and attributes
 # only the classes that the code reachable from main uses. The census before, if it wrote its JSON,
 # is moved to census-previous for the summary to compare with; the one before that is deleted.
+# The server's class files and its libraries' have the tables of their locals (--named-locals),
+# which the messages of a NullPointerException show by name.
 census() {
   [ -x "$translator" ] || (cd "$root" && "${slot[@]}" cargo build -q --release -p java-to-rust)
   local out=$cache/census
@@ -433,7 +435,7 @@ census() {
   set +e
   "${slot[@]}" "${cap[@]}" "$translator" --timings --main "$main" "$cache/src/server/${main//.//}.java" \
     --library "$cache/src/server" "${libraries[@]}" \
-    --census --keep-going --census-json "$out/census.json" --modules-json "$out/modules.json" \
+    --census --keep-going --named-locals --census-json "$out/census.json" --modules-json "$out/modules.json" \
     "${trial[@]}" > "$out/census.txt" 2> "$out/stderr.txt"
   local code=$?
   set -e

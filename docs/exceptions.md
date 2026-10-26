@@ -573,6 +573,21 @@ one name that start at the same place, as calls of a chain do
 first argument starts, which `BytecodeNames` adds to the name (`stream@3:30`, `stream@`), and
 calls without arguments by the class of their receiver too (`stream@#java.util.List`).
 
+**Libraries, local names and errors.** The classes that the program's code uses from its
+library roots compile with it (`--sourcepath-root`), and get names too, as their code is
+translated with the program's; a root of a module of the JDK's is left out (the JDK's own
+compiled module serves, and the JDK's code is named as below), and no `module-info.java` of the
+other roots is seen, so that all compile in the unnamed module, as the classes do on the class
+path. A program whose class files were compiled with `-g` (`--named-locals`,
+`Program::named_locals`; the Minecraft server's and its libraries' were) has its locals named by
+their names, as the JDK's are. With `--keep-going` (decompiled code can have compile errors),
+javac attributes everything, then generates the classes of the files without errors one by one,
+since its code generator can fail on code with errors; the code of a file with an error, or of
+a class the code generator failed on, has no names, and its messages are not certain. Where the
+program's class files cannot be compiled at all, a census finds the messages with the JDK's
+names alone: only the code whose message needs a name of the program's class files is
+rejected, with why.
+
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
 its locals (`because "original" is null`), by their Java names where lowering renamed them
 (`ClassFileNames::renamed_locals`). A call of the JDK's is named by the erasure of its

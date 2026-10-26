@@ -3544,6 +3544,42 @@ fn messages_name_the_class_files_of_two_modules_of_the_jdk() {
     assert_contains(&rust, &["Cannot invoke \\\"String.length()\\\" because \\\"t\\\" is null"]);
 }
 
+/// A program whose class files name their locals (`Program::named_locals`), with a library whose
+/// code is translated with it: the messages of a `NullPointerException` name the locals of both,
+/// the library's from its classes compiled with the program's.
+#[test]
+fn messages_name_the_locals_of_class_files_compiled_with_their_names() {
+    let dir = write_sources(
+        "named-locals",
+        &[
+            (
+                "src/p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] args) {\n        String t = args.length > 3 ? \"a\" : null;\n        try { System.out.println(t.length()); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n        try { System.out.println(q.Lib.size(null)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+            ),
+            (
+                "lib/q/Lib.java",
+                "package q;\npublic class Lib {\n    public static int size(String text) {\n        String copy = text;\n        return copy.length();\n    }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir.join("src")],
+        libraries: vec![dir.join("lib")],
+        named_locals: true,
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            "Cannot invoke \\\"String.length()\\\" because \\\"t\\\" is null",
+            "Cannot invoke \\\"String.length()\\\" because \\\"copy\\\" is null",
+        ],
+    );
+}
+
 #[test]
 fn census_json_writes_the_census_to_the_file_given() {
     let dir = census_sources("census_cli");

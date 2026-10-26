@@ -57,6 +57,10 @@ pub struct Program {
     /// known to have some, such as a library whose optional dependencies are not given, or a
     /// decompiler's output.
     pub keep_going: bool,
+    /// The class files of the program and its libraries name their locals (they were compiled
+    /// with `-g`, as the Minecraft server's were): the message of a `NullPointerException` shows
+    /// a local by its name, as it shows the JDK's (`javac::program_names`).
+    pub named_locals: bool,
     /// For a census only: its translation is written, and each piece of rejected code in it ends
     /// the program with the rejection's message, where a census otherwise leaves a rejected
     /// initializer out (`lower::census_lower_program`, `census::Stubs`).
@@ -278,7 +282,12 @@ fn class_file_names(program: &Program) -> Result<javac::BytecodeNames, ProgramEr
         .into_iter()
         .filter_map(|m| Some((m.name, m.file.parent()?.to_path_buf())))
         .collect::<Vec<_>>();
-    javac::program_names(&source_files(program)?, &modules)
+    let roots = javac::NameRoots {
+        libraries: &program.libraries,
+        named_locals: program.named_locals,
+        keep_going: program.keep_going,
+    };
+    javac::program_names(&source_files(program)?, &modules, roots)
         .map_err(|error| ProgramError { file: None, error })
 }
 

@@ -110,11 +110,37 @@ pub fn source_names(source: &str) -> Result<BytecodeNames, Error> {
     names(Vec::new(), Some(source))
 }
 
+/// What else decides the names of a program's code (`program_names`).
+pub struct NameRoots<'a> {
+    /// The library roots: the classes of the program's code from those that are not the JDK's
+    /// compile with it, and get names too, as the library's code is translated with it.
+    pub libraries: &'a [PathBuf],
+    /// The class files name their locals (`Program::named_locals`).
+    pub named_locals: bool,
+    /// Compile errors do not stop it: the code of a file with one has no names
+    /// (`Program::keep_going`).
+    pub keep_going: bool,
+}
+
 /// The names of the code of a program's files. `modules` are the program's roots that are
 /// modules, by name: the files of one that the JDK has too (javac's `jdk.compiler`) compile as
 /// part of it, since the unnamed module may not hold its packages.
-pub fn program_names(files: &[PathBuf], modules: &[(String, PathBuf)]) -> Result<BytecodeNames, Error> {
+pub fn program_names(
+    files: &[PathBuf],
+    modules: &[(String, PathBuf)],
+    roots: NameRoots,
+) -> Result<BytecodeNames, Error> {
     let mut args = Vec::new();
+    for root in roots.libraries {
+        args.push("--sourcepath-root".into());
+        args.push(root.as_os_str().to_owned());
+    }
+    if roots.named_locals {
+        args.push("--named-locals".into());
+    }
+    if roots.keep_going {
+        args.push("--keep-going".into());
+    }
     for (name, root) in modules {
         args.push("--patch-module".into());
         let mut patch = std::ffi::OsString::from(format!("{name}="));
