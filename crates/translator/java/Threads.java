@@ -724,7 +724,8 @@ class ThreadGroup implements Thread.UncaughtExceptionHandler {
             if (ueh != null) {
                 ueh.uncaughtException(t, e);
             } else {
-                Thread.printUncaught0(t.getName(), e);
+                // Java prints the name as a string concatenation does, which takes a null.
+                Thread.printUncaught0(String.valueOf(t.getName()), e);
             }
         }
     }

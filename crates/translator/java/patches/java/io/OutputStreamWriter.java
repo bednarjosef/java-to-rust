@@ -24,8 +24,9 @@ class OutputStreamWriter {
     @Add
     private final OutputStream out;
 
+    /** What {@code getEncoding} returns while the writer is open. */
     @Add
-    private final Charset charset;
+    private final String encoding;
 
     /** 0 for UTF-8, 1 for US-ASCII, 2 for ISO-8859-1, 3 for UTF-16BE, 4 for UTF-16LE. */
     @Add
@@ -57,14 +58,25 @@ class OutputStreamWriter {
     @Replace
     public OutputStreamWriter(OutputStream out, Charset cs) {
         super(out);
+        if (cs == null) {
+            throw new NullPointerException("charset");
+        }
         this.out = out;
-        this.charset = cs;
+        this.encoding = InputStreamReader.historicalName(cs.name());
         this.kind = kindOf(cs.name());
     }
 
     @Replace
     public OutputStreamWriter(OutputStream out, CharsetEncoder enc) {
-        this(out, enc.charset());
+        this(out, charsetOf(enc));
+    }
+
+    @Add
+    private static Charset charsetOf(CharsetEncoder enc) {
+        if (enc == null) {
+            throw new NullPointerException("charset encoder");
+        }
+        return enc.charset();
     }
 
     @Add
@@ -98,7 +110,7 @@ class OutputStreamWriter {
 
     @Replace
     public String getEncoding() {
-        return closed ? null : InputStreamReader.historicalName(charset.name());
+        return closed ? null : encoding;
     }
 
     @Add

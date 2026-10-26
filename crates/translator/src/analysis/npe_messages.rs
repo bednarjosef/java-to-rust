@@ -397,6 +397,15 @@ impl Messages<'_> {
                     }
                 }
             }
+            // The natives of `java.net`'s name service (`java/net/TranslatedNet.java`), which
+            // stand for the JVM's C code: a null array of a name or an address fails there without
+            // a message. So does the array of `Unsafe.getLoadAverage0`, whose caller has read its
+            // length.
+            ExprKind::Builtin(Builtin::Native(Native::Net(_) | Native::LoadAverage), args) => {
+                for arg in args.iter().filter(|a| matches!(a.ty, Type::Array(_))) {
+                    out.insert(arg.id, None);
+                }
+            }
             // `java.lang.reflect.Array`'s natives of a null class or array, which the JVM's C code
             // throws without a message (`Gen::reflect_result`).
             ExprKind::Builtin(
@@ -482,6 +491,17 @@ impl Messages<'_> {
                         let message =
                             "Cannot invoke \"java.lang.CharSequence.length()\" because \"cs\" is null";
                         out.entry(text[0].id).or_insert(Some(message.to_string()));
+                    }
+                    // A null prefix of `startsWith(String)` or suffix of `endsWith` fails in
+                    // `String.startsWith(String, int)`, which asks for its length (`-g`, so the
+                    // parameter has its name).
+                    if let (Builtin::String(op @ (StringOp::StartsWith | StringOp::EndsWith)), [_, other]) =
+                        (builtin, &args[..])
+                    {
+                        let param = if *op == StringOp::StartsWith { "prefix" } else { "suffix" };
+                        let message =
+                            format!("Cannot invoke \"String.length()\" because \"{param}\" is null");
+                        out.entry(other.id).or_insert(Some(message));
                     }
                     // A null argument of `compareTo` fails in `String.compareTo`, which reads its
                     // `value` (`-g`, so the parameter has its name).
@@ -1200,9 +1220,10 @@ impl Messages<'_> {
     /// by their simple names. `None` where the translation's types may not be the declared ones:
     /// a receiver of `Object`, whose type may have been an interface or a type variable with
     /// another bound, a string, which may have been a `CharSequence`, or another value type of
-    /// the runtime.
+    /// the runtime. A call through `super` names the class's superclass (`Gen.binaryQualifier` of
+    /// the type of `super`).
     fn jdk_call(&self, x: &Expr) -> Option<String> {
-        let ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. } = &x.kind else {
+        let ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super, .. } = &x.kind else {
             return None;
         };
         if !self.jdk || self.class.methods[*r].is_static {
@@ -1228,7 +1249,20 @@ impl Messages<'_> {
         {
             return Some("java.lang.Comparable.compareTo(Object)".to_string());
         }
-        let owner = self.java_class(receiver.ty)?;
+        let owner = match is_super {
+            // A superclass's method, not an interface's (`I.super.m()`), from the class's own
+            // code, not a lambda's.
+            true => {
+                let superclass = self.class.types[self.method.class].extends?;
+                if !self.extends(superclass, callee.class)
+                    || self.class.types[callee.class].kind == TypeKind::Interface
+                {
+                    return None;
+                }
+                self.java_class_at(superclass)?
+            }
+            false => self.java_class(receiver.ty)?,
+        };
         let params: Option<Vec<String>> =
             self.class.methods[*r].params.iter().map(|p| self.java_param(p.ty)).collect();
         Some(format!("{owner}.{name}({})", params?.join(", ")))

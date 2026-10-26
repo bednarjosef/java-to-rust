@@ -23,6 +23,10 @@ class InputStreamReader {
     @Add
     private final Charset charset;
 
+    /** What {@code getEncoding} returns while the reader is open. */
+    @Add
+    private final String encoding;
+
     /** 1 for the charsets of one byte per character, 2 for UTF-16, 0 for UTF-8. */
     @Add
     private final int unit;
@@ -61,15 +65,27 @@ class InputStreamReader {
     @Replace
     public InputStreamReader(InputStream in, Charset cs) {
         super(in);
+        if (cs == null) {
+            throw new NullPointerException("charset");
+        }
         this.in = in;
         this.charset = cs;
+        this.encoding = historicalName(cs.name());
         this.unit = unitOf(cs.name());
         this.bigEndian = cs.name().equals("UTF-16BE");
     }
 
     @Replace
     public InputStreamReader(InputStream in, CharsetDecoder dec) {
-        this(in, dec.charset());
+        this(in, charsetOf(dec));
+    }
+
+    @Add
+    private static Charset charsetOf(CharsetDecoder dec) {
+        if (dec == null) {
+            throw new NullPointerException("charset decoder");
+        }
+        return dec.charset();
     }
 
     @Add
@@ -120,7 +136,7 @@ class InputStreamReader {
 
     @Replace
     public String getEncoding() {
-        return closed ? null : historicalName(charset.name());
+        return closed ? null : encoding;
     }
 
     @Add

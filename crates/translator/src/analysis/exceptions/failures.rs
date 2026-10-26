@@ -754,6 +754,14 @@ pub(super) fn runtime_failures(
                     out.push((NPE, "this compareTo", true, args[1].id));
                 }
             }
+            // The receiver, and the prefix or suffix, whose length `String.startsWith(String)` and
+            // `endsWith` read: both are dereferenced with the checked form (`Gen::text_ref`). (With
+            // an offset, a negative one returns before the prefix is read.)
+            Builtin::String(StringOp::StartsWith | StringOp::EndsWith) if args.len() == 2 => {
+                for arg in args.iter().filter(|a| null(a)) {
+                    out.push((NPE, "this call", true, arg.id));
+                }
+            }
             Builtin::StringCharAt => {
                 if args.first().is_some_and(null) {
                     out.push((NPE, "this call", true, args[0].id));

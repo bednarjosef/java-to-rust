@@ -254,7 +254,10 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
   and `catching` returns it as an `Err`. A panic of anything else still unwinds.
 - **A null argument of `compareTo`** on a `String` or a box is checked like a dereference:
   `try_non_null_message` gives Java's message for the argument's class, and the `Result` of
-  `compare_to` passes it on with `?`. A raw `Comparable`'s call of any class's `compareTo` with a
+  `compare_to` passes it on with `?`. So is a null prefix of `startsWith(String)` or suffix of
+  `endsWith`, whose length `String.startsWith(String, int)` asks for (`because "prefix" is
+  null`); with an offset, a negative one returns before the prefix is read, and the call runs
+  inside `java::catching`. A raw `Comparable`'s call of any class's `compareTo` with a
   null argument runs inside `java::catching`, and the receiver's arm raises Java's message for its
   class, an enum's `Cannot invoke "Object.getClass()"` included (`dispatch.rs`, `compare_arm`).
 
@@ -639,18 +642,24 @@ chain do (`b.append('0').append(1)`), are told apart by their first argument
 the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`) and its methods that do (a null format of
 `String.format`, which `Formatter.parse` asks for its length, a null `CharSequence` of
-`contentEquals`), a static by the class that declares it, an
+`contentEquals`, a null prefix or suffix of `startsWith` and `endsWith`), a method of a null
+`Charset` (`name()`) as the call names it, in the JDK's code too, a static by the class
+that declares it, a call through `super` by the superclass (javac's `binaryQualifier` of the type
+of `super`), an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
 the field it is, a string `switch`'s temporary and a for-each loop's iterator as `<localN>` from
-the slots javac would give (`javac::jdk_temps`), in an argument too, counting the slots of
-`instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
+the slots javac would give (`javac::jdk_temps`), in an argument too, and in a lambda that uses
+nothing of `this` (javac's static method whose parameters are the variables it uses, then its
+own), counting the slots of `instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
 statement are declared just around it, those of an expression just for it). A method with record,
 primitive or `switch` patterns, or a binding that outlives its statement (`if (!(o instanceof
 String s)) return;`), has no known slots for its temporaries, and a null message of one is not
 certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
-for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)`,
-which the JVM's native code throws without one, `wait`, `notify` and `notifyAll` of a null as
+for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)` and
+a null array of a name or an address given to the name service's natives
+(`java/net/TranslatedNet.java`) or of `Unsafe.getLoadAverage0`, which the JVM's native code
+throws without one, `wait`, `notify` and `notifyAll` of a null as
 `Object`'s, and `System.getProperty` of a null key that is not a constant (a `switch` on the key)
 with `System.checkKey`'s own message (`key can't be null`). A native that the runtime does not
 have takes null (a JNI native gets it as it is) and raises nothing: it is only where it never

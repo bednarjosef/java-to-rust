@@ -121,8 +121,14 @@ final class TranslatedNet {
         return new String(name, StandardCharsets.UTF_8);
     }
 
-    /** {@code NetworkInterface.boundInetAddress0(addr)}: whether an interface has the address. */
+    /**
+     * {@code NetworkInterface.boundInetAddress0(addr)}: whether an interface has the address. A
+     * null address fails without a message, as in the JVM's C code.
+     */
     static boolean boundInetAddress0(InetAddress addr) throws SocketException {
+        if (addr == null) {
+            throw new NullPointerException();
+        }
         return bound0(addr.getAddress());
     }
 
