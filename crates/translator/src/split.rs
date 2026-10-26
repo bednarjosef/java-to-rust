@@ -328,8 +328,10 @@ fn split_module(
                 let whole = braces.span.join().byte_range();
                 let range = whole.start + 1..whole.end - 1;
                 let inner = &text[range.clone()];
-                let published =
-                    replace_word(&replace_word(inner, "pub static", "static"), "static", "pub static");
+                let private = ["pub(crate) static", "pub(super) static", "pub static"]
+                    .iter()
+                    .fold(inner.to_string(), |text, visible| replace_word(&text, visible, "static"));
+                let published = replace_word(&private, "static", "pub static");
                 edits.push(Edit { start: range.start, end: range.end, text: published });
             }
             syn::Item::Fn(f) => {
@@ -536,4 +538,21 @@ fn trait_params(sig: &syn::Signature, text: &str) -> String {
         .map(|(k, ty)| format!("p{k}: {ty}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The statics of a `thread_local!` in a package's module, which the generator declares
+    /// `pub(crate)`, are public in the header, as those of the root module are.
+    #[test]
+    fn thread_local_statics_of_any_visibility_become_public() {
+        let text = "thread_local! {\n    pub(crate) static A__INITIALIZED: Cell<bool> = const { Cell::new(false) };\n    static B: Cell<i32> = const { Cell::new(0) };\n    pub static C: Cell<i32> = const { Cell::new(0) };\n}\n";
+        let split = split_module(text, &["p".to_string()], &mut std::collections::HashSet::new()).unwrap();
+        for name in ["A__INITIALIZED", "B", "C"] {
+            assert!(split.header.contains(&format!("    pub static {name}:")), "{}", split.header);
+        }
+        assert!(!split.header.contains("pub(crate)"), "{}", split.header);
+    }
 }
