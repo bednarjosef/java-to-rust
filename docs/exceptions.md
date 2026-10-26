@@ -647,8 +647,9 @@ that declares it, a call through `super` by the superclass (javac's `binaryQuali
 of `super`), an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
 the field it is, a string `switch`'s temporary and a for-each loop's iterator as `<localN>` from
-the slots javac would give (`javac::jdk_temps`), in an argument too, counting the slots of
-`instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
+the slots javac would give (`javac::jdk_temps`), in an argument too, and in a lambda that uses
+nothing of `this` (javac's static method whose parameters are the variables it uses, then its
+own), counting the slots of `instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
 statement are declared just around it, those of an expression just for it). A method with record,
 primitive or `switch` patterns, or a binding that outlives its statement (`if (!(o instanceof
 String s)) return;`), has no known slots for its temporaries, and a null message of one is not

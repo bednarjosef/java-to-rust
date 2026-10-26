@@ -8,7 +8,7 @@
 use super::{fail, java};
 use crate::ast::{Error, Pos};
 use crate::value::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// The Java version whose messages the translation writes: the one they were checked against.
@@ -311,8 +311,8 @@ pub fn jdk_temps(trees: &[&Value]) -> JdkTemps {
 /// a variable is. A `switch` expression's string is in the next slot whatever is on the stack
 /// (javac declares it in a `LetExpr` around the `switch`). A `switch` in code whose slots this
 /// does not follow is left out: in a constructor that javac gives parameters of its own (an
-/// enum's, or an inner, local or anonymous class's), an initializer or a lambda, in a `finally` block or
-/// a try-with-resources, in a method with patterns other than those of `instanceof` that this
+/// enum's, or an inner, local or anonymous class's), an initializer, a lambda that may use `this`
+/// (see `lambda_captures`), in a `finally` block or a try-with-resources, in a method with patterns other than those of `instanceof` that this
 /// follows (see `bindings`), in an expression whose own temps javac declares (a compound
 /// assignment, an increment), and in the cases of a `switch` expression with a `try`, whose stack
 /// javac keeps in variables.
@@ -544,6 +544,68 @@ fn position(v: &Value) -> Pos {
     )
 }
 
+/// The slots that lambda `e` takes for the variables of the code around it that it uses, where
+/// it uses nothing of `this`: javac makes it a static method whose parameters are those
+/// variables, then its own, so only the slots they take together matter. A constant variable is
+/// not one of them, javac writes its value. `None` where the lambda may use `this`: `this` or
+/// `super`, `Outer.this`, an unqualified instance field or method, or a class it creates (which
+/// may need the enclosing object).
+fn lambda_captures(e: &Value) -> Option<usize> {
+    fn declared<'v>(v: &'v Value, out: &mut HashSet<&'v str>) {
+        match v {
+            Value::Object(fields) => {
+                if v["kind"].as_str() == Some("VARIABLE")
+                    && let Some(name) = v["name"].as_str()
+                {
+                    out.insert(name);
+                }
+                fields.iter().filter(|(k, _)| *k != "symbol").for_each(|(_, f)| declared(f, out));
+            }
+            Value::Array(items) => items.iter().for_each(|i| declared(i, out)),
+            _ => {}
+        }
+    }
+    fn uses<'v>(v: &'v Value, own: &HashSet<&str>, captured: &mut HashMap<&'v str, usize>) -> bool {
+        match v {
+            Value::Object(fields) => {
+                let kind = v["kind"].as_str().unwrap_or_default();
+                let name = v["name"].as_str().unwrap_or_default();
+                if kind == "NEW_CLASS" || kind == "MEMBER_SELECT" && matches!(name, "this" | "super") {
+                    return false;
+                }
+                if kind == "IDENTIFIER" {
+                    let symbol = &v["symbol"];
+                    let local = matches!(
+                        symbol["kind"].as_str(),
+                        Some(
+                            "LOCAL_VARIABLE"
+                                | "PARAMETER"
+                                | "EXCEPTION_PARAMETER"
+                                | "BINDING_VARIABLE"
+                                | "RESOURCE_VARIABLE"
+                        )
+                    );
+                    let member = matches!(symbol["kind"].as_str(), Some("FIELD" | "METHOD"))
+                        && symbol["static"].as_bool() != Some(true);
+                    if name == "this" || name == "super" || member {
+                        return false;
+                    }
+                    if local && !own.contains(name) && symbol["constant"].is_null() {
+                        captured.insert(name, size(v));
+                    }
+                }
+                fields.iter().filter(|(k, _)| *k != "symbol").all(|(_, f)| uses(f, own, captured))
+            }
+            Value::Array(items) => items.iter().all(|i| uses(i, own, captured)),
+            _ => true,
+        }
+    }
+    let mut own = HashSet::new();
+    declared(e, &mut own);
+    let mut captured = HashMap::new();
+    uses(&e["body"], &own, &mut captured).then(|| captured.values().sum())
+}
+
 /// The slots a variable declaration takes: two for a `long` or a `double`.
 fn size(variable: &Value) -> usize {
     match variable["symbol"]["type"].as_str() {
@@ -673,7 +735,8 @@ impl SwitchSlots<'_> {
     }
 
     /// The `switch`es of an expression, through the expressions for which javac declares no
-    /// variables of its own: not into a lambda's body or a class's, which are other methods.
+    /// variables of its own: not into a class's body, a method of its own, and into a lambda's,
+    /// another method, with slots of its own.
     fn expression(&mut self, e: &Value) {
         let (start, claimed) = (self.next, self.claimed);
         let kind = e["kind"].as_str().unwrap_or_default();
@@ -690,6 +753,26 @@ impl SwitchSlots<'_> {
         }
         let parts: &[&str] = match kind {
             "SWITCH_EXPRESSION" => return self.switch(e),
+            // A lambda is a method of its own, whose slots are known where it uses nothing of
+            // `this`: javac makes it static, with the variables it uses, then its parameters.
+            "LAMBDA_EXPRESSION" => {
+                if let Some(captured) = lambda_captures(e) {
+                    let mut slots = SwitchSlots {
+                        outermost: self.outermost,
+                        out: &mut *self.out,
+                        next: captured,
+                        claimed: false,
+                    };
+                    for param in e["parameters"].as_array().into_iter().flatten() {
+                        slots.next += size(param);
+                    }
+                    match e["body"]["kind"].as_str() {
+                        Some("BLOCK") => slots.statement(&e["body"]),
+                        _ => slots.expression(&e["body"]),
+                    }
+                }
+                return;
+            }
             "PARENTHESIZED" | "TYPE_CAST" | "MEMBER_SELECT" | "INSTANCE_OF" | "UNARY_PLUS"
             | "UNARY_MINUS" | "BITWISE_COMPLEMENT" | "LOGICAL_COMPLEMENT" => &["expression"],
             "ASSIGNMENT" => &["variable", "expression"],
