@@ -359,9 +359,6 @@ impl<'t> Lowering<'t> {
             _ => None,
         };
         let Some(record) = record else { return unsupported(pattern, "this record pattern") };
-        if self.types[record].node.list("typeParameters").next().is_some() {
-            return unsupported(pattern, "record patterns of generic records");
-        }
         let simple = self.types[record].node.str("simpleName");
         let name = fresh.name(&variable_name(simple));
         let mut test = self.instance_test(pattern, value, ty, name.clone())?;
@@ -410,14 +407,15 @@ impl<'t> Lowering<'t> {
         Ok(self.synth(kind, pattern.pos(), Type::Boolean))
     }
 
-    /// The components of the record `index`: each field's name and type, with the record's own
+    /// The components of the record `index`: each field's name and declared type, with the record's own
     /// accessor of it if it declares one (`javac::records` marks the ones it writes synthetic).
     fn components(&self, index: usize) -> Result<Vec<(String, Type, Option<usize>)>, Error> {
         let node = self.types[index].node;
         let mut out = Vec::new();
         for member in node.list("members").filter(|m| m.kind() == "VARIABLE" && !m.has_flag("STATIC")) {
             let name = member.str("name").to_string();
-            let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
+            // Read in the record's scope, where a type variable is its erasure.
+            let ty = self.declared_type(member, member.symbol().map_or("", |s| s.ty), index, None)?;
             let accessor = self.methods.iter().position(|m| {
                 m.owner == index
                     && m.name == name

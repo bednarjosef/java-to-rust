@@ -201,7 +201,8 @@ Design: [object-model.md](object-model.md).
   `javac/records.rs`): canonical or compact constructor, accessors, `toString`, `equals` and
   `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case null`, record patterns,
   nested records) is an `if let` chain, exhaustive over a sealed hierarchy or enum without
-  `default`. Rejected: a generic record in a record pattern. An accessor written in the record
+  `default`. The components of a generic record's pattern have the erasures its fields hold;
+  rejected: a record pattern of a record that is a Rust generic. An accessor written in the record
   runs at each use of a pattern variable, not once. `java.lang.Record` is a type like `Object`: a
   value of it holds any of the program's records.
 - Local records, enums and interfaces declared in a method or an initializer block move to the
