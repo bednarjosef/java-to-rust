@@ -822,7 +822,12 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     // in what many others changed, and the order does not change what the places end up holding.
     let mut huge = vec![false; visits.len()];
     let mut later: VecDeque<usize> = VecDeque::new();
-    let mut readers: super::FastMap<Read, super::FastSet<usize>> = super::FastMap::default();
+    // The visits that read each place, by the place's number (`read_ids`), and the places that
+    // each visit is noted as reading: a run notes only what it reads anew, in its own small set,
+    // rather than every place it reads in the set of that place's readers.
+    let mut read_ids: super::FastMap<Read, u32> = super::FastMap::default();
+    let mut readers: Vec<Vec<u32>> = Vec::new();
+    let mut registered: Vec<super::FastSet<u32>> = vec![super::FastSet::default(); visits.len()];
     // Only the visit of a method in a context reads its variables there (`var`), so a change to
     // them runs that visit again, with no readers kept for them.
     let visit_of: super::FastMap<(usize, usize), usize> =
@@ -831,7 +836,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         queued[v] = false;
         runs += 1;
         if timings && runs.is_multiple_of(100_000) {
-            let entries: usize = readers.values().map(|r| r.len()).sum();
+            let entries: usize = readers.iter().map(|r| r.len()).sum();
             let (words, held) = values.class_set_words();
             eprintln!(
                 "timing: points-to: {runs} runs, {} queued, {} read places with {entries} readers, \
@@ -848,7 +853,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             usize::MAX => visit_outside_methods(&values, class),
             _ => visit(&values, class, m, ctx, &class.methods[m].body),
         };
-        let reads = values.reads.borrow_mut().replace(super::FastSet::default()).unwrap_or_default();
+        let mut reads = values.reads.borrow_mut().take().unwrap_or_default();
         if timings && (updates.len() > 200_000 || reads.len() > 200_000) {
             let name = match m {
                 usize::MAX => "the code outside methods".to_string(),
@@ -862,15 +867,25 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             );
         }
         huge[v] = updates.len() > HUGE_VISIT;
-        for read in reads {
-            readers.entry(read).or_default().insert(v);
+        for read in reads.drain() {
+            let next = read_ids.len() as u32;
+            let id = *read_ids.entry(read).or_insert(next);
+            if id == next {
+                readers.push(Vec::new());
+            }
+            if registered[v].insert(id) {
+                readers[id as usize].push(v as u32);
+            }
         }
+        // The set, empty, is kept for the next run, with the room it grew to.
+        *values.reads.borrow_mut() = Some(reads);
         for changed in apply(&mut values, updates) {
             let own = match changed {
                 Read::Vars(m, ctx) => visit_of.get(&(m, ctx)).copied(),
                 _ => None,
             };
-            for &r in own.iter().chain(readers.get(&changed).into_iter().flatten()) {
+            let read_by = read_ids.get(&changed).map_or(&[][..], |&id| &readers[id as usize][..]);
+            for r in own.into_iter().chain(read_by.iter().map(|&r| r as usize)) {
                 if !queued[r] {
                     queued[r] = true;
                     if huge[r] { later.push_back(r) } else { queue.push_back(r) }
