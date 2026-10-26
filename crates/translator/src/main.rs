@@ -12,7 +12,9 @@ const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs
                     [--named-locals]
                     [<File.java>]... [-o <output.rs> | --crate <directory> [--crates <n>]
                      | --survey [--survey-json <file>]
-                     | --census [--census-json <file>] [-o <output.rs> | --crate <directory>]]
+                     | --census [--census-json <file>] [--save-tree <file>]
+                       [-o <output.rs> | --crate <directory>]
+                     | --from-tree <file> (-o <output.rs> | --crate <directory> [--crates <n>])]
                     [--modules-json <file>]";
 
 /// The stack that translation runs on: the trees of real code, and the recursion over them, can
@@ -118,6 +120,8 @@ fn run_program(args: &[String]) -> Result<(), String> {
     let mut census_json = None;
     let mut modules_json = None;
     let mut crates = None;
+    let mut save_tree = None;
+    let mut from_tree = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -135,6 +139,8 @@ fn run_program(args: &[String]) -> Result<(), String> {
             "--keep-going" => program.keep_going = true,
             "--named-locals" => program.named_locals = true,
             "--modules-json" => modules_json = Some(value()?),
+            "--save-tree" => save_tree = Some(value()?),
+            "--from-tree" => from_tree = Some(value()?),
             "--crates" => crates = Some(value()?.parse::<usize>().map_err(|e| format!("--crates: {e}"))?),
             "--census-json" => {
                 census = true;
@@ -146,6 +152,15 @@ fn run_program(args: &[String]) -> Result<(), String> {
     }
     if program.main.is_empty() {
         return Err(format!("--main is required for a program\n{USAGE}"));
+    }
+    // A census's translation saved with `--save-tree`, written again without taking the census:
+    // for a change to how a translation is written or split.
+    if let Some(path) = from_tree {
+        let Some((flag, out)) = &output else {
+            return Err(format!("--from-tree needs -o or --crate\n{USAGE}"));
+        };
+        let tree = java_to_rust::timings::phase("tree read", || read_tree(&path))?;
+        return write_translation(tree, crate_name(&program.main), crates, flag, out);
     }
     if census {
         program.ends_rejected = output.is_some();
@@ -167,6 +182,9 @@ fn run_program(args: &[String]) -> Result<(), String> {
             // large texts of the write do not reuse: given back, they fit where it was.
             drop((census.report, census.json));
             release_free_memory();
+            if let Some(file) = &save_tree {
+                java_to_rust::timings::phase("census: tree saved", || save_tree_to(&tree, file))?;
+            }
             let name = crate_name(&program.main);
             return phase("census: write", || write_translation(tree, name, crates, flag, path));
         }
@@ -205,6 +223,22 @@ fn write_translation(
         return workspace.write(Path::new(path), &name).map_err(|e| format!("{path}: {e}"));
     }
     emit(Some((flag, path)), &name, &tree.files(layout(flag)))
+}
+
+/// Saves a census's translation, before it is written, to `path` (`--save-tree`), for
+/// `--from-tree` to write it again.
+fn save_tree_to(tree: &java_to_rust::output::ModuleTree, path: &str) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    bincode::serialize_into(&mut out, tree).map_err(|e| format!("{path}: {e}"))?;
+    std::io::Write::flush(&mut out).map_err(|e| format!("{path}: {e}"))
+}
+
+/// A translation that `--save-tree` saved to `path`.
+fn read_tree(path: &str) -> Result<java_to_rust::output::ModuleTree, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    bincode::deserialize_from(std::io::BufReader::with_capacity(1 << 20, file))
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 /// Gives the memory that the allocator holds free back to the system (glibc's `malloc_trim`),

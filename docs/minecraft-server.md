@@ -28,6 +28,7 @@ the machine running out of memory.
 | `parse` | javac on the decompiled server against the original library jars, then on each decompiled library, counting errors by kind | 1 min 37 s |
 | `census` | the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), with the messages of a `NullPointerException` naming locals as the server's class files do (`--named-locals`: the server and its libraries were compiled with `-g`, [exceptions.md](exceptions.md#the-messages-of-nullpointerexception)), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
 | `summary` | splits the census by origin, into the server, each library and the JDK (`scripts/census-by-origin.py`), and compares it with the previous one (`scripts/census-compare.py`, below) | seconds |
+| `trial-write` | not run by default. Writes the trial translation again from the `trial-tree.bin` that the census saved, with the translator as it is now (see below) | |
 | `trial` | not run by default. Builds the trial translation that the census writes when `TRIAL_CRATES` is set: the whole server with each rejected piece of code ending the program with its rejection, as a workspace split into that many body crates ([several-crates.md](several-crates.md)), in `trial/`. Then runs it in a new directory `trial-run/` with the EULA accepted, as `--nogui`, with `stop` on standard input once it logs that it is done starting (the server fails a `stop` that comes earlier, and keeps running), so that it makes a world, loads, and stops. The build is capped at `TRIAL_MEMORY_CAP` (16 GB), with the `dev` profile unless `TRIAL_PROFILE` says otherwise, and goes on past a crate that fails (`--keep-going`), so that `trial-build.txt` has the errors of every crate | |
 | `java-run` | not run by default. The same run of the server on Java, from the jars, in `java-run/`: what the trial's run is compared with | |
 
@@ -46,6 +47,12 @@ does, it reads the program from it and starts the census at the analyses. A cens
 checkpoint is the same as the full one (checked on javac's census and translation). A checkpoint
 belongs to one program and to a translator whose javac, reach and lowering give the same
 program. After a change to those, delete the file so that the next census writes a new one.
+
+A census that writes the trial translation (`TRIAL_CRATES`) also saves it, before it is written,
+to `trial-tree.bin` (`--save-tree`). After a change to how a translation is written or split,
+the `trial-write` step writes the trial again from that file (`--from-tree`) in seconds, rather
+than through a census (checked on javac: the workspace written from the saved translation is the
+census's, byte for byte).
 
 ### Comparing censuses
 

@@ -15,12 +15,13 @@
 //! program into several crates would be one more variant here, with a rule that puts each module
 //! in a crate (see `docs/large-projects.md`).
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// The whole generated program: the modules in the order of their Java packages (a package
 /// before the packages inside it), the crate root first.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModuleTree {
     /// The comment that starts the crate root.
     pub header: String,
@@ -32,7 +33,7 @@ pub struct ModuleTree {
 }
 
 /// The module of one Java package.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Module {
     /// The Java package, such as `com.example.util`; empty for the crate root.
     pub package: String,
@@ -46,7 +47,7 @@ pub struct Module {
 }
 
 /// One item of a module, or a few that belong together (a class's struct with its `impl`s).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Item {
     /// What the item was made from.
     pub origin: Origin,
@@ -59,7 +60,7 @@ pub struct Item {
 }
 
 /// What an item was made from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Origin {
     /// A class's struct, its `impl`s and its methods, by the Java class's qualified name.
     Class(String),
