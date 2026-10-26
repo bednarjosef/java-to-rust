@@ -11,6 +11,11 @@
 //! the same. The call does nothing, and a program that only makes a cleaner (an `Inflater` does,
 //! for the memory of its stream) starts no thread. A cleaning action still runs when `clean()`
 //! is called, as `Inflater.end()` does.
+//!
+//! And `AccessibleObject.setAccessible(array, flag)`, which makes reflection's members
+//! accessible: the translator's `Method`, `Field` and `Constructor` are, with no module or
+//! security manager to refuse, so the call reads the array's length, which throws for a null
+//! array as Java's loop over it does, and nothing else.
 
 use super::*;
 
@@ -37,6 +42,34 @@ impl<'t> Lowering<'t> {
                 return unsupported(node, "`CleanerImpl.start` of anything but variables and their fields");
             }
             return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
+        }
+        if (symbol.owner, symbol.name, symbol.ty)
+            == (
+                "java.lang.reflect.AccessibleObject",
+                "setAccessible",
+                "(java.lang.reflect.AccessibleObject[],boolean)void",
+            )
+        {
+            let mut written = node.list("arguments");
+            let (Some(array), Some(flag)) = (written.next(), written.next()) else {
+                return unsupported(node, "this `AccessibleObject.setAccessible`");
+            };
+            let (array, flag) = (self.expr(array)?, self.expr(flag)?);
+            let (pos, ty) = (node.pos(), array.ty);
+            let local = self.fresh_name("array");
+            let body = vec![
+                Stmt::Local { ty, name: local.clone(), init: Some(array), pos },
+                Stmt::Expr(flag),
+                Stmt::Expr(self.synth(
+                    ExprKind::Length(Box::new(self.synth(ExprKind::Var(local), pos, ty))),
+                    pos,
+                    Type::Int,
+                )),
+            ];
+            return Ok(Some(ExprKind::Switch {
+                selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+                cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+            }));
         }
         if (symbol.owner, symbol.name) != ("jdk.internal.loader.BootLoader", "loadLibrary") {
             return Ok(None);

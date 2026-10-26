@@ -561,6 +561,12 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
         "(java.lang.ref.Cleaner,java.util.concurrent.ThreadFactory)void",
     ),
     ("jdk.internal.loader.BootLoader", "loadLibrary", "(java.lang.String)void"),
+    // Reflection's members are always accessible (`lower/libraries.rs`).
+    (
+        "java.lang.reflect.AccessibleObject",
+        "setAccessible",
+        "(java.lang.reflect.AccessibleObject[],boolean)void",
+    ),
     ("java.security.SecureRandom", "getSeed", "(int)byte[]"),
     // Preview features are off in a plain run, and there is no security manager to check the
     // `jrt:` file system's callers (`lower/system.rs`).

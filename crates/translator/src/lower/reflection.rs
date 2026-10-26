@@ -512,6 +512,21 @@ impl<'t> Lowering<'t> {
                 let decl = *decl;
                 let ty = self.reflected_field_type(decl)?;
                 let name = decl.str("name").to_string();
+                // An enum's constant, which no `set` changes.
+                if super::enums::is_enum_constant(decl) {
+                    if native == "setPart" {
+                        return Ok(None);
+                    }
+                    let node = self.types[*class].node;
+                    let ordinal = node
+                        .list("members")
+                        .filter(|m| super::enums::is_enum_constant(*m))
+                        .position(|m| m.str("name") == name)
+                        .unwrap_or_default();
+                    let constant = ExprKind::EnumConstant { class: *class, ordinal };
+                    let read = self.synth(constant, pos, self.self_type(*class));
+                    return Ok(Some(vec![Stmt::Yield(self.convert(read, object))]));
+                }
                 let place = if decl.has_flag("STATIC") {
                     Place::Static { class: *class, name }
                 } else {
@@ -660,7 +675,12 @@ impl<'t> Lowering<'t> {
                     let decl = *decl;
                     let name = self.synth(ExprKind::Str(decl.str("name").to_string()), pos, Type::String);
                     let ty = literal(self.reflected_field_type(decl)?);
-                    let modifiers = flags(decl, self.types[*declaring].node.kind() == "INTERFACE", false);
+                    let mut modifiers = flags(decl, self.types[*declaring].node.kind() == "INTERFACE", false);
+                    // An enum's constant is public, static and final, and `ENUM`, which
+                    // `isEnumConstant` reads.
+                    if super::enums::is_enum_constant(decl) {
+                        modifiers |= 1 | 8 | 0x10 | 0x4000;
+                    }
                     let declaring = literal(self.self_type(*declaring));
                     vec![found_on, declaring, name, ty, int(modifiers), int(slot as i32)]
                 }
@@ -806,7 +826,6 @@ impl<'t> Lowering<'t> {
                         for decl in self.types[owner].node.list("members") {
                             let name = decl.str("name");
                             if decl.kind() != "VARIABLE"
-                                || super::enums::is_enum_constant(decl)
                                 || !self.keeps(decl, javac)
                                 || !reflected(t, name)
                                 || depth > 0 && !(interface || decl.has_flag("PUBLIC"))

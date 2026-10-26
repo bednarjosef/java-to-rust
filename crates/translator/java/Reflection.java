@@ -375,6 +375,14 @@ final class Field {
         return true;
     }
 
+    public boolean isEnumConstant() {
+        return (modifiers & 0x4000) != 0;
+    }
+
+    public boolean isSynthetic() {
+        return (modifiers & 0x1000) != 0;
+    }
+
     public Object get(Object obj) throws IllegalAccessException {
         check(obj);
         return get0(slot, obj);

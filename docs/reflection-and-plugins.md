@@ -107,10 +107,15 @@ program where such a lookup can happen, so they can be checked before the progra
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final
   field is never written, even after `setAccessible(true)`; `set` throws
   `IllegalAccessException`, since the analyses rely on final fields keeping their value. Generic methods, and members
-  whose types do not box to and from `Object`, are not in the table, and neither are enum
-  constants, static fields that hold a field offset or another handle (which are no fields of
+  whose types do not box to and from `Object`, are not in the table, and neither are static
+  fields that hold a field offset or another handle (which are no fields of
   the translation, see [multi-threading.md](multi-threading.md)), nor the methods that javac adds (bridges, lambdas' bodies), so no method of the
-  table is synthetic; `isDefault` is Java's test of the modifiers.
+  table is synthetic; `isDefault` is Java's test of the modifiers. An enum's constants are
+  fields of the table, public static final with Java's enum flag, so `isEnumConstant` finds
+  them as gson's `EnumTypeAdapter` does; `get` gives the constant and `set` throws. The
+  `$VALUES` array that javac adds is not a field of the table. `AccessibleObject.setAccessible`
+  of an array of members checks the array for null and does nothing else, as every member of
+  the table is accessible (`lower/libraries.rs`).
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
   and `NoSuchMethodException` or `NoSuchFieldException` for a member the table does not hold.
