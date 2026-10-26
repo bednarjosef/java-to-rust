@@ -816,6 +816,17 @@ impl<'t> Lowering<'t> {
             // Assertions are disabled by default in Java, so an `assert` does nothing at all.
             "ASSERT" => return Ok(()),
             "SYNCHRONIZED" => return self.synchronized(node, out),
+            // A `Runtime` has no state of its own: a local that holds `Runtime.getRuntime()` is a
+            // name for it, and calls on that name are calls on it (`lower/natives.rs`).
+            "VARIABLE"
+                if node.symbol().is_some_and(|s| s.ty == "java.lang.Runtime")
+                    && node
+                        .get("initializer")
+                        .and_then(|v| v.symbol())
+                        .is_some_and(|s| (s.owner, s.name) == ("java.lang.Runtime", "getRuntime")) =>
+            {
+                return Ok(());
+            }
             "VARIABLE" => {
                 let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
                 let init = match node.get("initializer") {

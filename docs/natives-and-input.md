@@ -121,6 +121,11 @@ different on every run, as in Java. `String.intern()` is the string itself where
 values, and the interned object of its text where the program compares strings by reference
 (see [object-model.md](object-model.md), section 1.6).
 
+A `Runtime` has no state of its own, so it is no value in a translation: its methods
+(`availableProcessors`, the heap's figures, `gc`, `halt`, the shutdown hooks) are translated on
+`Runtime.getRuntime()` or on a local that holds it, whose declaration leaves nothing behind
+(`lower.rs`). Any other use of a `Runtime` as a value is rejected.
+
 `Set.of` and `Map.of` iterate in a different order on every run, in Java too: with the CDS seed
 0, `ImmutableCollections` seeds its order from `System.nanoTime()`. Their output cannot be
 compared with one recorded run.
