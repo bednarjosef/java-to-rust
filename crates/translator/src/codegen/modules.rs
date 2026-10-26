@@ -355,6 +355,20 @@ impl<'a> Gen<'a> {
             members.into_iter().map(|(p, (_, methods))| (p.to_string(), std::rc::Rc::new(methods))).collect();
         let mut tree = ModuleTree { header, modules: Vec::new(), footer: ALLOCATOR.to_string() };
         self.module("", Vec::new(), live, &packages, &mut tree.modules);
+        // The classes as values, which every module may name, once each at the crate root.
+        let (text, names) = self.class_value_constants();
+        if !text.is_empty() {
+            let root = &mut tree.modules[0];
+            if !root.uses.iter().any(|group| group.contains("use java_runtime as java;")) {
+                root.uses.push("use java_runtime as java;\n".to_string());
+            }
+            root.items.push(Item {
+                origin: Origin::ClassValues,
+                text: format!("\n{text}"),
+                refers: BTreeSet::new(),
+                names,
+            });
+        }
         tree
     }
 

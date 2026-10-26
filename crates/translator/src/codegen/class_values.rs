@@ -1,9 +1,12 @@
-//! Classes as values (see `lower::classes`): a `java::Class`, written out where it is used with
-//! its names, a function for its superclass or component type and the binary names of the
-//! classes and interfaces above it (`java::Class::new("Main$Dog", "Dog", Some(|| ..), &["Main$Dog",
-//! "Main$Animal", "java.lang.Object"])`), so that no class needs a declaration of its own. For a value of an enum
-//! of classes, the enum's `runtime_class()` and `runtime_type_names()` hold the `match` over its
-//! variants (`dispatch::class_value_impls`).
+//! Classes as values (see `lower::classes`): a `java::Class`, with its names, a function for its
+//! superclass or component type and the binary names of the classes and interfaces above it
+//! (`java::Class::new("Main$Dog", "Dog", Some(|| CLASS__MAIN_ANIMAL), &["Main$Dog", "Main$Animal",
+//! "java.lang.Object"])`). The class of the program that code names is a constant at the crate
+//! root (`const CLASS__MAIN_DOG: java::Class = ..;`), written once however many places name it,
+//! as the reflection tables name a class in each of its methods; the runtime's classes and arrays
+//! are written out where they are used. For a value of an enum of classes, the enum's
+//! `runtime_class()` and `runtime_type_names()` hold the `match` over its variants
+//! (`dispatch::class_value_impls`).
 
 use super::*;
 
@@ -236,6 +239,60 @@ impl<'a> Gen<'a> {
             RECORD => return "java::Class::RECORD".to_string(),
             _ => {}
         }
+        self.class_values.insert(c);
+        format!("crate::{}", self.class_value_name(c))
+    }
+
+    /// The name of the constant at the crate root that holds the `java::Class` of class `c` of the
+    /// program: `CLASS__` and its name in capitals, with a number after it where two names are
+    /// the same, made for every class at once so that each keeps its name.
+    fn class_value_name(&mut self, c: usize) -> String {
+        if self.class_value_names.is_empty() {
+            let mut taken = HashSet::new();
+            self.class_value_names = (self.class.types.iter())
+                .map(|t| {
+                    let upper: String = (t.name.chars())
+                        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+                        .collect();
+                    let base = format!("CLASS__{upper}");
+                    let mut name = base.clone();
+                    for n in 2.. {
+                        if taken.insert(name.clone()) {
+                            break;
+                        }
+                        name = format!("{base}_{n}");
+                    }
+                    name
+                })
+                .collect();
+        }
+        self.class_value_names[c].clone()
+    }
+
+    /// The constants of the classes that the program's code names (`decl_class`), and of their
+    /// superclasses, in the order of their names: the items of the crate root that hold them.
+    pub(super) fn class_value_constants(&mut self) -> (String, std::collections::BTreeSet<String>) {
+        let mut constants = std::collections::BTreeMap::new();
+        let mut done = std::collections::BTreeSet::new();
+        loop {
+            let named: Vec<usize> = self.class_values.difference(&done).copied().collect();
+            if named.is_empty() {
+                break;
+            }
+            for c in named {
+                done.insert(c);
+                let value = self.class_value(c);
+                constants.insert(self.class_value_name(c), value);
+            }
+        }
+        let text =
+            constants.iter().map(|(name, value)| format!("const {name}: java::Class = {value};\n")).collect();
+        (text, done.iter().map(|&c| self.class.types[c].name.clone()).collect())
+    }
+
+    /// The `java::Class` of class `c` of the program, written out.
+    fn class_value(&mut self, c: usize) -> String {
+        let decl = &self.class.types[c];
         let (kind, extends) = (decl.kind, decl.extends);
         // A record's superclass is `Record`, which the program's records implement where it is a
         // type.

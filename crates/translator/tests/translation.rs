@@ -6177,7 +6177,7 @@ fn a_static_method_asking_for_its_caller_gets_the_calling_class() {
             public static void main(String[] a) { System.out.println(caller() + B.name()); }
         }",
     );
-    assert_contains(&rust, &["fn caller(caller_class: java::Class)", "caller(java::Class::"]);
+    assert_contains(&rust, &["fn caller(caller_class: java::Class)", "caller(crate::CLASS__A)"]);
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let instance = reject(
         "class A {

@@ -76,6 +76,8 @@ pub enum Origin {
     Function(String),
     /// The crate's `fn main`.
     Main,
+    /// The constants of the classes that code uses as values (`java::Class`), at the crate root.
+    ClassValues,
 }
 
 /// How the modules are laid out in files.
@@ -108,6 +110,7 @@ impl Origin {
             Origin::Monitors => ("monitors", None),
             Origin::Function(c) => ("function", Some(c)),
             Origin::Main => ("main", None),
+            Origin::ClassValues => ("class values", None),
         }
     }
 }

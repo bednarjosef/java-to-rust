@@ -353,6 +353,8 @@ fn generate_with(
         on_stack: false,
         stack_forms: HashSet::new(),
         only_enums: only_enums.cloned(),
+        class_values: Default::default(),
+        class_value_names: Vec::new(),
     };
     g.shared_names = setup.shared_names.get_or_insert_with(|| g.shared_names()).clone();
     g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
@@ -610,6 +612,11 @@ struct Gen<'a> {
     /// The enum items written in a round of them alone, to find what they ask for
     /// (`generate_all`).
     only_enums: Option<OnlyEnums>,
+    /// The classes of the program whose `java::Class` values the code names, each declared once
+    /// as a constant at the crate root (`class_value_constants`).
+    class_values: std::collections::BTreeSet<usize>,
+    /// The name of each class's constant, made when the first is named (`class_value_names`).
+    class_value_names: Vec<String>,
 }
 
 impl<'a> Gen<'a> {
