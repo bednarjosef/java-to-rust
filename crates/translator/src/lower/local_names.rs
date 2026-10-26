@@ -2,8 +2,9 @@
 //! not overlap share a name (`for (Box s : boxes)` and later `for (String s : names)`), but the
 //! analyses record what they find about a local by its method and name (`Facts::nullable_vars`),
 //! so a later local of another reference type (whose nullness may differ) is renamed, with every
-//! use of it: `s2`. Locals of primitive types, and catch parameters, which are never null, keep
-//! their names.
+//! use of it: `s2`, as is a pattern variable, which is never null, that shares its name and type
+//! with a local that may be. Locals of primitive types, and catch parameters, which are never null,
+//! keep their names.
 //!
 //! Java forbids a local to shadow another one in scope, so a use refers to the declaration of its
 //! name that comes last before it in the order of the source, which is the order of this walk.
@@ -17,9 +18,9 @@ use std::collections::{HashMap, HashSet};
 /// another type, and returns each new name with the Java name it stands for.
 pub(super) fn distinct_locals(method: &mut Method) -> Vec<(String, String)> {
     // Every declaration, by name, with its types in order of appearance.
-    let mut found: HashMap<String, Vec<Type>> = HashMap::new();
+    let mut found: HashMap<String, Vec<Declared>> = HashMap::new();
     for p in &method.params {
-        found.entry(p.name.clone()).or_default().push(p.ty);
+        found.entry(p.name.clone()).or_default().push((p.ty, false));
     }
     // The declarations in the order they appear, and every name the method uses.
     let declarations = RefCell::new(Vec::new());
@@ -27,21 +28,25 @@ pub(super) fn distinct_locals(method: &mut Method) -> Vec<(String, String)> {
     for stmt in &method.body {
         visit_stmt(
             stmt,
-            &mut |e| match &e.kind {
-                ExprKind::InstanceOf { binding: Some(b), ty, .. } => {
-                    declarations.borrow_mut().push((b.clone(), *ty))
-                }
-                ExprKind::Var(v) => {
-                    names.insert(v.clone());
-                }
-                _ => {}
+            &mut |top| {
+                visit_expr(top, &mut |e| match &e.kind {
+                    ExprKind::InstanceOf { binding: Some(b), ty, .. } => {
+                        declarations.borrow_mut().push((b.clone(), (*ty, true)))
+                    }
+                    ExprKind::Var(v) => {
+                        names.insert(v.clone());
+                    }
+                    _ => {}
+                })
             },
             &mut |s| match s {
                 Stmt::Local { ty, name, .. } | Stmt::ForEach { ty, name, .. } => {
-                    declarations.borrow_mut().push((name.clone(), *ty))
+                    declarations.borrow_mut().push((name.clone(), (*ty, false)))
                 }
                 Stmt::Try { catches, .. } => {
-                    declarations.borrow_mut().extend(catches.iter().map(|c| (c.name.clone(), CAUGHT)));
+                    declarations
+                        .borrow_mut()
+                        .extend(catches.iter().map(|c| (c.name.clone(), (CAUGHT, false))));
                 }
                 _ => {}
             },
@@ -52,13 +57,13 @@ pub(super) fn distinct_locals(method: &mut Method) -> Vec<(String, String)> {
     }
     names.extend(found.keys().cloned());
     // The names declared with more than one type: each type after the first gets a new name.
-    let mut renames: HashMap<(String, Type), String> = HashMap::new();
+    let mut renames: HashMap<(String, Declared), String> = HashMap::new();
     for (name, types) in &found {
-        let mut distinct: Vec<Type> = Vec::new();
-        for &ty in types {
+        let mut distinct: Vec<Declared> = Vec::new();
+        for &declared in types {
             // Only a string, an array, an object or an enum can be null.
-            if crate::analysis::nullable_type(ty) && !distinct.contains(&ty) {
-                distinct.push(ty);
+            if crate::analysis::nullable_type(declared.0) && !distinct.contains(&declared) {
+                distinct.push(declared);
             }
         }
         for &ty in distinct.iter().skip(1) {
@@ -95,7 +100,7 @@ pub(super) fn distinct_locals(method: &mut Method) -> Vec<(String, String)> {
     }
     let mut walk = Walk { renames, current: HashMap::new() };
     for p in &method.params {
-        walk.declare(&p.name, p.ty);
+        walk.declare(&p.name, (p.ty, false));
     }
     for stmt in &mut method.body {
         walk.stmt(stmt);
@@ -112,20 +117,23 @@ fn stmt_declarations(s: &Stmt) -> Vec<&str> {
     }
 }
 
+/// A declaration's type, and whether it declares a pattern variable.
+type Declared = (Type, bool);
+
 /// The type that stands for every catch parameter's: one is never null, so catch parameters of
 /// different classes need no names of their own.
 const CAUGHT: Type = Type::Class("java.lang.Throwable", &[]);
 
 struct Walk {
     /// The new name of each name declared with each type.
-    renames: HashMap<(String, Type), String>,
+    renames: HashMap<(String, Declared), String>,
     /// The name each Java name stands for now, where it is renamed.
     current: HashMap<String, String>,
 }
 
 impl Walk {
     /// Declares `name` with type `ty`, and returns the name it gets.
-    fn declare(&mut self, name: &str, ty: Type) -> Option<String> {
+    fn declare(&mut self, name: &str, ty: Declared) -> Option<String> {
         match self.renames.get(&(name.to_string(), ty)) {
             Some(fresh) => {
                 self.current.insert(name.to_string(), fresh.clone());
@@ -150,7 +158,7 @@ impl Walk {
             ExprKind::Assign { target: Place::Var(v), .. }
             | ExprKind::IncDec { target: Place::Var(v), .. } => self.rename(v),
             ExprKind::InstanceOf { binding: Some(b), ty, .. } => {
-                if let Some(fresh) = self.declare(b, *ty) {
+                if let Some(fresh) = self.declare(b, (*ty, true)) {
                     *b = fresh;
                 }
             }
@@ -164,13 +172,13 @@ impl Walk {
                 if let Some(init) = init {
                     self.expr(init);
                 }
-                if let Some(fresh) = self.declare(name, *ty) {
+                if let Some(fresh) = self.declare(name, (*ty, false)) {
                     *name = fresh;
                 }
             }
             Stmt::ForEach { ty, name, array, body } => {
                 self.expr(array);
-                if let Some(fresh) = self.declare(name, *ty) {
+                if let Some(fresh) = self.declare(name, (*ty, false)) {
                     *name = fresh;
                 }
                 self.stmt(body);
@@ -215,7 +223,7 @@ impl Walk {
             Stmt::Try { body, catches, finally } => {
                 body.iter_mut().for_each(|s| self.stmt(s));
                 for c in catches {
-                    if let Some(fresh) = self.declare(&c.name, CAUGHT) {
+                    if let Some(fresh) = self.declare(&c.name, (CAUGHT, false)) {
                         c.name = fresh;
                     }
                     c.body.iter_mut().for_each(|s| self.stmt(s));
