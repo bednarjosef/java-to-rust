@@ -105,7 +105,8 @@ program where such a lookup can happen, so they can be checked before the progra
   field is never written, even after `setAccessible(true)`; `set` throws
   `IllegalAccessException`, since the analyses rely on final fields keeping their value. Generic methods, and members
   whose types do not box to and from `Object`, are not in the table, and neither are enum
-  constants nor the methods that javac adds (bridges, lambdas' bodies), so no method of the
+  constants, static fields that hold a field offset or another handle (which are no fields of
+  the translation, see [multi-threading.md](multi-threading.md)), nor the methods that javac adds (bridges, lambdas' bodies), so no method of the
   table is synthetic; `isDefault` is Java's test of the modifiers.
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
