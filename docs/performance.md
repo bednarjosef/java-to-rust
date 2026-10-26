@@ -315,14 +315,23 @@ and the translations and census reports of the whole-program corpus are byte for
 `a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round` (`tests/translation.rs`)
 has a round for each kind; its first two rounds run none of the steps moved after the checks.
 
-**Steps of the analyses alongside each other.** A census cannot take fewer rounds without
-changing what it finds. Each round stubs what the first check to reject code finds in the
-program as the rounds before left it, and a stub changes the facts of the rest of the program: a
-stubbed constructor can leave a field null, and then dereferences elsewhere need the messages
-they did not need before. So the errors that a later check, the messages or the generator find
-in the same round, even in code the stubs do not touch, need not be those that the next round
-finds; and every check reads facts that the steps before it find, so none can move ahead of
-another. What a round can do is find its facts sooner. The steps that read none of each other's
+**Errors of every check in one round.** A round of a census goes on past the errors it finds
+(`analysis::analyze_collecting`): each check, the analysis of exceptions, the messages of
+`NullPointerException`s and then the generator run as if the errors before them had passed, on
+the facts found so far (the analysis of exceptions keeps its facts with its errors, which the
+messages read), and the round stubs the code of all of their errors at once. An error found in
+code that another error's stub takes away comes to nothing; a stub that changes the facts of the
+rest of the program (a stubbed constructor can leave a field null, whose dereferences then need
+messages) shows in the next round. A panic of the generator outside a method, after errors, ends
+the round with those errors. On the Minecraft server, pass 3 took a round each for the checks
+(28 pieces), the messages (633), the generator (171) and a cast (1), and a fifth that passed,
+about 6 minutes each. `a_census_finds_the_same_with_the_errors_of_every_check_in_one_round`
+(`tests/translation.rs`) finds the same census and translation in one round as round by round
+(`program::round_by_round`), where each round ends at the first check that rejects code.
+
+**Steps of the analyses alongside each other.** Every check reads facts that the steps before
+it find, so none can move ahead of another; what a round can do is find its facts sooner. The
+steps that read none of each other's
 facts run at once, on threads of their own (`analysis/alongside.rs`): from the start of a round,
 alongside the representation and the checks, the ranges, fixed fields, statics, early reads and
 ASCII strings, which read the code and the ranges alone, and the objects on the stack, which the

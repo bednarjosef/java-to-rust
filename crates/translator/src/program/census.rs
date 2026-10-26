@@ -469,17 +469,39 @@ fn analyse(
                 Ok(messages) => messages,
                 Err(panic) => return Err(after_errors(panic)),
             };
+            // The generator runs past the errors of the analyses and the messages too, as they
+            // run past each other's, so that one round stubs the errors of all three; its tree
+            // is kept only from a round without errors.
             let mut errors = collected.take();
-            if !errors.is_empty() {
-                errors.extend(messages.err().unwrap_or_default());
-                return Err(errors);
+            match messages {
+                Err(found) if ROUND_BY_ROUND.get() => return Err(found),
+                Err(found) => errors.extend(found),
+                Ok(()) => {}
             }
-            messages?;
             let facts = analysed.with_stack_objects();
             codegen::catch_panics(true);
-            let tree = crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
+            let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::timings::phase("census: generator", || codegen::generate_all(class, &facts))
+            }));
             codegen::catch_panics(false);
-            tree.map(|tree| *generated.borrow_mut() = Some(tree))
+            // A panic outside the methods, after errors, may come of the code they reject: the
+            // round ends with those errors.
+            let tree = match tree {
+                Ok(tree) => tree,
+                Err(_) if !errors.is_empty() => return Err(errors),
+                Err(panic) => std::panic::resume_unwind(panic),
+            };
+            match tree {
+                Ok(tree) if errors.is_empty() => {
+                    *generated.borrow_mut() = Some(tree);
+                    Ok(())
+                }
+                Ok(_) => Err(errors),
+                Err(found) => {
+                    errors.extend(found);
+                    Err(errors)
+                }
+            }
         },
     ];
     for (index, pass) in passes.into_iter().enumerate() {
