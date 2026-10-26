@@ -577,7 +577,9 @@ reference's class holds and its call may first keep in a local, is never null th
 one name that start at the same place, as calls of a chain do
 (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told apart by where their
 first argument starts, which `BytecodeNames` adds to the name (`stream@3:30`, `stream@`), and
-calls without arguments by the class of their receiver too (`stream@#java.util.List`).
+calls without arguments by the class of their receiver too (`stream@#java.util.List`). The start
+of a first argument is taken before lowering, as lowering replaces a method reference or a lambda
+(`codec.xmap(A::of, A::to).xmap(B::new, B::value)`).
 
 **Libraries, local names and errors.** The classes that the program's code uses from its
 library roots compile with it (`--sourcepath-root`), and get names too, as their code is
