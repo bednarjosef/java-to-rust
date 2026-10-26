@@ -172,6 +172,13 @@ impl<'t> Lowering<'t> {
         let args: Vec<Expr> = call.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(call, &symbol, args)?;
         let resolved = self.method_index(&symbol);
+        // A class that a whole program does not translate has no constructors
+        // (`program::reach::stubs`), so its part of the object cannot be made.
+        if resolved.is_none()
+            && let Some(feature) = crate::program::untranslated(symbol.owner)
+        {
+            return unsupported(call, &format!("`super(..)` of `{}` ({feature})", symbol.owner));
+        }
         let args = self.convert_args(resolved, args)?;
         let args = self.with_synthetic((first, last), args);
         let kind = ExprKind::SuperInit { args, resolved };

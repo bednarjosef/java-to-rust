@@ -608,6 +608,57 @@ fn a_class_as_a_constable_is_rejected() {
     }
 }
 
+/// A class that extends one the translation leaves out (`ObjectInputStream`, which the program
+/// also names as a type, so that it is declared without constructors) is rejected at its
+/// `super(..)`, which has no constructor to call.
+#[test]
+fn a_subclass_of_an_untranslated_class_is_rejected() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-untranslated-superclass");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    let java = "import java.io.*;
+public class Main {
+    static final class Loading extends ObjectInputStream {
+        Loading(InputStream in) throws IOException {
+            super(in);
+        }
+    }
+
+    static ObjectInputStream last;
+
+    public static void main(String[] args) throws IOException {
+        if (args.length > 3) {
+            last = new Loading(new ByteArrayInputStream(new byte[0]));
+        }
+        System.out.println(last == null);
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&translated.stderr);
+    assert!(!translated.status.success(), "translated");
+    assert!(
+        stderr.contains(
+            "Main.java:5:13: `super(..)` of `java.io.ObjectInputStream` (serialization) not supported yet"
+        ),
+        "{stderr}"
+    );
+}
+
 /// Handles held as values that lowering does not follow are rejected: an access through a handle
 /// that may be null whose arguments do something before Java's null check, and a handle kept as
 /// an `Object`. (A lookup of a method other than the handle factories throws when it runs, which
