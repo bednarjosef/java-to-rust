@@ -411,7 +411,10 @@ before 64 MB have been allocated (docs/collector.md).
 
 The crate is one of about 537,000 lines, built with all 16 cores. Fat LTO makes the binary 22%
 smaller (72 MB against 92 MB), and the crates the translator writes use it for their release
-builds (`lto = "fat"`). They build for AVX2 processors (`.cargo/config.toml`, which Cargo reads
+builds (`lto = "fat"`). Their debug builds are not incremental (`incremental = false`): the
+data that rustc keeps for an incremental build of a generated crate is large, a new translation
+changes every crate anyway, and the Minecraft server's 205 MB header crate takes rustc past
+21 GB with it and to 14.2 GB without. They build for AVX2 processors (`.cargo/config.toml`, which Cargo reads
 in the crate's directory); flags that a build adds go in `CARGO_BUILD_RUSTFLAGS`, which adds to
 them, not `RUSTFLAGS`, which replaces them. PGO (profile-guided optimization) is three steps, which
 `scripts/pgo-build.sh CRATE TRAIN_COMMAND` runs for any translated crate: a build with
