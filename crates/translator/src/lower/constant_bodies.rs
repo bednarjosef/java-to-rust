@@ -275,7 +275,7 @@ impl<'t> Lowering<'t> {
         Ok(self.synth(kind, pos, ty))
     }
 
-    /// Declares the lambdas and method references in the methods of the constants' bodies of enum
+    /// Declares the lambdas and method references in the fields and methods of the constants' bodies of enum
     /// `class` as those of the enum's method that each overrides, whose code it becomes
     /// (`constant_bodies`): `this` in them is the constant, and the override's parameters are
     /// locals of that method.
@@ -284,6 +284,10 @@ impl<'t> Lowering<'t> {
             self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).collect();
         for constant in constants {
             let Some(body) = constant.get("initializer").and_then(|i| i.get("classBody")) else { continue };
+            // The initializers of the body's fields, which are the enum's (`constant_body_fields`).
+            for member in body.list("members").filter(|m| m.kind() == "VARIABLE" && !m.has_flag("STATIC")) {
+                self.declare_lambdas(member, class, None)?;
+            }
             for member in body.list("members").filter(|m| m.kind() == "METHOD" && m.str("name") != "<init>") {
                 let (name, sig) = (member.str("name"), member.symbol().map_or("", |s| s.ty));
                 // One that overrides none of the enum's methods is rejected by `constant_bodies`.

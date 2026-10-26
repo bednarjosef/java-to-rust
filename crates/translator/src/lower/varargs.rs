@@ -12,9 +12,24 @@ impl<'t> Lowering<'t> {
         &self,
         node: Node<'t>,
         symbol: &Symbol<'t>,
-        mut args: Vec<Expr>,
+        args: Vec<Expr>,
     ) -> Result<Vec<Expr>, Error> {
         let Some(index) = self.method_index(symbol).filter(|_| symbol.varargs) else { return Ok(args) };
+        self.packed_args_of(node, index, args)
+    }
+
+    /// `packed_args` for a call of method `index`, which is variable-arity if its declaration is:
+    /// an enum constant with a body calls its enum's constructor through the body's anonymous
+    /// one, which javac does not mark as variable-arity.
+    pub(super) fn packed_args_of(
+        &self,
+        node: Node<'t>,
+        index: usize,
+        mut args: Vec<Expr>,
+    ) -> Result<Vec<Expr>, Error> {
+        if !self.methods[index].node.symbol().is_some_and(|s| s.varargs) {
+            return Ok(args);
+        }
         let params: Vec<Node<'t>> = self.methods[index].node.list("parameters").collect();
         let Some(last) = params.last().copied() else { return Ok(args) };
         let fixed = params.len() - 1;
