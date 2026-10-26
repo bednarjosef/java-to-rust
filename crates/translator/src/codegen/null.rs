@@ -680,6 +680,19 @@ impl<'a> Gen<'a> {
     /// non-null, so it is bound with `let Some(s) = s.as_deref() else { .. };` (`s.clone()` for an
     /// array). Returns the name
     /// of `s`, or `None`, emitting nothing, when `stmt` is not of that form or `rest` assigns `s`.
+    /// Whether the block `body` of a `do`-`while` may narrow a variable that its condition `cond`
+    /// reads (see `early_null_exit`): the narrowed name is the body's to its end, and the
+    /// condition, written after it, reads the variable itself.
+    pub(super) fn narrows_for(&self, body: &'a Stmt, cond: &Expr) -> bool {
+        let Stmt::Block(stmts) = body else { return false };
+        stmts.iter().any(|s| match s {
+            Stmt::If { cond: test, otherwise: None, .. } => self
+                .null_test_var(test)
+                .is_some_and(|(name, then_non_null, _)| !then_non_null && mentions(cond, name)),
+            _ => false,
+        })
+    }
+
     pub(super) fn early_null_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> Option<&'a str> {
         let Stmt::If { cond, then, otherwise: None } = stmt else { return None };
         let (name, then_non_null, ty) = self.null_test_var(cond)?;
