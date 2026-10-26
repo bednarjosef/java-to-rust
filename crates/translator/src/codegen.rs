@@ -270,7 +270,7 @@ fn generate_with(
     only_enums: Option<&OnlyEnums>,
 ) -> (ModuleTree, Needs, Vec<Error>, Vec<Error>) {
     let live = setup.live.clone();
-    let modules = modules::enter(class);
+    let _modules = modules::enter(class);
     let mut g = Gen {
         class,
         facts,
@@ -358,9 +358,9 @@ fn generate_with(
     };
     g.shared_names = setup.shared_names.get_or_insert_with(|| g.shared_names()).clone();
     g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
-    let header = match modules {
-        Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
-        None => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
+    let header = match class.types.iter().any(|t| !t.package.is_empty()) {
+        true => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
+        false => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
     };
     // With threads a static holds objects that must be `Send`, which Rust proves through every
     // field of every class the object reaches: javac's `Arc<Locked<..>>` chains go deeper than

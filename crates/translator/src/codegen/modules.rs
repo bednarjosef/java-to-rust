@@ -26,6 +26,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 thread_local! {
     static RESOLVER: RefCell<Option<Resolver>> = const { RefCell::new(None) };
+    /// The names in their packages of the nested classes whose names there, without the dots,
+    /// are another class's of the package too (`flat_name`).
+    static CLASHING: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// Names of the program's classes, static fields and static methods, as written from the module
@@ -76,7 +79,7 @@ impl Resolver {
         }
         // A class whose name is a module's (Java allows `class util`) would clash with its `use`.
         let types: HashSet<String> =
-            packages.iter().map(|(name, package)| local_name(name, package).replace('.', "")).collect();
+            packages.iter().map(|(name, package)| flat_name(name, local_name(name, package))).collect();
         let aliases = by_name
             .into_iter()
             .filter(|(name, packages)| {
@@ -159,24 +162,59 @@ fn all_packages(class: &Class) -> BTreeSet<String> {
     packages
 }
 
-/// Holds the resolver of a whole program while it is generated, and removes it when dropped.
+/// Holds the names of a whole program's classes and its resolver while it is generated, and removes
+/// them when dropped.
 pub(super) struct Scope;
 
 impl Drop for Scope {
     fn drop(&mut self) {
         RESOLVER.with_borrow_mut(|r| *r = None);
+        CLASHING.with_borrow_mut(HashMap::clear);
     }
 }
 
-/// Enters the resolver of a program whose classes are in packages; `None` for a program (or
-/// file) whose classes are all in the unnamed package, which is generated as before.
-pub(super) fn enter(class: &Class) -> Option<Scope> {
-    if class.types.iter().all(|t| t.package.is_empty()) {
-        return None;
+/// Enters the names of a program's classes (`flat_name`), and the resolver of a program whose
+/// classes are in packages; a program (or file) whose classes are all in the unnamed package has
+/// none, and is generated as before.
+pub(super) fn enter(class: &Class) -> Scope {
+    CLASHING.with_borrow_mut(|c| *c = clashing(class));
+    if class.types.iter().any(|t| !t.package.is_empty()) {
+        let resolver = Resolver::new(class);
+        RESOLVER.with_borrow_mut(|r| *r = Some(resolver));
     }
-    let resolver = Resolver::new(class);
-    RESOLVER.with_borrow_mut(|r| *r = Some(resolver));
-    Some(Scope)
+    Scope
+}
+
+/// The classes of the program whose names would be another's without the dots, with the names
+/// they get instead: of the classes of a package with the same name so, all but the one with the
+/// fewest dots (and of those, the first by name) take the first number after it that no class of
+/// the package has, as Guava's `StandardTable.Column.KeySet` (`StandardTableColumnKeySet2`)
+/// beside `StandardTable.ColumnKeySet`.
+fn clashing(class: &Class) -> HashMap<String, String> {
+    let mut by_flat: BTreeMap<(&str, String), Vec<&str>> = BTreeMap::new();
+    for t in class.types.iter().filter(|t| t.kind != TypeKind::Runtime) {
+        let flat = local_name(&t.name, &t.package).replace('.', "");
+        by_flat.entry((t.package.as_str(), flat)).or_default().push(&t.name);
+    }
+    let mut clashing = HashMap::new();
+    let groups: Vec<_> = by_flat.iter().filter(|(_, names)| names.len() > 1).collect();
+    for ((package, flat), names) in groups {
+        let mut names = names.clone();
+        names.sort_by_key(|name| (name.matches('.').count(), *name));
+        let mut free =
+            (2..).map(|n| format!("{flat}{n}")).filter(|f| !by_flat.contains_key(&(*package, f.clone())));
+        for name in &names[1..] {
+            clashing.insert(name.to_string(), free.next().expect("a free name"));
+        }
+    }
+    clashing
+}
+
+/// The name in its package of class `name`, whose name there is `local`, as one Rust name:
+/// `Outer.Inner` is `OuterInner`, or another name where that would be another class's
+/// (`clashing`).
+pub(super) fn flat_name(name: &str, local: &str) -> String {
+    CLASHING.with_borrow(|c| c.get(name).cloned()).unwrap_or_else(|| local.replace('.', ""))
 }
 
 fn with<T>(f: impl FnOnce(&mut Resolver) -> T) -> Option<T> {

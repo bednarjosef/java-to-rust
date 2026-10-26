@@ -23,7 +23,7 @@ use super::*;
 /// another package, with that package's path (`crate::a::b::init_point`).
 pub(super) fn init_name(class: &str) -> String {
     let (path, local) = modules::split(class);
-    path + &format!("init_{}", snake_case(&local.replace('.', "")))
+    path + &format!("init_{}", snake_case(&modules::flat_name(class, local)))
 }
 
 /// The flag that records that a class's static initialization has started.
