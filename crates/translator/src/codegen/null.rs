@@ -508,8 +508,9 @@ impl<'a> Gen<'a> {
                     ));
                     narrowed.extend(self.narrow(name));
                 }
+                // A `Boolean` is unboxed, which throws on a null, as in any condition.
                 None => {
-                    let text = self.expr(part).at(AND + 1);
+                    let text = self.value(part, Type::Boolean).at(AND + 1);
                     texts.push(if text.starts_with('{') { format!("({text})") } else { text });
                 }
             }
