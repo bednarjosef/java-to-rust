@@ -228,7 +228,7 @@ impl<'t> Lowering<'t> {
 
     /// `Builtin::MemoryAccessWarning` of the receiver of `call`, a call of the method `method`
     /// of `sun.misc.Unsafe`, and of the class whose code makes it.
-    fn memory_access_warning(&self, call: Node<'t>, method: &str) -> Result<Expr, Error> {
+    pub(super) fn memory_access_warning(&self, call: Node<'t>, method: &str) -> Result<Expr, Error> {
         let select = call.child("methodSelect")?;
         let Some(receiver) = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT") else {
             return unsupported(call, &format!("`sun.misc.Unsafe.{method}` without a receiver"));
