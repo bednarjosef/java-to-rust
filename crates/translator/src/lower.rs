@@ -1411,9 +1411,9 @@ impl<'t> Lowering<'t> {
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
             return Ok(ExprKind::Builtin(builtin, args));
         }
-        let system_out = receiver
-            .and_then(|r| r.symbol())
-            .is_some_and(|s| s.kind == "FIELD" && s.owner == "java.lang.System" && s.name == "out");
+        let system_out = receiver.and_then(|r| r.symbol()).is_some_and(|s| {
+            s.kind == "FIELD" && s.owner == "java.lang.System" && s.name == "out" && !self.replaced_stream("out")
+        });
         if let Some(kind) = self.enum_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }

@@ -447,6 +447,14 @@ field reads a static field of a holder class that the translator adds to the JDK
   (`FIONREAD`). Descriptor 0 is read without a buffer in between, so each read returns what the
   JVM's would, and standard output is flushed before a read so that a prompt shows.
 
+`System.setOut` and `System.setErr` set those fields (`REDIRECTED_CALLS`; null is kept, as in
+Java). A program that calls one of them has no direct calls on that stream: reachability notes
+each direct call it meets, and once it meets the `set` call it reaches `PrintStream`'s method for
+each of them (`Reach::replaced_streams`), and lowering makes them calls on the field's object. So
+`System.out.println(x)` after `System.setOut(new LoggedPrintStream(..))`, as a Minecraft server's
+`Bootstrap` sets it, runs the subclass's `println`. What the runtime prints itself, such as the
+stack trace of an uncaught exception, still goes to the process's standard error.
+
 The JVM's `System.out` is a `PrintStream` over a 128-byte `BufferedOutputStream` over a
 `FileOutputStream`. The translation does not build that chain, because the direct calls and the
 value must write through one buffer to stay in order: `System.out.write('x')` through the value

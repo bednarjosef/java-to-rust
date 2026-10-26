@@ -76,6 +76,10 @@ pub struct Reach {
     /// change only a copy. A translation sets it when one can run with it
     /// (`translate_program_modules`).
     pub string_array_writes: bool,
+    /// The standard streams, `out` and `err`, that the program replaces (`System.setOut` and
+    /// `System.setErr`): its printing calls on them are calls of the `PrintStream` that the field
+    /// holds, not the runtime's (`direct_stream_call`).
+    pub replaced_streams: BTreeSet<String>,
     /// Classes that reachable code names, or makes live, that no unit declares, other than those
     /// where reachability stops (`outside`): those that the sources do not have, and those whose
     /// units javac has not given yet when it gives them as they are asked for (`javac::Session`).
@@ -733,6 +737,15 @@ pub fn direct_stream_call(stream: &str, name: &str, signature: &str) -> bool {
         }
         "err" => matches!(name, "print" | "println" | "flush"),
         _ => false,
+    }
+}
+
+/// The field of `System` that its method `name` replaces: `out` of `setOut`.
+pub fn replaced_stream(name: &str) -> Option<&'static str> {
+    match name {
+        "setOut" => Some("out"),
+        "setErr" => Some("err"),
+        _ => None,
     }
 }
 
@@ -1677,6 +1690,10 @@ pub fn charset_coding(owner: &str, name: &str, signature: &str) -> Option<JdkMet
 /// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
 /// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
 pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    // The standard streams a program replaces, which `System.out` and `System.err` then read
+    // (`java/io/StandardOutput.java`, `Reach::replaced_streams`).
+    (("java.lang.System", "setOut", "(java.io.PrintStream)void"), ("java.io.StandardOutput", "setOut")),
+    (("java.lang.System", "setErr", "(java.io.PrintStream)void"), ("java.io.StandardOutput", "setErr")),
     // The properties a program changes, which its reads of properties then see
     // (`java/lang/TranslatedProperties.java`, `CHANGED_PROPERTY`).
     (
@@ -2589,6 +2606,10 @@ struct Walk<'t> {
     /// (`string_array_write_items`), and whether it met one whose visit is not known that way.
     string_array_write_items: HashSet<Item>,
     unknown_string_array_write: bool,
+    /// The calls that the runtime makes on `System.out` and `System.err` that this walk met, as
+    /// (stream, name, signature): where the program replaces the stream, they are calls of
+    /// `PrintStream`'s methods (`Reach::replaced_streams`).
+    stream_calls: BTreeSet<(String, String, String)>,
 }
 
 impl<'t> Walk<'t> {
@@ -3383,9 +3404,28 @@ impl<'t> Walk<'t> {
             return self.scan(&value["arguments"]);
         }
         // So does a call that the runtime makes on `System.out` or `System.err`
-        // (`direct_stream_call`).
-        if call && runtime_stream_call(value) {
+        // (`direct_stream_call`), unless the program replaces that stream.
+        if call
+            && runtime_stream_call(value)
+            && let Some(stream) = stream_of_call(value)
+            && !self.reach.replaced_streams.contains(stream)
+        {
+            let symbol = &value["symbol"];
+            self.stream_calls.insert((stream.into(), text(symbol, "name").into(), text(symbol, "type").into()));
             return self.scan(&value["arguments"]);
+        }
+        // A program that replaces a standard stream prints through the object it gives, also
+        // where an earlier call was the runtime's.
+        if call
+            && text(&value["symbol"], "owner") == "java.lang.System"
+            && let Some(stream) = replaced_stream(text(&value["symbol"], "name"))
+            && self.reach.replaced_streams.insert(stream.to_string())
+        {
+            let (class, field) = standard_stream_field(stream).expect("a standard stream");
+            self.work.push(Item::Field((class.into(), field.into())));
+            for (_, name, signature) in self.stream_calls.iter().filter(|c| c.0 == stream) {
+                self.work.push(Item::Method(("java.io.PrintStream".into(), name.clone(), signature.clone())));
+            }
         }
         // An access of a buffer through a view handle calls the translator's method, and the
         // handle, which is a constant, is no field of the translation (`lower/handles.rs`).
