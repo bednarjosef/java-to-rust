@@ -491,6 +491,9 @@ text outside the charset, and on `Charset.encode(String)`, and matches Java.
 `ByteArrayOutputStream`, `FileInputStream`, `FileOutputStream`) are translated from the JDK.
 `InputStreamReader` and `OutputStreamWriter` are patched (`java/patches/java/io`) for the same
 reason as `PrintStream`: the JDK's decode and encode through `StreamDecoder` and `StreamEncoder`.
+Their constructors check a null charset, decoder or encoder as the JDK's do (`NullPointerException`
+with `charset`, `charset decoder` or `charset encoder`), and `getEncoding` gives the name kept
+when the stream was made, so no dereference of theirs needs a message of its own.
 
 - The patched `InputStreamReader` reads into a buffer of 8192 bytes, reading again in one call
   only while the stream has bytes available, and decodes with `new String(bytes, off, len,
