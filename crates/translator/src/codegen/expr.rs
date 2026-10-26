@@ -507,6 +507,9 @@ impl<'a> Gen<'a> {
                 value,
             ) if matches!(value.ty, Type::Class(..)) => self.checked_class_cast(e.id, *to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
+            // A cast of a box to its own type is the box, null where it is: what takes it unboxes
+            // it, or not.
+            ExprKind::Cast(ty @ Type::Boxed(_), value) if value.ty == *ty => self.expr(value),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 if let Some(code) = self.enum_conditional(e, cond, a, b) {
