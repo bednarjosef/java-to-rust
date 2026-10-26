@@ -1460,6 +1460,23 @@ fn expr_points(
             expr_points(class, facts, m, b, frames, &b_safe, out);
             return;
         }
+        // The object's own `equals` or `hashCode` that `Objects.equals` or `Objects.hashCode` calls
+        // runs only when the object is not null: its receiver raises nothing.
+        ExprKind::Builtin(builtin @ (Builtin::ObjectsEquals | Builtin::ObjectsHashCode), args)
+            if args.len() == if matches!(builtin, Builtin::ObjectsEquals) { 3 } else { 2 } =>
+        {
+            let (call, values) = args.split_last().expect("a call");
+            for v in values {
+                expr_points(class, facts, m, v, frames, safe, out);
+            }
+            let mut points = Vec::new();
+            expr_points(class, facts, m, call, frames, safe, &mut points);
+            let receiver = guarded_receiver(call);
+            out.extend(points.into_iter().filter(|p| {
+                !matches!(p.raise, Raise::Runtime { id, .. } if Some(id) == receiver)
+            }));
+            return;
+        }
         _ => {}
     }
     let mut children = Vec::new();
@@ -1508,6 +1525,23 @@ fn expr_points(
     }
     for c in children {
         expr_points(class, facts, m, c, frames, safe, out);
+    }
+}
+
+/// The receiver of the object's own call that `Objects.equals` or `Objects.hashCode` makes
+/// (`lower::java_objects`): the call's, or where `lower::argument_order` moved it into a local
+/// (`{ receiver$0 = a; argument$1 = b; yield receiver$0.equals(argument$1); }`), that local's read.
+fn guarded_receiver(call: &Expr) -> Option<ExprId> {
+    match &call.kind {
+        ExprKind::MethodCall { receiver, .. } => Some(receiver.id),
+        ExprKind::Switch { cases, .. } => match cases.as_slice() {
+            [Case { body, .. }] => match body.last() {
+                Some(Stmt::Yield(value)) => guarded_receiver(value),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
     }
 }
 

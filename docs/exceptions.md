@@ -631,7 +631,10 @@ variable tested as it is assigned (`(k = e.getKey()) != null && k.equals(key)`),
 `if (v == null) v = ..;` sets, and a static that the first statements of its class's static
 initializer set to a non-null value and nothing else assigns (`Facts::initialized_statics`), when
 nothing those statements run reads it first. A branch of an `if` on a call of a method that only
-returns a constant (the translator's `Thread.isVirtual()`) is never taken.
+returns a constant (the translator's `Thread.isVirtual()`) is never taken. The object's own
+`equals` or `hashCode` that `Objects.equals` and `Objects.hashCode` call (`lower::java_objects`,
+which the `equals` and `hashCode` written for records use) runs only on an object that is not
+null.
 
 **Checked against Java 26** (`CHECKED_JAVA` in `javac/bytecode_names.rs`). With another Java the
 texts may differ, and a program whose `catch` reads one is not translated.
