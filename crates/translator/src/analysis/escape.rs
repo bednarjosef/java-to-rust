@@ -136,7 +136,10 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     }
     // Callees are solved before their callers, so that a caller is mostly solved once, with its
     // callees' summaries final: the order of the strongly connected components of the calls, each
-    // after those it calls. The least fixpoint is the same in any order.
+    // after those it calls, and in a component the smaller methods first, so that a large one
+    // that calls many of the others (the reflection's `Method.invoke`, which calls every method
+    // that reflection may run) is solved again only once they settle, not after each of them
+    // changes. The least fixpoint is the same in any order.
     let callees: Vec<Vec<usize>> = {
         let mut callees = vec![Vec::new(); n];
         for (t, cs) in callers.iter().enumerate() {
@@ -149,8 +152,9 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let (rank, _) = super::closure::components(&callees);
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     let mut queued = vec![true; n];
-    let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
-        (0..n).map(|m| std::cmp::Reverse((rank[m], m))).collect();
+    let size: Vec<usize> = analysis.code.iter().map(|c| c.assigns.len() + c.calls.len()).collect();
+    let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize, usize)>> =
+        (0..n).map(|m| std::cmp::Reverse((rank[m], size[m], m))).collect();
     let mut solves = 0;
     // Once the summaries are final, what solving a method finds depends on the factories only
     // through those that its calls run (`active`, `site_class`): each method's last facts are
@@ -158,7 +162,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let mut kept: Vec<Option<Kept>> = (0..n).map(|_| None).collect();
     // The time each method's solves took, for --timings.
     let mut spent: Vec<(f64, u32)> = if crate::timings::enabled() { vec![(0.0, 0); n] } else { Vec::new() };
-    while let Some(std::cmp::Reverse((_, m))) = work.pop() {
+    while let Some(std::cmp::Reverse((_, _, m))) = work.pop() {
         queued[m] = false;
         solves += 1;
         let start = (!spent.is_empty()).then(std::time::Instant::now);
@@ -177,7 +181,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
             analysis.set_summary(m, summary);
             for &caller in &callers[m] {
                 if !std::mem::replace(&mut queued[caller], true) {
-                    work.push(std::cmp::Reverse((rank[caller], caller)));
+                    work.push(std::cmp::Reverse((rank[caller], size[caller], caller)));
                 }
             }
         }
