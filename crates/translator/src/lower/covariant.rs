@@ -30,7 +30,13 @@
 //! array cannot hold throws `ArrayStoreException` (`Class::checks_store`), its `getClass()` is its
 //! own class, and an `instanceof` or a cast to an array class tests that class
 //! (`Class::array_tests`). A class literal of an array type is the array's own class
-//! (`exact_ty`). An array of arrays (`String[][]` as an `Object[][]`) carries no class.
+//! (`exact_ty`). An array of arrays (`String[][]` as an `Object[][]`, `int[][]` as an
+//! `Object[]`) carries its class too.
+//!
+//! An array that becomes an `Object` (`Object o = names`) meets each array type that an `Object`
+//! is tested for or cast to where it may be one (`meets_through_object`): a `String[]` and
+//! `instanceof Object[]` or `(Comparable<?>[]) o`, an `int[][]` and `(Object[]) o`. Both are then
+//! `Object[]`s and the test reads the class the array carries.
 
 use super::*;
 use std::rc::Rc;
@@ -58,6 +64,34 @@ impl<'t> Lowering<'t> {
                 let a = !Self::is_object(*x) && self.note_covariant(a);
                 let b = !Self::is_object(*y) && self.note_covariant(b);
                 a | b
+            }
+            _ => false,
+        }
+    }
+
+    /// Notes array types `array`, which becomes an `Object`, and `tested`, which an `Object` is
+    /// tested for or cast to, as covariant where `array` may be a `tested` (`meets_object_array`):
+    /// `Object o = new String[] {..}` and `o instanceof Object[]` or `(Comparable<?>[]) o`, or an
+    /// `int[][]` and `Object[]`. The test then reads the class the array carries.
+    pub(super) fn meets_through_object(&self, array: Type, tested: Type) -> bool {
+        array != tested && self.may_hold(array, tested) && self.meets_object_array(array, tested)
+    }
+
+    /// Whether an array of type `array` may be one of type `tested`: an array of references whose
+    /// elements may be `tested`'s, or arrays of such arrays. A class of the runtime (a string, a
+    /// box, a class, a builder) may be of any interface, and a box a `Number`.
+    fn may_hold(&self, array: Type, tested: Type) -> bool {
+        let (Type::Array(a), Type::Array(b)) = (array, tested) else { return false };
+        if !Self::of_objects(*a) || !Self::of_objects(*b) {
+            return false;
+        }
+        match (*a, *b) {
+            (_, b) if Self::is_object(b) => true,
+            (Type::Array(_), Type::Array(_)) => self.may_hold(*a, *b),
+            (Type::Class(..) | Type::Enum(_), b @ Type::Class(..)) => self.upcast_to(*a, b),
+            (Type::String | Type::Boxed(_) | Type::JavaClass | Type::StringBuilder, Type::Class(name, _)) => {
+                name == NUMBER
+                    || self.type_index(name).is_none_or(|t| self.types[t].node.kind() == "INTERFACE")
             }
             _ => false,
         }
@@ -205,11 +239,11 @@ impl<'t> Lowering<'t> {
             }
             _ => return Ok(()),
         };
-        let Some(element) = java.strip_suffix("[]") else { return Ok(()) };
-        if element.ends_with("[]") || !Self::is_object_array(made.ty) {
+        if !java.ends_with("[]") || !Self::is_object_array(made.ty) {
             return Ok(());
         }
-        let exact = Type::array(self.ty(node, element)?);
+        // An array of arrays carries its own class too (`String[][]`, `int[][]`).
+        let exact = self.exact_ty(node, &java)?;
         if !Self::of_objects(exact.element()) || exact == made.ty && node.kind() == "NEW_ARRAY" {
             return Ok(());
         }

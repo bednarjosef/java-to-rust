@@ -104,7 +104,7 @@ impl<T: Clone + std::fmt::Debug> std::fmt::Debug for SharedElements<T> {
 /// as the translator writes it where the array is made.
 pub struct ElementClass<T> {
     /// The array's class, which its `getClass()` gives.
-    class: fn() -> Class,
+    pub(crate) class: fn() -> Class,
     /// The binary name of the class of the elements: `java.lang.String`.
     pub(crate) element: &'static str,
     /// The module and class loader of the class of the elements as HotSpot names them, which a

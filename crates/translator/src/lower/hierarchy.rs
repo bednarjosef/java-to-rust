@@ -316,7 +316,7 @@ impl<'t> Lowering<'t> {
 
     /// Whether a value of type `from` is one of type `to` without a checked cast: an object of
     /// one of the program's classes as `Object` or as one of its supertypes.
-    fn upcast_to(&self, from: Type, to: Type) -> bool {
+    pub(super) fn upcast_to(&self, from: Type, to: Type) -> bool {
         match (from, to) {
             (Type::Class(..) | Type::Enum(_), _) if Self::is_object(to) => true,
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => {

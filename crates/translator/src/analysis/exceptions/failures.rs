@@ -1085,6 +1085,13 @@ pub(super) fn runtime_failures(
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
+    // So may a cast of an object to an array type (`(Object[]) o` of an `int[]`).
+    if let ExprKind::Cast(Type::Array(_), value) = &x.kind
+        && x.pos != value.pos
+        && matches!(value.ty, Type::Class(..))
+    {
+        out.push(("java.lang.ClassCastException", "this cast", true, x.id));
+    }
     // So may a cast to an array class that an `Object[]` may not be (`Class::array_tests`).
     if let ExprKind::Cast(_, value) = &x.kind
         && class.array_tests.contains_key(&value.id)

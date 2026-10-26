@@ -702,7 +702,8 @@ source's class. So:
   handle more than another store;
 - `System.arraycopy` into an array that carries another class than the source's checks each
   element, and stores those before the first that fails, which throws HotSpot's
-  `ArrayStoreException` ("arraycopy: element type mismatch: ...");
+  `ArrayStoreException` ("arraycopy: element type mismatch: ..." where the destination's element
+  class is below the source's, else "arraycopy: type mismatch: ...");
 - `getClass()` of an `Object[]` (`java::array_class`), as a value or as an `Object`, is the class
   it carries, and so are its `getName()` and `getSimpleName()`; a class literal of an array type
   (`String[].class`) is that array's own class, not `Object[]`'s (`covariant::exact_ty`);
@@ -712,15 +713,19 @@ source's class. So:
   the test, and the cast throws HotSpot's `ClassCastException` ("class [Ljava.lang.Integer;
   cannot be cast to class [Ljava.lang.String; (...)"), which a `catch` may see.
 
-An array of arrays (`String[][]` as an `Object[][]`) carries no class, nor does an array that a
-method keeps to itself as a plain `Vec` (`analysis::arrays`), an array that
+An array of arrays carries its class too (`String[][]` as an `Object[][]`, `int[][]` as an
+`Object[]`). An array held as an `Object` meets each array type that the code tests an `Object`
+for or casts one to, where it may be one (`covariant::meets_through_object`): `Object o = names`
+of a `String[]` and `o instanceof Object[]`, `(Comparable<?>[]) o` or `(String[]) o` make both
+`Object[]`s, as does an `int[][]` and `(Object[]) o`, so the test reads the class the array
+carries; an `int[]` is not an `Object[]`, and a cast of it throws `ClassCastException`.
+
+An array that a method keeps to itself as a plain `Vec` (`analysis::arrays`), an array that
 `new Object[n]` makes, or one that `Array.newInstance` makes of a component class that the code
-neither makes nor tests arrays of:
+neither makes nor tests arrays of carries no class:
 storing an object of another class in one of them does not throw, its `getClass()` is
 `Object[]`'s, and it passes every `instanceof` and cast to an array class held as an `Object[]`,
-as an array of that class would (an `Object[]` passes `instanceof String[]`). A test of an
-`Object` against an array type that is not an `Object[]` (`Comparable[]` where no `String[]` meets
-it) looks at the variant only, so a `String[]` held as an `Object[]` fails it. Also:
+as an array of that class would (an `Object[]` passes `instanceof String[]`). Also:
 
 - a `String[]` that is an `Object[]` is copied where the runtime's string builtins take or make
   one (`Builtin::StringArrayOf`, `Builtin::ObjectArrayOf`; the copy of a null is null, so
@@ -883,10 +888,9 @@ A call may run any member of an override group, so the analyses treat the group 
 - Real generics need no trait: a generic whose type variables are used for text, `equals`,
   `hashCode`, a bound, a cast or an array stays erased. Traits for interfaces used as bounds and
   per-instantiation enum variants (`Shape::BoxOfInteger`) are not built.
-- Arrays of arrays, plain arrays, `new Object[n]` and the arrays that `Array.newInstance` makes
-  of a class the code neither makes nor tests arrays of do not carry their class (1.11, covariant arrays), so tests of their class pass where Java's
-  would fail, and a test against an array type of references that is not an `Object[]` does not
-  see an array held as one.
+- Plain arrays, `new Object[n]` and the arrays that `Array.newInstance` makes of a class the
+  code neither makes nor tests arrays of do not carry their class (1.11, covariant arrays), so
+  tests of their class pass where Java's would fail.
 - `Number.byteValue()` or `shortValue()` overridden by a program class, `CharSequence`'s methods
   beyond those listed in 1.9, and other `java.lang.Enum` methods implementing an interface method
   are rejected.
