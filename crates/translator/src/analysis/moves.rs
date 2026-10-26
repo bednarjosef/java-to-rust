@@ -244,6 +244,10 @@ impl Walk {
                 self.expr(receiver);
                 self.arguments(args);
             }
+            // `NullChecked(v, v)`, the enclosing instance of `v.new Inner()`, writes `v` once.
+            ExprKind::Builtin(Builtin::NullChecked(_), args) if matches!(args.as_slice(), [a, b] if same_var(a, b)) => {
+                self.expr(&args[1])
+            }
             ExprKind::Call { args, .. }
             | ExprKind::Builtin(_, args)
             | ExprKind::New { args, .. }
@@ -277,6 +281,11 @@ impl Walk {
             Place::Static { .. } => {}
         }
     }
+}
+
+/// Whether `a` and `b` read the same variable.
+fn same_var(a: &Expr, b: &Expr) -> bool {
+    matches!((&a.kind, &b.kind), (ExprKind::Var(x), ExprKind::Var(y)) if x == y)
 }
 
 /// Whether an expression compares something with `null`.
