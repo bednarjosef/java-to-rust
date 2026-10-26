@@ -141,6 +141,14 @@ impl<'t> Lowering<'t> {
         stub
     }
 
+    /// The body of a stub of method `index` of class `class`, rejected for `error`.
+    pub(super) fn stub_body(&self, class: usize, index: usize, error: &Error) -> Vec<Stmt> {
+        *self.stub_message.borrow_mut() = Some(self.stub_message(index, error));
+        let body = self.never(class, self.methods[index].node.pos());
+        self.stub_message.borrow_mut().take();
+        body
+    }
+
     /// What the stub of method `index`, rejected for `error`, says where it runs: the method, and
     /// the rejection with its line.
     fn stub_message(&self, index: usize, error: &Error) -> String {

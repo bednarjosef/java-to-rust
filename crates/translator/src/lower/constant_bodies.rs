@@ -332,6 +332,30 @@ impl<'t> Lowering<'t> {
 
     /// Moves the methods of the constants' bodies of enum `class` into the enum's methods, as arms
     /// of a switch on `this`.
+    /// The methods of enum `class` that its constants' bodies override, whose `switch` over the
+    /// constants `constant_bodies` makes.
+    pub(super) fn overridden_by_bodies(&self, class: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        for constant in self.types[class].node.list("members").filter(|m| is_enum_constant(*m)) {
+            let Some(body) = constant.get("initializer").and_then(|i| i.get("classBody")) else { continue };
+            for member in body.list("members") {
+                if member.kind() != "METHOD" || member.str("name") == "<init>" {
+                    continue;
+                }
+                let sig = member.symbol().map_or("", |s| s.ty);
+                let name = member.str("name");
+                let base = self
+                    .methods
+                    .iter()
+                    .position(|m| m.owner == class && m.name == name && params_of(m.sig) == params_of(sig));
+                if let Some(base) = base.filter(|b| !self.body_helpers.contains(b) && !out.contains(b)) {
+                    out.push(base);
+                }
+            }
+        }
+        out
+    }
+
     pub(super) fn constant_bodies(&self, class: usize, methods: &mut [Method]) -> Result<(), Error> {
         self.current.set(class);
         self.in_ctor.set(false);
