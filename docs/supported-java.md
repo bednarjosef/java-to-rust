@@ -388,10 +388,13 @@ Design: [natives-and-input.md](natives-and-input.md).
   are only on javac's source path, so javac attributes a library file only when reachability
   asks for one of its classes.
 - Reachability stops at the classes the runtime provides (`RUNTIME_CLASSES`: `String`,
-  `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`) and at what is not
-  translated (`UNTRANSLATED`: most reflection, method handles, serialization, security but its
-  exceptions and message digests, class loading). An untranslated class used as a type has no objects, so its variables are only ever
-  null (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
+  `StringBuilder`, `System`, `Runtime`, `Math`, the boxes, `Object`, `Class`, `Thread`, the
+  standard charsets) and at what is not translated (`UNTRANSLATED`: most reflection, method
+  handles but those above, serialization, class loading, and security but its exceptions,
+  message digests, secure random numbers and what a server's login needs, see
+  [natives-and-input.md](natives-and-input.md#class-loading-resources-and-classes-by-name)).
+  An untranslated class used as a type has no objects, so its variables are only ever null
+  (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
   `Tripwire.ENABLED`, virtual threads) is not reached, and neither are parallel streams when no
   stream can become parallel (`program/reach/sequential.rs`).
 - A source root may be a module with `module-info.java`; the whole translation is one closed
@@ -401,7 +404,9 @@ Design: [natives-and-input.md](natives-and-input.md).
   `java.util` is `java_::util`). `--crate DIR` writes a file per package, `-o FILE` one file.
 - `--census` translates past every rejection, stubbing each rejected method, and reports what is
   rejected and why, grouped by message, separately for program and library code
-  (`program/census.rs`). `--survey` is a quicker syntactic view of what the reachable code needs
+  (`program/census.rs`). It lists apart, as code that translates, the code that throws
+  `NoClassDefFoundError` for a class missing from the roots (`--keep-going`) and the handle
+  calls that throw `UnsupportedOperationException` because the translation does not follow them. `--survey` is a quicker syntactic view of what the reachable code needs
   from outside the translated sources (`program/survey.rs`). Both have `-json` forms.
   `scripts/jdk-coverage.py` runs the census over the target programs and writes
   [jdk-coverage.md](jdk-coverage.md).
