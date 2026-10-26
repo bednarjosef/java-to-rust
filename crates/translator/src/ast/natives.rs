@@ -72,8 +72,7 @@ pub enum Native {
     MaxMemory,
     /// `Runtime.getRuntime().gc()`, which does nothing.
     Gc,
-    /// `Runtime.halt(status)`: exits without running shutdown hooks, which translated programs
-    /// do not have.
+    /// `Runtime.halt(status)`: ends the process at once, without running the shutdown hooks.
     Halt,
     /// `Thread.sleep(millis)`, or `Thread.sleep(millis, nanos)` when `nanos`.
     Sleep {

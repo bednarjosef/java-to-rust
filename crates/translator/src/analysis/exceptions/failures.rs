@@ -353,6 +353,8 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::FreeMemory
             | Native::MaxMemory
             | Native::Gc
+            // It ends the process.
+            | Native::Halt
             | Native::Nothing
             | Native::Missing { .. }
             | Native::CdsConfigStatus

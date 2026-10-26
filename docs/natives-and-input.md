@@ -124,7 +124,9 @@ values, and the interned object of its text where the program compares strings b
 A `Runtime` has no state of its own, so it is no value in a translation: its methods
 (`availableProcessors`, the heap's figures, `gc`, `halt`, the shutdown hooks) are translated on
 `Runtime.getRuntime()` or on a local that holds it, whose declaration leaves nothing behind
-(`lower.rs`). Any other use of a `Runtime` as a value is rejected.
+(`lower.rs`). Any other use of a `Runtime` as a value is rejected. None of them throws, so a
+`catch` around them sees nothing (`Runtime.getRuntime().halt(1)` in a `catch (Throwable)`, or in
+a `TimerTask` whose thread's `finally` the JDK's `Timer` has).
 
 `Set.of` and `Map.of` iterate in a different order on every run, in Java too: with the CDS seed
 0, `ImmutableCollections` seeds its order from `System.nanoTime()`. Their output cannot be
