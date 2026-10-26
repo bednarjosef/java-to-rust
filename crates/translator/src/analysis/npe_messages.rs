@@ -100,6 +100,7 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
             receivers,
             arguments,
             declared: Default::default(),
+            proxied: Default::default(),
         };
         for s in &method.body {
             visit_stmt(
@@ -202,6 +203,8 @@ struct Messages<'a> {
     arguments: HashMap<&'a str, &'a Expr>,
     /// What the method's body declares (`declared`).
     declared: std::cell::OnceCell<Declared>,
+    /// Whether the method is that of a method reference's class that the JVM makes (`proxied`).
+    proxied: std::cell::OnceCell<bool>,
 }
 
 /// A field as the class file has it.
@@ -246,7 +249,7 @@ impl Messages<'_> {
             // The JVM gives no message for the null receiver of an unbound method reference
             // (`String::length`), which the class it makes for the reference dereferences; a
             // bound one's receiver, checked where the reference was made, is never null.
-            if self.reference_receiver(object) || self.checked_receiver(object) {
+            if self.reference_param(object) || self.checked_receiver(object) {
                 out.insert(object.id, None);
                 return;
             }
@@ -772,6 +775,12 @@ impl Messages<'_> {
     /// and any other box where a primitive is wanted (`Gen::boxing_value`). javac writes it as a
     /// call of the box's method (`Integer.intValue()`, also for a wider primitive).
     fn unboxing(&self, value: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+        // An argument that the class the JVM makes for a method reference unboxes
+        // (`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`): no message.
+        if matches!(value.ty, Type::Boxed(_)) && self.reference_param(value) {
+            out.entry(value.id).or_insert(None);
+            return;
+        }
         if matches!(value.ty, Type::Boxed(_))
             && let Some(message) = self.message(&crate::analysis::unboxing::unboxing_action(value), value)
         {
@@ -1156,15 +1165,47 @@ impl Messages<'_> {
         }))
     }
 
-    /// Whether `object` is the receiver of the call that an unbound method reference makes: the
-    /// first parameter of the method of the reference's class, which the translation reads at the
-    /// reference's position (`lower::lambdas`), where a lambda's body starts after its parameters.
-    fn reference_receiver(&self, object: &Expr) -> bool {
+    /// Whether `object` is a parameter of the method of a method reference's class that the JVM
+    /// makes itself (`proxied`), as the call of the reference reads it: the receiver of an
+    /// unbound reference, or an argument. The translation reads them at the reference's position
+    /// (`lower::lambdas`), where a lambda's body starts after its parameters. The JVM gives no
+    /// message for a null that this class dereferences.
+    fn reference_param(&self, object: &Expr) -> bool {
         let method = self.method;
-        matches!(self.class.types[method.class].origin, Origin::Lambda { .. })
-            && !method.is_ctor
-            && object.pos == method.pos
-            && matches!(&object.kind, ExprKind::Var(name) if method.params.first().is_some_and(|p| &p.name == name))
+        object.pos == method.pos
+            && matches!(&object.kind, ExprKind::Var(name) if method.params.iter().any(|p| &p.name == name))
+            && *self.proxied.get_or_init(|| self.proxied())
+    }
+
+    /// Whether the method is that of the class the JVM makes for a method reference, with no
+    /// method of javac's in between: javac writes one for a reference that packs varargs, that
+    /// calls through `super`, or that makes an array or an object of an inner or local class.
+    fn proxied(&self) -> bool {
+        let method = self.method;
+        if !matches!(self.class.types[method.class].origin, Origin::Lambda { .. }) || method.is_ctor {
+            return false;
+        }
+        let mut proxied = true;
+        for s in &method.body {
+            visit_stmt_exprs(s, &mut |e| {
+                if e.pos != method.pos {
+                    return;
+                }
+                match &e.kind {
+                    ExprKind::MethodCall { is_super: true, .. }
+                    | ExprKind::NewArray(_)
+                    | ExprKind::ArrayLit(_) => proxied = false,
+                    ExprKind::New { class, .. } => {
+                        let decl = &self.class.types[*class];
+                        if decl.outer.is_some() || !matches!(decl.origin, Origin::Member) {
+                            proxied = false;
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+        proxied
     }
 
     /// Whether `object` is the receiver of a bound method reference that the class of the
