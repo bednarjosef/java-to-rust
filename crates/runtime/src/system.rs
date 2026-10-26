@@ -5,8 +5,6 @@
 //! answers it; the translation fixes the others (see `lower::system`). The memory figures are plausible
 //! constants, not the JVM's, which depend on the machine and its flags.
 
-use crate::exit;
-
 /// `System.getenv(name)`: the variable of the environment the program runs in, as the JVM reads
 /// it, or `None` where it is unset. A name that no variable can have (empty, or with `=` or a
 /// zero byte) is unset, and a value that is not UTF-8 is read with replacement characters.
@@ -101,10 +99,12 @@ pub fn max_memory() -> i64 {
 /// allocated enough, which the specification of `gc()` allows.
 pub fn gc() {}
 
-/// `Runtime.halt(status)`: exits at once. Shutdown hooks are not run, which translated programs
-/// do not have; the buffered standard output is flushed, as the JVM does.
+/// `Runtime.halt(status)`: exits at once, without running the shutdown hooks, which only
+/// `System.exit` and the other ways out run (`thread::run_shutdown_hooks`). What standard output
+/// has written is written out, as the JVM's unbuffered stream has written it.
 pub fn halt(status: i32) -> ! {
-    exit(status)
+    crate::drain_stdout();
+    std::process::exit(status)
 }
 
 /// `Thread.sleep(millis)`. An interrupt ends it with an `InterruptedException` (see
