@@ -151,10 +151,14 @@ TextAdventure, and from more than 55 minutes of CPU (never finished) to about 2 
   peak of the whole run from 3.22 GB to 1.43 GB; the census and the corpus's translations are
   the same as before.
 - **Not done: lowering the generics attempts only where they change.** Each attempt lowers the
-  whole program again from the same trees, which are already held, so no tree is read twice; what
-  costs is the lowering itself (5 attempts of about 20 s on javac). Redoing only the methods an
-  attempt affects means tracking which methods depend on which generics decision, which is not a
-  small change.
+  whole program again from the same trees, which are already held, so no tree is read twice. The
+  scans of the trees whose answers don't depend on the attempt are made once and handed on to the
+  next attempt (`lower/scans.rs`): the standard classes and functional interfaces that the code
+  uses, what of `Object` it needs, the names of each class's variables, and in each member its
+  local and anonymous classes, its lambdas and what it asks about its caller. That took an
+  attempt after the first on javac from 6.3 s to 3.5 s. What costs is the lowering of the methods
+  itself. Redoing only the methods an attempt affects means tracking which methods depend on which
+  generics decision, which is not a small change.
 - **Not done: a compact transfer format.** A unit's JSON repeats few strings (239 distinct ones
   among 3,075 in a typical unit), and node kinds, types, owners and names are about 65% of the
   bytes, so a table of strings would make the text several times smaller. But the peak comes from

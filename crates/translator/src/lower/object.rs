@@ -344,12 +344,17 @@ impl<'t> Lowering<'t> {
     /// Plans `Object` for a program that uses it: its type and methods come after the `types`
     /// and `methods` declared so far.
     pub(super) fn plan_object(&mut self, decls: &[Node<'t>]) {
-        let comparable = uses_comparable(decls);
-        let number = uses_number(decls);
-        let char_sequence = uses_char_sequence(decls);
-        let record = uses_record(decls);
+        let trees: Vec<&Value> = decls.iter().map(|d| d.0).collect();
+        let uses = self.scans.object(&trees, || super::scans::ObjectUses {
+            comparable: uses_comparable(decls),
+            number: uses_number(decls),
+            char_sequence: uses_char_sequence(decls),
+            record: uses_record(decls),
+            enumeration: decls.iter().any(|d| uses_enum(d.0)),
+            array_text: decls.iter().any(|d| concatenates_array(d.0)),
+        });
+        let super::scans::ObjectUses { comparable, number, char_sequence, record, array_text, .. } = uses;
         let unrelated = decls.iter().any(|d| self.compares_unrelated(d.0));
-        let array_text = decls.iter().any(|d| concatenates_array(d.0));
         let appendable = self.type_index("java.lang.Appendable");
         let class_interface = CLASS_VALUE_INTERFACES.iter().any(|i| self.type_index(i).is_some());
         if uses_object(decls, &self.real_type_parameters())
@@ -370,10 +375,7 @@ impl<'t> Lowering<'t> {
             let after = usize::from(comparable.is_some());
             let number =
                 number.then_some(NumberIndexes { decl: runtime + after, methods: equals + 2 + after });
-            let enumeration = decls
-                .iter()
-                .any(|d| uses_enum(d.0))
-                .then_some(runtime + after + usize::from(number.is_some()));
+            let enumeration = uses.enumeration.then_some(runtime + after + usize::from(number.is_some()));
             let char_sequence = char_sequence.then_some(NumberIndexes {
                 decl: runtime + after + usize::from(number.is_some()) + usize::from(enumeration.is_some()),
                 methods: equals + 2 + after + if number.is_some() { NUMBER_METHODS.len() } else { 0 },

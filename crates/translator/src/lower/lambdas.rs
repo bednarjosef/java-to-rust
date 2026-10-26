@@ -89,11 +89,14 @@ impl<'t> Lowering<'t> {
         let instance = !(member.has_flag("STATIC") || Self::is_static_block(member));
         // In the order of the source, which numbers the names; a lambda inside another comes after
         // it, so the class and method of its enclosing lambda are known.
-        let mut found = Vec::new();
-        find_lambdas(member.0, None, &mut found);
-        found.sort_by_key(|(n, _)| (Node(n).pos().line, Node(n).pos().column));
+        let found = self.scans.clone().lambdas(member.0, || {
+            let mut found = Vec::new();
+            find_lambdas(member.0, None, &mut found);
+            found.sort_by_key(|(n, _)| (Node(n).pos().line, Node(n).pos().column));
+            found
+        });
         let mut declared: Vec<(&Value, usize)> = Vec::new();
-        for (lambda, outer) in found {
+        for &(lambda, outer) in found.iter() {
             let enclosing = outer.and_then(|o| declared.iter().find(|(n, _)| std::ptr::eq(*n, o)));
             let (enclosing, method, instance) = match enclosing {
                 Some(&(_, l)) => (self.lambdas[l].class, Some(self.lambdas[l].method), true),

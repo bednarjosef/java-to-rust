@@ -26,6 +26,7 @@ mod object_clone;
 mod objects;
 mod real_generics;
 mod references;
+mod scans;
 mod statics;
 mod strings;
 mod stubs;
@@ -121,17 +122,21 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         .filter(|n| !matches!(n.kind(), "EMPTY_STATEMENT" | "ANNOTATION_TYPE"))
         .collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
+    let scans = std::rc::Rc::default();
     real_generics::retry(|real, covariant| {
         let mut lowering = Lowering::declare(&decls)?;
+        lowering.scans = std::rc::Rc::clone(&scans);
         let annotations = unit.list("typeDecls").filter(|n| n.kind() == "ANNOTATION_TYPE");
         lowering.annotation_types.extend(annotations.map(|n| (crate::program::class_name(n.0), n)));
         lowering.covariant = covariant.clone();
-        lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
+        let trees: Vec<&Value> = decls.iter().map(|d| d.0).collect();
+        lowering.standard = lowering.scans.standard(&trees);
         lowering.declare_standard()?;
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
         // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
-        let trees = decls.iter().map(|d| d.0).chain(lowering.standard.classes.iter().map(|(_, d)| *d));
-        lowering.functional = functional::Functional::select(trees, &declared);
+        let trees: Vec<&Value> =
+            trees.into_iter().chain(lowering.standard.classes.iter().map(|(_, d)| *d)).collect();
+        lowering.functional = lowering.scans.functional(&trees, &declared);
         lowering.declare_functional()?;
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
@@ -236,16 +241,33 @@ impl<'t> Node<'t> {
 
     fn symbol(self) -> Option<Symbol<'t>> {
         let s = self.get("symbol")?;
-        Some(Symbol {
-            kind: s.str("kind"),
-            name: s.str("name"),
-            owner: s.str("owner"),
-            is_static: s.0["static"].as_bool().unwrap_or(false),
-            varargs: s.0["varargs"].as_bool().unwrap_or(false),
-            native: s.0["native"].as_bool().unwrap_or(false),
-            ty: s.str("type"),
-            constant: s.0.get("constant").and_then(Value::as_str),
-        })
+        let mut symbol = Symbol {
+            kind: "",
+            name: "",
+            owner: "",
+            is_static: false,
+            varargs: false,
+            native: false,
+            ty: "",
+            constant: None,
+        };
+        // One pass over the fields, as lowering asks for the symbols of most nodes.
+        for (field, value) in s.0.as_object().into_iter().flat_map(|fields| fields.iter()) {
+            let text = || value.as_str().unwrap_or("");
+            let flag = || value.as_bool().unwrap_or(false);
+            match field.as_str() {
+                "kind" => symbol.kind = text(),
+                "name" => symbol.name = text(),
+                "owner" => symbol.owner = text(),
+                "static" => symbol.is_static = flag(),
+                "varargs" => symbol.varargs = flag(),
+                "native" => symbol.native = flag(),
+                "type" => symbol.ty = text(),
+                "constant" => symbol.constant = value.as_str(),
+                _ => {}
+            }
+        }
+        Some(symbol)
     }
 
     /// Whether the declaration has a modifier. `STATIC` comes from the declaration's symbol when it
@@ -332,7 +354,7 @@ struct Lowering<'t> {
     /// In a whole program, the class whose `main` is the entry point; in a file, every `main` is.
     entry: Option<usize>,
     /// The standard exception classes that the program uses (see `exceptions`).
-    standard: exceptions::Standard,
+    standard: std::rc::Rc<exceptions::Standard>,
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
@@ -379,7 +401,7 @@ struct Lowering<'t> {
     /// The pattern variables in scope that name a value without testing it (see `patterns`).
     aliases: RefCell<Vec<patterns::Alias>>,
     /// The JDK's functional interfaces that the program uses and lowering provides (see `functional`).
-    functional: functional::Functional,
+    functional: std::rc::Rc<functional::Functional>,
     /// The lambdas and method references of the code being lowered (see `lambdas`).
     lambdas: Vec<lambdas::LambdaInfo<'t>>,
     /// Where each lambda is in `lambdas`, by its class, its constructor and method, and its node.
@@ -404,6 +426,9 @@ struct Lowering<'t> {
     /// `Object[]` lowered as a call of the JDK's method (`jdk_string_array_write`), as a type and
     /// a method or none, as `Rejected` names the code that a rejection is in.
     string_array_writes: RefCell<Vec<(usize, Option<usize>)>>,
+    /// The answers of the scans of the trees that each attempt of lowering asks the same, shared
+    /// by the attempts (`scans`).
+    scans: std::rc::Rc<scans::Scans<'t>>,
     /// Whether a census takes a panic while lowering a method for a rejection of the method. A
     /// whole program's lowering, which goes on past rejections too (`tolerant_lower_program`),
     /// lets it end the translation, as it would without them.

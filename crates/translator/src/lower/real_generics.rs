@@ -64,16 +64,63 @@ pub(super) fn retry<E>(
         let noted: Vec<Type> =
             covariant.noted.take().into_iter().filter(|ty| !covariant.known.contains(ty)).collect();
         if !noted.is_empty() {
+            if crate::timings::enabled() {
+                eprintln!(
+                    "timing: lowering attempt {attempt} is lowered again for {}",
+                    covariant_types(&noted)
+                );
+            }
             covariant.known.extend(noted);
             continue;
         }
         match result {
             Ok((class, _, failed)) if failed.is_empty() => return Ok(class),
-            Ok((_, used, failed)) => real = Some(used.without(&failed)),
+            Ok((class, used, failed)) => {
+                if crate::timings::enabled() {
+                    eprintln!(
+                        "timing: lowering attempt {attempt} is lowered again without {}",
+                        failed_generics(&class, &used, &failed)
+                    );
+                }
+                real = Some(used.without(&failed))
+            }
             Err(e) if real.as_ref().is_some_and(Real::is_empty) => return Err(e),
-            Err(_) => real = Some(Real::default()),
+            Err(_) => {
+                if crate::timings::enabled() {
+                    eprintln!(
+                        "timing: lowering attempt {attempt} is lowered again without Rust generics, for an error"
+                    );
+                }
+                real = Some(Real::default())
+            }
         }
     }
+}
+
+/// For `--timings`: how many array types became `Object[]`s, with the first few.
+fn covariant_types(noted: &[Type]) -> String {
+    let first: Vec<String> = noted.iter().take(5).map(Type::to_string).collect();
+    let more = if noted.len() > first.len() { ", …" } else { "" };
+    format!("{} new covariant array types ({}{more})", noted.len(), first.join(", "))
+}
+
+/// For `--timings`: how many of the Rust generics `used` failed, with the first few.
+fn failed_generics(class: &Class, used: &Real, failed: &Real) -> String {
+    let classes = failed.classes.iter().map(|&t| class.types[t].name.clone());
+    let methods = failed.methods.iter().map(|&m| {
+        let method = &class.methods[m];
+        format!("{}.{}", class.types[method.class].name, method.name)
+    });
+    let names: Vec<String> = classes.chain(methods).collect();
+    let first = names[..names.len().min(5)].join(", ");
+    let more = if names.len() > 5 { ", …" } else { "" };
+    format!(
+        "{} of {} Rust generic classes and {} of {} methods ({first}{more})",
+        failed.classes.len(),
+        used.classes.len(),
+        failed.methods.len(),
+        used.methods.len()
+    )
 }
 
 /// Whether every type variable of class `node` occurs in the type of one of its instance fields:

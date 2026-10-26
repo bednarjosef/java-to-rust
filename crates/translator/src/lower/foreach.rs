@@ -196,10 +196,14 @@ impl<'t> Lowering<'t> {
     /// A local's name, `base` or with `_` appended, that no variable of the current class's code
     /// has.
     pub(super) fn fresh_name(&self, base: &str) -> String {
-        let mut taken = HashSet::new();
-        for member in self.types[self.current.get()].node.list("members") {
-            captures::declared_names(member, &mut taken);
-        }
+        let node = self.types[self.current.get()].node;
+        let taken = self.scans.declared_names(node.0, || {
+            let mut taken = HashSet::new();
+            for member in node.list("members") {
+                captures::declared_names(member, &mut taken);
+            }
+            taken
+        });
         let mut name = base.to_string();
         while taken.contains(&name) {
             name.push('_');

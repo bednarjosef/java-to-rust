@@ -84,7 +84,7 @@ impl<'t> Lowering<'t> {
         let query = if self.lambda_of_method(m).is_some() || info.node.kind() != "METHOD" {
             None
         } else {
-            info.node.get("body").and_then(|b| asked(b.0))
+            info.node.get("body").and_then(|b| self.scans.caller_query(b.0, || asked(b.0)))
         };
         self.callers.borrow_mut().insert(m, query);
         query
