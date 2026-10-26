@@ -91,7 +91,16 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
                 }
             });
         }
-        let at = Messages { class, names, outermost: &outermost, method, jdk, receivers, arguments };
+        let at = Messages {
+            class,
+            names,
+            outermost: &outermost,
+            method,
+            jdk,
+            receivers,
+            arguments,
+            declared: Default::default(),
+        };
         for s in &method.body {
             visit_stmt(
                 s,
@@ -165,6 +174,14 @@ fn outermost(class: &Class, t: usize) -> Option<String> {
     }
 }
 
+/// The names that a method's body declares: its locals (with for-each loops' variables), and
+/// those of its `catch` clauses.
+#[derive(Default)]
+struct Declared {
+    locals: HashSet<String>,
+    caught: HashSet<String>,
+}
+
 /// The messages of the code of one method.
 struct Messages<'a> {
     class: &'a Class,
@@ -183,6 +200,8 @@ struct Messages<'a> {
     /// The locals that hold an argument of a call that a receiver is computed before
     /// (`lower/argument_order.rs`), with the argument.
     arguments: HashMap<&'a str, &'a Expr>,
+    /// What the method's body declares (`declared`).
+    declared: std::cell::OnceCell<Declared>,
 }
 
 /// A field as the class file has it.
@@ -1278,19 +1297,31 @@ impl Messages<'_> {
     /// does.
     fn is_outer_param(&self, name: &str) -> bool {
         let method = self.method;
-        let mut declared = false;
-        for s in &method.body {
-            visit_stmt(s, &mut |_| {}, &mut |s| {
-                if let Stmt::Local { name: local, .. } | Stmt::ForEach { name: local, .. } = s {
-                    declared |= local == name;
-                }
-            });
-        }
         name == crate::lower::OUTER
             && self.is_constructor(method)
             && self.class.types[method.class].outer.is_some()
             && method.params.first().is_some_and(|p| p.name == name)
-            && !declared
+            && !self.declared().locals.contains(name)
+    }
+
+    /// The names that the method's body declares, found once: a method can read thousands of
+    /// locals (the reflection's `Method.invoke`), each of which looks its name up.
+    fn declared(&self) -> &Declared {
+        self.declared.get_or_init(|| {
+            let mut declared = Declared::default();
+            for s in &self.method.body {
+                visit_stmt(s, &mut |_| {}, &mut |s| match s {
+                    Stmt::Local { name, .. } | Stmt::ForEach { name, .. } => {
+                        declared.locals.insert(name.clone());
+                    }
+                    Stmt::Try { catches, .. } => {
+                        declared.caught.extend(catches.iter().map(|c| c.name.clone()))
+                    }
+                    _ => {}
+                });
+            }
+            declared
+        })
     }
 
     /// Whether `method` is a constructor, or the method that one becomes where its class tree
@@ -1523,15 +1554,11 @@ impl Messages<'_> {
         }
         let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
         if base != name && !method.params.iter().any(|p| p.name == name) {
-            let mut declared = method.params.iter().any(|p| p.name == base);
-            for s in &method.body {
-                visit_stmt(s, &mut |_| {}, &mut |s| match s {
-                    Stmt::Local { name, .. } | Stmt::ForEach { name, .. } => declared |= name == base,
-                    Stmt::Try { catches, .. } => declared |= catches.iter().any(|c| c.name == base),
-                    _ => {}
-                });
-            }
-            if declared {
+            let declared = self.declared();
+            if method.params.iter().any(|p| p.name == base)
+                || declared.locals.contains(base)
+                || declared.caught.contains(base)
+            {
                 return None;
             }
         }
