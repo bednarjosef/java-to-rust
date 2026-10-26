@@ -13,8 +13,8 @@ import java.util.List;
 
 // A file's contents through java.nio.file, in a temporary directory that it removes at the end:
 // bytes and text read and written whole, appended, by lines, through buffered readers and writers
-// and through streams, a new empty file, and the failures of an existing, a missing and a
-// directory path.
+// (with and without a charset) and through streams, a new empty file, and the failures of an
+// existing, a missing and a directory path.
 public class FileContentsThroughFiles {
     public static void main(String[] args) throws IOException {
         Path dir = Files.createTempDirectory("nio-contents");
@@ -35,6 +35,10 @@ public class FileContentsThroughFiles {
         try (BufferedReader in = Files.newBufferedReader(file)) {
             System.out.println(in.readLine() + " / " + in.readLine());
         }
+        try (BufferedWriter out = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+            out.write("written in UTF-8, without options");
+        }
+        System.out.println(Files.readString(file));
         try (OutputStream out = Files.newOutputStream(dir.resolve("raw.bin"))) {
             for (int i = 0; i < 300; i++) {
                 out.write(i);

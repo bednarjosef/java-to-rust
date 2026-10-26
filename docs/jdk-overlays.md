@@ -24,7 +24,8 @@ writes outside the repository.
 From the lightest to the heaviest:
 
 1. **A redirect.** Every call of one JDK method becomes a call of a static method of ours with the
-   same parameters, and the JDK's method is not translated at all. The list is
+   same parameters, and the JDK's method is not translated at all (the arguments of a variable
+   arity are packed for ours, as the JDK's has no parameters to pack them for). The list is
    `REDIRECTED_CALLS` in `program/reach.rs` (and `TRANSLATED_LANG_ACCESS` for the methods of
    `JavaLangAccess`); the methods are in classes of our own, such as
    `java/overlay/sun/nio/fs/TranslatedFiles.java`. Use it when one JDK method should behave
