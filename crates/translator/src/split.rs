@@ -12,9 +12,10 @@
 //! - Each **body** crate depends on the header alone and defines those functions, with
 //!   `#[unsafe(no_mangle)]`, for the modules given to it. A module of a body crate re-exports its
 //!   header module (`pub use header::a::b::*`) and has the module's own `use` lines, so the moved
-//!   code names everything as it did. A method's code moves into a private trait that the body
-//!   crate implements for the header's type (`impl Bodies0 for X { fn body_m(&self, ..) {..} }`),
-//!   where `self` and `Self` mean what they did; its function calls it.
+//!   code names everything as it did, and the header's `recursion_limit`. A method's code moves
+//!   into a private trait that the body crate implements for the header's type (`impl Bodies0 for
+//!   X { fn body_m(&self, ..) {..} }`), where `self` and `Self` mean what they did; the trait is
+//!   `Sized`, as `X` is, for a signature that names `Option<Self>`. Its function calls it.
 //! - The **app** crate is the binary: it depends on all of them, so that the linker finds the
 //!   bodies, and its `main` calls the header's.
 //!
@@ -142,6 +143,13 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
             format!("{uses}{}", std::mem::take(&mut splits.borrow_mut()[m].header))
         })
     );
+    // The proofs that statics are `Send` go as deep in the body crates as in the header.
+    let limit: String = tree
+        .header
+        .lines()
+        .filter(|l| l.starts_with("#![recursion_limit"))
+        .map(|l| format!("{l}\n"))
+        .collect();
     let mut bodies = Vec::new();
     for c in 0..crates {
         let text = nest(tree, &|m| {
@@ -157,7 +165,7 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
         });
         let text = format!(
             "//! Code of the translated program (see the header crate).\n\
-             #![allow(warnings)]\n\n{text}"
+             #![allow(warnings)]\n{limit}\n{text}"
         );
         bodies.push(vec![SourceFile { path: "lib.rs".into(), text }]);
     }
@@ -454,7 +462,7 @@ fn split_module(
                 }
                 if !decls.is_empty() {
                     body.push_str(&format!(
-                        "trait {bodies} {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
+                        "trait {bodies}: Sized {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
                     ));
                     traits += 1;
                 }
