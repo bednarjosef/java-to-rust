@@ -128,7 +128,10 @@ Naming:
   nothing below overrides keeps its own name.
 - Instance methods are named once per override group within the class trees the group reaches,
   so every implementation has the name its callers use; overload suffixes count the groups of a
-  name (`codegen/names.rs`). Overloads take their parameters' type names (`print_i32`), and
+  name (`codegen/names.rs`). A type also has its interfaces' methods, whose trees are their
+  own, so groups that each kept a bare name in their trees can still meet on a type that has
+  both (fastutil's `Reference2FloatMap`, with `put(K, float)` of its function interface and
+  `put(K, V)` of `Map`); the one found later is then numbered (`put_2`). Overloads take their parameters' type names (`print_i32`), and
   where those meet, as a `String[]` passed on as an `Object[]` is held as one, a number
   (`new_object_array_string_2`); constructors only need to differ from their own class's.
 - A field named `base` in a class that embeds a `base` is renamed `base_`.

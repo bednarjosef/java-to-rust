@@ -1,7 +1,7 @@
 //! Rust names for Java methods and locals: snake case, overload suffixes, keywords.
 
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Rust's keywords, strict and reserved, which a snake-cased Java name can be: `Return` and `If`
 /// are names of javac's `TreeMaker`, though Java's own keywords never name anything.
@@ -227,6 +227,7 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             name
         });
     }
+    separate_met_groups(class, &mut names, &mut group_names, &mut used);
     // The methods emitted on each struct (`Home::Class` or `Home::Fields` of a class).
     let mut on_struct: HashMap<usize, Vec<usize>> = HashMap::new();
     for (o, home) in homes.iter().enumerate() {
@@ -267,4 +268,81 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
         }
     }
     (names, group_names)
+}
+
+/// Renames the override groups that came to one name and meet on a type. A group's name is taken
+/// in the class trees of its methods, but a type also has the methods of its interfaces, whose
+/// trees are their own: fastutil's `Reference2FloatMap` extends both `Reference2FloatFunction`,
+/// whose `put(K, float)` is alone in its tree, and `Map`, whose `put(K, V)` is too, and its enum
+/// has a dispatcher for each. Of two groups of one name on a type, the one named later takes the
+/// first number after the name that is free in its trees and on that type; as the new name may
+/// meet another group elsewhere, the types are gone through again until no two meet.
+fn separate_met_groups(
+    class: &Class,
+    names: &mut [String],
+    group_names: &mut HashMap<usize, String>,
+    used: &mut [HashSet<String>],
+) {
+    let h = &class.hierarchy;
+    let instance = |m: usize| {
+        let method = &class.methods[m];
+        !method.is_ctor && !method.is_static && !method.is_main
+    };
+    loop {
+        // Only a name that two groups have can meet.
+        let mut groups_of: HashMap<&str, BTreeSet<usize>> = HashMap::new();
+        for (&group, name) in group_names.iter() {
+            groups_of.entry(name.as_str()).or_default().insert(group);
+        }
+        let shared: HashSet<String> = groups_of
+            .into_iter()
+            .filter(|(_, groups)| groups.len() > 1)
+            .map(|(n, _)| n.to_string())
+            .collect();
+        if shared.is_empty() {
+            return;
+        }
+        let mut renamed = false;
+        for t in 0..class.types.len() {
+            // The groups of each shared name among the methods that `t` has.
+            let mut met: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+            for s in h.supertypes(t) {
+                for &m in h.methods_of(s) {
+                    if m < class.methods.len() && instance(m) && shared.contains(&names[m]) {
+                        met.entry(names[m].clone()).or_default().insert(h.group_id(m));
+                    }
+                }
+            }
+            for (name, groups) in met {
+                // The first group keeps the name.
+                for &group in groups.iter().skip(1) {
+                    if group_names.get(&group) != Some(&name) {
+                        continue;
+                    }
+                    let members = h.group(group);
+                    let roots: BTreeSet<usize> =
+                        members.iter().map(|&o| h.root(class.methods[o].class)).collect();
+                    let free = |n: &String| {
+                        !roots.iter().any(|&r| used[r].contains(n))
+                            && !h
+                                .supertypes(t)
+                                .iter()
+                                .any(|&s| h.methods_of(s).iter().any(|&m| names.get(m) == Some(n)))
+                    };
+                    let fresh = (2..).map(|n| format!("{name}_{n}")).find(free).unwrap_or_default();
+                    for &r in &roots {
+                        used[r].insert(fresh.clone());
+                    }
+                    for &o in &members {
+                        names[o] = fresh.clone();
+                    }
+                    group_names.insert(group, fresh);
+                    renamed = true;
+                }
+            }
+        }
+        if !renamed {
+            return;
+        }
+    }
 }
