@@ -72,7 +72,7 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         // the JDK's (`CharacterName`), and its overlays get the messages of their own code, as
         // other overlays do.
         let decl = &class.types[method.class];
-        let jdk = super::exceptions::from_jdk(decl);
+        let jdk = super::exceptions::from_jdk(class, decl);
         let outer = decl.name.split('.').take(3).collect::<Vec<_>>().join(".");
         if jdk && decl.package == "java.lang" && crate::lower::is_standard(&outer) {
             continue;
@@ -125,7 +125,7 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
     // A position in the JDK's code may be in any of its many files: the message names the method.
     let ids: HashSet<ExprId> = missing.iter().map(|(_, id)| *id).collect();
     let mut in_jdk: HashMap<ExprId, &Method> = HashMap::new();
-    for m in class.methods.iter().filter(|m| super::exceptions::from_jdk(&class.types[m.class])) {
+    for m in class.methods.iter().filter(|m| super::exceptions::from_jdk(class, &class.types[m.class])) {
         for s in &m.body {
             let mut see = |x: &Expr| {
                 if ids.contains(&x.id) {
@@ -1129,7 +1129,7 @@ impl Messages<'_> {
                 }) =>
                 {
                     let rest = ty.strip_prefix(decl.package.as_str())?.strip_prefix('.')?;
-                    (super::exceptions::from_jdk(decl) && !decl.package.is_empty())
+                    (super::exceptions::from_jdk(self.class, decl) && !decl.package.is_empty())
                         .then(|| format!("{}.{}", decl.package, rest.replace('.', "$")))?
                 }
                 // A class that the program does not have: its name, unless it may be nested.
@@ -1198,7 +1198,7 @@ impl Messages<'_> {
         };
         let package = match decl.package.as_str() {
             "" => template_package()?,
-            _ if super::exceptions::from_jdk(decl) => decl.package.clone(),
+            _ if super::exceptions::from_jdk(self.class, decl) => decl.package.clone(),
             _ => return None,
         };
         let rest = decl.name.strip_prefix(&package)?.strip_prefix('.')?;
@@ -1213,7 +1213,9 @@ impl Messages<'_> {
         if is_object(decl) {
             return Some("java.lang.Object".to_string());
         }
-        if super::exceptions::from_jdk(decl) || decl.package.is_empty() && decl.name.starts_with("java.") {
+        if super::exceptions::from_jdk(self.class, decl)
+            || decl.package.is_empty() && decl.name.starts_with("java.")
+        {
             return self.java_class_at(t);
         }
         if !matches!(decl.origin, Origin::Member) {
