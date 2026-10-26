@@ -336,7 +336,7 @@ impl<'t> Lowering<'t> {
             {
                 let info = &self.methods[*index];
                 let Some(ret) = info.node.get("returnType") else { return Ok(None) };
-                Some(self.declared_type(ret, ret.java_type(), info.owner, Some(*index))?)
+                Some(self.declared_type(ret, self.return_java_type(*index, ret), info.owner, Some(*index))?)
             }
             // (A call that reads a field, as one through a field offset does, has the field's type
             // already.)
