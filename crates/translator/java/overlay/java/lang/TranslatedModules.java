@@ -1,6 +1,7 @@
 package java.lang;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -104,18 +105,60 @@ public final class TranslatedModules {
 
     /**
      * {@code loader.getResources(name)}: nothing when the loader finds no resource of that name,
-     * as in Java. The translation's loaders find a resource exactly when {@code getResource} does,
-     * and throw then, as no resource is in the translation; a loader of the program's own that
-     * gives a URL throws here too, as its enumeration would need the URLs of the loaders
-     * between.
+     * as in Java. The translation's loaders find a resource exactly when {@code getResource} does:
+     * the system class loader's on the class path are each directory's that has it
+     * ({@link Module#classPathResources}); any other throws as {@code getResource} does, and a
+     * loader of the program's own that gives a URL throws here too, as its enumeration would need
+     * the URLs of the loaders between.
      */
     public static Enumeration<URL> resources(ClassLoader loader, String name) throws IOException {
         URL url = loader.getResource(name);
-        if (url != null) {
-            throw new UnsupportedOperationException("the resources " + name + " that " + loader
-                    + " finds, with " + url + ": code that is not in the translation cannot run");
+        if (url == null) {
+            return Collections.emptyEnumeration();
         }
-        return Collections.emptyEnumeration();
+        if (loader == ClassLoader.getSystemClassLoader()) {
+            return Collections.enumeration(Module.classPathResources(name, true));
+        }
+        throw new UnsupportedOperationException("the resources " + name + " that " + loader
+                + " finds, with " + url + ": code that is not in the translation cannot run");
+    }
+
+    /**
+     * {@code c.getResource(name)}, as Java's: the name taken from the class's package unless it
+     * starts with {@code /}, and found by the class's loader. A class file is not there, as the
+     * program's classes were translated from their sources (javac's {@code -XDshowClass} asks
+     * for one it cannot find). Nor is a resource of the JDK's modules: its data files, such as
+     * {@code CharacterName}'s {@code uniName.dat}, are made when the JDK is built and are not in
+     * its sources, so asking for one ends the program.
+     */
+    public static URL classResource(Class<?> c, String name) {
+        String resolved = resolveName(c, name);
+        return resolved.endsWith(".class") ? null : loaderOfResource(c, name).getResource(resolved);
+    }
+
+    /** {@code c.getResourceAsStream(name)}: the class's loader's stream of the name, or null. */
+    public static InputStream classResourceAsStream(Class<?> c, String name) {
+        String resolved = resolveName(c, name);
+        return resolved.endsWith(".class") ? null : loaderOfResource(c, name).getResourceAsStream(resolved);
+    }
+
+    // The class loader that finds the resources of `c`, which is not one of the JDK's.
+    private static ClassLoader loaderOfResource(Class<?> c, String name) {
+        ClassLoader loader = classLoaderOf(c);
+        if (loader == null || loader == ClassLoader.getPlatformClassLoader()) {
+            throw new InternalError("the resource " + name + " of " + c.getName()
+                    + " is not part of the translated program");
+        }
+        return loader;
+    }
+
+    // Java's `Class.resolveName`.
+    private static String resolveName(Class<?> c, String name) {
+        if (name.startsWith("/")) {
+            return name.substring(1);
+        }
+        String base = c.getPackageName();
+        return base.isEmpty() ? name : base.replace('.', '/') + "/" + name;
     }
 
     /** {@code ClassLoader.getSystemResources(name)}. */

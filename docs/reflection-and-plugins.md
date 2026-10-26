@@ -141,13 +141,20 @@ program where such a lookup can happen, so they can be checked before the progra
   modules and then the roots without a `module-info.java` (the class path), and a file in a
   package of a named module is found only if it is a class file or the module opens the package
   to all, as in Java. A lookup that finds nothing gives `null` or an empty enumeration, as Java
-  does; one that finds a resource throws `UnsupportedOperationException` saying "code that is
-  not in the translation cannot run", since the translation has no resources and its URL would
-  depend on how the Java program was deployed (`jar:file:…!/name` or `file:…`). A top-level class
+  does. The class path's resources are read from its directories, the roots without a
+  `module-info.java`, when the program runs, as Java's `URLClassPath` reads a directory
+  (`Module.classPathResources` in `java/patches/java/lang/Module.java`, over the native
+  `classPath0`, the roots' absolute paths): the URL of the first directory that has the file or
+  directory, `file:/…/name`, ending in `/` where the name does, and its stream; a name that
+  leaves the directory is not there. The translated program reads them where the translator
+  found them, so it must run where those roots are. Any other resource that a lookup finds, a
+  named module's or a class file, throws `UnsupportedOperationException` saying "code that is
+  not in the translation cannot run", since the translation has neither. A top-level class
   declared in a file of another name has a class file that is not found. `getResources` is
   `TranslatedModules.resources` (`MODULE_CALLS`), and `getSystemResources` its
-  `systemResources`; they are empty exactly when `getResource` is `null`, which holds for the
-  translation's loaders and for a loader of the program's own that overrides only
+  `systemResources`: the system loader's are each class path directory's that has the name, and
+  any other loader's are empty exactly when `getResource` is `null`, which holds for the
+  translation's other loaders and for a loader of the program's own that overrides only
   `findResource`.
   `URLClassLoader` is patched by the translator (`java/patches/java/net/URLClassLoader.java`). It
   finds what its parent finds and nothing of its own. A class or resource that is in one of its

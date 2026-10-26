@@ -151,7 +151,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 |---|---|
 | `java/io/PrintStream.java` | encodes text itself with `String.getBytes` instead of through a `StreamEncoder` |
 | `java/io/InputStreamReader.java`, `OutputStreamWriter.java` | decode and encode the charsets themselves instead of through `StreamDecoder` and `StreamEncoder`, all but UTF-16 with its byte-order mark; `getEncoding` is the charset's historical name, from the runtime |
-| `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; no layers but the boot layer, and no dynamic modules: the module of a proxy class in one throws |
+| `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; the class path's resources read from its directories when the program runs; no layers but the boot layer, and no dynamic modules: the module of a proxy class in one throws |
 | `java/lang/Package.java` | a package of the translation, made by `Class.getPackage()`; the manifest attributes of an unnamed module's package and every package's annotations throw; not an `AnnotatedElement`; `getPackage(name)` and `getPackages()` throw, as the lowering answers or rejects their calls |
 | `java/lang/reflect/Proxy.java` | defines and finds the proxy classes that the translator wrote through `TranslatedProxies` (`program/reach/proxies.rs`), without generating or caching classes; `InvocationHandler.invokeDefault` throws |
 | `java/net/InetAddress.java`, `Inet4AddressImpl.java`, `Inet6AddressImpl.java` | names looked up by the system through `TranslatedNet`; no hosts file and no resolver of the program's own |
@@ -166,6 +166,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/security/SecureRandom.java` | `new SecureRandom()` and `getInstance(String)` make the `SUN` provider's generators (`NativePRNG` and its blocking and non-blocking variants, `SHA1PRNG`) by name through `TranslatedRandoms`, the default one as `SUN` chooses it; `getProvider()` is null. `DRBG`, which reads the security properties, throws a `ProviderException` that says it is not supported yet |
 | `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |
 | `java/net/URLClassLoader.java` | finds only what its parent finds; code from its URLs fails loudly |
+| `sun/net/www/protocol/jar/Handler.java` | opening a connection to a `jar:` URL throws: reading a jar's entries needs the checks of signed jars, which are security code. Every URL a program makes reaches the jar handler, so without this any connection would reach those checks |
 | `java/nio/file/DirectoryIteratorException.java`, `InvalidPathException.java` | constructors that do not throw |
 | `java/nio/file/TempFileHelper.java` | names from `java.util.Random` instead of `SecureRandom` |
 | `java/util/PropertyResourceBundle.java` | reads a stream through `TranslatedPropertyFiles` |

@@ -16,3 +16,15 @@ class ThreadLocal {
         }
     }
 }
+
+// The translator's patch of `Module` (`java/patches/java/lang/Module.java`), whose class path the
+// runtime's `ClassLoader` reads resources from.
+class Module {
+    static java.util.ArrayList<java.net.URL> classPathResources(String name, boolean all) {
+        return null;
+    }
+
+    static java.io.InputStream openFile(java.net.URL url) throws java.io.IOException {
+        return null;
+    }
+}

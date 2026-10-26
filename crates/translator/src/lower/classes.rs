@@ -16,36 +16,7 @@ use super::*;
 /// (`class_enum_constants`).
 pub(crate) const ENUM_CONSTANTS: &str = "getEnumConstants";
 
-/// Whether the resource name `node` certainly ends in `.class`: a string literal that does, or a
-/// concatenation whose last operand is one (`'/' + name.replace('.', '/') + ".class"`).
-fn names_class_file(node: Node) -> bool {
-    match node.kind() {
-        "STRING_LITERAL" => node.str("value").ends_with(".class"),
-        "PLUS" => node.get("rightOperand").is_some_and(names_class_file),
-        "PARENTHESIZED" => node.get("expression").is_some_and(names_class_file),
-        _ => false,
-    }
-}
-
 impl<'t> Lowering<'t> {
-    /// `getResource(name)` or `getResourceAsStream(name)` of a class file, `node`: `null`, after
-    /// `name` for its effects (see `names_class_file`).
-    fn no_class_file(&self, node: Node<'t>, name: Node<'t>) -> Result<ExprKind, Error> {
-        let pos = node.pos();
-        let name = self.expr(name)?;
-        if !has_effects(&name) {
-            return Ok(ExprKind::Null);
-        }
-        let null = self.synth(ExprKind::Null, pos, self.ty(node, node.java_type())?);
-        Ok(ExprKind::Switch {
-            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
-            cases: vec![Case {
-                labels: vec![CaseLabel::Default],
-                body: vec![Stmt::Expr(name), Stmt::Yield(null)],
-            }],
-        })
-    }
-
     /// Whether `node`, an `==` or `!=`, compares the classes of objects of the program or class
     /// literals of its classes, by name (see the module's comment).
     pub(super) fn compares_classes(&self, node: Node<'t>) -> bool {
@@ -125,10 +96,6 @@ impl<'t> Lowering<'t> {
             ("getName" | "getSimpleName", []) if is_get_class(receiver) && self.named_class(receiver) => {
                 return Ok(None);
             }
-            // A translated program has no resources, not even the JDK's data files, such as
-            // `CharacterName`'s `uniName.dat` or `Currency`'s `currency.data`, which are generated
-            // when the JDK is built and are not in its source: the program ends when it reads one
-            // (`Builtin::MissingResource`).
             ("isInstance", [x]) => {
                 let (class, x) = (self.expr(receiver)?, self.expr(*x)?);
                 return Ok(Some(self.class_is_instance(class, x)));
@@ -150,19 +117,9 @@ impl<'t> Lowering<'t> {
                 let class = self.expr(receiver)?;
                 return Ok(Some(self.class_enum_constants(node, class, true)?));
             }
-            // A class file, which a name that ends in `.class` names, is not in the translation
-            // either: the program's classes were translated from their source. Such a resource
-            // is one that is not there, for which Java answers `null`, as javac's
-            // `-XDshowClass` expects of a class it cannot find.
-            ("getResourceAsStream" | "getResource", [name]) if names_class_file(*name) => {
-                return Ok(Some(self.no_class_file(node, *name)?));
-            }
-            // `getResource` too; and a class's protection domain, the code source it was loaded
-            // from, which is no more in the translation than a resource is.
-            ("getResourceAsStream" | "getResource", [name]) => {
-                let class = self.class_name_text(node, receiver);
-                return Ok(Some(ExprKind::Builtin(Builtin::MissingResource, vec![class, self.expr(*name)?])));
-            }
+            // A class's resources are its class loader's (`TranslatedModules.classResource`,
+            // `MODULE_CALLS`). Its protection domain, the code source it was loaded from, is not
+            // in the translation: the program ends when it asks (`Builtin::MissingResource`).
             ("getProtectionDomain", []) => {
                 let class = self.class_name_text(node, receiver);
                 let what = self.synth(

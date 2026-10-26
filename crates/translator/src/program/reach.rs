@@ -581,8 +581,25 @@ type Member = (&'static str, &'static str, &'static str);
 /// the standard method that calls them: reachability does not read the standard classes' code.
 /// What a new thread calls to copy its parent's inheritable thread locals is reached by
 /// `setInheritableThreadLocals`, with which a program has that copy
-/// (`lower/exceptions.rs`).
+/// (`lower/exceptions.rs`). A class loader's resource lookups read the class path's files
+/// through `Module`'s methods (`java/Threads.java`).
 const STANDARD_CALLS: &[(Member, Member)] = &[
+    (("java.lang.ClassLoader", "getResource", "(java.lang.String)java.net.URL"), CLASS_PATH_RESOURCES),
+    (("java.lang.ClassLoader", "findResource", "(java.lang.String)java.net.URL"), CLASS_PATH_RESOURCES),
+    (("java.lang.ClassLoader", "getSystemResource", "(java.lang.String)java.net.URL"), CLASS_PATH_RESOURCES),
+    (
+        ("java.lang.ClassLoader", "getResourceAsStream", "(java.lang.String)java.io.InputStream"),
+        CLASS_PATH_RESOURCES,
+    ),
+    (("java.lang.ClassLoader", "getResourceAsStream", "(java.lang.String)java.io.InputStream"), OPEN_FILE),
+    (
+        ("java.lang.ClassLoader", "getSystemResourceAsStream", "(java.lang.String)java.io.InputStream"),
+        CLASS_PATH_RESOURCES,
+    ),
+    (
+        ("java.lang.ClassLoader", "getSystemResourceAsStream", "(java.lang.String)java.io.InputStream"),
+        OPEN_FILE,
+    ),
     (
         ("java.lang.Throwable", "printStackTrace", "(java.io.PrintStream)void"),
         ("java.io.PrintStream", "println", "(java.lang.String)void"),
@@ -604,6 +621,11 @@ const STANDARD_CALLS: &[(Member, Member)] = &[
         ),
     ),
 ];
+
+/// `Module`'s lookup of a resource in the class path's directories, and its opening of one.
+const CLASS_PATH_RESOURCES: Member =
+    ("java.lang.Module", "classPathResources", "(java.lang.String,boolean)java.util.ArrayList<java.net.URL>");
+const OPEN_FILE: Member = ("java.lang.Module", "openFile", "(java.net.URL)java.io.InputStream");
 
 /// The methods that answer which class called the method that calls them: the lowering makes the
 /// answer the class of each call of that method (`lower/callers.rs`), so reachability does not
@@ -2001,6 +2023,15 @@ pub const MODULE_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.lang.Class", "getPackage", "()java.lang.Package"),
         ("packageOf", "(java.lang.Class<?>)java.lang.Package"),
+    ),
+    // A class's resources, which its class loader finds.
+    (
+        ("java.lang.Class", "getResource", "(java.lang.String)java.net.URL"),
+        ("classResource", "(java.lang.Class<?>,java.lang.String)java.net.URL"),
+    ),
+    (
+        ("java.lang.Class", "getResourceAsStream", "(java.lang.String)java.io.InputStream"),
+        ("classResourceAsStream", "(java.lang.Class<?>,java.lang.String)java.io.InputStream"),
     ),
     // Not a module, but an `Enumeration` of the JDK, which the runtime's `ClassLoader` cannot
     // make (`java/Threads.java`).

@@ -73,6 +73,12 @@ extract() {
   (cd "$cache/jar" && unzip -q "$jar")
   echo "main class: $(cat "$cache/jar/META-INF/main-class")"
   echo "$(find "$cache/jar/META-INF/libraries" -name '*.jar' | wc -l) library jars"
+  # The server's resources, the files of its jar other than its classes and its META-INF: the
+  # data packs, assets and version.json, which the translated server reads from this root of the
+  # class path as Java reads them from the jar.
+  rm -rf "$cache/resources" && mkdir -p "$cache/resources/server"
+  unzip -q "$(server_jar)" -x '*.class' 'META-INF/*' -d "$cache/resources/server"
+  echo "$(find "$cache/resources/server" -type f | wc -l) resource files"
 }
 
 # Fetches a jar from Maven Central into the cache, unless it is there, and checks its SHA-1.
@@ -422,8 +428,9 @@ census() {
   fi
   mkdir -p "$out"
   [ -f "$jdk_sources/modules.txt" ] || { echo "no $jdk_sources/modules.txt (run the jdk-sources step)" >&2; exit 1; }
-  local -a libraries
+  local -a libraries resources=()
   mapfile -t libraries < <(library_args)
+  [ -d "$cache/resources/server" ] && resources=(--library "$cache/resources/server")
   local main
   main=$(cat "$cache/jar/META-INF/main-class")
   # --timings prints each phase's time and the peak memory of the translator and of javac.
@@ -437,7 +444,7 @@ census() {
   fi
   set +e
   "${slot[@]}" "${cap[@]}" "$translator" --timings --main "$main" "$cache/src/server/${main//.//}.java" \
-    --library "$cache/src/server" "${libraries[@]}" \
+    --library "$cache/src/server" "${resources[@]}" "${libraries[@]}" \
     --census --keep-going --named-locals --census-json "$out/census.json" --modules-json "$out/modules.json" \
     "${trial[@]}" > "$out/census.txt" 2> "$out/stderr.txt"
   local code=$?
