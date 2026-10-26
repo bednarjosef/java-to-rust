@@ -8,11 +8,12 @@ use std::rc::Rc;
 
 impl<'t> Lowering<'t> {
     /// Whether a member of the class `class` is lowered: in a whole program only reachable
-    /// members are, in a single file all of them. A native method never is: it has no body, and
-    /// its calls become the runtime's code or are rejected (`native_call`).
+    /// members are, in a single file all of them. A native method has no body, and its calls
+    /// become the runtime's code or are rejected (`native_call`), so it is not lowered, but for
+    /// one that a call of a method it implements or overrides may run (`native_dispatch`).
     pub(super) fn keeps(&self, member: Node<'t>, class: &str) -> bool {
         if member.kind() == "METHOD" && member.has_flag("NATIVE") {
-            return false;
+            return self.native_dispatch(member, class);
         }
         if self.standard.has(class) {
             return self.standard.keeps(member, class);
@@ -21,6 +22,21 @@ impl<'t> Lowering<'t> {
             return true;
         }
         self.reach.is_none_or(|reach| reach.member(class, member.0))
+    }
+
+    /// Whether the native method `member` of class `class` is lowered as a method whose body calls
+    /// it: in a whole program, a reachable instance method that is not private, and that the
+    /// runtime does not implement, as `sun.management.VMManagementImpl`'s natives implement
+    /// `VMManagement`'s methods. A call of the method it implements may run it, which needs a
+    /// method to dispatch to; its body is the native's call (`Native::Missing`), which rejects
+    /// the program where it can run, and in a census is the stub of that.
+    pub(super) fn native_dispatch(&self, member: Node<'t>, class: &str) -> bool {
+        let Some(reach) = self.reach else { return false };
+        let signature = member.symbol().map_or("", |s| s.ty);
+        !member.has_flag("STATIC")
+            && !member.has_flag("PRIVATE")
+            && crate::ast::declared_native(class, member.str("name"), signature).is_none()
+            && reach.member(class, member.0)
     }
 
     /// The only branch of an `if` or a `?:` that can run, when reachability skipped the other

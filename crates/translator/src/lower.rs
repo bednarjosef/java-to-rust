@@ -651,6 +651,7 @@ impl<'t> Lowering<'t> {
             Some(_) if self.body_methods.contains(&index) => self.interface_default(index, &params, ret)?,
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
+            None if node.has_flag("NATIVE") => self.native_body(index, &params, ret),
             None => return unsupported(node, "methods without a body"),
         };
         let params = if is_ctor && self.stubbing.get() {

@@ -3682,6 +3682,25 @@ fn a_census_takes_the_arguments_of_a_native_that_the_runtime_lacks_as_code_that_
     assert_lacks(&census.report, &["NullPointerException"]);
 }
 
+#[test]
+fn a_census_calls_a_native_that_the_runtime_lacks_through_the_interface_it_implements() {
+    // `VMManagementImpl`'s natives implement `VMManagement`'s methods: a call through the
+    // interface runs the native of the implementing class, which the census lists.
+    let dir = write_sources(
+        "census_native_dispatch",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    interface Management {\n        long total();\n    }\n    static class Impl implements Management {\n        public native long total();\n    }\n    static long count(Management m) {\n        return m.total();\n    }\n    public static void main(String[] a) {\n        System.out.println(a.length > 3 ? count(new Impl()) : 0);\n    }\n}\n",
+        )],
+    );
+    let program =
+        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ends_rejected: true, ..Default::default() };
+    let census = census(&program);
+    assert_contains(&census.report, &["p.Main.Impl.total"]);
+    let rust = census.modules.expect("a translation").one_file();
+    assert_contains(&rust, &["fn total(this: &"]);
+}
+
 /// A program whose census takes a round of the analyses for each kind of check that rejects code
 /// (`a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round`).
 const ROUNDS: &str = r#"public class Main {
