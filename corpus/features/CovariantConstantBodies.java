@@ -71,9 +71,11 @@ public class CovariantConstantBodies {
     }
 
     public static void main(String[] args) {
+        for (Reader r : Policy.values()) {
+            System.out.println(r + " " + r.read("12"));
+        }
         for (Policy p : Policy.values()) {
-            Reader r = p;
-            System.out.println(p + " " + r.read("12") + " " + p.read("8"));
+            System.out.println(p + " " + p.read("8"));
         }
         System.out.println(Policy.WHOLE.read("7").intValue() + 1);
         for (Version v : Version.values()) {

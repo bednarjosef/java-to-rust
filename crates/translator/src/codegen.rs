@@ -225,7 +225,11 @@ impl Setup {
         // The names of methods are made in the program's modules, before any is written.
         let _modules = modules::enter(class);
         let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
+        let start = std::time::Instant::now();
         let (fn_names, group_names) = method_names(class, &homes);
+        if crate::timings::enabled() {
+            eprintln!("timing: codegen: method names: {:.3} s", start.elapsed().as_secs_f64());
+        }
         // The methods that may be emitted in the `impl` of each class's struct (`emitted_in`),
         // in index order.
         let mut struct_methods: HashMap<usize, Vec<usize>> = HashMap::new();
