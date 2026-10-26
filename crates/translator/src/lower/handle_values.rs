@@ -1002,7 +1002,11 @@ impl<'t> Lowering<'t> {
         let mut before = Vec::new();
         for part in receiver.into_iter().chain(node.list("arguments")) {
             if !quiet(part) {
-                before.push(Stmt::Expr(self.expr(part)?));
+                // A local of the value's type, which an expression statement of `new Object[] { null }`
+                // would leave to inference.
+                let value = self.expr(part)?;
+                let name = self.fresh_name("unfollowed");
+                before.push(Stmt::Local { ty: value.ty, name, init: Some(value), pos });
             }
         }
         let message = format!("{what} of a handle or arguments that the translation does not follow");

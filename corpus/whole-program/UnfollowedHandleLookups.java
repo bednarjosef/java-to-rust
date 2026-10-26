@@ -68,9 +68,22 @@ public class UnfollowedHandleLookups {
         }
     }
 
+    // An argument that does something, evaluated before the call throws: an array of a null.
+    static boolean nullBound() {
+        try {
+            MethodHandle isNull = MethodHandles.lookup()
+                    .findStatic(java.util.Objects.class, "isNull", methodType(boolean.class, Object.class));
+            MethodHandle bound = MethodHandles.insertArguments(isNull, 0, new Object[] {null});
+            return (boolean) bound.invokeExact();
+        } catch (Throwable t) {
+            return java.util.Objects.isNull(null);
+        }
+    }
+
     public static void main(String[] args) {
         System.out.println(isVirtual(Thread.currentThread()));
         System.out.println(nameLength());
         System.out.println(trimmedLength(" abc "));
+        System.out.println(nullBound());
     }
 }
