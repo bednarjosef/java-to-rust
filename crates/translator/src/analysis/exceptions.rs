@@ -1472,9 +1472,11 @@ fn expr_points(
             let mut points = Vec::new();
             expr_points(class, facts, m, call, frames, safe, &mut points);
             let receiver = guarded_receiver(call);
-            out.extend(points.into_iter().filter(|p| {
-                !matches!(p.raise, Raise::Runtime { id, .. } if Some(id) == receiver)
-            }));
+            out.extend(
+                points
+                    .into_iter()
+                    .filter(|p| !matches!(p.raise, Raise::Runtime { id, .. } if Some(id) == receiver)),
+            );
             return;
         }
         _ => {}

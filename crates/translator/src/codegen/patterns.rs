@@ -17,8 +17,7 @@ impl<'a> Gen<'a> {
             Some(value) if !self.nullable(&args[0]) => self.value(value, ty),
             // `NullChecked(v, v)`: the variable itself, not null: the enclosing instance of
             // `v.new Inner()` (`lower::inner`), which javac checks with `Objects.requireNonNull`.
-            Some(value)
-                if matches!((&args[0].kind, &value.kind), (ExprKind::Var(a), ExprKind::Var(b)) if a == b) =>
+            Some(value) if matches!((&args[0].kind, &value.kind), (ExprKind::Var(a), ExprKind::Var(b)) if a == b) =>
             {
                 let option = self.expr(value).text;
                 Code::atom(self.dereference(&[args[0].id], &option))

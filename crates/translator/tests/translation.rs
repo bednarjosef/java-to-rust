@@ -3313,7 +3313,10 @@ fn a_superclass_with_errors_leaves_the_names_of_the_classes_that_extend_it() {
     let dir = write_sources(
         "superclass_errors_names",
         &[
-            ("p/Base.java", "package p;\npublic class Base {\n    void f(int a, int b) {}\n    void g() { f(); }\n}\n"),
+            (
+                "p/Base.java",
+                "package p;\npublic class Base {\n    void f(int a, int b) {}\n    void g() { f(); }\n}\n",
+            ),
             (
                 "p/Main.java",
                 "package p;\npublic class Main extends Base {\n    static String name(Main m) { return m.toString(); }\n    public static void main(String[] a) {\n        try {\n            name(null);\n        } catch (NullPointerException e) {\n            System.out.println(e.getMessage());\n        }\n    }\n}\n",
