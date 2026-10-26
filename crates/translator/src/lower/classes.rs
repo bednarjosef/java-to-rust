@@ -58,6 +58,15 @@ impl<'t> Lowering<'t> {
             let x = self.expr(node.list("arguments").next().expect("comparableClassFor has an argument"))?;
             return Ok(Some(ExprKind::Builtin(Builtin::ComparableClassFor, vec![x])));
         }
+        if (symbol.owner, symbol.name) == ("sun.security.jca.TranslatedServices", "securityProperties") {
+            return Ok(Some(match super::system::security_file() {
+                Some(text) => ExprKind::Str(text.to_string()),
+                None => ExprKind::Null,
+            }));
+        }
+        if crate::program::constructs_services(node.0) {
+            return Ok(Some(self.constructed_service(node)?));
+        }
         if crate::program::is_ensure_initialized(node.0) {
             return Ok(Some(self.ensure_initialized(node)?));
         }

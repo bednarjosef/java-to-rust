@@ -21,6 +21,7 @@ mod initialize;
 mod proxies;
 mod reflection;
 mod sequential;
+mod services;
 mod stubs;
 
 pub use by_name::{
@@ -30,6 +31,7 @@ pub use by_name::{
 pub use initialize::{is_ensure_initialized, literal_class};
 pub use proxies::ProxyClass;
 pub use reflection::{Kind as LookupKind, Lookup, lookup};
+pub use services::constructs as constructs_services;
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -107,6 +109,9 @@ pub struct Reach {
     /// The proxy classes of the lists of interfaces that reachable code makes proxies of
     /// (`proxies.rs`).
     pub proxies: BTreeMap<Vec<String>, ProxyClass>,
+    /// The classes, by binary name, that providers register for the services that reachable code
+    /// looks up, which `TranslatedServices` makes by name (`services.rs`).
+    pub service_classes: BTreeSet<String>,
     /// The modules of the program's roots, which its `java.lang.Module` and `ClassLoader` answer with
     /// (`modules::contents`, `lower/modules.rs`); set after reachability.
     pub modules: Vec<super::modules::Contents>,
@@ -140,6 +145,7 @@ impl Reach {
         lines.extend(self.found_by_name.iter().map(|c| format!("found {c}")));
         lines.extend(self.services.iter().map(|s| format!("service {s:?}")));
         lines.extend(self.reflected.iter().map(|r| format!("reflected {r:?}")));
+        lines.extend(self.service_classes.iter().map(|c| format!("service class {c}")));
         lines.extend(
             self.proxies.iter().map(|(interfaces, made)| format!("proxy {interfaces:?} {}", made.class)),
         );
@@ -266,7 +272,10 @@ pub const TRANSLATED_NESTED: &[&str] = &[
 /// `ObjectMethods` and `SwitchBootstraps` are the bootstrap methods of `invokedynamic` for a
 /// record's methods and a `switch` on patterns, which the translation makes without them; only a
 /// class name that code computes, which `Class.forName` initializes (`reach::by_name`), reaches
-/// them, and their static state is method handles.
+/// them, and their static state is method handles. The `ChaCha20` ciphers of `SunJCE`, which read
+/// arrays through method handles that the translation does not follow and whose MAC computes in
+/// `sun.security.util.math`, and its key generators and MACs for TLS and SSL, which serve only
+/// JSSE, are not translated: their services fail when made (`reach/services.rs`).
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
@@ -274,6 +283,9 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.invoke.", "reflection"),
     ("java.lang.runtime.ObjectMethods", "reflection"),
     ("java.lang.runtime.SwitchBootstraps", "reflection"),
+    ("com.sun.crypto.provider.ChaCha20", "security"),
+    ("com.sun.crypto.provider.SslMac", "security"),
+    ("com.sun.crypto.provider.Tls", "security"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
     // There is no security manager (`System.getSecurityManager()` is null, see `lower::system`).
@@ -342,8 +354,7 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.util.SignatureFileVerifier",
     // Message digests, as javac's `-XDshowClass` computes a class file's checksum: the JDK's
     // own code of `MessageDigest` and of the `SUN` provider's digests, which
-    // `MessageDigest.getInstance` makes directly (`java/patches/java/security/MessageDigest.java`,
-    // `java/overlay/sun/security/provider/TranslatedDigests.java`).
+    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below).
     "java.security.DigestException",
     "java.security.DigestInputStream",
     "java.security.DigestOutputStream",
@@ -374,7 +385,6 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.provider.SHA5.SHA512",
     "sun.security.provider.SHA5.SHA512_224",
     "sun.security.provider.SHA5.SHA512_256",
-    "sun.security.provider.TranslatedDigests",
     // The interface of digests that take a key, which `MessageDigest`'s own `Delegate`
     // implements.
     "sun.security.util.MessageDigestSpi2",
@@ -400,10 +410,9 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.security.spec.InvalidParameterSpecException",
     // Secure random numbers, as `UUID.randomUUID` makes them: the JDK's own code of
     // `SecureRandom` and of the `SUN` provider's generators, which `new SecureRandom()` and
-    // `SecureRandom.getInstance` make directly (`java/patches/java/security/SecureRandom.java`,
-    // `java/overlay/sun/security/provider/TranslatedRandoms.java`), and of their seed sources,
-    // the operating system's random devices. Of `SunEntries`, the `SUN` provider's
-    // registrations, only the choice of the default generator is reached.
+    // `SecureRandom.getInstance` look up as the JDK does (see the lookup below), and of their
+    // seed sources, the operating system's random devices. `SunEntries` is the `SUN` provider's
+    // registrations.
     "java.security.SecureRandom",
     "java.security.SecureRandom.StrongPatternHolder",
     "java.security.SecureRandomParameters",
@@ -424,11 +433,9 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.provider.SeedGenerator.ThreadedSeedGenerator",
     "sun.security.provider.SeedGenerator.URLSeedGenerator",
     "sun.security.provider.SunEntries",
-    "sun.security.provider.TranslatedRandoms",
     // Key pairs, as a server makes one as it starts: the JDK's own code of `KeyPairGenerator` and
-    // of the `SunRsaSign` provider's RSA keys, which `KeyPairGenerator.getInstance` makes directly
-    // (`java/patches/java/security/KeyPairGenerator.java`,
-    // `java/overlay/sun/security/jca/TranslatedServices.java`).
+    // of the `SunRsaSign` provider's RSA keys, which `KeyPairGenerator.getInstance` looks up as
+    // the JDK does (see the lookup below).
     "java.security.KeyPair",
     "java.security.KeyPairGenerator",
     "java.security.KeyPairGenerator.Delegate",
@@ -438,7 +445,6 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.jca.TranslatedServices",
     "sun.security.rsa.RSAKeyPairGenerator",
     "sun.security.rsa.RSAKeyPairGenerator.Legacy",
-    "sun.security.rsa.TranslatedRsa",
     "java.security.interfaces.RSAKey",
     "java.security.interfaces.RSAPrivateCrtKey",
     "java.security.interfaces.RSAPrivateKey",
@@ -504,6 +510,93 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.util.ByteArrayLexOrder",
     "sun.security.util.ByteArrayTagOrder",
     "sun.security.util.InternalPrivateKey",
+    // The lookup of security services by name, as the JDK does it: the registered providers
+    // (`Security`, `ProviderList`, `ProviderConfig`), the JDK's own providers and their
+    // registrations, and `GetInstance`, which asks them for a service and makes its
+    // implementation (`java/patches/java/security/Provider.java`,
+    // `java/overlay/sun/security/jca/TranslatedServices.java`, `reach/services.rs`). The
+    // services' classes are translated as other code is, but only those of a type that
+    // reachable code looks up; a provider that is not translated, such as `SunPKCS11`, is not
+    // there, and the JSSE, X.509 and PKIX services, which are not translated, fail when made.
+    "java.security.Provider",
+    "java.security.Provider.EngineDescription",
+    "java.security.Provider.OPType",
+    "java.security.Provider.Service",
+    "java.security.Provider.ServiceKey",
+    "java.security.Provider.UString",
+    "java.security.Security",
+    "java.security.Security.Criteria",
+    "java.security.Security.ProviderProperty",
+    "java.security.Security.SecPropLoader",
+    "java.security.Security.SecPropLoader.LoadingMode",
+    "sun.security.jca.GetInstance",
+    "sun.security.jca.GetInstance.Instance",
+    "sun.security.jca.ProviderConfig",
+    "sun.security.jca.ProviderConfig.ProviderLoader",
+    "sun.security.jca.ProviderList",
+    "sun.security.jca.ProviderList.PreferredEntry",
+    "sun.security.jca.ProviderList.PreferredList",
+    "sun.security.jca.ProviderList.ServiceIterator",
+    "sun.security.jca.Providers",
+    "sun.security.jca.ServiceId",
+    "sun.security.provider.Sun",
+    "sun.security.rsa.SunRsaSign",
+    "sun.security.rsa.SunRsaSignEntries",
+    "sun.security.ssl.SunJSSE",
+    "sun.security.ec.SunEC",
+    "sun.security.ec.SunEC.ProviderService",
+    "sun.security.ec.SunEC.ProviderServiceA",
+    "java.security.KeyStore",
+    "java.security.KeyStore.Builder",
+    "java.security.KeyStore.CallbackHandlerProtection",
+    "java.security.KeyStore.Entry",
+    "java.security.KeyStore.Entry.Attribute",
+    "java.security.KeyStore.LoadStoreParameter",
+    "java.security.KeyStore.PasswordProtection",
+    "java.security.KeyStore.PrivateKeyEntry",
+    "java.security.KeyStore.ProtectionParameter",
+    "java.security.KeyStore.SecretKeyEntry",
+    "java.security.KeyStore.SimpleLoadStoreParameter",
+    "java.security.KeyStore.TrustedCertificateEntry",
+    "java.security.KeyStoreSpi",
+    "java.security.cert.CertificateFactory",
+    "java.security.cert.CertificateFactorySpi",
+    "java.security.cert.CertStoreParameters",
+    "java.security.AlgorithmParameterGenerator",
+    "java.security.AlgorithmParameterGeneratorSpi",
+    "java.security.spec.ECField",
+    "java.security.spec.ECFieldF2m",
+    "java.security.spec.ECFieldFp",
+    "java.security.spec.ECParameterSpec",
+    "java.security.spec.ECPoint",
+    "java.security.spec.EllipticCurve",
+    "sun.security.provider.ParameterCache",
+    "sun.security.util.CurveDB",
+    "sun.security.util.IOUtils",
+    "sun.security.util.NamedCurve",
+    "sun.security.util.PBEUtil",
+    "sun.security.util.PBKDF2Parameters",
+    "sun.security.util.PBEUtil.PBES2Params",
+    "sun.security.util.SafeDHParameterSpec",
+    "sun.security.util.SecurityProperties",
+    "sun.security.util.KeyUtil",
+    "java.security.AlgorithmConstraints",
+    "java.security.AllPermission",
+    "java.security.AllPermissionCollection",
+    "java.security.CryptoPrimitive",
+    "sun.security.util.AbstractAlgorithmConstraints",
+    "sun.security.util.AlgorithmDecomposer",
+    "sun.security.util.CryptoAlgorithmConstraints",
+    "sun.security.util.CryptoAlgorithmConstraints.CryptoHolder",
+    "sun.security.util.PropertyExpander",
+    "sun.security.util.PropertyExpander.ExpandException",
+    "java.security.interfaces.DSAParams",
+    "java.security.spec.DSAParameterSpec",
+    "sun.security.util.SecurityConstants",
+    // What the `SunJCE` provider's services need besides: the parameters' `toString`, and the
+    // named curves of `DHKEM`.
+    "sun.security.util.HexDumpEncoder",
+    "java.security.spec.NamedParameterSpec",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.UndeclaredThrowableException",
@@ -1454,6 +1547,13 @@ fn then_branch(node: &Value) -> &Value {
 /// The feature that the class with qualified name `class` belongs to, if it is not translated.
 pub fn untranslated(class: &str) -> Option<&'static str> {
     if TRANSLATED_ANYWAY.contains(&class) {
+        return None;
+    }
+    // A local or anonymous class (`java.security.Security$1`) is translated with the class that
+    // declares it.
+    if let Some((declaring, _)) = class.split_once('$')
+        && TRANSLATED_ANYWAY.contains(&declaring)
+    {
         return None;
     }
     UNTRANSLATED.iter().find(|(prefix, _)| class.starts_with(prefix)).map(|&(_, feature)| feature)
@@ -2668,6 +2768,12 @@ struct Walk<'t> {
     /// (stream, name, signature): where the program replaces the stream, they are calls of
     /// `PrintStream`'s methods (`Reach::replaced_streams`).
     stream_calls: BTreeSet<(String, String, String)>,
+    /// The classes that the calls of reachable code register for services, by the service's
+    /// type, all of them by binary name, and whether it makes services by class name
+    /// (`services.rs`).
+    registrations: BTreeMap<String, BTreeSet<String>>,
+    registered: HashSet<String>,
+    constructs_services: bool,
 }
 
 impl<'t> Walk<'t> {
@@ -3550,6 +3656,9 @@ impl<'t> Walk<'t> {
         ) {
             self.reflection_scan(value);
         }
+        if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
+            self.service_scan(value);
+        }
         if kind == "TRY" && recreated_exception(value).is_some() {
             self.recreates_exceptions();
         }
@@ -4223,7 +4332,9 @@ mod tests {
         assert_eq!(untranslated("java.lang.reflect.ParameterizedType"), None);
         assert_eq!(untranslated("java.security.PrivateKey"), None);
         assert_eq!(untranslated("java.security.KeyPair"), None);
-        assert_eq!(untranslated("java.security.KeyStore"), Some("security"));
+        assert_eq!(untranslated("java.security.KeyStore"), None);
+        assert_eq!(untranslated("java.security.cert.X509Certificate"), Some("security"));
+        assert_eq!(untranslated("com.sun.crypto.provider.ChaCha20Cipher"), Some("security"));
         assert_eq!(untranslated("java.util.ArrayList"), None);
         // Reachability stops at method handles, and goes into `Array`.
         let unit = json!({"typeDecls": [

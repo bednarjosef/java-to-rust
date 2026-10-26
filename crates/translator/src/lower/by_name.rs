@@ -25,6 +25,9 @@ use super::*;
 /// `Class.forName(name, initialize, loader)` throw for a null name.
 const FOR_NAME_NULL: &str = "Cannot invoke \"String.length()\" because \"str\" is null";
 
+/// The message of the `NullPointerException` that a `switch` on a null string throws.
+const SWITCH_NULL: &str = "Cannot invoke \"String.hashCode()\" because the selector is null";
+
 impl<'t> Lowering<'t> {
     /// The creation that the cast `node` makes from the class name `name`:
     /// `{ String n = name; switch (n) { case "C" -> (T) new C(); .. default -> unknown(n) } }`.
@@ -65,6 +68,94 @@ impl<'t> Lowering<'t> {
             self.checked_name(&class_name, &given, Some(FOR_NAME_NULL), pos),
             Stmt::Yield(switch),
         ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
+    }
+
+    /// The call `node`, `TranslatedServices.construct(className, parameterName, parameter,
+    /// noClass, noConstructor)`, which makes the implementation of a security service by its
+    /// class's binary name (`program/reach/services.rs`): `switch (className) { case "a.B$C" ->
+    /// switch (parameterName) { case "" -> new C(); case "a.P" -> new C((P) parameter); default ->
+    /// noConstructor } .. default -> noClass }`, with a case for each public class among the
+    /// classes that reachability found (`Reach::service_classes`), and in it one for each of its
+    /// public constructors without parameters or with one of a class.
+    pub(super) fn constructed_service(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let object = Type::class(OBJECT);
+        let arguments: Vec<Node<'t>> = node.list("arguments").collect();
+        let [class_name, parameter_name, parameter, no_class, no_constructor] = arguments[..] else {
+            return unsupported(node, "a call of `TranslatedServices.construct` with other arguments");
+        };
+        let mut block = Vec::new();
+        let mut local = |name: &str, ty: Type, value: Node<'t>| -> Result<String, Error> {
+            let fresh = self.fresh_name(name);
+            let init = self.convert(self.expr(value)?, ty);
+            block.push(Stmt::Local { ty, name: fresh.clone(), init: Some(init), pos });
+            Ok(fresh)
+        };
+        let given_class = local("given_class", Type::String, class_name)?;
+        let given_parameter = local("given_parameter", Type::String, parameter_name)?;
+        let parameter = local("parameter", object, parameter)?;
+        let no_class = local("no_class", object, no_class)?;
+        let no_constructor = local("no_constructor", object, no_constructor)?;
+        // Both names are switched on, which throws for a null, as a `switch` in Java does.
+        let (class_name, parameter_name) = (self.fresh_name("class_name"), self.fresh_name("parameter_name"));
+        block.push(self.checked_name(&class_name, &given_class, Some(SWITCH_NULL), pos));
+        block.push(self.checked_name(&parameter_name, &given_parameter, Some(SWITCH_NULL), pos));
+        let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let classes = self.reach.map(|reach| &reach.service_classes);
+        let mut cases = Vec::new();
+        for t in 0..self.types.len() {
+            let info = &self.types[t];
+            let Some(binary) = self.binary_name(t).filter(|b| classes.is_some_and(|c| c.contains(b))) else {
+                continue;
+            };
+            if info.nested.is_some()
+                || info.node.kind() != "CLASS"
+                || !info.node.has_flag("PUBLIC")
+                || info.node.has_flag("ABSTRACT")
+            {
+                continue;
+            }
+            let mut constructors = Vec::new();
+            for m in self.methods_of(t) {
+                let method = &self.methods[m];
+                if method.name != "<init>" || !method.node.has_flag("PUBLIC") {
+                    continue;
+                }
+                let inside = method.sig.strip_prefix('(').and_then(|s| s.split_once(')')).map(|(p, _)| p);
+                let (label, args) = match inside {
+                    Some("") => (String::new(), Vec::new()),
+                    Some(param) if !param.contains(',') && param.contains('.') => {
+                        let param_ty = self.ty(node, param)?;
+                        let name = match self.type_index(param) {
+                            Some(p) => self.binary_name(p).unwrap_or_else(|| param.to_string()),
+                            None => param.to_string(),
+                        };
+                        let cast = ExprKind::Cast(param_ty, Box::new(var(&parameter, object)));
+                        (name, vec![self.synth(cast, pos, param_ty)])
+                    }
+                    _ => continue,
+                };
+                let created = ExprKind::New { class: t, args, ctor: Some(m) };
+                let created = self.convert(self.synth(created, pos, Type::class(&info.name)), object);
+                let label = self.synth(ExprKind::Str(label), pos, Type::String);
+                constructors
+                    .push(Case { labels: vec![CaseLabel::Value(label)], body: vec![Stmt::Yield(created)] });
+            }
+            let missing = Stmt::Yield(var(&no_constructor, object));
+            constructors.push(Case { labels: vec![CaseLabel::Default], body: vec![missing] });
+            let selector = Box::new(var(&parameter_name, Type::String));
+            let by_parameter = self.synth(ExprKind::Switch { selector, cases: constructors }, pos, object);
+            let label = self.synth(ExprKind::Str(binary), pos, Type::String);
+            cases.push(Case { labels: vec![CaseLabel::Value(label)], body: vec![Stmt::Yield(by_parameter)] });
+        }
+        cases
+            .push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(var(&no_class, object))] });
+        let selector = Box::new(var(&class_name, Type::String));
+        block.push(Stmt::Yield(self.synth(ExprKind::Switch { selector, cases }, pos, object)));
         Ok(ExprKind::Switch {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
