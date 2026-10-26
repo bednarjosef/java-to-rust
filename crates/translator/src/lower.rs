@@ -535,6 +535,8 @@ impl<'t> Lowering<'t> {
             })
             .collect();
         for (index, bodies) in enum_indices.into_iter().zip(made) {
+            let bodies_rejected =
+                bodies.as_ref().err().map(|e| Error { pos: e.pos, message: e.message.clone() });
             let finished = self.finish_enum(index, types, methods, bodies, &mut kept);
             // The enum's own methods may have changed.
             kept.writes.forget(index);
@@ -545,6 +547,15 @@ impl<'t> Lowering<'t> {
                 let names = self.enum_constant_names(index);
                 let constants = names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() });
                 types[index].enum_constants = Some(constants.collect());
+                // The methods that the constants' bodies override have no `switch` over the
+                // constants, and those that implement an interface's abstract method no body at
+                // all (Guava's `Predicates.ObjectPredicate.apply`): they are rejected with it.
+                if let Some(error) = bodies_rejected {
+                    for m in self.overridden_by_bodies(index) {
+                        methods[m].body = self.stub_body(index, m, &error);
+                        methods[m].is_abstract = false;
+                    }
+                }
             }
         }
         self.field_update_methods(methods);

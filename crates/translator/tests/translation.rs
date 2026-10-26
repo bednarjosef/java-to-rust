@@ -3736,6 +3736,33 @@ fn a_census_gives_the_value_of_a_native_that_the_runtime_lacks_the_type_of_the_c
 }
 
 #[test]
+fn a_census_rejects_the_methods_that_a_rejected_enums_constant_bodies_override() {
+    // Two constants' bodies declare a helper of one name, which lowering rejects with the enum:
+    // `test`, which each body implements for the interface, has no switch over the constants
+    // and no body of its own (Guava's `Predicates.ObjectPredicate.apply`), so it is a stub.
+    let dir = write_sources(
+        "census_enum_bodies",
+        &[(
+            "p/Main.java",
+            "package p;\nimport java.util.function.Predicate;\npublic class Main {\n    enum Always implements Predicate<Object> {\n        YES { public boolean test(Object o) { return true; } void help() {} },\n        NO { public boolean test(Object o) { return false; } void help() {} };\n    }\n    public static void main(String[] a) {\n        Predicate<Object> p = Always.YES;\n        System.out.println(p.test(a));\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let rust = census(&program).modules.expect("a translation").one_file();
+    assert_contains(
+        &rust,
+        &[
+            "java::not_translated(\"p.Main.Always.test: methods of one name and signature that override nothing in two enum constants' bodies not supported yet (line 6)\")",
+        ],
+    );
+}
+
+#[test]
 fn a_census_calls_a_native_that_the_runtime_lacks_through_the_interface_it_implements() {
     // `VMManagementImpl`'s natives implement `VMManagement`'s methods: a call through the
     // interface runs the native of the implementing class, which the census lists.
