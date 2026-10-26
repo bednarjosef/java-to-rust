@@ -60,6 +60,8 @@ directory with one) and prints, in plain text:
 - the rejection messages whose pieces went down the most and up the most, and the new ones, each
   with its old and new count (a message's pieces as the census counts them, `--top N` of each,
   20 by default).
+- the handle calls that the translation does not follow and makes throw (below), by pieces, old
+  and new, and the messages whose pieces changed.
 
 The `summary` step runs it with the roots of `census-by-origin.py`, against `census-previous/`
 (or `PREVIOUS_CENSUS`, such as a census kept by hand under another name), and writes the result
@@ -315,6 +317,17 @@ Two kinds of error mark nothing:
 An error that names a missing class in an annotation, or in an import that only annotations use,
 is not even printed: the JVM ignores an annotation whose class is missing, so it is no error,
 with or without `--keep-going`.
+
+The census lists one more kind of code that translates but knowingly behaves otherwise than
+Java: a call of a lookup's or a `MethodHandle`'s method that the translation does not follow,
+which throws `UnsupportedOperationException` where Java runs it
+([multi-threading.md](multi-threading.md), handles found at run time). netty looks up its
+virtual-thread check and its cleaners of direct buffers this way and catches the failure. Such
+calls are no rejections. Their own section, per part, groups them by what was not followed, with
+the number of pieces and the place of every call:
+``throws UnsupportedOperationException: `Lookup.findVirtual` of a handle or arguments that the
+translation does not follow, or that may fail, N pieces``. `census.json` has them under
+`unfollowedHandles`, and each piece's under its own `unfollowedHandles`.
 
 A translation with `--keep-going` does the same, so a program whose library has optional
 dependencies can be built: it stops only at a rejected piece, as any translation does.

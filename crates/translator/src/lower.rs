@@ -91,6 +91,7 @@ pub use exceptions::{
     is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
 };
 pub use functional::is_functional;
+pub(crate) use handle_values::{UNFOLLOWED, UNFOLLOWED_MESSAGE};
 pub(crate) use inner::OUTER;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;

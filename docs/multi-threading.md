@@ -568,7 +568,8 @@ name:
   whose evaluation does nothing. A call of a lookup or a `MethodHandle` that is not followed, or
   that may fail, throws an `UnsupportedOperationException` that says so, which netty's `catch`
   turns into going without that handle (no virtual-thread check through a handle, no cleaner
-  linked to `malloc`). A value that may be one of several handles and a handle kept anywhere else
+  linked to `malloc`); a census lists each such call
+  ([minecraft-server.md](minecraft-server.md#going-on-past-compile-errors)). A value that may be one of several handles and a handle kept anywhere else
   (a collection, an `Object`) are rejected.
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
