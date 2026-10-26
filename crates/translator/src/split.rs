@@ -104,12 +104,15 @@ struct Split {
     moved: usize,
 }
 
-/// The program `tree` as a header crate, `crates` body crates and the binary.
-pub fn split(tree: &ModuleTree, crates: usize) -> Result<Workspace, String> {
+/// The program `tree` as a header crate, `crates` body crates and the binary. The code is held
+/// once at a time: each module's items go once their text is split, and each part of a split
+/// once it is in its crate (a program as large as the Minecraft server is gigabytes of it).
+pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     let mut used = std::collections::HashSet::new();
     let mut splits = Vec::new();
-    for module in &tree.modules {
+    for module in &mut tree.modules {
         let text = module.items_text();
+        module.items = Vec::new();
         let split = split_module(&text, &module.path, &mut used)
             .map_err(|e| format!("splitting the module of package `{}`: {e}", module.package))?;
         splits.push(split);
@@ -129,12 +132,14 @@ pub fn split(tree: &ModuleTree, crates: usize) -> Result<Workspace, String> {
         crate_of.push(current);
         filled += split.moved;
     }
+    let splits = std::cell::RefCell::new(splits);
+    let tree = &tree;
     let header = format!(
         "{}#![allow(dead_code, unused_imports, unused_mut, unused_variables, non_snake_case)]\n\n{}",
         tree.header,
         nest(tree, &|m| {
             let uses = uses_text(&tree.modules[m].uses);
-            format!("{uses}{}", splits[m].header)
+            format!("{uses}{}", std::mem::take(&mut splits.borrow_mut()[m].header))
         })
     );
     let mut bodies = Vec::new();
@@ -143,7 +148,11 @@ pub fn split(tree: &ModuleTree, crates: usize) -> Result<Workspace, String> {
             let path = &tree.modules[m].path;
             let reexport =
                 if path.is_empty() { "header".to_string() } else { format!("header::{}", path.join("::")) };
-            let code = if crate_of[m] == c { splits[m].body.as_str() } else { "" };
+            let code = if crate_of[m] == c {
+                std::mem::take(&mut splits.borrow_mut()[m].body)
+            } else {
+                String::new()
+            };
             format!("pub use {reexport}::*;\n{}{code}", uses_text(&tree.modules[m].uses))
         });
         let text = format!(

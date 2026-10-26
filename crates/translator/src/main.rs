@@ -143,7 +143,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
             phase("census: modules json", || write_dependencies(&path, tree))?;
         }
         if let Some((flag, path)) = &output {
-            let Some(tree) = &census.modules else {
+            let Some(tree) = census.modules else {
                 return Err("the census ended early, so it has no translation to write".to_string());
             };
             let name = crate_name(&program.main);
@@ -165,7 +165,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
         write_dependencies(&path, &tree)?;
     }
     match &output {
-        Some((flag, path)) => write_translation(&tree, crate_name(&program.main), crates, flag, path),
+        Some((flag, path)) => write_translation(tree, crate_name(&program.main), crates, flag, path),
         None => emit(None, &crate_name(&program.main), &tree.files(Layout::OneFile)),
     }
 }
@@ -173,7 +173,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
 /// Writes a whole program's translation with `flag` (`-o` or `--crate`) to `path`: with
 /// `--crates`, a project is a workspace split into that many body crates (`split.rs`).
 fn write_translation(
-    tree: &java_to_rust::output::ModuleTree,
+    tree: java_to_rust::output::ModuleTree,
     name: String,
     crates: Option<usize>,
     flag: &str,
