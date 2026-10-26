@@ -3489,6 +3489,32 @@ fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_censu
 }
 
 #[test]
+fn a_super_call_that_names_a_missing_class_throws_before_the_superclass_part_is_made() {
+    // javac's rewrite replaces the `super(..)` with a throw, so the constructor has no superclass
+    // part to put in its object: it throws before the object is made (netty's
+    // `OpenSslServerContext`, whose `super(..)` reads a constant of the native library's `SSL`).
+    let dir = write_sources(
+        "missing_class_super",
+        &[(
+            "p/Main.java",
+            "package p;\nimport missing.Native;\npublic class Main {\n    static class Context {\n        final int mode;\n        Context(int mode) { this.mode = mode; }\n    }\n    static final class Server extends Context {\n        final String name;\n        Server(String name) {\n            super(Native.MODE);\n            this.name = name;\n        }\n    }\n    public static void main(String[] a) {\n        System.out.println(new Context(a.length).mode);\n        System.out.println(new Server(\"s\").name);\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        keep_going: true,
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &["NoClassDefFoundError::new(java::wtf8(\"missing/Native\"))", "base: unreachable!()"],
+    );
+}
+
+#[test]
 fn a_missing_class_of_an_annotation_is_ignored_as_on_the_jvm_without_going_on() {
     let dir = write_sources(
         "missing_class_annotation",
