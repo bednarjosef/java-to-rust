@@ -111,6 +111,9 @@ struct Split {
 pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     let mut used = std::collections::HashSet::new();
     let mut splits = Vec::new();
+    // The items that are not Rust, all of them, rather than the first: each is a bug of the
+    // generator, and a census takes long enough that one run should show every one.
+    let mut failures = Vec::new();
     for module in &mut tree.modules {
         // Item by item: a parsed module's syntax tree is many times its text, and the largest
         // modules of a program like the Minecraft server are hundreds of megabytes.
@@ -118,8 +121,13 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
         let mut externs = String::new();
         let mut traits = 0;
         for item in std::mem::take(&mut module.items) {
-            let part = split_module(&item.text, &module.path, &mut used, &mut traits)
-                .map_err(|e| format!("splitting the module of package `{}`: {e}", module.package))?;
+            let part = match split_module(&item.text, &module.path, &mut used, &mut traits) {
+                Ok(part) => part,
+                Err(e) => {
+                    failures.push(format!("splitting the module of package `{}`: {e}", module.package));
+                    continue;
+                }
+            };
             split.header.push_str(&part.split.header);
             split.body.push_str(&part.split.body);
             split.moved += part.split.moved;
@@ -130,6 +138,9 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
             split.header.push_str(&format!("\nunsafe extern \"Rust\" {{\n{externs}}}\n"));
         }
         splits.push(split);
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("\n"));
     }
     // Each body crate takes the next modules until it has its share of the code.
     let total: usize = splits.iter().map(|s| s.moved).sum();
@@ -572,6 +583,32 @@ mod tests {
 
     /// The statics of a `thread_local!` in a package's module, which the generator declares
     /// `pub(crate)`, are public in the header, as those of the root module are.
+    #[test]
+    fn every_item_that_is_not_rust_is_reported() {
+        let module = |package: &str, text: &str| crate::output::Module {
+            package: package.to_string(),
+            path: vec![package.to_string()],
+            uses: Vec::new(),
+            items: vec![crate::output::Item {
+                origin: crate::output::Origin::Statics,
+                text: text.to_string(),
+                refers: Default::default(),
+                names: Default::default(),
+            }],
+        };
+        let tree = ModuleTree {
+            header: String::new(),
+            modules: vec![
+                module("a", "fn f() { g_()_2(); }\n"),
+                module("b", "fn ok() {}\n"),
+                module("c", "fn h( {}\n"),
+            ],
+            footer: String::new(),
+        };
+        let Err(e) = split(tree, 2) else { panic!("items that are not Rust were split") };
+        assert!(e.contains("package `a`") && e.contains("package `c`") && !e.contains("package `b`"), "{e}");
+    }
+
     #[test]
     fn thread_local_statics_of_any_visibility_become_public() {
         let text = "thread_local! {\n    pub(crate) static A__INITIALIZED: Cell<bool> = const { Cell::new(false) };\n    static B: Cell<i32> = const { Cell::new(0) };\n    pub static C: Cell<i32> = const { Cell::new(0) };\n}\n";
