@@ -469,7 +469,7 @@ impl<'t> Lowering<'t> {
                     }
                     Vec::new()
                 } else {
-                    vec![self.convert(value, self.self_type(nested.enclosing))]
+                    vec![self.checked_enclosing(self.convert(value, self.self_type(nested.enclosing)))]
                 }
             }
             None if nested.outer => vec![self.enclosing_instance_of(nested.enclosing, pos)?],
@@ -494,9 +494,36 @@ impl<'t> Lowering<'t> {
         }
         let value = self.expr(e)?;
         match self.superclass(t)?.and_then(|s| self.nesting(s)) {
-            Some(s) => Ok(Some(self.convert(value, self.self_type(s.enclosing)))),
+            Some(s) => Ok(Some(self.checked_enclosing(self.convert(value, self.self_type(s.enclosing))))),
             None => unsupported(e, "an enclosing instance for this class"),
         }
+    }
+
+    /// The explicit enclosing instance `o` of `o.new Inner()`, which javac checks for null with
+    /// `Objects.requireNonNull(o)` before it evaluates the arguments: `NullChecked(o, o)`, or for
+    /// a computed one, `{ Outer outer$ = o; yield NullChecked(outer$, outer$); }`.
+    fn checked_enclosing(&self, value: Expr) -> Expr {
+        let (pos, ty) = (value.pos, value.ty);
+        let checked = |name: &str| {
+            let var = || self.synth(ExprKind::Var(name.to_string()), pos, ty);
+            self.synth(ExprKind::Builtin(Builtin::NullChecked(None), vec![var(), var()]), pos, ty)
+        };
+        match &value.kind {
+            ExprKind::This | ExprKind::New { .. } => return value,
+            ExprKind::Var(name) => return checked(name),
+            _ => {}
+        }
+        let name = self.fresh_name("outer");
+        let yielded = checked(&name);
+        let block = vec![Stmt::Local { ty, name, init: Some(value), pos }, Stmt::Yield(yielded)];
+        self.synth(
+            ExprKind::Switch {
+                selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+                cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+            },
+            pos,
+            ty,
+        )
     }
 
     /// `args` with the synthetic arguments around them.

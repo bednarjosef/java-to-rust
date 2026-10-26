@@ -33,7 +33,10 @@ structs, wherever that is correct.
    captured array is a second name for it, so it stays a shared `java::Array`.
 3. **An inner class holds its enclosing object in a field `outer`**, set by every constructor
    from the explicit (`ring.new RingIterator()`) or implicit (`new RingIterator()` inside `Ring`)
-   enclosing instance. `Outer.this.f` and an unqualified outer member read through it.
+   enclosing instance. `Outer.this.f` and an unqualified outer member read through it. An
+   explicit enclosing instance is checked for null before the arguments are evaluated, as javac's
+   `Objects.requireNonNull` does (a `NullPointerException` without a message), so `outer` is
+   never null.
 4. **A functional interface is a closure type when only lambdas flow into it** and its values
    are only called, stored and passed on. Its values are then `Rc<dyn Fn(A) -> R>` (`Arc<dyn
    Fn(A) -> R + Send + Sync>` when threads may share them). Otherwise the interface is an enum as
