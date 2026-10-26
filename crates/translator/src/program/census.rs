@@ -292,7 +292,14 @@ struct Names<'a> {
     /// The temps of the JDK's code (`javac::jdk_temps`), until they are added to `found`.
     jdk_temps: RefCell<javac::JdkTemps>,
     /// The names, or why the class files could not be compiled for them, once looked for.
-    found: RefCell<Option<Result<javac::BytecodeNames, Error>>>,
+    found: RefCell<Option<Found>>,
+}
+
+/// The names of the class files, or, where they cannot be compiled, none but those of the JDK's
+/// code, with why.
+struct Found {
+    names: javac::BytecodeNames,
+    without: Option<String>,
 }
 
 impl Names<'_> {
@@ -305,41 +312,43 @@ impl Names<'_> {
         let mut found = self.found.borrow_mut();
         if found.is_none() {
             let names = crate::timings::phase("census: class files", || class_file_names(self.program));
-            *found = Some(
-                names
-                    .map(|mut names| {
-                        names.add_jdk_temps(self.jdk_temps.take());
-                        if crate::timings::enabled() {
-                            eprintln!("timing: census: class files: {}", names.sizes());
-                        }
-                        names
-                    })
-                    .map_err(|e| e.error),
-            );
-        }
-        // Without the class files (the program does not compile, as decompiled code may not), no
-        // message is certain: each piece of code that a `catch` may read one in is rejected there,
-        // as a translation rejects an uncertain one, and the census goes on.
-        let names = match found.as_ref().expect("found above") {
-            Ok(names) => names,
-            Err(error) => {
-                let message = error.message.lines().next().unwrap_or_default();
-                let message = format!(
-                    "the message of a `NullPointerException` without the class files of the program ({message})"
-                );
-                let mut at: Vec<Pos> = facts
-                    .npe_message_needed
-                    .iter()
-                    .filter_map(|id| facts.null_checked.get(id))
-                    .copied()
-                    .collect();
-                at.extend(facts.npe_message_read);
-                at.sort_by_key(|p| (p.line, p.column));
-                at.dedup();
-                return Err(at.into_iter().map(|pos| Error { pos, message: message.clone() }).collect());
+            // Without the class files (the program does not compile, as decompiled code may
+            // not), the messages are found with the names of the JDK's code alone, which do not
+            // come from them: each that needs a name of the program's class files is not
+            // certain, and its code is rejected there, as a translation rejects an uncertain
+            // one, and the census goes on.
+            let (names, without) = match names.map_err(|e| e.error) {
+                Ok(names) => (Ok(names), None),
+                Err(error) => {
+                    let why = error.message.lines().next().unwrap_or_default().to_string();
+                    (javac::source_names("").map_err(|e| e.message), Some(why))
+                }
+            };
+            let mut names = names.unwrap_or_else(|e| panic!("the names of no code: {e}"));
+            names.add_jdk_temps(self.jdk_temps.take());
+            if crate::timings::enabled() {
+                eprintln!("timing: census: class files: {}", names.sizes());
             }
-        };
-        crate::timings::phase("census: messages", || analysis::npe_messages(class, facts, names))
+            *found = Some(Found { names, without });
+        }
+        let Found { names, without } = found.as_ref().expect("found above");
+        let found = crate::timings::phase("census: messages", || analysis::npe_messages(class, facts, names));
+        found.map_err(|errors| match without {
+            // A message of the program's own code, which names no method of the JDK's.
+            Some(why) => errors
+                .into_iter()
+                .map(|e| match e.message.contains(" in `") {
+                    true => e,
+                    false => Error {
+                        pos: e.pos,
+                        message: format!(
+                            "the message of a `NullPointerException` without the class files of the program ({why})"
+                        ),
+                    },
+                })
+                .collect(),
+            None => errors,
+        })
     }
 }
 
