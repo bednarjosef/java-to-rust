@@ -339,8 +339,8 @@ impl fmt::Display for Type {
 ///
 /// `unit` is the source file it is in, as the index of javac's unit, where it is known: the
 /// program stamps it on the code of each class once lowering is done (`program::stamp_units`), so
-/// that an error an analysis or the generator reports at an expression names its file, where a
-/// line and column alone may be those of code in another file. Positions compare by line and
+/// that an error an analysis or the generator reports at a method, a statement or an expression
+/// names its file, where a line and column alone may be those of code in another file. Positions compare by line and
 /// column alone, as those that javac's class files give (`javac::bytecode_names`) have no unit.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default)]
 pub struct Pos {

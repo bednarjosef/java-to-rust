@@ -182,8 +182,12 @@ fn analysed(
     hook: Box<dyn Fn(&std::panic::PanicHookInfo) + Sync + Send>,
 ) -> Census {
     use crate::timings::phase;
-    let Lowered { class, units, files, mut rejections, mut fatal, scan, jdk_temps } = lowered;
-    if let Some(class) = &class {
+    let Lowered { mut class, units, files, mut rejections, mut fatal, scan, jdk_temps } = lowered;
+    // Each error of the analyses and the generator is at the position of code with its unit, so
+    // that the census stubs the code of that unit alone at its line and column (`Stubs::stub`).
+    // A checkpoint keeps the program as lowering left it.
+    if let Some(class) = &mut class {
+        super::stamp_units(class, &units);
         super::print_notes(class, &files);
     }
     let mut modules = None;
@@ -258,7 +262,6 @@ fn lower_and_narrow(
         // As a translation does, only what can run counts (the unresolved calls are found again
         // below, where they are stubbed).
         Ok(mut class) => {
-            super::stamp_units(&mut class, &lowered.units);
             // The census is taken again with the writes of `String` arrays (`census_program`)
             // once one of them can run: looking further, or analysing this program, would
             // change nothing.

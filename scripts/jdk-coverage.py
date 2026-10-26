@@ -207,9 +207,10 @@ def report(censuses, jdk):
     w("- A piece is stubbed at its first rejection in each phase, so a piece with several blockers "
       "may show only some of them; the counts of pieces blocked are exact, the lists of blockers per "
       "piece are a lower bound.")
-    w("- An error of an analysis or of the generator has a line and column but no file. The census "
-      "stubs the code at that position in every file, so on rare collisions it also hides the code of "
-      "an innocent method from the later phases.")
+    w("- An error of an analysis or of the generator is at a line and column of the file of the code "
+      "it is in, and the census stubs the code at that position in that file alone. One in code that "
+      "lowering provides has no file: the census stubs the code at its position in every file, so on "
+      "a collision it also hides the code of an innocent method from the later phases.")
     w("- A rejection that no stub can take away ends the census early, and so does a panic of the "
       "translator outside the generator; the numbers then count only what was checked before the "
       "stop. A rejection of a class's declaration, or in code that lowering provides, belongs to no "
