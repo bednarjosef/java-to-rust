@@ -1,19 +1,19 @@
-//! `System.arraycopy` between two `Object`s. A pair of arrays of one type is a plain copy. Between
-//! arrays of two classes or of strings each element is checked against the destination's class as
-//! it is stored (`arraycopy_classes.rs`), and so between arrays of `String` and of `Object`; a pair
-//! of arrays of other reference types, such as arrays of arrays, is rejected. Every other pair (a
-//! source or destination that is not an array, or a primitive element type on either side and
-//! different types) fails with the `ArrayStoreException` that HotSpot throws, with HotSpot's
-//! message, which a program may print: one arm makes it from what each side is
-//! (`array_copy_kind`), so the arms grow with the pairs of array types, not of all classes.
+//! `System.arraycopy` between two `Object`s. A pair of arrays of one class is a plain copy, with
+//! an arm of its own at the call. Every other pair goes to `java::try_arraycopy_across`, which
+//! does what HotSpot does: a source or destination that is not an array, or an array of a
+//! primitive type, fails with HotSpot's `ArrayStoreException`; between arrays of references each
+//! element is checked against the class of the destination's elements as it is stored. It asks the
+//! program's `Object` for what it needs through `java::CopyAcross`, which is written once for the
+//! program with one arm for each array class: the elements of a source as `Object`s, and the
+//! storing of `Object`s into a destination, each converted to the destination's elements. So the
+//! arms grow with the array classes, not with their pairs, and every pair is translated.
 
 use super::*;
 
-/// One `System.arraycopy` call, as its arms of the match need it: where the call is, whether a
-/// failure goes on from it (`checked`), and the names of the positions and the length.
+/// One `System.arraycopy` call, as its arms of the match need it: whether a failure goes on from
+/// it (`checked`), and the names of the positions and the length.
 #[derive(Clone, Copy)]
 pub(super) struct CopyCall<'n> {
-    pub(super) pos: Pos,
     pub(super) checked: bool,
     pub(super) names: [&'n str; 3],
 }
@@ -34,33 +34,157 @@ fn primitive_name(ty: Type) -> Option<&'static str> {
 }
 
 impl<'a> Gen<'a> {
-    /// The arms of `match (&src, &dest)` for `System.arraycopy`, over the runtime classes
-    /// `variants` of the enum of `t`: a pair of arrays of one class, a pair of arrays of two
-    /// reference types, and last every pair that fails.
+    /// The arms of `match (src.view(), dest.view())` for `System.arraycopy`, over the runtime
+    /// classes `variants` of the enum of `t`: a pair of arrays of one class, and last every other
+    /// pair, which binds `src` and `dest` as the objects (`object_array_copy`).
     pub(super) fn object_copy_arms(&mut self, t: usize, variants: &[usize], call: CopyCall) -> Vec<String> {
-        let arrays: Vec<(usize, Type)> =
-            variants.iter().filter_map(|&c| self.element_of(c).map(|element| (c, element))).collect();
-        // `String`'s variant, found once for all the pairs.
-        let string = variants.iter().copied().find(|&c| self.binary_name(c) == "java.lang.String");
+        let [p, q, n] = call.names;
+        let copy = self.runtime(if call.checked { "try_arraycopy" } else { "arraycopy" });
         let mut arms = Vec::new();
-        for &(s, es) in &arrays {
-            for &(d, ed) in &arrays {
-                if s == d || (primitive_name(es).is_none() && primitive_name(ed).is_none()) {
-                    arms.push(self.array_pair_arm(t, string, (s, d), (es, ed), call));
-                }
+        for &c in variants {
+            if self.element_of(c).is_some() {
+                let v = self.view_pattern(t, c);
+                arms.push(format!("({v}(src), {v}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
             }
         }
-        self.need(Need::CopyKind(t));
-        let failure =
-            format!("{}(src.array_copy_kind(), dest.array_copy_kind())", self.runtime("arraycopy_mismatch"));
+        self.need(Need::CopyAcross(t));
+        let across = format!("{}(src, {p}, dest, {q}, {n})", self.runtime("try_arraycopy_across"));
         let body = if call.checked {
-            format!("Err({failure})")
+            across
         } else {
-            format!("{}({failure})", self.runtime("throw_exception"))
+            format!("{across}.unwrap_or_else(|e| {}(e))", self.runtime("throw_exception"))
         };
-        // The arms bind the arrays; the values themselves are `src` and `dest` (`object_array_copy`).
         arms.push(format!("_ => {body},"));
         arms
+    }
+
+    /// `impl java::CopyAcross` for the enum of `t`, whose runtime classes are `variants`: for
+    /// each array of references, its length, its elements as values of the enum, and the storing
+    /// of values of the enum, which the runtime has checked against the class of its elements.
+    pub(super) fn copy_across_impl(&mut self, t: usize, variants: &[usize]) {
+        let arrays: Vec<usize> = variants
+            .iter()
+            .copied()
+            .filter(|&c| self.element_of(c).is_some_and(|e| primitive_name(e).is_none()))
+            .collect();
+        let name = struct_name(&self.class.types[t].name);
+        let elements = self.runtime("Elements");
+        let (kind, class) = (self.runtime("CopyKind"), self.runtime("Class"));
+        self.gap();
+        let across = self.runtime("CopyAcross");
+        self.line(&format!("impl {across} for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn copy_kind(&self) -> {kind} {{"));
+        self.line("    self.array_copy_kind()");
+        self.line("}");
+        self.line(&format!("fn copy_class(&self) -> {class} {{"));
+        self.line("    self.runtime_class()");
+        self.line("}");
+        let methods: [(&str, &str, &str); 3] = [
+            ("fn copy_length(&self) -> usize", "length", "0"),
+            ("fn copy_out(&self, range: std::ops::Range<usize>) -> Vec<Option<Self>>", "out", "Vec::new()"),
+            ("fn copy_in(&self, at: usize, items: &[Option<Self>])", "in", "{}"),
+        ];
+        for (signature, method, otherwise) in methods {
+            self.line(&format!("{signature} {{"));
+            self.indent += 1;
+            if arrays.is_empty() {
+                self.line(otherwise);
+            } else {
+                let elements = elements.clone();
+                self.match_arms_or(&arrays, Some(otherwise.to_string()), &move |g: &mut Self, c| {
+                    let element = g.element_of(c).expect("an array class");
+                    let text = match method {
+                        "length" => format!("{elements}::length(o)"),
+                        "out" => {
+                            let each = g.element_as_value(t, element);
+                            format!("{elements}::reading(o, range, |items| items.iter().map(|e| {each}).collect())")
+                        }
+                        _ => {
+                            let each = g.value_as_element(t, element);
+                            format!("{elements}::store_from(o, at, &items.iter().map(|e| {each}).collect::<Vec<_>>())")
+                        }
+                    };
+                    (text, true)
+                });
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// An element `e` (a reference) of an array of `element`s as an `Option` of a value of the
+    /// enum of `t`, `Object`'s: null as `None`.
+    fn element_as_value(&mut self, t: usize, element: Type) -> String {
+        let Some(c) = self.type_of(element) else {
+            return self.copy_missing(&format!("a {element} as an `Object`"));
+        };
+        // The element, owned, is `x`.
+        let value = match self.rep(c) {
+            _ if c == t => "x".to_string(),
+            hierarchy::Rep::Enum(e) if e == t => "x".to_string(),
+            hierarchy::Rep::Enum(e) => {
+                // A value of another enum has the same bits, where `Object`'s has its class.
+                self.need(Need::Convert(e, t));
+                let convert = format!("x.{}()", self.to_name(t));
+                let (mine, objects) = (self.enum_variants(e), self.enum_variants(t));
+                let shared: Vec<usize> = mine.iter().copied().filter(|c| objects.contains(c)).collect();
+                if shared.len() == mine.len() {
+                    convert
+                } else {
+                    let missing = self.copy_missing("an object of a class that is no `Object` elsewhere");
+                    if shared.is_empty() {
+                        format!("{{ let _ = x; {missing} }}")
+                    } else {
+                        let tags = self.tags(&shared, &mine);
+                        format!("match x.0.tag() {{ {tags} => {convert}, _ => {missing} }}")
+                    }
+                }
+            }
+            hierarchy::Rep::Object(k) => match self.variant_of(t, k) {
+                Some(variant) => format!("{variant}(x)"),
+                None => {
+                    let missing = self.copy_missing(&format!("a {} as an `Object`", self.binary_name(k)));
+                    format!("{{ let _ = x; {missing} }}")
+                }
+            },
+        };
+        if self.nullable_element(element) {
+            format!("e.clone().map(|x| {value})")
+        } else {
+            format!("{{ let x = e.clone(); Some({value}) }}")
+        }
+    }
+
+    /// A value `e` (an `&Option` of a value of the enum of `t`) as an element of an array of
+    /// `element`s, which the runtime has found it to be an instance of, or null.
+    fn value_as_element(&mut self, t: usize, element: Type) -> String {
+        let nullable = self.nullable_element(element);
+        let null = self.copy_missing(&format!("a null into an array of {element} that holds none"));
+        let Some(c) = self.type_of(element) else {
+            return self.copy_missing(&format!("an `Object` as a {element}"));
+        };
+        let narrowed = if c == t {
+            "o.clone()".to_string()
+        } else {
+            self.need(Need::Narrow(t, c));
+            let missing = self.copy_missing(&format!("an `Object` as a {}", self.binary_name(c)));
+            format!("o.{}().unwrap_or_else(|| {missing})", self.as_name(c))
+        };
+        if nullable {
+            format!("e.as_ref().map(|o| {narrowed})")
+        } else {
+            format!("match e {{ Some(o) => {narrowed}, None => {null} }}")
+        }
+    }
+
+    /// The end of a program at a copy that the translation cannot make: `what`, which no object
+    /// of the program was found to be.
+    fn copy_missing(&mut self, what: &str) -> String {
+        let message = format!("`System.arraycopy` of {what}");
+        format!("{}({})", self.runtime("not_translated"), rust_string(&message))
     }
 
     /// What an object of class `c` is to `System.arraycopy` (`java::CopyKind`).
@@ -75,89 +199,10 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The arm for a source array of class `s` and a destination array of class `d`, where
-    /// `string` is the variant of `String` among the classes, if it is one.
-    fn array_pair_arm(
-        &mut self,
-        t: usize,
-        string: Option<usize>,
-        (s, d): (usize, usize),
-        (es, ed): (Type, Type),
-        call: CopyCall,
-    ) -> String {
-        let (vs, vd) = (self.view_pattern(t, s), self.view_pattern(t, d));
-        let (pattern, body) = if s == d {
-            let copy = self.runtime(if call.checked { "try_arraycopy" } else { "arraycopy" });
-            let [p, q, n] = call.names;
-            (format!("({vs}(src), {vd}(dest))"), format!("{copy}(src, {p}, dest, {q}, {n})"))
-        } else {
-            self.object_copy_between(t, string, (s, d), (es, ed), call)
-        };
-        format!("{pattern} => {body},")
-    }
-
     /// The element type of the array class `c`, when it is an array class.
     fn element_of(&self, c: usize) -> Option<Type> {
         match self.class.array_of(c) {
             Some(Type::Array(element)) => Some(*element),
-            _ => None,
-        }
-    }
-
-    /// A copy between arrays of two different reference types: the pattern of its arm and its body. The
-    /// pattern binds `src` and `dest` only where the body reads them.
-    fn object_copy_between(
-        &mut self,
-        t: usize,
-        string: Option<usize>,
-        (s, d): (usize, usize),
-        (es, ed): (Type, Type),
-        call: CopyCall,
-    ) -> (String, String) {
-        let CopyCall { pos, checked, names: [p, q, n] } = call;
-        let (vs, vd) = (self.view_pattern(t, s), self.view_pattern(t, d));
-        let is_object = |ty: &Type| matches!(ty, Type::Class(name, _) if *name == OBJECT);
-        let object = struct_name(&self.class.types[t].name);
-        let copy = self.runtime("try_arraycopy_with");
-        let uncaught = self.runtime("uncaught");
-        let (string, is_string_to_object, is_object_to_string) = match string {
-            Some(c) => (c, es == Type::String && is_object(&ed), is_object(&es) && ed == Type::String),
-            None => (0, false, false),
-        };
-        let text = rust_type(Type::String);
-        // Each element is stored as the `Object` it is: every `String` is an `Object`.
-        let convert = if is_string_to_object {
-            let string_variant = self.variant(t, string);
-            format!(
-                "|e: &Option<{text}>| -> Result<Option<{object}>, &'static str> {{ Ok(e.clone().map({string_variant})) }}"
-            )
-        } else if is_object_to_string {
-            // An element is stored only if it is a `String`, which no other `Object` is.
-            let string_variant = self.view_pattern(t, string);
-            let message = "arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String";
-            format!(
-                "|e: &Option<{object}>| -> Result<Option<{text}>, &'static str> {{ match e.as_ref().map({object}::view) {{ None => Ok(None), Some({string_variant}(s)) => Ok(Some(s.clone())), Some(_) => Err(\"{message}\") }} }}"
-            )
-        } else if let (Some(a), Some(b)) = (self.class_element(es), self.class_element(ed)) {
-            // Arrays of two classes: each element is checked against the destination's class.
-            self.class_element_convert((a, b), (es, ed))
-        } else {
-            let (from, to) = (self.binary_name(s), self.binary_name(d));
-            self.rejected.push(Error {
-                pos,
-                message: format!("`System.arraycopy` from {from} to {to} not supported yet"),
-            });
-            return (format!("({vs}(_), {vd}(_))"), "unreachable!()".to_string());
-        };
-        let copy_call = format!("{copy}(src, {p}, dest, {q}, {n}, {convert})");
-        let body = if checked { copy_call } else { format!("{copy_call}.unwrap_or_else({uncaught})") };
-        (format!("({vs}(src), {vd}(dest))"), body)
-    }
-
-    /// The type of the elements of type `element`, when they are of a class or strings.
-    fn class_element(&self, element: Type) -> Option<usize> {
-        match element {
-            Type::Class(..) | Type::String => self.type_of(element),
             _ => None,
         }
     }

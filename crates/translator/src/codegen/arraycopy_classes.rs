@@ -59,12 +59,7 @@ impl<'a> Gen<'a> {
     pub(super) fn class_element_convert(&mut self, (s, d): (usize, usize), (es, ed): (Type, Type)) -> String {
         let (src_ty, dst_ty) = (self.element_ty_name(es), self.element_ty_name(ed));
         let subtype = self.class.hierarchy.is_subtype(s, d);
-        // `Object` is named as the runtime names it, which is not its binary name.
-        let binary = |t: usize| match self.class.types[t].name.as_str() {
-            OBJECT => "java.lang.Object".to_string(),
-            _ => self.binary_name(t),
-        };
-        let (from, to) = (binary(s), binary(d));
+        let (from, to) = (self.binary_name(s), self.binary_name(d));
         let message = if self.class.hierarchy.is_subtype(d, s) {
             format!(
                 "arraycopy: element type mismatch: can not cast one of the elements of {from}[] to the type of the destination array, {to}"
@@ -97,9 +92,8 @@ impl<'a> Gen<'a> {
     /// The arms converting each element of class `s` that is an instance of `d`. A pattern takes
     /// the object out of the source's representation, which is one class's object or an enum over
     /// several, and the arm yields it in the destination's: an enum variant when `d` has subclasses.
-    /// A class that no value of `d` is anywhere else has no variant there, and its element ends
-    /// the program: an array held as an `Object` may be copied to any other, which is beyond what
-    /// the analysis follows (the arrays that `SpinedBuffer` copies are always of one type).
+    /// A class that has no variant there, as no value of `d` is of it, ends the program at its
+    /// element.
     fn element_arms(
         &mut self,
         s: usize,

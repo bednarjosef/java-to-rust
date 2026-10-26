@@ -122,6 +122,9 @@ pub(super) enum Need {
     CastSource(usize),
     /// `array_copy_kind()`: what the object is to `System.arraycopy` (`java::CopyKind`).
     CopyKind(usize),
+    /// `java::CopyAcross`: what `System.arraycopy` between arrays of two classes asks of the
+    /// object (see `arraycopy`).
+    CopyAcross(usize),
 }
 
 /// `text` as the operand of a method call or field access: in parentheses unless it is a path,
@@ -167,6 +170,9 @@ impl<'a> Gen<'a> {
             Need::Convert(s, t) => {
                 needs.insert(Need::Enum(s));
                 needs.insert(Need::Enum(t));
+            }
+            Need::CopyAcross(t) => {
+                needs.extend([Need::Enum(t), Need::CopyKind(t), Need::RuntimeClass(t)]);
             }
             Need::Narrow(s, _) => {
                 needs.insert(Need::Enum(s));
@@ -480,7 +486,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The name of the checked conversion to type `t`: `as_circle`.
-    fn as_name(&self, t: usize) -> String {
+    pub(super) fn as_name(&self, t: usize) -> String {
         format!("as_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
     }
 
@@ -495,6 +501,12 @@ impl<'a> Gen<'a> {
         }
         if let Some((binary, _)) = decl.origin.java_names() {
             return binary.to_string();
+        }
+        // The types of `java.lang` that lowering adds are named without their package.
+        if decl.package.is_empty()
+            && matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD)
+        {
+            return format!("java.lang.{}", decl.name);
         }
         match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
             Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
@@ -827,7 +839,7 @@ impl<'a> Gen<'a> {
         let arms = match self.object_index() {
             Some(t) => {
                 let variants = self.enum_variants(t);
-                let call = CopyCall { pos: src.pos, checked, names: [p.as_str(), q.as_str(), n.as_str()] };
+                let call = CopyCall { checked, names: [p.as_str(), q.as_str(), n.as_str()] };
                 self.object_copy_arms(t, &variants, call)
             }
             None => vec!["_ => unreachable!(),".to_string()],
@@ -1072,15 +1084,9 @@ impl<'a> Gen<'a> {
     }
 
     /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
-    /// module, `("Main$Dog", java::APP)`. The `Comparable` and `Record` that the translation keeps
-    /// under their own names are `java.lang.Comparable` and `java.lang.Record` to HotSpot.
+    /// module, `("Main$Dog", java::APP)`.
     pub(super) fn cast_class(&mut self, c: usize) -> String {
-        let binary = match self.class.types[c].name.as_str() {
-            COMPARABLE => "java.lang.Comparable".to_string(),
-            RECORD => "java.lang.Record".to_string(),
-            _ => self.binary_name(c),
-        };
-        let name = rust_string(&binary);
+        let name = rust_string(&self.binary_name(c));
         let module = self.cast_module(c);
         format!("({name}, {module})")
     }
@@ -1716,7 +1722,7 @@ impl<'a> Gen<'a> {
     }
 
     /// `match_arms`, where an object of a class outside `variants` runs `otherwise`, if given.
-    fn match_arms_or(
+    pub(super) fn match_arms_or(
         &mut self,
         variants: &[usize],
         otherwise: Option<String>,
@@ -2946,6 +2952,9 @@ impl<'a> Gen<'a> {
     /// rather than as a `match` over every variant wherever it is used: `Object`'s enum has a
     /// variant for every class that the program creates, and javac's has thousands.
     fn class_value_impls(&mut self, t: usize, variants: &[usize]) {
+        if self.wanted.contains(&Need::CopyAcross(t)) {
+            self.copy_across_impl(t, variants);
+        }
         let wanted = |need: Need| self.wanted.contains(&need);
         let methods = [
             (Need::RuntimeClass(t), "runtime_class", "java::Class"),

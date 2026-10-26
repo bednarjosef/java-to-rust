@@ -183,6 +183,7 @@ pub fn flows(
     }
     // A string, a box or a primitive is a value of its runtime class, beside `Object`.
     let index = |ty: Type| class.type_of(ty);
+    let mut copies_objects = false;
     let mut note = |e: &Expr, at: usize| match &e.kind {
         ExprKind::New { class: c, .. } => _ = flows[*c].insert(*c),
         // A cast, and a pattern's binding, make the value a value of the target type.
@@ -228,7 +229,9 @@ pub fn flows(
         }
         // A `System.arraycopy` between arrays of classes: the objects of the source's element class
         // are values of the destination's, where they pass the check (`lower::arraycopy_classes`).
+        // One between `Object`s copies through `Object` (`codegen::arraycopy`), below.
         ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) => {
+            copies_objects |= matches!(args[0].ty, Type::Class(name, _) if name == OBJECT);
             if let (Type::Array(s), Type::Array(d)) = (args[0].ty, args[2].ty)
                 && let (Type::Class(..), Type::Class(..)) = (*s, *d)
                 && let (Some(s), Some(d)) = (index(*s), index(*d))
@@ -274,11 +277,46 @@ pub fn flows(
     }
     let mut work: Vec<(usize, usize)> =
         flows.iter().enumerate().flat_map(|(s, f)| f.iter().map(move |&c| (s, c))).collect();
-    while let Some((s, c)) = work.pop() {
-        for &t in &out[s] {
-            if h.is_subtype(c, t) && flows[t].insert(c) {
-                work.push((t, c));
+    let spread = |flows: &mut Vec<FastSet<usize>>, out: &Vec<Vec<usize>>, work: &mut Vec<(usize, usize)>| {
+        while let Some((s, c)) = work.pop() {
+            for &t in &out[s] {
+                if h.is_subtype(c, t) && flows[t].insert(c) {
+                    work.push((t, c));
+                }
             }
+        }
+    };
+    spread(&mut flows, &out, &mut work);
+    // A `System.arraycopy` between `Object`s reads the elements of any array that is an `Object`
+    // as `Object`s, and stores `Object`s as the elements of any such array where they pass the
+    // check: the element class of each array class among `Object`'s values flows both ways with
+    // `Object`. The elements may be arrays, which become `Object`s in turn.
+    if copies_objects && let Some(object) = class.type_index(OBJECT) {
+        let mut done: FastSet<usize> = FastSet::default();
+        loop {
+            let arrays: Vec<usize> = flows[object]
+                .iter()
+                .copied()
+                .filter(|&a| class.array_of(a).is_some() && !done.contains(&a))
+                .collect();
+            if arrays.is_empty() {
+                break;
+            }
+            for a in arrays {
+                done.insert(a);
+                let Some(Type::Array(element)) = class.array_of(a) else { continue };
+                if element.is_numeric() || *element == Type::Boolean {
+                    continue;
+                }
+                let Some(e) = index(*element).filter(|&e| e != object) else { continue };
+                for (s, t) in [(e, object), (object, e)] {
+                    if edges.insert((s, t)) {
+                        out[s].push(t);
+                        work.extend(flows[s].iter().map(|&c| (s, c)));
+                    }
+                }
+            }
+            spread(&mut flows, &out, &mut work);
         }
     }
     flows
