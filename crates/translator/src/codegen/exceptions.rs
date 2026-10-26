@@ -294,8 +294,9 @@ fn tuple(items: &[String]) -> String {
 /// statement of its own or never completes normally, and without a `finally` it goes out in the
 /// `Ok` value (`carried_out`); with a `finally` that nothing but an exception leaves early, every
 /// block that completes normally, the `catch` clauses too, sets it with a statement of its own
-/// (`carried_through_finally`). The `try` statements in the cases of a switch expression are
-/// looked at too, at any depth, as `visit_stmt` reports them.
+/// (`carried_through_finally`). A `try` whose block declares the local has nothing to carry out.
+/// The `try` statements in the cases of a switch expression are looked at too, at any depth, as
+/// `visit_stmt` reports them.
 fn carriable(body: &[Stmt], name: &str) -> bool {
     let mut set = HashSet::new();
     assigned_before(body, name, false, &mut set);
@@ -304,6 +305,7 @@ fn carriable(body: &[Stmt], name: &str) -> bool {
         visit_stmt(s, &mut |_| {}, &mut |s| {
             if let Stmt::Try { body, catches, finally } = s
                 && (assigns(body, name) || catches.iter().any(|c| assigns(&c.body, name)))
+                && !declares_within(body, name)
                 && !set.contains(&(s as *const Stmt as usize))
                 && !match finally {
                     None => !assigns(body, name) || sets_at_top(body, name) || !completes_all(body),
@@ -405,6 +407,19 @@ fn sets(s: &Stmt, name: &str) -> bool {
 }
 
 /// Whether a statement of `stmts` itself declares a local `name`.
+/// Whether `stmts` declare local `name` at any depth: then a `try` of them has nothing to carry
+/// out, since Java lets no local of that name outside be seen inside (`main` of a program whose
+/// whole body is a `try` declares and assigns its locals in it).
+fn declares_within(stmts: &[Stmt], name: &str) -> bool {
+    let mut found = false;
+    for s in stmts {
+        visit_stmt(s, &mut |_| {}, &mut |s| {
+            found |= matches!(s, Stmt::Local { name: declared, .. } if declared == name);
+        });
+    }
+    found
+}
+
 fn declares(stmts: &[Stmt], name: &str) -> bool {
     stmts.iter().any(|s| matches!(s, Stmt::Local { name: declared, .. } if declared == name))
 }
