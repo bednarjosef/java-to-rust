@@ -166,7 +166,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             }
         }
         for (t, decl) in class.types.iter().enumerate() {
-            for f in decl.fields.iter().filter(|f| may_be_unset(f.ty) || starts_null_enum(f)) {
+            for f in decl.fields.iter().filter(|f| may_be_unset(f.ty) || starts_null_enum(facts, f)) {
                 if !set_by_construction(class, facts, &ctors[t], t, &f.name) {
                     fields.push((decl.name.clone(), f.name.clone()));
                 }
@@ -293,10 +293,11 @@ fn may_be_unset(ty: Type) -> bool {
     )
 }
 
-/// An enum field that starts as `null`, with no initializer or `null`: an `Option` unless every
-/// constructor sets it first (`set_by_construction`).
-fn starts_null_enum(f: &Field) -> bool {
-    matches!(f.ty, Type::Enum(_)) && f.init.as_ref().is_none_or(|e| matches!(e.kind, ExprKind::Null))
+/// An enum field that may start as `null`: with no initializer, or one that may be null (`null`,
+/// or gson's `strictness = DEFAULT_STRICTNESS`, a constant that is `null`). An `Option` unless
+/// every constructor sets it first (`set_by_construction`).
+fn starts_null_enum(facts: &Facts, f: &Field) -> bool {
+    matches!(f.ty, Type::Enum(_)) && f.init.as_ref().is_none_or(|e| maybe_null(facts, usize::MAX, e))
 }
 
 /// Whether every constructor of class `t` sets the field `name` to a value that is not null
