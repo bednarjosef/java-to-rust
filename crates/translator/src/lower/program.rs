@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::program::Reach;
+use std::rc::Rc;
 
 impl<'t> Lowering<'t> {
     /// Whether a member of the class `class` is lowered: in a whole program only reachable
@@ -40,8 +41,9 @@ pub fn lower_program<'t>(
     reach: &'t Reach,
     main: &str,
 ) -> Result<Class, (Option<usize>, Error)> {
+    let scans = Rc::default();
     super::real_generics::retry(|real, covariant| {
-        lower_with(units, program_units, reach, main, real, covariant, None)
+        lower_with(units, program_units, reach, main, real, covariant, &scans, None)
     })
 }
 
@@ -114,8 +116,9 @@ fn lower_going_on<'t>(
     census_of: Option<bool>,
 ) -> Lowered {
     let census = RefCell::new(CensusSink::default());
+    let scans = Rc::default();
     let class = super::real_generics::retry(|real, covariant| {
-        lower_with(units, program_units, reach, main, real, covariant, Some((&census, census_of)))
+        lower_with(units, program_units, reach, main, real, covariant, &scans, Some((&census, census_of)))
     });
     let CensusSink { rejected, units, live, string_array_writes, wrote_string_arrays } = census.into_inner();
     Lowered { class, rejected, units, live, string_array_writes, wrote_string_arrays }
@@ -134,7 +137,8 @@ struct CensusSink {
 }
 
 /// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`, and
-/// the arrays `covariant`.
+/// the arrays `covariant`; `scans` holds what the attempts before found of the trees.
+#[allow(clippy::too_many_arguments)]
 fn lower_with<'t>(
     units: &[&'t Value],
     program_units: usize,
@@ -142,9 +146,11 @@ fn lower_with<'t>(
     main: &str,
     real: Option<&super::real_generics::Real>,
     covariant: &super::covariant::Covariant,
+    scans: &Rc<super::scans::Scans<'t>>,
     census: Option<(&RefCell<CensusSink>, Option<bool>)>,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
+    lowering.scans = scans.clone();
     lowering.covariant = covariant.clone();
     lowering.reach = Some(reach);
     lowering.census = census.map(|_| RefCell::default());
@@ -193,7 +199,12 @@ fn lower_with<'t>(
         (rejected, (0..lowering.types.len()).map(unit).collect(), live, string_array_writes);
     drop(sink);
     match first {
-        Some(error) if retried => Err((None, error)),
+        Some(error) if retried => {
+            if crate::timings::enabled() {
+                eprintln!("timing: lowering with Rust generics rejects code that can run: {}", error.message);
+            }
+            Err((None, error))
+        }
         _ => lowered,
     }
 }
@@ -249,12 +260,13 @@ fn lower_into<'t>(
             reachable_members(decl, reach, &mut reachable);
         }
     }
-    lowering.standard = super::exceptions::Standard::select(reachable.iter().copied());
+    lowering.standard = lowering.scans.standard(&reachable);
     lowering.declare_standard().map_err(|e| (None, e))?;
     let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
     // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
-    let trees = reachable.iter().copied().chain(lowering.standard.classes.iter().map(|(_, d)| *d));
-    lowering.functional = super::functional::Functional::select(trees, &declared);
+    let trees: Vec<&Value> =
+        reachable.iter().copied().chain(lowering.standard.classes.iter().map(|(_, d)| *d)).collect();
+    lowering.functional = lowering.scans.functional(&trees, &declared);
     lowering.declare_functional().map_err(|e| (None, e))?;
     lowering.declare_plain_object(reachable.iter().copied()).map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);

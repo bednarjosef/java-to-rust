@@ -113,12 +113,15 @@ impl<'t> Lowering<'t> {
         method: Option<usize>,
     ) -> Result<(), Error> {
         let instance = !(member.has_flag("STATIC") || Self::is_static_block(member));
-        let mut found = Vec::new();
-        let code = ["body", "initializer", "statements"].into_iter().filter_map(|f| member.get(f));
-        for node in code {
-            classes_in(node, &mut found);
-        }
-        for (decl, new) in found {
+        let found = self.scans.clone().local_classes(member, || {
+            let mut found = Vec::new();
+            let code = ["body", "initializer", "statements"].into_iter().filter_map(|f| member.get(f));
+            for node in code {
+                classes_in(node, &mut found);
+            }
+            found
+        });
+        for &(decl, new) in found.iter() {
             let javac = crate::program::class_name(decl.0);
             if self.reach.is_some_and(|r| !r.classes.contains(&javac)) {
                 continue;

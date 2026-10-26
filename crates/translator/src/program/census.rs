@@ -228,6 +228,10 @@ fn lower_and_narrow(
     // The program's files are the first units (`load`).
     let lower = || lower::census_lower_program(trees, files, reach, &program.main, program.ends_rejected);
     let lowered = phase("lower", || std::panic::catch_unwind(lower));
+    // To time lowering alone, on a program whose census takes long (`docs/performance.md`).
+    if std::env::var_os("JAVA_TO_RUST_STOP_AFTER_LOWER").is_some() {
+        std::process::exit(0);
+    }
     let lowered = lowered.unwrap_or_else(|panic| {
         let message = format!("the translator panicked: {}", lower::panic_message(&*panic));
         lower::Lowered {

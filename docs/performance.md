@@ -127,7 +127,10 @@ How fast the translator itself runs in whole-program mode (`--main`, `--library`
 `java.base` sources), which `targets/run.sh` and `tests/whole_program.rs` use. `--timings` (or
 the environment variable `JAVA_TO_RUST_TIMINGS`) prints the time of each phase to standard error:
 javac with the number of units it attributed, reachability with its rounds, lowering (each
-attempt of the Rust generics), the analyses and the generator.
+attempt of the Rust generics, and why the next one is needed: the covariant arrays it noted, the
+generic classes and methods that failed, or an error that erases them all), the analyses and the
+generator. A census run with `JAVA_TO_RUST_STOP_AFTER_LOWER=1` set exits once lowering is done,
+which times lowering alone on a program whose census takes long.
 
 **Cause of the slow translations.** javac, given the JDK's sources as its source path, attributes
 every unit it loads, and loads every class that the code of an attributed unit names, so a
