@@ -185,9 +185,15 @@ Rules the generator keeps:
   read, under `#[allow(unused_assignments)]`: Java's default for primitives and strings, an empty
   array, an enum's first constant, a plain box's zero. A local of an object type has no such
   value: a `try` without `finally` whose own statements set it carries it out in its `Ok` value
-  (`Ok((a, b))`), which the `match` arm stores. Set anywhere else (only inside an `if` of the
-  block, or in a `try` with a `finally`), it is rejected. A local declared inside the body itself
-  is left alone, as Rust follows it there.
+  (`Ok((a, b))`), which the `match` arm stores. A `try` with a `finally` that nothing but an
+  exception leaves early carries it out the same way when the body and each `catch` clause that
+  completes normally set it with a statement of their own: the code after the `finally` takes
+  the value from the `Ok` that it passes on (`let (a_value,) = attempt?;`). A `try` that starts
+  where the local already holds a value, as Rust sees it (a statement before it sets it whenever
+  it completes, such as a loop whose condition assigns it: `while (null != (key =
+  s.readObject()))` in `Component.readObject`), needs nothing. Set anywhere else (only inside an
+  `if` of the block, or in a `try` with a `finally` that a `return` or a jump leaves), it is
+  rejected. A local declared inside the body itself is left alone, as Rust follows it there.
 
 ## try-with-resources
 

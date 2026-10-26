@@ -244,6 +244,29 @@ fn assigns(stmts: &[Stmt], name: &str) -> bool {
 /// block itself sets, which then hold a value wherever the block completes normally, as Java's
 /// definite assignment has them when the code after the `try` reads them.
 pub(super) fn carried_out(body: &[Stmt], unset: &HashMap<String, Type>) -> Vec<String> {
+    if completes_all(body) { set_at_top(body, unset) } else { Vec::new() }
+}
+
+/// The locals that the blocks of a `try` with a `finally` (its body and its `catch` clauses)
+/// carry out in their `Ok` value, for the code after the `finally` to set them: those of `unset`
+/// that a statement of each block that completes normally sets itself.
+pub(super) fn carried_through_finally(
+    body: &[Stmt],
+    catches: &[Catch],
+    unset: &HashMap<String, Type>,
+) -> Vec<String> {
+    let mut ending =
+        std::iter::once(body).chain(catches.iter().map(|c| &c.body[..])).filter(|b| completes_all(b));
+    let Some(first) = ending.next() else { return Vec::new() };
+    let mut out = set_at_top(first, unset);
+    for block in ending {
+        out.retain(|name| sets_at_top(block, name));
+    }
+    out
+}
+
+/// The locals of `unset` that a statement of `body` itself sets, in their order.
+fn set_at_top(body: &[Stmt], unset: &HashMap<String, Type>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for s in body {
         if let Stmt::Expr(e) = s
@@ -254,7 +277,7 @@ pub(super) fn carried_out(body: &[Stmt], unset: &HashMap<String, Type>) -> Vec<S
             out.push(v.clone());
         }
     }
-    if completes_all(body) { out } else { Vec::new() }
+    out
 }
 
 /// A Rust tuple of `items`: `(a,)` of one.
@@ -266,23 +289,150 @@ fn tuple(items: &[String]) -> String {
 }
 
 /// Whether every `try` of `body` that assigns local `name` carries its value out where Rust needs
-/// it (`carried_out`): it has no `finally`, and its block sets the local with a statement of its
-/// own or never completes normally. The `try` statements in the cases of a switch expression are
+/// it, or leaves Rust nothing to follow: either the local holds a value where the `try` starts
+/// (`assigned_before`), so that what the `try` does keeps one in it; or the block sets it with a
+/// statement of its own or never completes normally, and without a `finally` it goes out in the
+/// `Ok` value (`carried_out`); with a `finally` that nothing but an exception leaves early, every
+/// block that completes normally, the `catch` clauses too, sets it with a statement of its own
+/// (`carried_through_finally`). The `try` statements in the cases of a switch expression are
 /// looked at too, at any depth, as `visit_stmt` reports them.
 fn carriable(body: &[Stmt], name: &str) -> bool {
+    let mut set = HashSet::new();
+    assigned_before(body, name, false, &mut set);
     let ok = std::cell::Cell::new(true);
     for s in body {
         visit_stmt(s, &mut |_| {}, &mut |s| {
             if let Stmt::Try { body, catches, finally } = s
                 && (assigns(body, name) || catches.iter().any(|c| assigns(&c.body, name)))
-                && !(finally.is_none()
-                    && (!assigns(body, name) || sets_at_top(body, name) || !completes_all(body)))
+                && !set.contains(&(s as *const Stmt as usize))
+                && !match finally {
+                    None => !assigns(body, name) || sets_at_top(body, name) || !completes_all(body),
+                    Some(_) => {
+                        leaves_early(body, catches) == (false, false)
+                            && std::iter::once(&body[..])
+                                .chain(catches.iter().map(|c| &c.body[..]))
+                                .all(|b| sets_at_top(b, name) || !completes_all(b))
+                    }
+                }
             {
                 ok.set(false);
             }
         });
     }
     ok.get()
+}
+
+/// Notes in `out` the `try` statements of `stmts` (by address) where local `name` holds a value,
+/// as Rust sees it: after a statement before them, or before a statement they are in, that sets
+/// it whenever it completes normally (`sets`). `before` says whether it holds one where `stmts`
+/// start. The `try` statements of switch expressions are not looked at.
+fn assigned_before(stmts: &[Stmt], name: &str, mut before: bool, out: &mut HashSet<usize>) {
+    for s in stmts {
+        assigned_within(s, name, before, out);
+        // A local of that name declared here is another one, in a block of its own.
+        before = match s {
+            Stmt::Local { name: declared, init, .. } if declared == name => {
+                init.as_ref().is_some_and(|e| always_sets(e, name))
+            }
+            _ => before || sets(s, name),
+        };
+    }
+}
+
+/// `assigned_before` for one statement `s`.
+fn assigned_within(s: &Stmt, name: &str, before: bool, out: &mut HashSet<usize>) {
+    match s {
+        Stmt::Try { body, catches, finally } => {
+            if before {
+                out.insert(s as *const Stmt as usize);
+            }
+            assigned_before(body, name, before, out);
+            for catch in catches {
+                assigned_before(&catch.body, name, before, out);
+            }
+            if let Some(finally) = finally {
+                assigned_before(finally, name, before, out);
+            }
+        }
+        Stmt::Block(stmts) => assigned_before(stmts, name, before, out),
+        Stmt::Labeled { body, .. } => assigned_within(body, name, before, out),
+        Stmt::If { cond, then, otherwise } => {
+            let before = before || always_sets(cond, name);
+            assigned_within(then, name, before, out);
+            if let Some(otherwise) = otherwise {
+                assigned_within(otherwise, name, before, out);
+            }
+        }
+        Stmt::While { cond, body } => assigned_within(body, name, before || always_sets(cond, name), out),
+        Stmt::DoWhile { body, .. } => assigned_within(body, name, before, out),
+        Stmt::ForEach { name: declared, body, .. } => {
+            assigned_within(body, name, before && declared != name, out)
+        }
+        Stmt::For { init, cond, body, .. } => {
+            assigned_before(init, name, before, out);
+            let before = !declares(init, name)
+                && (before
+                    || init.iter().any(|s| sets(s, name))
+                    || cond.as_ref().is_some_and(|c| always_sets(c, name)));
+            assigned_within(body, name, before, out);
+        }
+        Stmt::Switch { selector, cases } => {
+            let before = before || always_sets(selector, name);
+            for case in cases {
+                assigned_before(&case.body, name, before, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether statement `s` sets local `name` whenever it completes normally, as Rust also sees in
+/// the code it becomes.
+fn sets(s: &Stmt, name: &str) -> bool {
+    match s {
+        Stmt::Expr(e) | Stmt::Local { init: Some(e), .. } => always_sets(e, name),
+        Stmt::Block(stmts) => !declares(stmts, name) && stmts.iter().any(|s| sets(s, name)),
+        Stmt::If { cond, then, otherwise } => {
+            always_sets(cond, name) || otherwise.as_ref().is_some_and(|o| sets(then, name) && sets(o, name))
+        }
+        Stmt::While { cond, .. } => always_sets(cond, name),
+        Stmt::For { init, cond, .. } => {
+            !declares(init, name)
+                && (init.iter().any(|s| sets(s, name)) || cond.as_ref().is_some_and(|c| always_sets(c, name)))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a statement of `stmts` itself declares a local `name`.
+fn declares(stmts: &[Stmt], name: &str) -> bool {
+    stmts.iter().any(|s| matches!(s, Stmt::Local { name: declared, .. } if declared == name))
+}
+
+/// Whether evaluating `e` always assigns local `name`: an assignment, or a part that is always
+/// evaluated (not the right of `&&` or `||`) of an operator, a cast, a comparison, a call or a
+/// switch with one group.
+fn always_sets(e: &Expr, name: &str) -> bool {
+    match &e.kind {
+        ExprKind::Assign { target: Place::Var(v), op: None, .. } if v == name => true,
+        ExprKind::Assign { value, .. } => always_sets(value, name),
+        ExprKind::Binary(BinOp::And | BinOp::Or, left, _) => always_sets(left, name),
+        ExprKind::Binary(_, left, right) => always_sets(left, name) || always_sets(right, name),
+        ExprKind::Unary(_, value) | ExprKind::Cast(_, value) => always_sets(value, name),
+        ExprKind::MethodCall { receiver, args, .. } => {
+            always_sets(receiver, name) || args.iter().any(|a| always_sets(a, name))
+        }
+        ExprKind::Call { args, .. } | ExprKind::New { args, .. } => args.iter().any(|a| always_sets(a, name)),
+        // A switch with a `default` alone, as lowering evaluates the parts of a call in order
+        // (`receiver$0`, `argument$1`) before it yields the call.
+        ExprKind::Switch { selector, cases } => {
+            always_sets(selector, name)
+                || matches!(&cases[..], [case] if matches!(case.labels[..], [CaseLabel::Default])
+                    && !declares(&case.body, name)
+                    && case.body.iter().any(|s| sets(s, name) || matches!(s, Stmt::Yield(e) if always_sets(e, name))))
+        }
+        _ => false,
+    }
 }
 
 /// A local of the method that `try_assigned` names (`assigned`) whose type has no value to start
@@ -1066,13 +1216,26 @@ impl<'a> Gen<'a> {
         let exceptions =
             self.class.type_index("java.lang.Throwable").is_some_and(|t| !self.enum_variants(t).is_empty());
         let throwable = if exceptions { self.throwable_type() } else { never.to_string() };
+        // The locals that the blocks set for the code after the `finally`, which Rust does not
+        // see set on the way through it, go out in their `Ok` value.
+        let carried = match completion {
+            true => Vec::new(),
+            false => carried_through_finally(body, catches, &self.unset_locals),
+        };
         let ty = if completion {
             let value = if has_return { self.completion_value() } else { never.to_string() };
             let jump = if has_jump { "usize" } else { never };
             format!("{}<{value}, {throwable}, {jump}>", self.runtime("Completion"))
+        } else if !ends {
+            format!("Result<{never}, {throwable}>")
+        } else if carried.is_empty() {
+            format!("Result<(), {throwable}>")
         } else {
-            format!("Result<{}, {throwable}>", if ends { "()" } else { never })
+            let types: Vec<String> = carried.iter().map(|n| self.ty_name(self.unset_locals[n])).collect();
+            format!("Result<{}, {throwable}>", tuple(&types))
         };
+        let rust: Vec<String> = carried.iter().map(|n| self.local(n)).collect();
+        let normal = (!carried.is_empty()).then(|| format!("Ok({})", tuple(&rust)));
         let (arms, all) = self.catch_arms(catches);
         let finally_completes = completes_all(finally);
         // When the `finally` does not complete, what ended the `try` is not used after it.
@@ -1080,7 +1243,7 @@ impl<'a> Gen<'a> {
         let first = if arms.is_empty() { &last } else { &result };
         self.line(&format!("let {first}: {ty} = {{"));
         self.finallies.push(Finally { frame: self.frames.len(), jumps: Vec::new() });
-        self.attempt_block(label, completion, body, &[], None);
+        self.attempt_block(label, completion, body, &[], normal.clone());
         self.line("};");
         if !arms.is_empty() {
             self.line(&format!("let {last} = match {result} {{"));
@@ -1091,7 +1254,7 @@ impl<'a> Gen<'a> {
                 let thrown = self.thrown(completion, &pattern);
                 self.line(&format!("{thrown} => {{"));
                 let handler = self.attempt_label("handler");
-                self.attempt_block(handler, completion, &catch.body, &before, None);
+                self.attempt_block(handler, completion, &catch.body, &before, normal.clone());
                 self.line("}");
             }
             self.line("other => other,");
@@ -1109,9 +1272,18 @@ impl<'a> Gen<'a> {
         if !finally_completes {
             return;
         }
-        if !completion && ends {
+        if !completion && ends && carried.is_empty() {
             let text = self.passed_on(Code::atom(result));
             self.line(&format!("{text};"));
+            return;
+        }
+        if !completion && ends {
+            let values: Vec<String> = rust.iter().map(|r| self.temp(&format!("{r}_value"))).collect();
+            let text = self.passed_on(Code::atom(result));
+            self.line(&format!("let {} = {text};", tuple(&values)));
+            for (r, v) in rust.iter().zip(&values) {
+                self.line(&format!("{r} = {v};"));
+            }
             return;
         }
         if !completion {
