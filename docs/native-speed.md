@@ -38,10 +38,12 @@ experimental runtimes), on the 540 corpus features:
 - Freeing is still needed: javac makes about seven times more short-lived objects than it keeps.
   Without freeing, the Minecraft benchmark passes 10 GB within 20 seconds.
 
-On the Minecraft benchmark (4,754 decompiled server files), today's fat-LTO and PGO build takes
-60 s and 6.2 GB, against the real javac's 11.3 s and 4.1 GB. While it attributes types, it misses
+On the Minecraft benchmark (4,754 decompiled server files), the fat-LTO and PGO build with
+reference counting took 60 s and 6.2 GB, against the real javac's 11.3 s and 4.1 GB; with the
+collector and 4-byte references it takes 13.1 s and 1.36 GB (see "Measuring"). With reference
+counting, while it attributed types, it missed
 the data cache five times as often as the JVM, the instruction cache 5.6 times and the
-instruction TLB 17 times. Causes are 16-byte references (an enum tag and a pointer) against the
+instruction TLB 17 times. The causes were 16-byte references (an enum tag and a pointer) against the
 JVM's 4-byte compressed ones, 48 bytes of count, lock and borrow flag per object against the
 JVM's 12-byte header, and a 90 MB binary of dispatch `match`es and drop code.
 
