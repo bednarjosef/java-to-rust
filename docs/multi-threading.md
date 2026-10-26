@@ -504,8 +504,9 @@ name:
   accesses are the translator's methods in `java/overlay/java/nio/TranslatedBufferViews.java`,
   with the handle's checks and byte order) are handles too, as is a `MethodHandle` constant of a constructor.
 - **Field updater constants** (`AtomicIntegerFieldUpdater.newUpdater(C.class, "f")`, the `long`
-  one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`) are handles of a
-  field for which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
+  one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`, cast to a raw
+  updater or held in a static block's local first, as netty does) are handles of a field for
+  which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
   accessible to the class that makes it). `get`, `set`, `lazySet`, the compare-and-set forms,
   `getAndSet` and `getAndAdd` are the field's access or update; `getAndIncrement`,
   `incrementAndGet`, `addAndGet` and their kin are its `getAndAdd`, with the new value computed
