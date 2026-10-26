@@ -307,6 +307,10 @@ impl<'t> Lowering<'t> {
     }
 }
 
+/// The kind of a node that stands for a node of the program in a tree that lowering writes
+/// (`Lowering::stand_in`).
+const STAND_IN: &str = "STAND_IN";
+
 fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
     error(node.pos(), format!("{what} not supported yet"))
 }
@@ -373,6 +377,8 @@ struct Lowering<'t> {
     /// The binary name of the anonymous class of the enum constant's body whose method is being
     /// lowered (`constant_bodies`), which javac names that body's own methods by (`note_call`).
     body_class: RefCell<Option<String>>,
+    /// The nodes of the program that a tree lowering writes stands for (`stand_in`), by number.
+    stand_ins: RefCell<Vec<Node<'t>>>,
     /// The Java name of each local that `local_names` renamed (see `Class::class_file`).
     renamed_locals:
         RefCell<std::collections::HashMap<(String, Pos), std::collections::HashMap<String, String>>>,
@@ -948,6 +954,9 @@ impl<'t> Lowering<'t> {
         let kind = match node.kind() {
             _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
+            STAND_IN => {
+                return self.expr(self.stand_ins.borrow()[node.0["standsFor"].as_u64().unwrap_or(0) as usize]);
+            }
             "INT_LITERAL" => ExprKind::Int(self.number(node)?),
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
             "DOUBLE_LITERAL" => ExprKind::Double(self.number(node)?),

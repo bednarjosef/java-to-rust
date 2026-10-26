@@ -111,6 +111,7 @@ impl<'t> Lowering<'t> {
             chained_calls: Default::default(),
             iterators: Default::default(),
             body_class: Default::default(),
+            stand_ins: Default::default(),
             renamed_locals: Default::default(),
             covariant: Default::default(),
             object: None,

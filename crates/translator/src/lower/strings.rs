@@ -136,7 +136,7 @@ impl<'t> Lowering<'t> {
         let language = crate::value::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column,
             "javaType": "java.lang.String", "arguments": [],
             "methodSelect": {"kind": "MEMBER_SELECT", "line": line, "column": column,
-                "identifier": method, "expression": locale.0,
+                "identifier": method, "expression": self.stand_in(*locale),
                 "symbol": {"kind": "METHOD", "name": method, "owner": class, "static": false,
                     "type": signature}},
             "symbol": {"kind": "METHOD", "name": method, "owner": class, "static": false,
@@ -334,6 +334,16 @@ impl<'t> Lowering<'t> {
         Ok(ExprKind::Builtin(Builtin::Format, args))
     }
 
+    /// A node that stands for `node` in a tree that lowering writes, and is lowered as `node`
+    /// is: the analyses of the program's code know its nodes by their place in memory, so a copy
+    /// of a lambda or of a captured local would be unknown to them. It has `node`'s type and place.
+    pub(super) fn stand_in(&self, node: Node<'t>) -> crate::value::Value {
+        let mut stand_ins = self.stand_ins.borrow_mut();
+        stand_ins.push(node);
+        crate::value::json!({"kind": STAND_IN, "standsFor": stand_ins.len() - 1, "javaType": node.0["javaType"],
+            "line": node.0["line"], "column": node.0["column"]})
+    }
+
     /// `String.format(locale, format, args...)` (and `printf` with a locale): what the JDK's code
     /// runs, `new Formatter(locale).format(format, args).toString()`, with the JDK's `Formatter`,
     /// which formats as the locale does.
@@ -368,8 +378,8 @@ impl<'t> Lowering<'t> {
                 "symbol": symbol(method)})
         };
         let formatter = crate::value::json!({"kind": "NEW_CLASS", "line": line, "column": column,
-            "javaType": new.0, "arguments": [locale.0], "symbol": symbol(new)});
-        let formatted = call(formatter, format, rest.iter().map(|a| a.0.clone()).collect(), new.0);
+            "javaType": new.0, "arguments": [self.stand_in(*locale)], "symbol": symbol(new)});
+        let formatted = call(formatter, format, rest.iter().map(|&a| self.stand_in(a)).collect(), new.0);
         let text = call(formatted, text, Vec::new(), "java.lang.String");
         let text: &'t crate::value::Value = Box::leak(Box::new(text));
         Ok(self.expr(Node(text))?.kind)
