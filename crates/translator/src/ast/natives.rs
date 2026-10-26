@@ -119,6 +119,9 @@ pub enum Native {
     /// `lower/natives.rs`), which is not evaluated where the native is, and which reads the
     /// exception with `Throwable.uncaught0()` (`UncaughtException`).
     InstallTrace,
+    /// `installShutdown0()` of the translator's `Thread`, to which lowering adds the call
+    /// `Thread.runShutdownHooks()` that the runtime makes, once, as the program exits.
+    InstallShutdown,
     /// `Unsafe.park(absolute, time)` of `LockSupport`: waits for the calling thread's permit, until
     /// the deadline `time` (milliseconds since the epoch) when `absolute`, else for `time`
     /// nanoseconds, or without a limit for 0.
@@ -569,6 +572,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.lang.Thread", "isInterrupted0", "(long)boolean") => Native::ThreadIsInterrupted,
         ("java.lang.Thread", "clearInterrupt0", "()boolean") => Native::ThreadClearInterrupt,
         ("java.lang.Thread", "installUncaught0", "()void") => Native::InstallUncaught,
+        ("java.lang.Thread", "installShutdown0", "()void") => Native::InstallShutdown,
         ("java.lang.Thread", "uncaught0", "()java.lang.Throwable") => Native::UncaughtException,
         ("java.lang.Thread", "printUncaught0", "(java.lang.String,java.lang.Throwable)void") => {
             Native::PrintUncaught

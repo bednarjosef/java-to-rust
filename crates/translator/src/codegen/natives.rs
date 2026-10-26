@@ -222,6 +222,7 @@ impl<'a> Gen<'a> {
             }
             Native::InstallUncaught => self.install_uncaught(args),
             Native::InstallTrace => self.install_trace(args),
+            Native::InstallShutdown => self.install_shutdown(args),
             Native::UncaughtException => {
                 let ty = self.ty_name(ty);
                 call(self, &format!("pending_uncaught::<{ty}>"), vec![])
@@ -429,6 +430,19 @@ impl<'a> Gen<'a> {
              {pending}(uncaught); {body}; true }}, |e: &dyn std::any::Any| \
              e.downcast_ref::<{throwable}>().map(|e| String::from(e.runtime_class_name())))"
         ))
+    }
+
+    /// `Native::InstallShutdown` with its call of `Thread.runShutdownHooks()`: the runtime gets
+    /// a function that makes the call, which it runs as the program exits.
+    fn install_shutdown(&mut self, args: &'a [Expr]) -> Code {
+        let attempts = std::mem::take(&mut self.attempts);
+        let catching = std::mem::take(&mut self.catching_now);
+        let throwing = std::mem::replace(&mut self.throwing, false);
+        let body = self.expr(&args[0]).text;
+        self.attempts = attempts;
+        self.catching_now = catching;
+        self.throwing = throwing;
+        Code::atom(format!("{}(|| {{ let _ = {body}; }})", self.runtime("set_shutdown_hook")))
     }
 
     /// `Native::InstallTrace` with its call of `Throwable.uncaughtTrace()`: the runtime gets a

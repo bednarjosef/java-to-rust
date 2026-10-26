@@ -1504,7 +1504,11 @@ fn expr_points(
         ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
         // The runtime runs the dispatch of an uncaught exception later, on the thread it ends, and
         // makes the text of its stack trace there.
-        ExprKind::Builtin(Builtin::Native(Native::InstallUncaught | Native::InstallTrace), _) => {}
+        // So do the shutdown hooks, as the program exits.
+        ExprKind::Builtin(
+            Builtin::Native(Native::InstallUncaught | Native::InstallTrace | Native::InstallShutdown),
+            _,
+        ) => {}
         // The store of an atomic update of an element through `Unsafe` checks neither the array
         // nor the index, as the JVM's does not (see `failures::library_failure`): its operands
         // are evaluated, and the store raises nothing.

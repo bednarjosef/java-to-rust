@@ -334,7 +334,8 @@ impl Walk<'_> {
     /// static initialization it may run: a second walk, once this one is done, from what the
     /// runtime runs on a thread that `Thread.start()` starts (the call of `run` in
     /// `Native::ThreadStart`), from the dispatch of an exception that ends a thread
-    /// (`Native::InstallUncaught`) and from the exceptions that the runtime raises. `None` when
+    /// (`Native::InstallUncaught`), from the shutdown hooks' start on the thread that exits
+    /// (`Native::InstallShutdown`) and from the exceptions that the runtime raises. `None` when
     /// the program starts no thread, or when the facts do not tell what that walk needs.
     ///
     /// Why the second walk is sound. It starts from this walk's knowledge, which holds for every
@@ -360,9 +361,10 @@ impl Walk<'_> {
                                 starts = true;
                                 roots.extend(args.last().map(|run| (m, run)));
                             }
-                            ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), args) => {
-                                roots.extend(args.iter().map(|a| (m, a)))
-                            }
+                            ExprKind::Builtin(
+                                Builtin::Native(Native::InstallUncaught | Native::InstallShutdown),
+                                args,
+                            ) => roots.extend(args.iter().map(|a| (m, a))),
                             _ => {}
                         })
                     },

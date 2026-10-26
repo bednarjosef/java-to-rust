@@ -77,6 +77,7 @@ pub(crate) fn die(e: impl fmt::Display + 'static) -> ! {
         if crate::thread::threads_started() { crate::thread::current_record().name() } else { "main".into() };
     crate::out::eprint_text(&format!("Exception in thread \"{name}\" {}\n", crate::uncaught_text(&e)));
     crate::thread::await_threads();
+    crate::thread::run_shutdown_hooks();
     crate::drain_stdout();
     std::process::exit(1)
 }
