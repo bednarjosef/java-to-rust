@@ -335,8 +335,10 @@ enum; since an enum is a Rust `enum`, `lower/constant_bodies.rs` turns its overr
 a `match` on `self` in the enum's method. A body may override the enum's methods, or the
 methods of an interface the enum leaves to its constants; a method that overrides nothing is a
 method of the enum, which only that body's code calls. Lambdas and method references in
-those methods translate and capture the constant as `this`
-(`corpus/whole-program/LambdasInConstantBodies.java`).
+those methods and in the initializers of the body's fields translate and capture the constant as
+`this` (`corpus/whole-program/LambdasInConstantBodies.java`, `ConstantBodyFieldLambdas.java`). A
+constant with a body calls the enum's constructor through the body's anonymous one, which javac
+does not mark as variable-arity, so its varargs are packed by the enum's own constructor.
 
 A body may declare fields of type `int`, `long`, `double`, `float`, `char`, `boolean` or
 `String`: each becomes a field of the enum whose value for a constant is that body's
@@ -643,4 +645,4 @@ Corpus programs: `corpus/features/` (`LocalClasses`, `CapturedLocals`, `LocalMem
 `LambdaMadeOnce`, `LambdaCaptures`, `MethodReferences`, `MethodReferenceReceivers`, `SuperInLambdas`,
 `ClosureForms`, `LocalClosures`, `ClosureDefaultMethods`, `GenericClosures`), and in
 `corpus/whole-program/` (`FunctionChains`, `Comparators`, `ReverseOrder`,
-`LambdasInConstantBodies`), which run only with the JDK's sources.
+`LambdasInConstantBodies`, `ConstantBodyFieldLambdas`), which run only with the JDK's sources.

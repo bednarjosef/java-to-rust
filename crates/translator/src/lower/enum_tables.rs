@@ -227,7 +227,7 @@ impl<'t> Lowering<'t> {
                 return unsupported(member, "this enum constant");
             };
             // A constructor's varargs, which a constant may pass none of.
-            let args = self.packed_args(init, &symbol, args)?;
+            let args = self.packed_args_of(init, ctor, args)?;
             let mut args = self.convert_args(Some(ctor), args)?;
             args.insert(0, self.synth(ExprKind::Int(ordinal as i32), member.pos(), Type::Int));
             let call = ExprKind::Call { name: builder.clone(), args, resolved: Some(ctor) };

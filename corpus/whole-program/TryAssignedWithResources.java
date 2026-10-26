@@ -41,10 +41,26 @@ public class TryAssignedWithResources {
         return certificate;
     }
 
+    // A local of an object type, which has no value to start as, set in the try-with-resources:
+    // the closing `try` with its `finally` carries it out.
+    static String certObject(String text) {
+        CharSequence certificate;
+        try (StringReader in = new StringReader(text)) {
+            if (text.isEmpty()) throw new IllegalArgumentException();
+            certificate = new StringBuilder("object:").append((char) in.read());
+        } catch (Exception e) {
+            System.out.println("Failed to open certificate file");
+            return null;
+        }
+        return certificate.toString();
+    }
+
     public static void main(String[] args) throws Exception {
         dump(false);
         dump(true);
         System.out.println(cert("xyz"));
         System.out.println(cert(""));
+        System.out.println(certObject("xyz"));
+        System.out.println(certObject(""));
     }
 }
