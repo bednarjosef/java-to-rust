@@ -267,8 +267,16 @@ impl<'a> Gen<'a> {
             }
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
+            // Its value has the type of the call, in the form of a value that is not null, as the
+            // type `!` of `unreachable!` is no type that a local, an operator or a borrow can take.
             Native::Missing { what } => {
-                Code::never(format!("unreachable!(\"the native method {what} never runs\")"))
+                let never = format!("unreachable!(\"the native method {what} never runs\")");
+                if ty == Type::Void {
+                    Code::never(never)
+                } else {
+                    let ty_text = self.ty_name(ty);
+                    Code::atom(format!("{{ let never: {ty_text} = {never}; never }}"))
+                }
             }
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),
             Native::CdsRandomSeed => call(self, "cds_random_seed_for_dumping", vec![]),

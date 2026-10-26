@@ -41,7 +41,8 @@ take the descriptor of the stream's object, and the tables `FILE_SYSTEM`, `UNIX_
 A native that the runtime lacks becomes `Native::Missing`. Where it can run, the program is
 rejected with ``native method `Class.name(signature)` not supported yet``
 (`analysis/live_methods.rs`); where it cannot (a branch that only a direct buffer takes, say), it
-is code that never runs.
+is code that never runs: `unreachable!` in a block that gives it the type of the call, as Rust's
+`!` is no type that a local, an operator or a borrow can take.
 
 Some methods are replaced at the call, before their argument is lowered, so that reachability
 never enters them (`REPLACED_METHODS` in `program/reach.rs`). They take a `Class`, which the
