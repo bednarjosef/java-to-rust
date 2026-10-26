@@ -291,8 +291,7 @@ thread uses keeps its monitor by address, as a `RefCell` object does.
 
 Rejected, by name: `synchronized` on a string, a box, a Java enum's constant, or the class of a
 value (`o.getClass()`) where the monitor would be kept (they are values without a lock), and
-`wait`, `notify` or `holdsLock` on a string or box anywhere;
-`wait(millis, nanos)`. A string, box or `Class` held as an `Object` has no monitor either, since
+`wait`, `notify` or `holdsLock` on a string or box anywhere. A string, box or `Class` held as an `Object` has no monitor either, since
 the translation keeps them as values; where a locked `Object` may hold one of them as well as the
 program's objects (as `Collections.synchronizedSet(set, mutex)` locks what it is given), the
 objects keep their monitors, and locking, waiting on or notifying such a value at run time ends

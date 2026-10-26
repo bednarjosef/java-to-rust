@@ -14,7 +14,7 @@ follows it; thorough mode adds stronger analyses and design-level entries (per c
 pattern instead of per value), not a second generator.
 
 The speed side of this mode (the collected object model, points-to and escape analysis, and the
-transformations they allow) is planned in docs/native-speed.md, which also replaces analysis
+transformations they allow) is in docs/native-speed.md, built in part, which also replaces analysis
 precision built from recorded runs: decisions come from the code alone. This doc keeps the idiom
 side.
 

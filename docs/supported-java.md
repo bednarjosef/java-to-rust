@@ -35,7 +35,7 @@ plainer form only where it proves the meaning is the same:
 
 | Java | Faithful form | Plainer forms, where an analysis allows |
 |---|---|---|
-| object | `Arc<RefCell<C>>` | `Arc<C>` when objects never change after construction (`analysis/objects.rs`); a plain struct with `&self`/`&mut self` methods when objects are never shared (`analysis/owned.rs`, `analysis/borrowing.rs`) |
+| object | `Arc<RefCell<C>>` | `Arc<C>` when objects never change after construction (`analysis/objects.rs`); a plain struct with `&self`/`&mut self` methods when objects are never shared (`analysis/owned.rs`, `analysis/borrowing.rs`); made in a slot on its method's stack instead of the heap when it never leaves that method (`analysis/escape.rs`) |
 | reference that may be null | `Option<..>` | the plain value where nullness analysis proves it is never null (`analysis/nullness.rs`) |
 | `int` arithmetic | `wrapping_add`, `java::rem`, ... | `+ - * / %` where range analysis proves no overflow and a nonzero divisor (`analysis/ranges.rs`) |
 | array | `java::Array<T>`, a shared cell | `Vec<T>` (or `Vec<Vec<T>>`) when no other name can see it (`analysis/arrays.rs`) |
@@ -114,13 +114,17 @@ included (docs/collector.md).
 - **`String.format`** is Java's `Formatter` in the US locale for `%b %h %s %c %d %o %x %e %f %g
   %n %%` with indexes, flags, width and precision, rounding half up from the shortest decimal as
   Java does. Arguments keep their Java type (`java::Arg::Long(n)`), so a mismatch throws
-  `IllegalFormatConversionException`. `%t` and `%a` are rejected in a constant format.
+  `IllegalFormatConversionException`. `%t` and `%a` are rejected in a constant format, and so
+  is an array argument other than the `Object[]` of all of them. With a `Locale`,
+  `String.format` and `printf` are the JDK's `Formatter` in that locale (a whole program; without
+  the JDK's sources they are rejected).
 - **Charsets**: `getBytes` and `new String(bytes, ..)` for UTF-8, US-ASCII, ISO-8859-1, UTF-16,
   UTF-16BE and UTF-16LE (`charset.rs`). A `Charset` is an ordinary value; `forName` resolves
   aliases and case as Java does, and `defaultCharset()` is UTF-8 (JEP 400). An unknown or
   malformed name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with
-  Java's message, which a `catch` sees. A constant name of another charset (`windows-1252`),
-  `Charset.aliases()` and a `Charset` array element that may be null are rejected. In a whole program
+  Java's message, which a `catch` sees. So does the name of any other charset, which Java has
+  (`windows-1252`), and `isSupported` is false for it. `Charset.aliases()` and a `Charset` array
+  element that starts out null are rejected. In a whole program
   `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings compares what Java compares: by text where both sides can only be interned
@@ -166,16 +170,20 @@ Design: [object-model.md](object-model.md).
   inheritance, `Iface.super.m()`, and enums implementing interfaces. An interface type is an enum
   over its implementing classes, or that class's object when there is only one.
 - **`instanceof` and casts** are `matches!`/`if let` on the type's enum, including patterns,
-  record patterns, negated patterns (`if (!(x instanceof T t)) return;` becomes `let .. else`)
-  and `||` chains with a negated pattern. A failed downcast throws `ClassCastException`.
+  record patterns, negated patterns (`if (!(x instanceof T t)) return;` becomes `let .. else`,
+  and the branches of `!(o instanceof T t) ? false : ..t..` swap), `||` chains with a negated
+  pattern, and an `if` whose negated `&&` chain or `||` inside an `&&` chain binds a pattern
+  (`lower/negated_patterns.rs`). A failed downcast throws `ClassCastException`.
 - **`Object`** is an enum with a variant per class of the program whose values become `Object`s,
   plus strings, boxes, arrays, builders and class values (`Object::String(..)`,
   `Object::Integer(5)`, `Object::IntArray(..)`). `equals`/`hashCode` are the program's where
   defined, otherwise identity for objects and value for strings and boxes. Default `toString`
   prints the binary name and hash code (`Point@1b6d3586`). `new Object()` is `PlainObject`.
-  `==` between two `Object`s that may both be strings or boxes is rejected, except in
-  `a == b || a.equals(b)`; a points-to analysis (`analysis/object_values.rs`) decides which sides
-  may be. Where the program's strings are shared (above), strings in them compare as objects.
+  `==` between two `Object`s that may both be strings or boxes compares them at run time
+  (above), except in `a == b || a.equals(b)`, where `equals` decides either way; a points-to
+  analysis (`analysis/object_values.rs`) decides which sides may be. An atomic compare of
+  `Object` elements that may be strings or boxes is rejected. Where the program's strings are
+  shared (above), strings in them compare as objects.
 - `Comparable`, `Number`, `CharSequence` and `java.lang.Enum` used as types are enums like
   `Object` over the program's implementors and the matching library values.
 - **Generics** translate erased, as javac compiles them, with javac's casts and bridge methods.
@@ -195,8 +203,8 @@ Design: [object-model.md](object-model.md).
   arguments) keeps its fields in tables indexed by ordinal, filled by running its constructors in
   its static initialization, as Java does. Constant bodies override methods as a
   `match self`. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
-  message. An enum value that may be null is an `Option` of the enum. Using a constant does not
-  initialize the enum by itself, unlike Java; reading its fields or calling its methods does.
+  message. An enum value that may be null is an `Option` of the enum. Using a constant
+  initializes the enum first, as in Java.
   A body's methods that override nothing are methods of the enum. A body's instance field of an
   object type gives the enum the table form, and its static fields are the enum's
   (`javac/enum_bodies.rs`), initialized after every constant rather than as its constant is
@@ -220,8 +228,10 @@ Design: [closures-and-nested-classes.md](closures-and-nested-classes.md).
 - **Inner, local and anonymous classes** are lowered as javac desugars them (`lower/captures.rs`,
   `lower/inner.rs`): an inner object holds its enclosing object in the field `outer`, and the
   locals a local class reads become fields set from its constructor. `getName` gives javac's
-  binary names (`Main$1Labeler`, `Main$1`). Not yet: an inner class with subclasses whose
-  constructor uses `this` as a value or calls an overridable method.
+  binary names (`Main$1Labeler`, `Main$1`). An inner class tree takes Java's construction order
+  as any other (above), passing each class's enclosing instance and captured locals on, upcast
+  where a superclass is an inner class of the enclosing class's superclass. Not yet: such a tree
+  where a constructor passes them on other than as they are (`analysis/whole_objects.rs`).
 - **Lambdas and method references** (`lower/lambdas.rs`) are each a class implementing the
   functional interface, with the captured locals as fields. A bound method reference evaluates
   its receiver once and checks it for null, as Java does.
@@ -295,8 +305,10 @@ program can tell. In a whole program `java.util.concurrent` (atomics, `Concurren
 `ForkJoinPool`, `LockSupport`) and `ThreadLocal` are the JDK's translated code.
 `wait(millis, nanos)` waits a millisecond longer for any nanoseconds, as `Object`'s does.
 
-Rejected: the monitor (`synchronized`, `wait`, `notify`) of a string, a box, an array or another
-value that has no identity in the translation (`lower/sync.rs`).
+An array's monitor is kept too, made the first time a thread takes it
+([multi-threading.md](multi-threading.md), 3.1). Rejected: the monitor (`synchronized`, `wait`,
+`notify`) of a string, a box or another value that has no identity in the translation
+(`lower/sync.rs`).
 
 ## Class values and reflection
 
@@ -316,8 +328,17 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   supported yet: making a type that mentions one throws `UnsupportedOperationException`.
   `getGenericInterfaces`, `getTypeParameters` and the generic types of methods and fields are
   still rejected.
-- `Class.forName` of a constant name is that class; of a computed name, a `switch` over the
-  classes code can find by name. An unknown name throws `ClassNotFoundException`.
+- `Class.forName` of a constant name is that class, and of an array's descriptor
+  (`"[La.B;"`) that array's class; of a computed name, a `switch` over the classes code can find
+  by name. An unknown name throws `ClassNotFoundException`.
+- **Handles**: `Unsafe` offsets, field updaters and `VarHandle`s of fields and array elements,
+  and the `MethodHandle`s of the handle factories, are the accesses they name, followed through
+  constants, locals, fields and calls ([multi-threading.md](multi-threading.md), 5.3). A call of
+  a lookup's or a `MethodHandle`'s method that the translation does not follow (a handle of any
+  other method, `invokeWithArguments`, combinators such as `filterArguments`) throws
+  `UnsupportedOperationException` where it runs, as a JDK that lacks the method would fail, and
+  code that falls back on a failed lookup, as netty does, takes its fallback; a census lists each
+  such call. A handle used as a value any other way is rejected.
 - Reflection over the program's classes (`getMethod`, `getField`, `Method.invoke`,
   `Constructor.newInstance`, ...) goes through a table of members built into the translation for
   the names that reachable lookups can find (`lower/reflection.rs`). `ServiceLoader` finds the
@@ -333,9 +354,10 @@ Design: [natives-and-input.md](natives-and-input.md).
 - `System.out` and `System.err` printing is buffered with Java's 128-byte buffers
   (`java::println!`); `System.err` flushes `System.out` first so the two stay in order.
 - With the JDK's sources, `System.out`, `System.err` and `System.in` can be values, wrapped in
-  the JDK's streams, readers and writers or the program's own subclasses. Without them, using one
-  as a value is rejected. `PrintStream`, `InputStreamReader` and `OutputStreamWriter` are
-  stand-ins that use the runtime's charsets.
+  the JDK's streams, readers and writers or the program's own subclasses, and `System.setOut`
+  and `setErr` replace them: the program's calls on `System.out` then run the new stream's
+  methods. Without them, using one as a value is rejected. `PrintStream`, `InputStreamReader`
+  and `OutputStreamWriter` are stand-ins that use the runtime's charsets.
 - Native methods of translated JDK classes are hand-written in the runtime and chosen by class,
   name and signature (`ast/natives.rs`); any other native is rejected with its name. This covers
   the clocks, `identityHashCode`, the bit conversions of floats, file descriptors and files
@@ -345,15 +367,21 @@ Design: [natives-and-input.md](natives-and-input.md).
 - `System.getProperty` gives what a plain `java Main` run gives (`lower/system.rs`): machine
   values at run time, other keys fixed from the JDK the translator ran with, and
   `java.awt.headless` `"true"`, as with `-Djava.awt.headless=true`.
-  `sun.java.command` and `user.timezone` as constants are rejected. `System.getenv(name)` reads
-  the environment; `System.getenv()` as a map is not translated yet.
+  `sun.java.command` and `user.timezone` as constants are rejected. `System.setProperty` and
+  `clearProperty` keep their changes, which every `getProperty` of a program that calls them
+  reads (`java/overlay/java/lang/TranslatedProperties.java`). `System.getenv(name)` reads the
+  environment, and in a whole program `System.getenv()` is the JDK's map of it.
+- `Runtime` is no value: its methods are translated on `Runtime.getRuntime()` or a local that
+  holds it, and any other use of one is rejected. Its shutdown hooks run on the first exit, as
+  Java's do, but not on a signal ([multi-threading.md](multi-threading.md), 6).
 - A translation is headless, unlike a JVM on a machine with a display: AWT's natives are not
   translated, so `GraphicsEnvironment.isHeadless()` is always true, and a program that would
   open a window there (the Minecraft server without `nogui`) runs as it does on a server
   without one. The tests run Java with `-Djava.awt.headless=true` to compare.
-- There is no security manager (`System.getSecurityManager()` is null), no garbage collector
-  (`gc()` does nothing, `Runtime`'s memory figures are fixed values), no virtual threads, and no
-  network connections: sockets stay rejected.
+- There is no security manager (`System.getSecurityManager()` is null), no virtual threads, and
+  no network connections: sockets stay rejected. The collector runs on its own
+  ([collector.md](collector.md)): `gc()` does nothing, and `Runtime`'s memory figures are fixed
+  values.
 
 ## Whole programs
 
@@ -363,25 +391,32 @@ Design: [natives-and-input.md](natives-and-input.md).
   are only on javac's source path, so javac attributes a library file only when reachability
   asks for one of its classes.
 - Reachability stops at the classes the runtime provides (`RUNTIME_CLASSES`: `String`,
-  `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`) and at what is not
-  translated (`UNTRANSLATED`: most reflection, method handles, serialization, security but its
-  exceptions and message digests, class loading). An untranslated class used as a type has no objects, so its variables are only ever
-  null (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
+  `StringBuilder`, `System`, `Runtime`, `Math`, the boxes, `Object`, `Class`, `Thread`, the
+  standard charsets) and at what is not translated (`UNTRANSLATED`: most reflection, method
+  handles but those above, serialization, class loading, and security but its exceptions,
+  message digests, secure random numbers and what a server's login needs, see
+  [natives-and-input.md](natives-and-input.md#class-loading-resources-and-classes-by-name)).
+  An untranslated class used as a type has no objects, so its variables are only ever null
+  (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
   `Tripwire.ENABLED`, virtual threads) is not reached, and neither are parallel streams when no
   stream can become parallel (`program/reach/sequential.rs`).
 - A source root may be a module with `module-info.java`; the whole translation is one closed
   program, and `Class.getModule()`, `Module` and `ModuleLayer.boot()` answer from the declared
   modules (`program/modules.rs`). Defining a new module layer throws.
 - Each package becomes a Rust module (`com.example.util` is `com::example::util`; the JDK's
-  `java.util` is `java_::util`). `--crate DIR` writes a file per package, `-o FILE` one file.
+  `java.util` is `java_::util`). `--crate DIR` writes a file per package, `-o FILE` one file, and
+  `--crate DIR --crates N` a workspace of a header crate and `N` body crates that build in
+  parallel ([several-crates.md](several-crates.md)).
 - `--census` translates past every rejection, stubbing each rejected method, and reports what is
   rejected and why, grouped by message, separately for program and library code
-  (`program/census.rs`). `--survey` is a quicker syntactic view of what the reachable code needs
+  (`program/census.rs`). It lists apart, as code that translates, the code that throws
+  `NoClassDefFoundError` for a class missing from the roots (`--keep-going`) and the handle
+  calls that throw `UnsupportedOperationException` because the translation does not follow them. `--survey` is a quicker syntactic view of what the reachable code needs
   from outside the translated sources (`program/survey.rs`). Both have `-json` forms.
   `scripts/jdk-coverage.py` runs the census over the target programs and writes
   [jdk-coverage.md](jdk-coverage.md).
-- `--modules-json FILE` writes the module tree and what each item names, the input for planning
-  a split into crates ([several-crates.md](several-crates.md)).
+- `--modules-json FILE` writes the module tree and what each item names, the dependency graph
+  that shows which groups of classes could be split off ([several-crates.md](several-crates.md)).
 
 ## Idiomatic output
 
@@ -401,9 +436,11 @@ Beyond the rejections listed in each section above:
 
 - In a single file, every library class the runtime does not supply (collections, streams,
   `Scanner`, `java.io` beyond the standard streams). Translate the program whole instead.
-- Escape analysis (objects that never leave a method as stack values), and objects held in one
-  place as owned fields, `Box`es or `Vec` elements: see [thorough-mode.md](thorough-mode.md) and
-  [natural-rust.md](natural-rust.md).
+- Objects held in one place as owned fields, `Box`es or `Vec` elements: see
+  [thorough-mode.md](thorough-mode.md) and [natural-rust.md](natural-rust.md). An object that
+  never leaves its method is already made on its stack
+  ([collector.md](collector.md#objects-on-the-stack)).
 - `ArrayList` as a `Vec` and sequential streams as iterators: [lists-and-streams.md](lists-and-streams.md).
 - Not measured yet: the share of values that became owned or plain, the remaining `Option`s and
-  null checks, dynamic calls, and memory.
+  null checks, and dynamic calls. The time and peak memory of the benchmarks are in
+  [native-speed.md](native-speed.md).
