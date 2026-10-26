@@ -570,6 +570,9 @@ impl<'a> Gen<'a> {
                     if self.is_object_method(target) {
                         return self.identity_call(receiver, target, args);
                     }
+                    if self.homes[target] == Home::Nowhere {
+                        return self.no_object_runs(receiver, target, index);
+                    }
                     self.method_call(receiver, target, args)
                 };
                 self.raising(code, index)
@@ -579,6 +582,25 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty, e.id),
         }
+    }
+
+    /// A call of method `target` (`index` as called) that no object runs (`Home::Nowhere`): the
+    /// receiver's class has no objects, as a census leaves a class whose constructors cannot run
+    /// (JNA's `W32WindowUtils`), so the receiver is null, which Java's call throws for. Its code
+    /// was never emitted.
+    fn no_object_runs(&mut self, receiver: &'a Expr, target: usize, index: usize) -> Code {
+        let m = &self.class.methods[target];
+        let message = format!("no object runs {}.{}", self.class.types[m.class].name, m.name);
+        let checked = self.receiver_ref(receiver);
+        let plain = self.plain_ret_text(target);
+        let ret = plain.strip_prefix(" -> ").unwrap_or("()").to_string();
+        let ret = if self.facts.throwing.contains(&index) {
+            format!("Result<{ret}, {}>", self.throwable_type())
+        } else {
+            ret
+        };
+        let never = format!("{{ let _ = {checked}; let value: {ret} = unreachable!({message:?}); value }}");
+        self.raising(Code::atom(never), index)
     }
 
     /// Reads a variable after assigning it, for an assignment used as a value.
