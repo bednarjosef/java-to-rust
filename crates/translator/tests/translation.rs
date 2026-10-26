@@ -3683,6 +3683,29 @@ fn a_census_takes_the_arguments_of_a_native_that_the_runtime_lacks_as_code_that_
 }
 
 #[test]
+fn a_census_gives_the_value_of_a_native_that_the_runtime_lacks_the_type_of_the_call() {
+    // The value of a JNI native is code that never runs; a local declared with it, a comparison
+    // and a borrow of it take the type of the call, as `!` can do none of these.
+    let dir = write_sources(
+        "census_native_type",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    static native int level();\n    static native String name();\n    static boolean loaded = Boolean.getBoolean(\"x\");\n    static int size(String s) {\n        return s.length();\n    }\n    public static void main(String[] a) {\n        if (loaded) {\n            int l = level();\n            System.out.println(l >= 0 ? size(name()) : 0);\n        }\n    }\n}\n",
+        )],
+    );
+    let program =
+        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ends_rejected: true, ..Default::default() };
+    let rust = census(&program).modules.expect("a translation").one_file();
+    assert_contains(
+        &rust,
+        &[
+            "let never: i32 = unreachable!(\"the native method p.Main.level()int never runs\"); never }",
+            "let never: java::JString = unreachable!(\"the native method p.Main.name()java.lang.String never runs\"); never }",
+        ],
+    );
+}
+
+#[test]
 fn a_census_calls_a_native_that_the_runtime_lacks_through_the_interface_it_implements() {
     // `VMManagementImpl`'s natives implement `VMManagement`'s methods: a call through the
     // interface runs the native of the implementing class, which the census lists.
