@@ -91,19 +91,27 @@ fn names(v: &crate::value::Value, out: &mut HashSet<String>) {
 
 /// Whether the last statement of a case leaves it, so that it does not fall into the next case.
 fn leaves(body: &[Stmt]) -> bool {
-    match body.last() {
-        Some(Stmt::Block(inner)) => leaves(inner),
-        last => matches!(
-            last,
-            Some(
-                Stmt::Break
-                    | Stmt::Continue
-                    | Stmt::Return(..)
-                    | Stmt::BreakLabel(_)
-                    | Stmt::ContinueLabel(_)
-                    | Stmt::Yield(_)
-                    | Stmt::Throw(_)
-            )
+    body.last().is_some_and(leaves_stmt)
+}
+
+/// Whether statement `stmt` never ends normally: it jumps, or each of its branches does (an `if`
+/// with both branches, a `try` whose body and catches do, or whose `finally` does).
+fn leaves_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Block(inner) => leaves(inner),
+        Stmt::If { then, otherwise: Some(otherwise), .. } => leaves_stmt(then) && leaves_stmt(otherwise),
+        Stmt::Try { body, catches, finally } => {
+            finally.as_deref().is_some_and(leaves) || (leaves(body) && catches.iter().all(|c| leaves(&c.body)))
+        }
+        _ => matches!(
+            stmt,
+            Stmt::Break
+                | Stmt::Continue
+                | Stmt::Return(..)
+                | Stmt::BreakLabel(_)
+                | Stmt::ContinueLabel(_)
+                | Stmt::Yield(_)
+                | Stmt::Throw(_)
         ),
     }
 }
