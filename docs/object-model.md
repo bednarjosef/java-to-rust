@@ -112,11 +112,16 @@ Naming:
   the first number after it that is free (`StandardTableColumnKeySet2`), in its statics, monitor
   and static initialization too.
 - A variant is named after its class's simple name (`Shape::Circle`, and `ShapeView::Circle`
-  in the view), with the outer classes' names when two variants of one enum would share one.
-  Runtime variants are `String`, `Integer`, ..., `IntArray`, `StringBuilder` and so on. The
+  in the view), with the outer classes' names when two variants of one enum would share one,
+  and with the package's too when those still meet; names that meet even then (`CSS.Value` and
+  `CSSValue` of one package) are numbered after the first (`CSSValue2`). Runtime variants are `String`, `Integer`, ..., `IntArray`, `StringBuilder` and so on. The
   view is `<Name>View`, or `<Name>Variants` when the program has a class of the first name.
 - Accessors are `base()`, `base_mut()` and `view()`; conversions `to_<type>()` and
-  `as_<type>()`. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
+  `as_<type>()`, the type's name in snake case: its simple name, with its outer classes where
+  another type has the same name either way (`CSS.Value` beside `CSSValue`), with its package
+  where that is shared too. The names are unique in the program, as every enum's conversions
+  meet on `Object`: where two types still come to one name (`WinDef.LONG` and `Long`), all but
+  the one with fewest dots take the first free number (`as_long`, `as_long_2`). A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
   the class methods above gets a suffix (`base_2`, `clone_2`).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that

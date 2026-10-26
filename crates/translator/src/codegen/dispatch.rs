@@ -19,7 +19,7 @@
 use super::arraycopy::CopyCall;
 use super::*;
 use crate::analysis::{ENUM_COMPARE_NULL, compare_null_message};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How `same_variant` compares two objects of a variant that is equal only to itself.
 const IDENTITY: &str = "Arc::ptr_eq(a, b)";
@@ -463,6 +463,20 @@ impl<'a> Gen<'a> {
                 names.insert(c, self.full_variant_name(c));
             }
         }
+        // Whole names can still meet in one package (`CSS.Value` and `CSSValue`): all but the
+        // first such variant take the first number after the name that no variant has.
+        let mut taken: HashSet<String> = names.values().cloned().collect();
+        let mut first: HashSet<String> = HashSet::new();
+        for &c in variants.iter() {
+            let name = names[&c].clone();
+            if first.insert(name.clone()) {
+                continue;
+            }
+            let numbered =
+                (2..).map(|n| format!("{name}{n}")).find(|n| !taken.contains(n)).unwrap_or_default();
+            taken.insert(numbered.clone());
+            names.insert(c, numbered);
+        }
         let names = std::rc::Rc::new(names);
         self.variant_names.borrow_mut().insert(t, names.clone());
         names
@@ -513,37 +527,61 @@ impl<'a> Gen<'a> {
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
     pub(super) fn to_name(&self, t: usize) -> String {
-        format!("to_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
+        format!("to_{}", self.conversion_names[t])
     }
 
-    /// The name of type `t` in the names of its conversions: its simple name, or with its outer
-    /// classes when another type has that simple name too (`ImageReaderNode` and
-    /// `ConcurrentHashMapNode`, or `ArrayCacheByteBucketArray` for an array), or with its package
-    /// as well when that is shared too.
-    fn distinct_name(&self, t: usize) -> String {
-        let simple = self.simple_name(t);
-        if !self.shared_names.contains(&simple) {
-            return simple;
-        }
-        let in_package = self.in_package_name(t);
-        if !self.shared_names.contains(&in_package) {
-            return in_package;
-        }
-        self.full_variant_name(t)
-    }
-
-    /// The simple names, and the names with outer classes, that more than one type has.
-    pub(super) fn shared_names(&self) -> HashSet<String> {
+    /// The name of each type in the names of its conversions (`as_name`, `to_name`), in snake
+    /// case: its simple name, or with its outer classes when another type has that simple name
+    /// too (`image_reader_node` and `concurrent_hash_map_node`, or `array_cache_byte_bucket_array`
+    /// for an array), or with its package as well when that is shared too. A name with outer
+    /// classes counts as shared when it is another type's simple name (`CSS.Value` beside
+    /// `CSSValue`). Where two types still come to one name in snake case (JNA's `WinDef.LONG`
+    /// and `Long`), all but the one with the fewest dots in its name (and of those, the first by
+    /// name) take the first number after it that no type's name is: `long_2`.
+    pub(super) fn conversion_names(&self) -> Vec<String> {
+        let types = 0..self.class.types.len();
         let mut seen = HashSet::new();
         let mut shared = HashSet::new();
-        for t in 0..self.class.types.len() {
-            for name in [self.simple_name(t), format!("{}\0", self.in_package_name(t))] {
+        for t in types.clone() {
+            let names: BTreeSet<String> = [self.simple_name(t), self.in_package_name(t)].into();
+            for name in names {
                 if !seen.insert(name.clone()) {
-                    shared.insert(name.trim_end_matches('\0').to_string());
+                    shared.insert(name);
                 }
             }
         }
-        shared
+        let distinct = |t: usize| {
+            let simple = self.simple_name(t);
+            if !shared.contains(&simple) {
+                return simple;
+            }
+            let in_package = self.in_package_name(t);
+            if !shared.contains(&in_package) {
+                return in_package;
+            }
+            self.full_variant_name(t)
+        };
+        let mut names: Vec<String> =
+            types.map(|t| snake_case(&distinct(t)).trim_end_matches('_').to_string()).collect();
+        let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (t, name) in names.iter().enumerate() {
+            by_name.entry(name).or_default().push(t);
+        }
+        let taken: HashSet<String> = by_name.keys().map(|n| n.to_string()).collect();
+        let mut renamed = Vec::new();
+        for (name, types) in by_name.iter().filter(|(_, types)| types.len() > 1) {
+            let mut types = types.clone();
+            let full = |t: &usize| &self.class.types[*t].name;
+            types.sort_by_key(|t| (full(t).matches('.').count(), full(t).clone()));
+            let mut free = (2..).map(|n| format!("{name}_{n}")).filter(|f| !taken.contains(f));
+            for t in &types[1..] {
+                renamed.push((*t, free.next().expect("a free name")));
+            }
+        }
+        for (t, name) in renamed {
+            names[t] = name;
+        }
+        names
     }
 
     /// The simple name of type `t`, which names its variants and conversions: `Circle` for
@@ -558,7 +596,7 @@ impl<'a> Gen<'a> {
 
     /// The name of the checked conversion to type `t`: `as_circle`.
     pub(super) fn as_name(&self, t: usize) -> String {
-        format!("as_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
+        format!("as_{}", self.conversion_names[t])
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.

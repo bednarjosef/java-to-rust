@@ -215,8 +215,8 @@ struct Setup {
     class_tags: Vec<u16>,
     runs: Vec<bool>,
     super_targets: HashSet<usize>,
-    /// `Gen::shared_names` and `Gen::stack_forms`, which the first round finds.
-    shared_names: Option<HashSet<String>>,
+    /// `Gen::conversion_names` and `Gen::stack_forms`, which the first round finds.
+    conversion_names: Option<std::sync::Arc<[String]>>,
     stack_forms: Option<HashSet<usize>>,
 }
 
@@ -253,7 +253,7 @@ impl Setup {
             class_tags: dispatch::class_numbers(class),
             runs: running_types(class, facts),
             super_targets: super_targets(class),
-            shared_names: None,
+            conversion_names: None,
             stack_forms: None,
         }
     }
@@ -288,7 +288,7 @@ fn generate_with(
         checked_value_ofs: Default::default(),
         group_names: setup.group_names.clone(),
         receiver_sets: setup.receiver_sets.clone(),
-        shared_names: HashSet::new(),
+        conversion_names: std::sync::Arc::from([]),
         live: live.clone(),
         class_tags: setup.class_tags.clone(),
         runs: setup.runs.clone(),
@@ -356,7 +356,7 @@ fn generate_with(
         class_values: Default::default(),
         class_value_names: Vec::new(),
     };
-    g.shared_names = setup.shared_names.get_or_insert_with(|| g.shared_names()).clone();
+    g.conversion_names = setup.conversion_names.get_or_insert_with(|| g.conversion_names().into()).clone();
     g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
     let header = match class.types.iter().any(|t| !t.package.is_empty()) {
         true => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
@@ -460,9 +460,9 @@ struct Gen<'a> {
     group_names: HashMap<usize, String>,
     /// The sets of classes in `Class::receivers`, by their key (`receiver_key`).
     receiver_sets: HashMap<u64, std::sync::Arc<[usize]>>,
-    /// The simple names of types, and those names with the outer classes, that more than one
-    /// type has: the conversions to such a type's enum are named with more (`as_name`).
-    shared_names: HashSet<String>,
+    /// The name of each type in the names of its conversions, unique in the program
+    /// (`conversion_names`).
+    conversion_names: std::sync::Arc<[String]>,
     /// Which classes have a struct (see `live_types`).
     live: Vec<bool>,
     /// The number of each type in a `java::Thin` (see `dispatch::class_numbers`).
