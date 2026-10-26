@@ -3736,6 +3736,30 @@ fn a_census_gives_the_value_of_a_native_that_the_runtime_lacks_the_type_of_the_c
 }
 
 #[test]
+fn a_census_stubs_the_bridge_of_a_lambda_whose_parameter_type_is_not_supported() {
+    // The lambda's own `accept(ProcessBuilder)` is a stub with an `int` for the type; its bridge,
+    // the interface's `accept(Object)`, ends the program the same way rather than pass the object
+    // on (`LogRecord`'s lambdas over `StackWalker.StackFrame`).
+    let dir = write_sources(
+        "census_stubbed_bridge",
+        &[(
+            "p/Main.java",
+            "package p;\ninterface Sink<T> {\n    void accept(T t);\n}\npublic class Main {\n    static <T> void feed(Sink<T> s, T t) {\n        if (t != null) s.accept(t);\n    }\n    public static void main(String[] a) {\n        Sink<ProcessBuilder> print = b -> System.out.println(b);\n        feed(print, null);\n        System.out.println(print == print);\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let rust = census(&program).modules.expect("a translation").one_file();
+    let stub = "type `java.lang.ProcessBuilder` not supported yet (line 10)\")";
+    assert_eq!(rust.matches(stub).count(), 2, "{rust}");
+    assert!(!rust.contains("accept_i32(t"), "{rust}");
+}
+
+#[test]
 fn a_census_rejects_the_methods_that_a_rejected_enums_constant_bodies_override() {
     // Two constants' bodies declare a helper of one name, which lowering rejects with the enum:
     // `test`, which each body implements for the interface, has no switch over the constants

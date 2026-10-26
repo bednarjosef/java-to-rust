@@ -1098,7 +1098,25 @@ impl<'t> Lowering<'t> {
         let call =
             ExprKind::MethodCall { receiver, name: m.name.clone(), args, resolved: Some(i), is_super: false };
         let call = self.synth(call, pos, m.ret);
-        let body = if o.ret == Type::Void {
+        // A census stub of a method whose types are not supported has `int`s for them, which no
+        // bridge passes a reference on as: the bridge ends the program as the stub does.
+        let stubbed =
+            o.params.iter().zip(&m.params).any(|(p, to)| p.ty.is_reference() && !to.ty.is_reference());
+        let body = if stubbed {
+            let message = match &m.body[..] {
+                [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, args), .. })] => {
+                    args.iter().find_map(|a| match &a.kind {
+                        ExprKind::Str(message) => {
+                            Some(self.synth(ExprKind::Str(message.clone()), pos, Type::String))
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            let never = ExprKind::Builtin(Builtin::NoObject { class }, message.into_iter().collect());
+            vec![Stmt::Expr(self.synth(never, pos, Type::Void))]
+        } else if o.ret == Type::Void {
             vec![Stmt::Expr(call)]
         } else {
             vec![Stmt::Return(Some(self.convert(call, o.ret)), pos)]
