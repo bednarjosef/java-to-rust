@@ -8,12 +8,17 @@ use super::*;
 
 /// The Rust variant for an enum constant: `RED` is `Red`, and `VERY_BIG` is `VeryBig`. A word
 /// that starts with a digit keeps its underscore, as `JDK1_2` and `JDK12` of javac's `Source` are
-/// `Jdk1_2` and `Jdk12`.
+/// `Jdk1_2` and `Jdk12`. A `$`, which Rust names cannot have, becomes an underscore between the
+/// parts that it separates: `AES_128$ECB$NoPadding` of `KnownOIDs` is `Aes_128_Ecb_Nopadding`.
 pub(super) fn variant_name(constant: &str) -> String {
     // `SELF` would be `Self`, Rust's keyword.
     if constant == "SELF" {
         return "Self_".to_string();
     }
+    constant.split('$').map(camel_case).collect::<Vec<_>>().join("_")
+}
+
+fn camel_case(constant: &str) -> String {
     constant
         .split('_')
         .enumerate()
