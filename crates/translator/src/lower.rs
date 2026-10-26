@@ -76,7 +76,7 @@ mod regex;
 mod sun_unsafe;
 mod switch;
 mod sync;
-mod system;
+pub(crate) mod system;
 mod varargs;
 pub use annotation_values::is_member_annotation_call;
 pub(crate) use argument_order::{ARGUMENT, RECEIVER, held_local, ordered_call};

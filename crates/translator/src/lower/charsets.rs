@@ -34,6 +34,7 @@ fn constant(charset: java_runtime::Charset) -> CharsetOp {
         java_runtime::Charset::Utf16 => CharsetOp::Utf16,
         java_runtime::Charset::Utf16Be => CharsetOp::Utf16Be,
         java_runtime::Charset::Utf16Le => CharsetOp::Utf16Le,
+        java_runtime::Charset::Bytes(_) => unreachable!("`Charset::known` finds only the runtime's own"),
     }
 }
 

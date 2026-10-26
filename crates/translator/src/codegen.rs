@@ -925,6 +925,10 @@ impl<'a> Gen<'a> {
             let call = self.init_run(t);
             self.line(&format!("{call};"));
         }
+        // The charsets of the JDK that the program may look up by name, before anything does.
+        if m.is_main {
+            self.register_charsets();
+        }
         // The program ends when its last thread does, not when `main` returns.
         if m.is_main && self.facts.threaded {
             let guard = self.runtime("main_thread");

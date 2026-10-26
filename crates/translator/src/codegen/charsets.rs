@@ -3,6 +3,7 @@
 //! `new String`, which may also be a name.
 
 use super::*;
+use crate::jdk_charsets::{self, JdkCharset};
 
 impl<'a> Gen<'a> {
     /// The `java::Charset` a charset argument names: a `Type::Charset` expression, or a
@@ -100,4 +101,65 @@ impl<'a> Gen<'a> {
             }
         }
     }
+
+    /// The statements at the start of `main` that give the runtime the single-byte charsets of the
+    /// JDK that the program may look up by name (`jdk_charsets`): a static of their tables and
+    /// the call of `java::register_charsets`. Nothing where it looks none up.
+    pub(super) fn register_charsets(&mut self) {
+        let charsets = looked_up(self.class);
+        if charsets.is_empty() {
+            return;
+        }
+        let table = self.runtime("ByteCharset");
+        self.line(&format!("static CHARSETS: [{table}; {}] = [", charsets.len()));
+        self.indent += 1;
+        for charset in charsets {
+            let aliases: Vec<String> = charset.aliases.iter().map(|a| code::rust_string(a)).collect();
+            let overrides: Vec<String> =
+                charset.overrides.iter().map(|(c, b)| format!("({c}, {b})")).collect();
+            let decode = jdk_charsets::decode_literal(charset.decode.as_deref().unwrap_or_default());
+            self.line(&format!(
+                "{table}::new({}, &[{}], {decode}, &[{}], {}),",
+                code::rust_string(&charset.name),
+                aliases.join(", "),
+                overrides.join(", "),
+                charset.replacement
+            ));
+        }
+        self.indent -= 1;
+        self.line("];");
+        let register = self.runtime("register_charsets");
+        self.line(&format!("{register}(&CHARSETS);"));
+    }
+}
+
+/// The single-byte charsets of the JDK, other than the runtime's own, that `class` may look up
+/// by name: those that a constant name names, or all of them where a name is computed.
+fn looked_up(class: &Class) -> Vec<&'static JdkCharset> {
+    let mut names: Vec<String> = Vec::new();
+    let mut computed = false;
+    let mut name = |e: &Expr| match &e.kind {
+        ExprKind::Str(text) => names.push(text.to_string()),
+        _ => computed = true,
+    };
+    for method in &class.methods {
+        for stmt in &method.body {
+            crate::ast::visit_stmt_exprs(stmt, &mut |e| {
+                let ExprKind::Builtin(builtin, args) = &e.kind else { return };
+                match builtin {
+                    Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => name(&args[0]),
+                    Builtin::String(StringOp::GetBytes | StringOp::FromBytes)
+                    | Builtin::Kept(StringOp::GetBytes | StringOp::FromBytes) => {
+                        args.iter().skip(1).filter(|a| a.ty == Type::String).for_each(&mut name)
+                    }
+                    _ => {}
+                }
+            });
+        }
+    }
+    jdk_charsets::charsets()
+        .iter()
+        .filter(|c| c.decode.is_some() && !c.in_runtime())
+        .filter(|c| computed || names.iter().any(|n| c.named(n)))
+        .collect()
 }

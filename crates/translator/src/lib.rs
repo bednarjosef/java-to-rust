@@ -7,6 +7,7 @@ pub mod ast;
 pub mod check_cache;
 pub mod codegen;
 pub mod javac;
+pub mod jdk_charsets;
 pub mod lower;
 pub mod output;
 pub mod program;

@@ -119,14 +119,20 @@ included (docs/collector.md).
   `String.format` and `printf` are the JDK's `Formatter` in that locale (a whole program; without
   the JDK's sources they are rejected).
 - **Charsets**: `getBytes` and `new String(bytes, ..)` for UTF-8, US-ASCII, ISO-8859-1, UTF-16,
-  UTF-16BE and UTF-16LE (`charset.rs`). A `Charset` is an ordinary value; `forName` resolves
-  aliases and case as Java does, and `defaultCharset()` is UTF-8 (JEP 400). An unknown or
-  malformed name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with
-  Java's message, which a `catch` sees. So does the name of any other charset, which Java has
-  (`windows-1252`), and `isSupported` is false for it. `Charset.aliases()` and a `Charset` array
-  element that starts out null are rejected. In a whole program
-  `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
-  (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
+  UTF-16BE and UTF-16LE (`charset.rs`), and for the JDK's single-byte charsets (windows-1252
+  and the other Windows code pages, the ISO-8859 ones, KOI8-R, the IBM and Mac code pages: 104
+  on JDK 26). Those are tables of the JDK that the translator was built with, taken from its own
+  coders (`java/Charsets.java`, `jdk_charsets.rs`), and the translator asks the JDK it runs
+  with again where that is another one. A program that looks a charset up by name carries the
+  tables it may need: the ones its constant names name, or all of them where it computes a
+  name. A `Charset` is an ordinary value; `forName` resolves aliases and case as Java does, and
+  gives the same value for each name of a charset, and `defaultCharset()` is UTF-8 (JEP 400).
+  An unknown or malformed name throws `UnsupportedCharsetException` or
+  `IllegalCharsetNameException` with Java's message, which a `catch` sees. So does the name of
+  a charset that Java has but that is none of these (Shift_JIS, GBK, UTF-32), and `isSupported`
+  is false for it. `Charset.aliases()` and a `Charset` array element that starts out null are
+  rejected. In a whole program `newDecoder()`/`newEncoder()` give the JDK's own coders of the
+  six charsets (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings compares what Java compares: by text where both sides can only be interned
   strings, as null against null where no string can be on both sides, and otherwise by the
   objects, with every string of the program shared as Java shares it (literals interned, new
