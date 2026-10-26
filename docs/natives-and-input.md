@@ -417,10 +417,10 @@ A translated program is closed: it knows all its classes. So:
 
 ### References
 
-`java.lang.ref` is translated from the JDK (`lower/references.rs`). A translated program has no
-garbage collector that clears a reference behind its back: an object is freed when its last strong
-reference goes, and a reference holds one. So a reference behaves as on a JVM whose collector
-never needs the memory: `get` gives the referent until `clear`, and no reference is enqueued but
+`java.lang.ref` is translated from the JDK (`lower/references.rs`). A reference holds its
+referent in an ordinary field, which the collector ([collector.md](collector.md)) traces as any
+other, so it keeps the referent alive and nothing clears it behind the program's back. So a
+reference behaves as on a JVM whose collector never needs the memory: `get` gives the referent until `clear`, and no reference is enqueued but
 by `enqueue`. No reference is ever pending, so the reference handler thread that `Reference`
 starts waits for ever in `waitForReferencePendingList`; it is a daemon thread, so the program
 ends without it.
