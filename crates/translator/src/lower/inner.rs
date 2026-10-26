@@ -501,7 +501,8 @@ impl<'t> Lowering<'t> {
 
     /// The explicit enclosing instance `o` of `o.new Inner()`, which javac checks for null with
     /// `Objects.requireNonNull(o)` before it evaluates the arguments: `NullChecked(o, o)`, or for
-    /// a computed one, `{ Outer outer$ = o; yield NullChecked(outer$, outer$); }`.
+    /// a computed one, `{ Outer enclosing = o; yield NullChecked(enclosing, enclosing); }` (not
+    /// `outer`, the name of the constructors' parameter for their own enclosing instance).
     fn checked_enclosing(&self, value: Expr) -> Expr {
         let (pos, ty) = (value.pos, value.ty);
         let checked = |name: &str| {
@@ -513,7 +514,7 @@ impl<'t> Lowering<'t> {
             ExprKind::Var(name) => return checked(name),
             _ => {}
         }
-        let name = self.fresh_name("outer");
+        let name = self.fresh_name("enclosing");
         let yielded = checked(&name);
         let block = vec![Stmt::Local { ty, name, init: Some(value), pos }, Stmt::Yield(yielded)];
         self.synth(
