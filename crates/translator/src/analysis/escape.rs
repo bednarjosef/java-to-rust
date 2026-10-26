@@ -152,13 +152,18 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
         (0..n).map(|m| std::cmp::Reverse((rank[m], m))).collect();
     let mut solves = 0;
+    // Once the summaries are final, what solving a method finds depends on the factories only
+    // through those that its calls run (`active`, `site_class`): each method's last facts are
+    // kept with the factories they were found with, and found again only when one changed.
+    let mut kept: Vec<Option<Kept>> = (0..n).map(|_| None).collect();
     // The time each method's solves took, for --timings.
     let mut spent: Vec<(f64, u32)> = if crate::timings::enabled() { vec![(0.0, 0); n] } else { Vec::new() };
     while let Some(std::cmp::Reverse((_, m))) = work.pop() {
         queued[m] = false;
         solves += 1;
         let start = (!spent.is_empty()).then(std::time::Instant::now);
-        let MethodFacts { summary, read, .. } = analysis.solve(m);
+        let MethodFacts { summary, read, staying, product } = analysis.solve(m);
+        kept[m] = Some(Kept { key: analysis.factory_key(m), staying, product });
         if let Some(start) = start {
             spent[m].0 += start.elapsed().as_secs_f64();
             spent[m].1 += 1;
@@ -207,7 +212,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
         queued[m] = false;
         visits[m] = visits[m].saturating_add(1);
         // A method visited too often is no factory from then on, so the rounds end.
-        let product = analysis.solve(m).product.filter(|_| visits[m] < 4);
+        let product = analysis.settled(m, &mut kept).product.filter(|_| visits[m] < 4);
         if product != analysis.factories.get(&m).copied() {
             match product {
                 Some(p) => _ = analysis.factories.insert(m, p),
@@ -224,7 +229,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
         let mut wrong: Vec<usize> = Vec::new();
         let factories: Vec<(usize, Product)> = analysis.factories.iter().map(|(&m, &p)| (m, p)).collect();
         for (m, p) in factories {
-            if analysis.solve(m).product != Some(p) {
+            if analysis.settled(m, &mut kept).product != Some(p) {
                 wrong.push(m);
             }
         }
@@ -237,7 +242,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     }
     let mut found = StackObjects::default();
     for m in 0..n {
-        for (id, call) in analysis.solve(m).staying {
+        for &(id, call) in &analysis.settled(m, &mut kept).staying {
             found.objects.insert(id);
             if let Some(t) = call {
                 found.calls.insert(id, t);
@@ -277,6 +282,42 @@ impl Summary {
             contents: Vec::new(),
         }
     }
+
+    /// Adds what `other` does to what this does, as the summary of calls that may run either.
+    fn add(&mut self, other: &Summary) {
+        if self.escapes.len() < other.escapes.len() {
+            self.escapes.resize(other.escapes.len(), Escape::default());
+            self.returned.resize(other.returned.len(), false);
+            self.stored.resize(other.stored.len(), Vec::new());
+        }
+        for k in 0..other.escapes.len() {
+            self.escapes[k].add(&other.escapes[k]);
+            self.returned[k] |= other.returned[k];
+            for f in &other.stored[k] {
+                if let Err(at) = self.stored[k].binary_search(f) {
+                    self.stored[k].insert(at, *f);
+                }
+            }
+        }
+        add_fields(&mut self.contents, &other.contents);
+    }
+
+    /// Whether this does at least what `other` does with each parameter.
+    fn covers(&self, other: &Summary) -> bool {
+        let covers_fields =
+            |mine: &[FieldKey], theirs: &[FieldKey]| theirs.iter().all(|f| mine.binary_search(f).is_ok());
+        self.escapes.len() >= other.escapes.len()
+            && (0..other.escapes.len()).all(|k| {
+                self.escapes[k].covers(&other.escapes[k])
+                    && (self.returned[k] || !other.returned[k])
+                    && covers_fields(&self.stored[k], &other.stored[k])
+            })
+            && other.contents.iter().all(|(f, e)| {
+                self.contents
+                    .binary_search_by_key(f, |&(g, _)| g)
+                    .is_ok_and(|at| self.contents[at].1.covers(e))
+            })
+    }
 }
 
 /// Whether a parameter escapes: always, or when the object is of a class whose implementation of
@@ -299,6 +340,10 @@ fn add_fields(into: &mut Vec<(FieldKey, Escape)>, other: &[(FieldKey, Escape)]) 
 }
 
 impl Escape {
+    fn covers(&self, other: &Escape) -> bool {
+        (self.always || !other.always) && other.via.iter().all(|r| self.via.binary_search(r).is_ok())
+    }
+
     fn add(&mut self, other: &Escape) {
         self.always |= other.always;
         if !other.via.iter().all(|r| self.via.binary_search(r).is_ok()) {
@@ -307,6 +352,14 @@ impl Escape {
             self.via.dedup();
         }
     }
+}
+
+/// What solving a method found once the summaries were final, and the factories it found it with
+/// (`Analysis::factory_key`).
+struct Kept {
+    key: Vec<Option<Product>>,
+    staying: Vec<(ExprId, Option<usize>)>,
+    product: Option<Product>,
 }
 
 /// What one analysis of a method finds with the summaries and factories known so far.
@@ -350,10 +403,16 @@ impl Sources {
     }
 
     fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.0
-            .iter()
-            .enumerate()
-            .flat_map(|(w, &bits)| (0..64).filter(move |b| bits & (1 << b) != 0).map(move |b| w * 64 + b))
+        self.0.iter().enumerate().flat_map(|(w, &bits)| {
+            let mut rest = bits;
+            std::iter::from_fn(move || {
+                let b = rest.trailing_zeros() as usize;
+                (rest != 0).then(|| {
+                    rest &= rest - 1;
+                    w * 64 + b
+                })
+            })
+        })
     }
 
     /// Adds `other`; whether that added anything.
@@ -432,22 +491,7 @@ impl Lists {
         }
         let mut all = Summary::empty(0);
         for &t in self.targets[l as usize].iter() {
-            let s = &summaries[t];
-            if all.escapes.len() < s.escapes.len() {
-                all.escapes.resize(s.escapes.len(), Escape::default());
-                all.returned.resize(s.returned.len(), false);
-                all.stored.resize(s.stored.len(), Vec::new());
-            }
-            for k in 0..s.escapes.len() {
-                all.escapes[k].add(&s.escapes[k]);
-                all.returned[k] |= s.returned[k];
-                for f in &s.stored[k] {
-                    if let Err(at) = all.stored[k].binary_search(f) {
-                        all.stored[k].insert(at, *f);
-                    }
-                }
-            }
-            add_fields(&mut all.contents, &s.contents);
+            all.add(&summaries[t]);
         }
         let all = Rc::new(all);
         self.combined[l as usize] = Some(all.clone());
@@ -1027,13 +1071,23 @@ struct Analysis<'a> {
 }
 
 impl Analysis<'_> {
+    /// Sets the summary of method `m`. The combined summary of each list with `m` in it is kept
+    /// when the new summary only adds to the old, with the new one added (what the list's
+    /// methods do together is then the same as found again), and is found again otherwise: a
+    /// list can have thousands of methods (the overrides of `Object.equals`), whose summaries
+    /// change one at a time.
     fn set_summary(&mut self, m: usize, summary: Summary) {
-        self.summaries[m] = summary;
+        let grows = summary.covers(&self.summaries[m]);
         if let Some(ls) = self.lists.lists_of.get(&m) {
             for &l in ls {
-                self.lists.combined[l as usize] = None;
+                let combined = &mut self.lists.combined[l as usize];
+                match combined {
+                    Some(all) if grows => Rc::make_mut(all).add(&summary),
+                    _ => *combined = None,
+                }
             }
         }
+        self.summaries[m] = summary;
     }
 
     /// The class of the object of an active site.
@@ -1084,6 +1138,23 @@ impl Analysis<'_> {
             add_fields(&mut all, &self.contents_escape(r, c, seen, read)?);
         }
         Some(all)
+    }
+
+    /// What the factories are of the methods that the calls among the sources of method `m` run,
+    /// which is all that solving it reads of them.
+    fn factory_key(&self, m: usize) -> Vec<Option<Product>> {
+        self.code[m].sites.iter().filter_map(|s| s.call).map(|t| self.factories.get(&t).copied()).collect()
+    }
+
+    /// The facts of method `m` with the final summaries and the factories known so far: those
+    /// kept, when they were found with the same factories, or else found again and kept.
+    fn settled<'k>(&mut self, m: usize, kept: &'k mut [Option<Kept>]) -> &'k Kept {
+        let key = self.factory_key(m);
+        if kept[m].as_ref().is_none_or(|k| k.key != key) {
+            let MethodFacts { staying, product, .. } = self.solve(m);
+            kept[m] = Some(Kept { key, staying, product });
+        }
+        kept[m].as_ref().expect("kept above")
     }
 
     /// Whether site `s` of method `m` is a source: a `new`, or a call of a factory.
@@ -1296,10 +1367,13 @@ impl Analysis<'_> {
         // called on it. What an object that escapes holds escapes with it.
         let mut read = Vec::new();
         let mut resolved = vec![0; n];
+        // What each source holds is the same throughout, so each that escapes lets it escape
+        // once.
+        let mut spread = vec![false; held];
         loop {
             let mut grew = false;
             for x in 0..held {
-                if escaping.contains(x) {
+                if escaping.contains(x) && !std::mem::replace(&mut spread[x], true) {
                     grew |= escaping.union(&holds(&Sources::of(x), None));
                 }
             }
