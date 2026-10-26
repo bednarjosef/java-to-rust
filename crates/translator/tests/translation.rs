@@ -3748,11 +3748,11 @@ enum Level {
 "#;
 
 #[test]
-fn a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round() {
-    // Each round of the analyses ends at the first check that rejects code, which is stubbed
-    // before the next round: a pattern variable, then `synchronized` on a string (the checks that
-    // come before the range analysis and nullness), then a `toString` whose exception is caught
-    // (exceptions), then the message of a `NullPointerException` (after the analyses).
+fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
+    // The checks of the analyses reject a pattern variable and `synchronized` on a string (the
+    // checks that come before the range analysis and nullness), a `toString` whose exception is
+    // caught (exceptions) and the message of a `NullPointerException` (after the analyses); the
+    // census stubs the code of each.
     let dir = write_sources("census_rounds", &[("Main.java", ROUNDS)]);
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
     let census = census(&program);
@@ -3770,12 +3770,33 @@ fn a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round() {
 }
 
 #[test]
+fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
+    // A census takes the errors of every check of the analyses, and of the messages after them,
+    // in one round (`analysis::analyze_collecting`). Round by round, each ending at the first
+    // check that rejects code as a translation's analyses end, it finds the same, its
+    // translation too.
+    let dir = write_sources("census_one_round", &[("Main.java", ROUNDS)]);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let together = census(&program);
+    let by_round = java_to_rust::program::round_by_round(|| census(&program));
+    assert_eq!(together.report, by_round.report);
+    assert_eq!(together.json, by_round.json);
+    let rust = together.modules.expect("a translation").one_file();
+    assert_eq!(rust, by_round.modules.expect("a translation").one_file());
+}
+
+#[test]
 fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
     // The analyses run the steps that read none of each other's facts alongside each other
-    // (`analysis::analyze_from`). Over the rounds of a census (a pattern variable, `synchronized`
-    // on a string, a `toString` whose exception is caught, the message of a
-    // `NullPointerException`, then a local that the generator rejects), the census is the same
-    // as with the steps run one after another, its translation too.
+    // (`analysis::analyze_from`). Over a census whose analyses reject a pattern variable,
+    // `synchronized` on a string, a `toString` whose exception is caught and the message of a
+    // `NullPointerException`, and then whose generator rejects a local, the census is the same as
+    // with the steps run one after another, its translation too.
     let dir = write_sources(
         "census_alongside",
         &[(

@@ -14,7 +14,10 @@
 //! analysis or of the generator, which only has a line and column, stubs the methods whose code
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
 //! the generator run again. The generator and the analysis of exceptions report every error they
-//! find, which are stubbed together; the other analyses report their first. A panic while the
+//! find, which are stubbed together; the other analyses report their first. A run of the
+//! analyses goes on past a check that rejects code, to the checks and the messages after it
+//! (`analysis::analyze_collecting`), so that the errors of all of them are stubbed in one round,
+//! and the census is the one that a round per check finds (`round_by_round`). A panic while the
 //! generator writes a method is an error of the method, found with the others. So every error
 //! recorded is one that a translation of the program would report once the code before it
 //! translated. Where a `catch` reads the message of a `NullPointerException`, the messages are
@@ -56,6 +59,23 @@ use std::fmt::Write;
 
 /// Up to this many example places per message.
 const EXAMPLES: usize = 3;
+
+thread_local! {
+    /// Whether the census on this thread ends each run of the analyses at the first check that
+    /// rejects code (`round_by_round`).
+    static ROUND_BY_ROUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with each census on this thread taken one round per check of the analyses that
+/// rejects code, each round ending at that check, rather than with the errors of every check and
+/// of the messages in one round (`analysis::analyze_collecting`): for a test that the census is
+/// the same either way.
+pub fn round_by_round<T>(f: impl FnOnce() -> T) -> T {
+    let before = ROUND_BY_ROUND.replace(true);
+    let out = f();
+    ROUND_BY_ROUND.set(before);
+    out
+}
 
 /// The census: the text report, and the same census as JSON; and the modules that the generator
 /// wrote last, with every rejected piece of code stubbed, if it got that far.
@@ -412,13 +432,49 @@ fn analyse(
         &unresolved_calls,
         &|class| {
             let tolerated = tolerated.borrow();
-            let mut analysed = crate::timings::phase("census: analyses", || {
-                analysis::analyze_from(class, &tolerated, &mut represented.borrow_mut())
-            })?;
+            // The errors of every check, and those of the messages after them, are found in one
+            // run (`analysis::analyze_collecting`); a panic after an error ends the run there,
+            // with the errors found before it, as the analyses that stop at it end.
+            let collected = RefCell::new(Vec::new());
+            let after_errors = |panic: Box<dyn std::any::Any + Send>| -> Vec<Error> {
+                let errors = collected.take();
+                if errors.is_empty() {
+                    std::panic::resume_unwind(panic);
+                }
+                represented.take();
+                errors
+            };
+            let analysed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::timings::phase("census: analyses", || match ROUND_BY_ROUND.get() {
+                    true => analysis::analyze_from(class, &tolerated, &mut represented.borrow_mut()),
+                    false => analysis::analyze_collecting(
+                        class,
+                        &tolerated,
+                        &mut represented.borrow_mut(),
+                        &collected,
+                    ),
+                })
+            }));
+            let mut analysed = match analysed {
+                Ok(analysed) => analysed?,
+                Err(panic) => return Err(after_errors(panic)),
+            };
             // Each message that is not certain stubs its code, as a translation rejects it. The
             // objects on the stack, which the messages do not read, are taken once the messages
             // pass.
-            names.messages(class, &mut analysed.facts)?;
+            let messages = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                names.messages(class, &mut analysed.facts)
+            }));
+            let messages = match messages {
+                Ok(messages) => messages,
+                Err(panic) => return Err(after_errors(panic)),
+            };
+            let mut errors = collected.take();
+            if !errors.is_empty() {
+                errors.extend(messages.err().unwrap_or_default());
+                return Err(errors);
+            }
+            messages?;
             let facts = analysed.with_stack_objects();
             codegen::catch_panics(true);
             let tree = crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));

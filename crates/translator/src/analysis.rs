@@ -47,6 +47,7 @@ pub(crate) mod unboxing;
 mod whole_objects;
 
 use crate::ast::*;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 pub use exceptions::{generator_text, text_objects};
@@ -399,10 +400,43 @@ pub fn analyze_from(
     tolerated: &[Error],
     found: &mut Option<Represented>,
 ) -> Result<Analysed, Vec<Error>> {
+    analyze_with(class, tolerated, found, None)
+}
+
+/// `analyze_from` for a census, which stubs the code of every error it is given at once: an
+/// error of a check, or of the analysis of exceptions, does not end the analyses but is added to
+/// `errors`, and the checks and analyses after it run as if it had passed, to find their errors
+/// too. They then see code that the stubs of the errors before take away; an error they find in
+/// it comes to nothing, as the stub that takes its code away was made first. A panic of a step
+/// after an error may come of the code that the error rejects, and is the caller's to take as
+/// the end of the analyses at that error.
+pub fn analyze_collecting(
+    class: &Class,
+    tolerated: &[Error],
+    found: &mut Option<Represented>,
+    errors: &RefCell<Vec<Error>>,
+) -> Result<Analysed, Vec<Error>> {
+    analyze_with(class, tolerated, found, Some(errors))
+}
+
+fn analyze_with(
+    class: &Class,
+    tolerated: &[Error],
+    found: &mut Option<Represented>,
+    collect: Option<&RefCell<Vec<Error>>>,
+) -> Result<Analysed, Vec<Error>> {
     let checked = |result: Result<(), Vec<Error>>| {
         let mut errors = result.err().unwrap_or_default();
         errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
         if errors.is_empty() { Ok(()) } else { Err(errors) }
+    };
+    // An error that ends the analyses, or is collected.
+    let failed = |errors: Vec<Error>| match collect {
+        Some(collected) => {
+            collected.borrow_mut().extend(errors);
+            Ok(())
+        }
+        None => Err(errors),
     };
     use crate::timings::phase;
     use alongside::Alongside;
@@ -441,8 +475,8 @@ pub fn analyze_from(
         // The representation finds no boxes compared by identity (`boxing`, below), and a panic
         // of a check may have left some.
         found.facts.faithful_boxes.clear();
-        checked(phase("analysis: validate", || validate(class, &found.facts)))?;
-        patterns::check(class)?;
+        checked(phase("analysis: validate", || validate(class, &found.facts))).or_else(failed)?;
+        patterns::check(class).or_else(failed)?;
         // The facts as the steps after the checks find them: the representation's, with those
         // found from the code; the checks' own (`faithful_boxes`) are set aside until nullness
         // is done.
@@ -474,15 +508,16 @@ pub fn analyze_from(
         });
         let (identity_checks, object_values) =
             phase("analysis: object values", || patterns::check_object_values(class, &found.facts));
-        checked(object_values)?;
+        checked(object_values).or_else(failed)?;
         // The representation's facts have no boxes compared by identity; what threads share reads
         // them.
         phase("analysis: boxing", || boxing::analyze(class, &mut found.facts));
         let checks = (|| {
             if found.facts.threaded {
-                checked(phase("analysis: threads", || threads::check(class, &found.facts)))?;
+                checked(phase("analysis: threads", || threads::check(class, &found.facts)))
+                    .or_else(failed)?;
             }
-            checked(phase("analysis: monitors", || monitors::check(class, &found.facts)))
+            checked(phase("analysis: monitors", || monitors::check(class, &found.facts))).or_else(failed)
         })();
         let faithful_boxes = std::mem::take(&mut found.facts.faithful_boxes);
         checks?;
@@ -496,7 +531,7 @@ pub fn analyze_from(
         phase("analysis: arrays", || arrays::analyze(class, &mut facts));
         phase("analysis: indexing", || indexing::analyze(class, &mut facts));
         phase("analysis: moves", || moves::analyze(class, &mut facts));
-        phase("analysis: exceptions", || exceptions::analyze(class, &mut facts))?;
+        phase("analysis: exceptions", || exceptions::analyze(class, &mut facts)).or_else(failed)?;
         // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
         if threads::handles_uncaught(class) {
             for new in &class.raised {
