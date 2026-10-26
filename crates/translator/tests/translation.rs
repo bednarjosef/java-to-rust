@@ -5997,7 +5997,7 @@ fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
             "let (src_pos, dest_pos, length_2) = (0, 0, length); match (&src, &dest) { (src, dest) => match (src.view(), dest.view()) {",
             "(ObjectView::IntArray(src), ObjectView::IntArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
             "(ObjectView::LongArray(src), ObjectView::LongArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
-            "_ => java::try_arraycopy_across(src, src_pos, dest, dest_pos, length_2).unwrap_or_else(|e| java::throw_exception(e)),",
+            "_ => java::try_arraycopy_across::<Object>(src, src_pos, dest, dest_pos, length_2).unwrap_or_else(|e| java::throw_exception(e)),",
             "11 => java::CopyKind::Primitive(\"int\"),",
         ],
     );
