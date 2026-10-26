@@ -831,7 +831,9 @@ impl<'a> Gen<'a> {
                 let message =
                     "java.lang.InternalError: the resource {} of {} is not part of the translated program";
                 let format = format!("format!({message:?}, {name}, {class})");
-                Code::never(format!("{}({format})", self.runtime("throw_uncaught")))
+                // Typed, as a call on the protection domain needs (`getCodeSource()`).
+                let throw = format!("{}({format})", self.runtime("throw_uncaught"));
+                self.never_of(throw, ty)
             }
             Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::MemoryAccessWarning(method) => {
