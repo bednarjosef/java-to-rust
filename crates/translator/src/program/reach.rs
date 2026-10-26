@@ -515,6 +515,12 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.reflect.TranslatedProxies",
 ];
 
+/// The translator's method that gives `objectFieldOffset(Field)` of `Unsafe` and of
+/// `sun.misc.Unsafe` when its value is used as a number rather than as a field handle
+/// (`lower/handles.rs`).
+pub const FIELD_OFFSET_VALUE: (&str, &str, &str) =
+    ("java.lang.reflect.Field", "objectFieldOffset", "(java.lang.reflect.Field,boolean)long");
+
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
 /// They take a `Class`, which the translation has no value for: every call that `Unsafe`'s own
@@ -675,6 +681,18 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
     };
     let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
     Some((class_named(class)?, field.to_string()))
+}
+
+/// Whether `node` is a call of `objectFieldOffset(Field)` of `Unsafe` or `sun.misc.Unsafe` of a
+/// field that `field_offset_named` does not name, whose value may be used as a number
+/// (`FIELD_OFFSET_VALUE`).
+pub fn field_offset_value(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    text(node, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "name") == "objectFieldOffset"
+        && text(symbol, "type") == "(java.lang.reflect.Field)long"
+        && matches!(text(symbol, "owner"), "jdk.internal.misc.Unsafe" | SUN_MISC_UNSAFE)
+        && field_offset_named(node).is_none()
 }
 
 /// The class that the expression `node` of type `Class<C>` is: a class literal, or a value of
@@ -3506,6 +3524,9 @@ impl<'t> Walk<'t> {
             }
             if let Some(field) = field_offset_named(value) {
                 self.work.push(Item::Field(field));
+            } else if field_offset_value(value) {
+                let (class, method, signature) = FIELD_OFFSET_VALUE;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
             }
             let field_of = |class: &str, name: &str| {
                 self.classes.get(class).is_some_and(|(decl, _)| {

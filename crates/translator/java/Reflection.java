@@ -484,6 +484,26 @@ final class Field {
                 + "." + name;
     }
 
+    // `Unsafe.objectFieldOffset(f)` used as a number (`lower/handles.rs`): a number of the
+    // field's own, the same for every `Field` of it, 16 apart, which tells nothing of where the
+    // object keeps it, so that code which checks the layout before reading memory at an offset
+    // takes its other way. `sun` (`sun.misc.Unsafe`'s, which refuses a record's field) is not
+    // told apart yet: a record's field gets its number too.
+    static long objectFieldOffset(Field f, boolean sun) {
+        if (f == null) {
+            throw new NullPointerException();
+        }
+        if ((f.modifiers & 8) != 0) {
+            throw new IllegalArgumentException();
+        }
+        Field[] all = table();
+        int i = 0;
+        while (all[i].clazz != f.clazz || !all[i].name.equals(f.name)) {
+            i++;
+        }
+        return 16L * (i + 1);
+    }
+
     // `c.getField(name)`, or with `declared` `c.getDeclaredField(name)`.
     static Field find(Class<?> c, String name, boolean declared) throws NoSuchFieldException {
         Field[] all = table();

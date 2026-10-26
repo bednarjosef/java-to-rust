@@ -22,7 +22,9 @@
 //! field itself, so the call above lowers to `this.constant`. That is Java's meaning in a program
 //! with one thread, and in a program with threads the field is the object's, read and written
 //! under its lock, which orders the accesses at least as the plain, opaque, acquire, release and
-//! volatile forms ask. Any other use of a handle is rejected.
+//! volatile forms ask. Any other use of a handle is rejected. `objectFieldOffset(f)` of a `Field`
+//! that is no handle is a number of the field's own, which no access can use
+//! (`field_offset_value`).
 //!
 //! An atomic update through a handle, `U.compareAndSetInt(this, VALUE, expect, update)` and the
 //! get-and-add, get-and-bitwise-or (and `And`, `Xor`), get-and-set and compare-and-exchange forms
@@ -560,7 +562,8 @@ impl<'t> Lowering<'t> {
     /// Whether `stmt`, a statement of `block`, declares a local that the block uses only to make
     /// handles, whose definitions are left out (`handle_definition`), so that the local is left
     /// out with them: a `Field` whose value is `getDeclaredField`, used only as the argument of
-    /// `staticFieldOffset(f)`, `staticFieldBase(f)` or `objectFieldOffset(f)`, a
+    /// `staticFieldOffset(f)`, `staticFieldBase(f)` or `objectFieldOffset(f)` in the values given
+    /// to handles, a
     /// `MethodHandles.Lookup` whose value is `MethodHandles.lookup()`, used only in the values of
     /// `VarHandle` constants (`SharedThreadContainer` finds its handles so), or a field updater
     /// whose value is `newUpdater`, used only in the values of updater constants.
@@ -578,13 +581,19 @@ impl<'t> Lowering<'t> {
                 if found.is_none_or(|s| (s.owner, s.name) != ("java.lang.Class", "getDeclaredField")) {
                     return false;
                 }
+                // Only in the value given to a handle: an offset used as a number keeps its
+                // `Field` (`field_offset_value`).
                 walk(block.0, &mut |n| {
                     uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
-                    let handle = [STATIC_OFFSET_OF, STATIC_BASE_OF, OFFSET_OF_FIELD, SUN_OFFSET_OF_FIELD]
-                        .into_iter()
-                        .find_map(|m| call_of(n, m));
-                    in_handles +=
-                        usize::from(handle.is_some_and(|args| args.first().is_some_and(|a| named(*a))));
+                    let defines = n.kind() == "ASSIGNMENT" && self.handle_definition_of(n).is_some();
+                    let Some(value) = n.get("expression").filter(|_| defines) else { return };
+                    walk(value.0, &mut |v| {
+                        let handle = [STATIC_OFFSET_OF, STATIC_BASE_OF, OFFSET_OF_FIELD, SUN_OFFSET_OF_FIELD]
+                            .into_iter()
+                            .find_map(|m| call_of(v, m));
+                        in_handles +=
+                            usize::from(handle.is_some_and(|args| args.first().is_some_and(|a| named(*a))));
+                    });
                 });
             }
             // An updater that a static block makes in a local, then gives its constant.
@@ -1754,7 +1763,10 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol<'t>,
     ) -> Result<Option<ExprKind>, Error> {
         let key = (symbol.owner, symbol.name, symbol.ty);
-        if key == OFFSET_OF || key == OFFSET_OF_FIELD || key == SUN_OFFSET_OF_FIELD {
+        if key == OFFSET_OF_FIELD || key == SUN_OFFSET_OF_FIELD {
+            return self.field_offset_value(node, key == SUN_OFFSET_OF_FIELD).map(Some);
+        }
+        if key == OFFSET_OF {
             return unsupported(node, "a field offset used as a value");
         }
         // A method of `sun.misc.Unsafe` that forwards to one of `jdk.internal.misc.Unsafe`'s is
@@ -1822,6 +1834,51 @@ impl<'t> Lowering<'t> {
             Some(method) => self.after_memory_access_warning(node, method, access).map(Some),
             None => Ok(Some(access)),
         }
+    }
+
+    /// `U.objectFieldOffset(f)` of a `Field` that is no field handle, used as a number, with `sun`
+    /// `sun.misc.Unsafe`'s: the number that the translator's `Field.objectFieldOffset` gives
+    /// (`program::FIELD_OFFSET_VALUE`), a number of the field's own that no access can use, as
+    /// any access at an offset must name its field or element. So code that checks the layout of
+    /// its fields before it reads them at offsets of its own computing (`joml`'s `MemUtil` checks
+    /// that a matrix's floats are 4 bytes apart) finds that it is not the layout it expects, as on
+    /// a JVM that lays them out otherwise, and takes its other way. `sun.misc.Unsafe`'s warns
+    /// after its checks of the field, as Java's does.
+    fn field_offset_value(&self, node: Node<'t>, sun: bool) -> Result<ExprKind, Error> {
+        let (class, name, signature) = crate::program::FIELD_OFFSET_VALUE;
+        let Some(method) = self.method_named(class, name, signature) else {
+            return unsupported(node, "a field offset used as a value");
+        };
+        let select = node.child("methodSelect")?;
+        let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        let stateless = receiver.is_none_or(|r| match r.symbol() {
+            Some(s) => s.kind == "FIELD" || s.name == "getUnsafe",
+            None => false,
+        });
+        if !sun && !stateless {
+            return unsupported(node, "`Unsafe.objectFieldOffset` on this receiver");
+        }
+        let pos = node.pos();
+        let Some(field) = node.list("arguments").next() else {
+            return unsupported(node, "a field offset used as a value");
+        };
+        let args = vec![self.expr(field)?, self.synth(ExprKind::Bool(sun), pos, Type::Boolean)];
+        let call = ExprKind::Call { name: name.to_string(), args, resolved: Some(method) };
+        if !sun {
+            return Ok(call);
+        }
+        let local = self.fresh_name("offset");
+        let call = self.synth(call, pos, Type::Long);
+        let warning = self.memory_access_warning(node, "objectFieldOffset")?;
+        let body = vec![
+            Stmt::Local { ty: Type::Long, name: local.clone(), init: Some(call), pos },
+            Stmt::Expr(warning),
+            Stmt::Yield(self.synth(ExprKind::Var(local), pos, Type::Long)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
     }
 
     /// `U.get<Kind>(base, offset)` or `U.put<Kind>(base, offset, x)` of a primitive of kind `kind`

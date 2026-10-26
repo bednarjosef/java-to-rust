@@ -492,6 +492,13 @@ name:
   read or write through it, in any memory mode, is a read or write of `o.f`; the field may be one
   of another class (`ThreadLocalRandom`'s offsets into `Thread`) as long as the object is of that
   class. Static fields (`staticFieldOffset`, `staticFieldBase`) work the same way.
+- **An offset used as a number**, `objectFieldOffset(f)` of a `Field` that is no handle (joml's
+  `MemUtil` finds a matrix's offsets so to check that its floats are 4 bytes apart), is a number
+  of the field's own, the same for every `Field` of it and 16 apart from the others, that no
+  access can use. Code that checks the layout before reading at offsets of its own computing
+  finds it is not the one it expects, as on a JVM that lays fields out otherwise, and takes its
+  other way; an access at such an offset is rejected. A record's field gets a number too, where
+  `sun.misc.Unsafe` throws.
 - **An element offset** is `base + (index << shift)` or `base + index * scale`, with `base` and
   `scale` the `arrayBaseOffset` and `arrayIndexScale` of one array class, written out, read from
   a static final, computed by a one-line method (`ForkJoinPool.slotOffset`), held in a `long`

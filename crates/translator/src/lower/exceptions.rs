@@ -747,6 +747,13 @@ impl Uses {
                                 "(java.lang.String)void".into(),
                             ));
                         }
+                        // An offset of a field used as a number is the translator's
+                        // `Field.objectFieldOffset` (`handles.rs`).
+                        if crate::program::field_offset_value(v) {
+                            let (class, name, signature) = crate::program::FIELD_OFFSET_VALUE;
+                            self.classes.insert(class.into());
+                            self.members.insert((class.into(), name.into(), signature.into()));
+                        }
                         // A lookup of reflection calls the translator's `Method`, `Field` or
                         // `Constructor` (`reflection.rs`).
                         if owner == "java.lang.Class" && !self.handle_fields.contains(&(v as *const Value)) {
