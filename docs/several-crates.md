@@ -136,7 +136,7 @@ along classes. It splits declarations from code, as C splits headers from source
   method whose code can move keeps only its signature there. Its body calls a function declared
   in an `unsafe extern "Rust"` block of its module (`safe fn j2r__<module>__<type>__<name>(..)`),
   with its parameters renamed `p0`, `p1`, .. so that every pattern is a plain name.
-- **Each body crate** depends on the header alone and defines those functions for the modules
+- **Each body crate** depends on the header alone and defines those functions for the items
   given to it, each with `#[unsafe(no_mangle)]`. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names
   everything as it did, `crate::..` paths included: the body crate has every module, and a module
@@ -157,10 +157,12 @@ signature names `Self::..`, and the initializers of statics. The header calls in
 crates, which depend on it; rustc's linker (lld, the default on x86-64 Linux) resolves symbols
 whatever the order of the libraries.
 
-The modules go to the body crates in the order of the module tree, each crate taking modules until
-it has its share of the moved code, so the same program is split the same way every time, and
-neighbouring packages share a crate. A module is the unit, so a crate root with much code of its
-own makes its crate larger than the others.
+The moved code goes to the body crates item by item (a function, or an `impl` with its trait), in
+the order of the module tree and of each module's items, each crate taking items until it has its
+share, so the same program is split the same way every time, and neighbouring packages share a
+crate. A module with more code than a share is spread over several crates, each with the module's
+`use` lines: the Minecraft server's crate root, whose `Object` enum's methods and reflection
+table are 290 MB of code, would otherwise be one crate of its own.
 
 `--crates N` with `--crate DIR` writes the split workspace, for a translation or for a census's
 trial translation (`--census --crate DIR --crates N`, each rejected piece ending the program with
@@ -184,5 +186,3 @@ most from the split.
 
 - The translated JDK as a crate reused between programs ([large-projects.md](large-projects.md)):
   its code depends on the program's classes through the hierarchies' enums.
-- Splitting a large module (such as the crate root) across body crates, by item rather than by
-  module.
