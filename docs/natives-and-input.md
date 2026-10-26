@@ -309,21 +309,28 @@ A translated program is closed: it knows all its classes. So:
 
 - `jdk.internal.loader.` is untranslated ("class loading"), as are reflection
   (`java.lang.reflect.`, `java.lang.invoke.`, with the exceptions in `TRANSLATED_ANYWAY`),
-  serialization streams and security (`UNTRANSLATED`). Of security, message digests are
-  translated: `MessageDigest`, `DigestInputStream` and the `SUN` provider's digests, which
-  `MessageDigest.getInstance(String)` makes by name (`java/patches/java/security/MessageDigest.java`,
-  `TranslatedDigests`); so are secure random numbers: `SecureRandom` and the `SUN` provider's
-  generators and seed sources, which `new SecureRandom()` and `SecureRandom.getInstance(String)`
-  make by name (`java/patches/java/security/SecureRandom.java`, `TranslatedRandoms`), as
-  `UUID.randomUUID` does; and so is what a Minecraft server's login needs: RSA key pairs, key
-  factories, ciphers and signatures of the `SunRsaSign` provider, the AES cipher and key
-  generator of `SunJCE` (`javax.crypto` is translated, `com.sun.crypto.provider` too), and the
-  DER encoding of keys (`sun.security.util`'s `Der*`, `ObjectIdentifier`, `KnownOIDs`,
-  `AlgorithmId`, `X509Key`, `PKCS8Key`), which `KeyPairGenerator`, `KeyFactory`, `Signature`,
-  `Cipher` and `KeyGenerator.getInstance(String)` make by name (their patches and
-  `TranslatedServices`). `AlgorithmParameters.getInstance(String)` finds no algorithm's
-  parameters. A `Provider` and the methods that name one are not translated. Neither are other
-  keys and specs, except their plain interfaces, which the program's own classes implement (see
+  serialization streams and security (`UNTRANSLATED`). Of security, the lookup of services by
+  name is translated as the JDK does it: `Security` and its properties, the JDK's own providers
+  (`SUN`, `SunRsaSign`, `SunEC`, `SunJSSE`, `SunJCE` and the others that the translation's
+  modules provide) with their registrations, and `GetInstance`, through which every engine's
+  `getInstance` finds a service, with or without a provider's name. A provider makes a service's
+  implementation from its class name by reflection; the translation instead has a `switch` over
+  the classes that the providers register for each type that reachable code looks up
+  (`program/reach/services.rs`, `java/patches/java/security/Provider.java`,
+  `TranslatedServices`), so a program that only digests has the digests' classes and none of
+  the ciphers'. The security properties are those of the translating JDK's
+  `conf/security/java.security`, written into the program. The services translated so far are
+  message digests and secure random numbers (`MessageDigest`, the `SUN` provider's digests,
+  generators and seed sources, as `UUID.randomUUID` uses them), and what a Minecraft server's
+  login needs: RSA key pairs, key factories, ciphers and signatures of `SunRsaSign`, the
+  ciphers, MACs, key generators, key derivation and key stores of `SunJCE` (`javax.crypto` and
+  `com.sun.crypto.provider` are translated), and the DER encoding of keys (`sun.security.util`'s
+  `Der*`, `ObjectIdentifier`, `KnownOIDs`, `AlgorithmId`, `X509Key`, `PKCS8Key`). A service whose
+  class is not translated, as JSSE's (`SSLContext`, `KeyManagerFactory`), X.509's, PKCS12's and
+  PKIX's are, fails when it is made, with the `NoSuchAlgorithmException` the JDK throws for a
+  class it cannot find, so a library that falls back from one algorithm to another does so; a
+  name no provider registers fails as in Java. Other keys and specs are not translated, except
+  their plain interfaces, which the program's own classes implement (see
   [object-model.md](object-model.md) 1.9). The security APIs' exceptions (`KeyException`,
   `SignatureException`, `CertificateException`, `InvalidKeySpecException` and the like) are
   translated: plain constructors, which library code throws and catches as its own.

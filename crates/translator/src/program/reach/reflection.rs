@@ -202,7 +202,7 @@ impl<'t> Walk<'t> {
     /// (see the module's comment), and whether that is anything new: the walk then goes on, as
     /// what it reaches may name more classes and more strings.
     pub(super) fn reflect(&mut self) -> bool {
-        let loaded = self.load_services() | self.make_proxies();
+        let loaded = self.load_services() | self.make_proxies() | self.make_services();
         if self.lookups.is_empty() {
             return loaded;
         }

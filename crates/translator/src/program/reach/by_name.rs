@@ -290,6 +290,10 @@ impl Walk<'_> {
     /// A string literal of reachable code, which may name a class that a cast creates. One that
     /// could name a class that no unit declares is kept for `note_named`.
     pub(super) fn named(&mut self, literal: &str) {
+        // A provider's registration names its class for the services alone (`services.rs`).
+        if self.registered.contains(literal) {
+            return;
+        }
         if !self.classes.contains_key(literal) {
             if could_name_class(literal) && !self.literals.contains(literal) {
                 self.literals.insert(literal.to_string());

@@ -89,7 +89,9 @@ program where such a lookup can happen, so they can be checked before the progra
   `newInstance` and the rest look members up in a table that the translation builds in. The
   table holds only what lookups of reachable code can find. The classes are those named by
   string literals of reachable code, plus the classes of its class literals for methods and
-  fields, or only the class of the receiver when it is a class literal. The member names are
+  fields, or only the class of the receiver when it is a class literal. The names of the classes
+  that security providers register for their services are left out: the providers' own lookup
+  makes those (`program/reach/services.rs`). The member names are
   the spelled-out name, or for a computed name any string literal of reachable code, or every
   member for `getMethods()` and its relatives. Reachability finds these
   (`program/reach/reflection.rs`, kept in `Reach::reflected`). Of `Object`'s methods, the table

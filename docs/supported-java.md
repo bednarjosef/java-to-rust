@@ -405,8 +405,8 @@ Design: [natives-and-input.md](natives-and-input.md).
 - Reachability stops at the classes the runtime provides (`RUNTIME_CLASSES`: `String`,
   `StringBuilder`, `System`, `Runtime`, `Math`, the boxes, `Object`, `Class`, `Thread`, the
   standard charsets) and at what is not translated (`UNTRANSLATED`: most reflection, method
-  handles but those above, serialization, class loading, and security but its exceptions,
-  message digests, secure random numbers and what a server's login needs, see
+  handles but those above, serialization, class loading, and security but its exceptions, the
+  lookup of services by name and the services translated so far, see
   [natives-and-input.md](natives-and-input.md#class-loading-resources-and-classes-by-name)).
   An untranslated class used as a type has no objects, so its variables are only ever null
   (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,

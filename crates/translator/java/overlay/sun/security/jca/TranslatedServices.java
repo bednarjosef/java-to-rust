@@ -1,86 +1,90 @@
 package sun.security.jca;
 
-import com.sun.crypto.provider.TranslatedSunJce;
-import java.security.AlgorithmParametersSpi;
-import java.security.KeyFactorySpi;
-import java.security.KeyPairGeneratorSpi;
-import java.security.NoSuchAlgorithmException;
-import java.security.SignatureSpi;
-import java.util.Locale;
-import javax.crypto.CipherSpi;
-import javax.crypto.KeyGeneratorSpi;
-import sun.security.rsa.TranslatedRsa;
-import sun.security.util.KnownOIDs;
+import java.lang.reflect.InvocationTargetException;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
+import javax.crypto.interfaces.DHPrivateKey;
+import javax.crypto.interfaces.DHPublicKey;
 
 /**
- * The security services of the translator's {@code getInstance(String)} methods (see
- * docs/jdk-overlays.md): those of the JDK's own providers, made directly by name. The JDK finds a
- * service through the registered providers ({@code Security}, {@code Provider} and
- * {@code GetInstance}), which make the implementation from its class name by reflection; the
- * translation has no providers, so the names that the providers register, their aliases and
- * object identifiers among them, are listed here. A name is matched ignoring case, as the
- * providers match it, and {@code OID.} before an object identifier is left out.
+ * What the JDK's security providers find by name at run time, by reflection or in the JDK's
+ * files, for a translated program, which has neither (see docs/jdk-overlays.md): the classes of
+ * the services that a provider makes ({@code Provider.Service.newInstance}), the key interfaces
+ * that it names, and the security properties.
  */
 public final class TranslatedServices {
     private TranslatedServices() {}
 
-    /** A new key pair generator of the algorithm named {@code algorithm}, as {@code SunRsaSign} makes it. */
-    public static KeyPairGeneratorSpi keyPairGenerator(String algorithm) throws NoSuchAlgorithmException {
-        switch (name(algorithm)) {
-            case "RSA", "1.2.840.113549.1.1.1": return TranslatedRsa.keyPairGenerator();
-            default: throw new NoSuchAlgorithmException(algorithm + " KeyPairGenerator not available");
-        }
-    }
+    /** What {@link #construct} gives for a name of no class of the translation. */
+    private static final Object NO_CLASS = new Object();
 
-    /** A new key factory of the algorithm named {@code algorithm}, as {@code SunRsaSign} makes it. */
-    public static KeyFactorySpi keyFactory(String algorithm) throws NoSuchAlgorithmException {
-        switch (name(algorithm)) {
-            case "RSA", "1.2.840.113549.1.1.1": return TranslatedRsa.keyFactory();
-            default: throw new NoSuchAlgorithmException(algorithm + " KeyFactory not available");
+    /** What {@link #construct} gives for a class without the constructor asked for. */
+    private static final Object NO_CONSTRUCTOR = new Object();
+
+    /**
+     * A new object of the class with the binary name {@code className}, which a provider
+     * registers as the implementation of a service ({@code Provider.Service.newInstance}): made
+     * with its public constructor without parameters when {@code parameterClass} is null, else
+     * with the one whose only parameter is of that class, given {@code parameter}. The JDK finds
+     * the class by name and its constructor by reflection; the translation is closed, so the
+     * classes are those the providers register for the services that reachable code looks up,
+     * and that are translated ({@code program/reach/services.rs}). As with reflection, a name of
+     * no such class throws {@code ClassNotFoundException}, a class without that constructor
+     * {@code NoSuchMethodException}, and an exception of the constructor is wrapped in an
+     * {@code InvocationTargetException}.
+     */
+    public static Object newInstance(String className, Class<?> parameterClass, Object parameter)
+            throws ClassNotFoundException, NoSuchMethodException, InvocationTargetException {
+        String parameterName = parameterClass == null ? "" : parameterClass.getName();
+        Object made;
+        try {
+            made = construct(className, parameterName, parameter, NO_CLASS, NO_CONSTRUCTOR);
+        } catch (Throwable e) {
+            throw new InvocationTargetException(e);
         }
+        if (made == NO_CLASS) {
+            throw new ClassNotFoundException(className + ", which is not in the translation");
+        }
+        if (made == NO_CONSTRUCTOR) {
+            throw new NoSuchMethodException(className + ".<init>(" + parameterName + ")");
+        }
+        return made;
     }
 
     /**
-     * A new signature of the algorithm named {@code algorithm}, as {@code SunRsaSign} makes it:
-     * its names are the standard names and object identifiers of {@code KnownOIDs}.
+     * The object of {@link #newInstance}, {@code noClass} or {@code noConstructor}: the translator
+     * writes this method's calls as a {@code switch} over the class name with a case for each
+     * class, and in it one over {@code parameterName} ({@code ""} for none) with a case for each
+     * constructor ({@code lower/by_name.rs}).
      */
-    public static SignatureSpi signature(String algorithm) throws NoSuchAlgorithmException {
-        String name = name(algorithm);
-        KnownOIDs known = KnownOIDs.findMatch(name);
-        SignatureSpi spi = TranslatedRsa.signature(known == null ? name : known.stdName().toUpperCase(Locale.ENGLISH));
-        if (spi == null) {
-            throw new NoSuchAlgorithmException(algorithm + " Signature not available");
-        }
-        return spi;
+    private static Object construct(String className, String parameterName, Object parameter,
+            Object noClass, Object noConstructor) {
+        return noClass;
     }
 
     /**
-     * A new cipher of the transformation {@code transform} as {@code SunJCE} registers it, before
-     * its mode and padding are set: null if {@code SunJCE} has none of that name.
+     * The text of the JDK's security properties file, {@code conf/security/java.security}, which
+     * {@code Security} loads first: the translator writes this method's calls as the text of the
+     * file of the JDK it translates with ({@code lower/system.rs}), as a translated program has
+     * no JDK to read it from at run time; null if that JDK has none.
      */
-    public static CipherSpi cipher(String transform) {
-        switch (name(transform)) {
-            case "AES", "2.16.840.1.101.3.4.1": return TranslatedSunJce.aes();
-            case "RSA": return TranslatedSunJce.rsa();
+    public static String securityProperties() {
+        return null;
+    }
+
+    /**
+     * The key interface with the binary name {@code name}, which a provider names in a service's
+     * {@code SupportedKeyClasses} attribute, and the JDK finds by name: those of the JDK's
+     * providers that the translation has, and null for the others, whose keys no object of the
+     * translation is, as the JDK gives null for a class it cannot find.
+     */
+    public static Class<?> keyClass(String name) {
+        switch (name) {
+            case "java.security.interfaces.RSAPublicKey": return RSAPublicKey.class;
+            case "java.security.interfaces.RSAPrivateKey": return RSAPrivateKey.class;
+            case "javax.crypto.interfaces.DHPublicKey": return DHPublicKey.class;
+            case "javax.crypto.interfaces.DHPrivateKey": return DHPrivateKey.class;
             default: return null;
         }
-    }
-
-    /** A new secret key generator of the algorithm named {@code algorithm}, as {@code SunJCE} makes it. */
-    public static KeyGeneratorSpi keyGenerator(String algorithm) throws NoSuchAlgorithmException {
-        switch (name(algorithm)) {
-            case "AES", "2.16.840.1.101.3.4.1": return TranslatedSunJce.aesKeys();
-            default: throw new NoSuchAlgorithmException(algorithm + " KeyGenerator not available");
-        }
-    }
-
-    /** The parameters of the algorithm named {@code algorithm}: none of the providers' yet. */
-    public static AlgorithmParametersSpi algorithmParameters(String algorithm) throws NoSuchAlgorithmException {
-        throw new NoSuchAlgorithmException(algorithm + " AlgorithmParameters not available");
-    }
-
-    private static String name(String algorithm) {
-        String name = algorithm.toUpperCase(Locale.ENGLISH);
-        return name.startsWith("OID.") ? name.substring(4) : name;
     }
 }

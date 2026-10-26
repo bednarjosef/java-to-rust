@@ -164,6 +164,31 @@ fn security_properties() -> Option<&'static HashMap<String, String>> {
         .as_ref()
 }
 
+/// The text of the security properties file of the JDK on the path, without its comments and
+/// blank lines, which `Security` loads as the JDK's own (`TranslatedServices.securityProperties`):
+/// a translated program has no JDK to read it from. `None` when there is no such file.
+pub(crate) fn security_file() -> Option<&'static str> {
+    static TEXT: OnceLock<Option<String>> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        let path = std::path::Path::new(&jdk_home()).join("conf/security/java.security");
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut kept = String::new();
+        let mut continued = false;
+        for line in text.lines() {
+            let start = line.trim_start();
+            if !continued && (start.is_empty() || start.starts_with(['#', '!'])) {
+                continue;
+            }
+            kept.push_str(line);
+            kept.push('\n');
+            // A line ends in a continuation when it ends in an odd number of backslashes.
+            continued = line.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1;
+        }
+        Some(kept)
+    })
+    .as_deref()
+}
+
 /// `SecurityProperties.includedInExceptions(category)`: whether the system or security property
 /// `jdk.includeInExceptions` lists the category. No system property is set in a plain run, so it
 /// is the JDK's security property; `None` when the JDK's file cannot be read.
