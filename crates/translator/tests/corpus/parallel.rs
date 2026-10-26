@@ -3,8 +3,13 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The stack of each worker thread.
+const STACK: usize = 256 << 20;
+
 /// Calls `f` on each index below `n` on one thread per CPU (or `CORPUS_THREADS` threads, to keep
-/// memory down when several test runs share a machine), and returns the results in order.
+/// memory down when several test runs share a machine), and returns the results in order. The
+/// threads get a large stack, as the translator's own thread does, since translating recurses as
+/// deep as a program's expressions and statements nest.
 pub fn parallel<R: Send>(n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let threads = std::env::var("CORPUS_THREADS")
         .ok()
@@ -15,15 +20,18 @@ pub fn parallel<R: Send>(n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let results: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
         for _ in 0..threads.min(n) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
+            let worker = std::thread::Builder::new().stack_size(STACK);
+            worker
+                .spawn_scoped(s, || {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        *results[i].lock().unwrap() = Some(f(i));
                     }
-                    *results[i].lock().unwrap() = Some(f(i));
-                }
-            });
+                })
+                .expect("a worker thread starts");
         }
     });
     results.into_iter().map(|r| r.into_inner().unwrap().expect("every index is run")).collect()
