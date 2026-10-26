@@ -304,6 +304,14 @@ impl Messages<'_> {
             }
             _ => None,
         };
+        // A boxed parameter of the class the JVM makes for a method reference that an operation
+        // of the translator's takes as a primitive (`Character::toString` of an `Integer`): that
+        // class unboxes it.
+        if let ExprKind::Builtin(_, args) = &x.kind {
+            for arg in args.iter().filter(|a| matches!(a.ty, Type::Boxed(_)) && self.reference_param(a)) {
+                out.entry(arg.id).or_insert(None);
+            }
+        }
         let mut add = |object: &Expr, action: Option<String>| {
             // A message that the expression above gave (a native's).
             if out.contains_key(&object.id) {
@@ -1325,6 +1333,11 @@ impl Messages<'_> {
     /// message for a null that this class dereferences.
     fn reference_param(&self, object: &Expr) -> bool {
         let method = self.method;
+        // Its casts (`checkcast`, an unboxing) are the reference class's code too.
+        let mut object = object;
+        while let ExprKind::Cast(_, inner) = &object.kind {
+            object = inner;
+        }
         object.pos == method.pos
             && matches!(&object.kind, ExprKind::Var(name) if method.params.iter().any(|p| &p.name == name))
             && *self.proxied.get_or_init(|| self.proxied())

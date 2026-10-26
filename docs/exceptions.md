@@ -651,7 +651,9 @@ with `System.checkKey`'s own message (`key can't be null`). A native that the ru
 have takes null (a JNI native gets it as it is) and raises nothing: it is only where it never
 runs, and its call is written without its arguments, so a dereference in them is never made. A null that the class the JVM makes for a method reference dereferences has no message, as
 its hidden frame gives none: the receiver of an unbound reference, or an argument it unboxes
-(`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`). javac writes a method of its
+(`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`, `Character::toString` of an
+`Integer`, which the translation answers itself), also after the cast to the parameter's type
+that a reference given as a `Function<? super S, ? extends A>` makes. javac writes a method of its
 own instead for a reference that packs varargs, calls through `super`, or makes an array or an
 object of an inner or local class, so the rule leaves those out. A bound reference's receiver,
 checked where the reference is created, is never null in the reference's class. The translator's own `java.lang` classes (`Standard.java`) have no
