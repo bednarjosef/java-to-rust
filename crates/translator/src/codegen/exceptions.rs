@@ -1432,7 +1432,9 @@ impl<'a> Gen<'a> {
                     .collect();
                 arms.push("tag => java::bad_tag(tag)".to_string());
                 let tag = format!("{}.0.tag()", super::dispatch::operand(&obj));
-                Code::atom(format!("java::JString::from(match {tag} {{ {} }})", arms.join(", ")))
+                // Typed, for an enum without variants, whose match never gives a name.
+                let name = format!("{{ let name: &str = match {tag} {{ {} }}; name }}", arms.join(", "));
+                Code::atom(format!("java::JString::from({name})"))
             }
         }
     }
