@@ -43,8 +43,34 @@ public class UnfollowedHandleLookups {
         }
     }
 
+    // Handles passed on to a method of variable arity, as netty composes its cleaners' handles.
+    private static final MethodHandle TRIMMED_LENGTH = trimmedLengthHandle();
+
+    private static MethodHandle trimmedLengthHandle() {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.lookup();
+            MethodHandle length = lookup.findVirtual(String.class, "length", methodType(int.class));
+            MethodHandle trim = lookup.findVirtual(String.class, "trim", methodType(String.class));
+            return MethodHandles.filterArguments(length, 0, trim);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    static int trimmedLength(String s) {
+        if (TRIMMED_LENGTH == null) {
+            return s.trim().length();
+        }
+        try {
+            return (int) TRIMMED_LENGTH.invokeExact(s);
+        } catch (Throwable t) {
+            throw new Error(t);
+        }
+    }
+
     public static void main(String[] args) {
         System.out.println(isVirtual(Thread.currentThread()));
         System.out.println(nameLength());
+        System.out.println(trimmedLength(" abc "));
     }
 }

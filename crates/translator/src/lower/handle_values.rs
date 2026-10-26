@@ -309,10 +309,15 @@ fn slots(v: &Value, out: &mut HashSet<*const Value>) {
             let args: Vec<Node> = node.list("arguments").collect();
             if owner == METHOD_HANDLE {
                 args.iter().for_each(|a| allow(Some(*a)));
-            } else if let Some(symbol) = symbol.filter(|s| !s.varargs) {
+            } else if let Some(symbol) = symbol {
                 let (params, _) = lambdas::signature(symbol.ty);
-                for (arg, param) in args.iter().zip(params) {
-                    if is_handle_type(param) {
+                // The arguments of a variable arity parameter, such as `filterArguments`'s
+                // `MethodHandle...`, each have its element type.
+                let element = params.last().filter(|_| symbol.varargs).and_then(|p| p.strip_suffix("[]"));
+                let fixed = if element.is_some() { params.len() - 1 } else { params.len() };
+                for (i, arg) in args.iter().enumerate() {
+                    let param = if i < fixed { params.get(i).copied() } else { element };
+                    if param.is_some_and(is_handle_type) {
                         allow(Some(*arg));
                     }
                 }
