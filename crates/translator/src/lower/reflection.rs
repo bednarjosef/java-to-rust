@@ -103,12 +103,27 @@ fn constructor_slot(of_abstract: bool, slot: usize) -> i32 {
 /// What a lookup of a file finds by name, of one kind: `None` for every member.
 type Names = Option<HashSet<String>>;
 
+/// What the reflection table of a lowering depends on besides its kind (`Lowering::table`):
+/// whether a census's stub is being lowered, whose classes extend nothing they cannot
+/// (`Lowering::superclass`); whether the call is a node whose intersection type is an `Object`
+/// (`Lowering::ty`); and for fields, the class and method whose type variables are in scope, if
+/// any are.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct TableKey {
+    kind: LookupKind,
+    stubbing: bool,
+    joins: bool,
+    type_variables: Option<(usize, Option<usize>)>,
+}
+
 /// A member of the table, with the class it is looked up in (`None` for `Object`).
-struct Entry<'t> {
+#[derive(Clone, Copy)]
+pub(super) struct Entry<'t> {
     found_on: Option<usize>,
     member: Member<'t>,
 }
 
+#[derive(Clone, Copy)]
 enum Member<'t> {
     /// A method or constructor, by index in `Class::methods`.
     Method(usize),
@@ -709,8 +724,32 @@ impl<'t> Lowering<'t> {
     }
 
     /// The members of the table of one kind, in the order of their slots (see the module's
-    /// comment).
+    /// comment). Each of the natives' many calls asks for the same table, which is made once per
+    /// lowering: what it depends on that changes while lowering goes on is in its key
+    /// (`TableKey`), and what making it records (covariant arrays, generics that fail, rejected
+    /// classes) its first making has recorded.
     fn table(&self, node: Node<'t>, kind: LookupKind) -> Result<Vec<Entry<'t>>, Error> {
+        let key = TableKey {
+            kind,
+            stubbing: self.stubbing.get(),
+            joins: matches!(node.kind(), "CONDITIONAL_EXPRESSION" | "SWITCH_EXPRESSION" | "PARENTHESIZED"),
+            // A field's type is read where the table is asked for (`reflected_field_type`), and so
+            // are the type variables that it may name.
+            type_variables: match kind {
+                LookupKind::Field => self.type_variables_in_scope(),
+                _ => None,
+            },
+        };
+        if let Some(table) = self.reflection_tables.borrow().get(&key).cloned() {
+            return Ok(table);
+        }
+        let table = self.make_table(node, kind)?;
+        self.reflection_tables.borrow_mut().insert(key, table.clone());
+        Ok(table)
+    }
+
+    /// Makes the table of one kind, for `table`.
+    fn make_table(&self, node: Node<'t>, kind: LookupKind) -> Result<Vec<Entry<'t>>, Error> {
         let names = match self.reach {
             Some(_) => None,
             None => Some(self.file_names(kind)),

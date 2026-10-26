@@ -3514,6 +3514,74 @@ fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
     );
 }
 
+#[test]
+fn a_library_class_reached_only_by_name_has_null_pointer_messages() {
+    // No code names `q.Hidden`, so javac would not compile it from the library's root: the
+    // names of its class file come from compiling the files that the translation reached.
+    let dir = write_sources(
+        "messages_by_name",
+        &[
+            (
+                "app/p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) throws Exception {\n        try { System.out.println(q.Factories.make().size(null)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+            ),
+            ("lib/q/Factory.java", "package q;\npublic interface Factory {\n    int size(String s);\n}\n"),
+            (
+                "lib/q/Hidden.java",
+                "package q;\nclass Hidden implements Factory {\n    public int size(String s) {\n        return s.length();\n    }\n}\n",
+            ),
+            (
+                "lib/q/Factories.java",
+                "package q;\npublic class Factories {\n    public static Factory make() throws Exception {\n        return (Factory) Class.forName(\"q.Hidden\").getDeclaredConstructor().newInstance();\n    }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["Cannot invoke \\\"String.length()\\\" because \\\"<parameter1>\\\" is null"]);
+}
+
+#[test]
+fn a_census_takes_a_native_that_the_runtime_lacks_to_take_null() {
+    // A JNI native takes a null string as it is: the census lists the native, and its call
+    // raises no `NullPointerException` whose message would have to be found.
+    let dir = write_sources(
+        "census_native_null",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    static native long leak(String name);\n    static boolean loaded = Boolean.getBoolean(\"x\");\n    static long plot(String name) {\n        return loaded ? leak(name) : 0;\n    }\n    public static void main(String[] a) {\n        try { System.out.println(plot(a.length > 0 ? a[0] : null)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let census = census(&program);
+    assert_contains(&census.report, &["p.Main.leak"]);
+    assert_lacks(&census.report, &["NullPointerException"]);
+}
+
+#[test]
+fn a_census_takes_the_arguments_of_a_native_that_the_runtime_lacks_as_code_that_never_runs() {
+    // The call of a JNI native is written as code that never runs, without its arguments: the
+    // dereference in an argument, inside a `try` that catches its `NullPointerException`, is no
+    // dereference that the code has to check.
+    let dir = write_sources(
+        "census_native_argument",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    static native long leak(int size);\n    static boolean loaded = Boolean.getBoolean(\"x\");\n    static long plot(String name) {\n        return loaded ? leak(name.length()) : 0;\n    }\n    public static void main(String[] a) {\n        try { System.out.println(plot(a.length > 0 ? a[0] : null)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let census = census(&program);
+    assert_contains(&census.report, &["p.Main.leak"]);
+    assert_lacks(&census.report, &["NullPointerException"]);
+}
+
 /// A program whose census takes a round of the analyses for each kind of check that rejects code
 /// (`a_census_stubs_what_each_check_of_the_analyses_rejects_round_by_round`).
 const ROUNDS: &str = r#"public class Main {

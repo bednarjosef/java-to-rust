@@ -126,6 +126,15 @@ which it is reached. They only change how the work is ordered:
   lowering attempt. The
   implementation that a call runs on a class is kept once found (`Hierarchy::implementation`),
   as the analyses and the generator ask for it once for every concrete class under a type.
+- **The reflection table, made once per lowering attempt.** Each of the 230 or so natives of
+  `java/Reflection.java` (`tablePart`, `invokePart`, `getPart` and the rest, one for each of
+  the 32 parts) asked for the whole table again, reading the types of every member of every
+  class that reflection can reach: on javac, about half of each lowering attempt. Lowering now
+  keeps each table it makes (`Lowering::table`), keyed by what the table reads that can change
+  during an attempt: whether a census's stub is being lowered, and for fields the type
+  variables in scope where the table is asked for. What making a table records (covariant
+  arrays, Rust generics that fail, rejected classes) its first making records, so making it
+  again would add nothing. javac's five lowering attempts went from 21.1 s to 13.8 s.
 
 `whole_objects`, the analysis the old census never got past on javac, was slow for the first
 three of these reasons: the borrowing rounds over name sets, a scan of the program per class for

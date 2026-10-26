@@ -39,7 +39,7 @@ use std::rc::Rc;
 /// covariant (`noted`), shared with `real_generics::retry`, which lowers again with them.
 #[derive(Clone, Default)]
 pub(super) struct Covariant {
-    pub(super) known: Vec<Type>,
+    pub(super) known: std::collections::HashSet<Type>,
     pub(super) noted: Rc<RefCell<Vec<Type>>>,
 }
 

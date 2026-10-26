@@ -107,7 +107,7 @@ impl BytecodeNames {
 
 /// The names of the code of one source file.
 pub fn source_names(source: &str) -> Result<BytecodeNames, Error> {
-    names(Vec::new(), Some(source))
+    names(Vec::new(), Some(source), "")
 }
 
 /// What else decides the names of a program's code (`program_names`).
@@ -120,6 +120,10 @@ pub struct NameRoots<'a> {
     /// Compile errors do not stop it: the code of a file with one has no names
     /// (`Program::keep_going`).
     pub keep_going: bool,
+    /// The files of the units that the translation reached, as paths or relative to their root:
+    /// those of the library roots compile too, as the translation may reach a class that no
+    /// code names (by `Class.forName`), which javac would not compile.
+    pub reached: &'a [String],
 }
 
 /// The names of the code of a program's files. `modules` are the program's roots that are
@@ -141,6 +145,9 @@ pub fn program_names(
     if roots.keep_going {
         args.push("--keep-going".into());
     }
+    if !roots.reached.is_empty() {
+        args.push("--reached".into());
+    }
     for (name, root) in modules {
         args.push("--patch-module".into());
         let mut patch = std::ffi::OsString::from(format!("{name}="));
@@ -148,10 +155,17 @@ pub fn program_names(
         args.push(patch);
     }
     args.extend(files.iter().map(|f| f.as_os_str().to_owned()));
-    names(args, None)
+    let reached = roots.reached.iter().fold(String::new(), |mut list, f| {
+        list.push_str(f);
+        list.push('\n');
+        list
+    });
+    names(args, None, &reached)
 }
 
-fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<BytecodeNames, Error> {
+/// The names of the code of `files` (with their options), or of `source` on standard input when
+/// there are none; `input` is what standard input gives a program's run (`--reached`).
+fn names(files: Vec<std::ffi::OsString>, source: Option<&str>, input: &str) -> Result<BytecodeNames, Error> {
     // The code generator's `binaryQualifier`, which names a member's class as a class file does.
     let mut command =
         java("BytecodeNames", &["--add-opens", "jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED"]);
@@ -176,11 +190,15 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
     use std::process::Stdio;
     let mut child = command
         .args(files)
-        .stdin(Stdio::null())
+        .stdin(if input.is_empty() { Stdio::null() } else { Stdio::piped() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(cannot_run)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = input.to_string();
+        std::thread::spawn(move || std::io::Write::write_all(&mut stdin, input.as_bytes()));
+    }
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let errors = std::thread::spawn(move || {
         let mut errors = Vec::new();

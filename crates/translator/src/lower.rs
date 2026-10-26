@@ -84,6 +84,7 @@ pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::{panic_carried, panic_message, panic_place, quiet_panics};
+pub(crate) use classes::ENUM_CONSTANTS;
 pub(crate) use clinit_errors::{STATE, rewritten_clinit};
 pub(crate) use enum_tables::{ORDINAL as TABLE_ORDINAL, tabled_field};
 pub use exceptions::{
@@ -480,6 +481,8 @@ struct Lowering<'t> {
     library_annotations: std::collections::HashSet<String>,
     /// What each method asks about its caller (see `callers`).
     callers: callers::Callers,
+    /// The reflection tables made so far (`reflection::table`).
+    reflection_tables: RefCell<std::collections::HashMap<reflection::TableKey, Vec<reflection::Entry<'t>>>>,
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the

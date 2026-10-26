@@ -12,6 +12,10 @@
 
 use super::*;
 
+/// `Class.getEnumConstants`, which lowering writes as a block that checks the class
+/// (`class_enum_constants`).
+pub(crate) const ENUM_CONSTANTS: &str = "getEnumConstants";
+
 /// Whether the resource name `node` certainly ends in `.class`: a string literal that does, or a
 /// concatenation whose last operand is one (`'/' + name.replace('.', '/') + ".class"`).
 fn names_class_file(node: Node) -> bool {
@@ -142,7 +146,7 @@ impl<'t> Lowering<'t> {
             ("getGenericSuperclass", []) => return Ok(Some(self.generic_superclass(node, receiver)?)),
             ("getEnumConstants", []) => {
                 let class = self.expr(receiver)?;
-                return Ok(Some(self.class_enum_constants(node, class)?));
+                return Ok(Some(self.class_enum_constants(node, class, true)?));
             }
             // A class file, which a name that ends in `.class` names, is not in the translation
             // either: the program's classes were translated from their source. Such a resource
@@ -323,13 +327,16 @@ impl<'t> Lowering<'t> {
     fn enum_universe(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let arg = node.list("arguments").next().expect("the universe of a class");
         let class = self.expr(arg)?;
-        self.class_enum_constants(node, class)
+        self.class_enum_constants(node, class, false)
     }
 
     /// `cls.getEnumConstants()`, and the constants that `EnumMap` and `EnumSet` get: `{ Class c_ =
     /// cls; c_ == A.class ? new Enum[] {A.X, ..} : .. : null }`, over the program's enums, and the
-    /// array of the enum's constants directly for a class literal.
-    fn class_enum_constants(&self, node: Node<'t>, class: Expr) -> Result<ExprKind, Error> {
+    /// array of the enum's constants directly for a class literal. A `call` of
+    /// `getEnumConstants()` checks the class first, as the call's receiver
+    /// (`Builtin::NullChecked`), and holds it as a receiver (`lower/argument_order.rs`), so that
+    /// the message of a null names it.
+    fn class_enum_constants(&self, node: Node<'t>, class: Expr, call: bool) -> Result<ExprKind, Error> {
         let array = self.ty(node, node.java_type())?;
         let element = array.element();
         let pos = node.pos();
@@ -352,7 +359,10 @@ impl<'t> Lowering<'t> {
                 _ => ExprKind::Null,
             });
         }
-        let name = self.fresh_name("class");
+        let name = match call {
+            true => format!("{}{}", super::RECEIVER, class.id),
+            false => self.fresh_name("class"),
+        };
         let (mut chain, mut chain_ty) = (ExprKind::Null, Type::Null);
         for e in (0..self.types.len()).rev().filter(|&t| self.types[t].node.kind() == "ENUM") {
             let ty = Type::enum_type(&self.types[e].name);
@@ -365,10 +375,13 @@ impl<'t> Lowering<'t> {
             chain_ty = array;
             chain = ExprKind::Conditional(Box::new(test), Box::new(constants(e)), Box::new(rest));
         }
-        let body = vec![
-            Stmt::Local { ty: Type::JavaClass, name, init: Some(class), pos },
-            Stmt::Yield(self.synth(chain, pos, chain_ty)),
-        ];
+        let mut body = vec![Stmt::Local { ty: Type::JavaClass, name: name.clone(), init: Some(class), pos }];
+        if call {
+            let var = self.synth(ExprKind::Var(name), pos, Type::JavaClass);
+            let check = ExprKind::Builtin(Builtin::NullChecked(Some(ENUM_CONSTANTS)), vec![var]);
+            body.push(Stmt::Expr(self.synth(check, pos, Type::Void)));
+        }
+        body.push(Stmt::Yield(self.synth(chain, pos, chain_ty)));
         Ok(ExprKind::Switch {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body }],

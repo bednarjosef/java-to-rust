@@ -909,6 +909,9 @@ pub(super) fn runtime_failures(
                         | Builtin::Native(Native::NameProxyClass | Native::DynamicProxy)
                         // The expected and the new element of an atomic update may be null.
                         | Builtin::ElementUpdate(_)
+                        // A native that the runtime does not have never runs (it is only where
+                        // nothing calls it), and the natives of JNI take null.
+                        | Builtin::Native(Native::Missing { .. })
                 );
                 // Appending or inserting a null string, builder or boxed value writes "null" (the
                 // generator's `appended`); a null `char[]` throws.

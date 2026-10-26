@@ -146,6 +146,7 @@ impl<'t> Lowering<'t> {
             library_annotations: Default::default(),
             rejected_classes: Default::default(),
             callers: Default::default(),
+            reflection_tables: Default::default(),
         }
     }
 

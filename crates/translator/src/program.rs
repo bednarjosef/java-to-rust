@@ -251,7 +251,8 @@ fn translate_reached(
     let mut facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
     if facts.npe_message_read.is_some() {
-        let mut names = phase("class files", || class_file_names(program))?;
+        let reached: Vec<String> = units.iter().map(|u| u.file.clone()).collect();
+        let mut names = phase("class files", || class_file_names(program, &reached))?;
         names.add_jdk_temps(jdk_temps);
         phase("messages", || analysis::npe_messages(&class, &mut facts, &names))
             .map_err(|mut errors| located(errors.remove(0)))?;
@@ -276,8 +277,8 @@ fn rejected_write_runs(lowered: lower::Lowered) -> bool {
 }
 
 /// How the class files of the program's code name what the messages of a `NullPointerException`
-/// show (`javac::program_names`).
-fn class_file_names(program: &Program) -> Result<javac::BytecodeNames, ProgramError> {
+/// show (`javac::program_names`), with the files of the units that the translation `reached`.
+fn class_file_names(program: &Program, reached: &[String]) -> Result<javac::BytecodeNames, ProgramError> {
     let modules = modules::modules(&program.sources)
         .into_iter()
         .filter_map(|m| Some((m.name, m.file.parent()?.to_path_buf())))
@@ -286,6 +287,7 @@ fn class_file_names(program: &Program) -> Result<javac::BytecodeNames, ProgramEr
         libraries: &program.libraries,
         named_locals: program.named_locals,
         keep_going: program.keep_going,
+        reached,
     };
     javac::program_names(&source_files(program)?, &modules, roots)
         .map_err(|error| ProgramError { file: None, error })

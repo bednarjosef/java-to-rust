@@ -66,6 +66,34 @@ impl<'t> Lowering<'t> {
         Some(found)
     }
 
+    /// The class and method whose type variables `type_var` looks in, if they declare any, or
+    /// classes around them do: `None` where no name is a type variable.
+    pub(super) fn type_variables_in_scope(&self) -> Option<(usize, Option<usize>)> {
+        let (class, method) = self.scope.get().unwrap_or((self.current.get(), self.method_ctx.get()));
+        self.declares_type_variables(class, method).then_some((class, method))
+    }
+
+    /// Whether `type_var_around` can find a type variable around method `method` of class
+    /// `class`, as it looks for one.
+    fn declares_type_variables(&self, class: usize, method: Option<usize>) -> bool {
+        let declares = |node: Node<'t>| node.list("typeParameters").next().is_some();
+        if method.is_some_and(|m| declares(self.methods[m].node)) {
+            return true;
+        }
+        if let Some(nested) = self.nesting(class) {
+            return declares(self.types[class].node)
+                || self.declares_type_variables(nested.enclosing, nested.method);
+        }
+        let mut outer = Some(self.types[class].name.as_str());
+        while let Some(name) = outer {
+            if self.type_index(name).is_some_and(|t| declares(self.types[t].node)) {
+                return true;
+            }
+            outer = name.rsplit_once('.').map(|(outer, _)| outer);
+        }
+        false
+    }
+
     fn type_var_around(&self, name: &str, class: usize, method: Option<usize>) -> Option<(Node<'t>, Owner)> {
         let declares = |node: Node<'t>| node.list("typeParameters").find(|p| p.str("name") == name);
         if let Some(m) = method
