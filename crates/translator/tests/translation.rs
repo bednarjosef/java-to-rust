@@ -3747,6 +3747,25 @@ enum Level {
 }
 "#;
 
+/// A method whose local the generator rejects (an `Object` declared without a value).
+const DRAIN: &str = r#"
+class Drain {
+    static Object drain(boolean fail) {
+        Object tasks;
+        try {
+            if (!fail) {
+                tasks = new Object();
+            } else {
+                throw new IllegalStateException("no");
+            }
+        } catch (IllegalStateException e) {
+            tasks = e;
+        }
+        return tasks;
+    }
+}
+"#;
+
 #[test]
 fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
     // The checks of the analyses reject a pattern variable and `synchronized` on a string (the
@@ -3771,11 +3790,15 @@ fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
 
 #[test]
 fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
-    // A census takes the errors of every check of the analyses, and of the messages after them,
-    // in one round (`analysis::analyze_collecting`). Round by round, each ending at the first
-    // check that rejects code as a translation's analyses end, it finds the same, its
-    // translation too.
-    let dir = write_sources("census_one_round", &[("Main.java", ROUNDS)]);
+    // A census takes the errors of every check of the analyses, and of the messages and the
+    // generator after them, in one round (`analysis::analyze_collecting`); here the generator
+    // rejects a local (`Drain`). Round by round, each ending at the first check that rejects
+    // code as a translation's analyses end, it finds the same, its translation too.
+    let source = ROUNDS.replace(
+        "compare(new Name());",
+        "compare(new Name());\n        System.out.println(Drain.drain(args.length > 4) != null);",
+    );
+    let dir = write_sources("census_one_round", &[("Main.java", &format!("{source}{DRAIN}"))]);
     let program = java_to_rust::Program {
         main: "Main".into(),
         sources: vec![dir],
@@ -3832,23 +3855,6 @@ fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
             "a local of type `Object` declared without a value",
         ],
     );
-    const DRAIN: &str = r#"
-class Drain {
-    static Object drain(boolean fail) {
-        Object tasks;
-        try {
-            if (!fail) {
-                tasks = new Object();
-            } else {
-                throw new IllegalStateException("no");
-            }
-        } catch (IllegalStateException e) {
-            tasks = e;
-        }
-        return tasks;
-    }
-}
-"#;
 }
 
 /// Two source roots that are modules of the JDK, as javac's `jdk.compiler` and `java.compiler`

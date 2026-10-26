@@ -826,9 +826,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         }
     }
 
-    if !errors.is_empty() {
-        return Err(errors);
-    }
+    // The facts are kept with errors too: a census goes on past them as if they had passed
+    // (`analysis::analyze_collecting`), and the messages of the dereferences read them.
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -837,7 +836,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     facts.null_checked = null_checked;
     facts.catching = catching;
     facts.raised_classes = raised_classes;
-    Ok(())
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 /// Which methods may fail at all: throw, fail in the runtime (whether or not a handler would see
