@@ -654,8 +654,9 @@ primitive or `switch` patterns, or a binding that outlives its statement (`if (!
 String s)) return;`), has no known slots for its temporaries, and a null message of one is not
 certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
-for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)`,
-which the JVM's native code throws without one, `wait`, `notify` and `notifyAll` of a null as
+for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)` and
+a null array of a name or an address given to the name service's natives
+(`java/net/TranslatedNet.java`), which the JVM's native code throws without one, `wait`, `notify` and `notifyAll` of a null as
 `Object`'s, and `System.getProperty` of a null key that is not a constant (a `switch` on the key)
 with `System.checkKey`'s own message (`key can't be null`). A native that the runtime does not
 have takes null (a JNI native gets it as it is) and raises nothing: it is only where it never
