@@ -4,20 +4,20 @@
 //!
 //! `java.lang.reflect.Method`, `Field` and `Constructor` are the translator's own classes
 //! (`java/Reflection.java`), standard classes like the exceptions (`exceptions.rs`), and the
-//! lookups of `Class` are calls of their static methods (`Method.find`, `Field.list`, ...),
-//! which search the table. The table is made here, for each program, by its natives: `table0`
-//! gives the members, each with its slot, and `invokePart`, `getPart`, `setPart` and
-//! `newInstancePart` are a `switch` over the slots of a part that calls the method, reads or writes
-//! the field or creates the object of each, with its arguments unboxed and its result boxed. The
-//! slots are in 32 parts (`PARTS`), each with a method of its own in `java/Reflection.java`, so that
-//! a big program's table of 100,000 methods makes functions of a few thousand cases each, which
-//! rustc and the analyses take one by one, not one function with all of them. The members are those of the
-//! program's classes that reflection can reach: in a whole program, those that reachability
-//! found (`program::reach::reflection`, `Reach::reflected`); in a file, those whose names the
-//! file's lookups spell out, or any string literal of it for a lookup by a computed name, or
-//! every member for `getMethods()` and its relatives. A generic class or method, an inner,
-//! local or anonymous class's constructor, and a member whose types a value cannot be boxed to
-//! (`Class` itself) are not in the table, and looking them up throws as for a name that is not.
+//! lookups of `Class` are calls of their static methods (`Method.find`, `Field.list`, ...), which
+//! search the table. The table is made here, for each program, by its natives: `tablePart` gives
+//! the members of a part of the slots, each with its slot, and `invokePart`, `getPart`, `setPart`
+//! and `newInstancePart` are a `switch` over the slots of a part that calls the method, reads or
+//! writes the field or creates the object of each, with its arguments unboxed and its result boxed.
+//! The slots are in 32 parts (`PARTS`), each with a method of its own in `java/Reflection.java`, so
+//! that a big program's table of 100,000 methods makes functions of a few thousand cases each,
+//! which rustc and the analyses take one by one, not one function with all of them. The members are
+//! those of the program's classes that reflection can reach: in a whole program, those that
+//! reachability found (`program::reach::reflection`, `Reach::reflected`); in a file, those whose
+//! names the file's lookups spell out, or any string literal of it for a lookup by a computed name,
+//! or every member for `getMethods()` and its relatives. A generic class or method, an inner, local
+//! or anonymous class's constructor, and a member whose types a value cannot be boxed to (`Class`
+//! itself) are not in the table, and looking them up throws as for a name that is not.
 
 use super::*;
 use crate::program::{LookupKind, lookup};
@@ -47,7 +47,7 @@ const SUBCLASS: &str = "(java.lang.Class<?>,boolean)java.lang.Class<?>";
 /// translator's patch of it leaves that out (`java/patches/sun/misc/Unsafe.java`).
 const FILTERED_METHODS: &[(&str, &str)] = &[("sun.misc.Unsafe", "getUnsafe")];
 
-/// The constructors of the three classes, which `table0` calls.
+/// The constructors of the three classes, which `tablePart` calls.
 const MEMBER_CONSTRUCTORS: [(&str, &str); 3] = [
     (
         METHOD,
@@ -233,10 +233,8 @@ impl<'t> Lowering<'t> {
         let entries = self.table(node, kind)?;
         let pos = node.pos();
         Ok(Some(match symbol.name {
-            "table0" => self.table_array(node, symbol.owner, &entries)?,
-            "invokePart" | "newInstancePart" | "getPart" | "setPart" => {
-                // The part, which `java/Reflection.java` spells out, then the slot and the other
-                // arguments: those in locals, then a `switch` over the slots of the part.
+            "tablePart" | "invokePart" | "newInstancePart" | "getPart" | "setPart" => {
+                // The part, which `java/Reflection.java` spells out.
                 let mut args = args.into_iter();
                 let part = match args.next().map(|a| a.kind) {
                     Some(ExprKind::Int(part)) if (0..PARTS).contains(&part) => part as usize,
@@ -247,6 +245,11 @@ impl<'t> Lowering<'t> {
                         );
                     }
                 };
+                if symbol.name == "tablePart" {
+                    return Ok(Some(self.table_array(node, symbol.owner, &entries, part)?));
+                }
+                // The slot and the other arguments in locals, then a `switch` over the slots of
+                // the part.
                 let args: Vec<Expr> = args.collect();
                 let names: Vec<String> =
                     (0..args.len()).map(|i| self.fresh_name(&format!("reflected_{i}"))).collect();
@@ -409,7 +412,7 @@ impl<'t> Lowering<'t> {
                 let m = *m;
                 let info = &self.methods[m];
                 let creates = native == "newInstancePart";
-                // A constructor of an abstract class has a negative slot (`table0`): nothing creates one.
+                // A constructor of an abstract class has a negative slot (`tablePart`): nothing creates one.
                 if creates && self.types[info.owner].node.has_flag("ABSTRACT") {
                     return Ok(None);
                 }
@@ -575,8 +578,15 @@ impl<'t> Lowering<'t> {
         Ok(self.synth(ExprKind::Cast(ty, Box::new(value)), pos, ty))
     }
 
-    /// `table0()`: a new array of the table's members, each made with its slot.
-    fn table_array(&self, node: Node<'t>, class: &str, entries: &[Entry<'t>]) -> Result<ExprKind, Error> {
+    /// `tablePart(part)`: a new array of the members of the table's part `part`, each made with
+    /// its slot.
+    fn table_array(
+        &self,
+        node: Node<'t>,
+        class: &str,
+        entries: &[Entry<'t>],
+        part: usize,
+    ) -> Result<ExprKind, Error> {
         let pos = node.pos();
         let t = self.type_index(class).expect("the class of a native is declared");
         let (_, init) = MEMBER_CONSTRUCTORS.iter().find(|(c, _)| *c == class).expect("each class has one");
@@ -598,7 +608,7 @@ impl<'t> Lowering<'t> {
             self.synth(kind, pos, params[at])
         };
         let mut made = Vec::new();
-        for (slot, entry) in entries.iter().enumerate() {
+        for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
             let found_on = literal(entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t)));
             let args = match &entry.member {
                 Member::Method(m) if class == CONSTRUCTOR => {

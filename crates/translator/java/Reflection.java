@@ -4,9 +4,9 @@
 // syntax tree of this file with `JavaTree`, and lowering gives its classes their real package and
 // adds them, with the members a program uses, to the programs that use them, as it adds the
 // standard exception classes (see `lower/exceptions.rs`). Each member has a slot in the table;
-// the natives `table0`, `invokePart`, `getPart`, `setPart` and `newInstancePart` are written by
-// lowering for each program: the table's members, and a `switch` over the slots of a part that calls
-// the member of each.
+// the natives `tablePart`, `invokePart`, `getPart`, `setPart` and `newInstancePart` are written by
+// lowering for each program, each for one part of the slots: the part's members, and a `switch` over
+// its slots that calls the member of each.
 // A lookup by a name that is not in the table throws Java's exception, with a message that says
 // so. An exception that the member throws is wrapped in an `InvocationTargetException`, as in
 // Java, except by `Class.newInstance`, which throws it as it is. One deviation: a final field is
@@ -193,7 +193,66 @@ final class Method {
         return table;
     }
 
-    private static native Method[] table0();
+    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
+    // on, in order, each written by lowering as its own array.
+    private static Method[] table0() {
+        Method[][] parts = {
+            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
+            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
+            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
+            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
+            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
+            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
+            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
+            tablePart28(), tablePart29(), tablePart30(), tablePart31()
+        };
+        int length = 0;
+        for (Method[] part : parts) {
+            length += part.length;
+        }
+        Method[] table = new Method[length];
+        for (int p = 0; p < 32; p++) {
+            for (int i = 0; i < parts[p].length; i++) {
+                table[i * 32 + p] = parts[p][i];
+            }
+        }
+        return table;
+    }
+
+    private static Method[] tablePart0() { return tablePart(0); }
+    private static Method[] tablePart1() { return tablePart(1); }
+    private static Method[] tablePart2() { return tablePart(2); }
+    private static Method[] tablePart3() { return tablePart(3); }
+    private static Method[] tablePart4() { return tablePart(4); }
+    private static Method[] tablePart5() { return tablePart(5); }
+    private static Method[] tablePart6() { return tablePart(6); }
+    private static Method[] tablePart7() { return tablePart(7); }
+    private static Method[] tablePart8() { return tablePart(8); }
+    private static Method[] tablePart9() { return tablePart(9); }
+    private static Method[] tablePart10() { return tablePart(10); }
+    private static Method[] tablePart11() { return tablePart(11); }
+    private static Method[] tablePart12() { return tablePart(12); }
+    private static Method[] tablePart13() { return tablePart(13); }
+    private static Method[] tablePart14() { return tablePart(14); }
+    private static Method[] tablePart15() { return tablePart(15); }
+    private static Method[] tablePart16() { return tablePart(16); }
+    private static Method[] tablePart17() { return tablePart(17); }
+    private static Method[] tablePart18() { return tablePart(18); }
+    private static Method[] tablePart19() { return tablePart(19); }
+    private static Method[] tablePart20() { return tablePart(20); }
+    private static Method[] tablePart21() { return tablePart(21); }
+    private static Method[] tablePart22() { return tablePart(22); }
+    private static Method[] tablePart23() { return tablePart(23); }
+    private static Method[] tablePart24() { return tablePart(24); }
+    private static Method[] tablePart25() { return tablePart(25); }
+    private static Method[] tablePart26() { return tablePart(26); }
+    private static Method[] tablePart27() { return tablePart(27); }
+    private static Method[] tablePart28() { return tablePart(28); }
+    private static Method[] tablePart29() { return tablePart(29); }
+    private static Method[] tablePart30() { return tablePart(30); }
+    private static Method[] tablePart31() { return tablePart(31); }
+
+    private static native Method[] tablePart(int part);
 
     // The calls of the table's members, in 32 parts: slot `s` is in part `s & 31`, whose native
     // lowering writes as a `switch` over the slots of the part, so that no function of a big
@@ -467,7 +526,66 @@ final class Field {
         return table;
     }
 
-    private static native Field[] table0();
+    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
+    // on, in order, each written by lowering as its own array.
+    private static Field[] table0() {
+        Field[][] parts = {
+            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
+            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
+            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
+            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
+            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
+            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
+            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
+            tablePart28(), tablePart29(), tablePart30(), tablePart31()
+        };
+        int length = 0;
+        for (Field[] part : parts) {
+            length += part.length;
+        }
+        Field[] table = new Field[length];
+        for (int p = 0; p < 32; p++) {
+            for (int i = 0; i < parts[p].length; i++) {
+                table[i * 32 + p] = parts[p][i];
+            }
+        }
+        return table;
+    }
+
+    private static Field[] tablePart0() { return tablePart(0); }
+    private static Field[] tablePart1() { return tablePart(1); }
+    private static Field[] tablePart2() { return tablePart(2); }
+    private static Field[] tablePart3() { return tablePart(3); }
+    private static Field[] tablePart4() { return tablePart(4); }
+    private static Field[] tablePart5() { return tablePart(5); }
+    private static Field[] tablePart6() { return tablePart(6); }
+    private static Field[] tablePart7() { return tablePart(7); }
+    private static Field[] tablePart8() { return tablePart(8); }
+    private static Field[] tablePart9() { return tablePart(9); }
+    private static Field[] tablePart10() { return tablePart(10); }
+    private static Field[] tablePart11() { return tablePart(11); }
+    private static Field[] tablePart12() { return tablePart(12); }
+    private static Field[] tablePart13() { return tablePart(13); }
+    private static Field[] tablePart14() { return tablePart(14); }
+    private static Field[] tablePart15() { return tablePart(15); }
+    private static Field[] tablePart16() { return tablePart(16); }
+    private static Field[] tablePart17() { return tablePart(17); }
+    private static Field[] tablePart18() { return tablePart(18); }
+    private static Field[] tablePart19() { return tablePart(19); }
+    private static Field[] tablePart20() { return tablePart(20); }
+    private static Field[] tablePart21() { return tablePart(21); }
+    private static Field[] tablePart22() { return tablePart(22); }
+    private static Field[] tablePart23() { return tablePart(23); }
+    private static Field[] tablePart24() { return tablePart(24); }
+    private static Field[] tablePart25() { return tablePart(25); }
+    private static Field[] tablePart26() { return tablePart(26); }
+    private static Field[] tablePart27() { return tablePart(27); }
+    private static Field[] tablePart28() { return tablePart(28); }
+    private static Field[] tablePart29() { return tablePart(29); }
+    private static Field[] tablePart30() { return tablePart(30); }
+    private static Field[] tablePart31() { return tablePart(31); }
+
+    private static native Field[] tablePart(int part);
 
     // The reads of the table's fields, in 32 parts: slot `s` is in part `s & 31`, whose native
     // lowering writes as a `switch` over the slots of the part, so that no function of a big
@@ -775,7 +893,66 @@ final class Constructor<T> {
         return table;
     }
 
-    private static native Constructor<?>[] table0();
+    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
+    // on, in order, each written by lowering as its own array.
+    private static Constructor<?>[] table0() {
+        Constructor<?>[][] parts = {
+            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
+            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
+            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
+            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
+            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
+            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
+            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
+            tablePart28(), tablePart29(), tablePart30(), tablePart31()
+        };
+        int length = 0;
+        for (Constructor<?>[] part : parts) {
+            length += part.length;
+        }
+        Constructor<?>[] table = new Constructor<?>[length];
+        for (int p = 0; p < 32; p++) {
+            for (int i = 0; i < parts[p].length; i++) {
+                table[i * 32 + p] = parts[p][i];
+            }
+        }
+        return table;
+    }
+
+    private static Constructor<?>[] tablePart0() { return tablePart(0); }
+    private static Constructor<?>[] tablePart1() { return tablePart(1); }
+    private static Constructor<?>[] tablePart2() { return tablePart(2); }
+    private static Constructor<?>[] tablePart3() { return tablePart(3); }
+    private static Constructor<?>[] tablePart4() { return tablePart(4); }
+    private static Constructor<?>[] tablePart5() { return tablePart(5); }
+    private static Constructor<?>[] tablePart6() { return tablePart(6); }
+    private static Constructor<?>[] tablePart7() { return tablePart(7); }
+    private static Constructor<?>[] tablePart8() { return tablePart(8); }
+    private static Constructor<?>[] tablePart9() { return tablePart(9); }
+    private static Constructor<?>[] tablePart10() { return tablePart(10); }
+    private static Constructor<?>[] tablePart11() { return tablePart(11); }
+    private static Constructor<?>[] tablePart12() { return tablePart(12); }
+    private static Constructor<?>[] tablePart13() { return tablePart(13); }
+    private static Constructor<?>[] tablePart14() { return tablePart(14); }
+    private static Constructor<?>[] tablePart15() { return tablePart(15); }
+    private static Constructor<?>[] tablePart16() { return tablePart(16); }
+    private static Constructor<?>[] tablePart17() { return tablePart(17); }
+    private static Constructor<?>[] tablePart18() { return tablePart(18); }
+    private static Constructor<?>[] tablePart19() { return tablePart(19); }
+    private static Constructor<?>[] tablePart20() { return tablePart(20); }
+    private static Constructor<?>[] tablePart21() { return tablePart(21); }
+    private static Constructor<?>[] tablePart22() { return tablePart(22); }
+    private static Constructor<?>[] tablePart23() { return tablePart(23); }
+    private static Constructor<?>[] tablePart24() { return tablePart(24); }
+    private static Constructor<?>[] tablePart25() { return tablePart(25); }
+    private static Constructor<?>[] tablePart26() { return tablePart(26); }
+    private static Constructor<?>[] tablePart27() { return tablePart(27); }
+    private static Constructor<?>[] tablePart28() { return tablePart(28); }
+    private static Constructor<?>[] tablePart29() { return tablePart(29); }
+    private static Constructor<?>[] tablePart30() { return tablePart(30); }
+    private static Constructor<?>[] tablePart31() { return tablePart(31); }
+
+    private static native Constructor<?>[] tablePart(int part);
 
     // The constructions of the table's constructors, in 32 parts: slot `s` is in part `s & 31`, whose native
     // lowering writes as a `switch` over the slots of the part, so that no function of a big
