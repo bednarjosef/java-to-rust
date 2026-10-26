@@ -275,7 +275,9 @@ pub(super) fn super_targets(class: &Class) -> HashSet<usize> {
     out
 }
 
-/// The classes that a field, parameter, result, local or expression has as its type.
+/// The classes that a field, parameter, result, local or expression has as its type, or that
+/// are the elements of a class of arrays held as `Object`s, whose variant names the class's type
+/// whether or not code that makes such an array is left (`Class::array_of`).
 fn mentioned(class: &Class) -> HashSet<usize> {
     let mut out = HashSet::new();
     let mut note = |mut ty: Type| {
@@ -290,6 +292,11 @@ fn mentioned(class: &Class) -> HashSet<usize> {
     };
     for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
         note(f.ty);
+    }
+    for t in 0..class.types.len() {
+        if let Some(array) = class.array_of(t) {
+            note(array);
+        }
     }
     for m in &class.methods {
         note(m.ret);

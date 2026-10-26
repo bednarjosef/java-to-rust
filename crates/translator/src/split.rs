@@ -10,7 +10,7 @@
 //!   can move (`movable`) keeps only its signature there; its body calls a function declared in an
 //!   `extern "Rust"` block of its module, by a name of its own (`j2r_..`).
 //! - Each **body** crate depends on the header alone and defines those functions, with
-//!   `#[unsafe(no_mangle)]`, for the modules given to it. A module of a body crate re-exports its
+//!   `#[unsafe(no_mangle)]`, for the items given to it. A module of a body crate re-exports its
 //!   header module (`pub use header::a::b::*`) and has the module's own `use` lines, so the moved
 //!   code names everything as it did, and the header's `recursion_limit`. A method's code moves
 //!   into a private trait that the body crate implements for the header's type (`impl Bodies0 for
@@ -22,8 +22,10 @@
 //! Each body crate builds by itself, in parallel with the others; the header holds no code but
 //! what cannot move: generic functions and impls (Rust needs their code where they are used),
 //! `const` functions (statics call them), functions with an `impl Trait` in their signature, and
-//! the initializers of statics. The modules go to the body crates in their order, in runs of about
-//! the same size of code, so the same program is split the same way every time.
+//! the initializers of statics. The items' moved code goes to the body crates in the order of the
+//! modules and their items, in runs of about the same size of code, so the same program is split
+//! the same way every time, and a module with more code than a crate's share is spread over
+//! several.
 
 use crate::output::{ModuleTree, SourceFile};
 use proc_macro2::Span;
@@ -100,9 +102,11 @@ struct Edit {
 /// A module's text as the header has it, and the code that moves out of it.
 struct Split {
     header: String,
-    body: String,
-    /// The size of the code that moved, which decides the body crate.
-    moved: usize,
+    /// The `use` lines among the module's items, which the moved code has wherever it goes.
+    uses: String,
+    /// The moved code, item by item, each with the size of its functions' code, which decides
+    /// its body crate.
+    pieces: Vec<(String, usize)>,
 }
 
 /// The program `tree` as a header crate, `crates` body crates and the binary. The code is held
@@ -117,7 +121,7 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     for module in &mut tree.modules {
         // Item by item: a parsed module's syntax tree is many times its text, and the largest
         // modules of a program like the Minecraft server are hundreds of megabytes.
-        let mut split = Split { header: String::new(), body: String::new(), moved: 0 };
+        let mut split = Split { header: String::new(), uses: String::new(), pieces: Vec::new() };
         let mut externs = String::new();
         let mut traits = 0;
         for item in std::mem::take(&mut module.items) {
@@ -129,8 +133,8 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
                 }
             };
             split.header.push_str(&part.split.header);
-            split.body.push_str(&part.split.body);
-            split.moved += part.split.moved;
+            split.uses.push_str(&part.split.uses);
+            split.pieces.extend(part.split.pieces);
             externs.push_str(&part.externs);
             proc_macro2::extra::invalidate_current_thread_spans();
         }
@@ -142,19 +146,25 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     if !failures.is_empty() {
         return Err(failures.join("\n"));
     }
-    // Each body crate takes the next modules until it has its share of the code.
-    let total: usize = splits.iter().map(|s| s.moved).sum();
+    // Each body crate takes the next pieces of moved code, module by module, until it has its
+    // share of the code: a module whose code is more than a share (the crate root's, with the
+    // `Object` enum's methods and the reflection table) is spread over several crates.
+    let total: usize = splits.iter().flat_map(|s| &s.pieces).map(|(_, moved)| moved).sum();
     let crates = crates.max(1);
     let share = total.div_ceil(crates).max(1);
-    let mut crate_of = Vec::new();
+    let mut crate_of: Vec<Vec<usize>> = Vec::new();
     let (mut current, mut filled) = (0, 0);
     for split in &splits {
-        if filled >= share && current + 1 < crates {
-            current += 1;
-            filled = 0;
+        let mut of = Vec::with_capacity(split.pieces.len());
+        for (_, moved) in &split.pieces {
+            if filled >= share && current + 1 < crates {
+                current += 1;
+                filled = 0;
+            }
+            of.push(current);
+            filled += moved;
         }
-        crate_of.push(current);
-        filled += split.moved;
+        crate_of.push(of);
     }
     let splits = std::cell::RefCell::new(splits);
     let tree = &tree;
@@ -179,11 +189,15 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
             let path = &tree.modules[m].path;
             let reexport =
                 if path.is_empty() { "header".to_string() } else { format!("header::{}", path.join("::")) };
-            let code = if crate_of[m] == c {
-                std::mem::take(&mut splits.borrow_mut()[m].body)
-            } else {
-                String::new()
-            };
+            let mut splits = splits.borrow_mut();
+            let split = &mut splits[m];
+            let mut code = String::new();
+            for (piece, _) in split.pieces.iter_mut().zip(&crate_of[m]).filter(|(_, of)| **of == c) {
+                code.push_str(&std::mem::take(&mut piece.0));
+            }
+            if !code.is_empty() {
+                code.insert_str(0, &split.uses);
+            }
             format!("pub use {reexport}::*;\n{}{code}", uses_text(&tree.modules[m].uses))
         });
         let text = format!(
@@ -334,9 +348,10 @@ fn split_module(
     })?;
     let mut edits = Vec::new();
     let mut externs = String::new();
-    let mut body = String::new();
-    let mut moved = 0;
+    let mut uses = String::new();
+    let mut pieces = Vec::new();
     for item in &file.items {
+        let (mut body, mut moved) = (String::new(), 0);
         match item {
             syn::Item::Struct(s) => {
                 publish(&s.vis, s.struct_token.span.byte_range().start, &mut edits);
@@ -501,10 +516,13 @@ fn split_module(
             }
             // A `use` among the items is the moved code's too.
             syn::Item::Use(u) => {
-                body.push_str(at(text, u.span()));
-                body.push('\n');
+                uses.push_str(at(text, u.span()));
+                uses.push('\n');
             }
             _ => {}
+        }
+        if !body.is_empty() {
+            pieces.push((body, moved));
         }
     }
     edits.sort_by_key(|e| (e.start, e.end));
@@ -519,7 +537,7 @@ fn split_module(
         last = edit.end;
     }
     header.push_str(&text[last..]);
-    Ok(Part { split: Split { header, body, moved }, externs })
+    Ok(Part { split: Split { header, uses, pieces }, externs })
 }
 
 /// The text of a function's return type (` -> T`), or nothing.
