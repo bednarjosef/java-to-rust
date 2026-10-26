@@ -358,7 +358,8 @@ fn analyse(
     ends_rejected: bool,
 ) -> Option<Rejection> {
     let generated: std::cell::RefCell<Option<ModuleTree>> = Default::default();
-    let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new(), ends_rejected };
+    let mut stubs =
+        Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new(), ends_rejected, owner: None };
     // `whole_objects` changes the program only when it passes: an error of it that no stub takes
     // away is recorded, and the census goes on without it. An error of a check of the analyses
     // that only rejects (as of a field's type) that no stub takes away is recorded too, and the
@@ -417,10 +418,7 @@ fn analyse(
             for error in errors {
                 let rejection = stubs.stub(class, units, error);
                 if crate::timings::enabled() {
-                    let owner = rejection.anchor.and_then(|at| {
-                        let in_unit = |m: &Method| units.get(m.class).copied().flatten() == rejection.unit;
-                        class.methods.iter().find(|m| m.pos == at && in_unit(m))
-                    });
+                    let owner = rejection.anchor.and(stubs.owner).map(|m| &class.methods[m]);
                     let owner = owner.map_or("nothing".to_string(), |m| {
                         format!("{}.{}", class.types[m.class].name, m.name)
                     });
@@ -473,6 +471,12 @@ fn analyse(
     None
 }
 
+/// The name of a class as the stubs' messages name the code by it: none unless the translation
+/// is written (`Program::ends_rejected`).
+fn named(name: &str, ends_rejected: bool) -> &str {
+    if ends_rejected { name } else { "" }
+}
+
 /// A copy of a rejection.
 fn copy(r: &Rejection) -> Rejection {
     Rejection {
@@ -491,6 +495,8 @@ struct Stubs {
     /// The translation is written (`Program::ends_rejected`): a rejected field initializer becomes
     /// a stub that ends the program, rather than being left out.
     ends_rejected: bool,
+    /// The method that the last rejection stubbed first, for `--timings`.
+    owner: Option<usize>,
 }
 
 impl Stubs {
@@ -503,22 +509,20 @@ impl Stubs {
         // An error at a position with its unit is in that unit's code alone (`Pos::unit`).
         let known = pos.unit.map(|u| u as usize);
         let mut rejection = Rejection { unit: known, anchor: None, error };
+        self.owner = None;
         // The code that lowering provides has no position of its own.
         if pos == Pos::default() {
             return rejection;
         }
         let in_unit = |t: usize| known.is_none() || units.get(t).copied().flatten() == known;
-        // The names of the classes, which the stubs' messages name the code by.
-        let names: Vec<String> = match self.ends_rejected {
-            true => class.types.iter().map(|d| d.name.clone()).collect(),
-            false => vec![String::new(); class.types.len()],
-        };
+        let ends_rejected = self.ends_rejected;
         let at = |e: &Expr| {
             let mut here = false;
             visit_expr(e, &mut |x| here |= x.pos.same_place(pos));
             here
         };
         let mut abstracts = Vec::new();
+        let types = &class.types;
         for (index, method) in class.methods.iter_mut().enumerate() {
             if !in_unit(method.class) {
                 continue;
@@ -542,12 +546,15 @@ impl Stubs {
             if method.is_abstract {
                 abstracts.push(index);
             } else if self.stubbed.insert(index) {
-                let message =
-                    stub_message(&format!("{}.{}", names[method.class], method.name), &rejection.error);
+                let message = stub_message(
+                    &format!("{}.{}", named(&types[method.class].name, ends_rejected), method.name),
+                    &rejection.error,
+                );
                 self.never(method, message);
                 if rejection.anchor.is_none() {
                     rejection.unit = units.get(method.class).copied().flatten();
                     rejection.anchor = Some(method.pos);
+                    self.owner = Some(index);
                 }
             }
         }
@@ -564,7 +571,7 @@ impl Stubs {
                 // be that of an error in another file.
                 if !field.constant && field.init.as_ref().is_some_and(|i| at(i) && !is_stub(i)) {
                     field.init = self.ends_rejected.then(|| {
-                        let message = stub_message(&names[t], &rejection.error);
+                        let message = stub_message(named(&decl.name, ends_rejected), &rejection.error);
                         self.expr(Builtin::NoObject { class: t }, Some(message), field.pos, field.ty)
                     });
                     if rejection.anchor.is_none() {
@@ -582,13 +589,16 @@ impl Stubs {
                     continue;
                 }
                 let method = &mut class.methods[index];
-                let message =
-                    stub_message(&format!("{}.{}", names[method.class], method.name), &rejection.error);
+                let message = stub_message(
+                    &format!("{}.{}", named(&class.types[method.class].name, ends_rejected), method.name),
+                    &rejection.error,
+                );
                 method.is_abstract = false;
                 self.never(method, message);
                 class.hierarchy.make_concrete(index);
                 rejection.unit = units.get(method.class).copied().flatten();
                 rejection.anchor = Some(method.pos);
+                self.owner = Some(index);
             }
         }
         rejection
