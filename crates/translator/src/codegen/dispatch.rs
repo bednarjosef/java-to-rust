@@ -1984,7 +1984,7 @@ impl<'a> Gen<'a> {
     /// every enum has, which `lower` checks: `name()`, `toString()` or `ordinal()`.
     fn builtin_arm(&mut self, r: usize, c: usize) -> String {
         // An interface may declare `Object`'s `equals` or `hashCode` again (as `Comparator` does).
-        if self.class.hierarchy.group(r).into_iter().any(|g| self.is_object_method(g)) {
+        if self.class.hierarchy.group_members(r).iter().any(|&g| self.is_object_method(g)) {
             return self.object_arm(r, c);
         }
         if self.is_comparable_method(r) {
@@ -2008,6 +2008,12 @@ impl<'a> Gen<'a> {
 
     /// The type of `Object`, when the program uses it.
     pub(super) fn object_index(&self) -> Option<usize> {
+        // The first type of that name, found by the index, is the one unless it is not the
+        // interface.
+        let t = self.class.type_index(OBJECT)?;
+        if self.class.types[t].kind == TypeKind::Interface {
+            return Some(t);
+        }
         self.class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
     }
 
