@@ -611,8 +611,9 @@ fn a_class_as_a_constable_is_rejected() {
 }
 
 /// Handles held as values that lowering does not follow are rejected: an access through a handle
-/// that may be null whose arguments do something before Java's null check, a handle kept as an
-/// `Object`, and the `MethodHandle` of a method other than the handle factories.
+/// that may be null whose arguments do something before Java's null check, and a handle kept as
+/// an `Object`. (A lookup of a method other than the handle factories throws when it runs, which
+/// `UnfollowedHandleLookups` shows.)
 #[test]
 fn run_time_handles_not_followed_are_rejected() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
@@ -626,11 +627,6 @@ fn run_time_handles_not_followed_are_rejected() {
             "`VarHandle.set` of a handle that may be null, with arguments that do something",
         ),
         ("System.out.println(java.util.List.of(pick(true)).size());", "a `VarHandle` used as a value"),
-        (
-            "MethodHandle m = MethodHandles.lookup().findVirtual(Object.class, \"toString\", \
-             MethodType.methodType(String.class));",
-            "`Lookup.findVirtual` of a handle or arguments that the translation does not follow",
-        ),
     ];
     for (i, (statement, message)) in cases.iter().enumerate() {
         let sources = work.join(i.to_string());

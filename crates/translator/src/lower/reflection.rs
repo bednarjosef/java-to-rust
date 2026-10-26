@@ -812,6 +812,9 @@ impl<'t> Lowering<'t> {
                                 || depth > 0 && !(interface || decl.has_flag("PUBLIC"))
                                 || !seen.insert(name)
                                 || !self.reflected_field_type(decl).is_ok_and(boxable)
+                                // A field offset or another handle is no field of the
+                                // translation (`handles::is_handle`).
+                                || decl.has_flag("STATIC") && self.is_handle(owner, decl)
                             {
                                 continue;
                             }

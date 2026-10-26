@@ -24,7 +24,8 @@ mod sequential;
 mod stubs;
 
 pub use by_name::{
-    class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes, module_for_name,
+    array_for_name, class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes,
+    module_for_name,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
 pub use proxies::ProxyClass;
@@ -3479,6 +3480,10 @@ impl<'t> Walk<'t> {
             // so (`lower::by_name`).
             if let Some((class, initialize)) = class_for_name(value) {
                 self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
+            }
+            // So does the element class of an array that it names, which it does not initialize.
+            if let Some((element, _)) = array_for_name(value) {
+                self.work.push(Item::Class(element.replace('$', ".")));
             }
             self.reflective(value);
         }

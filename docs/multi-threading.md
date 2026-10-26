@@ -565,8 +565,11 @@ name:
   followed when none of them can fail. An access through a value that holds one handle, or null,
   is that handle's access after a null check that throws Java's `NullPointerException`, message
   included; Java checks after evaluating the arguments, so such an access takes only arguments
-  whose evaluation does nothing. A value that may be one of several handles, a call that may
-  fail, and a handle kept anywhere else (a collection, an `Object`) are rejected.
+  whose evaluation does nothing. A call of a lookup or a `MethodHandle` that is not followed, or
+  that may fail, throws an `UnsupportedOperationException` that says so, which netty's `catch`
+  turns into going without that handle (no virtual-thread check through a handle, no cleaner
+  linked to `malloc`). A value that may be one of several handles and a handle kept anywhere else
+  (a collection, an `Object`) are rejected.
 - Any other use of a handle (printing it, arithmetic other than the forms above, passing it on)
   is rejected: "a field offset used as a value".
 

@@ -267,7 +267,7 @@ impl<'a> Gen<'a> {
             // updater's `ClassCastException`, always throw: the closure's value is `Infallible`,
             // which ends the code here as Java's throw does.
             if matches!(e.kind, ExprKind::Builtin(Builtin::UnknownClass | Builtin::UpdaterRefused, _)) {
-                return Code::atom(format!("match {} {{}}", caught.text));
+                return self.never_of(format!("match {} {{}}", caught.text), e.ty);
             }
             return caught;
         }
@@ -696,6 +696,17 @@ impl<'a> Gen<'a> {
         )
     }
 
+    /// Code that never gives a value (a throw), whose Rust type `!` has no methods and implements
+    /// no trait, as Java's value of type `ty`: a block that declares it so, which the code can call
+    /// a method on or cast. A statement's (`void`) stays as it is.
+    pub(super) fn never_of(&mut self, text: String, ty: Type) -> Code {
+        if ty == Type::Void {
+            return Code::never(text);
+        }
+        let ty_text = self.ty_name(ty);
+        Code::atom(format!("{{ let value: {ty_text} = {text}; value }}"))
+    }
+
     pub(super) fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
@@ -780,14 +791,14 @@ impl<'a> Gen<'a> {
                 if self.catching_now.contains(&id) {
                     return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
                 }
-                Code::never(throw)
+                self.never_of(throw, ty)
             }
             Builtin::UpdaterRefused => {
                 let throw = format!("{}()", self.runtime("updater_refused"));
                 if self.catching_now.contains(&id) {
                     return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
                 }
-                Code::never(throw)
+                self.never_of(throw, ty)
             }
             Builtin::MissingResource => {
                 let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));

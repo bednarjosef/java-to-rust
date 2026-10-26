@@ -45,7 +45,8 @@
 //! then checks the receiver and warns, as Java does, so its arguments may do anything;
 //! `invokeCleaner` checks that its buffer is direct before it warns, as `sun.misc.Unsafe`'s does.
 //! `arrayBaseOffset` and `arrayIndexScale` of a class literal are the constants of
-//! `jdk.internal.misc.Unsafe`'s (`natives.rs`), the first after the warning.
+//! `jdk.internal.misc.Unsafe`'s (`natives.rs`), the first after the warning, the second after
+//! the receiver's null check where a local or a parameter holds it.
 //!
 //! The class's own initialization is translated, as a program that reads its `theUnsafe` by
 //! reflection runs it; a patch (`java/patches/sun/misc/Unsafe.java`) leaves out the reflection
@@ -178,7 +179,7 @@ impl<'t> Lowering<'t> {
 
     /// The receiver `receiver` of a call of the method `method`, checked for null as the call
     /// checks it.
-    fn receiver_checked(&self, receiver: Node<'t>, method: &str, pos: Pos) -> Result<Expr, Error> {
+    pub(super) fn receiver_checked(&self, receiver: Node<'t>, method: &str, pos: Pos) -> Result<Expr, Error> {
         let value = self.expr(receiver)?;
         let ty = value.ty;
         let checked = Builtin::NullChecked(Some(interned_name(method)));
@@ -246,7 +247,7 @@ impl<'t> Lowering<'t> {
 
     /// Whether evaluating the argument `node` does nothing that could be seen: a literal, `this`,
     /// a local or parameter, or a field of the class whose code is being lowered.
-    fn quiet_argument(&self, node: Node<'t>) -> bool {
+    pub(super) fn quiet_argument(&self, node: Node<'t>) -> bool {
         let node = handles::plain(node);
         if node.kind().ends_with("_LITERAL")
             || (node.kind() == "MEMBER_SELECT" && node.str("identifier") == "class")

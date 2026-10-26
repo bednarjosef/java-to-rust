@@ -43,10 +43,16 @@
 //! evaluates the arguments, so through a value that may be null the arguments must be ones whose
 //! evaluation does nothing (`quiet`: literals, locals, and casts and arithmetic of them that cannot
 //! throw), and a `MethodHandle` read before arguments that do something must be one that can be read
-//! again after them. Anything else is rejected: a handle
-//! that may be one of several, one that lowering cannot follow, and any use of a handle value but
-//! these (`slots`): an assignment, a `return`, an argument of a method's handle parameter, a
-//! comparison with `null`, and the receiver of a handle's method.
+//! again after them.
+//!
+//! A call of a lookup's or a `MethodHandle`'s method that lowering does not follow (a handle of any
+//! other method, a call such as `unreflect` or `invokeWithArguments`, or arguments that it cannot
+//! tell or that may fail to make a handle) evaluates its receiver and arguments and then throws an
+//! `UnsupportedOperationException` that says so (`unfollowed`). The code sees a JDK whose lookup
+//! fails, which netty expects of some and catches, going without that handle. Anything else is
+//! rejected: a handle that may be one of several, and any use of a handle value but these
+//! (`slots`): an assignment, a `return`, an argument of a method's handle parameter, a comparison
+//! with `null`, and the receiver of a handle's method.
 
 use super::handles::{VarHandleOf, byte_order, plain};
 use super::*;
@@ -58,6 +64,11 @@ pub(super) const METHOD_HANDLE: &str = "java.lang.invoke.MethodHandle";
 pub(super) const LOOKUP: &str = "java.lang.invoke.MethodHandles.Lookup";
 pub(super) const METHOD_TYPE: &str = "java.lang.invoke.MethodType";
 const METHOD_HANDLES: &str = "java.lang.invoke.MethodHandles";
+
+/// The exception that a call of a handle's method that lowering does not follow throws
+/// (`unfollowed`), whose constructor of a message the code that calls one uses
+/// (`exceptions::Uses`).
+pub(super) const UNFOLLOWED: &str = "java.lang.UnsupportedOperationException";
 
 /// The types of handles, whose values are tokens.
 pub(super) const HANDLE_TYPES: [&str; 4] = [VAR_HANDLE, METHOD_HANDLE, LOOKUP, METHOD_TYPE];
@@ -298,10 +309,15 @@ fn slots(v: &Value, out: &mut HashSet<*const Value>) {
             let args: Vec<Node> = node.list("arguments").collect();
             if owner == METHOD_HANDLE {
                 args.iter().for_each(|a| allow(Some(*a)));
-            } else if let Some(symbol) = symbol.filter(|s| !s.varargs) {
+            } else if let Some(symbol) = symbol {
                 let (params, _) = lambdas::signature(symbol.ty);
-                for (arg, param) in args.iter().zip(params) {
-                    if is_handle_type(param) {
+                // The arguments of a variable arity parameter, such as `filterArguments`'s
+                // `MethodHandle...`, each have its element type.
+                let element = params.last().filter(|_| symbol.varargs).and_then(|p| p.strip_suffix("[]"));
+                let fixed = if element.is_some() { params.len() - 1 } else { params.len() };
+                for (i, arg) in args.iter().enumerate() {
+                    let param = if i < fixed { params.get(i).copied() } else { element };
+                    if param.is_some_and(is_handle_type) {
                         allow(Some(*arg));
                     }
                 }
@@ -891,7 +907,7 @@ impl<'t> Lowering<'t> {
         node: Node<'t>,
         symbol: &Symbol<'t>,
     ) -> Result<Option<ExprKind>, Error> {
-        let makes = match symbol.owner {
+        let followed = match symbol.owner {
             METHOD_HANDLES => {
                 matches!(symbol.name, "lookup" | "publicLookup")
                     || FACTORIES.iter().any(|f| f.owner == METHOD_HANDLES && f.name == symbol.name)
@@ -902,18 +918,20 @@ impl<'t> Lowering<'t> {
             VAR_HANDLE => matches!(symbol.name, "withInvokeExactBehavior" | "withInvokeBehavior"),
             _ => false,
         };
+        // The other methods of the lookups and of `MethodHandle` that make or call a method's
+        // handle (`unreflect`, `asType`, `invokeWithArguments`), which lowering does not follow.
+        let returns = erased(lambdas::signature(symbol.ty).1);
+        let makes = followed
+            || matches!(symbol.owner, METHOD_HANDLES | LOOKUP | METHOD_HANDLE)
+                && (is_handle_type(returns) || symbol.name.starts_with("invoke"));
         if !makes {
             return Ok(None);
         }
         let short = symbol.owner.rsplit('.').next().unwrap_or_default();
         let what = format!("`{short}.{}`", symbol.name);
-        let Some(held) = self.held(node) else {
-            return unsupported(
-                node,
-                &format!(
-                    "{what} of a handle or arguments that the translation does not follow, or that may fail"
-                ),
-            );
+        let held = if followed { self.held(node) } else { None };
+        let Some(held) = held else {
+            return self.unfollowed(node, symbol, &what).map(Some);
         };
         if held.is_empty() || held.contains(&Known::Null) {
             return unsupported(node, &format!("{what} that may give null"));
@@ -971,6 +989,35 @@ impl<'t> Lowering<'t> {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
         }))
+    }
+
+    /// A call of the method `what` of a lookup or a `MethodHandle` that lowering does not follow
+    /// (a handle of a method other than one that makes handles, or one it cannot tell): its
+    /// receiver and arguments evaluated, then an `UnsupportedOperationException` that says so,
+    /// which the code can catch, as netty catches a lookup that fails and goes without the handle.
+    fn unfollowed(&self, node: Node<'t>, symbol: &Symbol<'t>, what: &str) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let receiver =
+            node.get("methodSelect").and_then(|s| s.get("expression")).filter(|_| !symbol.is_static);
+        let mut before = Vec::new();
+        for part in receiver.into_iter().chain(node.list("arguments")) {
+            if !quiet(part) {
+                // A local of the value's type, which an expression statement of `new Object[] { null }`
+                // would leave to inference.
+                let value = self.expr(part)?;
+                let name = self.fresh_name("unfollowed");
+                before.push(Stmt::Local { ty: value.ty, name, init: Some(value), pos });
+            }
+        }
+        let message = format!("{what} of a handle or arguments that the translation does not follow");
+        let ty = self.ty(node, node.java_type())?;
+        match self.standard_thrown(UNFOLLOWED, Some(&message), before, ty, pos) {
+            Some(thrown) => Ok(thrown.kind),
+            None => unsupported(
+                node,
+                &format!("{what} of a handle or arguments that the translation does not follow"),
+            ),
+        }
     }
 
     /// The token of a handle that is not null.

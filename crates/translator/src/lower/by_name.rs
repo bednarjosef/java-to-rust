@@ -91,11 +91,30 @@ impl<'t> Lowering<'t> {
     }
 
     /// The call `node`, `Class.forName("a.B", initialize, loader)` or `Class.forName("a.B")`,
-    /// as `{ loader; init a.B; a.B.class }`, and a `ClassNotFoundException` for a name of no class
-    /// of the program; `None` when the name is not a string literal. The
+    /// as `{ loader; init a.B; a.B.class }`, an array's descriptor (`"[La.B;"`) as `a.B[].class`,
+    /// and a `ClassNotFoundException` for a name of no class of the program or of an array of one;
+    /// `None` when the name is not a string literal, nor such an array's. The
     /// loader is evaluated for its effects only: the program's classes are all one loader's.
     pub(super) fn class_for_name(&self, node: Node<'t>) -> Result<Option<ExprKind>, Error> {
-        let Some((name, initialize)) = crate::program::class_for_name(node.0) else { return Ok(None) };
+        let Some((name, initialize)) = crate::program::class_for_name(node.0) else {
+            // An array's class (`"[La.B;"`, as netty names `java.lang.foreign`'s): its literal,
+            // without initializing the element class, or for a class that the program does not
+            // have the exception for that class, whose name it gives.
+            let Some((element, dimensions)) = crate::program::array_for_name(node.0) else { return Ok(None) };
+            if node.list("arguments").nth(2).is_some_and(|loader| !super::handle_values::quiet(loader)) {
+                return Ok(None);
+            }
+            return Ok(Some(match self.type_index(&element.replace('$', ".")) {
+                Some(class) => {
+                    let array = format!("{}{}", self.types[class].javac, "[]".repeat(dimensions));
+                    ExprKind::Builtin(Builtin::ClassLiteral(self.ty(node, &array)?), Vec::new())
+                }
+                None => {
+                    let name = self.synth(ExprKind::Str(element), node.pos(), Type::String);
+                    ExprKind::Builtin(Builtin::UnknownClass, vec![name])
+                }
+            }));
+        };
         let Some(class) = self.type_index(&name) else {
             // A class that the program does not have, such as `java.lang.invoke`'s, which is not
             // translated: the call throws when it runs (`Builtin::UnknownClass`).
@@ -387,11 +406,22 @@ impl<'t> Lowering<'t> {
     /// `switch (0) { default -> throw new NullPointerException(message); }`, a value of type `ty`
     /// that is never given, when the program has that class.
     pub(super) fn null_thrown(&self, message: Option<&str>, ty: Type, pos: Pos) -> Option<Expr> {
-        const NULL: &str = "java.lang.NullPointerException";
+        self.standard_thrown("java.lang.NullPointerException", message, Vec::new(), ty, pos)
+    }
+
+    /// `switch (0) { default -> { before; throw new E(message); } }` of the standard exception
+    /// class `exception` (`lower::exceptions`), a value of type `ty` that is never given, when the
+    /// program has that class and its constructor.
+    pub(super) fn standard_thrown(
+        &self,
+        exception: &str,
+        message: Option<&str>,
+        before: Vec<Stmt>,
+        ty: Type,
+        pos: Pos,
+    ) -> Option<Expr> {
         let sig = if message.is_some() { "(java.lang.String)void" } else { "()void" };
-        // A standard class of the translator (`lower::exceptions`), with its constructors, where
-        // the program has it.
-        let class = self.type_index(NULL)?;
+        let class = self.type_index(exception)?;
         let ctor = self
             .methods_of(class)
             .into_iter()
@@ -400,10 +430,11 @@ impl<'t> Lowering<'t> {
             .map(|m| self.synth(ExprKind::Str(m.to_string()), pos, Type::String))
             .into_iter()
             .collect();
-        let new = self.synth(ExprKind::New { class, args, ctor: Some(ctor) }, pos, Type::class(NULL));
-        let throw = Stmt::Throw(self.convert(new, Type::class("java.lang.Throwable")));
+        let new = self.synth(ExprKind::New { class, args, ctor: Some(ctor) }, pos, Type::class(exception));
+        let mut body = before;
+        body.push(Stmt::Throw(self.convert(new, Type::class("java.lang.Throwable"))));
         let selector = Box::new(self.synth(ExprKind::Int(0), pos, Type::Int));
-        let cases = vec![Case { labels: vec![CaseLabel::Default], body: vec![throw] }];
+        let cases = vec![Case { labels: vec![CaseLabel::Default], body }];
         Some(self.synth(ExprKind::Switch { selector, cases }, pos, ty))
     }
 }
