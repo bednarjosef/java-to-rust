@@ -188,7 +188,12 @@ Rules the generator keeps:
   (`Ok((a, b))`), which the `match` arm stores. A `try` with a `finally` that nothing but an
   exception leaves early carries it out the same way when the body and each `catch` clause that
   completes normally set it with a statement of their own: the code after the `finally` takes
-  the value from the `Ok` that it passes on (`let (a_value,) = attempt?;`). A `try` that starts
+  the value from the `Ok` that it passes on (`let (a_value,) = attempt?;`). A statement of its
+  own counts as setting the local when it is an `if` that sets it in both branches, or a `try`
+  without `finally` that sets it in its block and in each `catch` clause that completes
+  normally, as the inner `try` of a try-with-resources does (its clause throws again), so a
+  local set in a try-with-resources in one branch of an `if` and directly in the other is
+  carried out. A `try` that starts
   where the local already holds a value, as Rust sees it (a statement before it sets it whenever
   it completes, such as a loop whose condition assigns it: `while (null != (key =
   s.readObject()))` in `Component.readObject`), needs nothing. Set anywhere else (only inside an
