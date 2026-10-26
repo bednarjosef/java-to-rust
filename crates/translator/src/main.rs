@@ -138,14 +138,16 @@ fn run_program(args: &[String]) -> Result<(), String> {
             let json = serde_json::to_string_pretty(&census.json).map_err(|e| e.to_string())?;
             std::fs::write(&path, json + "\n").map_err(|e| format!("{path}: {e}"))?;
         }
+        use java_to_rust::timings::phase;
         if let (Some(path), Some(tree)) = (modules_json, &census.modules) {
-            write_dependencies(&path, tree)?;
+            phase("census: modules json", || write_dependencies(&path, tree))?;
         }
         if let Some((flag, path)) = &output {
             let Some(tree) = &census.modules else {
                 return Err("the census ended early, so it has no translation to write".to_string());
             };
-            return write_translation(tree, crate_name(&program.main), crates, flag, path);
+            let name = crate_name(&program.main);
+            return phase("census: write", || write_translation(tree, name, crates, flag, path));
         }
         return Ok(());
     }
