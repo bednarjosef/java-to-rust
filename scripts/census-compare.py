@@ -7,9 +7,11 @@ one after it. Each of OLD and NEW is a census.json, or a directory that has one.
 Prints whether each census is complete, the pieces of each origin and the share of them that
 translate, side by side, then the rejection messages whose pieces went down the most and up the
 most, and the messages that are new. A message's pieces are those it blocks, as the census
-counts them (every piece once for each normalized message it has). Last come the handle calls
-that the translation does not follow and makes throw UnsupportedOperationException, which are no
-rejections: the change in their pieces, and the messages whose pieces changed. The origins are the census's
+counts them (every piece once for each normalized message it has). Last come the code that
+translates but throws UnsupportedOperationException where Java goes on, which is no rejection:
+the handle calls that the translation does not follow, and the charset names known only at run
+time, which may name a charset of the JDK that the translation does not have. For each, the
+change in their pieces, and the messages whose pieces changed. The origins are the census's
 own (program and library), or, with NAME=ROOT arguments, those of census-by-origin.py: the first
 root whose directory has the piece's file."""
 
@@ -56,10 +58,12 @@ def messages(census):
     return pieces
 
 
-def unfollowed(census):
-    """The pieces of each message of a handle call not followed (none in an older census)."""
+def listed(census, key):
+    """The pieces of each message of the code listed under `key` (`unfollowedHandles`,
+    `charsetNames`), which throws UnsupportedOperationException where Java goes on (none in an
+    older census)."""
     pieces = collections.Counter()
-    for row in census.get("unfollowedHandles", []):
+    for row in census.get(key, []):
         pieces[row["message"]] += row["pieces"]
     return pieces
 
@@ -129,16 +133,22 @@ def main():
             print(f"  and {len(rows) - top} more")
         print()
 
-    before, after = unfollowed(old), unfollowed(new)
-    print("Handle calls not followed, which throw UnsupportedOperationException where Java runs them, "
-          f"by pieces: {sum(before.values())} -> {sum(after.values())}")
-    changed = sorted((m for m in before.keys() | after.keys() if before[m] != after[m]),
-                     key=lambda m: (-abs(after[m] - before[m]), m))
-    for m in changed[:top]:
-        note = "  (new)" if not before[m] else "  (gone)" if not after[m] else ""
-        print(f"  {before[m]:7} -> {after[m]:7}  {after[m] - before[m]:+7}  {m}{note}")
-    if len(changed) > top:
-        print(f"  and {len(changed) - top} more")
+    for key, title in (
+        ("unfollowedHandles",
+         "Handle calls not followed, which throw UnsupportedOperationException where Java runs them"),
+        ("charsetNames",
+         "Charset names known only at run time, which throw UnsupportedOperationException for a "
+         "charset of the JDK that the translation does not have"),
+    ):
+        before, after = listed(old, key), listed(new, key)
+        print(f"{title}, by pieces: {sum(before.values())} -> {sum(after.values())}")
+        changed = sorted((m for m in before.keys() | after.keys() if before[m] != after[m]),
+                         key=lambda m: (-abs(after[m] - before[m]), m))
+        for m in changed[:top]:
+            note = "  (new)" if not before[m] else "  (gone)" if not after[m] else ""
+            print(f"  {before[m]:7} -> {after[m]:7}  {after[m] - before[m]:+7}  {m}{note}")
+        if len(changed) > top:
+            print(f"  and {len(changed) - top} more")
 
 
 if __name__ == "__main__":

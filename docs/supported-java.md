@@ -128,10 +128,12 @@ included (docs/collector.md).
   name. A `Charset` is an ordinary value; `forName` resolves aliases and case as Java does, and
   gives the same value for each name of a charset, and `defaultCharset()` is UTF-8 (JEP 400).
   An unknown or malformed name throws `UnsupportedCharsetException` or
-  `IllegalCharsetNameException` with Java's message, which a `catch` sees. So does the name of
-  a charset that Java has but that is none of these (Shift_JIS, GBK, UTF-32), and `isSupported`
-  is false for it. `Charset.aliases()` and a `Charset` array element that starts out null are
-  rejected. In a whole program `newDecoder()`/`newEncoder()` give the JDK's own coders of the
+  `IllegalCharsetNameException` with Java's message, which a `catch` sees. A charset that Java
+  has but that is none of these (Shift_JIS, GBK, UTF-32 and the other multi-byte ones) is
+  rejected where a constant names it; where the program computes its name, it carries the names
+  of those charsets too, and `forName`, `isSupported`, `getBytes` and `new String` throw
+  `UnsupportedOperationException` for one, which the census lists. `Charset.aliases()` and a
+  `Charset` array element that starts out null are rejected. In a whole program `newDecoder()`/`newEncoder()` give the JDK's own coders of the
   six charsets (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings compares what Java compares: by text where both sides can only be interned
   strings, as null against null where no string can be on both sides, and otherwise by the
@@ -416,8 +418,10 @@ Design: [natives-and-input.md](natives-and-input.md).
 - `--census` translates past every rejection, stubbing each rejected method, and reports what is
   rejected and why, grouped by message, separately for program and library code
   (`program/census.rs`). It lists apart, as code that translates, the code that throws
-  `NoClassDefFoundError` for a class missing from the roots (`--keep-going`) and the handle
-  calls that throw `UnsupportedOperationException` because the translation does not follow them. `--survey` is a quicker syntactic view of what the reachable code needs
+  `NoClassDefFoundError` for a class missing from the roots (`--keep-going`), the handle calls
+  that throw `UnsupportedOperationException` because the translation does not follow them, and
+  the charset names known only at run time, which throw it for a charset of the JDK that the
+  translation does not have. `--survey` is a quicker syntactic view of what the reachable code needs
   from outside the translated sources (`program/survey.rs`). Both have `-json` forms.
   `scripts/jdk-coverage.py` runs the census over the target programs and writes
   [jdk-coverage.md](jdk-coverage.md).

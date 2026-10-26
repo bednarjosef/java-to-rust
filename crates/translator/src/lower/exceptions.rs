@@ -302,6 +302,16 @@ const RAISED: &[(&str, &[&str])] = &[
     ),
     // A charset's name that the runtime does not know.
     ("java.io.UnsupportedEncodingException", &["java.lang.String#getBytes", "java.lang.String#<init>"]),
+    // The name of a charset of the JDK that the program does not have (`charset.rs`).
+    (
+        "java.lang.UnsupportedOperationException",
+        &[
+            "java.nio.charset.Charset#forName",
+            "java.nio.charset.Charset#isSupported",
+            "java.lang.String#getBytes",
+            "java.lang.String#<init>",
+        ],
+    ),
     (
         "java.lang.NumberFormatException",
         &[

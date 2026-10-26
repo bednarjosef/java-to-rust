@@ -117,12 +117,21 @@ impl fmt::Debug for ByteCharset {
     }
 }
 
-/// The single-byte charsets that the program carries, which `register_charsets` sets as it starts.
-static PROGRAM_CHARSETS: OnceLock<&'static [ByteCharset]> = OnceLock::new();
+/// What the program tells the runtime of the JDK's charsets as it starts (`register_charsets`).
+struct ProgramCharsets {
+    /// The single-byte charsets that it carries.
+    tables: &'static [ByteCharset],
+    /// The names and aliases of the JDK's charsets that the translation has neither in the
+    /// runtime nor as a table, where the program computes a charset's name.
+    missing: &'static [&'static str],
+}
 
-/// Gives the runtime the charsets that the program carries, before anything looks one up.
-pub fn register_charsets(charsets: &'static [ByteCharset]) {
-    let _ = PROGRAM_CHARSETS.set(charsets);
+static PROGRAM_CHARSETS: OnceLock<ProgramCharsets> = OnceLock::new();
+
+/// Gives the runtime the charsets that the program carries and the names of those it does not
+/// have, before anything looks one up.
+pub fn register_charsets(tables: &'static [ByteCharset], missing: &'static [&'static str]) {
+    let _ = PROGRAM_CHARSETS.set(ProgramCharsets { tables, missing });
 }
 
 /// `toString()` is the canonical name, so a charset prints as Java prints it.
@@ -185,8 +194,21 @@ impl Charset {
     fn lookup(name: &str) -> Option<Charset> {
         Charset::builtin(name).or_else(|| {
             let program = PROGRAM_CHARSETS.get()?;
-            program.iter().find(|c| c.named(name)).map(Charset::Bytes)
+            program.tables.iter().find(|c| c.named(name)).map(Charset::Bytes)
         })
+    }
+
+    /// The charset of `name`, or else, for the name of a charset of the JDK that the program does
+    /// not have, an `UnsupportedOperationException`: Java has the charset, so neither its
+    /// exception for an unknown name nor `false` would be Java's answer.
+    fn lookup_known(name: &str) -> Option<Charset> {
+        let charset = Charset::lookup(name);
+        let missing = PROGRAM_CHARSETS.get().map_or(&[][..], |p| p.missing);
+        if charset.is_none() && missing.iter().any(|m| m.eq_ignore_ascii_case(name)) {
+            let message = format!("{name}, a charset of the JDK that the translation does not have");
+            throw("java.lang.UnsupportedOperationException", &message);
+        }
+        charset
     }
 
     fn builtin(name: &str) -> Option<Charset> {
@@ -233,19 +255,21 @@ impl Charset {
 
     /// `Charset.forName(name)`: a null name is an `IllegalArgumentException`, a malformed name an
     /// `IllegalCharsetNameException` and an unknown one an `UnsupportedCharsetException`, each
-    /// with the name as its message.
+    /// with the name as its message; one of the JDK's that the program does not have is an
+    /// `UnsupportedOperationException` (`lookup_known`).
     pub fn for_name(name: Option<&crate::Wtf8>) -> Charset {
         let name = name.map(|name| name.to_string_lossy());
         let name = name.as_deref();
         let name = Charset::legal_name(name);
-        Charset::lookup(name).unwrap_or_else(|| throw("java.nio.charset.UnsupportedCharsetException", name))
+        Charset::lookup_known(name)
+            .unwrap_or_else(|| throw("java.nio.charset.UnsupportedCharsetException", name))
     }
 
     /// `Charset.isSupported(name)`, which checks the name as `for_name` does.
     pub fn is_supported(name: Option<&crate::Wtf8>) -> bool {
         let name = name.map(|name| name.to_string_lossy());
         let name = name.as_deref();
-        Charset::lookup(Charset::legal_name(name)).is_some()
+        Charset::lookup_known(Charset::legal_name(name)).is_some()
     }
 
     /// The name, checked as Java checks it: letters and digits, and `-+:_.` after the first
@@ -264,7 +288,7 @@ impl Charset {
     /// `UnsupportedEncodingException` for an unknown name.
     pub fn for_encoding_name(name: &crate::Wtf8) -> Charset {
         let name = &*name.to_string_lossy();
-        Charset::lookup(name).unwrap_or_else(|| throw("java.io.UnsupportedEncodingException", name))
+        Charset::lookup_known(name).unwrap_or_else(|| throw("java.io.UnsupportedEncodingException", name))
     }
 
     /// The bytes of `s` in this charset. What it cannot encode becomes `?` (one per character,

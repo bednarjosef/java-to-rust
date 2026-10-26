@@ -524,6 +524,12 @@ impl<'t> Lowering<'t> {
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
         let bytes = Type::array(Type::Byte);
+        if symbol.owner == "java.lang.String"
+            && tys.first() == Some(&bytes)
+            && let Some(name) = args.last().filter(|a| a.ty == Type::String)
+        {
+            super::charsets::check_name(node, name)?;
+        }
         Ok(Some(match (symbol.owner, tys.as_slice()) {
             ("java.lang.String", []) => ExprKind::Str(String::new()),
             ("java.lang.String", [Type::String]) => {

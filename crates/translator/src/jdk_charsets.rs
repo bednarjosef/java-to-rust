@@ -6,7 +6,10 @@
 //!
 //! A program that looks a charset up by name carries the tables (`codegen`'s `main` gives them to
 //! the runtime, `java::register_charsets`), so that `Charset.forName`, `isSupported`, `getBytes`
-//! and `new String` of one behave as on that JDK.
+//! and `new String` of one behave as on that JDK. The other charsets of the JDK (`missing`) are
+//! rejected where a constant names one (`lower/charsets.rs`); a program that computes a name
+//! carries their names too, and throws `UnsupportedOperationException` for one, which the census
+//! lists.
 
 use serde::Deserialize;
 use std::sync::OnceLock;
@@ -76,6 +79,22 @@ fn asked_now() -> Option<Vec<JdkCharset>> {
 /// The charset of the JDK that `name` names, if any.
 pub fn find(name: &str) -> Option<&'static JdkCharset> {
     charsets().iter().find(|c| c.named(name))
+}
+
+/// The charset of the JDK that `name` names where the translation has it neither in the runtime
+/// nor as a table: one of the multi-byte charsets, such as Shift_JIS, GBK or UTF-32.
+pub fn missing(name: &str) -> Option<&'static JdkCharset> {
+    find(name).filter(|c| c.decode.is_none() && !c.in_runtime())
+}
+
+/// The names and aliases of the charsets that are `missing`.
+pub fn missing_names() -> Vec<&'static str> {
+    charsets()
+        .iter()
+        .filter(|c| c.decode.is_none() && !c.in_runtime())
+        .flat_map(|c| std::iter::once(&c.name).chain(&c.aliases))
+        .map(String::as_str)
+        .collect()
 }
 
 /// A Rust string literal of the chars `units`, none of which is a surrogate.
