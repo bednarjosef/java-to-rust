@@ -562,7 +562,8 @@ with nothing written. `BytecodeNames` follows the lowered code in the order of j
 generator to tell which. The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
 back, an element with its index when that is a constant (an `int` constant field too, which
-javac writes as its value), a local or a call, an enum's `ordinal()` among them (`[...]` otherwise),
+javac writes as its value), a local (also one that the index increments, `a[i++]`, as javac loads
+the local) or a call, an enum's `ordinal()` among them (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
 writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
 the update starts, which `BytecodeNames` notes), no message for a pattern switch's

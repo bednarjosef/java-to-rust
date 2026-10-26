@@ -1047,6 +1047,12 @@ impl Messages<'_> {
                 };
                 format!("{array}[{index}]")
             }
+            // `i++` and `++i` of a local, an index as in `a[i++]`: javac loads the local before or
+            // after its `iinc`, so the value is the local's.
+            ExprKind::IncDec { target: Place::Var(name), .. } if e.ty.is_integral() => {
+                let read = Expr { kind: ExprKind::Var(name.clone()), pos: e.pos, ty: e.ty, id: e.id };
+                return self.source(&read, detail);
+            }
             // Values that the JVM does not follow back: computed ones, and new objects.
             ExprKind::Conditional(..) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::New { .. } => {
                 return Some(Source::Hidden);
