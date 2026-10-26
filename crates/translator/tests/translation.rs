@@ -5560,12 +5560,53 @@ fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
             "let (src_pos, dest_pos, length_2) = (0, 0, length); match (&src, &dest) { (src, dest) => match (src.view(), dest.view()) {",
             "(ObjectView::IntArray(src), ObjectView::IntArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
             "(ObjectView::LongArray(src), ObjectView::LongArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
-            "_ => java::throw_exception(java::arraycopy_mismatch(src.array_copy_kind(), dest.array_copy_kind())),",
+            "_ => java::try_arraycopy_across(src, src_pos, dest, dest_pos, length_2).unwrap_or_else(|e| java::throw_exception(e)),",
             "11 => java::CopyKind::Primitive(\"int\"),",
         ],
     );
-    // One arm takes every pair that fails, so the arms grow with the pairs of array types only.
-    assert_lacks(&rust, &["(Object::IntArray(_), Object::LongArray(_))"]);
+    // One arm takes every pair of two classes, so the arms grow with the array classes.
+    assert_lacks(&rust, &["(ObjectView::IntArray(src), ObjectView::LongArray(dest))"]);
+}
+
+#[test]
+fn an_arraycopy_between_objects_reads_and_stores_each_array_class_once() {
+    let rust = translate(
+        "interface Shape {}
+        enum Color { RED }
+        record Circle(int r) implements Shape {}
+        public class Main {
+            static void copy(Object src, Object dest) {
+                System.arraycopy(src, 0, dest, 0, 1);
+            }
+            public static void main(String[] args) {
+                Shape[] shapes = new Shape[1];
+                copy(new Circle[] {new Circle(1)}, shapes);
+                Object[] objects = new Object[1];
+                copy(new Color[] {Color.RED}, objects);
+                copy(new String[][] {{\"s\"}}, objects);
+                copy(objects, new String[1]);
+                System.out.println(shapes[0] + \" \" + objects[0]);
+            }
+        }",
+    );
+    // Each array class has an arm that reads its elements as `Object`s, and one that stores
+    // `Object`s, which the runtime has checked against the class of its elements. The elements of
+    // every array that is an `Object` are `Object`s, as the copy may read them.
+    assert_contains(
+        &rust,
+        &[
+            "impl java::CopyAcross for Object {",
+            "fn copy_out(&self, range: std::ops::Range<usize>) -> Vec<Option<Self>> {",
+            "java::Elements::reading(o, range, |items| items.iter().map(|e| { let x = e.clone(); Some(Object::Color(x)) }).collect())",
+            "java::Elements::reading(o, range, |items| items.iter().map(|e| { let x = e.clone(); Some(Object::StringArray(x)) }).collect())",
+            "fn copy_in(&self, at: usize, items: &[Option<Self>]) {",
+            "java::Elements::store_from(o, at, &items.iter().map(|e| e.as_ref().map(|o| o.as_string().unwrap_or_else(",
+        ],
+    );
+    assert_lacks(
+        &rust,
+        &["not supported yet", "(ObjectView::ColorArray(src), ObjectView::ObjectArray(dest))"],
+    );
 }
 
 #[test]

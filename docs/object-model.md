@@ -727,23 +727,39 @@ it) looks at the variant only, so a `String[]` held as an `Object[]` fails it. A
 - an array of an enum that is an `Object[]` holds its constants as `Object`s, cast back where
   read (an `Option` where the element may be null).
 
-`System.arraycopy` where the source or destination is an `Object` matches their array variants
-(`codegen::dispatch::object_array_copy`, `codegen::arraycopy`): two arrays of one type are copied,
-and a `String[]` and an `Object[]` are copied element by element, where an element that is not a
-`String` throws `ArrayStoreException` after the elements before it are stored. Two arrays of other
-classes are copied as two typed arrays are, below; an element whose class no value of the
-destination's element class is anywhere else has no variant to be stored as, and ends the program
-(the analysis does not follow which arrays an `Object`-typed copy is given: the JDK's
-`SpinedBuffer` copies only arrays of one type). Other mismatches throw `ArrayStoreException` with
-HotSpot's message for them ("arraycopy: type mismatch: can not copy int[] into long[]",
-"arraycopy: source type java.lang.String is not an array"). A pair of arrays of
-two other element classes is copied as HotSpot copies it (`codegen::arraycopy_classes`): when the
-source's class is a subtype of the destination's, every element is stored; otherwise each element is
-checked as it is stored, where null always passes and a non-null element must be an instance of the
-destination's class. The first element that fails throws `ArrayStoreException` after the elements
-before it are stored (`runtime::try_copy_refs`). The message names the two element classes by their
-static types, since a typed array holds no runtime class of its own; for arrays held as `Object`s,
-by the classes of their variants.
+`System.arraycopy` where the source is an `Object` matches the variants of the two objects
+(`codegen::dispatch::object_array_copy`, `codegen::arraycopy`): two arrays of one class are copied
+as two typed arrays of it are. Every other pair goes to `java::try_arraycopy_across`, which does
+what HotSpot does. A source or destination that is not an array, or an array of a primitive type,
+throws `ArrayStoreException` with HotSpot's message ("arraycopy: type mismatch: can not copy int[]
+into long[]", "arraycopy: source type java.lang.String is not an array"); then the positions and
+the length are checked. Between two arrays of references the source's elements are read as
+`Object`s and each is checked as it is stored, against the class of the destination's elements,
+as HotSpot checks it: null always passes, and the elements before the first that fails are
+stored, after which the `ArrayStoreException` says "type mismatch: can not copy X[] into Y[]"
+where the destination's element class is not below the source's, and "element type mismatch:
+..." otherwise. The classes are the arrays' own, or the ones they carry. The runtime asks the
+program's `Object` for what it needs through `java::CopyAcross`, which the program has once, with
+an arm for each array class that reads its elements as `Object`s and one that stores `Object`s as
+its elements (by `as_<class>()`), so the code grows with the array classes, not with their pairs.
+
+Such a copy may read the elements of any array that is an `Object`, and store `Object`s into it,
+so where the program has one, the element class of each array class among `Object`'s values flows
+both ways with `Object` (`analysis::hierarchy::flows`): its objects are variants of `Object`, and
+`Object`'s variants of its class are values of it. What the representation still cannot hold ends
+the program with a message rather than storing something else: a row of an array of arrays whose
+class is no `Object` (an `int[]` row of an `int[][]` where no `int[]` is an `Object` otherwise), a
+row that Java lets in by covariance but that is held as another type (a `String[]` into an
+`Object[][]`, whose rows are `Object[]`s), and a null into an array whose elements the analysis
+found never to be null.
+
+Between two typed arrays of two element classes the copy is HotSpot's too
+(`codegen::arraycopy_classes`): when the source's class is a subtype of the destination's, every
+element is stored; otherwise each element is checked as it is stored, where null always passes
+and a non-null element must be an instance of the destination's class. The first element that
+fails throws `ArrayStoreException` after the elements before it are stored
+(`runtime::try_copy_refs`). The message names the two element classes by their static types,
+since a typed array holds no runtime class of its own.
 
 A value read back out of an erased container is a cast from `Object` that may be null, so an
 enum read back is an `Option` of the enum.

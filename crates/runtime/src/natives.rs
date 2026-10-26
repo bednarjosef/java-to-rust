@@ -187,6 +187,73 @@ pub fn try_arraycopy_with<T: Clone, U: Clone, S: Elements<T>, D: Elements<U>>(
     }
 }
 
+/// What `System.arraycopy` asks of the program's `Object` where the two arrays are of different
+/// classes (`try_arraycopy_across`). The generated code answers with one arm for each array
+/// class, so the arms grow with the classes, not with their pairs.
+pub trait CopyAcross: Sized {
+    /// What the object is to `System.arraycopy`.
+    fn copy_kind(&self) -> CopyKind;
+    /// The object's class: for an array, the one it carries if it is a covariant array.
+    fn copy_class(&self) -> crate::Class;
+    /// The length of an array of references.
+    fn copy_length(&self) -> usize;
+    /// The elements in `range` of an array of references, each as an object.
+    fn copy_out(&self, range: std::ops::Range<usize>) -> Vec<Option<Self>>;
+    /// Stores `items` from position `at` of an array of references, which can hold each of them.
+    fn copy_in(&self, at: usize, items: &[Option<Self>]);
+}
+
+/// `System.arraycopy` between two objects of different classes, as HotSpot does it. One that is
+/// not an array, or an array of a primitive type, fails before anything else
+/// (`arraycopy_mismatch`); then the positions and the length are checked. Between arrays of
+/// references each element is checked against the class of the destination's elements as it is
+/// stored: null always passes. The elements before the first that fails are stored, and then the
+/// `ArrayStoreException` is thrown. Its message is a type mismatch where the destination's
+/// element class is not below the source's, as no element could pass then but null, else an
+/// element type mismatch.
+pub fn try_arraycopy_across<O: CopyAcross>(
+    src: &O,
+    src_pos: i32,
+    dest: &O,
+    dest_pos: i32,
+    length: i32,
+) -> Result<(), Exception> {
+    let (s, d) = (src.copy_kind(), dest.copy_kind());
+    if !matches!((s, d), (CopyKind::References, CopyKind::References)) {
+        return Err(arraycopy_mismatch(s, d));
+    }
+    let (from, to, n) = copy_bounds::<O>(src.copy_length(), src_pos, dest.copy_length(), dest_pos, length)
+        .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
+    if n == 0 {
+        return Ok(());
+    }
+    let component =
+        |o: &O| o.copy_class().get_component_type().expect("an array's class has a component type");
+    let (from_class, to_class) = (component(src), component(dest));
+    let items = src.copy_out(from..from + n);
+    let fits = if to_class.is_assignable_from(from_class) {
+        n
+    } else {
+        items
+            .iter()
+            .take_while(|e| e.as_ref().is_none_or(|o| to_class.is_assignable_from(o.copy_class())))
+            .count()
+    };
+    dest.copy_in(to, &items[..fits]);
+    if fits == n {
+        return Ok(());
+    }
+    let (source, bound) = (from_class.binary_name(), to_class.binary_name());
+    let message = if from_class.is_assignable_from(to_class) {
+        format!(
+            "arraycopy: element type mismatch: can not cast one of the elements of {source}[] to the type of the destination array, {bound}"
+        )
+    } else {
+        format!("arraycopy: type mismatch: can not copy {source}[] into {bound}[]")
+    };
+    Err(Exception::new("java.lang.ArrayStoreException", message))
+}
+
 /// What an `Object` is to `System.arraycopy`: not an array (with its class's binary name), an
 /// array of a primitive type (with the type's name), or an array of references.
 #[derive(Clone, Copy)]
