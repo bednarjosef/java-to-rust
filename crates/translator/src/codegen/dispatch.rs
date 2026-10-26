@@ -1512,6 +1512,16 @@ impl<'a> Gen<'a> {
     /// The body that a call of `resolved` on the enum of `t` calls directly, when it calls no
     /// dispatcher (see `dispatch_name`).
     pub(super) fn enum_body(&self, t: usize, resolved: usize) -> Option<usize> {
+        if let Some(&body) = self.enum_bodies.borrow().get(&(t, resolved)) {
+            return body;
+        }
+        let body = self.find_enum_body(t, resolved);
+        self.enum_bodies.borrow_mut().insert((t, resolved), body);
+        body
+    }
+
+    /// `enum_body`, found.
+    fn find_enum_body(&self, t: usize, resolved: usize) -> Option<usize> {
         let h = &self.class.hierarchy;
         let declared = self.class.methods[resolved].class;
         match self.enum_targets(t, resolved)[..] {
@@ -2499,7 +2509,8 @@ impl<'a> Gen<'a> {
 
     /// The `hashCode` of the program that an object of class `c` runs, if it has one.
     pub(super) fn hash_index(&self, c: usize) -> Option<usize> {
-        self.object_method("hashCode").and_then(|h| self.class.hierarchy.implementation(h, c))
+        let hash_code = *self.object_hash_code.get_or_init(|| self.object_method("hashCode"));
+        hash_code.and_then(|h| self.class.hierarchy.implementation(h, c))
     }
 
     /// The call that the dispatcher of the enum of `t` makes for an object of class `c` bound to

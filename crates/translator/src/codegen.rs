@@ -212,6 +212,8 @@ fn generate_with(
         static_fn_names,
         variant_names: Default::default(),
         cell_names: Default::default(),
+        object_hash_code: Default::default(),
+        enum_bodies: Default::default(),
         package_types: HashMap::new(),
         package_methods: HashMap::new(),
         reps: Default::default(),
@@ -364,6 +366,11 @@ struct Gen<'a> {
     /// The names of the cells of each type's statics, by field (see `objects::cell_names`), once
     /// made.
     cell_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashMap<String, String>>>>,
+    /// `Object`'s `hashCode`, if the program has it (`hash_index`), found once.
+    object_hash_code: std::cell::OnceCell<Option<usize>>,
+    /// The body that a call of a method on the enum of a type calls directly, by type and method
+    /// (`dispatch::enum_body`), once found.
+    enum_bodies: std::cell::RefCell<HashMap<(usize, usize), Option<usize>>>,
     /// The types of each package, and the methods of its types, in index order (`Gen::program`).
     package_types: HashMap<String, std::rc::Rc<Vec<usize>>>,
     package_methods: HashMap<String, std::rc::Rc<Vec<usize>>>,
