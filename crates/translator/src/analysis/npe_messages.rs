@@ -1211,9 +1211,10 @@ impl Messages<'_> {
     /// by their simple names. `None` where the translation's types may not be the declared ones:
     /// a receiver of `Object`, whose type may have been an interface or a type variable with
     /// another bound, a string, which may have been a `CharSequence`, or another value type of
-    /// the runtime.
+    /// the runtime. A call through `super` names the class's superclass (`Gen.binaryQualifier` of
+    /// the type of `super`).
     fn jdk_call(&self, x: &Expr) -> Option<String> {
-        let ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. } = &x.kind else {
+        let ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super, .. } = &x.kind else {
             return None;
         };
         if !self.jdk || self.class.methods[*r].is_static {
@@ -1239,7 +1240,20 @@ impl Messages<'_> {
         {
             return Some("java.lang.Comparable.compareTo(Object)".to_string());
         }
-        let owner = self.java_class(receiver.ty)?;
+        let owner = match is_super {
+            // A superclass's method, not an interface's (`I.super.m()`), from the class's own
+            // code, not a lambda's.
+            true => {
+                let superclass = self.class.types[self.method.class].extends?;
+                if !self.extends(superclass, callee.class)
+                    || self.class.types[callee.class].kind == TypeKind::Interface
+                {
+                    return None;
+                }
+                self.java_class_at(superclass)?
+            }
+            false => self.java_class(receiver.ty)?,
+        };
         let params: Option<Vec<String>> =
             self.class.methods[*r].params.iter().map(|p| self.java_param(p.ty)).collect();
         Some(format!("{owner}.{name}({})", params?.join(", ")))

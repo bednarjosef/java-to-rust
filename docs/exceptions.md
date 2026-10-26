@@ -643,7 +643,8 @@ the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`) and its methods that do (a null format of
 `String.format`, which `Formatter.parse` asks for its length, a null `CharSequence` of
 `contentEquals`, a null prefix or suffix of `startsWith` and `endsWith`), a static by the class
-that declares it, an
+that declares it, a call through `super` by the superclass (javac's `binaryQualifier` of the type
+of `super`), an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
 the field it is, a string `switch`'s temporary and a for-each loop's iterator as `<localN>` from
 the slots javac would give (`javac::jdk_temps`), in an argument too, counting the slots of
