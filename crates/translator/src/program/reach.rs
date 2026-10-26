@@ -3411,7 +3411,11 @@ impl<'t> Walk<'t> {
             && !self.reach.replaced_streams.contains(stream)
         {
             let symbol = &value["symbol"];
-            self.stream_calls.insert((stream.into(), text(symbol, "name").into(), text(symbol, "type").into()));
+            self.stream_calls.insert((
+                stream.into(),
+                text(symbol, "name").into(),
+                text(symbol, "type").into(),
+            ));
             return self.scan(&value["arguments"]);
         }
         // A program that replaces a standard stream prints through the object it gives, also

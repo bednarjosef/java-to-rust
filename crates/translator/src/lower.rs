@@ -1412,7 +1412,10 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::Builtin(builtin, args));
         }
         let system_out = receiver.and_then(|r| r.symbol()).is_some_and(|s| {
-            s.kind == "FIELD" && s.owner == "java.lang.System" && s.name == "out" && !self.replaced_stream("out")
+            s.kind == "FIELD"
+                && s.owner == "java.lang.System"
+                && s.name == "out"
+                && !self.replaced_stream("out")
         });
         if let Some(kind) = self.enum_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
@@ -1655,8 +1658,12 @@ fn constant_condition(node: Node) -> Option<bool> {
         "BOOLEAN_LITERAL" => node.0["value"].as_bool(),
         "PARENTHESIZED" => constant_condition(node.get("expression")?),
         "LOGICAL_COMPLEMENT" => constant_condition(node.get("expression")?).map(|b| !b),
-        "CONDITIONAL_AND" => Some(constant_condition(node.get("leftOperand")?)? && constant_condition(node.get("rightOperand")?)?),
-        "CONDITIONAL_OR" => Some(constant_condition(node.get("leftOperand")?)? || constant_condition(node.get("rightOperand")?)?),
+        "CONDITIONAL_AND" => Some(
+            constant_condition(node.get("leftOperand")?)? && constant_condition(node.get("rightOperand")?)?,
+        ),
+        "CONDITIONAL_OR" => Some(
+            constant_condition(node.get("leftOperand")?)? || constant_condition(node.get("rightOperand")?)?,
+        ),
         "IDENTIFIER" | "MEMBER_SELECT" => {
             if node.kind() == "MEMBER_SELECT" {
                 let class = node.get("expression")?.symbol()?;

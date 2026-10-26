@@ -101,7 +101,8 @@ fn leaves_stmt(stmt: &Stmt) -> bool {
         Stmt::Block(inner) => leaves(inner),
         Stmt::If { then, otherwise: Some(otherwise), .. } => leaves_stmt(then) && leaves_stmt(otherwise),
         Stmt::Try { body, catches, finally } => {
-            finally.as_deref().is_some_and(leaves) || (leaves(body) && catches.iter().all(|c| leaves(&c.body)))
+            finally.as_deref().is_some_and(leaves)
+                || (leaves(body) && catches.iter().all(|c| leaves(&c.body)))
         }
         _ => matches!(
             stmt,
