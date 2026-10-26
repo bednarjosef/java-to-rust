@@ -453,7 +453,8 @@ written in checked form exactly when it is in the analysis's set.
   null, and of a store into a null array or out of its bounds, only once the arguments (the
   stored value) are computed. Where one may have an effect, lowering computes it first into a
   local, and the receiver (the array) before it unless it is a local that nothing there assigns
-  (`lower/argument_order.rs`); the message names the receiver itself.
+  (`lower/argument_order.rs`); the message names the receiver itself, and an argument that the
+  call unboxes from its local is the value that javac unboxes as it computes it.
 - **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
   `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`, and the
   `NullPointerException` message facts below.
@@ -542,7 +543,8 @@ the initializers the constructor runs read the field (`this.this$0.chk`), also w
 constructor is a method of a class that builds whole objects (`analysis/whole_objects.rs`);
 javac's own locals are named too (the `s$` of a string `switch`, the iterator
 `i$` of a for-each loop, whose calls start at the collection as javac's do, at its parenthesis
-if it has one). A variable of a
+if it has one); a local with a `$` in its name that javac did not make (it makes them
+synthetic) is the source's, as decompiled code has them (`rec$`). A variable of a
 `finally` block has a slot in each copy of the block that javac writes for a way out of the
 `try`: the copy for an exception keeps the exception in a slot first, so its variables are
 further along, by as much as the local variable table of the class file (compiled with `-g`,
@@ -560,31 +562,45 @@ with nothing written. `BytecodeNames` follows the lowered code in the order of j
 generator to tell which. The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
 back, an element with its index when that is a constant (an `int` constant field too, which
-javac writes as its value), a local or a call, an enum's `ordinal()` among them (`[...]` otherwise),
+javac writes as its value), a local (also one that the index increments, `a[i++]`, as javac loads
+the local) or a call, an enum's `ordinal()` among them (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
 writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
 the update starts, which `BytecodeNames` notes), no message for a pattern switch's
-`Objects.requireNonNull`, and an assigned value followed back to its source, whatever it is
+`Objects.requireNonNull`, an element that lowering reads once for several reads of it (`lower/element_reads.rs`)
+as the element, and an assigned value followed back to its source, whatever it is
 stored in (`(s = a).next` fails `because "a" is null`, `(this.f = g()).next` `because the return
 value of "Main.g()" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
-(`program::MODULE_CALLS`), an enum's `toString()` as the enum's, `c.cast(x)` (a block that
+(`program::MODULE_CALLS`), `c.isAssignableFrom(d)` as itself (a null `d` fails in the JVM's
+native code, which gives no message), `c.getEnumConstants()` (a block that checks `c` first) as
+itself, `n.byteValue()` and `n.shortValue()` of a `Number` (lowered as the narrowed
+`intValue()`) as themselves, an enum's `toString()` as the enum's, `c.cast(x)` (a block that
 checks `x`) as `java.lang.Class.cast(Object)`, `subSequence` (lowered as `substring`) as
 itself, and a `CharSequence`'s `isEmpty()` (lowered as a zero `length()`) as itself; the
 elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no message, as
 `Objects.requireNonNull` gives none, and a null iterator of them is the JDK's `<local5>`, the
 slot of `String.join`'s own loop. The receiver of a bound method reference, which the
-reference's class holds and its call may first keep in a local, is never null there. Calls of
+reference's class holds and its call may first keep in a local, is never null there. A nested
+class's use of a protected member of a superclass in another package goes through javac's
+accessor method in the subclass (`access$000`), which dereferences its own parameter: `because
+"x0" is null` (`<parameter1>` without local names), with the call named as the member's
+(`BytecodeNames`' `accessor` entries). Calls of
 one name that start at the same place, as calls of a chain do
 (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told apart by where their
 first argument starts, which `BytecodeNames` adds to the name (`stream@3:30`, `stream@`), and
-calls without arguments by the class of their receiver too (`stream@#java.util.List`). The start
+calls without arguments by the class of their receiver too (`stream@#java.util.List`); for a
+varargs parameter that is the first of the arguments that lowering packs into an array, and a
+call that passes none has no arguments. The start
 of a first argument is taken before lowering, as lowering replaces a method reference or a lambda
 (`codec.xmap(A::of, A::to).xmap(B::new, B::value)`).
 
 **Libraries, local names and errors.** The classes that the program's code uses from its
 library roots compile with it (`--sourcepath-root`), and get names too, as their code is
-translated with the program's; a root of a module of the JDK's is left out (the JDK's own
+translated with the program's, and so do the files of the library roots that the translation
+reached (`--reached`, on standard input), as it reaches classes that no code names
+(`Class.forName("com.google.gson.internal.bind.JavaTimeTypeAdapters")`), which javac would
+not compile; a root of a module of the JDK's is left out (the JDK's own
 compiled module serves, and the JDK's code is named as below), and no `module-info.java` of the
 other roots is seen, so that all compile in the unnamed module, as the classes do on the class
 path. A program whose class files were compiled with `-g` (`--named-locals`,
@@ -628,9 +644,16 @@ primitive or `switch` patterns, or a binding that outlives its statement (`if (!
 String s)) return;`), has no known slots for its temporaries, and a null message of one is not
 certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
-for which the JDK's code throws an exception without a message. A null that the class the JVM makes for a method reference dereferences has no message, as
+for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)`,
+which the JVM's native code throws without one, `wait`, `notify` and `notifyAll` of a null as
+`Object`'s, and `System.getProperty` of a null key that is not a constant (a `switch` on the key)
+with `System.checkKey`'s own message (`key can't be null`). A native that the runtime does not
+have takes null (a JNI native gets it as it is) and raises nothing: it is only where it never
+runs, and its call is written without its arguments, so a dereference in them is never made. A null that the class the JVM makes for a method reference dereferences has no message, as
 its hidden frame gives none: the receiver of an unbound reference, or an argument it unboxes
-(`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`). javac writes a method of its
+(`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`, `Character::toString` of an
+`Integer`, which the translation answers itself), also after the cast to the parameter's type
+that a reference given as a `Function<? super S, ? extends A>` makes. javac writes a method of its
 own instead for a reference that packs varargs, calls through `super`, or makes an array or an
 object of an inner or local class, so the rule leaves those out. A bound reference's receiver,
 checked where the reference is created, is never null in the reference's class. The translator's own `java.lang` classes (`Standard.java`) have no

@@ -176,6 +176,9 @@ impl<'a> Gen<'a> {
                 let temp = self.temp("f");
                 format!("({{ let {temp} = {value}; {temp} }})")
             }
+            // A closure that may be null, as an element of an array (an enum's field kept as a
+            // table, `lower/enum_tables.rs`) or a call's value: null throws there.
+            _ if self.nullable(receiver) => format!("({})", self.object(receiver)),
             _ => self.expr(receiver).receiver(),
         };
         let args = self.call_args(index, args).join(", ");

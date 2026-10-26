@@ -486,8 +486,11 @@ A call of the abstract method on a closure-typed value calls the closure: `f.app
 out of the `RefCell` before it runs, `({ let f = a.borrow().op.clone(); f })(3)`, since its body
 may reach the same object. A local, a capture, a field of a plain object or a field that only
 constructors write (docs/object-model.md, 1.8) is called in place (`op(x)`, `(self.op)(x)`,
-`(java::fixed!(a, op))(x)`). On an enum-typed interface the call is the dispatcher, as for any
-interface.
+`(java::fixed!(a, op))(x)`). Any other closure that may be null, such as an element of an
+array (an enum's field kept as a table of the constants' values) or a method's return value, is
+dereferenced first, `(java::non_null(f()))(x)`, so that null throws `NullPointerException`
+there, in the checked form where a `catch` may see it. On an enum-typed interface the call is
+the dispatcher, as for any interface.
 
 ### 4.6 Default and static methods; the JDK's functional interfaces
 

@@ -28,7 +28,11 @@ import javax.tools.*;
  * generation included, and prints what javac's code generator gave its code.
  *
  * <p>Usage: {@code java BytecodeNames [--patch-module MODULE=ROOT]... [--sourcepath-root DIR]...
- * [--named-locals] [--keep-going] FILE...}, or the source on standard input for one file. The
+ * [--named-locals] [--keep-going] [--reached] FILE...}, or the source on standard input for one
+ * file. With {@code --reached}, standard input lists the files that the translation reached,
+ * one per line, as paths or relative to the root they are in: those under a root of
+ * {@code --sourcepath-root} compile too, as the translation may reach a class that no code
+ * names (by {@code Class.forName}), which javac would not compile. The
  * files under the root of a module that the JDK has too, such as javac's {@code jdk.compiler},
  * compile as part of that module, as the JDK compiles them; with several such roots, each
  * module's files compile on their own, against the JDK's other modules. The classes that the
@@ -56,7 +60,11 @@ import javax.tools.*;
  * local;
  * <li>{@code call}: a call of the method {@code NAME}, {@code TEXT} being the method as the class
  * file refers to it, {@code Main$Box.size()};
- * <li>{@code static}: a static field, {@code Main$Box.shared}.
+ * <li>{@code static}: a static field, {@code Main$Box.shared};
+ * <li>{@code accessor}: an object whose member {@code NAME}, a protected one of a superclass in
+ * another package that a nested class uses, javac's accessor method ({@code access$000})
+ * dereferences, {@code TEXT} being how the JVM names the accessor's parameter, {@code x0} or
+ * {@code <parameter1>}; the call of a method there has its {@code call} too.
  * </ul>
  * A variable of a {@code finally} block, which the code generator copies to every exit of its
  * {@code try}, has two slots where the copies differ: U+0001 {@code <localN>} U+0002
@@ -118,6 +126,7 @@ public class BytecodeNames {
             }
         });
         List<File> files = new ArrayList<>();
+        boolean reached = false;
         // The roots of the JDK's own modules, such as javac's `jdk.compiler`, by module: their
         // packages compile only as part of that module.
         Map<String, File> patches = new LinkedHashMap<>();
@@ -128,6 +137,8 @@ public class BytecodeNames {
                 if (!jdkModuleRoot(root)) {
                     roots.add(root.getPath());
                 }
+            } else if (args[i].equals("--reached")) {
+                reached = true;
             } else if (args[i].equals("--named-locals")) {
                 namedLocals = true;
             } else if (args[i].equals("--keep-going")) {
@@ -141,6 +152,9 @@ public class BytecodeNames {
             } else {
                 files.add(new File(args[i]));
             }
+        }
+        if (reached) {
+            files.addAll(reachedFiles(roots, files));
         }
         // javac patches one module at most when it compiles without a module source path ("too
         // many patched modules"; given more, it reads a file of one module both as given and as
@@ -289,6 +303,46 @@ public class BytecodeNames {
         }
     }
 
+    /**
+     * The files that standard input lists (see {@code --reached}) that are under one of
+     * {@code roots} and not among {@code given}.
+     */
+    private static List<File> reachedFiles(List<String> roots, List<File> given) throws IOException {
+        Set<java.nio.file.Path> known = new HashSet<>();
+        for (File f : given) {
+            known.add(f.getAbsoluteFile().toPath().normalize());
+        }
+        List<java.nio.file.Path> under = new ArrayList<>();
+        for (String root : roots) {
+            under.add(new File(root).getAbsoluteFile().toPath().normalize());
+        }
+        List<File> found = new ArrayList<>();
+        String text = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
+        for (String line : text.split("\n")) {
+            if (!line.endsWith(".java") || line.endsWith("module-info.java")) {
+                continue;
+            }
+            java.nio.file.Path path = java.nio.file.Path.of(line);
+            java.nio.file.Path file = null;
+            java.nio.file.Path normal = path.toAbsolutePath().normalize();
+            if (normal.toFile().isFile() && under.stream().anyMatch(normal::startsWith)) {
+                file = normal;
+            } else if (!path.isAbsolute()) {
+                for (java.nio.file.Path root : under) {
+                    java.nio.file.Path candidate = root.resolve(path).normalize();
+                    if (candidate.toFile().isFile()) {
+                        file = candidate;
+                        break;
+                    }
+                }
+            }
+            if (file != null && file.toFile().isFile() && known.add(file)) {
+                found.add(file.toFile());
+            }
+        }
+        return found;
+    }
+
     /** Whether {@code root} is the root of a module of the JDK's: its {@code module-info.java} names one. */
     private static boolean jdkModuleRoot(File root) throws IOException {
         File info = new File(root, "module-info.java");
@@ -341,6 +395,11 @@ public class BytecodeNames {
      * that is a method reference or a lambda, whose new tree has no start of its own.
      */
     private final Map<JCMethodInvocation, long[]> firstArguments = new IdentityHashMap<>();
+    /**
+     * The calls that pass no arguments, as attributed: lowering gives a call of a varargs method
+     * that passes none an empty array.
+     */
+    private final Set<JCMethodInvocation> noArguments = Collections.newSetFromMap(new IdentityHashMap<>());
     /** The members of each class as lowered, which the code generator discards once done. */
     private final Map<JCClassDecl, com.sun.tools.javac.util.List<JCTree>> lowered = new HashMap<>();
     /** The entries: class, line, column, kind and name, to the text or null. */
@@ -426,6 +485,8 @@ public class BytecodeNames {
                                     if (first >= 0) {
                                         firstArguments.put(call, position(unit, first));
                                     }
+                                } else if (tree instanceof JCMethodInvocation call) {
+                                    noArguments.add(call);
                                 }
                                 if (tree instanceof JCUnary u
                                         && (u.getTag() == JCTree.Tag.PREINC || u.getTag() == JCTree.Tag.PREDEC)
@@ -709,11 +770,12 @@ public class BytecodeNames {
 
                 @Override
                 public void visitIdent(JCIdent t) {
-                    // The names with a `$` are javac's own (`arr$`), the temps.
+                    // The synthetic names with a `$` are javac's own (`arr$`), the temps; a
+                    // decompiler writes others in the source (`rec$`).
                     if (t.sym instanceof VarSymbol v && v.owner.kind == Kinds.Kind.MTH) {
                         // The JDK compiles its modules with the names of their locals (`-g`), and so
                         // were the program's class files with `--named-locals`.
-                        if (!t.name.toString().contains("$")) {
+                        if (!t.name.toString().contains("$") || (v.flags() & Flags.SYNTHETIC) == 0) {
                             String text = jdkModule ? t.name.toString() : local(v, t);
                             entry(t, "local", t.name.toString(), text);
                             if (prefixed.containsKey(t)) {
@@ -755,6 +817,30 @@ public class BytecodeNames {
 
                 @Override
                 public void visitApply(JCMethodInvocation t) {
+                    // A protected member of a superclass in another package, which a nested
+                    // class reaches through javac's accessor in the class that may use it
+                    // (`Main.access$000(this.mob)` for `this.mob.isPatrolling()`): the
+                    // accessor dereferences its first parameter, `x0`, and calls the member as
+                    // the source would have.
+                    if (TreeInfo.symbol(t.meth) instanceof MethodSymbol m && !t.args.isEmpty()
+                            && accessed(m) instanceof JCFieldAccess accessed) {
+                        JCTree at = written(t.args.head);
+                        entry(at, "accessor", accessed.name.toString(), jdkModule ? "x0" : "<parameter1>");
+                        if (accessed.sym instanceof MethodSymbol original) {
+                            Type site = accessed.selected.type;
+                            String text = member(original, site);
+                            entry(at, "call", original.name.toString(), text);
+                            boolean none = t.args.tail.isEmpty();
+                            long[] first = none ? null : starts.get(written(t.args.tail.head));
+                            if (none || first != null) {
+                                String where = first == null ? "" : first[0] + ":" + first[1];
+                                entry(at, "call", original.name + "@" + where, text);
+                            }
+                            if (none && types.erasure(site).tsym instanceof ClassSymbol receiver) {
+                                entry(at, "call", original.name + "@#" + receiver.flatname, text);
+                            }
+                        }
+                    }
                     if (TreeInfo.symbol(t.meth) instanceof MethodSymbol m && !m.isDynamic()) {
                         Type site = t.meth instanceof JCFieldAccess f ? f.selected.type : c.sym.type;
                         // A call that lowering wrote, such as the `iterator()` of a for-each
@@ -766,15 +852,16 @@ public class BytecodeNames {
                         // by where their first argument starts: `stream@3:30`, `stream@`. Calls
                         // without one are apart by the class of the receiver too:
                         // `stream@#java.util.List`.
-                        long[] first = t.args.isEmpty() ? null : starts.get(written(t.args.head));
-                        if (first == null && !t.args.isEmpty()) {
+                        boolean none = t.args.isEmpty() || noArguments.contains(t);
+                        long[] first = none ? null : starts.get(written(t.args.head));
+                        if (first == null && !none) {
                             first = firstArguments.get(t);
                         }
-                        if (t.args.isEmpty() || first != null) {
+                        if (none || first != null) {
                             String where = first == null ? "" : first[0] + ":" + first[1];
                             entry(at, "call", m.name + "@" + where, member(m, site));
                         }
-                        if (t.args.isEmpty() && types.erasure(site).tsym instanceof ClassSymbol receiver) {
+                        if (none && types.erasure(site).tsym instanceof ClassSymbol receiver) {
                             entry(at, "call", m.name + "@#" + receiver.flatname, member(m, site));
                         }
                     }
@@ -1096,6 +1183,38 @@ public class BytecodeNames {
     }
 
     /** A field or method as a class file refers to it, and the JVM's messages show it. */
+    /**
+     * The member that {@code m} reaches, where it is one of javac's accessors of an instance
+     * member ({@code access$000(x0)}): the {@code x0.member} of its body; else {@code null}.
+     */
+    private JCFieldAccess accessed(MethodSymbol m) {
+        if ((m.flags() & Flags.SYNTHETIC) == 0 || !m.isStatic() || !m.name.toString().startsWith("access$")) {
+            return null;
+        }
+        JCClassDecl owner = classes.get(m.owner);
+        if (owner == null) {
+            return null;
+        }
+        for (JCTree def : owner.defs) {
+            if (def instanceof JCMethodDecl d && d.sym == m && d.body != null && !d.params.isEmpty()) {
+                VarSymbol receiver = d.params.head.sym;
+                JCFieldAccess[] found = {null};
+                new TreeScanner() {
+                    @Override
+                    public void visitSelect(JCFieldAccess f) {
+                        if (found[0] == null && TreeInfo.skipParens(f.selected) instanceof JCIdent id
+                                && id.sym == receiver) {
+                            found[0] = f;
+                        }
+                        super.visitSelect(f);
+                    }
+                }.scan(d.body);
+                return found[0];
+            }
+        }
+        return null;
+    }
+
     private String member(Symbol s, Type site) {
         Symbol q;
         try {

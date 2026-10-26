@@ -193,7 +193,12 @@ fn analysed(
     let mut modules = None;
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
-            let names = Names { program, jdk_temps: RefCell::new(jdk_temps), found: RefCell::new(None) };
+            let names = Names {
+                program,
+                files: &files,
+                jdk_temps: RefCell::new(jdk_temps),
+                found: RefCell::new(None),
+            };
             analyse(&mut class, &units, &files, &mut rejections, &mut modules, &names, program.ends_rejected)
         });
     }
@@ -296,6 +301,8 @@ fn lower_and_narrow(
 /// time a `catch` of the program reads one, as a translation finds them.
 struct Names<'a> {
     program: &'a Program,
+    /// The file of each unit, relative to its root.
+    files: &'a [String],
     /// The temps of the JDK's code (`javac::jdk_temps`), until they are added to `found`.
     jdk_temps: RefCell<javac::JdkTemps>,
     /// The names, or why the class files could not be compiled for them, once looked for.
@@ -318,7 +325,8 @@ impl Names<'_> {
         }
         let mut found = self.found.borrow_mut();
         if found.is_none() {
-            let names = crate::timings::phase("census: class files", || class_file_names(self.program));
+            let names =
+                crate::timings::phase("census: class files", || class_file_names(self.program, self.files));
             // Without the class files (the program does not compile, as decompiled code may
             // not), the messages are found with the names of the JDK's code alone, which do not
             // come from them: each that needs a name of the program's class files is not

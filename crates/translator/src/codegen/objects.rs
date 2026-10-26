@@ -870,6 +870,25 @@ impl<'a> Gen<'a> {
                 &mut |_| {},
             );
         }
+        // The arguments of a native that the runtime does not have, which is written as code
+        // that never runs (`Native::Missing`).
+        for stmt in self.class.methods.iter().flat_map(|m| &m.body) {
+            visit_stmt(
+                stmt,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Builtin(Builtin::Native(Native::Missing { .. }), args) = &x.kind {
+                            for arg in args {
+                                visit_expr(arg, &mut |a| {
+                                    unwritten.insert(a.id);
+                                });
+                            }
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
         // Each one, first to last, as the generator reports what it rejects (`generate_all`).
         let mut missed: Vec<Pos> = self
             .facts
@@ -1121,8 +1140,10 @@ impl<'a> Gen<'a> {
     }
 
     /// `e` as the receiver of a method, borrowed; `this` is already a reference.
-    pub(super) fn receiver_ref(&mut self, e: &'a Expr) -> String {
-        let e = self.peel(e);
+    pub(super) fn receiver_ref(&mut self, receiver: &'a Expr) -> String {
+        // The object is dereferenced as `receiver`, with a cast that `peel` passes over, which
+        // may be the expression whose `NullPointerException` a `catch` sees.
+        let e = self.peel(receiver);
         match &e.kind {
             ExprKind::This => self.this_name().to_string(),
             // A variable narrowed by a null check is a reference already.
@@ -1134,10 +1155,10 @@ impl<'a> Gen<'a> {
                 if matches!(e.ty, Type::Class(..)) && self.nullable(e) =>
             {
                 let (_, place) = self.object_parts(e);
-                let text = self.object(e);
+                let text = self.object(receiver);
                 if place { text } else { format!("&{text}") }
             }
-            _ => format!("&{}", self.object(e)),
+            _ => format!("&{}", self.object(receiver)),
         }
     }
 

@@ -80,16 +80,40 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
         let jdk = jdk || method.jdk_code;
         let (mut receivers, mut arguments) = (HashMap::new(), HashMap::new());
+        let mut uninitialized = HashMap::new();
         for s in &method.body {
-            visit_stmt(s, &mut |_| {}, &mut |s| {
-                if let Stmt::Local { name, init: Some(init), .. } = s {
-                    if name.starts_with(crate::lower::RECEIVER) {
-                        receivers.insert(name.as_str(), init);
-                    } else if name.starts_with(crate::lower::ARGUMENT) {
-                        arguments.insert(name.as_str(), init);
-                    }
+            visit_stmt(s, &mut |_| {}, &mut |s| match s {
+                Stmt::Local { name, init: Some(init), .. } if name.starts_with(crate::lower::RECEIVER) => {
+                    receivers.insert(name.as_str(), init);
                 }
+                Stmt::Local { name, init: Some(init), .. } if name.starts_with(crate::lower::ARGUMENT) => {
+                    arguments.insert(name.as_str(), init);
+                }
+                Stmt::Local { name, init: None, pos, .. } => {
+                    uninitialized.insert(name.as_str(), *pos);
+                }
+                _ => {}
             });
+        }
+        // The locals that hold an element that a run of statements reads more than once
+        // (`lower/element_reads.rs`): declared where the first read is, which becomes
+        // `(name = element)` there.
+        let mut elements = HashMap::new();
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Assign { op: None, target: Place::Var(name), value } = &x.kind
+                            && matches!(value.kind, ExprKind::Index(..))
+                            && uninitialized.get(name.as_str()).is_some_and(|&p| p == x.pos && p == value.pos)
+                        {
+                            elements.insert(name.as_str(), &**value);
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
         }
         let at = Messages {
             class,
@@ -99,6 +123,7 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
             jdk,
             receivers,
             arguments,
+            elements,
             declared: Default::default(),
             proxied: Default::default(),
         };
@@ -162,6 +187,17 @@ fn is_object(decl: &TypeDecl) -> bool {
     decl.name == OBJECT || decl.name == "java.lang.Object"
 }
 
+/// Whether a block of `cases` is the call `c.getEnumConstants()` as lowering writes it
+/// (`lower::classes`): `{ Class c_ = c; NullChecked(c_); yield .. }`.
+fn enum_constants(cases: &[Case]) -> bool {
+    let [Case { body, .. }] = cases else { return false };
+    matches!(
+        &body[..],
+        [Stmt::Local { .. }, Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NullChecked(Some(name)), _), .. }), Stmt::Yield(_)]
+            if *name == crate::lower::ENUM_CONSTANTS
+    )
+}
+
 /// The qualified name of the outermost class that declares type `t`, by which `BytecodeNames`
 /// knows its code: `com.example.Main` for `com.example.Main.Inner`, and for the local class
 /// `com.example.Main$1Local` or the lambda's `com.example.Main$$Lambda`.
@@ -210,6 +246,9 @@ struct Messages<'a> {
     /// The locals that hold an argument of a call that a receiver is computed before
     /// (`lower/argument_order.rs`), with the argument.
     arguments: HashMap<&'a str, &'a Expr>,
+    /// The locals that hold an array element that lowering reads once for several reads
+    /// (`lower/element_reads.rs`), with the element: the JVM loads the element at each.
+    elements: HashMap<&'a str, &'a Expr>,
     /// What the method's body declares (`declared`).
     declared: std::cell::OnceCell<Declared>,
     /// Whether the method is that of a method reference's class that the JVM makes (`proxied`).
@@ -250,9 +289,40 @@ impl Messages<'_> {
             let read = Expr { kind: ExprKind::Var(v.to_string()), pos: x.pos, ty: x.ty, id: x.id };
             self.unboxing(&read, out);
         }
+        // The object of a protected member of a superclass in another package that a nested
+        // class uses, which javac's accessor method dereferences, as its parameter `x0`.
+        let accessed = match &x.kind {
+            ExprKind::MethodCall { receiver: object, name, .. }
+            | ExprKind::Field { object, name }
+            | ExprKind::Assign { target: Place::Field { object, name }, .. }
+            | ExprKind::IncDec { target: Place::Field { object, name }, .. }
+                if !self.jdk =>
+            {
+                self.names
+                    .get(self.outermost, object.pos, NameKind::Accessor, name)
+                    .map(|text| (object.id, text))
+            }
+            _ => None,
+        };
+        // A boxed parameter of the class the JVM makes for a method reference that an operation
+        // of the translator's takes as a primitive (`Character::toString` of an `Integer`): that
+        // class unboxes it.
+        if let ExprKind::Builtin(_, args) = &x.kind {
+            for arg in args.iter().filter(|a| matches!(a.ty, Type::Boxed(_)) && self.reference_param(a)) {
+                out.entry(arg.id).or_insert(None);
+            }
+        }
         let mut add = |object: &Expr, action: Option<String>| {
             // A message that the expression above gave (a native's).
             if out.contains_key(&object.id) {
+                return;
+            }
+            if let Some((id, text)) = accessed
+                && id == object.id
+            {
+                if let Some(action) = action {
+                    out.insert(object.id, Some(format!("{action} because \"{text}\" is null")));
+                }
                 return;
             }
             // The JVM gives no message for the null receiver of an unbound method reference
@@ -282,6 +352,21 @@ impl Messages<'_> {
                 let message =
                     format!("Cannot invoke \"java.util.Iterator.{name}()\" because \"<local5>\" is null");
                 out.insert(receiver.id, Some(message));
+            }
+            // `n.byteValue()` or `n.shortValue()` of a `Number`, which lowering narrows from
+            // `intValue()` (`lower::object::number_call`).
+            ExprKind::Cast(to @ (Type::Byte | Type::Short), inner)
+                if let ExprKind::MethodCall { receiver, name, resolved: Some(r), .. } = &inner.kind
+                    && name == "intValue"
+                    && inner.pos == x.pos
+                    && self.class.types[self.class.methods[*r].class].name == NUMBER =>
+            {
+                let method = if *to == Type::Byte { "byteValue" } else { "shortValue" };
+                let call = match self.jdk {
+                    true => Some(format!("java.lang.Number.{method}()")),
+                    false => self.call(x.pos, method),
+                };
+                add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
             }
             ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. }
                 if !self.class.methods[*r].is_static =>
@@ -634,6 +719,44 @@ impl Messages<'_> {
                         };
                         add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
                     }
+                    // `c.isAssignableFrom(d)` of a null class `c`, a call of `Class`; a null `d`
+                    // fails in the JVM's native code, which gives no message.
+                    Builtin::ClassMethod(ClassOp::IsAssignableFrom) => {
+                        let call = match self.jdk {
+                            true => Some("java.lang.Class.isAssignableFrom(java.lang.Class)".to_string()),
+                            false => self.call(x.pos, "isAssignableFrom"),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                        if let Some(class) = args.get(1) {
+                            out.entry(class.id).or_insert(None);
+                        }
+                    }
+                    // `o.wait(..)`, `o.notify()` and `o.notifyAll()` of a null `o`, which javac
+                    // calls as `Object`'s: `wait()` is `wait(0L)` at the call's own position
+                    // (`lower::sync`).
+                    Builtin::Native(native @ (Native::MonitorWait | Native::MonitorNotify { .. })) => {
+                        let (name, params) = match (native, &args[1..]) {
+                            (Native::MonitorNotify { all: true }, _) => ("notifyAll", ""),
+                            (Native::MonitorNotify { all: false }, _) => ("notify", ""),
+                            (_, [timeout])
+                                if matches!(timeout.kind, ExprKind::Long(0)) && timeout.pos == x.pos =>
+                            {
+                                ("wait", "")
+                            }
+                            (_, [_]) => ("wait", "long"),
+                            _ => ("wait", "long, int"),
+                        };
+                        let call = match self.jdk {
+                            true => Some(format!("Object.{name}({params})")),
+                            false => self.call(x.pos, name),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
+                    }
+                    // `Thread.holdsLock(null)`, which the JVM's native code throws without a
+                    // message.
+                    Builtin::Native(Native::HoldsLock) => {
+                        out.insert(args[0].id, None);
+                    }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {
                         add(&args[0], Some("Cannot enter synchronized block".to_string()))
@@ -649,6 +772,9 @@ impl Messages<'_> {
                     // as the call site's own types make it (`VarHandle.set(Main, int)`).
                     Builtin::NullChecked(Some(name)) => {
                         let call = match self.jdk {
+                            true if *name == crate::lower::ENUM_CONSTANTS => {
+                                Some(format!("java.lang.Class.{name}()"))
+                            }
                             true => self.named_call(x, name).flatten(),
                             false => self.call(x.pos, name),
                         };
@@ -663,6 +789,11 @@ impl Messages<'_> {
                     }
                     _ => {}
                 }
+            }
+            // `System.getProperty(key)` of a key that is not a constant, lowered as a switch on
+            // it (`lower::system`): `System.checkKey` throws for a null key, with a message.
+            ExprKind::Switch { selector, cases } if property_switch(cases) => {
+                out.insert(selector.id, Some("key can't be null".to_string()));
             }
             ExprKind::Switch { selector, .. } => self.switch(selector, out),
             _ => {}
@@ -856,6 +987,9 @@ impl Messages<'_> {
             // of the value it stores (`dup`, `dup_x1`, `dup_x2`), which the JVM follows back to
             // where the value came from.
             ExprKind::Assign { op: None, value, .. } => return self.source(value, detail),
+            ExprKind::Var(name) if let Some(element) = self.elements.get(name.as_str()) => {
+                return self.source(element, detail);
+            }
             // The iterator of a for-each loop, javac's own local `i$`; in the JDK's code, the walk
             // of its slots (`jdk_temps`).
             ExprKind::Var(_) if let Some(at) = self.iterator(e) => {
@@ -921,6 +1055,12 @@ impl Messages<'_> {
                 };
                 format!("{array}[{index}]")
             }
+            // `i++` and `++i` of a local, an index as in `a[i++]`: javac loads the local before or
+            // after its `iinc`, so the value is the local's.
+            ExprKind::IncDec { target: Place::Var(name), .. } if e.ty.is_integral() => {
+                let read = Expr { kind: ExprKind::Var(name.clone()), pos: e.pos, ty: e.ty, id: e.id };
+                return self.source(&read, detail);
+            }
             // Values that the JVM does not follow back: computed ones, and new objects.
             ExprKind::Conditional(..) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::New { .. } => {
                 return Some(Source::Hidden);
@@ -951,15 +1091,22 @@ impl Messages<'_> {
         }
     }
 
-    /// `e` as the JVM sees the value: through the receivers that lowering holds (`held`) and the
-    /// conversions that change nothing (`transparent`), also a held call under a cast.
+    /// `e` as the JVM sees the value: through the receivers and arguments that lowering holds
+    /// (`held`, `argument`: an argument unboxed where the call reads its local is the value
+    /// that javac unboxes right away) and the conversions that change nothing (`transparent`),
+    /// also a held call under a cast.
     fn unwrapped<'e>(&'e self, e: &'e Expr) -> Option<&'e Expr> {
-        Some(self.held(transparent(self.held(e))?))
+        Some(self.held(transparent(self.held(self.argument(e)))?))
     }
 
     /// The method that `e` calls, as the class file names it, if it is a call.
     fn called(&self, e: &Expr) -> Option<String> {
         match &e.kind {
+            // `c.getEnumConstants()`, a block that checks `c` (`lower::classes`).
+            ExprKind::Switch { cases, .. } if enum_constants(cases) => match self.jdk {
+                true => Some(format!("java.lang.Class.{}()", crate::lower::ENUM_CONSTANTS)),
+                false => self.call(e.pos, crate::lower::ENUM_CONSTANTS),
+            },
             ExprKind::MethodCall { name, .. } => self.call_of(e, name).or_else(|| self.jdk_call(e)),
             ExprKind::Call { name, resolved, .. } => self.call_of(e, name).or_else(|| {
                 // A call of `Class` or `ClassLoader` that the translator's module code answers
@@ -1095,13 +1242,13 @@ impl Messages<'_> {
         let mut named = self.class.class_file.calls.get(&key)?;
         // One of calls that start alike, by its first argument.
         let first = match &x.kind {
-            ExprKind::MethodCall { args, .. } | ExprKind::Call { args, .. } => args.first(),
-            ExprKind::Builtin(_, args) => args.get(1),
+            ExprKind::MethodCall { args, .. } | ExprKind::Call { args, .. } => self.first_argument(x, args),
+            ExprKind::Builtin(_, args) => args.get(1).map(|a| a.pos),
             _ => None,
         };
         if named.is_none()
             && let Some(first) = first
-            && let Some(chained) = self.class.class_file.chained_calls.get(&(key.0, key.1, key.2, first.pos))
+            && let Some(chained) = self.class.class_file.chained_calls.get(&(key.0, key.1, key.2, first))
         {
             named = chained;
         }
@@ -1186,6 +1333,11 @@ impl Messages<'_> {
     /// message for a null that this class dereferences.
     fn reference_param(&self, object: &Expr) -> bool {
         let method = self.method;
+        // Its casts (`checkcast`, an unboxing) are the reference class's code too.
+        let mut object = object;
+        while let ExprKind::Cast(_, inner) = &object.kind {
+            object = inner;
+        }
         object.pos == method.pos
             && matches!(&object.kind, ExprKind::Var(name) if method.params.iter().any(|p| &p.name == name))
             && *self.proxied.get_or_init(|| self.proxied())
@@ -1333,15 +1485,29 @@ impl Messages<'_> {
             let (ExprKind::MethodCall { args, .. } | ExprKind::Call { args, .. }) = &x.kind else {
                 return None;
             };
-            let first = args.first().map(|a| self.argument(a).pos);
+            let first = self.first_argument(x, args);
             let at = first.map_or(String::new(), |p| format!("{}:{}", p.line, p.column));
             self.call(x.pos, &format!("{name}@{at}")).or_else(|| {
                 // One without arguments, by the class of its receiver.
-                let ExprKind::MethodCall { receiver, args, .. } = &x.kind else { return None };
+                let ExprKind::MethodCall { receiver, .. } = &x.kind else { return None };
                 let class = self.binary_name(self.class.class_index(self.held(receiver).ty)?)?;
-                args.is_empty().then(|| self.call(x.pos, &format!("{name}@#{class}"))).flatten()
+                first.is_none().then(|| self.call(x.pos, &format!("{name}@#{class}"))).flatten()
             })
         })
+    }
+
+    /// Where the first argument of call `x` (of arguments `args`, as lowered) starts in the
+    /// source: the first of the arguments that lowering packs into an array for a varargs
+    /// parameter (`lower/varargs.rs`, an array literal at the call's own position), `None`
+    /// where the source passes none.
+    fn first_argument(&self, x: &Expr, args: &[Expr]) -> Option<Pos> {
+        let first = self.argument(args.first()?);
+        match &first.kind {
+            ExprKind::ArrayLit(packed) if args.len() == 1 && first.pos == x.pos => {
+                packed.first().map(|a| self.argument(a).pos)
+            }
+            _ => Some(first.pos),
+        }
     }
 
     /// The method `name` of the call at `pos`, as the class file names it: `Main$Box.size()`.
@@ -1754,6 +1920,13 @@ fn builder_method(op: BuilderOp) -> Option<&'static str> {
         BuilderOp::GetChars => "getChars",
         BuilderOp::EnsureCapacity => "ensureCapacity",
     })
+}
+
+/// Whether `cases` are those of `System.getProperty(key)` of a computed key (`lower::system`),
+/// which always have the case of `java.class.path`, and the default last.
+fn property_switch(cases: &[Case]) -> bool {
+    let class_path = |c: &Case| matches!(&c.labels[..], [CaseLabel::Value(Expr { kind: ExprKind::Str(key), .. })] if key == "java.class.path");
+    matches!(cases.last().map(|c| &c.labels[..]), Some([CaseLabel::Default])) && cases.iter().any(class_path)
 }
 
 /// `e` without the casts that the class file has no instruction for, or that pass the value
