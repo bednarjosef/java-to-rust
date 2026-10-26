@@ -157,7 +157,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         Kind::Class(c) => h.is_subtype(*c, t),
         // A failure not known exactly may be of any class of the JDK; one that is known is of
         // its class, a standard one or one that `standard_subclass` knows the superclass of.
-        Kind::Runtime("?") => from_jdk(&class.types[t]),
+        Kind::Runtime("?") => from_jdk(class, &class.types[t]),
         Kind::Runtime(name) => {
             let decl = &class.types[t].name;
             decl == name || crate::lower::is_standard(decl) && standard_subclass(name, decl)
@@ -208,7 +208,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // So do the constructors of the JDK's exceptions, which test only their arguments
     // (`URISyntaxException(input, reason, index)` throws for a null input or an index below -1),
     // and which the JDK's code that throws them never gives such arguments.
-    let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(&class.types[m.class])).collect();
+    let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(class, &class.types[m.class])).collect();
     let bugs_only: Vec<bool> = class
         .methods
         .iter()
@@ -434,7 +434,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // only for bugs (a collection changed while it is shown) and are not looked at.
     for (m, p) in points.iter().enumerate().flat_map(|(m, ps)| ps.iter().map(move |p| (m, p))) {
         let Raise::Text(shown) = &p.raise else { continue };
-        let program = shown.iter().filter(|&&c| !from_jdk(&class.types[class.methods[c].class]));
+        let program = shown.iter().filter(|&&c| !from_jdk(class, &class.types[class.methods[c].class]));
         if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[at[m]])) {
             reject(p.pos, "catching an exception that this toString may throw not supported yet");
         }
@@ -1408,7 +1408,7 @@ fn expr_points(
         let (calls, shown): (Vec<usize>, Vec<usize>) = shown.into_iter().partition(|&i| {
             calls_text
                 && matches!(class.methods[i].name.as_str(), "toString" | "hashCode")
-                && !from_jdk(&class.types[class.methods[i].class])
+                && !from_jdk(class, &class.types[class.methods[i].class])
         });
         if !calls.is_empty() {
             push(Raise::Call(calls), object.pos, "this toString");
@@ -1519,15 +1519,23 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
     }
 }
 
-/// Whether `decl` is a class of the JDK, which no program may declare. The classes that lowering
-/// provides (the standard exceptions, `Throwable`, `Thread`) have no package, but their JDK name.
-pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
+/// Whether `decl` is a class of the JDK, which no program may declare: one of its packages under
+/// `java`, `javax`, `jdk` or `sun`, or of a module of the JDK's that its bootstrap or platform
+/// class loader loads (`Class::module_labels`), as `java.xml`'s `com.sun.org.apache.xalan`. The
+/// classes that lowering provides (the standard exceptions, `Throwable`, `Thread`) have no
+/// package, but their JDK name. A module of the JDK's that its application class loader loads,
+/// as javac's `jdk.compiler`, is a program's own code here, as when javac is the program.
+pub(super) fn from_jdk(class: &Class, decl: &TypeDecl) -> bool {
     let in_jdk = |name: &str| {
         ["java", "javax", "jdk", "sun"]
             .iter()
             .any(|root| name.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
     };
-    in_jdk(&decl.package) || decl.package.is_empty() && in_jdk(&decl.name)
+    in_jdk(&decl.package)
+        || decl.package.is_empty() && in_jdk(&decl.name)
+        || class.module_labels.get(&decl.package).is_some_and(|label| {
+            label.ends_with(" of loader 'bootstrap'") || label.ends_with(" of loader 'platform'")
+        })
 }
 
 /// The objects whose text an expression makes, which runs their `toString`.
