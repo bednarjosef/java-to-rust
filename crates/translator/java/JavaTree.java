@@ -758,7 +758,9 @@ public class JavaTree {
             out.append(",\"native\":true");
         }
         out.append(",\"type\":");
-        string(typeText(e.asType()), out);
+        // A variable's type as its uses are typed: a lambda's parameter inferred as a capture of
+        // `?` has the bound of the capture's type variable, as the expressions that read it do.
+        string(e.getKind().isVariable() ? typeName(e.asType()) : typeText(e.asType()), out);
         if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {
             overrides((ExecutableElement) e, t, out);
             // The erased signature of an interface's method, which a proxy class declares it
