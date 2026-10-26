@@ -166,16 +166,20 @@ Design: [object-model.md](object-model.md).
   inheritance, `Iface.super.m()`, and enums implementing interfaces. An interface type is an enum
   over its implementing classes, or that class's object when there is only one.
 - **`instanceof` and casts** are `matches!`/`if let` on the type's enum, including patterns,
-  record patterns, negated patterns (`if (!(x instanceof T t)) return;` becomes `let .. else`)
-  and `||` chains with a negated pattern. A failed downcast throws `ClassCastException`.
+  record patterns, negated patterns (`if (!(x instanceof T t)) return;` becomes `let .. else`,
+  and the branches of `!(o instanceof T t) ? false : ..t..` swap), `||` chains with a negated
+  pattern, and an `if` whose negated `&&` chain or `||` inside an `&&` chain binds a pattern
+  (`lower/negated_patterns.rs`). A failed downcast throws `ClassCastException`.
 - **`Object`** is an enum with a variant per class of the program whose values become `Object`s,
   plus strings, boxes, arrays, builders and class values (`Object::String(..)`,
   `Object::Integer(5)`, `Object::IntArray(..)`). `equals`/`hashCode` are the program's where
   defined, otherwise identity for objects and value for strings and boxes. Default `toString`
   prints the binary name and hash code (`Point@1b6d3586`). `new Object()` is `PlainObject`.
-  `==` between two `Object`s that may both be strings or boxes is rejected, except in
-  `a == b || a.equals(b)`; a points-to analysis (`analysis/object_values.rs`) decides which sides
-  may be. Where the program's strings are shared (above), strings in them compare as objects.
+  `==` between two `Object`s that may both be strings or boxes compares them at run time
+  (above), except in `a == b || a.equals(b)`, where `equals` decides either way; a points-to
+  analysis (`analysis/object_values.rs`) decides which sides may be. An atomic compare of
+  `Object` elements that may be strings or boxes is rejected. Where the program's strings are
+  shared (above), strings in them compare as objects.
 - `Comparable`, `Number`, `CharSequence` and `java.lang.Enum` used as types are enums like
   `Object` over the program's implementors and the matching library values.
 - **Generics** translate erased, as javac compiles them, with javac's casts and bridge methods.
@@ -220,8 +224,10 @@ Design: [closures-and-nested-classes.md](closures-and-nested-classes.md).
 - **Inner, local and anonymous classes** are lowered as javac desugars them (`lower/captures.rs`,
   `lower/inner.rs`): an inner object holds its enclosing object in the field `outer`, and the
   locals a local class reads become fields set from its constructor. `getName` gives javac's
-  binary names (`Main$1Labeler`, `Main$1`). Not yet: an inner class with subclasses whose
-  constructor uses `this` as a value or calls an overridable method.
+  binary names (`Main$1Labeler`, `Main$1`). An inner class tree takes Java's construction order
+  as any other (above), passing each class's enclosing instance and captured locals on, upcast
+  where a superclass is an inner class of the enclosing class's superclass. Not yet: such a tree
+  where a constructor passes them on other than as they are (`analysis/whole_objects.rs`).
 - **Lambdas and method references** (`lower/lambdas.rs`) are each a class implementing the
   functional interface, with the captured locals as fields. A bound method reference evaluates
   its receiver once and checks it for null, as Java does.
