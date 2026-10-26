@@ -546,6 +546,11 @@ impl<'t> Lowering<'t> {
     /// when it is that assignment in a static block (see `static_value`), which is left out.
     pub(super) fn handle_definition(&self, node: Node<'t>) -> Option<(usize, Node<'t>)> {
         let e = node.get("expression").filter(|_| node.kind() == "EXPRESSION_STATEMENT")?;
+        self.handle_definition_of(e)
+    }
+
+    /// The class and declaration of the field handle that the assignment `e` gives its value.
+    fn handle_definition_of(&self, e: Node<'t>) -> Option<(usize, Node<'t>)> {
         let symbol = e.get("variable").filter(|_| e.kind() == "ASSIGNMENT").and_then(|v| plain(v).symbol());
         let symbol = symbol.filter(|s| s.kind == "FIELD" && s.is_static)?;
         self.static_field(&symbol).filter(|&(owner, member)| self.is_handle(owner, member))
@@ -554,9 +559,10 @@ impl<'t> Lowering<'t> {
     /// Whether `stmt`, a statement of `block`, declares a local that the block uses only to make
     /// handles, whose definitions are left out (`handle_definition`), so that the local is left
     /// out with them: a `Field` whose value is `getDeclaredField`, used only as the argument of
-    /// `staticFieldOffset(f)`, `staticFieldBase(f)` or `objectFieldOffset(f)`, or a
+    /// `staticFieldOffset(f)`, `staticFieldBase(f)` or `objectFieldOffset(f)`, a
     /// `MethodHandles.Lookup` whose value is `MethodHandles.lookup()`, used only in the values of
-    /// `VarHandle` constants (`SharedThreadContainer` finds its handles so).
+    /// `VarHandle` constants (`SharedThreadContainer` finds its handles so), or a field updater
+    /// whose value is `newUpdater`, used only in the values of updater constants.
     pub(super) fn handle_field_local(&self, block: Node<'t>, stmt: Node<'t>) -> bool {
         let Some(ty) = stmt.symbol().filter(|_| stmt.kind() == "VARIABLE").map(|s| s.ty) else {
             return false;
@@ -578,6 +584,27 @@ impl<'t> Lowering<'t> {
                         .find_map(|m| call_of(n, m));
                     in_handles +=
                         usize::from(handle.is_some_and(|args| args.first().is_some_and(|a| named(*a))));
+                });
+            }
+            // An updater that a static block makes in a local, then gives its constant.
+            _ if let Some(kind) = updater_kind(ty) => {
+                let made = self.updater_value(init, kind, Some(block)).is_some_and(|(v, _)| {
+                    v.symbol().is_some_and(|s| v.kind() == "METHOD_INVOCATION" && s.name == "newUpdater")
+                });
+                if !made {
+                    return false;
+                }
+                walk(block.0, &mut |n| {
+                    uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
+                    let constant = n.kind() == "ASSIGNMENT"
+                        && self
+                            .handle_definition_of(n)
+                            .is_some_and(|(owner, member)| self.updater_declaration(owner, member).is_some());
+                    if let Some(value) = n.get("expression").filter(|_| constant) {
+                        walk(value.0, &mut |v| {
+                            in_handles += usize::from(v.kind() == "IDENTIFIER" && v.str("name") == name)
+                        });
+                    }
                 });
             }
             "java.lang.invoke.MethodHandles.Lookup" | METHOD_TYPE => {
@@ -1134,10 +1161,32 @@ impl<'t> Lowering<'t> {
     /// (in the same outermost class when it is private, in the same package when it is neither
     /// public nor protected; a protected one, whose updater checks the class of its objects
     /// against `owner`'s, is not followed).
+    /// The expression that gives an updater of kind `kind` its value `value`: `value` itself, or
+    /// what it casts to an updater of that kind (netty casts the updaters of generic classes to
+    /// raw ones), or the value of the static block `block`'s local it reads (`Recycler` makes
+    /// `STATE_UPDATER` so), with the block that is in.
+    fn updater_value(
+        &self,
+        value: Node<'t>,
+        kind: Kind,
+        block: Option<Node<'t>>,
+    ) -> Option<(Node<'t>, Option<Node<'t>>)> {
+        match value.kind() {
+            "TYPE_CAST" if updater_kind(value.java_type()) == Some(kind) => {
+                self.updater_value(plain(value.get("expression")?), kind, block)
+            }
+            "IDENTIFIER" => {
+                let (value, block) = self.defined(value, block)?;
+                self.updater_value(plain(value), kind, block)
+            }
+            _ => Some((value, block)),
+        }
+    }
+
     fn updater_declaration(&self, owner: usize, member: Node<'t>) -> Option<(usize, &'t str)> {
         let kind = member.symbol().and_then(|s| updater_kind(s.ty))?;
         let (value, block) = self.static_value(owner, member)?;
-        let value = plain(value);
+        let (value, block) = self.updater_value(plain(value), kind, block)?;
         let symbol =
             value.symbol().filter(|s| value.kind() == "METHOD_INVOCATION" && s.name == "newUpdater")?;
         (updater_kind(symbol.owner)? == kind).then_some(())?;
