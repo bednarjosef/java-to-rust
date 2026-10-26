@@ -53,6 +53,7 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("Field", "java.lang.reflect"),
     ("Constructor", "java.lang.reflect"),
     ("DataFormatException", "java.util.zip"),
+    ("PatternSyntaxException", "java.util.regex"),
     ("UnsupportedCharsetException", "java.nio.charset"),
     ("IllegalCharsetNameException", "java.nio.charset"),
 ];
@@ -62,7 +63,7 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
 /// name: `owner#name`, `owner#` for any method of the owner, or `METHOD_INVOCATION` for any
 /// call; `owner#name(parameters)result` for one method of the name, by javac's signature;
 /// `owner#<init>` for a constructor; `enum#valueOf` for the `valueOf` of any enum of the
-/// program).
+/// program; `MALFORMED_PATTERN` for a regular expression that may be malformed).
 const RAISED: &[(&str, &[&str])] = &[
     (
         "java.lang.ArithmeticException",
@@ -221,6 +222,8 @@ const RAISED: &[(&str, &[&str])] = &[
     ("java.util.MissingFormatWidthException", FORMATS),
     ("java.util.UnknownFormatConversionException", FORMATS),
     ("java.util.UnknownFormatFlagsException", FORMATS),
+    // A malformed regular expression (`java_runtime::regex`).
+    ("java.util.regex.PatternSyntaxException", &[MALFORMED_PATTERN]),
     // Bad compressed data (`Native::InflateBytes`).
     ("java.util.zip.DataFormatException", &["java.util.zip.Inflater#inflate"]),
     // A monitor that the thread does not hold.
@@ -314,6 +317,10 @@ const RAISED: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+/// The operation of a regular expression call of `String` whose pattern is not a constant that
+/// compiles (`program::may_be_malformed`).
+const MALFORMED_PATTERN: &str = "regex#malformed";
 
 /// The calls that format text with the runtime's `format` (`Builtin::Format`).
 const FORMATS: &[&str] = &[
@@ -475,23 +482,14 @@ pub fn standard_local_name(name: &str) -> &str {
     name
 }
 
-/// The classes that are not standard but that the runtime raises (`regex.rs`), each with its
-/// standard superclass. A translation cannot catch them: a `catch` that would is rejected.
-const RAISED_NOT_STANDARD: &[(&str, &str)] =
-    &[("java.util.regex.PatternSyntaxException", "java.lang.IllegalArgumentException")];
-
-/// Whether the standard class `name` (or one of `RAISED_NOT_STANDARD`) is the standard class
-/// `ancestor` or a subclass of it.
+/// Whether the standard class `name` is the standard class `ancestor` or a subclass of it.
 pub fn standard_subclass(name: &str, ancestor: &str) -> bool {
     let mut at = Some(name.to_string());
     while let Some(c) = at {
         if c == ancestor {
             return true;
         }
-        at = template_type(&c)
-            .and_then(|d| d["extendsClause"]["javaType"].as_str())
-            .or_else(|| RAISED_NOT_STANDARD.iter().find(|(n, _)| *n == c).map(|(_, s)| *s))
-            .map(str::to_string);
+        at = template_type(&c).and_then(|d| d["extendsClause"]["javaType"].as_str()).map(str::to_string);
     }
     false
 }
@@ -718,6 +716,10 @@ impl Uses {
                                 self.members.insert(member);
                             }
                         }
+                        // A regular expression whose pattern may be malformed.
+                        if crate::program::may_be_malformed(v) {
+                            self.operations.insert(MALFORMED_PATTERN.to_string());
+                        }
                         self.operations.insert(kind.clone());
                         self.operations.insert(format!("{owner}#{}", text(symbol, "name")));
                         self.operations.insert(format!(
@@ -793,9 +795,12 @@ fn raise_classes(uses: &mut Uses, raised: &mut HashSet<String>) {
             || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
         if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
             uses.classes.insert(class.to_string());
-            // A format's exception is built from the message and a `raised` flag (see
-            // `raised_objects`), since its `(String)` constructor, if any, takes something else.
-            let from_message = if standard_subclass(class, "java.util.IllegalFormatException") {
+            // A format's exception, and a pattern's, is built from the message and a `raised`
+            // flag (see `raised_objects`), since its `(String)` constructor, if any, takes
+            // something else.
+            let from_message = if standard_subclass(class, "java.util.IllegalFormatException")
+                || *class == "java.util.regex.PatternSyntaxException"
+            {
                 "(java.lang.String,boolean)void"
             } else {
                 "(java.lang.String)void"

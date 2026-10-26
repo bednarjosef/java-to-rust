@@ -10,6 +10,11 @@
 //! JDK's own `Pattern` run it where the program has it, `lower::regex`), and any other pattern
 //! fails when it is compiled at run time.
 //!
+//! A malformed pattern throws `PatternSyntaxException` with the description and the index that
+//! Java's `Pattern` gives it: the parser reads as Java's does, with a quote written out as escapes
+//! first (`without_quotes`) and a cursor that runs past the end of the pattern where Java's does,
+//! so it finds each error at Java's position.
+//!
 //! The input is matched as code points, as Java's `Pattern` matches: a lone surrogate is a code
 //! point of its own, which `.` and a negated set match. A pattern or a replacement string with a
 //! lone surrogate is not supported.
@@ -129,15 +134,17 @@ impl Parser<'_> {
     fn error<T>(&self, what: &str) -> Result<T, Problem> {
         Err(Problem {
             message: format!("{what} in the regular expression \"{}\"", self.pattern),
-            malformed: false,
+            syntax: None,
         })
     }
 
-    /// A pattern that Java rejects with `PatternSyntaxException`.
-    fn malformed<T>(&self, what: &str) -> Result<T, Problem> {
+    /// A pattern that Java rejects with `PatternSyntaxException`: its description and index, as
+    /// Java's `Pattern` gives them (its `cursor - 1` where it finds the error, in code points;
+    /// `at` is that cursor at the same point, as this parser reads as Java's does).
+    fn malformed<T>(&self, description: &str, index: i32) -> Result<T, Problem> {
         Err(Problem {
-            message: format!("{what} in the regular expression \"{}\"", self.pattern),
-            malformed: true,
+            message: syntax_message(description, self.pattern, index),
+            syntax: Some((description.to_string(), index)),
         })
     }
 
@@ -156,20 +163,8 @@ impl Parser<'_> {
             if c == '|' || c == ')' {
                 break;
             }
-            if c == '\\' && self.chars.get(self.at + 1) == Some(&'Q') {
-                self.at += 2;
-                while self.at < self.chars.len() {
-                    if self.chars[self.at] == '\\' && self.chars.get(self.at + 1) == Some(&'E') {
-                        self.at += 2;
-                        break;
-                    }
-                    let node = Node::Char(self.chars[self.at]);
-                    seq.push(Piece { node, min: 1, max: 1, greed: Greed::Greedy });
-                    self.at += 1;
-                }
-                continue;
-            }
-            let node = self.atom()?;
+            // A `{` where an atom would be repeats nothing, as in Java (`{2}` matches "").
+            let node = if c == '{' { Node::Group(vec![Vec::new()], None) } else { self.atom()? };
             let (min, max, greed) = self.quantifier()?;
             seq.push(Piece { node, min, max, greed });
         }
@@ -183,8 +178,14 @@ impl Parser<'_> {
                 // The group's kind, from what follows `(?`: `None` for a capturing group.
                 let kind = if self.peek() == Some('?') {
                     let kind = self.chars.get(self.at + 1).copied();
-                    if !matches!(kind, Some(':' | '>' | '=' | '!')) {
-                        return self.error("lookbehind, flags and named groups");
+                    match kind {
+                        Some(':' | '>' | '=' | '!') => {}
+                        Some('$' | '@') => return self.malformed("Unknown group type", self.at as i32 + 1),
+                        // Flags (none, as in `(?)`, too), lookbehind and named groups.
+                        Some('i' | 'd' | 'm' | 's' | 'u' | 'c' | 'x' | 'U' | '-' | ')' | '<') => {
+                            return self.error("lookbehind, flags and named groups");
+                        }
+                        _ => return self.malformed("Unknown inline modifier", self.at as i32 + 1),
                     }
                     self.at += 2;
                     kind
@@ -194,8 +195,9 @@ impl Parser<'_> {
                 };
                 let number = self.groups;
                 let alt = self.alt()?;
+                let end = self.at;
                 if self.next() != Some(')') {
-                    return self.malformed("an unclosed group");
+                    return self.malformed("Unclosed group", end as i32);
                 }
                 match kind {
                     None => Node::Group(alt, Some(number)),
@@ -227,7 +229,9 @@ impl Parser<'_> {
                     Node::Set(Set { classes: vec![(class, negated)], ..Set::default() })
                 }
             },
-            '*' | '+' | '?' | '{' => return self.malformed("a dangling quantifier"),
+            '*' | '+' | '?' => {
+                return self.malformed(&format!("Dangling meta character '{c}'"), self.at as i32 - 1);
+            }
             c => Node::Char(c),
         })
     }
@@ -247,12 +251,18 @@ impl Parser<'_> {
         n
     }
 
-    fn number(&mut self) -> Option<u32> {
-        let start = self.at;
-        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+    /// The digits of a repetition's bound, at least one; one that takes it past Java's `int` is
+    /// an error there.
+    fn bound(&mut self) -> Result<u32, Problem> {
+        let mut n: i32 = 0;
+        while let Some(digit) = self.peek().and_then(|c| c.to_digit(10)) {
+            let Some(more) = n.checked_mul(10).and_then(|n| n.checked_add(digit as i32)) else {
+                return self.malformed("Illegal repetition range", self.at as i32);
+            };
+            n = more;
             self.at += 1;
         }
-        self.chars[start..self.at].iter().collect::<String>().parse().ok()
+        Ok(n as u32)
     }
 
     fn quantifier(&mut self) -> Result<(u32, u32, Greed), Problem> {
@@ -262,15 +272,21 @@ impl Parser<'_> {
             Some('?') => (0, 1),
             Some('{') => {
                 self.at += 1;
-                let Some(min) = self.number() else { return self.malformed("a malformed repetition") };
+                if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    return self.malformed("Illegal repetition", self.at as i32);
+                }
+                let min = self.bound()?;
                 let max = if self.peek() == Some(',') {
                     self.at += 1;
-                    if self.peek() == Some('}') { u32::MAX } else { self.number().unwrap_or(0) }
+                    if self.peek() == Some('}') { u32::MAX } else { self.bound()? }
                 } else {
                     min
                 };
-                if self.peek() != Some('}') || max < min {
-                    return self.malformed("a malformed repetition");
+                if self.peek() != Some('}') {
+                    return self.malformed("Unclosed counted closure", self.at as i32);
+                }
+                if max < min {
+                    return self.malformed("Illegal repetition range", self.at as i32);
                 }
                 (min, max)
             }
@@ -286,18 +302,62 @@ impl Parser<'_> {
         Ok((min, max, greed))
     }
 
-    fn hex(&mut self, digits: usize) -> Result<char, Problem> {
-        let text: String = self.chars.get(self.at..self.at + digits).unwrap_or_default().iter().collect();
-        self.at += digits;
-        match u32::from_str_radix(&text, 16).ok().and_then(char::from_u32) {
-            Some(c) if text.len() == digits => Ok(c),
-            _ => self.malformed("a malformed escape"),
+    /// The hexadecimal digit at the cursor, read as Java's `read()` does: past the end too.
+    fn read_hex(&mut self) -> Option<u32> {
+        let digit = self.peek().and_then(|c| c.to_digit(16));
+        self.at += 1;
+        digit
+    }
+
+    /// The code unit of `\xhh`, after the `x`.
+    fn hex_escape(&mut self) -> Result<char, Problem> {
+        let illegal = |p: &Self| p.malformed("Illegal hexadecimal escape sequence", p.at as i32 - 1);
+        if self.peek() == Some('{') && self.chars.get(self.at + 1).is_some_and(|c| c.is_ascii_hexdigit()) {
+            return self.error("the escape \\x{..}");
+        }
+        let Some(high) = self.read_hex() else { return illegal(self) };
+        let Some(low) = self.read_hex() else { return illegal(self) };
+        Ok(char::from_u32(high * 16 + low).expect("a code unit below 0x100"))
+    }
+
+    /// The code unit of the four digits of `\uhhhh`, after the `u`.
+    fn unit_escape(&mut self) -> Result<u32, Problem> {
+        let mut n = 0;
+        for _ in 0..4 {
+            let Some(digit) = self.read_hex() else {
+                return self.malformed("Illegal Unicode escape sequence", self.at as i32 - 1);
+            };
+            n = n * 16 + digit;
+        }
+        Ok(n)
+    }
+
+    /// The character of `\uhhhh`, after the `u`: a high surrogate followed by the `\uhhhh` of a
+    /// low one is their pair, as in Java.
+    fn unicode_escape(&mut self) -> Result<char, Problem> {
+        let n = self.unit_escape()?;
+        if (0xD800..0xDC00).contains(&n) {
+            let after = self.at;
+            if self.next() == Some('\\') && self.next() == Some('u') {
+                let low = self.unit_escape()?;
+                if (0xDC00..0xE000).contains(&low) {
+                    let pair = 0x10000 + ((n - 0xD800) << 10) + (low - 0xDC00);
+                    return Ok(char::from_u32(pair).expect("a supplementary code point"));
+                }
+            }
+            self.at = after;
+        }
+        match char::from_u32(n) {
+            Some(c) => Ok(c),
+            None => self.error("a lone surrogate"),
         }
     }
 
-    /// The escape after a `\`.
+    /// The escape after a `\`. One at the end of the pattern is the character 0 that Java reads
+    /// past it, with the cursor one further, as Java's: what it ends then says so.
     fn escape(&mut self, in_set: bool) -> Result<Escaped, Problem> {
-        let Some(c) = self.next() else { return self.malformed("a trailing backslash") };
+        let Some(c) = self.next() else { return Ok(Escaped::Char('\0')) };
+        let illegal = |p: &Self| p.malformed("Illegal/unsupported escape sequence", p.at as i32 - 1);
         Ok(match c {
             'd' => Escaped::Class(Class::Digit, false),
             'D' => Escaped::Class(Class::Digit, true),
@@ -311,10 +371,19 @@ impl Parser<'_> {
             'f' => Escaped::Char('\u{C}'),
             'a' => Escaped::Char('\u{7}'),
             'e' => Escaped::Char('\u{1B}'),
-            'x' => Escaped::Char(self.hex(2)?),
-            'u' => Escaped::Char(self.hex(4)?),
-            // Only outside a set, where `atom` reads them.
-            'R' | 'b' | 'B' | '1'..='9' if in_set => return self.malformed("an illegal escape in a set"),
+            'x' => Escaped::Char(self.hex_escape()?),
+            'u' => Escaped::Char(self.unicode_escape()?),
+            // Java has no such escape, or none in a set (`atom` reads `\R`, `\b`, `\B` and back
+            // references outside one).
+            'C' | 'E' | 'F' | 'I' | 'J' | 'K' | 'L' | 'M' | 'O' | 'Q' | 'T' | 'U' | 'Y' | 'g' | 'i' | 'j'
+            | 'l' | 'm' | 'o' | 'q' | 'y' => return illegal(self),
+            'R' | 'b' | 'B' | '1'..='9' | 'A' | 'G' | 'X' | 'Z' | 'z' | 'k' if in_set => {
+                return illegal(self);
+            }
+            'k' if self.peek() != Some('<') => {
+                let description = "\\k is not followed by '<' for named capturing group";
+                return self.malformed(description, self.at as i32);
+            }
             c if c.is_ascii_alphanumeric() => {
                 let place = if in_set { " in a set" } else { "" };
                 return self.error(&format!("the escape \\{c}{place}"));
@@ -331,10 +400,13 @@ impl Parser<'_> {
         }
         let mut first = true;
         loop {
-            let Some(c) = self.next() else { return self.malformed("an unclosed set") };
+            let end = self.at as i32 - 1;
+            let Some(c) = self.next() else { return self.malformed("Unclosed character class", end) };
             let item = match c {
                 ']' if !first => return Ok(set),
-                '[' | ']' => return self.error("nested sets"),
+                // A `]` that would leave the set empty is a character of it.
+                ']' => Escaped::Char(']'),
+                '[' => return self.error("nested sets"),
                 '&' if self.peek() == Some('&') => return self.error("set intersections"),
                 '\\' => self.escape(true)?,
                 c => Escaped::Char(c),
@@ -343,21 +415,18 @@ impl Parser<'_> {
             match item {
                 Escaped::Class(class, negated) => set.classes.push((class, negated)),
                 Escaped::Char(lo) => {
-                    if self.peek() == Some('-') && self.chars.get(self.at + 1).is_some_and(|&c| c != ']') {
+                    if self.peek() == Some('-') && self.chars.get(self.at + 1) != Some(&']') {
                         self.at += 1;
                         let hi = match self.next() {
-                            Some('\\') => match self.escape(true)? {
-                                Escaped::Char(c) => c,
-                                Escaped::Class(..) => return self.error("a class in a range"),
-                            },
+                            Some('\\') => self.escape(true)?,
                             Some('[') => return self.error("nested sets"),
-                            Some(c) => c,
-                            None => return self.malformed("an unclosed set"),
+                            // Java reads the character 0 past the end.
+                            c => Escaped::Char(c.unwrap_or('\0')),
                         };
-                        if hi < lo {
-                            return self.malformed("an illegal character range");
+                        match hi {
+                            Escaped::Char(hi) if hi >= lo => set.ranges.push((lo, hi)),
+                            _ => return self.malformed("Illegal character range", self.at as i32 - 1),
                         }
-                        set.ranges.push((lo, hi));
                     } else {
                         set.ranges.push((lo, lo));
                     }
@@ -374,10 +443,15 @@ enum Escaped {
 
 /// Compiles a pattern, or says why it is not supported.
 pub fn compile(pattern: &str) -> Result<Regex, Problem> {
-    let mut parser = Parser { chars: pattern.chars().collect(), at: 0, groups: 0, pattern };
+    let chars = without_quotes(pattern.chars().collect());
+    let mut parser = Parser { chars, at: 0, groups: 0, pattern };
     let alt = parser.alt()?;
-    if parser.at < parser.chars.len() {
-        return parser.malformed("an unmatched ')'");
+    let length = parser.chars.len();
+    if parser.at > length {
+        return parser.malformed("Unescaped trailing backslash", length as i32);
+    }
+    if parser.at < length {
+        return parser.malformed("Unmatched closing ')'", parser.at as i32 - 1);
     }
     let literal = match alt.as_slice() {
         [seq] if seq.iter().all(|p| matches!(p.node, Node::Char(_)) && p.min == 1 && p.max == 1) => Some(
@@ -393,26 +467,106 @@ pub fn compile(pattern: &str) -> Result<Regex, Problem> {
     Ok(Regex { alt, groups: parser.groups, literal })
 }
 
+/// The pattern with each quote (`\\Q..\\E`) written as the escapes of its characters, as Java's
+/// `Pattern` reads it before anything else (a digit that starts a quote as `\\x3d`, so that it
+/// cannot extend an escape before it): positions in a pattern with a quote are positions in this
+/// text, in Java's errors too.
+fn without_quotes(chars: Vec<char>) -> Vec<char> {
+    let mut i = 0;
+    while i + 1 < chars.len() {
+        match (chars[i], chars[i + 1]) {
+            ('\\', 'Q') => break,
+            ('\\', _) => i += 2,
+            _ => i += 1,
+        }
+    }
+    if i + 1 >= chars.len() {
+        return chars;
+    }
+    let mut out = chars[..i].to_vec();
+    i += 2;
+    let (mut quoted, mut begins) = (true, true);
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        if !c.is_ascii() || c.is_ascii_alphabetic() {
+            out.push(c);
+        } else if c.is_ascii_digit() {
+            if begins {
+                out.extend(['\\', 'x', '3']);
+            }
+            out.push(c);
+        } else if c != '\\' {
+            if quoted {
+                out.push('\\');
+            }
+            out.push(c);
+        } else if quoted {
+            if chars.get(i) == Some(&'E') {
+                i += 1;
+                quoted = false;
+            } else {
+                out.extend(['\\', '\\']);
+            }
+        } else if chars.get(i) == Some(&'Q') {
+            i += 1;
+            quoted = true;
+            begins = true;
+            continue;
+        } else {
+            out.push(c);
+            if i < chars.len() {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        begins = false;
+    }
+    out
+}
+
 /// Why a pattern cannot be compiled.
 #[derive(Debug)]
 pub struct Problem {
+    /// What the runtime does not support, or for a malformed pattern Java's message of its
+    /// `PatternSyntaxException` (`syntax_message`).
     pub message: String,
-    /// Whether Java rejects the pattern too, rather than the runtime not supporting it.
-    pub malformed: bool,
+    /// For a pattern that Java rejects too, the description and the index of its
+    /// `PatternSyntaxException`.
+    pub syntax: Option<(String, i32)>,
+}
+
+/// `PatternSyntaxException.getMessage()`: the description, the index when there is one, then on
+/// lines of their own the pattern and a `^` under the index (with a tab under each tab before it).
+/// Java counts the index in code points but places the `^` by code units, and so does this.
+pub fn syntax_message(description: &str, pattern: &str, index: i32) -> String {
+    let mut out = description.to_string();
+    if index >= 0 {
+        out += &format!(" near index {index}");
+    }
+    out.push('\n');
+    out.push_str(pattern);
+    let units: Vec<u16> = pattern.encode_utf16().collect();
+    if index >= 0 && (index as usize) < units.len() {
+        out.push('\n');
+        out.extend(units[..index as usize].iter().map(|&u| if u == u16::from(b'\t') { '\t' } else { ' ' }));
+        out.push('^');
+    }
+    out
 }
 
 /// Checks that a pattern is supported: the error names what is not. A malformed pattern is
 /// supported, as it throws `PatternSyntaxException` as in Java.
 pub fn check(pattern: &str) -> Result<(), String> {
     match compile(pattern) {
-        Err(problem) if !problem.malformed => Err(problem.message),
+        Err(problem) if problem.syntax.is_none() => Err(problem.message),
         _ => Ok(()),
     }
 }
 
 fn compiled(pattern: &str) -> Regex {
     compile(pattern).unwrap_or_else(|problem| {
-        if problem.malformed {
+        if problem.syntax.is_some() {
             throw("java.util.regex.PatternSyntaxException", &problem.message)
         }
         throw("java.lang.UnsupportedOperationException", &format!("{} not supported", problem.message))
@@ -889,16 +1043,168 @@ mod tests {
 
     #[test]
     fn unsupported_patterns_are_rejected() {
-        for p in ["(?i)a", "(?<=a)b", "(?<n>a)", "\\b{g}", "[a-z&&[^b]]", "\\0", "\\p{L}"] {
+        for p in [
+            "(?i)a",
+            "(?<=a)b",
+            "(?<n>a)",
+            "\\b{g}",
+            "[a-z&&[^b]]",
+            "\\0",
+            "\\p{L}",
+            "(?)",
+            "\\x{41}",
+            "\\ud800",
+        ] {
             assert!(check(p).is_err(), "{p}");
         }
         // Malformed patterns throw as in Java, so they are not rejected.
         for p in ["a{", "(a", "a)", "*a", "[z-a]", "\\", "[\\b]"] {
             assert!(check(p).is_ok(), "{p}");
-            assert!(compile(p).is_err_and(|problem| problem.malformed), "{p}");
+            assert!(compile(p).is_err_and(|problem| problem.syntax.is_some()), "{p}");
         }
         assert!(check_replacement("a", "${name}").is_err());
         assert!(check_replacement("a", "$1").is_ok());
         assert!(check_replacement("(a)", "$1").is_ok());
+    }
+
+    /// Malformed patterns, each with the description and the index of the
+    /// `PatternSyntaxException` that Java's `Pattern.compile` throws for it (from a JVM's run).
+    const MALFORMED: &[(&str, &str, i32)] = &[
+        ("(ab", "Unclosed group", 3),
+        ("a(b(c)", "Unclosed group", 6),
+        ("(", "Unclosed group", 1),
+        ("\t(x", "Unclosed group", 3),
+        ("(?:a", "Unclosed group", 4),
+        ("(?=a", "Unclosed group", 4),
+        ("(?>", "Unclosed group", 3),
+        ("((a)", "Unclosed group", 4),
+        ("(a\\", "Unclosed group", 4),
+        ("((a\\", "Unclosed group", 5),
+        ("*a", "Dangling meta character '*'", 0),
+        ("a|+b", "Dangling meta character '+'", 2),
+        ("?", "Dangling meta character '?'", 0),
+        ("a**", "Dangling meta character '*'", 2),
+        ("a+++", "Dangling meta character '+'", 3),
+        ("x{2}?+", "Dangling meta character '+'", 5),
+        ("(*)", "Dangling meta character '*'", 1),
+        ("a|*", "Dangling meta character '*'", 2),
+        ("{", "Illegal repetition", 1),
+        ("x{", "Illegal repetition", 2),
+        ("{a", "Illegal repetition", 1),
+        ("a{", "Illegal repetition", 2),
+        ("a{x}", "Illegal repetition", 2),
+        ("a{,2}", "Illegal repetition", 2),
+        ("a{2}{", "Illegal repetition", 5),
+        ("a{2,1}", "Illegal repetition range", 5),
+        ("a{1", "Unclosed counted closure", 3),
+        ("a{1,", "Unclosed counted closure", 4),
+        ("a{1,2", "Unclosed counted closure", 5),
+        ("a{1x}", "Unclosed counted closure", 3),
+        ("a{1,x}", "Unclosed counted closure", 4),
+        ("a{99999999999}", "Illegal repetition range", 11),
+        ("a{2147483648}", "Illegal repetition range", 11),
+        ("a{1,2147483648}", "Illegal repetition range", 13),
+        ("\\x4", "Illegal hexadecimal escape sequence", 3),
+        ("\\xzz", "Illegal hexadecimal escape sequence", 2),
+        ("\\x", "Illegal hexadecimal escape sequence", 2),
+        ("[\\x4]", "Illegal hexadecimal escape sequence", 4),
+        ("[a-\\x4]", "Illegal hexadecimal escape sequence", 6),
+        ("\\u12", "Illegal Unicode escape sequence", 4),
+        ("\\u12g4", "Illegal Unicode escape sequence", 4),
+        ("\\u", "Illegal Unicode escape sequence", 2),
+        ("\\uD800\\u12", "Illegal Unicode escape sequence", 10),
+        ("\\", "Unescaped trailing backslash", 1),
+        ("ab\\", "Unescaped trailing backslash", 3),
+        ("[\\", "Unclosed character class", 2),
+        ("[a\\", "Unclosed character class", 3),
+        ("[a-\\", "Illegal character range", 4),
+        ("[\\R]", "Illegal/unsupported escape sequence", 2),
+        ("[\\b]", "Illegal/unsupported escape sequence", 2),
+        ("[\\1]", "Illegal/unsupported escape sequence", 2),
+        ("[\\B]", "Illegal/unsupported escape sequence", 2),
+        ("[\\9]", "Illegal/unsupported escape sequence", 2),
+        ("[a-\\R]", "Illegal/unsupported escape sequence", 4),
+        ("[\\A]", "Illegal/unsupported escape sequence", 2),
+        ("[\\Z]", "Illegal/unsupported escape sequence", 2),
+        ("[\\k]", "Illegal/unsupported escape sequence", 2),
+        ("[\\Q]", "Unclosed character class", 2),
+        ("\\y", "Illegal/unsupported escape sequence", 1),
+        ("\\i", "Illegal/unsupported escape sequence", 1),
+        ("[\\y]", "Illegal/unsupported escape sequence", 2),
+        ("\\E", "Illegal/unsupported escape sequence", 1),
+        ("\\C", "Illegal/unsupported escape sequence", 1),
+        ("\\k", "\\k is not followed by '<' for named capturing group", 2),
+        ("\\kx", "\\k is not followed by '<' for named capturing group", 2),
+        ("[abc", "Unclosed character class", 3),
+        ("[^", "Unclosed character class", 1),
+        ("[]", "Unclosed character class", 1),
+        ("[^]", "Unclosed character class", 2),
+        ("[", "Unclosed character class", 0),
+        ("[a-", "Illegal character range", 3),
+        ("[z-a]", "Illegal character range", 3),
+        ("[a-\\d]", "Illegal character range", 4),
+        ("[b-a-c]", "Illegal character range", 3),
+        ("a)", "Unmatched closing ')'", 0),
+        ("ab)c", "Unmatched closing ')'", 1),
+        (")", "Unmatched closing ')'", -1),
+        ("(a))", "Unmatched closing ')'", 2),
+        ("(?", "Unknown inline modifier", 2),
+        ("(?$a)", "Unknown group type", 2),
+        ("(?@", "Unknown group type", 2),
+        ("(?*)", "Unknown inline modifier", 2),
+        ("(?a)", "Unknown inline modifier", 2),
+        ("(?z)", "Unknown inline modifier", 2),
+    ];
+
+    #[test]
+    fn malformed_patterns_are_described_as_in_java() {
+        for &(pattern, description, index) in MALFORMED {
+            let problem = compile(pattern).err();
+            let syntax = problem.and_then(|p| p.syntax);
+            assert_eq!(syntax, Some((description.to_string(), index)), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn syntax_messages_are_javas() {
+        let message = |p: &str| compile(p).err().map(|problem| problem.message);
+        let javas = [
+            ("a(b", "Unclosed group near index 3\na(b"),
+            (")", "Unmatched closing ')'\n)"),
+            ("a\t\tb{", "Illegal repetition near index 5\na\t\tb{"),
+            ("\u{1F600}{", "Illegal repetition near index 2\n\u{1F600}{\n  ^"),
+            ("\\Qa.b\\E)", "Unmatched closing ')' near index 3\n\\Qa.b\\E)\n   ^"),
+            ("\\Q(\\E(", "Unclosed group near index 3\n\\Q(\\E(\n   ^"),
+            ("[\\Qab]", "Unclosed character class near index 4\n[\\Qab]\n    ^"),
+            ("\\Q1\\E{", "Illegal repetition near index 5\n\\Q1\\E{\n     ^"),
+            ("x\\Q\\\\E\\y", "Illegal/unsupported escape sequence near index 4\nx\\Q\\\\E\\y\n    ^"),
+            ("(?:\\Q)\\E", "Unclosed group near index 5\n(?:\\Q)\\E\n     ^"),
+            ("\ta{x}", "Illegal repetition near index 3\n\ta{x}\n\t  ^"),
+            ("a\t\tb{x}", "Illegal repetition near index 5\na\t\tb{x}\n \t\t  ^"),
+            ("\u{1F600}a{x}", "Illegal repetition near index 3\n\u{1F600}a{x}\n   ^"),
+        ];
+        for (pattern, java) in javas {
+            assert_eq!(message(pattern).as_deref(), Some(java), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn patterns_that_java_reads_differently_from_how_they_look() {
+        // A `{` where an atom would be repeats nothing.
+        assert!(matches_all(w(""), w("{1}")));
+        assert!(!matches_all(w("{1}"), w("{1}")));
+        assert!(matches_all(w("a"), w("a{1}{2}")));
+        // A `]` first in a set is one of its characters.
+        assert!(matches_all(w("]"), w("[]a]")));
+        assert!(matches_all(w("b"), w("[^]a]")));
+        // A quote's characters are escaped, in a set too; a digit that starts one stays a digit.
+        assert!(matches_all(w("a.b"), w("\\Qa.b\\E")));
+        assert!(!matches_all(w("axb"), w("\\Qa.b\\E")));
+        assert!(matches_all(w("-"), w("[\\Qa-z\\E]")));
+        assert!(!matches_all(w("b"), w("[\\Qa-z\\E]")));
+        assert!(matches_all(w("12"), w("\\Q12\\E")));
+        assert!(matches_all(w("x"), w("x\\Q")));
+        // A pair of surrogates written as two escapes is one code point.
+        assert!(matches_all(w("\u{1F600}"), w("\\uD83D\\uDE00")));
     }
 }

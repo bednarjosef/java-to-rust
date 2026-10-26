@@ -3123,11 +3123,11 @@ fn census_sources(dir: &str) -> std::path::PathBuf {
         &[
             (
                 "p/Main.java",
-                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.split(a);\n        Other.compare(new Name());\n        Other.fine();\n    }\n}\n",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.show(a);\n        Other.compare(new Name());\n        Other.fine();\n    }\n}\n",
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void compare(Comparable<String> c) {\n        System.out.println(c.compareTo(\"x\"));\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\nclass Name implements Comparable<String> {\n    public int compareTo(String s) {\n        return s == \"x\" ? 0 : 1;\n    }\n}\n",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void show(String[] a) {\n        try { System.out.printf(\"%s%n\", new Name()); }\n        catch (RuntimeException e) { System.out.println(\"no text\"); }\n    }\n    static void compare(Comparable<String> c) {\n        System.out.println(c.compareTo(\"x\"));\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\nclass Name implements Comparable<String> {\n    public int compareTo(String s) {\n        return s == \"x\" ? 0 : 1;\n    }\n    public String toString() {\n        throw new IllegalStateException(\"no text\");\n    }\n}\n",
             ),
         ],
     )
@@ -3150,15 +3150,15 @@ fn the_census_reports_every_rejection_not_only_the_first() {
     assert!(error.to_string().ends_with("type `java.lang.ProcessBuilder` not supported yet"), "{error}");
     let census = census(&program);
     let report = &census.report;
-    // Lowering and two analyses each reject one method; `main`, `compare`, `fine` and `Name`'s
-    // constructor translate.
+    // Lowering and two analyses each reject one method; `main`, `compare`, `fine`, `Name`'s
+    // constructor and its `toString` translate.
     assert_lacks(report, &["Incomplete"]);
     assert_contains(
         report,
         &[
-            "  Program: 7 pieces; 4 (57.1%) translate, 3 rejected.",
+            "  Program: 8 pieces; 5 (62.5%) translate, 3 rejected.",
             "type `…` not supported yet\n          at p/Other.java:4:9",
-            "catching the `PatternSyntaxException` that this call of the library may throw not supported yet\n          at p/Other.java:7",
+            "catching an exception that this toString may throw not supported yet\n          at p/Other.java:7",
             "`==` on strings, where a string may come from where the translation does not follow it: a parameter of a method that the runtime calls\n          at p/Other.java:19",
         ],
     );
@@ -3169,8 +3169,15 @@ fn the_census_reports_every_rejection_not_only_the_first() {
         piece["errors"].as_array().expect("errors").len()
     };
     assert_eq!(
-        (errors("process"), errors("split"), errors("compareTo"), errors("fine"), errors("main")),
-        (1, 1, 1, 0, 0)
+        (
+            errors("process"),
+            errors("show"),
+            errors("compareTo"),
+            errors("toString"),
+            errors("fine"),
+            errors("main")
+        ),
+        (1, 1, 1, 0, 0, 0)
     );
     assert_eq!(census.json["complete"], true);
     assert_eq!(census.json["totals"]["program"]["rejected"], 3);
@@ -3193,7 +3200,7 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
         &rust,
         &[
             "java::not_translated(\"p.Other.process: type `java.lang.ProcessBuilder` not supported yet (line 4)\")",
-            "java::not_translated(\"p.Other.split: catching the `PatternSyntaxException`",
+            "java::not_translated(\"p.Other.show: catching an exception that this toString may throw",
             "java::not_translated(\"p.Name.compareTo: `==` on strings, where a string may come from where the translation does not follow it: a parameter of a method that the runtime calls (line 19)\")",
             "java::println!(\"fine\")",
         ],
@@ -4833,8 +4840,7 @@ fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
 }
 
 #[test]
-fn exceptions_the_translation_cannot_reproduce_are_rejected() {
-    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+fn failures_of_the_runtime_that_a_catch_sees_are_caught_where_they_happen() {
     // A failure without a checked form of its own runs inside `java::catching`.
     let rust = translate(
         "class A { public static void main(String[] a) {
@@ -4867,20 +4873,14 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         } }",
     );
     assert_contains(&rust, &["java::catching(|| ", "\"java.nio.charset.UnsupportedCharsetException\""]);
-    // Nor is a `PatternSyntaxException`, which is not one of the standard classes; a `catch` that
-    // cannot see it is fine.
-    let err = reject(
+    // So does a pattern's, which may be malformed.
+    let rust = translate(
         "class A { public static void main(String[] a) {
             try { System.out.println(\"a,b\".split(a[0]).length); }
             catch (RuntimeException e) { System.out.println(\"bad pattern\"); }
         } }",
     );
-    assert!(
-        err.contains(
-            "catching the `PatternSyntaxException` that this call of the library may throw not supported yet"
-        ),
-        "{err}"
-    );
+    assert_contains(&rust, &["java::catching(|| ", "\"java.util.regex.PatternSyntaxException\""]);
     translate(
         "class A { public static void main(String[] a) {
             try { System.out.println(Integer.parseInt(\"1,2\".replaceAll(a[0], \"\"))); }
@@ -6005,9 +6005,9 @@ fn an_abstract_class_copy_of_get_chars_calls_the_length_and_char_at_of_its_subcl
 /// names its own file, and the census rejects that file's method alone.
 #[test]
 fn an_analysis_error_names_its_file_where_another_file_has_code_at_its_position() {
-    let class = |name: &str, pattern: &str| {
+    let class = |name: &str, text: &str| {
         format!(
-            "package p;\nclass {name} {{\n    static void split(String[] a) {{\n        try {{ System.out.println(\"a,b\".split({pattern}).length); }}\n        catch (RuntimeException e) {{ System.out.println(\"bad pattern\"); }}\n    }}\n}}\n"
+            "package p;\nclass {name} {{\n    static void show(String[] a) {{\n        try {{ System.out.printf(\"%s%n\", {text}); }}\n        catch (RuntimeException e) {{ System.out.println(\"no text\"); }}\n    }}\n}}\n"
         )
     };
     let dir = write_sources(
@@ -6015,27 +6015,27 @@ fn an_analysis_error_names_its_file_where_another_file_has_code_at_its_position(
         &[
             (
                 "p/Main.java",
-                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Fine.split(a);\n        Rank.split(a);\n    }\n}\n",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Fine.show(a);\n        Rank.show(a);\n    }\n}\nclass Bad {\n    public String toString() {\n        throw new IllegalStateException();\n    }\n}\n",
             ),
-            // The same text but for the pattern, a constant that compiles, which cannot throw.
-            ("p/Fine.java", &class("Fine", "\"[,]\"")),
-            ("p/Rank.java", &class("Rank", "a[0]")),
+            // The same text but for the object, a string, whose text cannot throw.
+            ("p/Fine.java", &class("Fine", "\"text\"")),
+            ("p/Rank.java", &class("Rank", "new Bad()")),
         ],
     );
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
-    let error = java_to_rust::translate_program(&program).expect_err("a dynamic pattern's failure is caught");
+    let error = java_to_rust::translate_program(&program).expect_err("a toString's failure is caught");
     assert!(error.to_string().contains("p/Rank.java:4:"), "{error}");
     let census = census(&program);
     assert_contains(
         &census.report,
-        &["  Program: 3 pieces; 2 (66.7%) translate, 1 rejected.", "at p/Rank.java:4:"],
+        &["  Program: 5 pieces; 4 (80.0%) translate, 1 rejected.", "at p/Rank.java:4:"],
     );
     let pieces = census.json["pieces"].as_array().expect("pieces");
     let errors = |class: &str| {
         let piece = pieces
             .iter()
-            .find(|p| p["class"] == class && p["name"] == "split")
-            .unwrap_or_else(|| panic!("no {class}.split in {pieces:?}"));
+            .find(|p| p["class"] == class && p["name"] == "show")
+            .unwrap_or_else(|| panic!("no {class}.show in {pieces:?}"));
         piece["errors"].as_array().expect("errors").len()
     };
     assert_eq!((errors("p.Fine"), errors("p.Rank")), (0, 1));
