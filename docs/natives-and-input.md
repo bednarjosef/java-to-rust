@@ -43,7 +43,8 @@ is code that never runs.
 Some methods are replaced at the call, before their argument is lowered, so that reachability
 never enters them (`REPLACED_METHODS` in `program/reach.rs`). They take a `Class`, which the
 translation has no general value for at that point: `Unsafe.arrayBaseOffset(int[].class)` and
-`arrayIndexScale(..)` with a class literal of an array class, and `Unsafe.objectFieldOffset` of
+`arrayIndexScale(..)` with a class literal of an array class (on an `Unsafe` that a field holds
+or, checked for null first, a local or a parameter), and `Unsafe.objectFieldOffset` of
 a field named by a class literal and a string, which becomes a field handle (see
 [multi-threading.md](multi-threading.md)). Any other argument is
 rejected by name.

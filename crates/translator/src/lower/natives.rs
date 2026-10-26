@@ -341,14 +341,18 @@ impl<'t> Lowering<'t> {
             return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
         }
         // `Unsafe` has no state: its receiver, a name or `Unsafe.getUnsafe()`, needs no evaluating.
+        // A local or a parameter may hold null, which the call checks first (as netty's
+        // `PlatformDependent0` holds the object it found by reflection in a local).
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
         let stateless = receiver.is_none_or(|r| match r.symbol() {
             Some(s) => s.kind == "FIELD" || s.name == "getUnsafe",
             None => false,
         });
-        if !stateless {
-            return unsupported(node, &format!("`{method}` on this receiver"));
-        }
+        let checked = match receiver {
+            Some(r) if !stateless && self.quiet_argument(r) => Some(r),
+            _ if !stateless => return unsupported(node, &format!("`{method}` on this receiver")),
+            _ => None,
+        };
         let Some(element) = class.strip_suffix("[]") else {
             return unsupported(node, &format!("`{method}` of a class that is not an array"));
         };
@@ -361,15 +365,29 @@ impl<'t> Lowering<'t> {
             )
         };
         let value = ExprKind::Builtin(Builtin::Native(native), Vec::new());
-        if symbol.owner != crate::program::SUN_MISC_UNSAFE {
-            return Ok(Some(value));
+        let sun = symbol.owner == crate::program::SUN_MISC_UNSAFE;
+        let value = match sun {
+            false => value,
+            true => {
+                let ty = if symbol.name == "arrayBaseOffset" { Type::Long } else { Type::Int };
+                self.convert(self.synth(value, node.pos(), ty), Type::Int).kind
+            }
+        };
+        // `sun.misc.Unsafe.arrayBaseOffset` warns first, which checks the receiver.
+        if sun && symbol.name == "arrayBaseOffset" {
+            return self.after_memory_access_warning(node, symbol.name, value).map(Some);
         }
-        let ty = if symbol.name == "arrayBaseOffset" { Type::Long } else { Type::Int };
-        let value = self.convert(self.synth(value, node.pos(), ty), Type::Int).kind;
-        match symbol.name {
-            "arrayBaseOffset" => self.after_memory_access_warning(node, symbol.name, value).map(Some),
-            _ => Ok(Some(value)),
-        }
+        let Some(receiver) = checked else { return Ok(Some(value)) };
+        let pos = node.pos();
+        let ty = self.ty(node, node.java_type())?;
+        let body = vec![
+            Stmt::Expr(self.receiver_checked(receiver, symbol.name, pos)?),
+            Stmt::Yield(self.synth(value, pos, ty)),
+        ];
+        Ok(Some(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        }))
     }
 
     /// What the thread that `Thread.start0(t, ..)` starts runs: `t.run()`, added to the arguments
