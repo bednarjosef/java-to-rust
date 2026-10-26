@@ -291,7 +291,8 @@ struct Names<'a> {
     program: &'a Program,
     /// The temps of the JDK's code (`javac::jdk_temps`), until they are added to `found`.
     jdk_temps: RefCell<javac::JdkTemps>,
-    found: RefCell<Option<javac::BytecodeNames>>,
+    /// The names, or why the class files could not be compiled for them, once looked for.
+    found: RefCell<Option<Result<javac::BytecodeNames, Error>>>,
 }
 
 impl Names<'_> {
@@ -304,14 +305,40 @@ impl Names<'_> {
         let mut found = self.found.borrow_mut();
         if found.is_none() {
             let names = crate::timings::phase("census: class files", || class_file_names(self.program));
-            let mut names = names.map_err(|e| vec![e.error])?;
-            names.add_jdk_temps(self.jdk_temps.take());
-            if crate::timings::enabled() {
-                eprintln!("timing: census: class files: {}", names.sizes());
-            }
-            *found = Some(names);
+            *found = Some(
+                names
+                    .map(|mut names| {
+                        names.add_jdk_temps(self.jdk_temps.take());
+                        if crate::timings::enabled() {
+                            eprintln!("timing: census: class files: {}", names.sizes());
+                        }
+                        names
+                    })
+                    .map_err(|e| e.error),
+            );
         }
-        let names = found.as_ref().expect("found above");
+        // Without the class files (the program does not compile, as decompiled code may not), no
+        // message is certain: each piece of code that a `catch` may read one in is rejected there,
+        // as a translation rejects an uncertain one, and the census goes on.
+        let names = match found.as_ref().expect("found above") {
+            Ok(names) => names,
+            Err(error) => {
+                let message = error.message.lines().next().unwrap_or_default();
+                let message = format!(
+                    "the message of a `NullPointerException` without the class files of the program ({message})"
+                );
+                let mut at: Vec<Pos> = facts
+                    .npe_message_needed
+                    .iter()
+                    .filter_map(|id| facts.null_checked.get(id))
+                    .copied()
+                    .collect();
+                at.extend(facts.npe_message_read);
+                at.sort_by_key(|p| (p.line, p.column));
+                at.dedup();
+                return Err(at.into_iter().map(|pos| Error { pos, message: message.clone() }).collect());
+            }
+        };
         crate::timings::phase("census: messages", || analysis::npe_messages(class, facts, names))
     }
 }

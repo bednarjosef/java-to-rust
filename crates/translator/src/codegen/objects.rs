@@ -2073,7 +2073,7 @@ impl<'a> Gen<'a> {
         self.this_struct = index;
         self.field_inits(index);
         // Its own constructors and methods first, then those it inherits.
-        let mut order: Vec<usize> = (0..class.methods.len()).collect();
+        let mut order: Vec<usize> = self.struct_methods.get(&index).cloned().unwrap_or_default();
         order.sort_by_key(|&i| class.methods[i].class != index);
         for i in order {
             if self.emitted_in(i, index) {
