@@ -138,6 +138,7 @@ impl<'t> Lowering<'t> {
                 return Ok(Some(self.literal_interfaces(node, receiver)?));
             }
             ("getInterfaces", []) => return Ok(Some(self.class_interfaces(node, receiver)?)),
+            ("getSigners", []) => return Ok(Some(self.class_signers(node, receiver)?)),
             ("isAnnotationPresent", [annotation]) => {
                 return Ok(Some(self.annotation_present(node, receiver, *annotation)?));
             }
@@ -467,6 +468,29 @@ impl<'t> Lowering<'t> {
                 body: Box::new(Stmt::Expr(store)),
             },
             Stmt::Yield(var(&out, array)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
+    }
+
+    /// `c.getSigners()`: `null`, as Java gives for a class without signers. A translated class
+    /// comes from no jar, so none signed it, even where Java's came from a signed jar (the
+    /// Minecraft server's, whose `ModCheck` then reports the server as very likely modified). A
+    /// null `c` throws, as the other methods of a class do.
+    fn class_signers(&self, node: Node<'t>, receiver: Node<'t>) -> Result<ExprKind, Error> {
+        let class = self.expr(receiver)?;
+        let (pos, signers) = (node.pos(), self.ty(node, node.java_type())?);
+        let checked = ExprKind::Builtin(Builtin::ClassMethod(ClassOp::IsArray), vec![class]);
+        // A local of the array's type, so that the `null` has its type where nothing else gives
+        // it one (a call whose value is dropped).
+        let local = self.fresh_name("signers");
+        let null = self.synth(ExprKind::Null, pos, Type::Null);
+        let body = vec![
+            Stmt::Expr(self.synth(checked, pos, Type::Boolean)),
+            Stmt::Local { ty: signers, name: local.clone(), init: Some(null), pos },
+            Stmt::Yield(self.synth(ExprKind::Var(local), pos, signers)),
         ];
         Ok(ExprKind::Switch {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
