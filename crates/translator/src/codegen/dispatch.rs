@@ -2157,11 +2157,13 @@ impl<'a> Gen<'a> {
         if self.is_appendable_method(r) {
             return self.appendable_arm(r, c);
         }
-        match self.class.methods[r].name.as_str() {
-            "ordinal" => "*o as i32".to_string(),
-            "name" => "o.enum_name()".to_string(),
-            _ => "o.to_string()".to_string(),
-        }
+        let text = match self.class.methods[r].name.as_str() {
+            "ordinal" => return "*o as i32".to_string(),
+            "name" => "o.enum_name()",
+            _ => "o.to_string()",
+        };
+        // A method that another class answers with null returns an `Option`.
+        if self.facts.nullable_returns.contains(&r) { format!("Some({text})") } else { text.to_string() }
     }
 
     /// The type of `Object`, when the program uses it.
