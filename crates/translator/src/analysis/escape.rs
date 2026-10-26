@@ -152,10 +152,17 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
         (0..n).map(|m| std::cmp::Reverse((rank[m], m))).collect();
     let mut solves = 0;
+    // The time each method's solves took, for --timings.
+    let mut spent: Vec<(f64, u32)> = if crate::timings::enabled() { vec![(0.0, 0); n] } else { Vec::new() };
     while let Some(std::cmp::Reverse((_, m))) = work.pop() {
         queued[m] = false;
         solves += 1;
+        let start = (!spent.is_empty()).then(std::time::Instant::now);
         let MethodFacts { summary, read, .. } = analysis.solve(m);
+        if let Some(start) = start {
+            spent[m].0 += start.elapsed().as_secs_f64();
+            spent[m].1 += 1;
+        }
         for t in read {
             if edges.insert((t, m)) {
                 callers[t].push(m);
@@ -172,6 +179,22 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     }
     if crate::timings::enabled() {
         eprintln!("timing: stack objects: {solves} solves of {n} methods");
+        let mut costly: Vec<usize> = (0..n).collect();
+        costly.sort_by(|&a, &b| spent[b].0.total_cmp(&spent[a].0));
+        for &m in costly.iter().take(12) {
+            let method = &class.methods[m];
+            let code = &analysis.code[m];
+            eprintln!(
+                "timing: stack objects: {:.3} s in {} solves of {}.{} ({} variables, {} steps, {} objects)",
+                spent[m].0,
+                spent[m].1,
+                class.types[method.class].name,
+                method.name,
+                code.vars,
+                code.assigns.len() + code.calls.len(),
+                code.sites.len()
+            );
+        }
     }
     // The factories, with the summaries known: a method is one when what it returns of its own
     // objects is one object, made by a `new` or a call of another factory. Adding a factory can
