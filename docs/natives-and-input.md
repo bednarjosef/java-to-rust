@@ -312,8 +312,14 @@ A translated program is closed: it knows all its classes. So:
   `TranslatedDigests`); so are secure random numbers: `SecureRandom` and the `SUN` provider's
   generators and seed sources, which `new SecureRandom()` and `SecureRandom.getInstance(String)`
   make by name (`java/patches/java/security/SecureRandom.java`, `TranslatedRandoms`), as
-  `UUID.randomUUID` does. A `Provider` and the methods that name one are not. Neither are keys
-  and specs, except their plain interfaces, which the program's own classes implement (see
+  `UUID.randomUUID` does; and so are RSA key pairs: `KeyPairGenerator`, the `SunRsaSign`
+  provider's RSA keys and the DER encoding of the keys (`sun.security.util`'s `Der*`,
+  `ObjectIdentifier`, `KnownOIDs`, `AlgorithmId`, `X509Key`, `PKCS8Key`), which
+  `KeyPairGenerator.getInstance(String)` makes by name
+  (`java/patches/java/security/KeyPairGenerator.java`, `TranslatedServices`), as a Minecraft
+  server does as it starts. `AlgorithmParameters.getInstance(String)` finds no algorithm's
+  parameters. A `Provider` and the methods that name one are not translated. Neither are other
+  keys and specs, except their plain interfaces, which the program's own classes implement (see
   [object-model.md](object-model.md) 1.9). The security APIs' exceptions (`KeyException`,
   `SignatureException`, `CertificateException`, `InvalidKeySpecException` and the like) are
   translated: plain constructors, which library code throws and catches as its own.
