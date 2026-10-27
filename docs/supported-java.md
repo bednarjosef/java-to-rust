@@ -352,10 +352,12 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
 - `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
   type arguments, each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,
   `WildcardTypeImpl` and `GenericArrayTypeImpl` (`lower/generic_types.rs`), so a type token
-  (`new TypeToken<List<String>>() {}`) reads its type argument as in Java. A type variable is not
-  supported yet: making a type that mentions one throws `UnsupportedOperationException`.
-  `getGenericInterfaces`, `getTypeParameters` and the generic types of methods and fields are
-  still rejected.
+  (`new TypeToken<List<String>>() {}`) reads its type argument as in Java.
+  `getGenericInterfaces()` and `getTypeParameters()` are made the same way, and a class's type
+  variables are the JDK's `TypeVariableImpl`, with their bounds and the class that declares them,
+  so gson's walk from a field's `List<String>` up to `Collection<E>` resolves `E` to `String`. A
+  method's type variable is not made: a type that mentions one throws
+  `UnsupportedOperationException`. The generic types of methods are still rejected.
 - `Class.forName` of a constant name is that class, and of an array's descriptor
   (`"[La.B;"`) that array's class; of a computed name, a `switch` over the classes code can find
   by name. An unknown name throws `ClassNotFoundException`.

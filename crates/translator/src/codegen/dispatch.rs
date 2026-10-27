@@ -667,8 +667,7 @@ impl<'a> Gen<'a> {
     /// `java.lang.Class` implements and the program translates as interfaces of its own, which
     /// the runtime's classes do not implement (`Constable`, `TypeDescriptor.OfField`; `Type`,
     /// `TypeDescriptor`, `GenericDeclaration` and `Serializable` they do, see
-    /// `CLASS_VALUE_INTERFACES`): the cast or the
-    /// test is rejected.
+    /// `CLASS_VALUE_INTERFACES`): the cast or the test is rejected.
     fn rejects_class_as(&mut self, value: &Expr, to: Type) -> bool {
         let Type::Class(name, _) = to else { return false };
         if !CLASS_INTERFACES.contains(&name) || CLASS_VALUE_INTERFACES.contains(&name) {

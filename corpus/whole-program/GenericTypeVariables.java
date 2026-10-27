@@ -81,6 +81,16 @@ public class GenericTypeVariables {
         return toResolve;
     }
 
+    /** gson's `equals` of two type variables. */
+    static boolean sameVariable(Type a, Type b) {
+        if (!(a instanceof TypeVariable) || !(b instanceof TypeVariable)) {
+            return false;
+        }
+        TypeVariable<?> va = (TypeVariable<?>) a;
+        TypeVariable<?> vb = (TypeVariable<?>) b;
+        return va.getGenericDeclaration() == vb.getGenericDeclaration() && va.getName().equals(vb.getName());
+    }
+
     static Class<?> rawType(Type type) {
         return type instanceof ParameterizedType p ? (Class<?>) p.getRawType() : (Class<?>) type;
     }
@@ -119,9 +129,17 @@ public class GenericTypeVariables {
         TypeVariable<?> other = Source.class.getTypeParameters()[0];
         System.out.println(first.equals(again) + " " + (first.hashCode() == again.hashCode()) + " "
                 + first.equals(other) + " " + first.getName() + " " + first.getTypeName());
+        System.out.println(sameVariable(first, again) + " " + sameVariable(first, other) + " "
+                + Box.class.getTypeParameters().length + " " + Holder.class.getTypeParameters().length);
         Type bound = first.getBounds()[0];
         Type argument = ((ParameterizedType) bound).getActualTypeArguments()[0];
         System.out.println(bound + " names " + argument + " " + argument.equals(first));
+        for (Class<?> c : new Class<?>[] {Comparable.class, Enum.class, Class.class}) {
+            for (TypeVariable<?> variable : c.getTypeParameters()) {
+                System.out.println(
+                        c.getSimpleName() + " " + variable + " bounds " + Arrays.toString(variable.getBounds()));
+            }
+        }
         Type comparable = Box.class.getGenericInterfaces()[0];
         System.out.println(resolve(comparable, Comparable.class, Comparable.class.getTypeParameters()[0]));
     }

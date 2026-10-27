@@ -186,6 +186,8 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `javax/annotation/processing/AbstractProcessor.java` (module `java.compiler`) | reads its processor's annotations through `TranslatedProcessorAnnotations` |
 | `sun/reflect/annotation/AnnotationParser.java`, `AnnotationInvocationHandler.java` | an annotation object is the handler itself, not a `Proxy`: `annotationType`, `toString`, `hashCode` and `equals` its own (`lower/annotation_objects.rs`) |
 | `sun/reflect/generics/reflectiveObjects/ParameterizedTypeImpl.java`, `WildcardTypeImpl.java` | made from the types javac gives (`TranslatedTypes`, `lower/generic_types.rs`): the owner type as given, no check of the arguments, a wildcard's bounds as types rather than signatures |
+| `sun/reflect/generics/reflectiveObjects/TypeVariableImpl.java` | made from a class and a name (`TranslatedTypes`), its bounds made when first asked for from the bounds javac gives; no annotation methods |
+| `java/lang/reflect/TypeVariable.java`, `GenericDeclaration.java` | not an `AnnotatedElement`, so a class (the runtime's value) is a `GenericDeclaration` without annotations of type variables and bounds |
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own |
 | `sun/security/provider/NativePRNG.java` | the seed source, a `file:` URL, is read as a `URI`, not a `URL`: the `SUN` provider asks whether the generator is available as it registers, and a `URL` would bring the protocol handlers into every program that looks a service up |

@@ -8,7 +8,9 @@ import java.lang.reflect.Type;
  * {@code TranslatedTypes}), where the JDK parses them from the class's signature. Its bounds are
  * made when they are first asked for, as the JDK's are, by {@code TranslatedTypes.bounds}: a
  * bound may name the variable itself ({@code E extends Enum<E>}). Only a class declares one: a
- * method's type variables are not made.
+ * method's type variables are not made. A translated type variable is not an
+ * {@code AnnotatedElement} (see {@code java/lang/reflect/TypeVariable.java}), so its annotation
+ * methods go.
  */
 @Edit(find = "extends LazyReflectiveObjectGenerator implements", replace = "implements")
 @Edit(find = "private volatile Object[] bounds;", replace = "private volatile Type[] bounds;")
@@ -40,4 +42,31 @@ class TypeVariableImpl {
     public D getGenericDeclaration() {
         return genericDeclaration;
     }
+
+    @Remove
+    public <T extends Annotation> T getAnnotation(Class<T> annotationClass);
+
+    @Remove
+    public <T extends Annotation> T getDeclaredAnnotation(Class<T> annotationClass);
+
+    @Remove
+    public <T extends Annotation> T[] getAnnotationsByType(Class<T> annotationClass);
+
+    @Remove
+    public <T extends Annotation> T[] getDeclaredAnnotationsByType(Class<T> annotationClass);
+
+    @Remove
+    public Annotation[] getAnnotations();
+
+    @Remove
+    public Annotation[] getDeclaredAnnotations();
+
+    @Remove
+    public AnnotatedType[] getAnnotatedBounds();
+
+    @Remove
+    private int typeVarIndex();
+
+    @Remove
+    private static Map<Class<? extends Annotation>, Annotation> mapAnnotations(Annotation[] annos);
 }

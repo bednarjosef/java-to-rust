@@ -54,6 +54,23 @@ const UNSUPPORTED: usize = 4;
 const TYPE_PARAMETERS: usize = 5;
 const GENERIC_INTERFACES: usize = 6;
 
+/// The type variables of the runtime's generic classes (`program::RUNTIME_CLASSES`), which the
+/// program does not declare, with their bounds as javac writes them.
+const RUNTIME_TYPE_PARAMETERS: [(&str, &str, &[&str]); 3] = [
+    ("java.lang.Class", "T", &[]),
+    ("java.lang.Comparable", "T", &[]),
+    ("java.lang.Enum", "E", &["java.lang.Enum<E>"]),
+];
+
+/// The class whose declaration a type is in, which declares the type variables it can name.
+#[derive(Clone, Copy)]
+enum Context {
+    /// A class of the program.
+    Class(usize),
+    /// A class of the runtime's, of `RUNTIME_TYPE_PARAMETERS`.
+    Runtime(&'static str),
+}
+
 /// A type as javac writes it (`java.util.Map<java.lang.String,java.util.List<? extends T>>`).
 enum Generic {
     /// A class with its type arguments, and the parameterized type it is a member of where javac
@@ -163,7 +180,7 @@ impl<'t> Lowering<'t> {
                     &format!("`getGenericSuperclass` of a class that extends `{superclass}`"),
                 );
             };
-            let made = self.generic_type(node, &generic, &superclass, t, type_ty)?;
+            let made = self.generic_type(node, &generic, &superclass, Context::Class(t), type_ty)?;
             found.push((self.class_literal_of(node, t)?, made));
         }
         let superclass = ExprKind::Builtin(Builtin::ClassMethod(ClassOp::GetSuperclass), vec![var()]);
@@ -227,6 +244,17 @@ impl<'t> Lowering<'t> {
             let items = items.into_iter().map(|i| self.convert(i, ret.element())).collect();
             self.synth(ExprKind::ArrayLit(items), pos, ret)
         };
+        // `switch (name)` over the variables `cases` gives the bounds of.
+        let by_name = |mut cases: Vec<Case>| {
+            let null = self.synth(ExprKind::Null, pos, ret);
+            cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(null)] });
+            self.synth(ExprKind::Switch { selector: Box::new(var(1)), cases }, pos, ret)
+        };
+        let bounds_case = |name: &str, bounds: Vec<Expr>| {
+            let label = self.synth(ExprKind::Str(name.to_string()), pos, Type::String);
+            Case { labels: vec![CaseLabel::Value(label)], body: vec![Stmt::Yield(array(bounds))] }
+        };
+        let why = "the bound of a type variable,";
         let mut found = Vec::new();
         for t in 0..self.types.len() {
             let decl = self.types[t].node;
@@ -237,7 +265,7 @@ impl<'t> Lowering<'t> {
                 "typeParameters0" => {
                     let variables: Vec<Expr> = decl
                         .list("typeParameters")
-                        .map(|p| self.declared_variable(node, t, p.str("name")))
+                        .map(|p| self.declared_variable(node, self.class_literal_of(node, t)?, p.str("name")))
                         .collect::<Result<_, _>>()?;
                     if variables.is_empty() {
                         continue;
@@ -253,7 +281,9 @@ impl<'t> Lowering<'t> {
                     array(
                         clauses
                             .iter()
-                            .map(|c| self.made_or_thrown(node, c.java_type(), t, type_ty, why))
+                            .map(|c| {
+                                self.made_or_thrown(node, c.java_type(), Context::Class(t), type_ty, why)
+                            })
                             .collect(),
                     )
                 }
@@ -264,24 +294,38 @@ impl<'t> Lowering<'t> {
                         if bounds.is_empty() {
                             continue;
                         }
-                        let why = "the bound of a type variable,";
-                        let made =
-                            bounds.iter().map(|b| self.made_or_thrown(node, b.java_type(), t, type_ty, why));
-                        let label =
-                            self.synth(ExprKind::Str(variable.str("name").to_string()), pos, Type::String);
-                        let body = vec![Stmt::Yield(array(made.collect()))];
-                        cases.push(Case { labels: vec![CaseLabel::Value(label)], body });
+                        let made = bounds
+                            .iter()
+                            .map(|b| {
+                                self.made_or_thrown(node, b.java_type(), Context::Class(t), type_ty, why)
+                            })
+                            .collect();
+                        cases.push(bounds_case(variable.str("name"), made));
                     }
                     if cases.is_empty() {
                         continue;
                     }
-                    let null = self.synth(ExprKind::Null, pos, ret);
-                    cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(null)] });
-                    self.synth(ExprKind::Switch { selector: Box::new(var(1)), cases }, pos, ret)
+                    by_name(cases)
                 }
                 _ => return unsupported(node, &what),
             };
             found.push((self.class_literal_of(node, t)?, made));
+        }
+        // The runtime's generic classes, which the program does not declare.
+        for (class, variable, bounds) in RUNTIME_TYPE_PARAMETERS {
+            let literal = || self.class_of_name(node, class, class);
+            let made = match symbol.name {
+                "typeParameters0" => array(vec![self.declared_variable(node, literal()?, variable)?]),
+                "bounds0" if !bounds.is_empty() => {
+                    let made = bounds
+                        .iter()
+                        .map(|b| self.made_or_thrown(node, b, Context::Runtime(class), type_ty, why))
+                        .collect();
+                    by_name(vec![bounds_case(variable, made)])
+                }
+                _ => continue,
+            };
+            found.push((literal()?, made));
         }
         let mut chain = self.synth(ExprKind::Null, pos, ret);
         for (literal, made) in found.into_iter().rev() {
@@ -315,13 +359,19 @@ impl<'t> Lowering<'t> {
             return Ok(None);
         }
         let (_, type_ty) = self.generic_methods(node, "`Field.getGenericType`")?;
-        Ok(Some(self.made_or_thrown(node, text, class, type_ty, "`Field.getGenericType` of a field of type")))
+        Ok(Some(self.made_or_thrown(
+            node,
+            text,
+            Context::Class(class),
+            type_ty,
+            "`Field.getGenericType` of a field of type",
+        )))
     }
 
     /// The type that javac gives as `text` in the declaration of class `context`, or, where this
     /// does not make it, a call that throws `UnsupportedOperationException` with `why` and the
     /// type.
-    fn made_or_thrown(&self, node: Node<'t>, text: &str, context: usize, type_ty: Type, why: &str) -> Expr {
+    fn made_or_thrown(&self, node: Node<'t>, text: &str, context: Context, type_ty: Type, why: &str) -> Expr {
         parse(text)
             .and_then(|generic| self.generic_type(node, &generic, text, context, type_ty).ok())
             .unwrap_or_else(|| self.thrown_type(node, &format!("{why} `{text}`"), type_ty))
@@ -340,13 +390,13 @@ impl<'t> Lowering<'t> {
         self.synth(call, pos, type_ty)
     }
 
-    /// The type variable `name` that class `t` declares.
-    fn declared_variable(&self, node: Node<'t>, t: usize, name: &str) -> Result<Expr, Error> {
+    /// The type variable `name` that the class of `class`, a class literal, declares.
+    fn declared_variable(&self, node: Node<'t>, class: Expr, name: &str) -> Result<Expr, Error> {
         let pos = node.pos();
         let (methods, _) = self.generic_methods(node, "a type variable")?;
         let ret = self.return_type(node, methods[VARIABLE])?;
         let name = self.synth(ExprKind::Str(name.to_string()), pos, Type::String);
-        let args = vec![self.class_literal_of(node, t)?, name];
+        let args = vec![class, name];
         let call =
             ExprKind::Call { name: "typeVariable".to_string(), args, resolved: Some(methods[VARIABLE]) };
         Ok(self.synth(call, pos, ret))
@@ -385,7 +435,7 @@ impl<'t> Lowering<'t> {
         node: Node<'t>,
         generic: &Generic,
         whole: &str,
-        context: usize,
+        context: Context,
         type_ty: Type,
     ) -> Result<Expr, Error> {
         let pos = node.pos();
@@ -404,10 +454,21 @@ impl<'t> Lowering<'t> {
             Generic::Class { name, args, owner }
                 if args.is_empty() && owner.is_none() && self.is_variable(name) =>
             {
-                match self.type_var_around(name, context, None) {
-                    Some((_, super::real_generics::Owner::Class(t))) => {
-                        Ok(self.convert(self.declared_variable(node, t, name)?, type_ty))
-                    }
+                let declaring = match context {
+                    Context::Class(c) => match self.type_var_around(name, c, None) {
+                        Some((_, super::real_generics::Owner::Class(t))) => {
+                            Some(self.class_literal_of(node, t)?)
+                        }
+                        _ => None,
+                    },
+                    Context::Runtime(class) => RUNTIME_TYPE_PARAMETERS
+                        .iter()
+                        .any(|(c, variable, _)| *c == class && variable == name)
+                        .then(|| self.class_of_name(node, class, whole))
+                        .transpose()?,
+                };
+                match declaring {
+                    Some(class) => Ok(self.convert(self.declared_variable(node, class, name)?, type_ty)),
                     _ => Ok(self.thrown_type(
                         node,
                         &format!("the type variable `{name}` of a method, in `{whole}`,"),

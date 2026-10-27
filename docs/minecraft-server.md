@@ -568,8 +568,8 @@ These are plans. Work on several of them is under way but not merged yet.
    walk); that walk stops at the first such write. Planned: cheaper retries, and knowing which
    `String[]` writes can run before the first reach.
 3. The translator's refusals still open from the last census, by kind:
-   - reflection: generic types of interfaces, methods and fields; type variables; the rest of
-     `Class`'s interfaces (`AnnotatedElement`, `GenericDeclaration`, ...); member and parameter
+   - reflection: generic types of methods; a method's type variables; the rest of `Class`'s
+     interfaces (`AnnotatedElement`, ...); member and parameter
      annotations; `Method.toGenericString`;
    - method handles: constant handles (`lookup`, `findVirtual`, `insertArguments`, ...), the
      handles Netty builds at run time, byte array and byte buffer view handles, and field
