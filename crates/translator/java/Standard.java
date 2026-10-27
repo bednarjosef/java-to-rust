@@ -1243,4 +1243,17 @@ final class StackWalker {
     public static StackWalker getInstance(Option option) {
         return new StackWalker();
     }
+
+    public static StackWalker getInstance(java.util.Set<Option> options) {
+        java.util.Objects.requireNonNull(options);
+        return new StackWalker();
+    }
+
+    public static StackWalker getInstance(java.util.Set<Option> options, int estimateDepth) {
+        if (estimateDepth <= 0) {
+            throw new java.lang.IllegalArgumentException("estimateDepth must be > 0");
+        }
+        java.util.Objects.requireNonNull(options);
+        return new StackWalker();
+    }
 }

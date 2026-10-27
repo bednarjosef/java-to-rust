@@ -368,7 +368,8 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   providers that `module-info.java` and `META-INF/services` declare.
 - A static method that asks for its caller's class (`StackWalker.getCallerClass()`,
   `Reflection.getCallerClass()`) gets it as an extra parameter from each call
-  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected.
+  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected; a walker
+  itself is made with any of `getInstance`'s options.
 
 ## Output, input and the native layer
 
