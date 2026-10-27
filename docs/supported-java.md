@@ -368,7 +368,8 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   providers that `module-info.java` and `META-INF/services` declare.
 - A static method that asks for its caller's class (`StackWalker.getCallerClass()`,
   `Reflection.getCallerClass()`) gets it as an extra parameter from each call
-  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected.
+  (`lower/callers.rs`). Asking anywhere else, `StackWalker.walk` and a security manager's
+  `getClassContext()` (the classes on the call stack) are rejected.
 
 ## Output, input and the native layer
 
@@ -401,7 +402,8 @@ Design: [natives-and-input.md](natives-and-input.md).
   translated, so `GraphicsEnvironment.isHeadless()` is always true, and a program that would
   open a window there (the Minecraft server without `nogui`) runs as it does on a server
   without one. The tests run Java with `-Djava.awt.headless=true` to compare.
-- There is no security manager (`System.getSecurityManager()` is null), no virtual threads, and
+- There is no security manager (`System.getSecurityManager()` is null), though a class of the
+  program may extend `SecurityManager` and make its objects, as log4j's does; no virtual threads; and
   no network connections: sockets stay rejected. The collector runs on its own
   ([collector.md](collector.md)): `gc()` does nothing, and `Runtime`'s memory figures are fixed
   values.

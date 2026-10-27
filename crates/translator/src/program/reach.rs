@@ -294,8 +294,6 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("com.sun.crypto.provider.Tls", "security"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
-    // There is no security manager (`System.getSecurityManager()` is null, see `lower::system`).
-    ("java.lang.SecurityManager", "security"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
@@ -1454,21 +1452,20 @@ pub fn release_query(node: &Value) -> bool {
             == ("java.lang.Runtime", "version")
 }
 
-/// Whether `condition` is `x == null` (`equal`) or `x != null` of a value `x` of a stub's type
-/// (`stubs`), which is only ever null, and which it reads without effects: a variable, or
-/// `System.getSecurityManager()`. So `if (sm != null)` skips what a security manager would check.
+/// Whether `condition` is `x == null` (`equal`) or `x != null` of a value `x` that is only ever
+/// null and that it reads without effects: a variable of a stub's type (`stubs`), or
+/// `System.getSecurityManager()`, which is null as in Java. So
+/// `if (System.getSecurityManager() != null)` skips what a security manager would check. A
+/// variable of type `SecurityManager` is tested as it is: a class of the program may extend it.
 fn stub_null_test(condition: &Value, equal: bool) -> bool {
     let kind = if equal { "EQUAL_TO" } else { "NOT_EQUAL_TO" };
-    let only_null = |v: &Value| {
-        let read = match text(v, "kind") {
-            "IDENTIFIER" => text(&v["symbol"], "kind") != "METHOD",
-            "METHOD_INVOCATION" => {
-                (text(&v["symbol"], "owner"), text(&v["symbol"], "name"))
-                    == ("java.lang.System", "getSecurityManager")
-            }
-            _ => false,
-        };
-        read && stubs::is_stub(text(v, "javaType"))
+    let only_null = |v: &Value| match text(v, "kind") {
+        "IDENTIFIER" => text(&v["symbol"], "kind") != "METHOD" && stubs::is_stub(text(v, "javaType")),
+        "METHOD_INVOCATION" => {
+            (text(&v["symbol"], "owner"), text(&v["symbol"], "name"))
+                == ("java.lang.System", "getSecurityManager")
+        }
+        _ => false,
     };
     let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
     let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
@@ -3778,10 +3775,6 @@ impl<'t> Walk<'t> {
                 for (class, method, signature) in *methods {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
-            }
-            // The security manager, which is null: its type is a stub's (see `stubs`).
-            "METHOD" if owner == "java.lang.System" && name == "getSecurityManager" => {
-                self.stub_type("java.lang.SecurityManager");
             }
             // The annotations that reflection finds (`ANNOTATION_VALUES`).
             "METHOD"
