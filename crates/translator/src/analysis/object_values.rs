@@ -103,6 +103,24 @@ pub struct ClassSet {
     words: Rc<Vec<u64>>,
 }
 
+/// Whether every bit of `words` is also in `of`, a slice as long: a block of words at a time,
+/// without a branch inside a block, so that the check vectorizes. The sets of every class of a
+/// type are thousands of words, and most unions add nothing.
+fn within(words: &[u64], of: &[u64]) -> bool {
+    let ((blocks, tail), (of_blocks, of_tail)) = (words.as_chunks::<8>(), of.as_chunks::<8>());
+    tail.iter().zip(of_tail).all(|(w, o)| w & !o == 0)
+        && blocks
+            .iter()
+            .zip(of_blocks)
+            .all(|(w, o)| w.iter().zip(o).fold(0, |outside, (w, o)| outside | w & !o) == 0)
+}
+
+/// Whether `words` are all zero, a block at a time as `within`.
+fn empty(words: &[u64]) -> bool {
+    let (blocks, tail) = words.as_chunks::<8>();
+    tail.iter().all(|&w| w == 0) && blocks.iter().all(|b| b.iter().fold(0, |any, w| any | w) == 0)
+}
+
 impl Default for ClassSet {
     /// The empty set, whose words all empty sets share, so that making one allocates nothing.
     fn default() -> ClassSet {
@@ -153,21 +171,16 @@ impl ClassSet {
         let theirs = &other.words[first..last];
         let (from, to) = (other.start + first, other.start + last);
         let (start, end) = (self.start, self.start + self.words.len());
-        if start <= from && to <= end {
-            let mine = &self.words[from - start..to - start];
-            if theirs.iter().zip(mine).all(|(t, m)| t & !m == 0) {
-                return false;
-            }
+        if start <= from && to <= end && within(theirs, &self.words[from - start..to - start]) {
+            return false;
         }
         // Where `other` holds every class of this set, this set becomes a copy of it.
         let (low, high) = (start.max(other.start), end.min(other.start + other.words.len()));
         let within = low < high && {
             let (mine, rest) =
                 (&self.words[low - start..high - start], &other.words[low - other.start..high - other.start]);
-            self.words[..low - start].iter().all(|&w| w == 0)
-                && self.words[high - start..].iter().all(|&w| w == 0)
-                && mine.iter().zip(rest).all(|(m, t)| m & !t == 0)
-        } || self.words.iter().all(|&w| w == 0);
+            empty(&self.words[..low - start]) && empty(&self.words[high - start..]) && within(mine, rest)
+        } || empty(&self.words);
         if within {
             *self = other.clone();
             return true;
