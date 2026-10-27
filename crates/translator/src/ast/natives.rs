@@ -713,6 +713,8 @@ pub const UNIX_CALLS: &[(&str, &str)] = &[
     ("size", "unix_size"),
     ("truncate", "unix_truncate"),
     ("sync", "unix_sync"),
+    ("lock", "unix_lock"),
+    ("unlock", "unix_unlock"),
 ];
 
 /// The translator's class of the name service calls of `java.net`.

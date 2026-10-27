@@ -3,13 +3,19 @@ package sun.nio.fs;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
+import java.nio.channels.AsynchronousCloseException;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.NonReadableChannelException;
 import java.nio.channels.NonWritableChannelException;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -19,15 +25,27 @@ import java.util.Objects;
  * through memory the JVM gives; this one copies between the buffer and an array that the
  * runtime reads into or writes from ({@code UnixNativeDispatcher.readBytes}, {@code writeBytes}).
  * A failed call throws an {@code IOException} with the system's message, as the JDK's does.
- * Neither memory-mapped files nor file locks are here: {@code map}, {@code lock} and
- * {@code tryLock} throw {@code UnsupportedOperationException}. A thread interrupted in a call
- * does not close the channel.
+ * Memory-mapped files are not here: {@code map} throws {@code UnsupportedOperationException}. A
+ * thread interrupted in a call does not close the channel.
+ *
+ * <p>File locks are the system's record locks, as the JDK's channel takes them
+ * ({@code UnixNativeDispatcher.lock}). They belong to the process, so, as the JDK's
+ * {@code FileLockTable} does, the program keeps the locks it holds by file ({@link #LOCKS}) and
+ * refuses one that overlaps another, whichever channel of the file took it.
  */
 final class UnixFileChannel extends FileChannel {
     /** The most that one call reads or writes: a read may give fewer bytes than asked. */
     private static final int CHUNK = 1 << 20;
 
+    /** What {@code UnixNativeDispatcher.lock} answers where a signal ended the wait. */
+    private static final int INTERRUPTED = 2;
+
+    /** The locks that the program holds, by the file's key. */
+    private static final Map<UnixFileKey, List<ChannelLock>> LOCKS = new HashMap<>();
+
     private final int fd;
+    /** The key of the file, once a lock needs it. */
+    private UnixFileKey fileKey;
     private final boolean readable;
     private final boolean writable;
     private final boolean append;
@@ -275,18 +293,168 @@ final class UnixFileChannel extends FileChannel {
         throw new UnsupportedOperationException("memory-mapped files in a translated program");
     }
 
+    /** A lock of a region of the file that a channel holds. */
+    private static final class ChannelLock extends FileLock {
+        private volatile boolean valid = true;
+
+        ChannelLock(UnixFileChannel channel, long position, long size, boolean shared) {
+            super(channel, position, size, shared);
+        }
+
+        @Override
+        public boolean isValid() {
+            return valid;
+        }
+
+        void invalidate() {
+            valid = false;
+        }
+
+        @Override
+        public synchronized void release() throws IOException {
+            UnixFileChannel channel = (UnixFileChannel) acquiredBy();
+            if (!channel.isOpen()) {
+                throw new ClosedChannelException();
+            }
+            if (valid) {
+                channel.release(this);
+                valid = false;
+            }
+        }
+    }
+
+    /**
+     * A new lock of the region, checked against the channel's mode and added to {@link #LOCKS},
+     * or {@code OverlappingFileLockException} where the program already holds a lock that
+     * overlaps it. A size of 0 means to the end of the file however it grows.
+     */
+    private ChannelLock add(long position, long size, boolean shared) throws IOException {
+        ensureOpen();
+        if (shared && !readable) {
+            throw new NonReadableChannelException();
+        }
+        if (!shared && !writable) {
+            throw new NonWritableChannelException();
+        }
+        if (size == 0) {
+            size = Long.MAX_VALUE - Math.max(0, position);
+        }
+        ChannelLock lock = new ChannelLock(this, position, size, shared);
+        synchronized (LOCKS) {
+            if (fileKey == null) {
+                try {
+                    fileKey = UnixFileAttributes.get(fd).fileKey();
+                } catch (UnixException x) {
+                    throw UnixFileInputStream.failure(x);
+                }
+            }
+            List<ChannelLock> held = LOCKS.get(fileKey);
+            if (held == null) {
+                held = new ArrayList<>(2);
+                LOCKS.put(fileKey, held);
+            }
+            for (ChannelLock other : held) {
+                if (other.overlaps(position, size)) {
+                    throw new OverlappingFileLockException();
+                }
+            }
+            held.add(lock);
+        }
+        return lock;
+    }
+
+    /** Takes {@code lock} out of {@link #LOCKS}. */
+    private void remove(ChannelLock lock) {
+        synchronized (LOCKS) {
+            List<ChannelLock> held = LOCKS.get(fileKey);
+            if (held != null) {
+                held.remove(lock);
+                if (held.isEmpty()) {
+                    LOCKS.remove(fileKey);
+                }
+            }
+        }
+    }
+
+    /** Releases {@code lock}'s region, which the lock's {@code release} asks for. */
+    private void release(ChannelLock lock) throws IOException {
+        ensureOpen();
+        UnixNativeDispatcher.unlock(fd, lock.position(), lock.size());
+        check();
+        remove(lock);
+    }
+
     @Override
     public FileLock lock(long position, long size, boolean shared) throws IOException {
-        throw new UnsupportedOperationException("file locks in a translated program");
+        ChannelLock lock = add(position, size, shared);
+        boolean completed = false;
+        try {
+            if (!isOpen()) {
+                return null;
+            }
+            int n;
+            do {
+                n = UnixNativeDispatcher.lock(fd, true, lock.position(), lock.size(), shared);
+                check();
+            } while (n == INTERRUPTED && isOpen());
+            completed = isOpen();
+        } finally {
+            if (!completed) {
+                remove(lock);
+            }
+        }
+        if (!completed) {
+            throw new AsynchronousCloseException();
+        }
+        return lock;
     }
 
     @Override
     public FileLock tryLock(long position, long size, boolean shared) throws IOException {
-        throw new UnsupportedOperationException("file locks in a translated program");
+        ChannelLock lock = add(position, size, shared);
+        int n;
+        try {
+            ensureOpen();
+            n = UnixNativeDispatcher.lock(fd, false, lock.position(), lock.size(), shared);
+            check();
+        } catch (IOException e) {
+            remove(lock);
+            throw e;
+        }
+        if (n != 0) {
+            remove(lock);
+            return null;
+        }
+        return lock;
     }
 
     @Override
     protected void implCloseChannel() throws IOException {
+        // The channel's locks end with it.
+        List<ChannelLock> mine = new ArrayList<>();
+        synchronized (LOCKS) {
+            List<ChannelLock> held = fileKey == null ? null : LOCKS.get(fileKey);
+            if (held != null) {
+                for (ChannelLock lock : held) {
+                    if (lock.acquiredBy() == this) {
+                        mine.add(lock);
+                    }
+                }
+                held.removeAll(mine);
+                if (held.isEmpty()) {
+                    LOCKS.remove(fileKey);
+                }
+            }
+        }
+        for (ChannelLock lock : mine) {
+            synchronized (lock) {
+                if (lock.isValid()) {
+                    UnixNativeDispatcher.unlock(fd, lock.position(), lock.size());
+                    check();
+                    lock.invalidate();
+                }
+            }
+        }
         try {
             UnixNativeDispatcher.close(fd);
         } catch (UnixException x) {

@@ -20,10 +20,11 @@ pub struct ChannelCall {
 /// `UnixFileDispatcherImpl`, whose natives take a `FileDescriptor` first.
 pub const UNIX_FILE_DISPATCHER: &str = "sun.nio.ch.UnixFileDispatcherImpl";
 
+/// `FileKey`, whose `init` takes a `FileDescriptor` first too.
+pub const FILE_KEY: &str = "sun.nio.ch.FileKey";
+
 /// The natives of `sun.nio.ch` that the runtime implements, by the class and name Java gives them.
 /// `setDirect0` fails with an `IOException` (direct I/O is not supported), as its caller expects.
-/// `release0` releases file locks, which `lock0` takes and the runtime does not have, so it is
-/// never called with a lock held and does nothing.
 pub const CHANNEL_CALLS: &[ChannelCall] = &[
     ChannelCall { class: UNIX_FILE_DISPATCHER, name: "read0", function: "channel_read", fails: true },
     ChannelCall { class: UNIX_FILE_DISPATCHER, name: "pread0", function: "channel_pread", fails: true },
@@ -45,7 +46,10 @@ pub const CHANNEL_CALLS: &[ChannelCall] = &[
         function: "channel_set_direct",
         fails: true,
     },
-    ChannelCall { class: UNIX_FILE_DISPATCHER, name: "release0", function: "channel_release", fails: false },
+    ChannelCall { class: UNIX_FILE_DISPATCHER, name: "lock0", function: "channel_lock", fails: true },
+    ChannelCall { class: UNIX_FILE_DISPATCHER, name: "release0", function: "channel_release", fails: true },
+    ChannelCall { class: UNIX_FILE_DISPATCHER, name: "force0", function: "channel_force", fails: true },
+    ChannelCall { class: FILE_KEY, name: "init", function: "channel_file_key", fails: true },
     ChannelCall {
         class: "sun.nio.ch.NativeThread",
         name: "current0",
