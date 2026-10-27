@@ -129,6 +129,9 @@ fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
         std::fs::copy(resource, to).unwrap();
     }
     let mut java = Command::new("java");
+    // Both runs leave out the library path that cargo sets for the test, which Java and the
+    // translation read into `java.library.path`.
+    java.env_remove("LD_LIBRARY_PATH");
     java.args(INTERNAL_EXPORTS);
     // AWT is headless, as in every translation (`lower::system`).
     java.arg("-Djava.awt.headless=true");
@@ -251,7 +254,7 @@ fn run_rust(
     // The translator names the crate after the main class.
     let crate_name = p.main.rsplit('.').next().unwrap_or_default().to_lowercase();
     let binary = target.join("debug").join(crate_name);
-    (Ok(run(Command::new(binary).stdin(stdin_of(p)).output().unwrap())), key)
+    (Ok(run(Command::new(binary).env_remove("LD_LIBRARY_PATH").stdin(stdin_of(p)).output().unwrap())), key)
 }
 
 /// The key of a translated program's run: `build`, the crate the translator wrote in `dir` (its

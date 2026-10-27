@@ -50,6 +50,7 @@ const KEYS: &[&str] = &[
     "os.arch",
     "os.version",
     "java.home",
+    "java.library.path",
 ];
 
 /// Keys whose value a translated program cannot have: the command line of the run (the main class

@@ -67,6 +67,15 @@ fn property(key: &str) -> String {
             "aarch64" => "aarch64".to_string(),
             other => other.to_string(),
         },
+        // The JVM's search path for native libraries on 64-bit Linux: `LD_LIBRARY_PATH`, when it
+        // is set, before the system's directories.
+        "java.library.path" => {
+            let system = "/usr/java/packages/lib:/usr/lib64:/lib64:/lib:/usr/lib";
+            match std::env::var("LD_LIBRARY_PATH") {
+                Ok(path) => format!("{path}:{system}"),
+                Err(_) => system.to_string(),
+            }
+        }
         _ => unreachable!("the translation answers only the keys it lowers: {key}"),
     }
 }
