@@ -66,7 +66,8 @@ included (docs/collector.md).
 - Integer overflow wraps as in Java; division by zero throws `ArithmeticException`; float
   arithmetic and printing follow Java's rules (`Double.toString` and `Float.toString` exactly).
 - Annotations and annotation types are left out, since they do nothing at run time. The class
-  literal of a top-level annotation type is a `Class` that `isAnnotation()`, and a value of an
+  literal of an annotation type is a `Class` that `isAnnotation()`, named by its binary name
+  (`Outer$Skip` for one declared in a class; not one declared in a local or anonymous class), and a value of an
   annotation type is an `Annotation` where the program has that interface; a class implementing
   one, and any other use of one, is rejected. `isAnnotationPresent(A.class)` is answered from the
   declarations (`lower/annotation_presence.rs`), and so are `getAnnotation(A.class)` of a class

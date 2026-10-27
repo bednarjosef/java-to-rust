@@ -468,10 +468,11 @@ struct Lowering<'t> {
     /// The volatile element accesses (`Class::volatile_elements`).
     volatile_elements: RefCell<std::collections::HashSet<ExprId>>,
     /// The annotation types whose class literals the code has (`Class::annotation_classes`).
-    annotation_classes: RefCell<std::collections::BTreeSet<String>>,
-    /// The annotation types declared in other classes, whose binary names lowering does not
-    /// know: a class literal of one is rejected.
-    nested_annotation_types: std::collections::HashSet<String>,
+    annotation_classes: RefCell<std::collections::BTreeMap<String, String>>,
+    /// The annotation types declared in other classes, with their binary names
+    /// (`Outer$Annotation`): `None` for one in a local or anonymous class, whose binary name
+    /// lowering does not know, and whose class literal is rejected.
+    nested_annotation_types: std::collections::HashMap<String, Option<String>>,
     /// The methods of enums that only the bodies of their constants declare, each implementing a
     /// method of an interface that the enum leaves to it (see `constant_bodies::body_methods`).
     body_methods: std::collections::HashSet<usize>,
