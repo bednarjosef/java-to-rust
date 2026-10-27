@@ -43,7 +43,8 @@
 # TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G),
 #                    with CARGO_BUILD_JOBS crates built at once (default 10)
 # TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
-#                    memory and time to build)
+#                    memory and time to build; its runtime crate is built optimized all the same)
+# SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
 # PREVIOUS_CENSUS    the census that the summary compares the latest with, a directory with a
 #                    census.json (default $MINECRAFT_CACHE/census-previous, where the census step
 #                    moves the census before it, if it has one)
@@ -549,11 +550,12 @@ memory_cap_command() {
   fi
 }
 
-# Waits up to 600 s for the server in the current directory to log that it is done starting, then
-# prints `stop`. Stops waiting early once process PID, the server's, has exited.
+# Waits up to SERVER_SECONDS for the server in the current directory to log that it is done
+# starting, then prints `stop`. Stops waiting early once process PID, the server's, has exited.
 stop_when_started() {
   local waited=0
-  until grep -q 'Done (' stdout.txt 2>/dev/null || [ $waited -ge 600 ] || ! kill -0 "$1" 2>/dev/null; do
+  until grep -q 'Done (' stdout.txt 2>/dev/null || [ $waited -ge "${SERVER_SECONDS:-600}" ] \
+    || ! kill -0 "$1" 2>/dev/null; do
     sleep 1
     waited=$((waited + 1))
   done
@@ -562,7 +564,7 @@ stop_when_started() {
 
 # The server's first start in DIR, a new directory with the EULA accepted (as eula.txt), run as
 # COMMAND...: it makes a world and stops at the "stop" that it reads on standard input once
-# started, printing the console's log to DIR/stdout.txt. At most 10 minutes.
+# started, printing the console's log to DIR/stdout.txt. At most SERVER_SECONDS (10 minutes).
 run_server() {
   local dir=$1
   shift
@@ -575,7 +577,7 @@ run_server() {
   # ("An unexpected error occurred while trying to execute that command") and keeps running.
   # It reads it from a process substitution, not a pipe, so that a server that dies early is not
   # waited for: the subshell, which the wait watches, ends with the server.
-  (cd "$dir" && shell=$BASHPID && timeout 600 "$@" --nogui < <(stop_when_started "$shell") > stdout.txt 2> stderr.txt)
+  (cd "$dir" && shell=$BASHPID && timeout "${SERVER_SECONDS:-600}" "$@" --nogui < <(stop_when_started "$shell") > stdout.txt 2> stderr.txt)
   code=$?
   set -e
   echo "exit $code after $(($(date +%s) - start)) s" | tee "$dir/run.txt"
@@ -601,7 +603,8 @@ trial() {
   local start
   start=$(date +%s)
   (cd "$cache/trial" && CARGO_TARGET_DIR=$cache/trial-target CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} \
-    "${slot[@]}" "${cap[@]}" cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}" > "$cache/trial-build.txt" 2>&1) \
+    "${slot[@]}" "${cap[@]}" cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}" \
+    --config 'profile.dev.package.java-runtime.opt-level=2' > "$cache/trial-build.txt" 2>&1) \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
   local name profile=${TRIAL_PROFILE:-dev}
