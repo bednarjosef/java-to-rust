@@ -2371,12 +2371,29 @@ pub fn redirected_call(owner: &str, name: &str, signature: &str) -> Option<(&'st
 
 /// The JVM's natives of `sun.nio.ch`'s sockets, pipes and selectors, each with the method of the
 /// translator's `TranslatedSockets` (`ast::SOCKET_DISPATCHER`) that its calls call instead: the
-/// same parameters, on the runtime's system calls (`java_runtime::socket`). Unix domain sockets
+/// same parameters, on the runtime's system calls (`java_runtime::socket`). So are the natives of
+/// `jdk.net`'s Linux socket options. Unix domain sockets
 /// are not supported, as on a platform without them: `UnixDomainSockets.init()` answers false, so
 /// the JDK refuses the family before it would make one, and their other natives throw. The
 /// natives that sockets of other kinds need (datagrams, out-of-band data, SCTP) stay natives the
 /// translation does not have.
 pub const SOCKET_NATIVES: &[(JdkMethod, &str)] = &[
+    // `jdk.net`'s extended socket options on Linux.
+    (("jdk.net.LinuxSocketOptions", "keepAliveOptionsSupported0", "()boolean"), "keepAliveOptionsSupported0"),
+    (("jdk.net.LinuxSocketOptions", "quickAckSupported0", "()boolean"), "quickAckSupported0"),
+    (("jdk.net.LinuxSocketOptions", "incomingNapiIdSupported0", "()boolean"), "incomingNapiIdSupported0"),
+    (("jdk.net.LinuxSocketOptions", "setTcpKeepAliveProbes0", "(int,int)void"), "setTcpKeepAliveProbes0"),
+    (("jdk.net.LinuxSocketOptions", "setTcpKeepAliveTime0", "(int,int)void"), "setTcpKeepAliveTime0"),
+    (("jdk.net.LinuxSocketOptions", "setTcpKeepAliveIntvl0", "(int,int)void"), "setTcpKeepAliveIntvl0"),
+    (("jdk.net.LinuxSocketOptions", "getTcpKeepAliveProbes0", "(int)int"), "getTcpKeepAliveProbes0"),
+    (("jdk.net.LinuxSocketOptions", "getTcpKeepAliveTime0", "(int)int"), "getTcpKeepAliveTime0"),
+    (("jdk.net.LinuxSocketOptions", "getTcpKeepAliveIntvl0", "(int)int"), "getTcpKeepAliveIntvl0"),
+    (("jdk.net.LinuxSocketOptions", "setQuickAck0", "(int,boolean)void"), "setQuickAck0"),
+    (("jdk.net.LinuxSocketOptions", "getQuickAck0", "(int)boolean"), "getQuickAck0"),
+    (("jdk.net.LinuxSocketOptions", "setIpDontFragment0", "(int,boolean,boolean)void"), "setIpDontFragment0"),
+    (("jdk.net.LinuxSocketOptions", "getIpDontFragment0", "(int,boolean)boolean"), "getIpDontFragment0"),
+    (("jdk.net.LinuxSocketOptions", "getIncomingNapiId0", "(int)int"), "getIncomingNapiId0"),
+    (("jdk.net.LinuxSocketOptions", "getSoPeerCred0", "(int)long"), "getSoPeerCred0"),
     (("sun.nio.ch.IOUtil", "fdVal", "(java.io.FileDescriptor)int"), "fdVal"),
     (("sun.nio.ch.IOUtil", "setfdVal", "(java.io.FileDescriptor,int)void"), "setfdVal"),
     (("sun.nio.ch.IOUtil", "initIDs", "()void"), "initIDs"),

@@ -77,8 +77,8 @@ exactly. The Java run is the expected result, so no expectations are written by 
 - `corpus/whole-program/` holds programs that use the JDK's own code, translated whole by
   `cargo test --test whole_program`. The JDK's sources cannot be in the repository, so the test
   runs only when `JAVA_BASE_SOURCES` names the source root of `java.base`, and otherwise says it
-  skipped. The tests of other JDK modules (`jdk.unsupported`) look for their sources next to
-  `java.base`'s, as the JDK's `lib/src.zip` unpacks them, and skip without them.
+  skipped. The tests of other JDK modules (`jdk.unsupported`, `jdk.net`) look for their sources
+  next to `java.base`'s, as the JDK's `lib/src.zip` unpacks them, and skip without them.
 - `targets/` holds typical Java programs that do not translate yet; `targets/run.sh` runs them
   one by one, or whole with a JDK root as its first argument, and
   [targets/README.md](targets/README.md) records what rejects each one.
