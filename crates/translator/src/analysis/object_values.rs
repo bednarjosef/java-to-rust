@@ -175,13 +175,7 @@ impl ClassSet {
             return false;
         }
         // Where `other` holds every class of this set, this set becomes a copy of it.
-        let (low, high) = (start.max(other.start), end.min(other.start + other.words.len()));
-        let within = low < high && {
-            let (mine, rest) =
-                (&self.words[low - start..high - start], &other.words[low - other.start..high - other.start]);
-            empty(&self.words[..low - start]) && empty(&self.words[high - start..]) && within(mine, rest)
-        } || empty(&self.words);
-        if within {
+        if self.within(other) {
             *self = other.clone();
             return true;
         }
@@ -196,15 +190,30 @@ impl ClassSet {
 
     /// Whether every class of `other` is in this set.
     pub(super) fn holds(&self, other: &ClassSet) -> bool {
-        other.words.iter().enumerate().all(|(i, &word)| word & !self.word(other.start + i) == 0)
+        other.within(self)
+    }
+
+    /// Whether every class of this set is in `other`.
+    fn within(&self, other: &ClassSet) -> bool {
+        let (start, end) = (self.start, self.start + self.words.len());
+        let (low, high) = (start.max(other.start), end.min(other.start + other.words.len()));
+        if low >= high {
+            return empty(&self.words);
+        }
+        empty(&self.words[..low - start])
+            && empty(&self.words[high - start..])
+            && within(
+                &self.words[low - start..high - start],
+                &other.words[low - other.start..high - other.start],
+            )
     }
 
     /// Keeps the classes that are also in `other`.
     fn intersect(&mut self, other: &ClassSet) {
-        let start = self.start;
-        if self.words.iter().enumerate().all(|(i, &word)| word & !other.word(start + i) == 0) {
+        if self.within(other) {
             return;
         }
+        let start = self.start;
         for (i, word) in Rc::make_mut(&mut self.words).iter_mut().enumerate() {
             *word &= other.word(start + i);
         }
