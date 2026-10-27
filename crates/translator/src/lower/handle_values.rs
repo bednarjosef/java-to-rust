@@ -1109,7 +1109,10 @@ impl<'t> Lowering<'t> {
                 ExprKind::Builtin(Builtin::NullChecked(Some(interned_name(symbol.name))), vec![receiver]);
             block.push(Stmt::Expr(self.synth(check, pos, Type::JavaClass)));
         }
-        let token = self.static_token(node, &held)?;
+        // A handle that a call of type `Object` gives (`invoke` of a handle that makes handles)
+        // is its token as an `Object`.
+        let ty = self.ty(node, node.java_type())?;
+        let token = self.convert(self.static_token(node, &held)?, ty);
         if block.is_empty() {
             return Ok(Some(token.kind));
         }
