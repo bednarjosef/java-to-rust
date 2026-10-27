@@ -3978,6 +3978,37 @@ fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
 }
 
 #[test]
+fn a_census_finds_the_same_with_the_messages_of_unchanged_code_kept_from_round_to_round() {
+    // A census keeps the messages of `NullPointerException`s of each method from one round to
+    // the next, finding them anew only for the code that the stubs changed
+    // (`analysis::KeptMessages`). Over a census whose first round stubs the errors of the checks,
+    // of the messages and of the generator, and whose second round finds the messages again, the
+    // census is the same as with the messages of every method found anew in each round, its
+    // translation too.
+    let source = ROUNDS.replace(
+        "compare(new Name());",
+        "compare(new Name());\n        System.out.println(Drain.drain(args.length > 4) != null);",
+    );
+    let dir = write_sources("census_kept_messages", &[("Main.java", &format!("{source}{DRAIN}"))]);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let kept = census(&program);
+    let anew = java_to_rust::program::messages_found_anew(|| census(&program));
+    assert_eq!(kept.report, anew.report);
+    assert_eq!(kept.json, anew.json);
+    let rust = kept.modules.expect("a translation").one_file();
+    assert_eq!(rust, anew.modules.expect("a translation").one_file());
+    assert_contains(
+        &kept.report,
+        &["the message of the `NullPointerException` of this dereference not supported yet"],
+    );
+}
+
+#[test]
 fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
     // The analyses run the steps that read none of each other's facts alongside each other
     // (`analysis::analyze_from`). Over a census whose analyses reject a pattern variable,
@@ -4415,6 +4446,9 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             private Unsafe() {}
             private static final Unsafe theUnsafe = new Unsafe();
             public static Unsafe getUnsafe() { return theUnsafe; }
+            // The translator's patch replaces it (java/patches/jdk/internal/misc/Unsafe.java), so
+            // the stand-in has it too.
+            public native Object allocateInstance(Class<?> cls) throws InstantiationException;
             public long arrayBaseOffset(Class<?> c) {
                 if (c == null) { throw new NullPointerException(); }
                 return arrayBaseOffset0(c);

@@ -54,6 +54,19 @@ impl<'t> Lowering<'t> {
         Ok(Some(ExprKind::Call { name: to.to_string(), args, resolved: Some(resolved) }))
     }
 
+    /// The translator's method `to` that a call of the restricted method `symbol` calls: the one
+    /// that loads nothing where the code being lowered has no native access
+    /// (`program::NATIVE_ACCESS_CALLS`).
+    pub(super) fn restricted(&self, symbol: &Symbol, to: &'static str) -> &'static str {
+        match crate::program::NATIVE_ACCESS_CALLS
+            .iter()
+            .find(|(call, _)| *call == (symbol.owner, symbol.name))
+        {
+            Some((_, unlinked)) if !self.has_native_access() => unlinked,
+            _ => to,
+        }
+    }
+
     /// Whether the code being lowered is in a module that Java gives native access
     /// (`program::NATIVE_ACCESS_MODULES`): the named module whose root has the package of the
     /// class that holds it.

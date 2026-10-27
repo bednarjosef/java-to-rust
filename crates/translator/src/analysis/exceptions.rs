@@ -1358,6 +1358,21 @@ fn stmt_points(
         _ => {
             // The expressions of this statement, then its nested statements.
             visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, safe, out));
+            // A for-each reads its array's length as it starts, which throws for a null one.
+            if let Stmt::ForEach { array, .. } = s
+                && maybe_null(facts, m, array)
+                && !is_tested(array, safe)
+            {
+                let raise =
+                    Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: array.id };
+                out.push(Point {
+                    raise,
+                    pos: array.pos,
+                    what: "this loop",
+                    frames: frames.clone(),
+                    known: Vec::new(),
+                });
+            }
             statement_unboxing_points(class, facts, m, s, frames, safe, out);
             for nested in children(s) {
                 stmt_points(class, facts, m, nested, frames, safe, out);
@@ -1706,8 +1721,10 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
             Vec::new()
         }
         // A range of a `CharSequence` that a builder appends is read with its `length` and
-        // `charAt` (`codegen::char_sequence`), or is a string's or a builder's.
+        // `charAt` (`codegen::char_sequence`), or is a string's or a builder's; one that it
+        // inserts is a string's or a builder's.
         ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args) if args.len() == 4 => Vec::new(),
+        ExprKind::Builtin(Builtin::Builder(BuilderOp::Insert), args) if args.len() == 5 => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()

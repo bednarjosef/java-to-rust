@@ -49,7 +49,8 @@ use super::checkpoint;
 use super::survey::{self, Part, Piece};
 use super::{Program, ProgramError, Reach, Reaching, Writes, class_file_names, load, source_files};
 use crate::ast::{
-    Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt, visit_stmt_exprs,
+    Builtin, Class, Error, Expr, ExprKind, Method, PROVIDED_UNIT, Pos, Stmt, Type, visit_expr, visit_stmt,
+    visit_stmt_exprs,
 };
 use crate::output::ModuleTree;
 use crate::value::{Value, json};
@@ -66,6 +67,19 @@ thread_local! {
     /// Whether the census on this thread ends each run of the analyses at the first check that
     /// rejects code (`round_by_round`).
     static ROUND_BY_ROUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the census on this thread finds the messages of every method anew in each round
+    /// (`messages_found_anew`).
+    static MESSAGES_ANEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with each census on this thread finding the messages of `NullPointerException`s of
+/// every method anew in each round, rather than keeping those of the methods that no stub changed
+/// (`analysis::KeptMessages`): for a test that the census is the same either way.
+pub fn messages_found_anew<T>(f: impl FnOnce() -> T) -> T {
+    let before = MESSAGES_ANEW.replace(true);
+    let out = f();
+    MESSAGES_ANEW.set(before);
+    out
 }
 
 /// Runs `f` with each census on this thread taken one round per check of the analyses that
@@ -232,6 +246,10 @@ fn analysed(
                 jdk_temps: RefCell::new(jdk_temps),
                 found: RefCell::new(None),
                 approximated: RefCell::new(Vec::new()),
+                kept: RefCell::new(match MESSAGES_ANEW.get() {
+                    true => analysis::KeptMessages::default(),
+                    false => analysis::KeptMessages::new(),
+                }),
             };
             let fatal = analyse(
                 &mut class,
@@ -357,6 +375,9 @@ struct Names<'a> {
     found: RefCell<Option<Found>>,
     /// The dereferences whose message the last pass approximated (`Facts::npe_approximated`).
     approximated: RefCell<Vec<(Pos, Option<Pos>)>>,
+    /// The messages of each method's code, kept from pass to pass but for the methods whose code
+    /// a stub changed (`Stubs::changed`).
+    kept: RefCell<analysis::KeptMessages>,
 }
 
 /// The names of the class files, or, where they cannot be compiled, none but those of the JDK's
@@ -401,7 +422,7 @@ impl Names<'_> {
         let Found { names, without } = found.as_ref().expect("found above");
         let approximate = self.program.approximate_messages;
         let found = crate::timings::phase("census: messages", || {
-            analysis::npe_messages(class, facts, names, approximate)
+            analysis::npe_messages_kept(class, facts, names, approximate, &mut self.kept.borrow_mut())
         });
         *self.approximated.borrow_mut() = std::mem::take(&mut facts.npe_approximated);
         found.map_err(|errors| match without {
@@ -438,8 +459,13 @@ fn analyse(
     ends_rejected: bool,
 ) -> Option<Rejection> {
     let generated: std::cell::RefCell<Option<ModuleTree>> = Default::default();
-    let mut stubs =
-        Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new(), ends_rejected, owner: None };
+    let mut stubs = Stubs {
+        next_id: next_id(class) + 1,
+        stubbed: HashSet::new(),
+        ends_rejected,
+        owner: None,
+        changed: Vec::new(),
+    };
     // `whole_objects` changes the program only when it passes: an error of it that no stub takes
     // away is recorded, and the census goes on without it. An error of a check of the analyses
     // that only rejects (as of a field's type) that no stub takes away is recorded too, and the
@@ -571,6 +597,10 @@ fn analyse(
                     stuck.push(rejection);
                 }
             }
+            // The messages are found again for the code the stubs changed alone.
+            for method in stubs.changed.drain(..) {
+                names.kept.borrow_mut().forget(method);
+            }
             // An error that no stub took away comes back, unless the stubs took away its cause.
             if stubbed {
                 represented.take();
@@ -633,6 +663,10 @@ struct Stubs {
     ends_rejected: bool,
     /// The method that the last rejection stubbed first, for `--timings`.
     owner: Option<usize>,
+    /// The methods whose code the stubs changed since `changed` was last taken: those stubbed,
+    /// the abstract ones made concrete, and those of a class whose field initializers a stub
+    /// dropped, which its first constructor runs.
+    changed: Vec<usize>,
 }
 
 impl Stubs {
@@ -642,15 +676,19 @@ impl Stubs {
     /// nothing to stub.
     fn stub(&mut self, class: &mut Class, units: &[Option<usize>], error: Error) -> Rejection {
         let pos = error.pos;
-        // An error at a position with its unit is in that unit's code alone (`Pos::unit`).
-        let known = pos.unit.map(|u| u as usize);
-        let mut rejection = Rejection { unit: known, anchor: None, error };
+        // An error at a position with its unit is in that unit's code alone (`Pos::unit`), or in
+        // the code that lowering provides alone (`PROVIDED_UNIT`).
+        let known = pos.unit;
+        let mut rejection = Rejection { unit: pos.source_unit(), anchor: None, error };
         self.owner = None;
         // The code that lowering provides has no position of its own.
         if pos == Pos::default() {
             return rejection;
         }
-        let in_unit = |t: usize| known.is_none() || units.get(t).copied().flatten() == known;
+        let in_unit = |t: usize| {
+            let unit = units.get(t).copied().flatten();
+            known.is_none_or(|k| unit.map_or(PROVIDED_UNIT, |u| u as u32) == k)
+        };
         let ends_rejected = self.ends_rejected;
         let at = |e: &Expr| {
             let mut here = false;
@@ -687,6 +725,7 @@ impl Stubs {
                     &rejection.error,
                 );
                 self.never(method, message);
+                self.changed.push(index);
                 if rejection.anchor.is_none() {
                     rejection.unit = units.get(method.class).copied().flatten();
                     rejection.anchor = Some(method.pos);
@@ -694,6 +733,7 @@ impl Stubs {
                 }
             }
         }
+        let mut initialized = Vec::new();
         for (t, decl) in class.types.iter_mut().enumerate() {
             if !in_unit(t) {
                 continue;
@@ -710,11 +750,17 @@ impl Stubs {
                         let message = stub_message(named(&decl.name, ends_rejected), &rejection.error);
                         self.expr(Builtin::NoObject { class: t }, Some(message), field.pos, field.ty)
                     });
+                    initialized.push(t);
                     if rejection.anchor.is_none() {
                         rejection.unit = units.get(t).copied().flatten();
                         rejection.anchor = Some(field.pos);
                     }
                 }
+            }
+        }
+        for (index, method) in class.methods.iter().enumerate() {
+            if initialized.contains(&method.class) {
+                self.changed.push(index);
             }
         }
         // An abstract method that an analysis rejects (one that an enum does not implement, say,
@@ -731,6 +777,7 @@ impl Stubs {
                 );
                 method.is_abstract = false;
                 self.never(method, message);
+                self.changed.push(index);
                 class.hierarchy.make_concrete(index);
                 rejection.unit = units.get(method.class).copied().flatten();
                 rejection.anchor = Some(method.pos);
@@ -816,7 +863,7 @@ fn thrown_unsupported(class: &Class, marker: &str) -> Vec<Rejection> {
             && let [Expr { kind: ExprKind::Str(message), .. }] = args.as_slice()
             && message.contains(marker)
         {
-            let unit = x.pos.unit.map(|u| u as usize);
+            let unit = x.pos.source_unit();
             let error = Error { pos: x.pos, message: message.clone() };
             found.push(Rejection { unit, anchor, error });
         }
@@ -844,7 +891,7 @@ fn computed_charset_names(class: &Class) -> Vec<Rejection> {
         if !matches!(lookup.name.kind, ExprKind::Str(_)) {
             let pos = lookup.call.pos;
             let message = format!("`{}` of a charset name known only at run time", lookup.what);
-            let unit = pos.unit.map(|u| u as usize);
+            let unit = pos.source_unit();
             found.push(Rejection { unit, anchor: lookup.method, error: Error { pos, message } });
         }
     });
@@ -858,17 +905,17 @@ fn approximated_messages(places: Vec<(Pos, Option<Pos>)>) -> Vec<Rejection> {
         .into_iter()
         .map(|(pos, anchor)| {
             let message = "the message of the `NullPointerException` of this dereference".to_string();
-            Rejection { unit: pos.unit.map(|u| u as usize), anchor, error: Error { pos, message } }
+            Rejection { unit: pos.source_unit(), anchor, error: Error { pos, message } }
         })
         .collect()
 }
 
 /// Gives the rejections that have a position but no unit (an error that lowering met outside the
 /// code of a class, or one that no stub took away) the unit with code at that position, when one
-/// unit alone has code there.
+/// unit alone has code there; not those in the code that lowering provides.
 fn locate<'a>(trees: &[&Value], rejections: impl Iterator<Item = &'a mut Rejection>) {
     let mut rejections: Vec<&mut Rejection> =
-        rejections.filter(|r| r.unit.is_none() && r.error.pos != Pos::default()).collect();
+        rejections.filter(|r| r.unit.is_none() && r.error.pos != Pos::default() && !provided(r)).collect();
     if rejections.is_empty() {
         return;
     }
@@ -907,6 +954,11 @@ fn locate<'a>(trees: &[&Value], rejections: impl Iterator<Item = &'a mut Rejecti
             rejection.unit = units.first().copied();
         }
     }
+}
+
+/// Whether `rejection` is in the code that lowering provides (`PROVIDED_UNIT`).
+fn provided(rejection: &Rejection) -> bool {
+    rejection.error.pos.unit == Some(PROVIDED_UNIT)
 }
 
 /// The largest id of an expression of the program.

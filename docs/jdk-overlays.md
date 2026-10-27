@@ -153,6 +153,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/io/InputStreamReader.java`, `OutputStreamWriter.java` | decode and encode the charsets themselves instead of through `StreamDecoder` and `StreamEncoder`, all but UTF-16 with its byte-order mark; `getEncoding` is the charset's historical name, from the runtime |
 | `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; the class path's resources read from its directories when the program runs; no layers but the boot layer, and no dynamic modules: the module of a proxy class in one throws |
 | `java/lang/Package.java` | a package of the translation, made by `Class.getPackage()`; the manifest attributes of an unnamed module's package from its root's manifest (`Module.manifest0`); every package's annotations throw; not an `AnnotatedElement`; `getPackage(name)` and `getPackages()` throw, as the lowering answers or rejects their calls |
+| `java/lang/ProcessImpl.java` | `forkAndExec` calls `spawn0`, the runtime's start of a process with `std::process` (docs/natives-and-input.md), without the JDK's launcher and with no null arrays |
 | `java/lang/SecurityManager.java` | `getClassContext`, the classes on the call stack, throws `UnsupportedOperationException`: a translated program has no stack to walk |
 | `java/lang/reflect/Proxy.java` | defines and finds the proxy classes that the translator wrote through `TranslatedProxies` (`program/reach/proxies.rs`), without generating or caching classes; `InvocationHandler.invokeDefault` throws |
 | `java/net/InetAddress.java`, `Inet4AddressImpl.java`, `Inet6AddressImpl.java` | names looked up by the system through `TranslatedNet`; no hosts file and no resolver of the program's own |
@@ -177,6 +178,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
 | `jdk/internal/misc/UnsafeConstants.java` | the values the JVM injects: 8-byte little-endian addresses, unaligned access, 64-byte cache lines, the system's page size |
 | `jdk/internal/misc/CarrierThreadLocal.java`, `TerminatingThreadLocal.java` | thread-locals without the JVM's carrier threads and identity maps |
+| `jdk/internal/misc/Unsafe.java` | `allocateInstance` throws `InstantiationException`: for a class without objects as the JDK does, and for one with objects too, since a translation makes an object only by running a constructor |
 | `jdk/internal/misc/VM.java` | `getRuntimeArguments` answers an empty array: a translated program has no JVM arguments |
 | `jdk/internal/perf/Perf.java` | `createLong` returns the heap buffer that HotSpot returns with `-XX:-UsePerfData`: 8 bytes in native order holding the value |
 | `jdk/internal/misc/InnocuousThread.java` | the thread group's parent read with `getParent`, not through an `Unsafe` offset held in a local; the `Thread` offsets stay, so `eraseThreadLocals` and the constructor write the thread's fields as the JDK does |
@@ -186,6 +188,8 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `javax/annotation/processing/AbstractProcessor.java` (module `java.compiler`) | reads its processor's annotations through `TranslatedProcessorAnnotations` |
 | `sun/reflect/annotation/AnnotationParser.java`, `AnnotationInvocationHandler.java` | an annotation object is the handler itself, not a `Proxy`: `annotationType`, `toString`, `hashCode` and `equals` its own (`lower/annotation_objects.rs`) |
 | `sun/reflect/generics/reflectiveObjects/ParameterizedTypeImpl.java`, `WildcardTypeImpl.java` | made from the types javac gives (`TranslatedTypes`, `lower/generic_types.rs`): the owner type as given, no check of the arguments, a wildcard's bounds as types rather than signatures |
+| `sun/reflect/generics/reflectiveObjects/TypeVariableImpl.java` | made from a class and a name (`TranslatedTypes`), its bounds made when first asked for from the bounds javac gives; no annotation methods |
+| `java/lang/reflect/TypeVariable.java`, `GenericDeclaration.java` | not an `AnnotatedElement`, so a class (the runtime's value) is a `GenericDeclaration` without annotations of type variables and bounds |
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own |
 | `sun/security/provider/NativePRNG.java` | the seed source, a `file:` URL, is read as a `URI`, not a `URL`: the `SUN` provider asks whether the generator is available as it registers, and a `URL` would bring the protocol handlers into every program that looks a service up |

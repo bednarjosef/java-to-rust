@@ -369,6 +369,24 @@ translations are byte for byte the same. On javac's census from its checkpoint, 
 goes from 26.6 s (4.9 s for the first round, ten rounds of enum items at 1.1 to 1.6 s each,
 6.1 s for the last) to 10.4 s (3.8 s, 1.4 s for all ten together, 4.6 s).
 
+**Messages kept from round to round.** Pass 3 of a census runs the analyses, the messages of
+`NullPointerException`s and the generator once per round, and the stubs between the rounds change
+only a few hundred methods; on the Minecraft server, the messages took about 100 s in each of the
+three rounds. What a method's messages are depends on its own code (and, for the first
+constructor of a class, the initializers of its instance fields), the declarations and the class
+files' names alone, not on the facts, which only pick the messages needed afterwards. So a census
+keeps each method's messages (`analysis::KeptMessages`) and, after each round of stubs, forgets
+those of the methods whose code changed (`Stubs::changed`): the methods stubbed, the abstract
+methods made concrete, and the methods of a class whose field initializer a stub dropped. An
+expression's id is unique in the program and a stub's expressions get new ones, so a kept
+message can only be one of code that is still there. `timing: messages: N of M methods found
+anew` shows how many were found again. The census is the same:
+`a_census_finds_the_same_with_the_messages_of_unchanged_code_kept_from_round_to_round`
+(`tests/translation.rs`) compares a census of two rounds with one that finds every method's
+messages anew in each round (`program::messages_found_anew`), and with
+`JAVA_TO_RUST_CHECK_KEPT_MESSAGES=1` each round also finds every method's messages anew and
+panics if they are not the ones kept, which on the Minecraft server costs back the 100 s a round.
+
 Further speed-ups, not done:
 
 - The walk from scratch when the members written into a record change is what is left of the
@@ -382,6 +400,40 @@ Further speed-ups, not done:
 - Lowering of `ScannerGrades` and `TextAdventure` now takes 1 to 2.5 s, twice (two attempts
   of the Rust generics, `lower::real_generics`); keeping what the first attempt learned
   instead of lowering everything again would halve it.
+- The later rounds of a census. On the Minecraft server, pass 3 took three rounds: the first
+  stubbed 315 pieces, 236 of them the generator's conversions (most of them strings as
+  `ConstantDesc`s, which the translator now converts) and 72 the analysis of exceptions'; the
+  second found one more, a cast whose `ClassCastException` is caught, which the facts changed
+  by the first round's stubs show; the third passed and wrote the translation. Each round
+  runs the analyses again (about 305 s after the first), the messages, and the generator
+  (178 s, then 421 s for the last with its rounds of enum items). The analyses that take long, and that the round waits for, are
+  the object values (122 s), then exceptions (105 s), after the structs and the representation
+  (34 s); the ranges, nullness, early static reads, ASCII strings and the objects on the stack
+  run alongside them. Each is a fixpoint over the whole program, and a stub, by taking code
+  away, can change the facts of any code its method's values or exceptions reach, so a
+  second round needs more than the stubbed methods' facts again. Ways to make it cheaper,
+  each to be checked by a census that stays byte for byte the same:
+  - Predicting the generator's rejections before the first round, where they read no facts,
+    saves a round only when every rejection of the first round is predicted: the analysis of
+    exceptions' own rejections, which read the facts, would still be stubbed after the first
+    round, and the round after them is needed all the same, as it was for the cast above. It
+    is worth it only for a program whose first round rejects nothing but such code, and exact
+    only if the stubs are the same, in the same order, with the same messages and anchors.
+  - Incremental analyses: rerun the object values and the exceptions only over the stubbed
+    methods and what their values and exceptions reach (a worklist seeded with them) rather
+    than over everything. As the stubs only take facts away and the analyses grow their facts
+    to a fixpoint, they cannot start from the last round's facts; they would need to find the
+    facts that depended on the stubbed code and drop them before growing again (delete and
+    derive again), which is a large change to each analysis.
+  - Keep the representation and the range facts (`analysis::Represented`), which a census
+    drops whenever a stub changes the program, for the methods no stub changed, where they are
+    facts of a method's own code. The representation is mostly whole-program (borrowing,
+    owned, flows), so this saves part of its 34 s at most.
+  - Find the class files' names (104 s, the first round only) and the messages of the first
+    round alongside the analyses, since the messages read no facts until they are picked:
+    their results are taken only where a `catch` reads a message, as now. This needs the
+    class files compiled while the analyses run (javac peaked at 1.9 GB) and `Names` made
+    safe to share between threads.
 
 ## The translated javac
 

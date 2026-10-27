@@ -10,7 +10,7 @@ mod modules;
 mod reach;
 mod survey;
 
-pub use census::{Census, census_program, round_by_round};
+pub use census::{Census, census_program, messages_found_anew, round_by_round};
 pub use modules::{Contents as ModuleContents, loader_name, loader_resources};
 pub use reach::{
     ANNOTATION_VALUES, CHANGED_PROPERTY, CLASS_KINDS, CLEANER_CHECK, FIELD_OFFSET_VALUE, FORMAT_IN_LOCALE,
@@ -766,10 +766,19 @@ pub(crate) fn print_notes(class: &crate::ast::Class, files: &[String]) {
 /// Stamps on the positions of the code of each class the unit it is in (`Pos::unit`): those of
 /// the methods, of the statements and expressions in them (those of switch expressions too) and
 /// of the fields' initializers. `units` is the unit of each type, `None` for the types that
-/// lowering provides. It can stamp code again: what it stamps depends on the classes alone.
+/// lowering provides, whose code gets `PROVIDED_UNIT`. It can stamp code again: what it stamps
+/// depends on the classes alone.
 pub(crate) fn stamp_units(class: &mut crate::ast::Class, units: &[Option<usize>]) {
-    use crate::ast::{ExprKind, rewrite_expr, rewrite_stmt};
-    let unit_of = |t: usize| units.get(t).copied().flatten().and_then(|u| u32::try_from(u).ok());
+    use crate::ast::{ExprKind, PROVIDED_UNIT, rewrite_expr, rewrite_stmt};
+    let unit_of = |t: usize| {
+        Some(
+            units
+                .get(t)
+                .copied()
+                .flatten()
+                .map_or(PROVIDED_UNIT, |u| u32::try_from(u).unwrap_or(PROVIDED_UNIT)),
+        )
+    };
     for note in &mut class.notes {
         note.pos.unit = note.method.and_then(|m| unit_of(class.methods[m].class));
     }
@@ -836,13 +845,13 @@ fn stamp_statements(s: &mut crate::ast::Stmt, unit: Option<u32>) {
 }
 
 /// The file of the code at `pos` that an analysis or the generator rejected: the unit stamped on
-/// the position (`stamp_units`), or for a position without one, the unit of the classes whose
-/// methods have code there, when they agree on one (a line and column of one file may be that of
-/// another file's code too).
+/// the position (`stamp_units`; none in the code that lowering provides), or for a position
+/// without one, the unit of the classes whose methods have code there, when they agree on one (a
+/// line and column of one file may be that of another file's code too).
 fn locate(units: &[Unit], class: &crate::ast::Class, pos: Pos) -> Option<String> {
     use crate::ast::{visit_expr, visit_stmt};
-    if let Some(unit) = pos.unit {
-        return units.get(unit as usize).map(|u| u.file.clone());
+    if pos.unit.is_some() {
+        return pos.source_unit().and_then(|unit| units.get(unit)).map(|u| u.file.clone());
     }
     let mut files = std::collections::BTreeSet::new();
     for method in &class.methods {

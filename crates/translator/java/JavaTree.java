@@ -1241,9 +1241,14 @@ public class JavaTree {
         return inLocal(t) ? elements.getBinaryName(t).toString() : t.getQualifiedName().toString();
     }
 
-    /** Whether a type names a local or anonymous class anywhere in it. */
+    /**
+     * Whether a type names a local or anonymous class anywhere in it, or a type variable that
+     * inference made up ({@link #inferred}).
+     */
     private static boolean mentionsLocal(TypeMirror t) {
-        if (t instanceof ArrayType a) {
+        if (t instanceof TypeVariable v) {
+            return inferred(v);
+        } else if (t instanceof ArrayType a) {
             return mentionsLocal(a.getComponentType());
         } else if (t instanceof DeclaredType d) {
             return inLocal(d.asElement()) || d.getTypeArguments().stream().anyMatch(JavaTree::mentionsLocal);
@@ -1254,6 +1259,16 @@ public class JavaTree {
                     || w.getSuperBound() != null && mentionsLocal(w.getSuperBound());
         }
         return false;
+    }
+
+    /**
+     * Whether {@code v} is a type variable that javac's inference made for a type parameter with
+     * a bound that names the parameter itself ({@code <B extends Builder<B>> B newBuilder()},
+     * called with no type to infer it from): it is declared nowhere in the code, so it stands as
+     * its erasure.
+     */
+    private static boolean inferred(TypeVariable v) {
+        return (((com.sun.tools.javac.code.Symbol) v.asElement()).flags() & com.sun.tools.javac.code.Flags.SYNTHETIC) != 0;
     }
 
     /**
@@ -1273,6 +1288,7 @@ public class JavaTree {
      * A type as javac prints it, without its type annotations, with local and anonymous classes
      * named by {@link #className}, and a class that javac could not find (with {@code --keep-going},
      * see {@link MissingClasses}) as {@code java.lang.Object}: only {@code null} is of such a type.
+     * A type variable that inference made up ({@link #inferred}) is its erasure.
      */
     private static String typeText(TypeMirror t) {
         // Type annotations (`java.lang.@Nullable String`) say nothing the translation uses. javac
@@ -1302,6 +1318,8 @@ public class JavaTree {
         } else if (t instanceof WildcardType w) {
             return w.getExtendsBound() != null ? "? extends " + typeText(w.getExtendsBound())
                     : "? super " + typeText(w.getSuperBound());
+        } else if (t instanceof TypeVariable v && inferred(v)) {
+            return typeText(types.erasure(t));
         }
         return withoutAnnotations(t.toString());
     }

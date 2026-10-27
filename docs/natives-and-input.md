@@ -93,6 +93,10 @@ something a translated program does not have.
 | `ProcessHandleImpl.initNative()` | nothing | on Linux it only reads the boot time and the clock's ticks, which `isAlive0` reads itself |
 | `ProcessHandleImpl.getCurrentPid0()` | `java::current_pid()` | the process's id |
 | `ProcessHandleImpl.isAlive0(pid)` | `java::process_start_time(pid)` | as the JDK reads `/proc/<pid>/stat` on Linux: -1 when there is no such process, 0 when its fields cannot be read, else its start time in milliseconds since the epoch (`btime` of `/proc/stat` plus the start's clock ticks at `AT_CLKTCK` per second) |
+| `ProcessHandleImpl.waitForProcessExit0(pid, reap)` | `java::wait_for_process_exit(pid, reap)` | `waitpid`, or `waitid` with `WNOWAIT` where the process stays to be waited for: the status it exited with, or 0x80 plus the signal that ended it; 0 for a process that is not a child |
+| `ProcessHandleImpl.destroy0(pid, startTime, force)` | `java::destroy_process(pid, startTime, force)` | `SIGKILL` or `SIGTERM`, to the process that started at that time |
+| `ProcessImpl.init()` | nothing | the JDK's launcher needs setting up; `std::process` does not |
+| `ProcessImpl.spawn0(...)` | `java::spawn_process(...)` | starts a process (see "Processes" below) |
 | `Inflater` natives (`inflateBytesBytes`, `inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, ...) | `inflate.rs` | zlib inflation, from arrays or from memory outside the heap by address (direct buffers) |
 | `Deflater` natives (`init`, `deflateBytesBytes`, `deflateBytesBuffer`, `deflateBufferBytes`, `deflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, `getAdler`, `reset`, `end`) | `deflate.rs` | a compressor of the runtime's own, see "Compression" below |
 | `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()`, `getAndClearReferencePendingList()`, `waitForReferencePendingList()` | code on the field `referent`; `false`; `null`; `java::wait_for_pending_references()`, which parks for ever | see "References" below |
@@ -177,14 +181,51 @@ the program could call, and what is left of it is its outcome. In a whole progra
   file: "Expecting an absolute path of the library" and "Can't load library".
 - Only a file that is there but that the system could not load (not a library, or one whose
   dependencies are missing) differs: Java throws, the translation succeeds.
-- Both are restricted methods. Java runs them silently in the JDK's modules that it gives native
-  access (`java.desktop`, `java.management`, `java.prefs` and the rest of `NATIVE_ACCESS_MODULES`),
-  and elsewhere first prints a warning that names where the caller's class was loaded from
-  (`file:/...`), which a translation does not know. A call in any other module, the program's
-  included, is rejected (`lower.rs`).
+- Both are restricted methods (so are `Runtime`'s `load` and `loadLibrary`, which are the
+  same). Java runs them silently in the JDK's modules that it gives native access
+  (`java.desktop`, `java.management`, `java.prefs` and the rest of `NATIVE_ACCESS_MODULES`). In
+  any other module, the program's and its libraries' included, Java prints a warning that
+  names where the caller's class was loaded from (`file:/...`), then loads the library, whose
+  natives are the caller's own code. A translation has none of that code, so there the calls go
+  to `loadLibraryUnlinked` and `loadUnlinked` (`NATIVE_ACCESS_CALLS`, `lower.rs`), which throw
+  `UnsatisfiedLinkError` as Java does when it cannot load a library: Java's error where Java
+  finds no file, and "Can't load library: <file> (a translated program has no native code)"
+  where it finds one. Netty, JNA and lz4 catch it and fall back to code of their own. Java's
+  warning is left out: the translation does not know the place it names, and loads nothing.
 
 `BootLoader.loadLibrary`, the JDK's own loading of `zip` or `net`, does nothing
 (`lower/libraries.rs`).
+
+### Processes
+
+`ProcessBuilder.start` and `Runtime.exec` start real processes. `Runtime.exec` is the
+translator's (`java/overlay/java/lang/TranslatedRuntime.java`, by `REDIRECTED_CALLS`), which
+splits a command line at white space and starts a `ProcessBuilder`, as the JDK's does. The rest
+is the JDK's `ProcessBuilder`, `ProcessImpl` and `ProcessHandleImpl`, translated, but for
+starting, waiting and signalling, which are the runtime's (`process.rs`, the natives in the
+table above):
+
+- The translator's patch of `ProcessImpl` (`java/patches/java/lang/ProcessImpl.java`) calls
+  `spawn0`, which starts the program with Rust's `std::process::Command`: its arguments, its
+  environment (the parent's, or the one given), its directory, and for each standard stream a
+  pipe to the parent, the parent's own stream (`inheritIO`), or a file (`redirectInput`,
+  `redirectOutput`); `redirectErrorStream` gives standard error the pipe of standard output. The
+  parent's ends of the pipes are descriptors of the runtime's table (`fd.rs`), which the JDK's
+  `FileInputStream` and `FileOutputStream` under `getInputStream()` and `getOutputStream()` read
+  and write.
+- What the program wrote to standard output goes out before the child starts, so that the two
+  stay in order where the child inherits it.
+- A program that cannot start, or a directory the child cannot enter, throws the
+  `IOException` of the JDK's launcher on Linux: `Cannot run program "x": Exec failed, error: 2
+  (No such file or directory) ` and `Failed to access working directory, error: ...`.
+- The JDK's thread that waits for the process (`ProcessHandleImpl.completion`) waits with
+  `waitpid`; `waitFor`, `exitValue`, `isAlive` and `destroy` are the JDK's, so a process ended by
+  `destroy()` exits with 143, as in Java.
+- The JDK's launch mechanism (`jdk.lang.Process.launchMechanism`) and its `jspawnhelper` are not
+  used. A program name without `/` is looked up in the `PATH` of the child's environment, where
+  the JDK uses the parent's; they differ only where the program sets the child's `PATH`.
+- `ProcessHandle`'s queries of other processes (`children`, `descendants`, `parent`, `info`)
+  are natives that are not implemented.
 
 ### Not implemented
 
@@ -204,7 +245,8 @@ the program could call, and what is left of it is its outcome. In a whole progra
   definition and module natives, sockets, and every native not in the table.
 - The natives of a library's own classes, outside the JDK (jtracy's `TracyBindings`, JNA's
   `Native`, netty's `epoll` and `kqueue` classes). Their code is in a JNI library that the
-  program loads with `System.load` or `System.loadLibrary`, which a translation rejects. Planned:
+  program loads with `System.load` or `System.loadLibrary`, which always throws in a translation
+  (see "Loading native libraries"). Planned:
   a call of one becomes what Java does where that library was never loaded, since an accepted
   program never loads one: the JVM finds no function for the method and throws
   `UnsatisfiedLinkError` at each call, after the arguments are evaluated, with the message of the
@@ -301,9 +343,11 @@ of the accessor (mapped memory, continuations).
   type is a class that is not translated (`UNTRANSLATED`) is only ever null, since no translated
   code can create one. The class is declared as a stub without constructors or fields, with the
   instance methods called on it as dormant methods; a call throws `NullPointerException` and
-  `instanceof` is false, as in Java. Its static members, constructors, generic and array types
-  stay rejected. Example: `TreeMap.buildFromSorted` takes an `ObjectInputStream` that every copy
-  of a sorted map passes as null.
+  `instanceof` is false, as in Java. Its class literal is the stub's class, which reflection
+  finds no member of: `getDeclaredMethod` throws `NoSuchMethodException`. Its static members,
+  constructors, generic and array types stay rejected. Examples: `TreeMap.buildFromSorted` takes
+  an `ObjectInputStream` that every copy of a sorted map passes as null, and gson looks up
+  Android's `ObjectStreamClass.newInstance` by reflection, which HotSpot does not have either.
 - **`serialPersistentFields`** is initialized only if code reads it: serialization reads it by
   reflection, and its initializer needs `Class` values.
 
@@ -415,7 +459,10 @@ A translated program is closed: it knows all its classes. So:
   held in any field, passed and compared, and all of `System.Logger`'s methods work, with
   suppliers, `Throwable`s (their stack trace and an empty line), `MessageFormat` parameters where
   a `{` is followed by a digit, and resource bundles, as Java's `java.util.logging` wrapper does.
-  Each call gives a new logger, equal to the others of its name, as in Java. Without the JDK's
+  Each call gives a new logger, equal to the others of its name, as in Java.
+  `System.LoggerFinder` is translated from the JDK's sources too, so a program's own finder works,
+  and `LoggerFinder.getLoggerFinder()` finds the JDK's default one (`jdk.internal.logger`), whose
+  console logger names its caller from a stack walk, which is not translated yet. Without the JDK's
   sources, only `System.getLogger(name).log(Level.L, message)` with a constant level is
   translated. `System.getLogger(name, bundle)` is not translated yet.
 - The JDK's internal `sun.util.logging.PlatformLogger` logs the same way. It is translated from

@@ -329,9 +329,10 @@ impl<C: BuilderCell> Builder<C> {
         self.try_append_seq_range(start, end, length, char_at).unwrap_or_else(crate::uncaught)
     }
 
+    /// Java 26's `checkOffset`: `checkFromToIndex(offset, len, len)`.
     fn check_offset(&self, offset: i32, len: usize) {
         if offset < 0 || offset as usize > len {
-            out_of_bounds(format!("offset {offset}, length {len}"));
+            out_of_bounds(format!("Range [{offset}, {len}) out of bounds for length {len}"));
         }
     }
 
@@ -365,6 +366,35 @@ impl<C: BuilderCell> Builder<C> {
     /// `sb.insert(offset, chars)` of a `char[]`.
     pub fn insert_chars(&self, offset: i32, chars: &[u16]) -> &Self {
         self.insert_units(offset, chars)
+    }
+
+    /// `sb.insert(offset, chars, start, len)`: the offset is checked first, then the range.
+    pub fn insert_chars_range(
+        &self,
+        offset: i32,
+        chars: &(impl crate::Source<u16> + ?Sized),
+        start: i32,
+        len: i32,
+    ) -> &Self {
+        self.check_offset(offset, self.0.units().len());
+        let end = start.wrapping_add(len);
+        if start < 0 || start > end || end as i64 > chars.length() as i64 {
+            out_of_bounds(format!("Range [{start}, {end}) out of bounds for length {}", chars.length()));
+        }
+        let units = chars.range(start as usize..end as usize);
+        self.insert_units(offset, &units)
+    }
+
+    /// `sb.insert(offset, s, start, end)` of a part of a string (a null `s` is already "null"):
+    /// the offset is checked first, then the range, with `IndexOutOfBoundsException`.
+    pub fn insert_range(&self, offset: i32, s: &Wtf8, start: i32, end: i32) -> &Self {
+        self.check_offset(offset, self.0.units().len());
+        let units: Vec<u16> = s.units().collect();
+        if start < 0 || start > end || end as usize > units.len() {
+            let message = format!("Range [{start}, {end}) out of bounds for length {}", units.len());
+            throw("java.lang.IndexOutOfBoundsException", &message);
+        }
+        self.insert_units(offset, &units[start as usize..end as usize])
     }
 
     /// `sb.insert(offset, other)` of a builder, which may be this one.
@@ -418,11 +448,12 @@ impl<C: BuilderCell> Builder<C> {
         self
     }
 
-    /// The range `[start, end)` of `delete` and `replace`: `end` is cut to the length.
+    /// The range `[start, end)` of `delete` and `replace`: `end` is cut to the length, and then
+    /// checked as Java 26's `checkFromToIndex` does.
     fn range(start: i32, end: i32, len: usize) -> (usize, usize) {
         let end = end.min(len as i32);
         if start < 0 || start > end {
-            out_of_bounds(format!("begin {start}, end {end}, length {len}"));
+            out_of_bounds(format!("Range [{start}, {end}) out of bounds for length {len}"));
         }
         (start as usize, end as usize)
     }

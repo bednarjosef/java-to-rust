@@ -94,7 +94,12 @@ impl<'t> Lowering<'t> {
         false
     }
 
-    fn type_var_around(&self, name: &str, class: usize, method: Option<usize>) -> Option<(Node<'t>, Owner)> {
+    pub(super) fn type_var_around(
+        &self,
+        name: &str,
+        class: usize,
+        method: Option<usize>,
+    ) -> Option<(Node<'t>, Owner)> {
         let declares = |node: Node<'t>| node.list("typeParameters").find(|p| p.str("name") == name);
         if let Some(m) = method
             && let Some(found) = declares(self.methods[m].node)

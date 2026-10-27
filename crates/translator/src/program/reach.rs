@@ -245,13 +245,15 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// the same, as they are plain code over the JDK's other classes: `Runtime.Version`, a version
 /// string parsed and compared (`JarFile`'s and `ModulePath`'s release), with the pattern it
 /// parses with; and the decoder and encoder of each standard charset, which the translator's
-/// `newDecoder` and `newEncoder` make (`CHARSET_CODERS`); and `System.Logger` with its levels,
-/// whose loggers the translator's `System.getLogger` makes (`REDIRECTED_CALLS`).
+/// `newDecoder` and `newEncoder` make (`CHARSET_CODERS`); `System.Logger` with its levels,
+/// whose loggers the translator's `System.getLogger` makes (`REDIRECTED_CALLS`); and
+/// `System.LoggerFinder`, which the JDK's `jdk.internal.logger` and a program's finders extend.
 pub const TRANSLATED_NESTED: &[&str] = &[
     "java.lang.Runtime.Version",
     "java.lang.Runtime.VersionPattern",
     "java.lang.System.Logger",
     "java.lang.System.Logger.Level",
+    "java.lang.System.LoggerFinder",
     "sun.nio.cs.ISO_8859_1.Decoder",
     "sun.nio.cs.ISO_8859_1.Encoder",
     "sun.nio.cs.US_ASCII.Decoder",
@@ -336,6 +338,11 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.reflect.ParameterizedType",
     "java.lang.reflect.Type",
     "java.lang.reflect.WildcardType",
+    // A class's type variables, which the translator makes (`lower::generic_types`), and what
+    // declares one: a class, which the runtime's classes are (`ast::CLASS_VALUE_INTERFACES`).
+    // Neither is an `AnnotatedElement` (`java/patches/java/lang/reflect/`).
+    "java.lang.reflect.GenericDeclaration",
+    "java.lang.reflect.TypeVariable",
     "java.security.AsymmetricKey",
     "java.security.DEREncodable",
     "java.security.Key",
@@ -739,16 +746,41 @@ pub fn caller_query(class: &str, name: &str, signature: &str) -> Option<&'static
 
 /// The field of its own class that `MhUtil.findVarHandle(MethodHandles.lookup(), "name", type)`
 /// makes a handle of: the lookup is of the class whose code calls it, so the field is reached
-/// though no code names it (`lower/handles.rs`).
+/// though no code names it (`lower/handles.rs`). So is the field that `Lookup.findVarHandle`
+/// (or `findStaticVarHandle`) finds by name in a class that is not a class literal, a local
+/// that holds one (`LinkedTransferQueue`'s `ltq`), where the class whose code calls it declares
+/// a field of that name.
 fn own_field_handle(node: &Value) -> Option<String> {
     let symbol = &node["symbol"];
+    if text(node, "kind") != "METHOD_INVOCATION" {
+        return None;
+    }
+    let field = match (text(symbol, "owner"), text(symbol, "name"), &node["arguments"].as_array()?[..]) {
+        ("jdk.internal.invoke.MhUtil", "findVarHandle", [_, field, _]) => field,
+        (
+            "java.lang.invoke.MethodHandles.Lookup",
+            "findVarHandle" | "findStaticVarHandle",
+            [class, field, _],
+        ) if literal_class(class).is_none() => field,
+        _ => return None,
+    };
+    field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL").map(str::to_string)
+}
+
+/// The static methods that `Lookup.findStatic` of a method's name finds: the class of a class
+/// literal, or `None` for the class whose code calls it (as `own_field_handle`), and the name.
+/// They are reached though no code names them (`lower/handle_values.rs`).
+fn static_method_handle(node: &Value) -> Option<(Option<String>, String)> {
+    let symbol = &node["symbol"];
     if text(node, "kind") != "METHOD_INVOCATION"
-        || (text(symbol, "owner"), text(symbol, "name")) != ("jdk.internal.invoke.MhUtil", "findVarHandle")
+        || (text(symbol, "owner"), text(symbol, "name"))
+            != ("java.lang.invoke.MethodHandles.Lookup", "findStatic")
     {
         return None;
     }
-    let [_, field, _] = &node["arguments"].as_array()?[..] else { return None };
-    field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL").map(str::to_string)
+    let [class, name, _] = &node["arguments"].as_array()?[..] else { return None };
+    let name = name["value"].as_str().filter(|_| text(name, "kind") == "STRING_LITERAL")?;
+    Some((literal_class(class), name.to_string()))
 }
 
 /// The class and the field that `node` is the offset of, when it is a call of `Unsafe`'s
@@ -1723,7 +1755,7 @@ pub const ANNOTATION_VALUES: [JdkMethod; 2] = [
 /// The translator's methods that make the generic types that reflection answers
 /// (`java/overlay/sun/reflect/generics/reflectiveObjects/TranslatedTypes.java`, see
 /// `lower::generic_types`).
-pub const GENERIC_TYPES: [JdkMethod; 5] = [
+pub const GENERIC_TYPES: [JdkMethod; 7] = [
     (
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "parameterized",
@@ -1742,12 +1774,22 @@ pub const GENERIC_TYPES: [JdkMethod; 5] = [
     (
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "typeVariable",
-        "(java.lang.String)java.lang.reflect.Type",
+        "(java.lang.Class<?>,java.lang.String)java.lang.reflect.TypeVariable<?>",
     ),
     (
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "unsupported",
         "(java.lang.String)java.lang.reflect.Type",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "typeParameters",
+        "(java.lang.Class<?>)java.lang.reflect.TypeVariable<?>[]",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "genericInterfaces",
+        "(java.lang.Class<?>)java.lang.reflect.Type[]",
     ),
 ];
 
@@ -1867,6 +1909,36 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
         ("java.lang.TranslatedRuntime", "version"),
+    ),
+    // A process started as `Runtime.exec` starts it, through a `ProcessBuilder`: `Runtime` is the
+    // runtime's (`java/lang/TranslatedRuntime.java`, `lower.rs`).
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String)java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String,java.lang.String[])java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String,java.lang.String[],java.io.File)java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String[])java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String[],java.lang.String[])java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        (
+            "java.lang.Runtime",
+            "exec",
+            "(java.lang.String[],java.lang.String[],java.io.File)java.lang.Process",
+        ),
+        ("java.lang.TranslatedRuntime", "exec"),
     ),
     // A logger of the default backend, where nothing configures logging
     // (`java/lang/TranslatedSystemLogger.java`).
@@ -2052,13 +2124,19 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.net.TranslatedNet", "getByName0"),
     ),
     // Loading a native library, which a translation without JNI does by finding its file as Java
-    // does, and the name of a library's file (`java/lang/TranslatedLibraries.java`); the caller
-    // must be in a module that Java gives native access (`NATIVE_ACCESS_CALLS`).
+    // does, and the name of a library's file (`java/lang/TranslatedLibraries.java`); a caller
+    // outside the modules that Java gives native access calls another method
+    // (`NATIVE_ACCESS_CALLS`).
     (
         ("java.lang.System", "loadLibrary", "(java.lang.String)void"),
         ("java.lang.TranslatedLibraries", "loadLibrary"),
     ),
     (("java.lang.System", "load", "(java.lang.String)void"), ("java.lang.TranslatedLibraries", "load")),
+    (
+        ("java.lang.Runtime", "loadLibrary", "(java.lang.String)void"),
+        ("java.lang.TranslatedLibraries", "loadLibrary"),
+    ),
+    (("java.lang.Runtime", "load", "(java.lang.String)void"), ("java.lang.TranslatedLibraries", "load")),
     (
         ("java.lang.System", "mapLibraryName", "(java.lang.String)java.lang.String"),
         ("java.lang.TranslatedLibraries", "mapLibraryName"),
@@ -2071,12 +2149,19 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
     ),
 ];
 
-/// The restricted methods among `REDIRECTED_CALLS`, which Java lets code of a module without
-/// native access call only after it prints a warning that names where the caller's class was
-/// loaded from (`Module.ensureNativeAccess`). A translation does not know that place, so a call
-/// is supported only in the modules of `NATIVE_ACCESS_MODULES` (`lower.rs`).
-pub const NATIVE_ACCESS_CALLS: &[(&str, &str)] =
-    &[("java.lang.System", "loadLibrary"), ("java.lang.System", "load")];
+/// The restricted methods among `REDIRECTED_CALLS`, with the translator's method of the same
+/// class that a call from outside the modules of `NATIVE_ACCESS_MODULES` calls instead
+/// (`lower.rs`). Java lets such code load a library after it prints a warning that names where
+/// the caller's class was loaded from (`Module.ensureNativeAccess`); a translation has none of
+/// the library's code to run, so the translator's method throws `UnsatisfiedLinkError` as Java
+/// does when it cannot load the library, and the warning, which a translation could not complete
+/// (it does not know that place), is left out.
+pub const NATIVE_ACCESS_CALLS: &[((&str, &str), &str)] = &[
+    (("java.lang.System", "loadLibrary"), "loadLibraryUnlinked"),
+    (("java.lang.System", "load"), "loadUnlinked"),
+    (("java.lang.Runtime", "loadLibrary"), "loadLibraryUnlinked"),
+    (("java.lang.Runtime", "load"), "loadUnlinked"),
+];
 
 /// The modules of the JDK that Java 26 gives native access, with no warning
 /// (`ModuleLoaderMap.nativeAccessModules()`).
@@ -2390,6 +2475,21 @@ pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.lang.Iterable", "iterator", "()java.util.Iterator<T>"),
     ("java.util.Iterator", "hasNext", "()boolean"),
     ("java.util.Iterator", "next", "()E"),
+];
+
+/// The methods of the constant descriptions that the strings and the boxes of `int`, `long`,
+/// `float` and `double` implement, which a call of theirs on one runs (`Walk::method`).
+const CONSTANT_DESC_METHODS: [(&str, &str, &str); 2] = [
+    (
+        "java.lang.constant.Constable",
+        "describeConstable",
+        "()java.util.Optional<? extends java.lang.constant.ConstantDesc>",
+    ),
+    (
+        "java.lang.constant.ConstantDesc",
+        "resolveConstantDesc",
+        "(java.lang.invoke.MethodHandles.Lookup)java.lang.Object",
+    ),
 ];
 
 /// The method that a try-with-resources calls on each resource, which javac's tree does not show:
@@ -3175,6 +3275,24 @@ impl<'t> Walk<'t> {
     }
 
     fn method(&mut self, key: MethodKey) {
+        // A string's or a box's `describeConstable()` is `Optional.of(this)`, which the generator
+        // writes with `Optional`'s constructor (`codegen::dispatch::constant_desc_arm`).
+        if key.0 == "java.lang.constant.Constable" && key.1 == "describeConstable" {
+            self.work.push(Item::Method(("java.util.Optional".into(), "<init>".into(), "(T)void".into())));
+        }
+        // The method of a string or a box is that of `Constable` or `ConstantDesc` on it
+        // (`lower::object::constant_desc_call`).
+        if matches!(
+            key.0.as_str(),
+            "java.lang.String"
+                | "java.lang.Integer"
+                | "java.lang.Long"
+                | "java.lang.Float"
+                | "java.lang.Double"
+        ) && let Some(&(class, name, signature)) = CONSTANT_DESC_METHODS.iter().find(|m| m.1 == key.1)
+        {
+            self.work.push(Item::Method((class.into(), name.into(), signature.into())));
+        }
         if key.0 == "java.lang.Enum"
             && key.1 == "valueOf"
             && !std::mem::replace(&mut self.enum_by_class, true)
@@ -3667,6 +3785,11 @@ impl<'t> Walk<'t> {
         if kind == "VARIABLE" {
             self.stub_type(text(&value["symbol"], "type"));
         }
+        // A class literal of an untranslated class (`ObjectStreamClass.class`), which reflection
+        // finds no member of.
+        if kind == "MEMBER_SELECT" && text(value, "identifier") == "class" {
+            self.stub_type(text(&value["expression"], "javaType"));
+        }
         if call {
             self.initialization(value);
             // A class that `Class.forName` names exists, and is initialized if the call says
@@ -3714,8 +3837,19 @@ impl<'t> Walk<'t> {
             }
             if let Some(field) = own_field_handle(value)
                 && let Some(class) = self.lookup_class.clone()
+                && field_of(&class, &field)
             {
                 self.work.push(Item::Field((class, field)));
+            }
+            if let Some((class, name)) = static_method_handle(value)
+                && let Some(class) = class.or_else(|| self.lookup_class.clone())
+            {
+                let named = self.methods_by_name.get(&class).and_then(|by_name| by_name.get(&name));
+                for key in named.into_iter().flatten() {
+                    if self.methods.get(key).is_some_and(|m| has_flag(m, "STATIC")) {
+                        self.work.push(Item::Method(key.clone()));
+                    }
+                }
             }
         }
         if kind == "STRING_LITERAL"
@@ -3796,7 +3930,8 @@ impl<'t> Walk<'t> {
             }
             // The generic types that reflection answers (`GENERIC_TYPES`).
             "METHOD"
-                if name == "getGenericSuperclass" && owner == "java.lang.Class"
+                if matches!(name, "getGenericSuperclass" | "getGenericInterfaces" | "getTypeParameters")
+                    && owner == "java.lang.Class"
                     || name == "getGenericType" && owner == "java.lang.reflect.Field" =>
             {
                 for (class, method, signature) in GENERIC_TYPES {
@@ -3828,6 +3963,11 @@ impl<'t> Walk<'t> {
             // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
             "METHOD" if let Some((class, to)) = redirected_call(owner, name, text(symbol, "type")) => {
                 let signature = text(symbol, "type").to_string();
+                if let Some((_, unlinked)) =
+                    NATIVE_ACCESS_CALLS.iter().find(|(call, _)| *call == (owner, name))
+                {
+                    self.work.push(Item::Method((class.into(), (*unlinked).into(), signature.clone())));
+                }
                 self.work.push(Item::Method((class.into(), to.into(), signature)));
             }
             // The translator's code for what `JavaLangAccess` does (see `lower.rs`).

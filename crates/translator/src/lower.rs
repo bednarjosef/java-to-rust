@@ -1319,6 +1319,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.constant_desc_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.system_log(node, &symbol, select)? {
             return Ok(kind);
         }
@@ -1397,23 +1400,12 @@ impl<'t> Lowering<'t> {
                 && args.first().is_some_and(|a| a.ty == Type::String))
             && let Some((class, to)) = crate::program::redirected_call(symbol.owner, symbol.name, symbol.ty)
         {
+            let to = self.restricted(&symbol, to);
             let resolved = self.template_method(class, to, symbol.ty);
             if resolved.is_none() {
                 return unsupported(
                     node,
                     &format!("`{}.{}` outside a whole program", symbol.owner, symbol.name),
-                );
-            }
-            if crate::program::NATIVE_ACCESS_CALLS.contains(&(symbol.owner, symbol.name))
-                && !self.has_native_access()
-            {
-                return unsupported(
-                    node,
-                    &format!(
-                        "`{}.{}` outside the JDK's modules with native access (Java warns, naming \
-                         where the caller's class was loaded from)",
-                        symbol.owner, symbol.name
-                    ),
                 );
             }
             // The arguments of a variable arity are packed for the JDK's method where it is lowered,
@@ -1562,15 +1554,25 @@ impl<'t> Lowering<'t> {
                 return Ok(ExprKind::Call { name: name.to_string(), args, resolved });
             }
             // The shutdown hooks are the translator's `Thread`'s (`java/Threads.java`), which the
-            // runtime runs as the program exits. A `Runtime` has no state of its own: the receiver
-            // is `Runtime.getRuntime()` or a name that holds one, and neither needs evaluating.
-            ("java.lang.Runtime", name @ ("addShutdownHook" | "removeShutdownHook"))
-                if receiver.is_some_and(|r| {
-                    r.kind() == "IDENTIFIER" || r.symbol().is_some_and(|s| s.name == "getRuntime")
-                }) =>
+            // runtime runs as the program exits, and `exec` is the translator's
+            // (`program::REDIRECTED_CALLS`). A `Runtime` has no state of its own: the receiver is
+            // `Runtime.getRuntime()` or a name that holds one, and neither needs evaluating.
+            (
+                "java.lang.Runtime",
+                name @ ("addShutdownHook" | "removeShutdownHook" | "exec" | "load" | "loadLibrary"),
+            ) if receiver.is_some_and(|r| {
+                r.kind() == "IDENTIFIER" || r.symbol().is_some_and(|s| s.name == "getRuntime")
+            }) =>
             {
-                let resolved = self.template_method("java.lang.Thread", name, symbol.ty);
-                let args = self.convert_args(resolved, args)?;
+                let resolved = match crate::program::redirected_call(symbol.owner, name, symbol.ty) {
+                    Some((class, to)) => self.template_method(class, self.restricted(&symbol, to), symbol.ty),
+                    None => self.template_method("java.lang.Thread", name, symbol.ty),
+                };
+                if resolved.is_none() {
+                    return unsupported(node, &format!("`Runtime.{name}` outside a whole program"));
+                }
+                let mut args = self.convert_args(resolved, args)?;
+                args.extend(self.caller_arg(node, resolved)?);
                 return Ok(ExprKind::Call { name: name.to_string(), args, resolved });
             }
             // There are no virtual threads: a thread's carrier is the thread itself

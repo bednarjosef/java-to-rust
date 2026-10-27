@@ -579,24 +579,31 @@ the program's classes implement:
   are `Object`'s, which each record overrides. A record's class names `java.lang.Record` as its
   superclass where the type exists.
 - The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it.
+- The strings and boxes implement `Serializable`, and the string and the boxes of `int`, `long`,
+  `float` and `double` `java.lang.constant`'s `Constable` and `ConstantDesc`, where the program
+  has those (`lower/object.rs`). Each is its own constant description: `describeConstable()` is
+  `Optional.of` of the value and `resolveConstantDesc(lookup)` the value itself, both on a value
+  held as the interface (`constant_desc_arm` in `codegen/dispatch.rs`) and called on the string
+  or box (`lower::object::constant_desc_call`, which calls the interface's method).
 - Plain interfaces of reflection and security that library code implements with classes of its
   own (`java.lang.reflect.Type` and `ParameterizedType`, `WildcardType`, `GenericArrayType`,
   `InvocationHandler`, `java.security.Key` and its private and public keys, `KeySpec`,
   `AlgorithmParameterSpec`, `PrivilegedExceptionAction`) are translated from the JDK's sources as
   any interface of the program (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their
-  objects in the JDK (a provider's keys, `getGenericSuperclass`) stays untranslated, except
-  `Proxy`, which makes the proxy classes the translator writes (see
+  objects in the JDK (a provider's keys, the parser of generic signatures) stays untranslated,
+  except `Proxy`, which makes the proxy classes the translator writes (see
   [reflection-and-plugins.md](reflection-and-plugins.md)).
   `Class` implements `Type` in Java, and so does the runtime's class where the program has
-  `Type` (and `TypeDescriptor` and `Serializable`, `CLASS_VALUE_INTERFACES` in `ast.rs`): a class
+  `Type` (and `TypeDescriptor`, `Serializable` and `GenericDeclaration`, which a class's type
+  variable gives as its declaration; `CLASS_VALUE_INTERFACES` in `ast.rs`): a class
   held as a `Type` is the variant of the runtime's `java.lang.Class` in `Type`'s enum, found again
   by `instanceof Class` and a cast, compared and hashed as a class, and its `getTypeName()` is
   `Class`'s own (`int[]`, `java.lang.String`), not the interface's default `toString()`; as a
   `TypeDescriptor` (beside `java.lang.constant`'s `ClassDesc`), its `descriptorString()` is
   `Class`'s (`[J`, `Ljava/lang/String;`; `class_answer` in `codegen/dispatch.rs`).
   `Class`'s other interfaces need objects that describe the class (`Constable`'s `ClassDesc`,
-  `TypeDescriptor.OfField`'s component and array types) or reflection (`GenericDeclaration`,
-  `AnnotatedElement`, which are not translated): a class converted to one, and a cast or an
+  `TypeDescriptor.OfField`'s component and array types) or reflection (`AnnotatedElement`, which
+  is not translated): a class converted to one, and a cast or an
   `instanceof` of one on a value that may be a class, are rejected
   (`codegen::dispatch::rejects_class_as`).
 

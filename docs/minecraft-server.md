@@ -568,19 +568,19 @@ These are plans. Work on several of them is under way but not merged yet.
    walk); that walk stops at the first such write. Planned: cheaper retries, and knowing which
    `String[]` writes can run before the first reach.
 3. The translator's refusals still open from the last census, by kind:
-   - reflection: generic types of interfaces, methods and fields; type variables; the rest of
-     `Class`'s interfaces (`AnnotatedElement`, `GenericDeclaration`, ...); member and parameter
+   - reflection: generic types of methods; a method's type variables; the rest of `Class`'s
+     interfaces (`AnnotatedElement`, ...); member and parameter
      annotations; `Method.toGenericString`;
    - method handles: constant handles (`lookup`, `findVirtual`, `insertArguments`, ...), the
      handles Netty builds at run time, byte array and byte buffer view handles, and field
      updaters' `getAndUpdate`/`accumulateAndGet` loops;
    - logging: JDK logging at the levels it prints (the console handler's header line has the date
      and the caller);
-   - natives: library natives (Netty's epoll, JNA, jtracy) should throw `UnsatisfiedLinkError`
-     as on a JVM where the library is not loaded, so Netty falls back to NIO; and
-     `NetworkInterface`'s natives;
-   - JDK APIs: NIO networking (channels and selectors, which Netty's server uses), processes
-     (`ProcessBuilder`, `Runtime.exec`), `java.lang.management` and JFR, and service providers
+   - natives: calls of library natives (Netty's epoll, JNA, jtracy) should throw
+     `UnsatisfiedLinkError` as on a JVM where the library is not loaded, as loading the library
+     already does, so Netty falls back to NIO; and `NetworkInterface`'s natives;
+   - JDK APIs: NIO networking (channels and selectors, which Netty's server uses),
+     `java.lang.management` and JFR, and service providers
      that live in JDK modules the code does not name;
    - small ones, one to four pieces each: `Runtime` held as a value, the whole `System.getenv()`
      map, `Integer.getInteger` with a key that is not a constant, `getProperty` defaults that are

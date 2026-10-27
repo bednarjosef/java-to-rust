@@ -111,7 +111,10 @@ program where such a lookup can happen, so they can be checked before the progra
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final
   field is never written, even after `setAccessible(true)`; `set` throws
   `IllegalAccessException`, since the analyses rely on final fields keeping their value. Generic methods, and members
-  whose types do not box to and from `Object`, are not in the table, and neither are static
+  whose types do not box to and from `Object`, are not in the table: among them those that take
+  or hold a `Constable`, `TypeDescriptor.OfField` or `AnnotatedElement`, which a class held as an
+  `Object` is in Java but not in a translation, and the instance methods of those interfaces.
+  Neither are static
   fields that hold a field offset or another handle (which are no fields of
   the translation, see [multi-threading.md](multi-threading.md)), nor the methods that javac adds (bridges, lambdas' bodies), so no method of the
   table is synthetic; `isDefault` is Java's test of the modifiers. An enum's constants are
@@ -319,12 +322,14 @@ handles.
   annotations (`lower/processors.rs`), and `isAnnotationPresent` of an annotation type's class
   literal, a chain of tests of the class against those whose declarations have it
   (`lower/annotation_presence.rs`).
-- **Generic types read by reflection**: `getGenericSuperclass()` and `Field.getGenericType()`
-  are answered from the types javac gives, with the JDK's own `ParameterizedType`,
-  `WildcardType` and `GenericArrayType` objects (`lower/generic_types.rs`; a field's through the
-  native `genericTypePart` of `java/Reflection.java`, by slot), but a type variable in it throws
-  `UnsupportedOperationException` when it is made, and `getGenericInterfaces`,
-  `getTypeParameters` and the generic types of a method are rejected.
+- **Generic types read by reflection**: `getGenericSuperclass()`, `getGenericInterfaces()`,
+  `getTypeParameters()` and `Field.getGenericType()` are answered from the types javac gives,
+  with the JDK's own `ParameterizedType`, `WildcardType`, `GenericArrayType` and `TypeVariable`
+  objects (`lower/generic_types.rs`; a field's through the native `genericTypePart` of
+  `java/Reflection.java`, by slot; the others through the natives of `TranslatedTypes`). A
+  class's type variable has its bounds and its class as its `GenericDeclaration`; it is not an
+  `AnnotatedElement`. A method's type variable throws `UnsupportedOperationException` when a type
+  that mentions it is made, and the generic types of a method are rejected.
 - **Module layers** other than the boot layer, which load code from a module path, and a
   module's `ModuleDescriptor`.
 - **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as
@@ -341,6 +346,15 @@ handles.
   still does not compile: `Properties.entrySet()` is a `Collections.synchronizedSet` over the
   `Properties` as its lock, and the generator gives no monitor to an `Object` that may hold a
   value such as a string.
+- **Objects made without a constructor.** `Unsafe.allocateInstance`, which gson uses for a class
+  without a no-argument constructor, throws `InstantiationException` (the patch of
+  `jdk.internal.misc.Unsafe`), and the lookups of Android's ways (`ObjectStreamClass`,
+  `ObjectInputStream`, which are not translated) throw `NoSuchMethodException`, as on HotSpot.
+  The plan: a blank constructor for each class that may be allocated so, which gives every field
+  its default and runs neither a superclass's constructor nor the field initializers, called
+  through a `switch` over the classes like `newInstancePart`. Its fields would all be nullable,
+  so the classes need choosing (those whose fields reflection reads, without a no-argument
+  constructor), and the analyses must see the defaults as written.
 - **Members of the runtime's classes** (`String`, the boxes, `Object`, ...) are not in the
   table: a lookup on `String.class` finds nothing. `Modifier` is not translated in a single file.
 

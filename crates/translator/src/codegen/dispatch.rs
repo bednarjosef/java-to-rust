@@ -56,21 +56,15 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
     numbers
 }
 
+/// The interfaces of the constant descriptions that the runtime's strings and boxes implement,
+/// and the class of `describeConstable`'s result (`constant_desc_arm`).
+const CONSTABLE: &str = "java.lang.constant.Constable";
+const CONSTANT_DESC: &str = "java.lang.constant.ConstantDesc";
+const OPTIONAL: &str = "java.util.Optional";
+
 /// The most classes a call's receiver may be of for the call to dispatch among them alone
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
-
-/// The interfaces that `java.lang.Class` implements in Java, of which the runtime's classes
-/// implement only `CLASS_VALUE_INTERFACES`.
-const CLASS_INTERFACES: &[&str] = &[
-    "java.io.Serializable",
-    "java.lang.constant.Constable",
-    "java.lang.invoke.TypeDescriptor",
-    "java.lang.invoke.TypeDescriptor.OfField",
-    "java.lang.reflect.AnnotatedElement",
-    "java.lang.reflect.GenericDeclaration",
-    "java.lang.reflect.Type",
-];
 
 /// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
 /// generation and every translation.
@@ -666,11 +660,11 @@ impl<'a> Gen<'a> {
     /// Whether `value` may be a class that Java lets be a `to`, one of the interfaces that
     /// `java.lang.Class` implements and the program translates as interfaces of its own, which
     /// the runtime's classes do not implement (`Constable`, `TypeDescriptor.OfField`; `Type`,
-    /// `TypeDescriptor` and `Serializable` they do, see `CLASS_VALUE_INTERFACES`): the cast or the
-    /// test is rejected.
+    /// `TypeDescriptor`, `GenericDeclaration` and `Serializable` they do, see
+    /// `CLASS_VALUE_INTERFACES`): the cast or the test is rejected.
     fn rejects_class_as(&mut self, value: &Expr, to: Type) -> bool {
         let Type::Class(name, _) = to else { return false };
-        if !CLASS_INTERFACES.contains(&name) || CLASS_VALUE_INTERFACES.contains(&name) {
+        if !crate::ast::class_only_interface(name) {
             return false;
         }
         let holds_class = value.ty == Type::JavaClass
@@ -2160,6 +2154,9 @@ impl<'a> Gen<'a> {
         if self.is_appendable_method(r) {
             return self.appendable_arm(r, c);
         }
+        if let Some(text) = self.constant_desc_arm(r, c) {
+            return text;
+        }
         let text = match self.class.methods[r].name.as_str() {
             "ordinal" => return "*o as i32".to_string(),
             "name" => "o.enum_name()",
@@ -2167,6 +2164,59 @@ impl<'a> Gen<'a> {
         };
         // A method that another class answers with null returns an `Option`.
         if self.facts.nullable_returns.contains(&r) { format!("Some({text})") } else { text.to_string() }
+    }
+
+    /// `Constable`'s `describeConstable()` or `ConstantDesc`'s `resolveConstantDesc(lookup)`
+    /// (method `r`) of a string or a box bound to `o`, of class `c`; `None` for another method or
+    /// value. A string, an `Integer`, a `Long`, a `Float` and a `Double` are their own constant
+    /// descriptions: the first gives `Optional.of(o)`, made with `Optional`'s constructor (which
+    /// `program::reach` reaches with the method), and the second `o` itself. A `Boolean`, a
+    /// `Byte`, a `Short` and a `Character` describe themselves with `DynamicConstantDesc`s,
+    /// which is rejected.
+    fn constant_desc_arm(&mut self, r: usize, c: usize) -> Option<String> {
+        let method = &self.class.methods[r];
+        let owner = self.class.types[method.class].name.as_str();
+        let describe = owner == CONSTABLE && method.name == "describeConstable";
+        let resolve = owner == CONSTANT_DESC && method.name == "resolveConstantDesc";
+        let runtime = self.runtime_of(c)?;
+        if !describe && !resolve {
+            return None;
+        }
+        let pos = method.pos;
+        let reject = |g: &mut Self, what: &str| {
+            let message = format!("`{}` of {what} not supported yet", method.name);
+            g.rejected.push(Error { pos, message });
+            Some("unreachable!()".to_string())
+        };
+        let own = matches!(runtime, Type::String)
+            || matches!(runtime, Type::Boxed(Type::Int | Type::Long | Type::Float | Type::Double));
+        if !own {
+            let name = runtime_name(runtime).unwrap_or("value");
+            return reject(self, &format!("a `{name}` held as a `{owner}`"));
+        }
+        let object = self.object_index().filter(|&t| self.enum_variants(t).contains(&c));
+        let Some(object) = object else {
+            return reject(self, "a string or a box where no `Object` is one");
+        };
+        let value = format!("{}({})", self.variant(object, c), self.held(c));
+        let text = if resolve {
+            value
+        } else {
+            let optional = self.class.type_index(OPTIONAL);
+            let ctor = optional.and_then(|t| {
+                self.class.methods.iter().position(|m| m.class == t && m.is_ctor && m.params.len() == 1)
+            });
+            let Some(ctor) = ctor.filter(|ctor| !self.facts.throwing.contains(ctor)) else {
+                return reject(self, "a string or a box without `Optional`'s constructor");
+            };
+            let param = &self.class.methods[ctor].params[0];
+            let arg =
+                if self.optional_var(ctor, param.ty, &param.name) { format!("Some({value})") } else { value };
+            let class = self.class.methods[ctor].class;
+            let call = format!("{}({arg})", self.qualified_fn(ctor));
+            self.held_object(class, call)
+        };
+        Some(if self.facts.nullable_returns.contains(&r) { format!("Some({text})") } else { text })
     }
 
     /// The type of `Object`, when the program uses it.
@@ -2290,7 +2340,8 @@ impl<'a> Gen<'a> {
 
     /// The method of `CLASS_VALUE_INTERFACES` that method `r` is or overrides, by name, when a
     /// class answers it with its own: `Type`'s `getTypeName()`, where the interface's default
-    /// would give the class's `toString()`, and `TypeDescriptor`'s abstract `descriptorString()`.
+    /// would give the class's `toString()`, `TypeDescriptor`'s abstract `descriptorString()`, and
+    /// `GenericDeclaration`'s `getTypeParameters()`, which is rejected.
     fn class_answer(&self, r: usize) -> Option<&'static str> {
         self.class.hierarchy.group(r).into_iter().find_map(|g| {
             let m = &self.class.methods[g];
@@ -2298,6 +2349,7 @@ impl<'a> Gen<'a> {
                 _ if !m.params.is_empty() => None,
                 ("java.lang.reflect.Type", "getTypeName") => Some("getTypeName"),
                 ("java.lang.invoke.TypeDescriptor", "descriptorString") => Some("descriptorString"),
+                ("java.lang.reflect.GenericDeclaration", "getTypeParameters") => Some("getTypeParameters"),
                 _ => None,
             }
         })
@@ -2306,6 +2358,11 @@ impl<'a> Gen<'a> {
     /// Method `r` (see `class_answer`) for a class bound to `o`: `Class`'s own, as the JDK makes
     /// it.
     fn class_answer_arm(&mut self, r: usize) -> String {
+        if self.class_answer(r) == Some("getTypeParameters") {
+            let message = "`getTypeParameters` of a class held as a `GenericDeclaration` not supported yet";
+            self.rejected.push(Error { pos: self.class.methods[r].pos, message: message.to_string() });
+            return "unreachable!()".to_string();
+        }
         let text = match self.class_answer(r) {
             Some("getTypeName") if super::shared_strings() => "o.shared_type_name()".to_string(),
             Some("getTypeName") => "o.get_type_name()".to_string(),

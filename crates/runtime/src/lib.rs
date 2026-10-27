@@ -59,6 +59,7 @@ mod null;
 mod out;
 mod parse_range;
 mod preconditions;
+mod process;
 mod proxy_classes;
 mod random;
 pub mod regex;
@@ -141,6 +142,7 @@ pub use out::{
 };
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
 pub use preconditions::*;
+pub use process::{destroy_process, spawn_process, wait_for_process_exit};
 pub use proxy_classes::{annotations_made, in_dynamic_module, name_proxy_class, note_annotation};
 pub use random::*;
 pub use regex::{matches_all, replace_all, replace_first, split};

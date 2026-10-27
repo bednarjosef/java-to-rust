@@ -89,7 +89,10 @@ included (docs/collector.md).
   builders they are `java::SharedStringBuilder`. Their capacity grows as Java's does (twice
   plus two, from the byte length when text beyond Latin-1 first arrives, with room for the
   longest `double` or `float` text before appending one), so `capacity()` and `trimToSize()`
-  answer what Java's do.
+  answer what Java's do. `append` and `insert` take every overload, ranges of a `char[]` or a
+  `CharSequence` among them, and the bounds checks throw Java 26's exceptions with its
+  messages; inserting a range of a `CharSequence` that a program class implements is rejected
+  (Java reads it with `charAt` after making room for it).
 - **Characters**: the `Character` tests and conversions, with their `int` code point overloads,
   use tables generated from the JDK's data. Case conversion uses Rust's Unicode tables with Java's
   exceptions, and `isAlphabetic` uses Rust's `is_alphabetic`; both may differ from Java on code
@@ -203,7 +206,9 @@ Design: [object-model.md](object-model.md).
   `Object` over the program's implementors and the matching library values.
 - **Generics** translate erased, as javac compiles them, with javac's casts and bridge methods.
   A generic class or method that only stores, returns and passes its type variables is a Rust
-  generic instead (`struct Stack<T>`, `fn choose<T: Clone>`), with no casts.
+  generic instead (`struct Stack<T>`, `fn choose<T: Clone>`), with no casts. A type variable
+  that javac's inference makes up, for a parameter bounded by itself with nothing to infer it
+  from (`<B extends Builder<B>> B newBuilder()`), is its erasure.
 - An array of references used as an `Object[]` is an `Object[]` throughout. Where the code makes
   one, it carries the class it was made of, so storing an object of another class throws
   `ArrayStoreException`, `getClass()` is its own, and `instanceof` and casts to an array class
@@ -352,15 +357,18 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
 - `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
   type arguments, each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,
   `WildcardTypeImpl` and `GenericArrayTypeImpl` (`lower/generic_types.rs`), so a type token
-  (`new TypeToken<List<String>>() {}`) reads its type argument as in Java. A type variable is not
-  supported yet: making a type that mentions one throws `UnsupportedOperationException`.
-  `getGenericInterfaces`, `getTypeParameters` and the generic types of methods and fields are
-  still rejected.
+  (`new TypeToken<List<String>>() {}`) reads its type argument as in Java.
+  `getGenericInterfaces()` and `getTypeParameters()` are made the same way, and a class's type
+  variables are the JDK's `TypeVariableImpl`, with their bounds and the class that declares them,
+  so gson's walk from a field's `List<String>` up to `Collection<E>` resolves `E` to `String`. A
+  method's type variable is not made: a type that mentions one throws
+  `UnsupportedOperationException`. The generic types of methods are still rejected.
 - `Class.forName` of a constant name is that class, and of an array's descriptor
   (`"[La.B;"`) that array's class; of a computed name, a `switch` over the classes code can find
   by name. An unknown name throws `ClassNotFoundException`.
 - **Handles**: `Unsafe` offsets, field updaters and `VarHandle`s of fields and array elements,
-  and the `MethodHandle`s of the handle factories, are the accesses they name, followed through
+  and the `MethodHandle`s of the handle factories, are the accesses they name, and a
+  `MethodHandle` of a static method (`findStatic`) is a call of it, followed through
   constants, locals, fields and calls ([multi-threading.md](multi-threading.md), 5.3). A call of
   a lookup's, a `MethodHandle`'s or a `MethodType`'s method that the translation does not follow
   (a handle of any other method, `invokeWithArguments`, combinators such as `filterArguments`,
@@ -429,8 +437,8 @@ Design: [natives-and-input.md](natives-and-input.md).
   handles but those above, serialization, class loading, and security but its exceptions, the
   lookup of services by name and the services translated so far, see
   [natives-and-input.md](natives-and-input.md#class-loading-resources-and-classes-by-name)).
-  An untranslated class used as a type has no objects, so its variables are only ever null
-  (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
+  An untranslated class used as a type has no objects, so its variables are only ever null,
+  and reflection finds no member of its class literal (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
   `Tripwire.ENABLED`, virtual threads) is not reached, and neither are parallel streams when no
   stream can become parallel (`program/reach/sequential.rs`).
 - A source root may be a module with `module-info.java`; the whole translation is one closed

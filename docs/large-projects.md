@@ -102,7 +102,7 @@ The 28 targets reach a small part of the JDK. Real projects lean on parts that a
   their implementations this way. In a closed program the implementations are known at
   translation time.
 - **Files, networking and processes**: `java.nio.file`, sockets, `ProcessBuilder`, each with
-  hand-written natives.
+  hand-written natives (processes: [natives-and-input.md](natives-and-input.md)).
 - **Logging, JSON and other common libraries**: translated from their sources like the JDK, with
   their reflection resolved where the classes are known (Gson's field reflection over a known
   class, for example).

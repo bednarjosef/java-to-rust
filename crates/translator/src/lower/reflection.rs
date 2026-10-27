@@ -17,7 +17,8 @@
 //! names the file's lookups spell out, or any string literal of it for a lookup by a computed name,
 //! or every member for `getMethods()` and its relatives. A generic class or method, an inner, local
 //! or anonymous class's constructor, and a member whose types a value cannot be boxed to (`Class`
-//! itself) are not in the table, and looking them up throws as for a name that is not.
+//! itself, or `Constable`, which a class held as an `Object` is not in a translation) are not in
+//! the table, and looking them up throws as for a name that is not.
 
 use super::*;
 use crate::program::{LookupKind, lookup};
@@ -226,7 +227,8 @@ impl<'t> Lowering<'t> {
     }
 
     /// A call of a native of the translator's `Method`, `Field` or `Constructor` (see the
-    /// module's comment), with its arguments; `None` for any other call.
+    /// module's comment), `ServiceLoader` or `TranslatedTypes` (`generic_types`), with its
+    /// arguments; `None` for any other call.
     pub(super) fn reflection_native(
         &self,
         node: Node<'t>,
@@ -235,6 +237,9 @@ impl<'t> Lowering<'t> {
     ) -> Result<Option<ExprKind>, Error> {
         if symbol.owner == SERVICE_LOADER && symbol.native {
             return Ok(Some(self.service_native(node, symbol, std::mem::take(args))?));
+        }
+        if symbol.owner == super::generic_types::TRANSLATED_TYPES && symbol.native {
+            return Ok(Some(self.generic_types_native(node, symbol, std::mem::take(args))?));
         }
         if !matches!(symbol.owner, METHOD | FIELD | CONSTRUCTOR) || !symbol.native {
             return Ok(None);
@@ -508,9 +513,9 @@ impl<'t> Lowering<'t> {
                 }
                 Ok(Some(body))
             }
-            (Member::Field(_, decl), "genericTypePart") => {
+            (Member::Field(class, decl), "genericTypePart") => {
                 let text = decl.symbol().map_or("", |s| s.ty);
-                let made = self.field_generic_type(node, text)?;
+                let made = self.field_generic_type(node, text, *class)?;
                 Ok(made.map(|made| vec![Stmt::Yield(self.convert(made, object))]))
             }
             (Member::Field(class, decl), "getPart" | "setPart") => {
@@ -894,7 +899,15 @@ impl<'t> Lowering<'t> {
             && matches!(ret, Ok(Type::Void))
             && matches!(&declared[..], [p] if p.symbol().is_some_and(|s| s.ty == "java.lang.String[]"))
             && self.entry.is_none_or(|entry| entry == info.owner);
-        Ok(!main && params.into_iter().all(boxable) && ret.is_ok_and(|r| r == Type::Void || boxable(r)))
+        // The receiver of an instance method of `Constable` is unboxed from an `Object`, which
+        // may be a class, to the interface, which the runtime's classes do not implement.
+        let receiver = info.node.has_flag("STATIC")
+            || info.name == "<init>"
+            || !crate::ast::class_only_interface(&self.types[info.owner].javac);
+        Ok(!main
+            && receiver
+            && params.into_iter().all(boxable)
+            && ret.is_ok_and(|r| r == Type::Void || boxable(r)))
     }
 
     /// The type that method `m` returns, read where `m` is declared: the `E` of the anonymous
@@ -990,10 +1003,12 @@ fn block(lowering: &Lowering, pos: Pos, body: Vec<Stmt>) -> ExprKind {
     }
 }
 
-/// Whether a value of type `ty` goes to and from an `Object`.
+/// Whether a value of type `ty` goes to and from an `Object`: not as an interface that only
+/// `Class` of the runtime's classes implements in Java (`Constable`), as the `Object` may be a
+/// class.
 fn boxable(ty: Type) -> bool {
     match ty {
-        Type::Class(_, args) => args.is_empty(),
+        Type::Class(name, args) => args.is_empty() && !crate::ast::class_only_interface(name),
         Type::Array(element) => boxable(*element),
         Type::Enum(_) | Type::String | Type::Boxed(_) | Type::StringBuilder | Type::Boolean => true,
         _ => ty.is_numeric(),
