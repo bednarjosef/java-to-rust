@@ -265,10 +265,8 @@ impl Walk<'_> {
             {
                 let mut state = self.state.borrow_mut();
                 // Each method that runs is on the work list once at least (`reach`).
-                if state.unknown.is_some()
-                    || self.stop.methods.contains(&m)
-                    || walks.is_multiple_of(1024) && self.stop.types_run(&state.live)
-                {
+                let type_run = walks.is_multiple_of(1024).then(|| self.stop.type_run(&state.live)).flatten();
+                if state.unknown.is_some() || self.stop.methods.contains(&m) || type_run.is_some() {
                     state.stopped = true;
                     if timings {
                         let method = &class.methods[m];
@@ -277,7 +275,8 @@ impl Walk<'_> {
                         } else if self.stop.methods.contains(&m) {
                             format!("{}.{}", class.types[method.class].name, method.name)
                         } else {
-                            "a class of the code initialized or constructed".to_string()
+                            let t = type_run.expect("a type that stops the walk ran");
+                            format!("{}, initialized or constructed", class.types[t].name)
                         };
                         eprintln!("timing: live walk stopped after {walks} walks, at {at}");
                     }
@@ -601,8 +600,9 @@ impl Stop {
         stop
     }
 
-    fn types_run(&self, live: &LiveMethods) -> bool {
-        self.types.iter().any(|t| live.initialized.contains(t) || live.constructed.contains(t))
+    /// The first of the types that stop the walk that has been initialized or constructed.
+    fn type_run(&self, live: &LiveMethods) -> Option<usize> {
+        self.types.iter().copied().find(|t| live.initialized.contains(t) || live.constructed.contains(t))
     }
 }
 
