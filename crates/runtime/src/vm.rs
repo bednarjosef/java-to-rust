@@ -2,11 +2,26 @@
 //! JVM can answer: class data sharing (`jdk.internal.misc.CDS`), continuations
 //! (`jdk.internal.vm.ContinuationSupport`), the layout of arrays (`jdk.internal.misc.Unsafe`), the
 //! wall clock behind `Instant.now()` (`jdk.internal.misc.VM`), the checksums of `java.util.zip`
-//! (`CRC32`, `Adler32`) and the processes of `java.lang.ProcessHandleImpl`. Each
-//! answers as HotSpot does, or as HotSpot does when run with the flag named, where the default
-//! depends on something a translated program does not have (an archive, continuations).
+//! (`CRC32`, `Adler32`), the processes of `java.lang.ProcessHandleImpl` and the JVM's start of
+//! `sun.management.VMManagementImpl`. Each answers as HotSpot does, or as HotSpot does when run
+//! with the flag named, where the default depends on something a translated program does not have
+//! (an archive, continuations).
 
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// `VMManagementImpl.getStartupTime()`: when the JVM started, in milliseconds since the epoch.
+/// A translated program's is when its process started (as `process_start_time` reads it), the
+/// same on every call.
+pub fn vm_startup_time() -> i64 {
+    static START: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *START.get_or_init(|| process_start_time(current_pid()).max(0))
+}
+
+/// `VMManagementImpl.getUptime0()`: the milliseconds since `vm_startup_time`.
+pub fn vm_uptime() -> i64 {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    (now - vm_startup_time()).max(0)
+}
 
 /// `CDS.getCDSConfigStatus()`: the flags of class data sharing (dumping an archive, using one,
 /// logging lambda form invokers). A translated program has no archive, so none is set, as on a

@@ -633,9 +633,13 @@ field that is not `volatile` asks for more (section 7).
   returning (after the other non-daemon threads), `System.exit`, an uncaught exception that ends
   `main`, a failing static initializer. Every hook starts, and the exit waits until all of them
   have ended; no hook can be added or removed from then on (`Shutdown in progress`).
-  `Runtime.halt` runs none, as in Java. A signal (`SIGINT`, `SIGTERM`) ends the process without
-  running them, where Java runs them; and an exit while the hooks run ends the process at once,
-  where Java's blocks.
+  The JDK's own hooks (`JavaLangAccess.registerShutdownHook`, which `File.deleteOnExit`'s
+  `DeleteOnExitHook` registers) are the translator's `Thread.registerShutdownHook`'s, kept by
+  slot with the JDK's checks: the exit runs them in the order of their slots, the program's hooks
+  in slot 1 as the JDK's `ApplicationShutdownHooks` does, so the files go after every hook of the
+  program has ended. `Runtime.halt` runs none, as in Java. A signal (`SIGINT`, `SIGTERM`) ends
+  the process without running them, where Java runs them; and an exit while the hooks run ends
+  the process at once, where Java's blocks.
 - `InterruptedException`, `IllegalMonitorStateException` and `IllegalThreadStateException` are
   standard classes of `Standard.java`.
 

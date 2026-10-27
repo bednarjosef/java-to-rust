@@ -423,6 +423,32 @@ class Thread {
         return false;
     }
 
+    // The JDK's own hooks (`JavaLangAccess.registerShutdownHook`, the JDK's `Shutdown.add`), by
+    // slot: 0 the console's, 1 where the hooks above run, 2 `DeleteOnExitHook`'s. They run in
+    // the order of their slots as the program exits, each when the one before has ended.
+    private static final Runnable[] systemHooks = new Runnable[10];
+    // The slot whose hook runs, or has run last; -1 before the exit begins.
+    private static int runningSystemHook = -1;
+
+    static synchronized void registerShutdownHook(int slot, boolean registerShutdownInProgress, Runnable hook) {
+        if (slot < 0 || slot >= systemHooks.length) {
+            throw new IllegalArgumentException("Invalid slot: " + slot);
+        }
+        if (systemHooks[slot] != null) {
+            throw new InternalError("Shutdown hook at slot " + slot + " already registered");
+        }
+        if (registerShutdownInProgress ? slot <= runningSystemHook : runningSystemHook >= 0) {
+            throw new IllegalStateException("Shutdown in progress");
+        }
+        systemHooks[slot] = hook;
+        installShutdown0();
+    }
+
+    private static synchronized Runnable startSystemHook(int slot) {
+        runningSystemHook = slot;
+        return systemHooks[slot];
+    }
+
     // The hooks, taken once: no hook can be added or removed after this.
     private static synchronized Thread[] takeShutdownHooks() {
         Thread[] hooks = shutdownHooks;
@@ -430,9 +456,25 @@ class Thread {
         return hooks;
     }
 
-    // What the runtime runs, once, as the program exits: every hook starts, and the exit waits
-    // until all of them have ended.
+    // What the runtime runs, once, as the program exits: the JDK's hooks in the order of their
+    // slots, the program's in slot 1, where the JDK's `ApplicationShutdownHooks` runs them. A
+    // hook that fails does not keep the next from running.
     private static void runShutdownHooks() {
+        for (int slot = 0; slot < systemHooks.length; slot++) {
+            Runnable hook = startSystemHook(slot);
+            try {
+                if (slot == 1) {
+                    runApplicationHooks();
+                } else if (hook != null) {
+                    hook.run();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    // The program's hooks: every one starts, and the exit waits until all of them have ended.
+    private static void runApplicationHooks() {
         Thread[] hooks = takeShutdownHooks();
         for (Thread hook : hooks) {
             try {
