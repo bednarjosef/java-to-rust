@@ -32,9 +32,15 @@ impl<'t> Lowering<'t> {
             && let exact = Type::array(self.ty(node, row)?)
             && exact != self.ty(node, java)?
         {
+            if levels(exact) < sizes.len() {
+                return unsupported(node, DEEP_OBJECT_ROWS);
+            }
             self.note_object_array(exact.element());
             let rows = self.synth(ExprKind::NewArray(sizes), node.pos(), exact);
             return Ok(ExprKind::Cast(self.ty(node, java)?, Box::new(rows)));
+        }
+        if levels(self.ty(node, java)?) < sizes.len() {
+            return unsupported(node, DEEP_OBJECT_ROWS);
         }
         Ok(ExprKind::NewArray(sizes))
     }
@@ -324,4 +330,17 @@ pub(super) fn reads_name(body: &[Stmt], name: &str) -> bool {
         visit_stmt(stmt, &mut |e| found |= mentions(e, name), &mut |_| {});
     }
     found
+}
+
+/// A new array of several dimensions whose rows below the outermost are `Object[]`s (see
+/// `covariant`), as in `new C[a][b][c]` where `C[][]` is one: an `Object` element of a row has no
+/// type for the array that the next level puts there.
+const DEEP_OBJECT_ROWS: &str = "a new array whose rows are `Object[]`s below its outermost level";
+
+/// How many levels of arrays `ty` has: 2 for `int[][]`, 0 for `Object`.
+fn levels(ty: Type) -> usize {
+    match ty {
+        Type::Array(element) => 1 + levels(*element),
+        _ => 0,
+    }
 }

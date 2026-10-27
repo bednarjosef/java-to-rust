@@ -1912,6 +1912,25 @@ fn program_errors_name_their_file() {
 }
 
 #[test]
+fn a_new_array_whose_inner_rows_are_object_arrays_is_rejected_not_a_panic() {
+    // `aisle` makes `String[][]` an `Object[]`, so the rows of `new String[2][2][3]` hold
+    // `Object`s where the third level puts its `String[]`s, which the new array cannot type.
+    let dir = write_sources(
+        "deep_object_rows",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    public static void main(String[] a) {\n        String[][][] words = new String[2][2][3];\n        Object[] aisle = words[1];\n        System.out.println(aisle.length);\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("a deep new array").to_string();
+    assert!(
+        error.ends_with("Main.java:4:30: a new array whose rows are `Object[]`s below its outermost level not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
 fn arraycopy_copies_plain_arrays_between_slices() {
     let rust = translate(
         "class A { public static void main(String[] a) {
