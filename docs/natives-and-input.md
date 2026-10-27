@@ -343,9 +343,11 @@ of the accessor (mapped memory, continuations).
   type is a class that is not translated (`UNTRANSLATED`) is only ever null, since no translated
   code can create one. The class is declared as a stub without constructors or fields, with the
   instance methods called on it as dormant methods; a call throws `NullPointerException` and
-  `instanceof` is false, as in Java. Its static members, constructors, generic and array types
-  stay rejected. Example: `TreeMap.buildFromSorted` takes an `ObjectInputStream` that every copy
-  of a sorted map passes as null.
+  `instanceof` is false, as in Java. Its class literal is the stub's class, which reflection
+  finds no member of: `getDeclaredMethod` throws `NoSuchMethodException`. Its static members,
+  constructors, generic and array types stay rejected. Examples: `TreeMap.buildFromSorted` takes
+  an `ObjectInputStream` that every copy of a sorted map passes as null, and gson looks up
+  Android's `ObjectStreamClass.newInstance` by reflection, which HotSpot does not have either.
 - **`serialPersistentFields`** is initialized only if code reads it: serialization reads it by
   reflection, and its initializer needs `Class` values.
 

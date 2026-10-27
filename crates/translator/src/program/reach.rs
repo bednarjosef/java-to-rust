@@ -3734,6 +3734,11 @@ impl<'t> Walk<'t> {
         if kind == "VARIABLE" {
             self.stub_type(text(&value["symbol"], "type"));
         }
+        // A class literal of an untranslated class (`ObjectStreamClass.class`), which reflection
+        // finds no member of.
+        if kind == "MEMBER_SELECT" && text(value, "identifier") == "class" {
+            self.stub_type(text(&value["expression"], "javaType"));
+        }
         if call {
             self.initialization(value);
             // A class that `Class.forName` names exists, and is initialized if the call says

@@ -431,8 +431,8 @@ Design: [natives-and-input.md](natives-and-input.md).
   handles but those above, serialization, class loading, and security but its exceptions, the
   lookup of services by name and the services translated so far, see
   [natives-and-input.md](natives-and-input.md#class-loading-resources-and-classes-by-name)).
-  An untranslated class used as a type has no objects, so its variables are only ever null
-  (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
+  An untranslated class used as a type has no objects, so its variables are only ever null,
+  and reflection finds no member of its class literal (`program/reach/stubs.rs`). Code that only JVM flags enable (Java Flight Recorder,
   `Tripwire.ENABLED`, virtual threads) is not reached, and neither are parallel streams when no
   stream can become parallel (`program/reach/sequential.rs`).
 - A source root may be a module with `module-info.java`; the whole translation is one closed

@@ -343,6 +343,15 @@ handles.
   still does not compile: `Properties.entrySet()` is a `Collections.synchronizedSet` over the
   `Properties` as its lock, and the generator gives no monitor to an `Object` that may hold a
   value such as a string.
+- **Objects made without a constructor.** `Unsafe.allocateInstance`, which gson uses for a class
+  without a no-argument constructor, throws `InstantiationException` (the patch of
+  `jdk.internal.misc.Unsafe`), and the lookups of Android's ways (`ObjectStreamClass`,
+  `ObjectInputStream`, which are not translated) throw `NoSuchMethodException`, as on HotSpot.
+  The plan: a blank constructor for each class that may be allocated so, which gives every field
+  its default and runs neither a superclass's constructor nor the field initializers, called
+  through a `switch` over the classes like `newInstancePart`. Its fields would all be nullable,
+  so the classes need choosing (those whose fields reflection reads, without a no-argument
+  constructor), and the analyses must see the defaults as written.
 - **Members of the runtime's classes** (`String`, the boxes, `Object`, ...) are not in the
   table: a lookup on `String.class` finds nothing. `Modifier` is not translated in a single file.
 

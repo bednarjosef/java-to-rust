@@ -178,6 +178,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
 | `jdk/internal/misc/UnsafeConstants.java` | the values the JVM injects: 8-byte little-endian addresses, unaligned access, 64-byte cache lines, the system's page size |
 | `jdk/internal/misc/CarrierThreadLocal.java`, `TerminatingThreadLocal.java` | thread-locals without the JVM's carrier threads and identity maps |
+| `jdk/internal/misc/Unsafe.java` | `allocateInstance` throws `InstantiationException`: for a class without objects as the JDK does, and for one with objects too, since a translation makes an object only by running a constructor |
 | `jdk/internal/misc/VM.java` | `getRuntimeArguments` answers an empty array: a translated program has no JVM arguments |
 | `jdk/internal/perf/Perf.java` | `createLong` returns the heap buffer that HotSpot returns with `-XX:-UsePerfData`: 8 bytes in native order holding the value |
 | `jdk/internal/misc/InnocuousThread.java` | the thread group's parent read with `getParent`, not through an `Unsafe` offset held in a local; the `Thread` offsets stay, so `eraseThreadLocals` and the constructor write the thread's fields as the JDK does |
