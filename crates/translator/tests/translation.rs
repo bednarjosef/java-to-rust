@@ -4446,6 +4446,9 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             private Unsafe() {}
             private static final Unsafe theUnsafe = new Unsafe();
             public static Unsafe getUnsafe() { return theUnsafe; }
+            // The translator's patch replaces it (java/patches/jdk/internal/misc/Unsafe.java), so
+            // the stand-in has it too.
+            public native Object allocateInstance(Class<?> cls) throws InstantiationException;
             public long arrayBaseOffset(Class<?> c) {
                 if (c == null) { throw new NullPointerException(); }
                 return arrayBaseOffset0(c);
