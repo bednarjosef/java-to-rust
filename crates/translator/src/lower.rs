@@ -1287,18 +1287,7 @@ impl<'t> Lowering<'t> {
 
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
-        let Some(mut symbol) = node.symbol() else { return unsupported(node, "this call") };
-        // A method that the JDK declares in `AccessibleObject` (`isAccessible`), called on the
-        // translator's `Method`, `Field` or `Constructor`, which declare it themselves.
-        if symbol.owner == "java.lang.reflect.AccessibleObject"
-            && !symbol.is_static
-            && let Some(receiver) = select.0["expression"]["javaType"].as_str()
-            && let receiver = receiver.split('<').next().unwrap_or(receiver)
-            && is_standard(receiver)
-            && self.method_named(receiver, symbol.name, symbol.ty).is_some()
-        {
-            symbol.owner = receiver;
-        }
+        let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
         self.note_call(node, &symbol, select);
         if let Some(kind) = self.handle_access(node, &symbol)? {
             return Ok(kind);

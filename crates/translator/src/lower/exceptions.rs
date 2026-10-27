@@ -52,6 +52,9 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("Method", "java.lang.reflect"),
     ("Field", "java.lang.reflect"),
     ("Constructor", "java.lang.reflect"),
+    ("AccessibleObject", "java.lang.reflect"),
+    ("Executable", "java.lang.reflect"),
+    ("Member", "java.lang.reflect"),
     ("DataFormatException", "java.util.zip"),
     ("UnsupportedCharsetException", "java.nio.charset"),
     ("IllegalCharsetNameException", "java.nio.charset"),
@@ -821,21 +824,6 @@ impl Uses {
                         if map.get("kind").and_then(Value::as_str) == Some("NEW_CLASS") {
                             self.instantiated.insert(owner);
                         }
-                    }
-                    // A method that the JDK declares in a superclass of the translator's `Method`,
-                    // `Field` or `Constructor` (`AccessibleObject.isAccessible`): the translator's
-                    // class declares it itself.
-                    Some("METHOD")
-                        if owner == "java.lang.reflect.AccessibleObject"
-                            && let Some(receiver) = v["methodSelect"]["expression"]["javaType"].as_str()
-                            && let receiver = receiver.split('<').next().unwrap_or(receiver)
-                            && is_standard(receiver) =>
-                    {
-                        self.members.insert((
-                            receiver.to_string(),
-                            text(symbol, "name"),
-                            text(symbol, "type"),
-                        ));
                     }
                     Some("FIELD") if is_standard(&owner) => {
                         self.fields.insert((owner, text(symbol, "name")));
