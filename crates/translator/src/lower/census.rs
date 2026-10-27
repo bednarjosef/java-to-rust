@@ -360,7 +360,12 @@ pub fn panic_carried(place: Option<String>) {
 /// Makes panics quiet, as rejections in a census are: each is reported with the rest, not
 /// printed, with the place in the translator where it happened (`panic_message`).
 pub fn quiet_panics() {
-    std::panic::set_hook(Box::new(|info| {
+    // To find where a panic comes from, `JAVA_TO_RUST_PANIC_BACKTRACE` prints each one's stack.
+    let backtraces = std::env::var_os("JAVA_TO_RUST_PANIC_BACKTRACE").is_some();
+    std::panic::set_hook(Box::new(move |info| {
+        if backtraces {
+            eprintln!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture());
+        }
         let place = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
         PANIC_PLACE.with(|p| p.set(place));
     }));
