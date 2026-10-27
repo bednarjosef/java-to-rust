@@ -2827,8 +2827,8 @@ fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
     let report = survey(&program).report;
     // `Circle.area` runs for `s.area()`; `Square` is named but never created, and the annotation
-    // does nothing.
-    assert_contains(&report, &["Reachable from Main: 6 classes (3 instantiated), 7 methods"]);
+    // type `Tag` is reached with the class it is on, for reflection to read.
+    assert_contains(&report, &["Reachable from Main: 7 classes (3 instantiated), 7 methods"]);
     // The program's own interfaces and inner classes translate.
     assert_lacks(&report, &["Square:", "Tag", "interfaces", "inner classes"]);
 }

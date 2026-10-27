@@ -2745,6 +2745,9 @@ struct Walk<'t> {
     lookups: BTreeSet<Lookup>,
     strings: HashSet<String>,
     class_literals: HashSet<String>,
+    /// The classes of the class literals among the values of annotations, which code that
+    /// reads the annotation makes objects of (`reflection.rs`).
+    annotation_classes: HashSet<String>,
     reflected_keys: HashSet<(String, String)>,
     /// The service providers of the sources, and the `Class` values that `ServiceLoader.load` of
     /// reachable code loads services of (`reflection.rs`).
@@ -3118,7 +3121,7 @@ impl<'t> Walk<'t> {
     }
 
     /// A class named by reachable code: it exists as a type, with its outer class and the types in
-    /// its header.
+    /// its header, the annotations on it among them (see `scan_object`).
     fn class(&mut self, class: String) {
         let Some((decl, outer)) = self.classes.get(&class).map(|(d, o)| (*d, o.clone())) else {
             return self.block(&class.clone(), Item::Class(class));
@@ -3132,7 +3135,7 @@ impl<'t> Walk<'t> {
         if let Some(outer) = outer {
             self.work.push(Item::Class(outer));
         }
-        for header in ["extendsClause", "implementsClause", "permitsClause", "typeParameters"] {
+        for header in ["modifiers", "extendsClause", "implementsClause", "permitsClause", "typeParameters"] {
             self.scan(&decl[header]);
         }
     }
@@ -3498,9 +3501,8 @@ impl<'t> Walk<'t> {
     /// anonymous classes declared inside are not scanned with it: their members are reached as
     /// those of any other class, a constructor by its `new` and an instance method by a call or
     /// by dispatch once the class is instantiated. (The body of an enum constant is not such a
-    /// class, see `local_classes`, and is scanned with its constant.) Of an annotation only its
-    /// type is: without reflection annotations do nothing at run time. So is the branch of an `if` or a `?:`
-    /// that never runs (`live_branch`), and the `then` branch of an `if` that tests for a class
+    /// class, see `local_classes`, and is scanned with its constant.) Neither is the branch of an
+    /// `if` or a `?:` that never runs (`live_branch`), and the `then` branch of an `if` that tests for a class
     /// without objects waits for the class to have some (`objectless`).
     fn scan(&mut self, value: &'t Value) {
         match value {
@@ -3516,10 +3518,13 @@ impl<'t> Walk<'t> {
         let kind = text(value, "kind");
         let call = kind == "METHOD_INVOCATION";
         if matches!(kind, "ANNOTATION" | "TYPE_ANNOTATION") {
-            // Its type alone, whose declaration says whether reflection finds it on a member
+            // Its type, whose declaration says whether reflection finds it on a member
             // (`lower::annotation_values`): jspecify's `@Nullable` before a field's type is on
-            // the type only.
+            // the type only. And its values, whose classes code that reads the annotation
+            // makes objects of (log4j's `@PluginVisitorStrategy(PluginValueVisitor.class)`).
             self.scan(&value["annotationType"]);
+            self.scan(&value["arguments"]);
+            self.note_annotation_classes(&value["arguments"]);
             return;
         }
         if CLASS_KINDS.contains(&kind) && self.classes.contains_key(&class_name(value)) {
