@@ -1319,6 +1319,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.constant_desc_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.system_log(node, &symbol, select)? {
             return Ok(kind);
         }

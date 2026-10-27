@@ -776,10 +776,12 @@ impl<'t> Lowering<'t> {
         }
         types.push(decl(OBJECT, "", TypeKind::Interface, Vec::new()));
         let runtime = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect::<Vec<_>>();
-        // The strings and boxes are `Serializable` and `Constable` (`Serializable s = 2.5;`) where
-        // the program names those.
+        // The strings and boxes are `Serializable`, and the string and the boxes of `int`, `long`,
+        // `float` and `double` `Constable` and `ConstantDesc` (`Serializable s = 2.5;`), where the
+        // program names those; `codegen::dispatch` answers the two interfaces' methods.
         let serializable = self.type_index("java.io.Serializable");
         let constable = self.type_index("java.lang.constant.Constable");
+        let constant_desc = self.type_index("java.lang.constant.ConstantDesc");
         for (name, _) in runtime_values() {
             let mut implements = runtime.clone();
             implements.extend(serializable);
@@ -792,6 +794,7 @@ impl<'t> Lowering<'t> {
                     | "java.lang.Double"
             );
             implements.extend(constable.filter(|_| constant));
+            implements.extend(constant_desc.filter(|_| constant));
             if let Some(n) = at.number.filter(|_| is_number_box(name)) {
                 implements.push(n.decl);
             }
@@ -1393,5 +1396,47 @@ impl<'t> Lowering<'t> {
             resolved: Some(resolved),
             is_super: false,
         })
+    }
+
+    /// `s.describeConstable()` or `n.resolveConstantDesc(lookup)` of a string or a box of
+    /// `int`, `long`, `float` or `double`: the call of `Constable`'s or `ConstantDesc`'s method on
+    /// the value as one, which the generator answers (`codegen::dispatch::constant_desc_arm`).
+    pub(super) fn constant_desc_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        select: Node<'t>,
+    ) -> Result<Option<ExprKind>, Error> {
+        let interface = match symbol.name {
+            "describeConstable" => "java.lang.constant.Constable",
+            "resolveConstantDesc" => "java.lang.constant.ConstantDesc",
+            _ => return Ok(None),
+        };
+        let owned = matches!(
+            symbol.owner,
+            "java.lang.String"
+                | "java.lang.Integer"
+                | "java.lang.Long"
+                | "java.lang.Float"
+                | "java.lang.Double"
+        );
+        let (Some(receiver), Some(t)) =
+            (select.get("expression").filter(|_| owned), self.type_index(interface))
+        else {
+            return Ok(None);
+        };
+        let Some(m) = self.methods_of(t).into_iter().find(|&m| self.methods[m].name == symbol.name) else {
+            return Ok(None);
+        };
+        let receiver = self.expr(receiver)?;
+        let receiver = Box::new(self.convert(receiver, Type::class(interface)));
+        let params = self.param_types(m)?;
+        let args = node
+            .list("arguments")
+            .zip(params)
+            .map(|(a, ty)| Ok(self.convert(self.expr(a)?, ty)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let name = symbol.name.to_string();
+        Ok(Some(ExprKind::MethodCall { receiver, name, args, resolved: Some(m), is_super: false }))
     }
 }

@@ -1586,7 +1586,7 @@ impl<'a> Gen<'a> {
         };
         let c = self.class.methods[ctor].class;
         let name = &self.class.types[c].name;
-        let (pointer, cell) = (self.pointer(c), self.cell(c));
+        let cell = self.cell(c);
         let place = if slot.is_some() { " on the stack" } else { "" };
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
             call
@@ -1599,12 +1599,8 @@ impl<'a> Gen<'a> {
                 format!("{cell}::new({call})")
             };
             format!("{slot}.put({value})")
-        } else if self.celled(name) {
-            self.celled_new(c, &call)
-        } else if self.facts.immutable.contains(name) {
-            format!("{pointer}::new({call})")
         } else {
-            format!("{pointer}::new({cell}::new({call}))")
+            self.held_object(c, call)
         };
         let object = match std::env::var_os("JAVA_TO_RUST_COUNT_ALLOCATIONS") {
             // Counts of the objects made at each `new`, for profiling (`java::count_allocation`).
@@ -1636,6 +1632,23 @@ impl<'a> Gen<'a> {
             Some(t) => format!("{}({object})", self.variant(t, c)),
             None => object,
         })
+    }
+
+    /// The object of class `c` that a call of its constructor, `call`, gives, as a handle: the
+    /// value that a constructor of a class built in place returns, put in its pointer and cell.
+    pub(super) fn held_object(&mut self, c: usize, call: String) -> String {
+        let name = &self.class.types[c].name;
+        if self.facts.owned.contains(name) || !self.builds_plain(name) {
+            return call;
+        }
+        let (pointer, cell) = (self.pointer(c), self.cell(c));
+        if self.celled(name) {
+            self.celled_new(c, &call)
+        } else if self.facts.immutable.contains(name) {
+            format!("{pointer}::new({call})")
+        } else {
+            format!("{pointer}::new({cell}::new({call}))")
+        }
     }
 
     /// Whether `ctor` makes the object of a lambda or method reference that captures nothing: a

@@ -2459,6 +2459,21 @@ pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.util.Iterator", "next", "()E"),
 ];
 
+/// The methods of the constant descriptions that the strings and the boxes of `int`, `long`,
+/// `float` and `double` implement, which a call of theirs on one runs (`Walk::method`).
+const CONSTANT_DESC_METHODS: [(&str, &str, &str); 2] = [
+    (
+        "java.lang.constant.Constable",
+        "describeConstable",
+        "()java.util.Optional<? extends java.lang.constant.ConstantDesc>",
+    ),
+    (
+        "java.lang.constant.ConstantDesc",
+        "resolveConstantDesc",
+        "(java.lang.invoke.MethodHandles.Lookup)java.lang.Object",
+    ),
+];
+
 /// The method that a try-with-resources calls on each resource, which javac's tree does not show:
 /// reaching it reaches the `close()` of every live class of a resource.
 pub const CLOSE: (&str, &str, &str) = ("java.lang.AutoCloseable", "close", "()void");
@@ -3242,6 +3257,25 @@ impl<'t> Walk<'t> {
     }
 
     fn method(&mut self, key: MethodKey) {
+        // A string's or a box's `describeConstable()` is `Optional.of(this)`, which the generator
+        // writes with `Optional`'s constructor (`codegen::dispatch::constant_desc_arm`).
+        if key.0 == "java.lang.constant.Constable" && key.1 == "describeConstable" {
+            self.work.push(Item::Method(("java.util.Optional".into(), "<init>".into(), "(T)void".into())));
+        }
+        // The method of a string or a box is that of `Constable` or `ConstantDesc` on it
+        // (`lower::object::constant_desc_call`).
+        if matches!(
+            key.0.as_str(),
+            "java.lang.String"
+                | "java.lang.Integer"
+                | "java.lang.Long"
+                | "java.lang.Float"
+                | "java.lang.Double"
+        ) {
+            if let Some(&(class, name, signature)) = CONSTANT_DESC_METHODS.iter().find(|m| m.1 == key.1) {
+                self.work.push(Item::Method((class.into(), name.into(), signature.into())));
+            }
+        }
         if key.0 == "java.lang.Enum"
             && key.1 == "valueOf"
             && !std::mem::replace(&mut self.enum_by_class, true)
