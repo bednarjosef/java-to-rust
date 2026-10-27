@@ -135,6 +135,8 @@ impl<'t> Lowering<'t> {
             stub_message: Default::default(),
             ends_rejected: false,
             stubbed: Default::default(),
+            cut_stmts: Default::default(),
+            failed_stmt: Default::default(),
             notes: Default::default(),
             element_classes: Default::default(),
             array_tests: Default::default(),
