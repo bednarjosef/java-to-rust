@@ -368,8 +368,9 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   providers that `module-info.java` and `META-INF/services` declare.
 - A static method that asks for its caller's class (`StackWalker.getCallerClass()`,
   `Reflection.getCallerClass()`) gets it as an extra parameter from each call
-  (`lower/callers.rs`). Asking anywhere else, `StackWalker.walk` and a security manager's
-  `getClassContext()` (the classes on the call stack) are rejected.
+  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected. A security
+  manager's `getClassContext()`, the classes on the call stack, throws
+  `UnsupportedOperationException`, which log4j and slf4j catch to fall back; a census lists it.
 
 ## Output, input and the native layer
 

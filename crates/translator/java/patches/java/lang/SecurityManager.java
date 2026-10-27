@@ -9,14 +9,13 @@ package java.lang;
 class SecurityManager {
     /**
      * The classes of the methods on the call stack, which the JDK walks the stack for. A
-     * translated program has no call stack to walk (docs/exceptions.md), so this is a native
-     * that the translation does not have, rejected where it can run.
+     * translated program has no call stack to walk (docs/exceptions.md), so this throws, as a
+     * JDK without the method would fail: log4j and slf4j call it where they catch the failure
+     * and fall back. A census lists it (`program/census.rs`, by this message).
      */
     @Replace
     protected Class<?>[] getClassContext() {
-        return callStackClasses();
+        throw new UnsupportedOperationException(
+                "SecurityManager.getClassContext: the classes on the call stack, which a translated program does not have");
     }
-
-    @Add
-    private static native Class<?>[] callStackClasses();
 }

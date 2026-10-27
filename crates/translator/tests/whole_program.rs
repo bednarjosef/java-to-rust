@@ -659,50 +659,6 @@ public class Main {
     );
 }
 
-/// A security manager's `getClassContext()`, the classes on the call stack, is rejected where it
-/// can run, as log4j calls it from a subclass: a translated program has no stack to walk.
-#[test]
-fn a_security_managers_class_context_is_rejected() {
-    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
-        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
-        return;
-    };
-    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-class-context");
-    let sources = work.join("src");
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&sources).unwrap();
-    let java = "@SuppressWarnings(\"removal\")
-public class Main {
-    static final class Stack extends SecurityManager {
-        @Override
-        protected Class<?>[] getClassContext() {
-            return super.getClassContext();
-        }
-    }
-
-    public static void main(String[] args) {
-        System.out.println(new Stack().getClassContext().length > 0);
-    }
-}
-";
-    std::fs::write(sources.join("Main.java"), java).unwrap();
-    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
-        .args(["--main", "Main", "--source"])
-        .arg(&sources)
-        .arg("--library")
-        .arg(library)
-        .arg("-o")
-        .arg(work.join("main.rs"))
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&translated.stderr);
-    assert!(!translated.status.success(), "translated");
-    assert!(
-        stderr.contains("native method `java.lang.SecurityManager.callStackClasses()java.lang.Class<?>[]`"),
-        "{stderr}"
-    );
-}
-
 /// Handles held as values that lowering does not follow are rejected: an access through a handle
 /// that may be null whose arguments do something before Java's null check, and a handle kept as
 /// an `Object`. (A lookup of a method other than the handle factories throws when it runs, which
