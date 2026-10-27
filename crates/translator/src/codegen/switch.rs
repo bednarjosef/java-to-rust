@@ -149,6 +149,19 @@ fn exhaustive(class: &Class, selector: &Expr, cases: &[Case]) -> bool {
 }
 
 /// The number of `yield`s in the cases, including those in nested statements.
+/// Whether every value that the cases yield is `null`.
+fn only_null_yields(cases: &[Case]) -> bool {
+    let mut only = true;
+    for case in cases {
+        for stmt in &case.body {
+            visit_stmt_outside_switches(stmt, &mut |s| {
+                only &= !matches!(s, Stmt::Yield(e) if !matches!(e.kind, ExprKind::Null));
+            });
+        }
+    }
+    only
+}
+
 fn yield_count(cases: &[Case]) -> usize {
     let mut n = 0;
     for case in cases {
@@ -474,7 +487,16 @@ impl<'a> Gen<'a> {
         }
         let text = format!("{{\n{body}{}}}", "    ".repeat(indent));
         // A switch that yields nothing, as one that only throws, has the type `!`.
-        if yield_count(cases) > 0 { Code::atom(text) } else { self.never_of(text, ty) }
+        if yield_count(cases) == 0 {
+            return self.never_of(text, ty);
+        }
+        // One that yields only `null` (a lookup of an annotation that no member has) says which
+        // `None` it is, which a test of it does not.
+        if self.optional_yield && only_null_yields(cases) {
+            let rust = self.ty_name(ty);
+            return Code::atom(format!("{{ let switched: Option<{rust}> = {text}; switched }}"));
+        }
+        Code::atom(text)
     }
 
     /// No case falls through and none leaves early: `match`, with `_ => {}` when there is no default.
