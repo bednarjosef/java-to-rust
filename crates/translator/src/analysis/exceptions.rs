@@ -1358,6 +1358,21 @@ fn stmt_points(
         _ => {
             // The expressions of this statement, then its nested statements.
             visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, safe, out));
+            // A for-each reads its array's length as it starts, which throws for a null one.
+            if let Stmt::ForEach { array, .. } = s
+                && maybe_null(facts, m, array)
+                && !is_tested(array, safe)
+            {
+                let raise =
+                    Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: array.id };
+                out.push(Point {
+                    raise,
+                    pos: array.pos,
+                    what: "this loop",
+                    frames: frames.clone(),
+                    known: Vec::new(),
+                });
+            }
             statement_unboxing_points(class, facts, m, s, frames, safe, out);
             for nested in children(s) {
                 stmt_points(class, facts, m, nested, frames, safe, out);

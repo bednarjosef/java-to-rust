@@ -438,7 +438,8 @@ written in checked form exactly when it is in the analysis's set.
 - **Points**: `throw e` raises the concrete classes under `e`'s static type; a call raises what
   escapes any method it may run (every implementation of a virtual call, constructors,
   `this(...)`, `super(...)`); a runtime operation raises its standard classes, from a table per
-  builtin and expression kind (`analysis/exceptions/failures.rs`).
+  builtin and expression kind (`analysis/exceptions/failures.rs`); a for-each loop over an array
+  that may be null raises `NullPointerException` as it starts, where it reads the length.
 - **Escapes** of a method: what its points raise, minus what an enclosing `catch` in the same
   method catches, plus what its `catch` and `finally` bodies raise.
 - **Observed** at a point: the classes under the enclosing `catch` types; everything, when an
@@ -554,8 +555,8 @@ reads the enclosing instance as `this` too; a local or anonymous class reads a c
 parameter (`<parameter1>.chk`), as does a lambda in it, which takes that as a parameter, while
 the initializers the constructor runs read the field (`this.this$0.chk`), also where the
 constructor is a method of a class that builds whole objects (`analysis/whole_objects.rs`);
-javac's own locals are named too (the `s$` of a string `switch`, the iterator
-`i$` of a for-each loop, whose calls start at the collection as javac's do, at its parenthesis
+javac's own locals are named too (the `s$` of a string `switch`, the copy `arr$` of the array of
+a for-each loop, whose length it reads, the iterator `i$` of a for-each loop over a collection, whose calls start at the collection as javac's do, at its parenthesis
 if it has one); a local with a `$` in its name that javac did not make (it makes them
 synthetic) is the source's, as decompiled code has them (`rec$`). A variable of a
 `finally` block has a slot in each copy of the block that javac writes for a way out of the

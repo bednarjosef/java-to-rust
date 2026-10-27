@@ -987,6 +987,14 @@ impl Messages<'_> {
         if let Stmt::Switch { selector, .. } = s {
             self.switch(selector, out);
         }
+        // javac copies a for-each's array into a local of its own (`arr$`), whose length it reads.
+        if let Stmt::ForEach { array, .. } = s {
+            let local = self.names.get(self.outermost, array.pos, NameKind::Temp, "arr$");
+            out.insert(
+                array.id,
+                local.map(|local| format!("Cannot read the array length because \"{local}\" is null")),
+            );
+        }
         if let Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } = s {
             self.unboxing(cond, out);
         }
