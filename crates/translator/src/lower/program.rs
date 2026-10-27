@@ -25,17 +25,26 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether the native method `member` of class `class` is lowered as a method whose body calls
-    /// it: in a whole program, a reachable instance method that is not private, and that the
-    /// runtime does not implement, as `sun.management.VMManagementImpl`'s natives implement
-    /// `VMManagement`'s methods. A call of the method it implements may run it, which needs a
-    /// method to dispatch to; its body is the native's call (`Native::Missing`), which rejects
-    /// the program where it can run, and in a census is the stub of that.
+    /// it: in a whole program, a reachable instance method that is not private, as
+    /// `sun.management.VMManagementImpl`'s natives implement `VMManagement`'s methods. A call of
+    /// the method it implements may run it, which needs a method to dispatch to (`native_body`).
+    /// The natives whose calls lowering builds on its own (`native_call`) are left to their calls.
     pub(super) fn native_dispatch(&self, member: Node<'t>, class: &str) -> bool {
         let Some(reach) = self.reach else { return false };
         let signature = member.symbol().map_or("", |s| s.ty);
+        let lowered_alone = matches!(
+            crate::ast::declared_native(class, member.str("name"), signature),
+            Some(
+                Native::ThreadStart
+                    | Native::InstallUncaught
+                    | Native::InstallShutdown
+                    | Native::ReflectArrayLength
+                    | Native::ReflectArraySet
+            )
+        );
         !member.has_flag("STATIC")
             && !member.has_flag("PRIVATE")
-            && crate::ast::declared_native(class, member.str("name"), signature).is_none()
+            && !lowered_alone
             && reach.member(class, member.0)
     }
 

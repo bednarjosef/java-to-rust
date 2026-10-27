@@ -186,17 +186,20 @@ impl<'t> Lowering<'t> {
     }
 
     /// The body of native instance method `index`, which a call of a method it implements may run
-    /// (`native_dispatch`): the call of the native, which the runtime does not implement, on
-    /// `this` and the parameters.
+    /// (`native_dispatch`): the call of the native on `this` and the parameters, the runtime's
+    /// (`declared_native`) or, where the runtime does not implement it, `Native::Missing`, which
+    /// rejects the program where it can run, and in a census is the stub of that.
     pub(super) fn native_body(&self, index: usize, params: &[Param], ret: Type) -> Vec<Stmt> {
         let info = &self.methods[index];
         let pos = info.node.pos();
         let owner = &self.types[info.owner].javac;
-        let what = Box::leak(format!("{owner}.{}{}", info.name, info.sig).into_boxed_str());
+        let native = declared_native(owner, info.name, info.sig).unwrap_or_else(|| Native::Missing {
+            what: Box::leak(format!("{owner}.{}{}", info.name, info.sig).into_boxed_str()),
+        });
         let this = self.synth(ExprKind::This, pos, self.self_type(info.owner));
         let mut args = vec![this];
         args.extend(params.iter().map(|p| self.synth(ExprKind::Var(p.name.clone()), pos, p.ty)));
-        let call = self.synth(ExprKind::Builtin(Builtin::Native(Native::Missing { what }), args), pos, ret);
+        let call = self.synth(ExprKind::Builtin(Builtin::Native(native), args), pos, ret);
         vec![if ret == Type::Void { Stmt::Expr(call) } else { Stmt::Return(Some(call), pos) }]
     }
 
