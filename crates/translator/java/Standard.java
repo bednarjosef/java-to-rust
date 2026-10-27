@@ -522,6 +522,11 @@ class NumberFormatException extends IllegalArgumentException {
     public NumberFormatException(String s) {
         super(s);
     }
+
+    // The JDK's factory of the exception of a string that is no number, which its code throws.
+    static NumberFormatException forInputString(String s, int radix) {
+        return new NumberFormatException("For input string: \"" + s + "\"" + (radix == 10 ? "" : " under radix " + radix));
+    }
 }
 
 class IllegalStateException extends RuntimeException {
@@ -1241,6 +1246,19 @@ final class StackWalker {
     }
 
     public static StackWalker getInstance(Option option) {
+        return new StackWalker();
+    }
+
+    public static StackWalker getInstance(java.util.Set<Option> options) {
+        java.util.Objects.requireNonNull(options);
+        return new StackWalker();
+    }
+
+    public static StackWalker getInstance(java.util.Set<Option> options, int estimateDepth) {
+        if (estimateDepth <= 0) {
+            throw new java.lang.IllegalArgumentException("estimateDepth must be > 0");
+        }
+        java.util.Objects.requireNonNull(options);
         return new StackWalker();
     }
 }

@@ -306,6 +306,7 @@ fn generate_with(
         method: 0,
         borrowed: HashSet::new(),
         borrowed_optional: HashSet::new(),
+        after_body: &[],
         borrowed_optional_objects: HashSet::new(),
         int_receiver: false,
         double_receiver: false,
@@ -493,6 +494,10 @@ struct Gen<'a> {
     borrowed: HashSet<String>,
     /// The current method's possibly-null string parameters that are borrowed as `Option<&str>`.
     borrowed_optional: HashSet<String>,
+    /// The update expressions of the `for` loop whose body is being written, which follow its
+    /// statements in their scope: a variable they assign is not narrowed there
+    /// (`early_null_exit`).
+    after_body: &'a [Expr],
     /// The current method's possibly-null object parameters that are borrowed as
     /// `&Option<Rc<..>>`: a read of one as a value clones it.
     borrowed_optional_objects: HashSet<String>,

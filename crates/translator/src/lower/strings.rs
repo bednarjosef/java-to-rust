@@ -251,6 +251,16 @@ impl<'t> Lowering<'t> {
                         (args.next().expect("two arguments"), args.next().expect("two arguments"));
                     return self.join_iterable(node, delimiter, elements);
                 }
+                if args.len() == 2
+                    && !array_form
+                    && matches!(args[1].ty, Type::Array(_))
+                    && args[0].ty == Type::String
+                {
+                    let mut args = args.into_iter();
+                    let (delimiter, elements) =
+                        (args.next().expect("two arguments"), args.next().expect("two arguments"));
+                    return Ok(self.join_array(delimiter, elements, node.pos()));
+                }
                 if !array_form && args.iter().any(|a| !char_sequence(a.ty)) {
                     return unsupported(node, "`String.join` of anything but strings");
                 }
@@ -458,6 +468,8 @@ impl<'t> Lowering<'t> {
             "offsetByCodePoints" => BuilderOp::OffsetByCodePoints,
             "getChars" => BuilderOp::GetChars,
             "ensureCapacity" => BuilderOp::EnsureCapacity,
+            "capacity" => BuilderOp::Capacity,
+            "trimToSize" => BuilderOp::TrimToSize,
             "subSequence" => BuilderOp::Substring,
             _ => return unsupported(node, &format!("method `StringBuilder.{name}`")),
         };

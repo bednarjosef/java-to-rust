@@ -394,9 +394,10 @@ pub struct Class {
     /// What the translation assumed where Java's meaning depends on something it does not
     /// follow, which the translator prints when it translates.
     pub notes: Vec<Note>,
-    /// The annotation types (`@interface`) whose class literals the code has, by binary name:
-    /// a `java::Class` of each, which `isAnnotation()`. The types themselves are left out.
-    pub annotation_classes: std::collections::BTreeSet<String>,
+    /// The annotation types (`@interface`) whose class literals the code has, by name, with their
+    /// binary names (`io.netty.channel.ChannelHandlerMask$Skip` for a nested one): a
+    /// `java::Class` of each, which `isAnnotation()`. The types themselves are left out.
+    pub annotation_classes: std::collections::BTreeMap<String, String>,
     /// Every string is a `java::JStr`, a shared text with an identity, as the program compares
     /// strings by reference where only their identity decides (`analysis::string_identity`).
     pub shared_strings: bool,
@@ -574,6 +575,9 @@ pub const STRING_BUILDER: &str = "java.lang.StringBuilder";
 
 /// The runtime class of the classes (`Class<?>` values) that become `Object`s.
 pub const CLASS_VALUE: &str = "java.lang.Class";
+
+/// The runtime class of the charsets that become `Object`s.
+pub const CHARSET_VALUE: &str = "java.nio.charset.Charset";
 
 /// The interfaces of `java.lang.Class` that the runtime's classes implement where the program
 /// has them: `Type` and `TypeDescriptor`, whose `getTypeName()` and `descriptorString()` a class

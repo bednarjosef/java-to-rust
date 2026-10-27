@@ -204,16 +204,16 @@ program where such a lookup can happen, so they can be checked before the progra
   package), in the class's module, so `==`, `getName`, `hashCode` and `equals` are Java's. A
   package of a named module has no versioning information, as the JVM's class loaders define
   it: its titles, versions and vendors are `null`, it is sealed, and `toString` is `package `
-  and the name. One of the unnamed module has the attributes of the manifest of the jar it was
-  loaded from, or none from a directory, which the translation does not know, so asking for
-  them (and `toString`, which shows two of them) throws `UnsupportedOperationException` with
-  the "not in the translation" message; so do a package's annotations, which are its
-  `package-info` class's (`java/patches/java/lang/Package.java`). Where the package is known
-  at translation time, these calls are rejected instead (`lower/packages.rs`): the annotations
-  always, and the manifest attributes when the package is of the unnamed module and is that of a
-  class literal (`Native.class.getPackage().getImplementationVersion()`), of the `getClass()` of
-  a value of a class, or a constant name of `Package.getPackage`, directly or through a local
-  variable that holds nothing else.
+  and the name. One of the unnamed module has the attributes of the manifest of its root of the
+  class path, as a jar's classes have their jar's: a root with a `META-INF/MANIFEST.MF` is a
+  jar's contents, and the translator reads each package's titles, versions and vendors from it
+  as `ClassLoader.definePackage` does, from the package's own section (`Name: a/b/`) or else the
+  main attributes (`program::modules::package_attributes`, the native `Module.manifest0`). A
+  package in two roots is the first's. A root without a manifest is a directory of the class
+  path, whose packages have none. A sealed package is not sealed, as the translation has no
+  jar's URL to seal it to. A package's annotations, which are its `package-info` class's, throw
+  `UnsupportedOperationException` with the "not in the translation" message
+  (`java/patches/java/lang/Package.java`), and their calls are rejected (`lower/packages.rs`).
 - **Packages by name.** Java knows a package by name only once one of its classes has been
   loaded, and the JVM loads classes when it first needs them, some of the JDK's at startup:
   `Package.getPackage("javax.swing")` is null until a Swing class is loaded, and
@@ -306,11 +306,12 @@ handles.
   annotations (`lower/processors.rs`), and `isAnnotationPresent` of an annotation type's class
   literal, a chain of tests of the class against those whose declarations have it
   (`lower/annotation_presence.rs`).
-- **Generic types read by reflection**: `getGenericSuperclass()` is answered from the types
-  javac gives, with the JDK's own `ParameterizedType`, `WildcardType` and `GenericArrayType`
-  objects (`lower/generic_types.rs`), but a type variable in it throws
+- **Generic types read by reflection**: `getGenericSuperclass()` and `Field.getGenericType()`
+  are answered from the types javac gives, with the JDK's own `ParameterizedType`,
+  `WildcardType` and `GenericArrayType` objects (`lower/generic_types.rs`; a field's through the
+  native `genericTypePart` of `java/Reflection.java`, by slot), but a type variable in it throws
   `UnsupportedOperationException` when it is made, and `getGenericInterfaces`,
-  `getTypeParameters`, `Field.getGenericType` and the generic types of a method are rejected.
+  `getTypeParameters` and the generic types of a method are rejected.
 - **Module layers** other than the boot layer, which load code from a module path, and a
   module's `ModuleDescriptor`.
 - **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as

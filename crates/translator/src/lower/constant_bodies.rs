@@ -35,7 +35,7 @@ impl<'t> Lowering<'t> {
     /// Declares a method of enum `class` for each method of its constants' bodies that overrides
     /// none of the enum's own, as one that implements an interface's: the constants that do not
     /// override it run the interface's default method (`interface_default`), which Java requires
-    /// when the interface's is abstract. It is declared with the first body's declaration, for its
+    /// when the interface's is abstract, or `Enum`'s `toString()`, their names. It is declared with the first body's declaration, for its
     /// signature, but with the interface's result type where bodies narrow it differently
     /// (`body_returns`). A method that implements no interface's is a helper of its body, declared as a
     /// method of the enum with the body's code (`body_helpers`).
@@ -56,7 +56,10 @@ impl<'t> Lowering<'t> {
                     None | Some("java.lang.Object" | "java.lang.Enum") => None,
                     Some(_) => o["type"].as_str(),
                 });
-                let of_interface = interface_sig.is_some();
+                // `toString()`, the one method of `Enum`'s that is not final, which the
+                // constants that do not override it answer with their names.
+                let to_string = name == "toString" && params_of(sig) == "()";
+                let of_interface = interface_sig.is_some() || to_string;
                 let overrides_none = overrides.is_none_or(|o| o.is_empty());
                 // Bodies that narrow the interface's result differently (`Double readNumber` and
                 // `Number readNumber` of Gson's `ToNumberPolicy`) share one method, which returns
@@ -104,8 +107,9 @@ impl<'t> Lowering<'t> {
     }
 
     /// The body of method `index` of `body_methods`: a call of the default method of an
-    /// interface that it overrides, on `this`, with its parameters; nothing when the interface's
-    /// method is abstract, as every constant overrides it then.
+    /// interface that it overrides, on `this`, with its parameters; the constant's name for
+    /// `toString()`, as `Enum`'s; nothing when the interface's method is abstract, as every
+    /// constant overrides it then.
     pub(super) fn interface_default(
         &self,
         index: usize,
@@ -114,6 +118,12 @@ impl<'t> Lowering<'t> {
     ) -> Result<Vec<Stmt>, Error> {
         let node = self.methods[index].node;
         let pos = node.pos();
+        if self.methods[index].name == "toString" && params.is_empty() {
+            let enum_name = &self.types[self.methods[index].owner].name;
+            let this = self.synth(ExprKind::This, pos, Type::enum_type(enum_name));
+            let name = self.synth(ExprKind::Builtin(Builtin::EnumName, vec![this]), pos, Type::String);
+            return Ok(vec![Stmt::Return(Some(self.convert(name, ret)), pos)]);
+        }
         let default = self.overrides(node).into_iter().find(|&m| {
             let owner = self.methods[m].owner;
             self.types[owner].node.kind() == "INTERFACE" && self.methods[m].node.get("body").is_some()

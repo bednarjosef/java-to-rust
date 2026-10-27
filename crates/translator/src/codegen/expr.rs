@@ -496,14 +496,15 @@ impl<'a> Gen<'a> {
                 self.checked_class_cast(e.id, *to, value)
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string, a builder, a box, an array or a class.
+            // string, a builder, a box, an array, a class or a charset.
             ExprKind::Cast(
                 to @ (Type::Enum(_)
                 | Type::String
                 | Type::StringBuilder
                 | Type::Boxed(_)
                 | Type::Array(_)
-                | Type::JavaClass),
+                | Type::JavaClass
+                | Type::Charset),
                 value,
             ) if matches!(value.ty, Type::Class(..)) => self.checked_class_cast(e.id, *to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),

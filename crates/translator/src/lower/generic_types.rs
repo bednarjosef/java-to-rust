@@ -1,4 +1,5 @@
-//! `c.getGenericSuperclass()`. A translation has no class files and no `Signature` attributes,
+//! `c.getGenericSuperclass()` and `f.getGenericType()`. A translation has no class files and no
+//! `Signature` attributes,
 //! so the call is a chain of tests of `c` against the classes whose superclass javac gives with
 //! type arguments, each making that type as the JDK's parser makes it from the signature: the
 //! JDK's own `ParameterizedTypeImpl`, `WildcardTypeImpl` and `GenericArrayTypeImpl`, through the
@@ -17,7 +18,9 @@
 //! `UnsupportedOperationException`, which says so, when it runs, as most classes a call can test
 //! (`ArrayList`, which extends `AbstractList<E>`) are never the ones it gets. Rejected, with the
 //! call: a superclass that mentions a captured type or an intersection, among the classes tested.
-//! An enum's superclass, `Enum<E>`, is made like any other. As with `getAnnotation`, each call makes new objects, where Java's class keeps the
+//! An enum's superclass, `Enum<E>`, is made like any other. A field's generic type is a case of
+//! the field's slot in `genericTypePart` (`lower::reflection`), for each field of the reflection
+//! table whose type has type arguments; the others answer their class. As with `getAnnotation`, each call makes new objects, where Java's class keeps the
 //! ones it made, so two calls give types that are `equals` but not `==`.
 
 use super::classes::{is_get_class, is_literal};
@@ -93,7 +96,7 @@ impl<'t> Lowering<'t> {
     /// `receiver.getGenericSuperclass()` (see the module's comment).
     pub(super) fn generic_superclass(&self, node: Node<'t>, receiver: Node<'t>) -> Result<ExprKind, Error> {
         let methods = crate::program::GENERIC_TYPES.map(|(c, m, s)| self.template_method(c, m, s));
-        let [Some(_), Some(_), Some(_), Some(_)] = methods else {
+        let [Some(_), Some(_), Some(_), Some(_), Some(_)] = methods else {
             return unsupported(node, "`getGenericSuperclass` outside a whole program");
         };
         let Some(type_ty) = self.type_index(TYPE).map(|t| self.self_type(t)) else {
@@ -152,6 +155,35 @@ impl<'t> Lowering<'t> {
         })
     }
 
+    /// The generic type of a field whose type javac gives as `text`, for `Field.getGenericType()`
+    /// (`genericTypePart` in `java/Reflection.java`): `None` for a type without type arguments,
+    /// which is the field's class. One that this does not make (a class the program leaves out)
+    /// throws `UnsupportedOperationException` when it is asked for.
+    pub(super) fn field_generic_type(&self, node: Node<'t>, text: &str) -> Result<Option<Expr>, Error> {
+        if !text.contains('<') {
+            return Ok(None);
+        }
+        let methods = crate::program::GENERIC_TYPES.map(|(c, m, s)| self.template_method(c, m, s));
+        let [Some(_), Some(_), Some(_), Some(_), Some(unsupported_type)] = methods else {
+            return unsupported(node, "`Field.getGenericType` outside a whole program");
+        };
+        let Some(type_ty) = self.type_index(TYPE).map(|t| self.self_type(t)) else {
+            return unsupported(node, "`Field.getGenericType` without `java.lang.reflect.Type`");
+        };
+        let made = parse(text).and_then(|generic| self.generic_type(node, &generic, text, type_ty).ok());
+        Ok(Some(made.unwrap_or_else(|| {
+            let pos = node.pos();
+            let why = format!("`Field.getGenericType` of a field of type `{text}`");
+            let why = self.synth(ExprKind::Str(why), pos, Type::String);
+            let call = ExprKind::Call {
+                name: "unsupported".to_string(),
+                args: vec![why],
+                resolved: Some(unsupported_type),
+            };
+            self.synth(call, pos, type_ty)
+        })))
+    }
+
     /// The class of the program that the class `receiver` is of, with whether it is an object's
     /// (`o.getClass()`, which only a class that can be made is); `None` where it can be any.
     fn classes_of(&self, receiver: Node<'t>) -> Result<Option<(usize, bool)>, Error> {
@@ -188,7 +220,7 @@ impl<'t> Lowering<'t> {
         type_ty: Type,
     ) -> Result<Expr, Error> {
         let pos = node.pos();
-        let [parameterized, wildcard, array, variable] = crate::program::GENERIC_TYPES
+        let [parameterized, wildcard, array, variable, _] = crate::program::GENERIC_TYPES
             .map(|(c, m, s)| self.template_method(c, m, s).expect("the generic types' methods are reached"));
         let types = self.param_types(wildcard)?[0];
         let call = |name: &str, method: usize, args: Vec<Expr>| {

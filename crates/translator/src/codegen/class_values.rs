@@ -205,13 +205,14 @@ impl<'a> Gen<'a> {
             }
             Type::Class("java.lang.Runtime", _) => constant("RUNTIME"),
             Type::Class("java.lang.System", _) => constant("SYSTEM"),
-            Type::Class(name, _) if self.class.annotation_classes.contains(name) => {
+            Type::Class(name, _) if self.class.annotation_classes.contains_key(name) => {
+                let binary = &self.class.annotation_classes[name];
                 let simple = name.rsplit('.').next().unwrap_or(name);
                 let names = format!(
                     "&[{}, \"java.lang.annotation.Annotation\", \"java.lang.Object\"]",
-                    rust_string(name)
+                    rust_string(binary)
                 );
-                format!("java::Class::annotation({}, {}, {names})", rust_string(name), rust_string(simple))
+                format!("java::Class::annotation({}, {}, {names})", rust_string(binary), rust_string(simple))
             }
             _ => match self.class.type_of(ty) {
                 Some(c) => self.decl_class(c),
@@ -618,6 +619,9 @@ impl<'a> Gen<'a> {
                 "java.lang.invoke.TypeDescriptor",
                 CONSTABLE,
             ]),
+            // A charset of an `Object` is of the runtime's one class of charsets, not of the
+            // JDK's class of that charset (`sun.nio.cs.UTF_8`).
+            Type::Charset => list(&["java.nio.charset.Charset", COMPARE]),
             Type::Boxed(primitive) => {
                 let own = class_name(self, ty);
                 match *primitive {

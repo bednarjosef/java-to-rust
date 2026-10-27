@@ -10,27 +10,39 @@ import java.net.URL;
  * <p>{@code Class.getPackage()} is {@code TranslatedModules.packageOf}, which makes one package
  * per name with {@link #ofTranslation}. A package of a named module has no versioning
  * information, as the JVM's class loaders define it. One of the unnamed module has the attributes
- * of the manifest of the jar its classes were loaded from, or none when they were loaded from a
- * directory: the translation does not know which, so asking for them (the titles, versions and
- * vendors, whether it is sealed, {@code isCompatibleWith} and {@code toString}, which shows the
- * specification's title and version) throws {@code UnsupportedOperationException}, saying so.
- * So do a package's annotations, which are those of its {@code package-info} class. The lowering
- * rejects both where it knows the package ({@code lower/packages.rs}), and answers
- * {@link #getPackage(String)} where it is called, if the answer is certain.
+ * of the manifest of its root of the class path ({@code META-INF/MANIFEST.MF}, that of the jar
+ * its classes come from), which the translator reads ({@code Module.manifest0}), or none when the
+ * root has no manifest, as a directory of the class path has none. A sealed package is not
+ * sealed: the translation has no jar's URL to seal it to. A package's annotations, which are
+ * those of its {@code package-info} class, throw {@code UnsupportedOperationException}, saying
+ * so; the lowering rejects them where it knows the package ({@code lower/packages.rs}), and
+ * answers {@link #getPackage(String)} where it is called, if the answer is certain.
  */
 // Not an `AnnotatedElement`: a package's annotations are not in the translation.
 @Edit(find = "implements java.lang.reflect.AnnotatedElement", replace = "")
 class Package {
-    /** Whether the package's versioning information is a manifest's that is not in the translation. */
-    @Add
-    private boolean manifestUnknown;
-
     /** The package {@code name} of {@code module}, as {@code Class.getPackage()} gives it. */
     @Add
     static Package ofTranslation(String name, Module module) {
-        Package p = new Package(name, module);
-        p.manifestUnknown = !module.isNamed();
-        return p;
+        String manifest = module.isNamed() ? null : Module.manifest0(name);
+        if (manifest == null) {
+            return new Package(name, module);
+        }
+        String[] values = new String[6];
+        String[] names = {
+            "Specification-Title", "Specification-Version", "Specification-Vendor",
+            "Implementation-Title", "Implementation-Version", "Implementation-Vendor",
+        };
+        for (String line : manifest.split("\n")) {
+            int colon = line.indexOf(": ");
+            for (int i = 0; i < names.length; i++) {
+                if (colon > 0 && names[i].equals(line.substring(0, colon))) {
+                    values[i] = line.substring(colon + 2);
+                }
+            }
+        }
+        return new Package(name, values[0], values[1], values[2], values[3], values[4], values[5], null,
+                module.getClassLoader());
     }
 
     // A package by name, and all of them, are those of the classes loaded so far: a call is
@@ -48,47 +60,6 @@ class Package {
         throw new UnsupportedOperationException(
                 "the packages loaded so far: code that is not in the translation cannot run");
     }
-
-    /** The package's versioning information, if the translation knows it. */
-    @Add
-    private VersionInfo versionInfo() {
-        if (manifestUnknown) {
-            throw new UnsupportedOperationException("the manifest attributes of package \"" + packageName()
-                    + "\": code that is not in the translation cannot run");
-        }
-        return versionInfo;
-    }
-
-    @Edit(find = "versionInfo.specTitle", replace = "versionInfo().specTitle")
-    public String getSpecificationTitle();
-
-    @Edit(find = "versionInfo.specVersion", replace = "versionInfo().specVersion")
-    public String getSpecificationVersion();
-
-    @Edit(find = "versionInfo.specVendor", replace = "versionInfo().specVendor")
-    public String getSpecificationVendor();
-
-    @Edit(find = "versionInfo.implTitle", replace = "versionInfo().implTitle")
-    public String getImplementationTitle();
-
-    @Edit(find = "versionInfo.implVersion", replace = "versionInfo().implVersion")
-    public String getImplementationVersion();
-
-    @Edit(find = "versionInfo.implVendor", replace = "versionInfo().implVendor")
-    public String getImplementationVendor();
-
-    @Edit(find = "versionInfo.sealBase", replace = "versionInfo().sealBase")
-    public boolean isSealed();
-
-    @Edit(find = "if (versionInfo !=", replace = "if (versionInfo() !=")
-    public boolean isSealed(URL url);
-
-    @Edit(find = "if (versionInfo.specVersion == null", replace = "if (versionInfo().specVersion == null")
-    public boolean isCompatibleWith(String desired);
-
-    @Edit(find = "String spec = versionInfo.specTitle;", replace = "String spec = versionInfo().specTitle;")
-    @Edit(find = "String ver =  versionInfo.specVersion;", replace = "String ver = versionInfo().specVersion;")
-    public String toString();
 
     @Add
     private UnsupportedOperationException annotationsNotInTranslation() {

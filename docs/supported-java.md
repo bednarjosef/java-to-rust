@@ -66,7 +66,8 @@ included (docs/collector.md).
 - Integer overflow wraps as in Java; division by zero throws `ArithmeticException`; float
   arithmetic and printing follow Java's rules (`Double.toString` and `Float.toString` exactly).
 - Annotations and annotation types are left out, since they do nothing at run time. The class
-  literal of a top-level annotation type is a `Class` that `isAnnotation()`, and a value of an
+  literal of an annotation type is a `Class` that `isAnnotation()`, named by its binary name
+  (`Outer$Skip` for one declared in a class; not one declared in a local or anonymous class), and a value of an
   annotation type is an `Annotation` where the program has that interface; a class implementing
   one, and any other use of one, is rejected. `isAnnotationPresent(A.class)` is answered from the
   declarations (`lower/annotation_presence.rs`), and so are `getAnnotation(A.class)` of a class
@@ -85,7 +86,10 @@ included (docs/collector.md).
   messages.
 - **`StringBuilder` and `StringBuffer`** are `java::StringBuilder`, a shared handle to UTF-16
   units: every holder sees changes, and `append` chains stay chains. Where two threads may reach
-  builders they are `java::SharedStringBuilder`.
+  builders they are `java::SharedStringBuilder`. Their capacity grows as Java's does (twice
+  plus two, from the byte length when text beyond Latin-1 first arrives, with room for the
+  longest `double` or `float` text before appending one), so `capacity()` and `trimToSize()`
+  answer what Java's do.
 - **Characters**: the `Character` tests and conversions, with their `int` code point overloads,
   use tables generated from the JDK's data. Case conversion uses Rust's Unicode tables with Java's
   exceptions, and `isAlphabetic` uses Rust's `is_alphabetic`; both may differ from Java on code
@@ -125,7 +129,7 @@ included (docs/collector.md).
   coders (`java/Charsets.java`, `jdk_charsets.rs`), and the translator asks the JDK it runs
   with again where that is another one. A program that looks a charset up by name carries the
   tables it may need: the ones its constant names name, or all of them where it computes a
-  name. A `Charset` is an ordinary value; `forName` resolves aliases and case as Java does, and
+  name. A `Charset` is an ordinary value, which can also be held as an `Object`; `forName` resolves aliases and case as Java does, and
   gives the same value for each name of a charset, and `defaultCharset()` is UTF-8 (JEP 400).
   An unknown or malformed name throws `UnsupportedCharsetException` or
   `IllegalCharsetNameException` with Java's message, which a `catch` sees. A charset that Java
@@ -213,7 +217,9 @@ Design: [object-model.md](object-model.md).
   that `match` on `self`; an enum whose constructor does more (calls, `this(..)`, null or computed
   arguments) keeps its fields in tables indexed by ordinal, filled by running its constructors in
   its static initialization, as Java does. Constant bodies override methods as a
-  `match self`. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
+  `match self`, also an interface's method and `toString()` that the enum itself does not
+  declare: the constants without an override run the interface's default method, or answer
+  their names. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
   message. An enum value that may be null is an `Option` of the enum. Using a constant
   initializes the enum first, as in Java.
   A body's methods that override nothing are methods of the enum. A body's instance field of an
@@ -368,7 +374,8 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   providers that `module-info.java` and `META-INF/services` declare.
 - A static method that asks for its caller's class (`StackWalker.getCallerClass()`,
   `Reflection.getCallerClass()`) gets it as an extra parameter from each call
-  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected.
+  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected; a walker
+  itself is made with any of `getInstance`'s options.
 
 ## Output, input and the native layer
 

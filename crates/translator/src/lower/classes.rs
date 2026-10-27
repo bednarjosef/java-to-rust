@@ -505,8 +505,8 @@ impl<'t> Lowering<'t> {
         let named = node.child("expression")?;
         // An annotation type's, whose binary name is its name where no class declares it.
         let name = named.java_type();
-        if self.annotation_types.contains_key(name) && !self.nested_annotation_types.contains(name) {
-            self.annotation_classes.borrow_mut().insert(name.to_string());
+        if self.annotation_types.contains_key(name) && self.annotation_binary_name(name).is_some() {
+            self.note_annotation_class(name.to_string());
             return Ok(ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new()));
         }
         // A class that is no type of the translation, as it has no objects: its class is the

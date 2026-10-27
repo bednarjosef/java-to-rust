@@ -227,7 +227,9 @@ impl<'t> Lowering<'t> {
             // Does nothing when the program runs (see `annotation_types`).
             "ANNOTATION_TYPE" => {
                 self.annotation_types.insert(crate::program::class_name(member.0), member);
-                self.nested_annotation_types.insert(crate::program::class_name(member.0));
+                let binary =
+                    self.binary_name(index).map(|outer| format!("{outer}${}", member.str("simpleName")));
+                self.nested_annotation_types.insert(crate::program::class_name(member.0), binary);
             }
             "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                 // Named after its outer class once that is named (see `inner::name_nested`).

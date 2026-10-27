@@ -240,7 +240,9 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | BuilderOp::ToString
             | BuilderOp::IsEmpty
             | BuilderOp::CompareTo
-            | BuilderOp::EnsureCapacity,
+            | BuilderOp::EnsureCapacity
+            | BuilderOp::Capacity
+            | BuilderOp::TrimToSize,
         ) => &[],
         // A negative count, an invalid code point.
         Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {
@@ -1103,7 +1105,7 @@ pub(super) fn runtime_failures(
     if let ExprKind::Cast(to, value) = &x.kind
         && x.pos != value.pos
         && matches!(value.ty, Type::Class(..))
-        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_) | Type::JavaClass)
+        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_) | Type::JavaClass | Type::Charset)
         && let Some(name) = instance_name(*to)
         && !matches!(&value.kind, ExprKind::Var(v) if safe.contains(&instance_fact(v, name)))
     {
