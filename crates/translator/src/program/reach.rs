@@ -302,6 +302,8 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 ];
 
 /// Classes under a prefix of `UNTRANSLATED` that are translated all the same:
+/// `java.lang.reflect.AccessFlag` and `ClassFileFormatVersion` are plain enums of the class
+/// file's flags and versions, of which `ModuleDescriptor.Modifier`'s constants are made.
 /// `java.lang.reflect.Array` creates arrays of a component type and measures them, which is what
 /// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
 /// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
@@ -608,7 +610,12 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // named curves of `DHKEM`.
     "sun.security.util.HexDumpEncoder",
     "java.security.spec.NamedParameterSpec",
+    "java.lang.reflect.AccessFlag",
+    "java.lang.reflect.AccessFlag.AccessFlagSet",
+    "java.lang.reflect.AccessFlag.AccessFlagSet.AccessFlagIterator",
+    "java.lang.reflect.AccessFlag.Location",
     "java.lang.reflect.Array",
+    "java.lang.reflect.ClassFileFormatVersion",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.UndeclaredThrowableException",
     "java.lang.reflect.Modifier",
