@@ -334,6 +334,27 @@ impl<'a> Gen<'a> {
                 let pid = self.value(&args[0], Type::Long).text;
                 call(self, "process_start_time", vec![pid])
             }
+            Native::Spawn => {
+                let [argc, envc] = self.hoisted_ints(args, [2, 4]);
+                let redirect = self.value(&args[7], Type::Boolean).text;
+                let prog = self.array_arg(&args[0], false);
+                let block = self.array_arg(&args[1], false);
+                let env = self.array_arg(&args[3], false);
+                let dir = self.array_arg(&args[5], false);
+                let fds = self.array_arg(&args[6], true);
+                self.fallible(id, "spawn_process", vec![prog, block, argc, env, envc, dir, fds, redirect])
+            }
+            Native::WaitForProcess => {
+                let pid = self.value(&args[0], Type::Long).text;
+                let reap = self.value(&args[1], Type::Boolean).text;
+                call(self, "wait_for_process_exit", vec![pid, reap])
+            }
+            Native::DestroyProcess => {
+                let pid = self.value(&args[0], Type::Long).text;
+                let start = self.value(&args[1], Type::Long).text;
+                let force = self.value(&args[2], Type::Boolean).text;
+                call(self, "destroy_process", vec![pid, start, force])
+            }
             Native::InflateInit
             | Native::InflateBytes
             | Native::InflateBytesBuffer

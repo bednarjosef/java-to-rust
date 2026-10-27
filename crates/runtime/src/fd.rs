@@ -456,6 +456,24 @@ pub(crate) fn duplicate(fd: i32) -> io::Result<i32> {
     })
 }
 
+/// What a child process gets for one of its standard streams where the parent gives it its
+/// descriptor `fd` (`process.rs`): the parent's own standard stream, or a copy of the file or
+/// pipe that `fd` holds.
+pub(crate) fn child_stdio(fd: i32) -> io::Result<std::process::Stdio> {
+    use std::process::Stdio;
+    with(|t| match t.entries.get(fd as usize).and_then(Option::as_ref) {
+        Some(Entry::Stdin) if fd >= 0 => Ok(Stdio::inherit()),
+        Some(Entry::Stdout) if fd >= 0 => Ok(Stdio::from(io::stdout())),
+        Some(Entry::Stderr) if fd >= 0 => Ok(Stdio::from(io::stderr())),
+        Some(Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file)) if fd >= 0 => {
+            Ok(Stdio::from(file.try_clone()?))
+        }
+        #[cfg(unix)]
+        Some(Entry::System(system)) if fd >= 0 => Ok(Stdio::from(system.try_clone()?)),
+        _ => Err(io::Error::from_raw_os_error(EBADF)),
+    })
+}
+
 /// A descriptor for `fd`, a socket, pipe, `epoll` instance or event counter (`socket.rs`).
 #[cfg(unix)]
 pub(crate) fn insert_system(fd: std::os::fd::OwnedFd) -> i32 {

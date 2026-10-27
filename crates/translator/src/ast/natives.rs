@@ -252,6 +252,13 @@ pub enum Native {
     CurrentPid,
     /// `ProcessHandleImpl.isAlive0(pid)`: the process's start time, or -1 when it does not exist.
     ProcessStartTime,
+    /// `ProcessImpl.spawn0(prog, argBlock, argc, envBlock, envc, dir, fds, redirectErrorStream)`
+    /// of the translator's patch (`java/patches/java/lang/ProcessImpl.java`): starts a process.
+    Spawn,
+    /// `ProcessHandleImpl.waitForProcessExit0(pid, reap)`.
+    WaitForProcess,
+    /// `ProcessHandleImpl.destroy0(pid, startTime, force)`.
+    DestroyProcess,
     /// `Reference.hasReferencePendingList()`: a translated program's collector traces a
     /// referent as any other field and discovers no references, so none is ever pending.
     NoPendingReferences,
@@ -480,6 +487,14 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.lang.ProcessHandleImpl", "initNative", "()void") => Native::Nothing,
         ("java.lang.ProcessHandleImpl", "getCurrentPid0", "()long") => Native::CurrentPid,
         ("java.lang.ProcessHandleImpl", "isAlive0", "(long)long") => Native::ProcessStartTime,
+        ("java.lang.ProcessHandleImpl", "waitForProcessExit0", "(long,boolean)int") => Native::WaitForProcess,
+        ("java.lang.ProcessHandleImpl", "destroy0", "(long,long,boolean)boolean") => Native::DestroyProcess,
+        // A process starts with `std::process` (`java_runtime::spawn_process`), which needs no
+        // helper set up first.
+        ("java.lang.ProcessImpl", "init", "()void") => Native::Nothing,
+        ("java.lang.ProcessImpl", "spawn0", "(byte[],byte[],int,byte[],int,byte[],int[],boolean)int") => {
+            Native::Spawn
+        }
         ("java.util.zip.Inflater", "init", "(boolean)long") => Native::InflateInit,
         ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
             Native::InflateBytes

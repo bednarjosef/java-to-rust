@@ -15,9 +15,13 @@ import jdk.internal.reflect.Reflection;
  * the boot loader did not define). A file that is there but that the system cannot load (not a
  * library, or one whose dependencies are missing) loads in the translation, where Java throws.
  *
- * <p>The translator calls these only from the JDK's modules that Java gives native access
- * ({@code lower.rs}): from any other, Java prints a warning naming where the caller's class was
- * loaded from, which a translation does not know, and the call is rejected.
+ * <p>Code in a module that Java does not give native access (any but the JDK's modules that
+ * {@code lower.rs} names) calls {@code loadLibraryUnlinked} and {@code loadUnlinked} instead. Java
+ * loads its library after a warning, and the library's natives are then that code's own, which a
+ * translation does not have: these throw {@code UnsatisfiedLinkError} as Java does when it cannot
+ * load the library, with Java's message where Java finds no file, and one that says so where it
+ * finds one. Java's warning, which names where the caller's class was loaded from, is left out:
+ * the translation does not know that place, and loads nothing.
  */
 final class TranslatedLibraries {
     private TranslatedLibraries() {}
@@ -25,26 +29,53 @@ final class TranslatedLibraries {
     /** {@code System.loadLibrary(libname)}, as {@code Runtime.loadLibrary0} does it. */
     static void loadLibrary(String libname) {
         Class<?> caller = Reflection.getCallerClass();
-        if (libname.indexOf((int) File.separatorChar) != -1) {
-            throw new UnsatisfiedLinkError(
-                "Directory separator should not appear in library name: " + libname);
-        }
-        String boot = System.getProperty("sun.boot.library.path");
-        if (found(boot, libname)) {
-            return;
-        }
-        if (caller.getClassLoader() == null) {
-            throw new UnsatisfiedLinkError("no " + libname + " in system library path: " + boot);
-        }
-        String user = System.getProperty("java.library.path");
-        if (found(user, libname)) {
-            return;
-        }
-        throw new UnsatisfiedLinkError("no " + libname + " in java.library.path: " + user);
+        search(libname, caller.getClassLoader() == null);
+    }
+
+    /** {@code System.loadLibrary(libname)} of code without native access. */
+    static void loadLibraryUnlinked(String libname) {
+        throw unlinked(search(libname, false));
     }
 
     /** {@code System.load(filename)}, as {@code Runtime.load0} does it. */
     static void load(String filename) {
+        check(filename);
+    }
+
+    /** {@code System.load(filename)} of code without native access. */
+    static void loadUnlinked(String filename) {
+        throw unlinked(check(filename));
+    }
+
+    /**
+     * The file of library {@code libname} in the directories that Java searches: those of
+     * {@code sun.boot.library.path}, then, unless the caller's class is the boot loader's
+     * ({@code boot}), those of {@code java.library.path}. Where none has it, Java's
+     * {@code UnsatisfiedLinkError}.
+     */
+    private static File search(String libname, boolean boot) {
+        if (libname.indexOf((int) File.separatorChar) != -1) {
+            throw new UnsatisfiedLinkError(
+                "Directory separator should not appear in library name: " + libname);
+        }
+        String bootPath = System.getProperty("sun.boot.library.path");
+        File file = found(bootPath, libname);
+        if (file != null) {
+            return file;
+        }
+        if (boot) {
+            throw new UnsatisfiedLinkError("no " + libname + " in system library path: " + bootPath);
+        }
+        String userPath = System.getProperty("java.library.path");
+        file = found(userPath, libname);
+        if (file == null) {
+            throw new UnsatisfiedLinkError("no " + libname + " in java.library.path: " + userPath);
+        }
+        return file;
+    }
+
+    /** The library file {@code filename}, if Java would load it, else Java's error. */
+    private static File check(String filename) {
         File file = new File(filename);
         if (!file.isAbsolute()) {
             throw new UnsatisfiedLinkError("Expecting an absolute path of the library: " + filename);
@@ -52,6 +83,13 @@ final class TranslatedLibraries {
         if (!loads(file)) {
             throw new UnsatisfiedLinkError("Can't load library: " + file);
         }
+        return file;
+    }
+
+    /** The error for the library {@code file}, which Java would load and a translation cannot. */
+    private static UnsatisfiedLinkError unlinked(File file) {
+        return new UnsatisfiedLinkError(
+            "Can't load library: " + file + " (a translated program has no native code)");
     }
 
     /**
@@ -73,21 +111,22 @@ final class TranslatedLibraries {
     }
 
     /**
-     * Whether a directory of the search path {@code path} has the file of library {@code name},
-     * as {@code NativeLibraries.findFromPaths} looks: an empty element of the path is the
-     * current directory.
+     * The file of library {@code name} in the first directory of the search path {@code path}
+     * that has it, as {@code NativeLibraries.findFromPaths} looks (an empty element of the path
+     * is the current directory), or null.
      */
-    private static boolean found(String path, String name) {
+    private static File found(String path, String name) {
         String file = mapLibraryName(name);
         int start = 0;
         while (true) {
             int end = path.indexOf(File.pathSeparatorChar, start);
             String dir = end < 0 ? path.substring(start) : path.substring(start, end);
-            if (loads(new File(dir.isEmpty() ? "." : dir, file))) {
-                return true;
+            File candidate = new File(dir.isEmpty() ? "." : dir, file);
+            if (loads(candidate)) {
+                return candidate;
             }
             if (end < 0) {
-                return false;
+                return null;
             }
             start = end + 1;
         }

@@ -1156,11 +1156,12 @@ fn annotations_of_a_library_are_read() {
 
 /// `System.loadLibrary` and `System.load` (`java/lang/TranslatedLibraries.java`), which Java lets
 /// code of a module without native access call only after a warning naming where the caller's
-/// class was loaded from: translated in a module of the JDK that has native access (here a root
-/// that declares itself `java.prefs`, as the JDK's sources do), and rejected in the unnamed
-/// module, which Java would warn for.
+/// class was loaded from: in a module of the JDK that has native access (here a root that
+/// declares itself `java.prefs`, as the JDK's sources do) they find the library's file, and in
+/// the unnamed module, which Java would warn for, they throw as Java does when it cannot load the
+/// library (`corpus/whole-program/MissingNativeLibraries.java` runs them).
 #[test]
-fn loading_native_libraries_needs_native_access() {
+fn loading_native_libraries_without_native_access_loads_nothing() {
     let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
         return;
@@ -1197,11 +1198,11 @@ fn loading_native_libraries_needs_native_access() {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
     let translated = translate("unnamed");
-    let stderr = String::from_utf8_lossy(&translated.stderr);
-    assert!(
-        stderr.contains("`java.lang.System.loadLibrary` outside the JDK's modules with native access"),
-        "{stderr}"
-    );
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("unnamed.rs")).unwrap();
+    for wanted in ["fn load_library_unlinked(", "fn load_unlinked("] {
+        assert!(rust.contains(wanted), "no {wanted} in the translation");
+    }
 }
 
 /// What a translation's proxies cannot do throws (`java/overlay/java/lang/reflect/TranslatedProxies.java`,

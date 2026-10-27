@@ -744,15 +744,24 @@ pub fn caller_query(class: &str, name: &str, signature: &str) -> Option<&'static
 
 /// The field of its own class that `MhUtil.findVarHandle(MethodHandles.lookup(), "name", type)`
 /// makes a handle of: the lookup is of the class whose code calls it, so the field is reached
-/// though no code names it (`lower/handles.rs`).
+/// though no code names it (`lower/handles.rs`). So is the field that `Lookup.findVarHandle`
+/// (or `findStaticVarHandle`) finds by name in a class that is not a class literal, a local
+/// that holds one (`LinkedTransferQueue`'s `ltq`), where the class whose code calls it declares
+/// a field of that name.
 fn own_field_handle(node: &Value) -> Option<String> {
     let symbol = &node["symbol"];
-    if text(node, "kind") != "METHOD_INVOCATION"
-        || (text(symbol, "owner"), text(symbol, "name")) != ("jdk.internal.invoke.MhUtil", "findVarHandle")
-    {
+    if text(node, "kind") != "METHOD_INVOCATION" {
         return None;
     }
-    let [_, field, _] = &node["arguments"].as_array()?[..] else { return None };
+    let field = match (text(symbol, "owner"), text(symbol, "name"), &node["arguments"].as_array()?[..]) {
+        ("jdk.internal.invoke.MhUtil", "findVarHandle", [_, field, _]) => field,
+        (
+            "java.lang.invoke.MethodHandles.Lookup",
+            "findVarHandle" | "findStaticVarHandle",
+            [class, field, _],
+        ) if literal_class(class).is_none() => field,
+        _ => return None,
+    };
     field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL").map(str::to_string)
 }
 
@@ -1883,6 +1892,36 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
         ("java.lang.TranslatedRuntime", "version"),
     ),
+    // A process started as `Runtime.exec` starts it, through a `ProcessBuilder`: `Runtime` is the
+    // runtime's (`java/lang/TranslatedRuntime.java`, `lower.rs`).
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String)java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String,java.lang.String[])java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String,java.lang.String[],java.io.File)java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String[])java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        ("java.lang.Runtime", "exec", "(java.lang.String[],java.lang.String[])java.lang.Process"),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
+    (
+        (
+            "java.lang.Runtime",
+            "exec",
+            "(java.lang.String[],java.lang.String[],java.io.File)java.lang.Process",
+        ),
+        ("java.lang.TranslatedRuntime", "exec"),
+    ),
     // A logger of the default backend, where nothing configures logging
     // (`java/lang/TranslatedSystemLogger.java`).
     (
@@ -2067,13 +2106,19 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.net.TranslatedNet", "getByName0"),
     ),
     // Loading a native library, which a translation without JNI does by finding its file as Java
-    // does, and the name of a library's file (`java/lang/TranslatedLibraries.java`); the caller
-    // must be in a module that Java gives native access (`NATIVE_ACCESS_CALLS`).
+    // does, and the name of a library's file (`java/lang/TranslatedLibraries.java`); a caller
+    // outside the modules that Java gives native access calls another method
+    // (`NATIVE_ACCESS_CALLS`).
     (
         ("java.lang.System", "loadLibrary", "(java.lang.String)void"),
         ("java.lang.TranslatedLibraries", "loadLibrary"),
     ),
     (("java.lang.System", "load", "(java.lang.String)void"), ("java.lang.TranslatedLibraries", "load")),
+    (
+        ("java.lang.Runtime", "loadLibrary", "(java.lang.String)void"),
+        ("java.lang.TranslatedLibraries", "loadLibrary"),
+    ),
+    (("java.lang.Runtime", "load", "(java.lang.String)void"), ("java.lang.TranslatedLibraries", "load")),
     (
         ("java.lang.System", "mapLibraryName", "(java.lang.String)java.lang.String"),
         ("java.lang.TranslatedLibraries", "mapLibraryName"),
@@ -2086,12 +2131,19 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
     ),
 ];
 
-/// The restricted methods among `REDIRECTED_CALLS`, which Java lets code of a module without
-/// native access call only after it prints a warning that names where the caller's class was
-/// loaded from (`Module.ensureNativeAccess`). A translation does not know that place, so a call
-/// is supported only in the modules of `NATIVE_ACCESS_MODULES` (`lower.rs`).
-pub const NATIVE_ACCESS_CALLS: &[(&str, &str)] =
-    &[("java.lang.System", "loadLibrary"), ("java.lang.System", "load")];
+/// The restricted methods among `REDIRECTED_CALLS`, with the translator's method of the same
+/// class that a call from outside the modules of `NATIVE_ACCESS_MODULES` calls instead
+/// (`lower.rs`). Java lets such code load a library after it prints a warning that names where
+/// the caller's class was loaded from (`Module.ensureNativeAccess`); a translation has none of
+/// the library's code to run, so the translator's method throws `UnsatisfiedLinkError` as Java
+/// does when it cannot load the library, and the warning, which a translation could not complete
+/// (it does not know that place), is left out.
+pub const NATIVE_ACCESS_CALLS: &[((&str, &str), &str)] = &[
+    (("java.lang.System", "loadLibrary"), "loadLibraryUnlinked"),
+    (("java.lang.System", "load"), "loadUnlinked"),
+    (("java.lang.Runtime", "loadLibrary"), "loadLibraryUnlinked"),
+    (("java.lang.Runtime", "load"), "loadUnlinked"),
+];
 
 /// The modules of the JDK that Java 26 gives native access, with no warning
 /// (`ModuleLoaderMap.nativeAccessModules()`).
@@ -3729,6 +3781,7 @@ impl<'t> Walk<'t> {
             }
             if let Some(field) = own_field_handle(value)
                 && let Some(class) = self.lookup_class.clone()
+                && field_of(&class, &field)
             {
                 self.work.push(Item::Field((class, field)));
             }
@@ -3844,6 +3897,11 @@ impl<'t> Walk<'t> {
             // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
             "METHOD" if let Some((class, to)) = redirected_call(owner, name, text(symbol, "type")) => {
                 let signature = text(symbol, "type").to_string();
+                if let Some((_, unlinked)) =
+                    NATIVE_ACCESS_CALLS.iter().find(|(call, _)| *call == (owner, name))
+                {
+                    self.work.push(Item::Method((class.into(), (*unlinked).into(), signature.clone())));
+                }
                 self.work.push(Item::Method((class.into(), to.into(), signature)));
             }
             // The translator's code for what `JavaLangAccess` does (see `lower.rs`).
