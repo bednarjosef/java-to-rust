@@ -434,8 +434,12 @@ impl<'t> Lowering<'t> {
         let var = || self.synth(ExprKind::Var(class_name.clone()), pos, Type::String);
         block.push(self.checked_name(&class_name, &given, Some(FOR_NAME_NULL), pos));
         let mut cases = Vec::new();
+        // A class is found by its binary name (`a.B$C` for a member class).
         let found = |t: usize| match self.reach {
-            Some(reach) => reach.named.contains(&self.types[t].javac).then(|| self.types[t].javac.clone()),
+            Some(reach) => reach
+                .named
+                .contains(&self.types[t].javac)
+                .then(|| self.binary_name(t).unwrap_or_else(|| self.types[t].javac.clone())),
             None => self.binary_name(t),
         };
         for (t, name) in (0..self.types.len()).filter_map(|t| found(t).map(|name| (t, name))) {

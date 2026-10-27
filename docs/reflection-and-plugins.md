@@ -160,6 +160,16 @@ program where such a lookup can happen, so they can be checked before the progra
   computed name can be. An entry applies only to a class that reachable code reaches otherwise,
   once the class of its condition (`typeReachable`) is reached too, and never to a class that is
   not translated (`program/reach/native_image.rs`, kept in `Reach::configured`).
+- **Class names in resource files.** A library that keeps the names of its classes in a file it
+  reads finds them by a name no code spells out: log4j's plugins are listed in the binary
+  `Log4j2Plugins.dat` under `META-INF`, which its plugin registry reads, and its configuration's
+  parsers, layouts and appenders are those plugins. The files under a root's `META-INF` (but for
+  its service files, its reflection metadata and class files) are read for runs of bytes that
+  could be a binary name (`a.b.C`, `a.b.C$D`) and that name a class whose source a root has; each
+  such class is named as a literal would name it, as soon as javac gives its unit, which
+  reachability asks for (`program/reach/resource_names.rs`). Words of a manifest or a properties
+  file that are not classes of the roots name nothing, and the data files outside `META-INF`
+  (Minecraft's, with their translation keys) are not read.
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
   and `NoSuchMethodException` or `NoSuchFieldException` for a member the table does not hold.

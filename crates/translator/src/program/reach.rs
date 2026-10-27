@@ -21,6 +21,7 @@ mod initialize;
 mod native_image;
 mod proxies;
 mod reflection;
+mod resource_names;
 mod sequential;
 mod services;
 mod stubs;

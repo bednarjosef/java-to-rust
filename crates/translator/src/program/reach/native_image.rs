@@ -16,7 +16,9 @@
 //! reached too: the metadata lists what a library may look up, and most of it is code that a
 //! program does not use. An entry for a class that is not translated (`outside`), or that no
 //! unit declares, or for an array class, never applies. Applied entries are noted in
-//! `Reach::configured`.
+//! `Reach::configured`. The class names in the roots' resource files come as entries too
+//! (`resource_names.rs`), which apply as soon as a unit declares their class and ask for its
+//! unit until one does, as a literal in reachable code would.
 
 use std::path::{Path, PathBuf};
 
@@ -34,13 +36,17 @@ pub struct ReflectEntry {
     /// Whether it asks for all methods, or all fields, of a kind.
     pub all_methods: bool,
     pub all_fields: bool,
+    /// Whether a resource file names the class (`resource_names.rs`): the entry applies without
+    /// the class being reached otherwise.
+    pub named: bool,
 }
 
 /// The entries of the reflection metadata of the roots, root by root, each root's files in the
-/// order of their paths.
+/// order of their paths, then those of the class names in their resource files.
 pub fn reflect_config<'a>(roots: impl IntoIterator<Item = &'a PathBuf>) -> Vec<ReflectEntry> {
+    let roots: Vec<&PathBuf> = roots.into_iter().collect();
     let mut out = Vec::new();
-    for root in roots {
+    for &root in &roots {
         let mut files = Vec::new();
         metadata_files(&root.join("META-INF").join("native-image"), &mut files);
         files.sort();
@@ -49,6 +55,7 @@ pub fn reflect_config<'a>(roots: impl IntoIterator<Item = &'a PathBuf>) -> Vec<R
             out.extend(entries(&text));
         }
     }
+    out.extend(super::resource_names::resource_names(&roots));
     out
 }
 
@@ -116,6 +123,7 @@ fn entry(item: &serde_json::Value) -> Option<ReflectEntry> {
         .into_iter()
         .any(flag),
         all_fields: flag("allDeclaredFields") || flag("allPublicFields"),
+        named: false,
     })
 }
 
@@ -130,7 +138,14 @@ impl Walk<'_> {
                 walk.declared_class(binary).filter(|class| walk.reach.classes.contains(class))
             };
             let condition = entry.condition.as_deref().is_none_or(|c| reached(self, c).is_some());
-            let Some(class) = reached(self, &entry.class).filter(|_| condition) else {
+            let found =
+                if entry.named { self.declared_class(&entry.class) } else { reached(self, &entry.class) };
+            let Some(class) = found.filter(|_| condition) else {
+                if entry.named {
+                    // The unit of its top-level class, which javac gives in the next round.
+                    let top = entry.class.split('$').next().unwrap_or(&entry.class).to_string();
+                    self.missing(&top);
+                }
                 self.config_pending.push(index);
                 continue;
             };
@@ -187,6 +202,7 @@ mod tests {
                 members: vec!["newBuilder".into(), "layout".into()],
                 all_methods: false,
                 all_fields: false,
+                named: false,
             }
         );
         assert!(found[1].all_methods && !found[1].all_fields);
