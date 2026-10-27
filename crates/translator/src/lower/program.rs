@@ -189,8 +189,9 @@ fn lower_with<'t>(
         .map(|(t, anchor, method, error)| Rejected { unit: unit(t), anchor, error, ty: t, method })
         .collect();
     // As without a census, an error with Rust generics is retried with all of them erased, but
-    // only an error in code that can run (`analysis::live_methods`): the others leave the
-    // program as it is, and the Rust generics may stay. A lowering that noted covariant arrays
+    // only an error in code that can run (`analysis::live_methods`) and not one of a missing
+    // class (`names_missing_class`): the others leave the program as it is, and the Rust
+    // generics may stay. A lowering that noted covariant arrays
     // is lowered again whatever it found (`real_generics::retry`), so its methods that can run
     // are not looked for. Nor are they once a rejection can run, as that lowering is retried:
     // the walk stops there (`live_methods_unless`). Those found are handed on with the program,
@@ -201,7 +202,11 @@ fn lower_with<'t>(
                 && lowering.covariant.noted.borrow().is_empty()
                 && !rejected.is_empty() =>
         {
-            let code: Vec<(usize, Option<usize>)> = rejected.iter().map(|r| (r.ty, r.method)).collect();
+            let code: Vec<(usize, Option<usize>)> = rejected
+                .iter()
+                .filter(|r| !names_missing_class(&r.error))
+                .map(|r| (r.ty, r.method))
+                .collect();
             Some(crate::timings::phase("methods that can run", || {
                 crate::analysis::live_methods::live_methods_unless(class, &code)
             }))
@@ -209,7 +214,9 @@ fn lower_with<'t>(
         _ => None,
     };
     let retried = live.as_ref().is_some_and(|live| match live {
-        Ok(Some(live)) => rejected.iter().any(|r| live.runs(r.ty, r.method)),
+        Ok(Some(live)) => {
+            rejected.iter().any(|r| live.runs(r.ty, r.method) && !names_missing_class(&r.error))
+        }
         Ok(None) | Err(_) => true,
     });
     let live = live.and_then(Result::ok).flatten();
@@ -229,6 +236,19 @@ fn lower_with<'t>(
         }
         _ => lowered,
     }
+}
+
+/// Whether `error` is that of a class the program does not have (`type `a.b.C` not supported
+/// yet`, `new a.b.C`, as of a field of an untranslated class's type and its initializer):
+/// erasing the Rust generics leaves the class missing, so it is no reason to lower the program
+/// again without them. A type variable's error (`type `B``) may be one.
+fn names_missing_class(error: &Error) -> bool {
+    let message = &error.message;
+    ["type `", "`new "]
+        .iter()
+        .find_map(|prefix| message.strip_prefix(prefix))
+        .and_then(|rest| rest.strip_suffix("` not supported yet"))
+        .is_some_and(|name| name.contains('.') && !name.contains(['<', '`', ' ']))
 }
 
 /// `lower_with` on `lowering`, which fills `unit_of` with the unit of each type (`usize::MAX` for
@@ -410,5 +430,25 @@ fn dotted(node: Node) -> String {
     match node.get("expression") {
         Some(outer) => format!("{}.{}", dotted(outer), node.str("identifier")),
         None => node.str("name").to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error(message: &str) -> Error {
+        Error { pos: Pos::default(), message: message.to_string() }
+    }
+
+    #[test]
+    fn a_missing_class_is_no_reason_to_erase_the_rust_generics() {
+        assert!(names_missing_class(&error("type `jdk.internal.loader.ClassLoaderValue` not supported yet")));
+        assert!(names_missing_class(&error("`new jdk.internal.loader.ClassLoaderValue` not supported yet")));
+        assert!(!names_missing_class(&error("type `B` not supported yet")));
+        assert!(!names_missing_class(&error("type `java.util.List<B>` not supported yet")));
+        assert!(!names_missing_class(&error(
+            "`Arrays.copyOf` into an array of another type not supported yet"
+        )));
     }
 }
