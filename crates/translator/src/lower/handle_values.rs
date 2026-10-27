@@ -29,9 +29,17 @@
 //! not followed). The calls that make handles are followed when their arguments are known: the
 //! lookups (`MethodHandles.lookup()`, `publicLookup()`, `privateLookupIn`), the `VarHandle`s of a
 //! field, a static field, the elements of an array and the views of a `byte[]` or a `ByteBuffer`,
-//! `MethodType.methodType` of class literals, `findVirtual` and `findStatic` of these methods
-//! themselves, and `invokeExact` or `invoke` of such a `MethodHandle`, with the call's own types
-//! exactly the handle's (as `invokeExact` requires, and `invoke` without a conversion).
+//! `MethodType.methodType` of class literals (or `Void.TYPE` and its kin), `findVirtual` and
+//! `findStatic` of these methods themselves, and `invokeExact` or `invoke` of such a
+//! `MethodHandle`, with the call's own types exactly the handle's (as `invokeExact` requires, and
+//! `invoke` without a conversion). `findStatic` also finds a static method of the program that
+//! reachability keeps, by its name and exact type, and `VarHandle`'s fences; `invokeExact` of
+//! such a handle is a call of the method (`static_handle_call`). A static method's handle has
+//! its class as its token, so that a value that may be one of several methods, each of its own
+//! class or a fence, calls the one it holds (netty's skip list takes `VarHandle.acquireFence` or
+//! a fallback of its own). A method whose `return`s are followed may also return a `Class`
+//! (netty's `cls`), and `Class.forName` of a constant name is that class, or no value where
+//! it throws.
 //!
 //! A call that makes a handle lowers to the token, after its receiver and arguments are evaluated,
 //! when every handle that its known arguments can make is made without an exception (the field
@@ -98,6 +106,10 @@ pub(super) enum Known<'t> {
     PublicLookup,
     /// A `MethodHandle` of one of the methods that make handles (`FACTORIES`).
     Method(Factory),
+    /// A `MethodHandle` of a static method of the program, by its index in `Lowering::methods`.
+    Static(usize),
+    /// A `MethodHandle` of one of `VarHandle`'s static fences (`FENCES`), each a full fence.
+    Fence,
     /// A `MethodType`: the return type and then the parameter types, as javac names them.
     Type(Vec<&'t str>),
 }
@@ -153,6 +165,25 @@ const FACTORIES: &[Factory] = &[
     },
 ];
 
+/// `VarHandle`'s static fences, which a `MethodHandle` value can be of (`findStatic` of them).
+const FENCES: [&str; 5] = ["fullFence", "acquireFence", "releaseFence", "loadLoadFence", "storeStoreFence"];
+
+/// The primitive type whose class the static field `TYPE` of the wrapper class `owner` holds.
+fn wrapped_primitive(owner: &str) -> Option<&'static str> {
+    Some(match owner {
+        "java.lang.Void" => "void",
+        "java.lang.Boolean" => "boolean",
+        "java.lang.Byte" => "byte",
+        "java.lang.Character" => "char",
+        "java.lang.Short" => "short",
+        "java.lang.Integer" => "int",
+        "java.lang.Long" => "long",
+        "java.lang.Float" => "float",
+        "java.lang.Double" => "double",
+        _ => return None,
+    })
+}
+
 /// Where an expression is: the code it is in (a method, an initializer block or a field's
 /// declaration), the class whose code that is, and the call whose arguments the method's
 /// parameters are, if known.
@@ -177,6 +208,27 @@ pub(super) struct Calls<'t> {
 /// javac's type `ty` without type arguments.
 fn erased(ty: &str) -> &str {
     ty.split_once('<').map_or(ty, |(raw, _)| raw)
+}
+
+/// The parameter types and the return type of javac's method type `ty`, without the type
+/// parameters of a generic method (`<T>(java.lang.Class<?>)java.lang.Class<T>`).
+fn method_signature(ty: &str) -> (Vec<&str>, &str) {
+    let mut depth = 0;
+    let start = match ty.starts_with('<') {
+        true => ty
+            .char_indices()
+            .find(|&(_, c)| {
+                depth += match c {
+                    '<' => 1,
+                    '>' => -1,
+                    _ => 0,
+                };
+                depth == 0
+            })
+            .map_or(0, |(i, _)| i + 1),
+        false => 0,
+    };
+    lambdas::signature(&ty[start..])
 }
 
 /// Whether `ty` (as javac names it) is a handle's type.
@@ -315,7 +367,7 @@ fn slots(v: &Value, out: &mut HashSet<*const Value>) {
             if owner == METHOD_HANDLE {
                 args.iter().for_each(|a| allow(Some(*a)));
             } else if let Some(symbol) = symbol {
-                let (params, _) = lambdas::signature(symbol.ty);
+                let (params, _) = method_signature(symbol.ty);
                 // The arguments of a variable arity parameter, such as `filterArguments`'s
                 // `MethodHandle...`, each have its element type.
                 let element = params.last().filter(|_| symbol.varargs).and_then(|p| p.strip_suffix("[]"));
@@ -436,6 +488,12 @@ impl<'t> Lowering<'t> {
                 }
                 if let Some(order) = byte_order(node) {
                     return Some(vec![Known::Order(order)]);
+                }
+                // `Void.TYPE`, `Integer.TYPE`: the class of a primitive type.
+                if symbol.name == "TYPE"
+                    && let Some(primitive) = wrapped_primitive(symbol.owner)
+                {
+                    return Some(vec![Known::Class(primitive)]);
                 }
                 let (owner, member) = self.static_field(&symbol)?;
                 if !member.has_flag("FINAL") {
@@ -592,6 +650,15 @@ impl<'t> Lowering<'t> {
                 }
                 return Some(vec![Known::Type(ty)]);
             }
+            // A class that the program has; one that it does not have, the call throws
+            // (`by_name`), so it gives no value.
+            ("java.lang.Class", "forName") => {
+                let (name, _) = crate::program::class_for_name(node.0)?;
+                return Some(match self.type_index(&name) {
+                    Some(class) => vec![Known::Class(self.javac_of(class))],
+                    None => Vec::new(),
+                });
+            }
             (VAR_HANDLE, "withInvokeExactBehavior" | "withInvokeBehavior") => {
                 let held = self.known(receiver?, at, depth + 1)?;
                 return (!held.contains(&Known::Null)).then_some(held);
@@ -650,8 +717,10 @@ impl<'t> Lowering<'t> {
         if let Some(h) = self.var_handle_value(node, None, &[], at.class) {
             return Some(vec![Known::Var(h)]);
         }
-        // A method of the program whose `return`s are followed with its parameters bound.
-        if !is_handle_type(erased(lambdas::signature(symbol.ty).1)) || symbol.kind != "METHOD" {
+        // A method of the program whose `return`s are followed with its parameters bound: one
+        // that returns a handle, or a class (netty's `cls`, which casts one to `Class<T>`).
+        let returns = erased(method_signature(symbol.ty).1);
+        if !(is_handle_type(returns) || returns == "java.lang.Class") || symbol.kind != "METHOD" {
             return None;
         }
         let owner = self.type_index(symbol.owner)?;
@@ -707,7 +776,8 @@ impl<'t> Lowering<'t> {
 
     /// The `MethodHandle` that `findVirtual` or `findStatic` (`name`) of the lookups `lookup`
     /// finds for every combination of its known arguments `args` (class, name and type), each a
-    /// method of `FACTORIES` of that kind and exactly that type; `None` when one is not.
+    /// method of `FACTORIES` of that kind and exactly that type, or for `findStatic` a static
+    /// method that `static_target` finds; `None` when one is not.
     fn find_method(
         &self,
         name: &str,
@@ -732,15 +802,57 @@ impl<'t> Lowering<'t> {
                             && f.is_static == (name == "findStatic")
                             && f.ty[..] == ty[..]
                     });
-                    let found =
-                        Known::Method(*factory.filter(|_| matches!(name, "findStatic" | "findVirtual"))?);
-                    if !out.contains(&found) {
-                        out.push(found);
+                    let found = match factory {
+                        Some(factory) if matches!(name, "findStatic" | "findVirtual") => {
+                            vec![Known::Method(*factory)]
+                        }
+                        None if name == "findStatic" => lookup
+                            .iter()
+                            .map(|l| self.static_target(l, class, method, ty))
+                            .collect::<Option<_>>()?,
+                        _ => return None,
+                    };
+                    for found in found {
+                        if !out.contains(&found) {
+                            out.push(found);
+                        }
                     }
                 }
             }
         }
         Some(out)
+    }
+
+    /// The handle that `findStatic` of the lookup `lookup` finds in class `class` by the
+    /// method's name and its type `ty` (the return type, then the parameter types, as javac
+    /// names them): one of `VarHandle`'s fences, or a static method that the class declares with
+    /// exactly that type, that reachability keeps and that the lookup may access (`may_access`).
+    /// `None` for any other.
+    fn static_target(&self, lookup: &Known<'t>, class: &str, name: &str, ty: &[&str]) -> Option<Known<'t>> {
+        if class == VAR_HANDLE && FENCES.contains(&name) && ty == ["void"] {
+            return Some(Known::Fence);
+        }
+        // A package of the JDK's that is not `java.*` is not open to the program's lookups.
+        let internal = Self::in_jdk(class) && !class.starts_with("java.");
+        if internal && !matches!(lookup, Known::Lookup(from) if Self::in_jdk(from)) {
+            return None;
+        }
+        let index = self.type_index(class)?;
+        let method = self.methods_of(index).into_iter().find(|&m| {
+            let info = &self.methods[m];
+            let (params, returns) = method_signature(info.sig);
+            info.name == name
+                && info.node.has_flag("STATIC")
+                && std::iter::once(returns).chain(params).map(erased).eq(ty.iter().copied())
+        })?;
+        let info = &self.methods[method];
+        let javac = &self.types[index].javac;
+        if self.reach.is_some_and(|reach| {
+            !reach.methods.contains(&(javac.clone(), name.to_string(), info.sig.to_string()))
+        }) {
+            return None;
+        }
+        self.may_access(lookup, class, index, info.node).then_some(Known::Static(method))
     }
 
     /// The handles that the factory `name` makes of every combination of its known receiver
@@ -829,9 +941,7 @@ impl<'t> Lowering<'t> {
     /// The index of class `class`, when the lookup `lookup` finds its field `field` of type `ty`
     /// (static or not) with `findVarHandle` (or `findStaticVarHandle`) and may access it: a field
     /// that the class declares, of exactly that type, that is not final (whose handle could not
-    /// write it), and that reachability keeps, which a lookup with every access of a class of
-    /// the same outermost class reaches, of one of the same package unless it is private, and any
-    /// lookup if it and its class are public.
+    /// write it), that reachability keeps, and that the lookup may access (`may_access`).
     fn accessible_field(
         &self,
         lookup: &Known<'t>,
@@ -854,6 +964,14 @@ impl<'t> Lowering<'t> {
         }) {
             return None;
         }
+        self.may_access(lookup, class, index, member).then_some(index)
+    }
+
+    /// Whether the lookup `lookup` may access the member `member` of class `class` (javac's name,
+    /// whose index is `index`): a lookup with every access of a class of the same outermost class
+    /// does, of one of the same package unless it is private, and any lookup if it and its class
+    /// are public.
+    fn may_access(&self, lookup: &Known<'t>, class: &str, index: usize, member: Node<'t>) -> bool {
         let outermost = |name: &str| -> Option<usize> {
             let mut t = self.type_index(name)?;
             while let Some(outer) = self.types[t].node.symbol().and_then(|s| self.type_index(s.owner)) {
@@ -866,15 +984,14 @@ impl<'t> Lowering<'t> {
             javac.rsplit_once('.').map_or(String::new(), |(p, _)| p.to_string())
         };
         let public = member.has_flag("PUBLIC") && self.types[index].node.has_flag("PUBLIC");
-        let allowed = match lookup {
+        match lookup {
             Known::Lookup(from) => {
-                let (from, to) = (outermost(from)?, outermost(class)?);
+                let (Some(from), Some(to)) = (outermost(from), outermost(class)) else { return false };
                 from == to || (!member.has_flag("PRIVATE") && package(from) == package(to)) || public
             }
             Known::PublicLookup => public,
             _ => false,
-        };
-        allowed.then_some(index)
+        }
     }
 
     /// Whether the class with javac's name `name` is one of the JDK's.
@@ -928,7 +1045,7 @@ impl<'t> Lowering<'t> {
         // and every other method of `MethodType`, whose value is a token
         // (`insertParameterTypes`, `parameterCount`, as `HBShaper` of `java.desktop` builds the
         // type of an upcall).
-        let returns = erased(lambdas::signature(symbol.ty).1);
+        let returns = erased(method_signature(symbol.ty).1);
         let makes = followed
             || symbol.owner == METHOD_TYPE
             || matches!(symbol.owner, METHOD_HANDLES | LOOKUP | METHOD_HANDLE)
@@ -938,16 +1055,25 @@ impl<'t> Lowering<'t> {
         }
         let short = symbol.owner.rsplit('.').next().unwrap_or_default();
         let what = format!("`{short}.{}`", symbol.name);
+        let receiver =
+            node.get("methodSelect").and_then(|s| s.get("expression")).filter(|_| !symbol.is_static);
+        if symbol.owner == METHOD_HANDLE
+            && matches!(symbol.name, "invokeExact" | "invoke")
+            && let Some(r) = receiver
+            && let Some(held) = self.held(r)
+            && held.iter().any(|k| matches!(k, Known::Static(_) | Known::Fence))
+        {
+            return self.static_handle_call(node, symbol.name, r, &held).map(Some);
+        }
         let held = if followed { self.held(node) } else { None };
         let Some(held) = held else {
             return self.unfollowed(node, symbol, &what, followed).map(Some);
         };
-        if held.is_empty() || held.contains(&Known::Null) {
+        // No value at all: a call whose arguments always throw, or code that nothing calls.
+        if held.contains(&Known::Null) {
             return unsupported(node, &format!("{what} that may give null"));
         }
         let pos = node.pos();
-        let receiver =
-            node.get("methodSelect").and_then(|s| s.get("expression")).filter(|_| !symbol.is_static);
         let args: Vec<Node<'t>> = node.list("arguments").collect();
         let mut block = Vec::new();
         // A `MethodHandle` that may be null throws after its arguments are evaluated, so its
@@ -956,13 +1082,7 @@ impl<'t> Lowering<'t> {
         let checked = match receiver {
             Some(r) if symbol.owner == METHOD_HANDLE => {
                 let nullable = self.held(r).is_none_or(|h| h.contains(&Known::Null));
-                let reread = quiet(r)
-                    || plain(r).symbol().is_some_and(|s| {
-                        s.kind == "FIELD"
-                            && s.is_static
-                            && Some(s.owner) == Some(self.javac_of(self.current.get()))
-                    });
-                if nullable && !reread && !args.iter().all(|a| quiet(*a)) {
+                if nullable && !self.rereadable(r) && !args.iter().all(|a| quiet(*a)) {
                     return unsupported(
                         node,
                         &format!("{what} of a handle that may be null, read where it cannot be read again"),
@@ -989,7 +1109,7 @@ impl<'t> Lowering<'t> {
                 ExprKind::Builtin(Builtin::NullChecked(Some(interned_name(symbol.name))), vec![receiver]);
             block.push(Stmt::Expr(self.synth(check, pos, Type::JavaClass)));
         }
-        let token = self.handle_token(pos);
+        let token = self.static_token(node, &held)?;
         if block.is_empty() {
             return Ok(Some(token.kind));
         }
@@ -998,6 +1118,202 @@ impl<'t> Lowering<'t> {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
         }))
+    }
+
+    /// Whether reading the handle `node` again gives the same value and does nothing: a local,
+    /// or a static field of the class being lowered.
+    fn rereadable(&self, node: Node<'t>) -> bool {
+        quiet(node)
+            || plain(node).symbol().is_some_and(|s| {
+                s.kind == "FIELD" && s.is_static && s.owner == self.javac_of(self.current.get())
+            })
+    }
+
+    /// `invokeExact` or `invoke` (`name`) of the `MethodHandle` `receiver`, which holds the
+    /// handle of a static method, or null (`held`): the call of that method, or a full fence for
+    /// one of `VarHandle`'s, with the call's arguments, which must have exactly the method's types
+    /// (as `invokeExact` requires, and `invoke` without a conversion). As in Java, the receiver is
+    /// evaluated, then the arguments, then the receiver checked for null. A handle that may be
+    /// one of several methods, as netty's fence is `VarHandle`'s or its own, calls the one whose
+    /// token the receiver holds (`static_token`).
+    fn static_handle_call(
+        &self,
+        node: Node<'t>,
+        name: &str,
+        receiver: Node<'t>,
+        held: &[Known<'t>],
+    ) -> Result<ExprKind, Error> {
+        let what = format!("`MethodHandle.{name}`");
+        let mut targets: Vec<(Option<usize>, Vec<&'t str>)> = Vec::new();
+        for target in held {
+            targets.push(match target {
+                Known::Null => continue,
+                Known::Fence => (None, vec!["void"]),
+                Known::Static(m) => {
+                    let (params, returns) = method_signature(self.methods[*m].sig);
+                    (Some(*m), std::iter::once(returns).chain(params).map(erased).collect())
+                }
+                _ => {
+                    return unsupported(
+                        node,
+                        &format!("{what} of a handle that may be a static method's or another"),
+                    );
+                }
+            });
+        }
+        let site = self.site_type(node);
+        if targets.iter().any(|(_, ty)| site.as_ref() != Some(ty)) {
+            return unsupported(
+                node,
+                &format!("{what} of a static method's handle with other types than the method's"),
+            );
+        }
+        // The fence's token is no class of the program, so it is the one left when the others
+        // are not; two methods of one class have the same token.
+        targets.sort_by_key(|(m, _)| m.is_none());
+        let owners: HashSet<usize> =
+            targets.iter().filter_map(|(m, _)| Some(self.methods[(*m)?].owner)).collect();
+        if owners.len() + targets.iter().filter(|(m, _)| m.is_none()).count().min(1) != targets.len()
+            || targets.iter().filter(|(m, _)| m.is_none()).count() > 1
+        {
+            return unsupported(
+                node,
+                &format!("{what} of a handle that may be one of several methods of a class"),
+            );
+        }
+        let nullable = held.contains(&Known::Null);
+        let several = targets.len() > 1;
+        let pos = node.pos();
+        let mut block = Vec::new();
+        // A value that is read again: a quiet node, lowered at each read, or a local that holds
+        // a value that does something.
+        enum Read<'t> {
+            Node(Node<'t>, Option<Type>),
+            Held(String, Type),
+        }
+        let hold = |value: Expr, prefix: &str, block: &mut Vec<Stmt>| {
+            let name = format!("{prefix}u{}", value.id);
+            let ty = value.ty;
+            block.push(Stmt::Local { ty, name: name.clone(), init: Some(value), pos });
+            Read::Held(name, ty)
+        };
+        let read = |r: &Read<'t>| -> Result<Expr, Error> {
+            match r {
+                Read::Node(n, None) => self.expr(*n),
+                Read::Node(n, Some(ty)) => Ok(self.convert(self.expr(*n)?, *ty)),
+                Read::Held(name, ty) => Ok(self.synth(ExprKind::Var(name.clone()), pos, *ty)),
+            }
+        };
+        // The receiver's value, when the call reads it; one that a second read gives again
+        // (`rereadable`) is not held, and not read when the call does not need it.
+        let token = match (self.rereadable(receiver), nullable || several) {
+            (true, true) => Some(Read::Node(receiver, None)),
+            (true, false) => None,
+            (false, false) => {
+                block.push(Stmt::Expr(self.expr(receiver)?));
+                None
+            }
+            (false, true) => Some(hold(self.expr(receiver)?, RECEIVER, &mut block)),
+        };
+        // Through a handle that may be null, the arguments that do something are held in locals
+        // before the check, and for several methods, before the test.
+        let args: Vec<Node<'t>> = node.list("arguments").collect();
+        let mut values = Vec::new();
+        for (arg, param) in args.iter().zip(site.iter().flatten().skip(1)) {
+            let param = self.ty(*arg, param)?;
+            values.push(match (nullable || several) && !quiet(*arg) {
+                true => hold(self.convert(self.expr(*arg)?, param), ARGUMENT, &mut block),
+                false => Read::Node(*arg, Some(param)),
+            });
+        }
+        if nullable && let Some(token) = &token {
+            let check =
+                ExprKind::Builtin(Builtin::NullChecked(Some(interned_name(name))), vec![read(token)?]);
+            block.push(Stmt::Expr(self.synth(check, pos, Type::JavaClass)));
+        }
+        let ty = self.ty(node, node.java_type())?;
+        let call = |method: Option<usize>| -> Result<Expr, Error> {
+            let kind = match method {
+                None => ExprKind::Builtin(Builtin::Native(Native::FullFence), Vec::new()),
+                Some(m) => ExprKind::Call {
+                    name: self.methods[m].name.to_string(),
+                    args: values.iter().map(read).collect::<Result<_, _>>()?,
+                    resolved: Some(m),
+                },
+            };
+            Ok(self.synth(kind, pos, ty))
+        };
+        // `token == C.class ? C.m(..) : ..`, the last target without a test.
+        let (last, tested) = targets.split_last().expect("a static method's handle");
+        let mut result = call(last.0)?;
+        for (method, _) in tested.iter().rev() {
+            let m = method.expect("the fence is last");
+            let class = self.ty(node, &self.types[self.methods[m].owner].javac)?;
+            let literal =
+                self.synth(ExprKind::Builtin(Builtin::ClassLiteral(class), Vec::new()), pos, Type::JavaClass);
+            let token = read(token.as_ref().expect("a token read for several targets"))?;
+            let test = self.synth(
+                ExprKind::Binary(BinOp::Eq, Box::new(token), Box::new(literal)),
+                pos,
+                Type::Boolean,
+            );
+            result = match ty {
+                Type::Void => {
+                    let branch = Stmt::If {
+                        cond: test,
+                        then: Box::new(Stmt::Expr(call(Some(m))?)),
+                        otherwise: Some(Box::new(Stmt::Expr(result))),
+                    };
+                    self.synth(
+                        ExprKind::Switch {
+                            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+                            cases: vec![Case { labels: vec![CaseLabel::Default], body: vec![branch] }],
+                        },
+                        pos,
+                        ty,
+                    )
+                }
+                _ => self.synth(
+                    ExprKind::Conditional(Box::new(test), Box::new(call(Some(m))?), Box::new(result)),
+                    pos,
+                    ty,
+                ),
+            };
+        }
+        if block.is_empty() {
+            return Ok(result.kind);
+        }
+        block.push(if ty == Type::Void { Stmt::Expr(result) } else { Stmt::Yield(result) });
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
+    }
+
+    /// The token of a handle made with the handles `held` that the call `node` can make: the
+    /// class of a static method's class, which `static_handle_call` tells from the others, and
+    /// for any other handle the same token (`handle_token`).
+    fn static_token(&self, node: Node<'t>, held: &[Known<'t>]) -> Result<Expr, Error> {
+        let pos = node.pos();
+        let statics: Vec<usize> = held
+            .iter()
+            .filter_map(|k| match k {
+                Known::Static(m) => Some(*m),
+                _ => None,
+            })
+            .collect();
+        match statics[..] {
+            [] => Ok(self.handle_token(pos)),
+            [m] if held.len() == 1 => {
+                let class = self.ty(node, &self.types[self.methods[m].owner].javac)?;
+                Ok(self.synth(
+                    ExprKind::Builtin(Builtin::ClassLiteral(class), Vec::new()),
+                    pos,
+                    Type::JavaClass,
+                ))
+            }
+            _ => unsupported(node, "`Lookup.findStatic` that may find one of several handles"),
+        }
     }
 
     /// A call of the method `what` of a lookup or a `MethodHandle` that lowering does not follow

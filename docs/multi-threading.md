@@ -573,7 +573,11 @@ name:
   methods and the arguments of every call of such a method. The lookups, `methodType` of class
   literals, the factories of field, static field, element and view handles, `findVirtual` and
   `findStatic` of those factories, and `invokeExact` of the `MethodHandle`s that finds, are
-  followed when none of them can fail. An access through a value that holds one handle, or null,
+  followed when none of them can fail. So is `findStatic` of a static method of the program
+  (reached by its name) or of `VarHandle`'s fences: `invokeExact` or `invoke` with exactly the
+  method's types is a direct call of it (a full fence for a fence). A handle that may be one of
+  several such methods, as netty's skip list takes `VarHandle.acquireFence` or its own fallback,
+  holds its method's class as its token, and the call tests it. An access through a value that holds one handle, or null,
   is that handle's access after a null check that throws Java's `NullPointerException`, message
   included; Java checks after evaluating the arguments, so such an access takes only arguments
   whose evaluation does nothing. A call of a lookup or a `MethodHandle` that is not followed, or

@@ -367,7 +367,8 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   (`"[La.B;"`) that array's class; of a computed name, a `switch` over the classes code can find
   by name. An unknown name throws `ClassNotFoundException`.
 - **Handles**: `Unsafe` offsets, field updaters and `VarHandle`s of fields and array elements,
-  and the `MethodHandle`s of the handle factories, are the accesses they name, followed through
+  and the `MethodHandle`s of the handle factories, are the accesses they name, and a
+  `MethodHandle` of a static method (`findStatic`) is a call of it, followed through
   constants, locals, fields and calls ([multi-threading.md](multi-threading.md), 5.3). A call of
   a lookup's, a `MethodHandle`'s or a `MethodType`'s method that the translation does not follow
   (a handle of any other method, `invokeWithArguments`, combinators such as `filterArguments`,

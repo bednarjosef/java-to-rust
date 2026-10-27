@@ -767,6 +767,22 @@ fn own_field_handle(node: &Value) -> Option<String> {
     field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL").map(str::to_string)
 }
 
+/// The static methods that `Lookup.findStatic` of a method's name finds: the class of a class
+/// literal, or `None` for the class whose code calls it (as `own_field_handle`), and the name.
+/// They are reached though no code names them (`lower/handle_values.rs`).
+fn static_method_handle(node: &Value) -> Option<(Option<String>, String)> {
+    let symbol = &node["symbol"];
+    if text(node, "kind") != "METHOD_INVOCATION"
+        || (text(symbol, "owner"), text(symbol, "name"))
+            != ("java.lang.invoke.MethodHandles.Lookup", "findStatic")
+    {
+        return None;
+    }
+    let [class, name, _] = &node["arguments"].as_array()?[..] else { return None };
+    let name = name["value"].as_str().filter(|_| text(name, "kind") == "STRING_LITERAL")?;
+    Some((literal_class(class), name.to_string()))
+}
+
 /// The class and the field that `node` is the offset of, when it is a call of `Unsafe`'s
 /// `objectFieldOffset` of a class literal and the field's name, or of the field that
 /// `getDeclaredField` of a class literal finds by its name: the field is reached, though no code
@@ -3824,6 +3840,16 @@ impl<'t> Walk<'t> {
                 && field_of(&class, &field)
             {
                 self.work.push(Item::Field((class, field)));
+            }
+            if let Some((class, name)) = static_method_handle(value)
+                && let Some(class) = class.or_else(|| self.lookup_class.clone())
+            {
+                let named = self.methods_by_name.get(&class).and_then(|by_name| by_name.get(&name));
+                for key in named.into_iter().flatten() {
+                    if self.methods.get(key).is_some_and(|m| has_flag(m, "STATIC")) {
+                        self.work.push(Item::Method(key.clone()));
+                    }
+                }
             }
         }
         if kind == "STRING_LITERAL"
