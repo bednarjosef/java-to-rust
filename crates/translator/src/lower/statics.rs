@@ -74,7 +74,9 @@ impl<'t> Lowering<'t> {
             match member.kind() {
                 // In a census, a rejected block or initializer is left out, or ends the program
                 // where the census writes its translation.
-                "BLOCK" if self.keeps(member, &self.types[index].javac) => match self.block(member) {
+                "BLOCK" if self.keeps(member, &self.types[index].javac) => match self
+                    .initializer_block(index, member)?
+                {
                     Ok(block) => body.push(Stmt::Block(block)),
                     Err(e) => {
                         body.extend(

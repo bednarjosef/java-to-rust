@@ -46,8 +46,9 @@ impl<'t> Lowering<'t> {
             // In a census, a rejected block is left out of the constructor, or ends the program
             // where the census writes its translation.
             let initializing = self.initializing.replace(true);
-            let stmts = self.block(member);
+            let stmts = self.initializer_block(owner, member);
             self.initializing.set(initializing);
+            let stmts = stmts?;
             let stmts = match stmts {
                 Ok(stmts) => stmts,
                 Err(e) => {

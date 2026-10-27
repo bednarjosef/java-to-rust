@@ -2,9 +2,9 @@
 //! of code is recorded with the type it is in, and lowering goes on past it. A rejected method,
 //! constructor or lambda becomes a stub, with its signature and a body that never runs, so the
 //! code around it is still lowered and analysed; a rejected statement of a method that is no
-//! constructor becomes a stub of the statement and the rest of its block, and the method keeps
-//! its other code (`cut_rejected_stmts`); a rejected field initializer or initializer block is
-//! left out. A class whose declaration is rejected has all of its code rejected with it
+//! constructor, or of an initializer block, becomes a stub of the statement and the rest of its
+//! block, and the code keeps its other statements (`cutting`); a rejected field initializer, or
+//! an initializer block rejected outside its statements, is left out. A class whose declaration is rejected has all of its code rejected with it
 //! (`reject_class`).
 
 use super::*;
@@ -123,19 +123,54 @@ impl<'t> Lowering<'t> {
     }
 
     /// `lower` of method `index`, or, when lowering rejects a statement of a method that is no
-    /// constructor, of the method with that statement and the rest of its block cut: a stub that
-    /// ends the program with the rejection stands for them (`cut_stub`), so that a method
-    /// rejected for code that seldom runs (a profiler's `StackWalker` behind `if (loaded)`) runs
-    /// the rest of its code. Each statement cut is recorded as a rejection of the method. A
-    /// method rejected for more than `CUTS` statements, or outside its statements, is stubbed
-    /// whole (`stub_if_rejected`).
+    /// constructor, of the method with that statement and the rest of its block cut
+    /// (`cutting`), so that a method rejected for code that seldom runs (a profiler's
+    /// `StackWalker` behind `if (loaded)`) runs the rest of its code. Each statement cut is
+    /// recorded as a rejection of the method. A method rejected outside its statements is
+    /// stubbed whole (`stub_if_rejected`).
     fn cut_rejected_stmts(
         &self,
         index: usize,
         lower: impl Fn() -> Result<Method, Error>,
     ) -> Result<Result<Method, Error>, Error> {
-        const CUTS: usize = 8;
         let info = &self.methods[index];
+        let message = |error: &Error| self.stub_message(index, error);
+        let (lowered, cuts) = self.cutting(info.owner, info.name != "<init>", message, lower);
+        for error in cuts {
+            self.record(info.owner, Some(info.node.pos()), Some(index), error)?;
+        }
+        Ok(lowered)
+    }
+
+    /// Initializer block `block` of class `t`, lowered as `cut_rejected_stmts` lowers a method:
+    /// a statement that lowering rejects is cut with the rest of its block, and recorded as a
+    /// rejection of the class's initializer.
+    pub(super) fn initializer_block(
+        &self,
+        t: usize,
+        block: Node<'t>,
+    ) -> Result<Result<Vec<Stmt>, Error>, Error> {
+        let message =
+            |error: &Error| format!("{}: {} (line {})", self.types[t].javac, error.message, error.pos.line);
+        let (lowered, cuts) = self.cutting(t, true, message, || self.block(block));
+        for error in cuts {
+            self.reject(t, error)?;
+        }
+        Ok(lowered)
+    }
+
+    /// `lower`, or in a census, when it rejects a statement (`note_failed_stmt`) and `cuttable`,
+    /// `lower` again with a stub of class `class` that ends the program with `message` of the
+    /// rejection in place of that statement and the rest of its block (`cut_stub`), up to `CUTS`
+    /// statements; and the rejections of the statements cut.
+    fn cutting<T>(
+        &self,
+        class: usize,
+        cuttable: bool,
+        message: impl Fn(&Error) -> String,
+        lower: impl Fn() -> Result<T, Error>,
+    ) -> (Result<T, Error>, Vec<Error>) {
+        const CUTS: usize = 8;
         let mut cuts = Vec::new();
         let lowered = loop {
             let recorded = self.census.as_ref().map_or(0, |c| c.borrow().len());
@@ -143,11 +178,12 @@ impl<'t> Lowering<'t> {
             let lowered = lower();
             let Err(error) = &lowered else { break lowered };
             let failed = self.failed_stmt.borrow_mut().take();
-            let Some((stmt, _, _)) = failed.filter(|(stmt, pos, message)| {
-                info.name != "<init>"
+            let Some((stmt, _, _)) = failed.filter(|(stmt, pos, text)| {
+                cuttable
+                    && self.census.is_some()
                     && cuts.len() < CUTS
                     && *pos == error.pos
-                    && *message == error.message
+                    && *text == error.message
                     && !self.cut_stmts.borrow().contains_key(stmt)
             }) else {
                 break lowered;
@@ -156,13 +192,10 @@ impl<'t> Lowering<'t> {
             if let Some(census) = &self.census {
                 census.borrow_mut().truncate(recorded);
             }
-            self.cut_stmts.borrow_mut().insert(stmt, (info.owner, self.stub_message(index, error)));
+            self.cut_stmts.borrow_mut().insert(stmt, (class, message(error)));
             cuts.push(Error { pos: error.pos, message: error.message.clone() });
         };
-        for error in cuts {
-            self.record(info.owner, Some(info.node.pos()), Some(index), error)?;
-        }
-        Ok(lowered)
+        (lowered, cuts)
     }
 
     /// In a census, the stub of statement `stmt` when lowering rejected it

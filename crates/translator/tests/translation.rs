@@ -3205,12 +3205,13 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
 fn a_census_stubs_a_rejected_statement_and_the_rest_of_its_block_not_the_whole_method() {
     // `zone` is rejected for `StackWalker.walk`, behind a test that is false in this run, as
     // jtracy's `TracyClient.beginZone` is when the profiler is not loaded: the rest of `zone`
-    // runs. `twice` is rejected for two statements, each cut with the rest of its block.
+    // runs. `twice` is rejected for two statements, each cut with the rest of its block, and the
+    // static initializer for one, after which `ready` is still incremented.
     let dir = write_sources(
         "census_cut_statements",
         &[(
             "p/Main.java",
-            "package p;\npublic class Main {\n    static boolean loaded = Boolean.getBoolean(\"loaded\");\n    static void zone(String name, boolean capture) {\n        System.out.println(\"zone \" + name);\n        if (loaded && capture) {\n            System.out.println(\"walking\");\n            Object frame = StackWalker.getInstance().walk(s -> s.findFirst());\n            System.out.println(frame);\n        }\n        System.out.println(\"after \" + name);\n    }\n    static int twice(int n) {\n        if (n > 10) {\n            ProcessBuilder b = null;\n        }\n        if (n > 20) {\n            ProcessBuilder c = null;\n        }\n        return n * 2;\n    }\n    public static void main(String[] a) {\n        zone(\"a\", true);\n        System.out.println(twice(a.length));\n    }\n}\n",
+            "package p;\npublic class Main {\n    static boolean loaded = Boolean.getBoolean(\"loaded\");\n    static int ready;\n    static {\n        ready = 1;\n        if (loaded) {\n            ProcessBuilder p = null;\n        }\n        ready += 1;\n    }\n    static void zone(String name, boolean capture) {\n        System.out.println(\"zone \" + name);\n        if (loaded && capture) {\n            System.out.println(\"walking\");\n            Object frame = StackWalker.getInstance().walk(s -> s.findFirst());\n            System.out.println(frame);\n        }\n        System.out.println(\"after \" + name);\n    }\n    static int twice(int n) {\n        if (n > 10) {\n            ProcessBuilder b = null;\n        }\n        if (n > 20) {\n            ProcessBuilder c = null;\n        }\n        return n * 2;\n    }\n    public static void main(String[] a) {\n        zone(\"a\", true);\n        System.out.println(twice(a.length) + ready);\n    }\n}\n",
         )],
     );
     let program = java_to_rust::Program {
@@ -3231,11 +3232,12 @@ fn a_census_stubs_a_rejected_statement_and_the_rest_of_its_block_not_the_whole_m
     assert_contains(
         &rust,
         &[
-            "java::not_translated(\"p.Main.zone: `StackWalker.walk` not supported yet (line 8)\")",
+            "java::not_translated(\"p.Main.zone: `StackWalker.walk` not supported yet (line 16)\")",
             "java::println!(\"walking\");\n            java::not_translated(\"p.Main.zone",
             "java::println!(\"after {name}\")",
-            "java::not_translated(\"p.Main.twice: type `java.lang.ProcessBuilder` not supported yet (line 15)\")",
-            "java::not_translated(\"p.Main.twice: type `java.lang.ProcessBuilder` not supported yet (line 18)\")",
+            "java::not_translated(\"p.Main.twice: type `java.lang.ProcessBuilder` not supported yet (line 23)\")",
+            "java::not_translated(\"p.Main.twice: type `java.lang.ProcessBuilder` not supported yet (line 26)\")",
+            "java::not_translated(\"p.Main: type `java.lang.ProcessBuilder` not supported yet (line 8)\")",
         ],
     );
 }

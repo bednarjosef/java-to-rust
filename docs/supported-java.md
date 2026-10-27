@@ -451,9 +451,10 @@ Design: [natives-and-input.md](natives-and-input.md).
 - `--census` translates past every rejection and reports what is rejected and why, grouped by
   message, separately for program and library code (`program/census.rs`). A rejected method
   becomes a stub that ends the program with the rejection if it runs; a statement that lowering
-  rejects in a method that is no constructor is stubbed with the rest of its block instead (up to
-  eight a method), so a method rejected for code behind a test that is false keeps its other code
-  (`lower/census.rs`). Either way the method counts as rejected. It lists apart, as code that translates, the code that throws
+  rejects in a method that is no constructor, or in an initializer block, is stubbed with the
+  rest of its block instead (up to eight a method or block), so code rejected for a statement
+  behind a test that is false keeps its other statements (`lower/census.rs`). Either way the code
+  counts as rejected. It lists apart, as code that translates, the code that throws
   `NoClassDefFoundError` for a class missing from the roots (`--keep-going`), the handle calls
   that throw `UnsupportedOperationException` because the translation does not follow them, and
   the charset names known only at run time, which throw it for a charset of the JDK that the
