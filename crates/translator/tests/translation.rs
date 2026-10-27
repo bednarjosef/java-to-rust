@@ -4723,6 +4723,25 @@ fn translate_with_natives(dir: &str, statements: &str) -> Result<String, String>
 }
 
 #[test]
+fn a_native_that_the_runtime_implements_runs_through_the_interface_it_implements() {
+    // As `VMManagementImpl`'s natives implement `VMManagement`'s methods: the call through the
+    // interface dispatches to a method whose body is the runtime's native (here `initIDs`, which
+    // does nothing), where it once found no method to run.
+    let dir = write_sources(
+        "native-through-interface",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    interface Natives {\n        void initIDs();\n    }\n    static class Impl implements Natives {\n        public native void initIDs();\n    }\n    static void init(Natives n) {\n        n.initIDs();\n    }\n    public static void main(String[] a) {\n        init(new Impl());\n        System.out.println(\"ok\");\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["fn init_i_ds("]);
+    assert!(!rust.contains("no object runs") && !rust.contains("never runs"), "{rust}");
+}
+
+#[test]
 fn natives_of_jdk_classes_become_runtime_calls() {
     let rust = translate_with_natives(
         "jdk-natives",

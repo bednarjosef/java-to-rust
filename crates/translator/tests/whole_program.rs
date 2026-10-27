@@ -8,8 +8,10 @@
 //! `corpus/projects/`. Translating with the JDK takes a few seconds per program, and the programs
 //! run on `CORPUS_THREADS` threads (one per CPU by default); `CORPUS_FILTER=text` runs only those
 //! whose name contains `text`. A program reads the file `Name.input` next to it (`input` in a
-//! directory) on standard input, and nothing without one. A program that uses `sun.misc` is
-//! translated with the sources of `jdk.unsupported` too, from the folder next to `java.base`'s.
+//! directory) on standard input, and nothing without one. A program that uses another module of
+//! the JDK (`sun.misc`, `jdk.net`) is translated with that module's
+//! sources too, from the folder next to `java.base`'s, and skipped without them
+//! (`module_libraries`).
 //!
 //! As in the corpus test, Java's results and the runs of translations that are the same as in an
 //! earlier run that matched Java are kept in the checks' cache (`check_cache::test_root`).
@@ -181,21 +183,28 @@ fn input_field(p: &Program, fingerprint: &mut Fingerprint) -> Option<()> {
     Some(())
 }
 
-/// The sources of `jdk.unsupported`, next to `java.base`'s, for a program that uses
-/// `sun.misc.Unsafe` or the other classes of `sun.misc`.
-fn unsupported_library(p: &Program, library: &Path) -> Option<PathBuf> {
-    fn uses_sun_misc(dir: &Path) -> bool {
+/// The sources of the JDK's other modules, next to `java.base`'s, that a program uses: those of
+/// `jdk.unsupported` for `sun.misc.Unsafe` and the other classes of `sun.misc`, and of `jdk.net`
+/// for its socket options.
+/// A program whose modules' sources are missing is skipped (`whole_programs_match_java`).
+fn module_libraries(p: &Program, library: &Path) -> Vec<PathBuf> {
+    const MODULES: [(&str, &str); 2] = [("jdk.unsupported", "sun.misc."), ("jdk.net", "jdk.net.")];
+    fn uses(dir: &Path, marker: &str) -> bool {
         std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
             let path = e.path();
             if path.is_dir() {
-                return uses_sun_misc(&path);
+                return uses(&path, marker);
             }
             path.extension().is_some_and(|x| x == "java")
-                && std::fs::read_to_string(&path).is_ok_and(|text| text.contains("sun.misc."))
+                && std::fs::read_to_string(&path).is_ok_and(|text| text.contains(marker))
         })
     }
-    let root = library.parent()?.join("jdk.unsupported");
-    (root.is_dir() && uses_sun_misc(&p.sources)).then_some(root)
+    let Some(parent) = library.parent() else { return Vec::new() };
+    MODULES
+        .iter()
+        .filter(|(_, marker)| uses(&p.sources, marker))
+        .map(|(module, _)| parent.join(module))
+        .collect()
 }
 
 /// The program's run translated with the JDK's sources, or why it does not get that far. A
@@ -220,11 +229,7 @@ fn run_rust(
         .arg(&p.sources)
         .arg("--library")
         .arg(library)
-        .args(
-            unsupported_library(p, library)
-                .into_iter()
-                .flat_map(|l| ["--library".into(), l.into_os_string()]),
-        )
+        .args(module_libraries(p, library).into_iter().flat_map(|l| ["--library".into(), l.into_os_string()]))
         .arg("--crate")
         .arg(&dir)
         .output()
@@ -290,8 +295,15 @@ fn whole_programs_match_java() {
     let build = check_cache::rust_build_key(&runtime(), &work);
     let filter = std::env::var("CORPUS_FILTER").ok();
     let programs = programs(&root, &work);
-    let selected: Vec<&Program> =
+    let mut selected: Vec<&Program> =
         programs.iter().filter(|p| filter.as_ref().is_none_or(|f| p.name.contains(f.as_str()))).collect();
+    selected.retain(|p| match module_libraries(p, &library).into_iter().find(|root| !root.is_dir()) {
+        Some(missing) => {
+            println!("{:<24} skipped: no sources of {} next to java.base's", p.name, missing.display());
+            false
+        }
+        None => true,
+    });
     let results = parallel(selected.len(), |i| {
         let p = selected[i];
         let java = run_java(p, &work.join(&p.name).join("classes"), &java_cache);

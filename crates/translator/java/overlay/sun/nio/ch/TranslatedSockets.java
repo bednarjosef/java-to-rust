@@ -20,8 +20,8 @@ import sun.net.ConnectionResetException;
 /**
  * The translator's sockets, pipes and selectors of {@code sun.nio.ch}, in place of the JVM's
  * natives of {@code Net}, {@code IOUtil}, {@code SocketDispatcher}, {@code UnixDispatcher},
- * {@code EPoll}, {@code EventFD} and {@code NativeThread}, and {@code closeIntFD} of
- * {@code UnixFileDispatcherImpl}: each call of one of those natives
+ * {@code EPoll}, {@code EventFD} and {@code NativeThread}, {@code closeIntFD} of
+ * {@code UnixFileDispatcherImpl}, and {@code jdk.net.LinuxSocketOptions}'s: each call of one of those natives
  * calls the method here of the same parameters ({@code program::SOCKET_NATIVES}). The natives
  * here are the system's calls on a descriptor's number ({@code java_runtime::socket},
  * {@code ast::SOCKET_CALLS}); they record the error of a call that fails, and the methods throw
@@ -526,5 +526,153 @@ final class TranslatedSockets {
             throw ioError(sysLastError());
         }
         return 0;
+    }
+
+    // -- jdk.net's socket options on Linux (LinuxSocketOptions), as libextnet's C code sets them --
+
+    private static final int SOL_SOCKET = 1;
+    private static final int IPPROTO_IP = 0;
+    private static final int IPPROTO_TCP = 6;
+    private static final int IPPROTO_IPV6 = 41;
+    private static final int TCP_KEEPIDLE = 4;
+    private static final int TCP_KEEPINTVL = 5;
+    private static final int TCP_KEEPCNT = 6;
+    private static final int TCP_QUICKACK = 12;
+    private static final int SO_INCOMING_NAPI_ID = 56;
+    private static final int IP_MTU_DISCOVER = 10;
+    private static final int IPV6_MTU_DISCOVER = 23;
+    private static final int IP_PMTUDISC_DONT = 0;
+    private static final int IP_PMTUDISC_DO = 2;
+    private static final int ENOPROTOOPT = 92;
+    private static final int EPFNOSUPPORT = 96;
+    private static final int EAFNOSUPPORT = 97;
+
+    /**
+     * {@code socketOptionSupported}: whether a new TCP socket, IPv6 where the system has it, can
+     * read the option, which fails only for an option the system does not know.
+     */
+    private static boolean optionSupported(int level, int option) {
+        int fd = sysOpen(true, true, false);
+        if (fd < 0) {
+            int error = sysLastError();
+            if (error != EPFNOSUPPORT && error != EAFNOSUPPORT) {
+                return false;
+            }
+            fd = sysOpen(false, true, false);
+            if (fd < 0) {
+                return false;
+            }
+        }
+        boolean supported = sysGetOption(fd, level, option) != -1 || sysLastError() != ENOPROTOOPT;
+        sysClose(fd);
+        return supported;
+    }
+
+    static boolean keepAliveOptionsSupported0() {
+        return optionSupported(IPPROTO_TCP, TCP_KEEPIDLE)
+                && optionSupported(IPPROTO_TCP, TCP_KEEPCNT)
+                && optionSupported(IPPROTO_TCP, TCP_KEEPINTVL);
+    }
+
+    /** As the C code, which sets the option on an IPv4 socket at the level of sockets. */
+    static boolean quickAckSupported0() {
+        int fd = sysOpen(false, true, false);
+        if (fd < 0) {
+            return false;
+        }
+        boolean supported = sysSetOption(fd, SOL_SOCKET, TCP_QUICKACK, 1) == 0 || sysLastError() != ENOPROTOOPT;
+        sysClose(fd);
+        return supported;
+    }
+
+    static boolean incomingNapiIdSupported0() {
+        return optionSupported(SOL_SOCKET, SO_INCOMING_NAPI_ID);
+    }
+
+    /**
+     * libextnet's {@code handleError}: an option the system does not know is unsupported, any
+     * other failure a {@code SocketException} with the system's text of the error.
+     */
+    private static SocketException optionError(String what) {
+        int error = sysLastError();
+        if (error == ENOPROTOOPT) {
+            throw new UnsupportedOperationException("unsupported socket option");
+        }
+        String message = text(error);
+        return new SocketException(message.isEmpty() ? what : message);
+    }
+
+    private static void setTcpOption(int fd, int option, int value, String name) throws SocketException {
+        if (sysSetOption(fd, IPPROTO_TCP, option, value) < 0) {
+            throw optionError("set option " + name + " failed");
+        }
+    }
+
+    private static int getOption(int fd, int level, int option, String name) throws SocketException {
+        int value = sysGetOption(fd, level, option);
+        if (value == -1 && sysLastError() != 0) {
+            throw optionError("get option " + name + " failed");
+        }
+        return value;
+    }
+
+    static void setTcpKeepAliveProbes0(int fd, int value) throws SocketException {
+        setTcpOption(fd, TCP_KEEPCNT, value, "TCP_KEEPCNT");
+    }
+
+    static void setTcpKeepAliveTime0(int fd, int value) throws SocketException {
+        setTcpOption(fd, TCP_KEEPIDLE, value, "TCP_KEEPIDLE");
+    }
+
+    static void setTcpKeepAliveIntvl0(int fd, int value) throws SocketException {
+        setTcpOption(fd, TCP_KEEPINTVL, value, "TCP_KEEPINTVL");
+    }
+
+    static int getTcpKeepAliveProbes0(int fd) throws SocketException {
+        return getOption(fd, IPPROTO_TCP, TCP_KEEPCNT, "TCP_KEEPCNT");
+    }
+
+    static int getTcpKeepAliveTime0(int fd) throws SocketException {
+        return getOption(fd, IPPROTO_TCP, TCP_KEEPIDLE, "TCP_KEEPIDLE");
+    }
+
+    static int getTcpKeepAliveIntvl0(int fd) throws SocketException {
+        return getOption(fd, IPPROTO_TCP, TCP_KEEPINTVL, "TCP_KEEPINTVL");
+    }
+
+    static void setQuickAck0(int fd, boolean on) throws SocketException {
+        setTcpOption(fd, TCP_QUICKACK, on ? 1 : 0, "TCP_QUICKACK");
+    }
+
+    static boolean getQuickAck0(int fd) throws SocketException {
+        return getOption(fd, IPPROTO_TCP, TCP_QUICKACK, "TCP_QUICKACK") != 0;
+    }
+
+    static void setIpDontFragment0(int fd, boolean value, boolean isIPv6) throws SocketException {
+        int level = isIPv6 ? IPPROTO_IPV6 : IPPROTO_IP;
+        int option = isIPv6 ? IPV6_MTU_DISCOVER : IP_MTU_DISCOVER;
+        if (sysSetOption(fd, level, option, value ? IP_PMTUDISC_DO : IP_PMTUDISC_DONT) < 0) {
+            throw optionError("set option IP_DONTFRAGMENT failed");
+        }
+    }
+
+    static boolean getIpDontFragment0(int fd, boolean isIPv6) throws SocketException {
+        int level = isIPv6 ? IPPROTO_IPV6 : IPPROTO_IP;
+        int option = isIPv6 ? IPV6_MTU_DISCOVER : IP_MTU_DISCOVER;
+        return getOption(fd, level, option, "IP_DONTFRAGMENT") == IP_PMTUDISC_DO;
+    }
+
+    static int getIncomingNapiId0(int fd) throws SocketException {
+        return getOption(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, "SO_INCOMING_NAPI_ID");
+    }
+
+    /**
+     * The peer's user and group of a Unix domain socket, which only those sockets have
+     * ({@code ExtendedSocketOptions} offers {@code SO_PEERCRED} on no other). A translated program
+     * has none, so what is asked is an internet socket, whose peer Linux gives no user: the JDK's
+     * C code then throws this.
+     */
+    static long getSoPeerCred0(int fd) throws SocketException {
+        throw new SocketException("get peer uid failed");
     }
 }
