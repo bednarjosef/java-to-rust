@@ -628,6 +628,14 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.reflect.Constructor",
     "java.lang.reflect.Proxy",
     "java.lang.reflect.TranslatedProxies",
+    // Values kept per class loader, as `java.util.logging.Level` keeps its custom levels: plain
+    // code over a `ConcurrentHashMap` that the loader holds, which a program makes as its
+    // classes initialize (`new ClassLoaderValue<>()`) and only reads through its loader.
+    "jdk.internal.loader.AbstractClassLoaderValue",
+    "jdk.internal.loader.AbstractClassLoaderValue.Memoizer",
+    "jdk.internal.loader.AbstractClassLoaderValue.Memoizer.RecursiveInvocationException",
+    "jdk.internal.loader.AbstractClassLoaderValue.Sub",
+    "jdk.internal.loader.ClassLoaderValue",
 ];
 
 /// The translator's method that gives `objectFieldOffset(Field)` of `Unsafe` and of
@@ -1922,6 +1930,7 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "uncheckedEncodeASCII",
     "concat",
     "blockedOn",
+    "createOrGetClassLoaderValueMap",
 ];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
@@ -2185,8 +2194,8 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.lang.Long", "parseUnsignedLong", "(java.lang.CharSequence,int,int,int)long"),
         ("java.lang.TranslatedNumbers", "parseUnsignedLong"),
     ),
-    // The boot loader's unnamed module, classes and resources, and the JDK's class loaders, as
-    // the translation's modules have them (`java/lang/TranslatedModules.java`).
+    // The boot loader's unnamed module, classes, resources and `ClassLoaderValue`s, and the JDK's
+    // class loaders, as the translation's modules have them (`java/lang/TranslatedModules.java`).
     (
         ("jdk.internal.loader.BootLoader", "getUnnamedModule", "()java.lang.Module"),
         (TRANSLATED_MODULES, "bootUnnamedModule"),
@@ -2206,6 +2215,14 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
             "(java.lang.String)java.util.Enumeration<java.net.URL>",
         ),
         (TRANSLATED_MODULES, "systemResources"),
+    ),
+    (
+        (
+            "jdk.internal.loader.BootLoader",
+            "getClassLoaderValueMap",
+            "()java.util.concurrent.ConcurrentHashMap<?,?>",
+        ),
+        (TRANSLATED_MODULES, "bootClassLoaderValueMap"),
     ),
     (
         ("jdk.internal.loader.ClassLoaders", "appClassLoader", "()java.lang.ClassLoader"),
