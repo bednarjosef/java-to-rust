@@ -496,7 +496,12 @@ impl<'t> Lowering<'t> {
         let mut out: Vec<(&'t str, Node<'t>)> = Vec::new();
         for at in modifiers.list("annotations") {
             let name = at.child("annotationType")?.java_type();
-            if wanted.is_some_and(|w| w != name) || NOT_AT_RUN_TIME.contains(&name) {
+            // javac writes an annotation of a missing class as `java.lang.Object`, which no
+            // annotation type is; Java's reflection skips an annotation whose class it cannot load.
+            if wanted.is_some_and(|w| w != name)
+                || NOT_AT_RUN_TIME.contains(&name)
+                || name == "java.lang.Object"
+            {
                 continue;
             }
             let Some(&annotation) = self.annotation_types.get(name) else {

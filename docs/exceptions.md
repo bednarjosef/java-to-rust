@@ -373,7 +373,8 @@ they are printed, so that the code fails where the JVM fails:
 **A missing class in an annotation** is no error at all, with or without `--keep-going`. The JVM
 ignores an annotation whose class is missing, and a library's compile-only annotations (Error
 Prone's `@CanIgnoreReturnValue`, J2ObjC's `@Weak`, the Checker Framework's) are never shipped, so
-the code they mark translates as if they were not there. javac's errors for the annotation's
+the code they mark translates as if they were not there; reflection leaves them out of a
+member's annotations, as the JVM skips one whose class it cannot load. javac's errors for the annotation's
 name, for a missing class in its arguments (`@ReflectionSupport(Level.FULL)`), and for an import
 that only annotations use, or nothing, are dropped and not printed. An import of a missing class
 that code uses outside annotations is still reported, with that code.

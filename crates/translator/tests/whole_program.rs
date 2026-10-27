@@ -648,6 +648,58 @@ public class Main {
     assert!(!rust.contains("@org.example.Nullable"), "`@Nullable` is made as an annotation of a member");
 }
 
+/// An annotation whose class is missing from the class path is not among a member's annotations,
+/// as the JVM skips one it cannot load: a census (`--keep-going`) of code compiled with an
+/// optional library's annotations, as log4j's plugins are, reads the others.
+#[test]
+fn an_annotation_of_a_missing_class_is_not_a_members() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-missing-annotations");
+    let _ = std::fs::remove_dir_all(&work);
+    let (sources, annotations) = (work.join("src"), work.join("lib"));
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::create_dir_all(annotations.join("org/example")).unwrap();
+    let attribute = "package org.example;\nimport java.lang.annotation.*;\n\
+                     @Retention(RetentionPolicy.RUNTIME)\n@Target(ElementType.FIELD)\n\
+                     public @interface Attribute { String value(); }\n";
+    std::fs::write(annotations.join("org/example/Attribute.java"), attribute).unwrap();
+    let java = "import java.lang.annotation.Annotation;
+import org.example.Attribute;
+import org.optional.Checked;
+public class Main {
+    static class Builder {
+        @Checked @Attribute(\"name\") String name;
+        @Checked Integer size;
+    }
+    public static void main(String[] args) throws Exception {
+        for (String n : new String[] {\"name\", \"size\"}) {
+            for (Annotation a : Builder.class.getDeclaredField(n).getDeclaredAnnotations()) {
+                System.out.println(n + \" \" + ((Attribute) a).value());
+            }
+        }
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--keep-going", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(&annotations)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    assert!(rust.contains("Main.Builder#name@org.example.Attribute"), "no `@Attribute` of the field `name`");
+}
+
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see
 /// `corpus/whole-program/ClassesAsReflectTypes.java`), but not `Constable`, whose
 /// `describeConstable()` would need the class's descriptor as an object: a class converted to a
