@@ -6,7 +6,7 @@
 #
 # Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, multi-release,
 # repair, jdk-sources, parse, census, summary, and on their own (not run by default) trial-write,
-# trial and java-run.
+# trial, java-run and bench.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -45,6 +45,8 @@
 # TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
 #                    memory and time to build; its runtime crate is built optimized all the same)
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
+# BENCH              which server the bench step measures: java (default) or trial; BENCH_SEED,
+#                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input)
 # PREVIOUS_CENSUS    the census that the summary compares the latest with, a directory with a
 #                    census.json (default $MINECRAFT_CACHE/census-previous, where the census step
 #                    moves the census before it, if it has one)
@@ -607,10 +609,15 @@ trial() {
     --config 'profile.dev.package.java-runtime.opt-level=2' > "$cache/trial-build.txt" 2>&1) \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
+  run_server "$cache/trial-run" "$(trial_binary)"
+}
+
+# The binary that the trial step builds.
+trial_binary() {
   local name profile=${TRIAL_PROFILE:-dev}
   [ "$profile" = dev ] && profile=debug
   name=$(sed -n 's/^members = \[.*, "\([^"]*\)"\]$/\1/p' "$cache/trial/Cargo.toml")
-  run_server "$cache/trial-run" "$cache/trial-target/$profile/$name"
+  echo "$cache/trial-target/$profile/$name"
 }
 
 # The server on Java, from the jars, in java-run: what the trial's run is compared with.
@@ -618,6 +625,72 @@ java-run() {
   local classpath
   classpath=$(server_jar):$(library_jars | paste -sd:)
   run_server "$cache/java-run" "$java" -cp "$classpath" "$(cat "$cache/jar/META-INF/main-class")"
+}
+
+# The commands that a bench run gives the server, each once its log shows the line it waits for:
+# once started, force-load the chunks within BENCH_RADIUS chunks of the world's centre; once they
+# are marked, and after BENCH_WARMUP seconds (default 30) for them to generate, a tick sprint of
+# BENCH_TICKS ticks (default 1000), which runs them as fast as the server can; once it reports, stop.
+# Gives up (stops the server) after SERVER_SECONDS, and ends when the server, run by shell $1, does.
+bench_input() {
+  local shell=$1 waited=0 radius=${BENCH_RADIUS:-5}
+  wait_for() {
+    until grep -q "$1" stdout.txt 2>/dev/null; do
+      kill -0 "$shell" 2>/dev/null || exit 0
+      [ $waited -ge "${SERVER_SECONDS:-600}" ] && { echo stop; exit 0; }
+      sleep 1
+      waited=$((waited + 1))
+    done
+  }
+  wait_for 'Done ('
+  echo "forceload add $((-16 * radius)) $((-16 * radius)) $((16 * radius + 15)) $((16 * radius + 15))"
+  wait_for 'to be force loaded'
+  sleep "${BENCH_WARMUP:-30}"
+  echo "tick sprint ${BENCH_TICKS:-1000}"
+  wait_for 'Sprint completed'
+  echo stop
+}
+
+# Runs COMMAND... and writes to FILE the most memory it or a process it started held at once,
+# and the processor time they took (getrusage of the children).
+measured() {
+  python3 -I -c '
+import resource, subprocess, sys
+code = subprocess.call(sys.argv[2:])
+usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+with open(sys.argv[1], "w") as out:
+    out.write(f"peak memory {usage.ru_maxrss // 1024} MB\n")
+    out.write(f"processor time {usage.ru_utime:.1f} s user, {usage.ru_stime:.1f} s system\n")
+sys.exit(code)' "$@"
+}
+
+# The server's speed, on Java (BENCH=java, the default) or as the trial step built it
+# (BENCH=trial), in bench-java or bench-trial: a new world of seed BENCH_SEED (default 1), the
+# commands of bench_input, and in result.txt the time it took to start (its "Done" line), the
+# speed of the tick sprint, its peak memory and its processor time.
+bench() {
+  local which=${BENCH:-java}
+  local dir=$cache/bench-$which
+  local -a command
+  case $which in
+    java) command=("$java" -cp "$(server_jar):$(library_jars | paste -sd:)" "$(cat "$cache/jar/META-INF/main-class")") ;;
+    trial) command=("$(trial_binary)") ;;
+    *) echo "BENCH is java or trial, not $which" >&2; exit 1 ;;
+  esac
+  rm -rf "$dir" && mkdir -p "$dir"
+  echo eula=true > "$dir/eula.txt"
+  echo "level-seed=${BENCH_SEED:-1}" > "$dir/server.properties"
+  set +e
+  (cd "$dir" && shell=$BASHPID && measured usage.txt timeout "${SERVER_SECONDS:-600}" "${command[@]}" --nogui \
+    < <(bench_input "$shell") > stdout.txt 2> stderr.txt)
+  local code=$?
+  set -e
+  {
+    echo "$which, exit $code"
+    grep -o 'Done ([0-9.]*s)' "$dir/stdout.txt" | head -n 1 || echo "never started"
+    grep -o 'Sprint completed.*' "$dir/stdout.txt" || echo "no sprint report"
+    cat "$dir/usage.txt" 2>/dev/null
+  } | tee "$dir/result.txt"
 }
 
 # The census split by origin: the server, each library, the JDK (census-by-origin.py), and
@@ -648,9 +721,9 @@ steps=("$@")
 for step in "${steps[@]}"; do
   case $step in
     extract | decompile | best-of | libraries | library-sources | library-best-of | multi-release | repair \
-      | jdk-sources | parse | census | summary | trial-write | trial | java-run) "$step" ;;
+      | jdk-sources | parse | census | summary | trial-write | trial | java-run | bench) "$step" ;;
     *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of," \
-      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run)" >&2
+      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run, bench)" >&2
       exit 2 ;;
   esac
 done
