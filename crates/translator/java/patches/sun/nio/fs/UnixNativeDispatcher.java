@@ -14,9 +14,10 @@ package sun.nio.fs;
  * use too. The calls relative to an open directory ({@code openat}, {@code fdopendir} and the
  * others), which the JDK makes only where {@link #openatSupported} says so, fail with
  * {@code ENOSYS}. The extended attributes are read from and written to memory outside the heap
- * by address, which the runtime's natives copy. The mount table and the calls that look users
- * and groups up by name are natives that the translator does not implement, so that a program
- * that runs them is rejected.
+ * by address, which the runtime's natives copy. The mount table is read without natives (the
+ * patch of {@code LinuxFileSystem}), so its {@code rewind} and {@code getlinelen} are not reached.
+ * The calls that look users and groups up by name are natives that the translator does not
+ * implement, so that a program that runs them is rejected.
  */
 class UnixNativeDispatcher {
     /** The number of fields {@code stat0} and {@code fstat0} fill (see {@link UnixFileAttributes}). */
