@@ -550,10 +550,10 @@ memory_cap_command() {
 }
 
 # Waits up to 600 s for the server in the current directory to log that it is done starting, then
-# prints `stop`.
+# prints `stop`. Stops waiting early once process PID, the server's, has exited.
 stop_when_started() {
   local waited=0
-  until grep -q 'Done (' stdout.txt 2>/dev/null || [ $waited -ge 600 ]; do
+  until grep -q 'Done (' stdout.txt 2>/dev/null || [ $waited -ge 600 ] || ! kill -0 "$1" 2>/dev/null; do
     sleep 1
     waited=$((waited + 1))
   done
@@ -573,7 +573,9 @@ run_server() {
   set +e
   # `stop` goes in once the server is done starting: the server fails one that comes earlier
   # ("An unexpected error occurred while trying to execute that command") and keeps running.
-  (cd "$dir" && stop_when_started | timeout 600 "$@" --nogui > stdout.txt 2> stderr.txt)
+  # It reads it from a process substitution, not a pipe, so that a server that dies early is not
+  # waited for: the subshell, which the wait watches, ends with the server.
+  (cd "$dir" && shell=$BASHPID && timeout 600 "$@" --nogui < <(stop_when_started "$shell") > stdout.txt 2> stderr.txt)
   code=$?
   set -e
   echo "exit $code after $(($(date +%s) - start)) s" | tee "$dir/run.txt"
