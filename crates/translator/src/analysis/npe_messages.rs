@@ -560,11 +560,15 @@ impl Messages<'_> {
                     }
                 }
             }
-            // The natives of `java.net`'s name service (`java/net/TranslatedNet.java`), which
-            // stand for the JVM's C code: a null array of a name or an address fails there without
+            // The natives of `java.net`'s name service (`java/net/TranslatedNet.java`) and of
+            // `sun.nio.ch`'s sockets (`TranslatedSockets.java`), which stand for the JVM's C
+            // code: a null array of a name or an address fails there without
             // a message. So does the array of `Unsafe.getLoadAverage0`, whose caller has read its
             // length.
-            ExprKind::Builtin(Builtin::Native(Native::Net(_) | Native::LoadAverage), args) => {
+            ExprKind::Builtin(
+                Builtin::Native(Native::Net(_) | Native::Socket(_) | Native::LoadAverage),
+                args,
+            ) => {
                 for arg in args.iter().filter(|a| matches!(a.ty, Type::Array(_))) {
                     out.insert(arg.id, None);
                 }

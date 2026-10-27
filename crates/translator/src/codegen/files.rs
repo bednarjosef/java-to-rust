@@ -116,9 +116,9 @@ impl<'a> Gen<'a> {
         Code::atom(format!("{}({})", self.runtime(f), values.join(", ")))
     }
 
-    /// A native of the translator's `UnixNativeDispatcher` (`Native::Unix`) or `TranslatedNet`
-    /// (`Native::Net`), as a call of the runtime's function that `calls` names (`ast::UNIX_CALLS`,
-    /// `ast::NET_CALLS`). A path, a host name or an address is the runtime's `&[i8]`; the `long[]` that
+    /// A native of the translator's `UnixNativeDispatcher` (`Native::Unix`), `TranslatedNet`
+    /// (`Native::Net`) or `TranslatedSockets` (`Native::Socket`), as a call of the runtime's
+    /// function that `calls` names (`ast::UNIX_CALLS`, `ast::NET_CALLS`, `ast::SOCKET_CALLS`). A path, a host name or an address is the runtime's `&[i8]`; the `long[]` that
     /// `stat0` and `fstat0` fill, and the buffer that `readBytes` reads into, are borrowed
     /// mutably. A `byte[]` that the function returns becomes a new array.
     pub(super) fn unix_native(

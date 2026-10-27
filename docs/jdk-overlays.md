@@ -38,7 +38,8 @@ From the lightest to the heaviest:
    whose body must be different.
 3. **An overlay class.** A whole class of ours that the JDK does not have, in
    `crates/translator/java/overlay/`: the targets of redirects (`TranslatedFiles`,
-   `TranslatedNet`, `TranslatedCoders`, `TranslatedClasses`, `TranslatedNumbers`), the objects
+   `TranslatedNet`, `TranslatedSockets`, `TranslatedCoders`, `TranslatedClasses`,
+   `TranslatedNumbers`), the objects
    behind `System.out` and `System.in` (`StandardOutput`), the object behind
    `String.CASE_INSENSITIVE_ORDER` and the stream of `String.codePoints()` (`TranslatedStrings`),
    and classes that patches use (`sun/nio/fs/UnixFileChannel.java`). The overlay directory is on
@@ -165,8 +166,10 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `javax/crypto/Cipher.java`, `JceSecurity.java` | no signed providers or jurisdiction policy files: every provider and caller may make a cipher, and every key length is allowed (the JDK's default `crypto.policy=unlimited`) |
 | `com/sun/crypto/provider/JceKeyStore.java` | a `JCEKS` key store with sealed keys, which are serialized objects, is neither stored nor loaded: that throws an `IOException` |
 | `sun/security/pkcs/PKCS8Key.java` | the public key in an EC private key's encoding is not read: EC keys are not translated |
+| `java/net/NetworkInterface.java`, `InterfaceAddress.java`, `Inet6Address.java` | the network interfaces listed and asked about through `TranslatedNet` (`net_interfaces`, the `ioctl`s of an interface's flags, MTU and hardware address), as the JVM lists them on Linux; `InterfaceAddress` and `Inet6Address` get factories that set what the JVM's natives set (an interface's IPv6 address has the interface as its scope) |
 | `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |
 | `java/net/URLClassLoader.java` | finds only what its parent finds; code from its URLs fails loudly |
+| `sun/net/spi/DefaultProxySelector.java` | no system proxy settings (`java.net.useSystemProxies`), as on a system without GNOME's libraries: only the proxy properties choose a proxy |
 | `sun/net/www/protocol/jar/Handler.java` | opening a connection to a `jar:` URL throws: reading a jar's entries needs the checks of signed jars, which are security code. Every URL a program makes reaches the jar handler, so without this any connection would reach those checks |
 | `java/nio/file/DirectoryIteratorException.java`, `InvalidPathException.java` | constructors that do not throw |
 | `java/nio/file/TempFileHelper.java` | names from `java.util.Random` instead of `SecureRandom` |
@@ -193,7 +196,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own |
 | `sun/security/provider/NativePRNG.java` | the seed source, a `file:` URL, is read as a `URI`, not a `URL`: the `SUN` provider asks whether the generator is available as it registers, and a `URL` would bring the protocol handlers into every program that looks a service up |
-| `sun/security/provider/SeedGenerator.java` | the system's entropy leaves out the network adapters (`NetworkInterface`'s natives are not translated) and reads the heap's figures from `Runtime.getRuntime()` directly, not through a local; a seed source that is not a `file:` URL throws instead of opening a connection |
+| `sun/security/provider/SeedGenerator.java` | the system's entropy reads the heap's figures from `Runtime.getRuntime()` directly, not through a local; a seed source that is not a `file:` URL throws instead of opening a connection |
 | `sun/security/util/Debug.java` | translated although `sun.security` is not; writing a message, which names the caller's frame, fails loudly |
 | `sun/util/logging/PlatformLogger.java` | every logger's backend is `TranslatedConsoleLogger`, Java's default one; levels without their `System.Logger.Level`; loggers cached strongly; `setLevel` a native the translation does not have |
 

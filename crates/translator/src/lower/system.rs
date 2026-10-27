@@ -403,6 +403,9 @@ impl<'t> Lowering<'t> {
 
     /// `System.getProperty(key)` or `getProperty(key, default)` as a plain run answers it.
     fn property_read(&self, node: Node<'t>, args: &mut [Expr]) -> Result<ExprKind, Error> {
+        if args.get(1).is_some_and(|default| !Self::reread_freely(default)) {
+            return self.default_held(node, args);
+        }
         let key = match args.first().map(|arg| &arg.kind) {
             Some(ExprKind::Str(key)) => Some(key.clone()),
             _ => {
@@ -417,17 +420,6 @@ impl<'t> Lowering<'t> {
             Ok(property) => property,
             Err(message) => return unsupported(node, &message),
         };
-        // Java evaluates the default even where it is not the result, so it must have no effect
-        // then.
-        if !matches!(property, Property::Unset)
-            && let Some(default) = args.get(1)
-            && !matches!(default.kind, ExprKind::Str(_) | ExprKind::Null | ExprKind::Var(_))
-        {
-            return unsupported(
-                node,
-                "a default of `System.getProperty` that is not a literal or a variable",
-            );
-        }
         if let Some(value) = self.property_value(node, property) {
             return Ok(value);
         }
@@ -440,6 +432,36 @@ impl<'t> Lowering<'t> {
 }
 
 impl<'t> Lowering<'t> {
+    /// Whether `e` is a literal, null or a variable, which a read of a property may evaluate
+    /// anywhere, or not at all, without a difference.
+    fn reread_freely(e: &Expr) -> bool {
+        matches!(e.kind, ExprKind::Str(_) | ExprKind::Null | ExprKind::Var(_))
+    }
+
+    /// `getProperty(key, default)` with a default that is not a literal or a variable
+    /// (`NetProperties` passes `props.getProperty(key)`): Java evaluates the default whatever the
+    /// key's value is, so the key, unless it is a literal or a variable, and then the default are
+    /// held in locals first, in Java's order, and the read takes the locals.
+    fn default_held(&self, node: Node<'t>, args: &mut [Expr]) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let string = |kind| self.synth(kind, pos, Type::String);
+        let mut body = Vec::new();
+        for (i, what) in ["key", "default"].into_iter().enumerate() {
+            if Self::reread_freely(&args[i]) {
+                continue;
+            }
+            let name = self.fresh_name(what);
+            let value = std::mem::replace(&mut args[i], string(ExprKind::Var(name.clone())));
+            body.push(Stmt::Local { ty: Type::String, name, init: Some(value), pos });
+        }
+        let read = self.property_read(node, args)?;
+        body.push(Stmt::Yield(string(read)));
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
+    }
+
     /// The value of a property that is set, `None` for one that is unset.
     fn property_value(&self, node: Node<'t>, property: Property) -> Option<ExprKind> {
         match property {
@@ -460,8 +482,7 @@ impl<'t> Lowering<'t> {
     /// keys of a plain run (those of `System.getProperties()`), each with the value that a read of
     /// it as a constant gives, and the default, or null, for any other key. The `REJECTED` keys
     /// are not among them, as they are not among `System.getProperties()`'s, and so have the
-    /// default too. The default must be a literal or a variable, as Java evaluates it whatever the
-    /// key is.
+    /// default too. The default is a literal or a variable (`default_held`).
     fn computed_property(&self, node: Node<'t>, args: &mut [Expr]) -> Result<ExprKind, Error> {
         let Some(jdk) = jdk_properties() else {
             return unsupported(
@@ -469,14 +490,6 @@ impl<'t> Lowering<'t> {
                 "`System.getProperty` without a `java` on the path to read the JDK's values from",
             );
         };
-        if let Some(default) = args.get(1)
-            && !matches!(default.kind, ExprKind::Str(_) | ExprKind::Null | ExprKind::Var(_))
-        {
-            return unsupported(
-                node,
-                "a default of `System.getProperty` that is not a literal or a variable",
-            );
-        }
         let pos = node.pos();
         let mut keys: Vec<&str> = jdk.keys().map(String::as_str).chain(KEYS.iter().copied()).collect();
         keys.extend(["java.class.path", HEADLESS.0]);

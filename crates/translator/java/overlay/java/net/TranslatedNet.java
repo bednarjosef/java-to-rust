@@ -12,9 +12,8 @@ import jdk.internal.util.Exceptions;
  * {@code Inet4AddressImpl}, {@code Inet6AddressImpl} and {@code NetworkInterface}: the natives
  * here are the C library's calls on the bytes of a name or an address ({@code java_runtime::net},
  * {@code ast::NET_CALLS}), and the methods make the JDK's objects of what they give, as the
- * JVM's natives do. Nothing here opens a connection. The JVM's natives that list or find network
- * interfaces are not here: {@code getByName0} (a scoped IPv6 address such as
- * {@code fe80::1%eth0}) throws {@code UnsupportedOperationException}.
+ * JVM's natives do. Nothing here opens a connection. The interfaces that the JVM's natives of
+ * {@code NetworkInterface} list and ask about come from here too, through its patch.
  */
 final class TranslatedNet {
     private TranslatedNet() {}
@@ -49,6 +48,36 @@ final class TranslatedNet {
 
     /** Whether a network interface has the address of these bytes. */
     static native boolean bound0(byte[] address);
+
+    /**
+     * The network interfaces and their addresses, in the order of the JVM's
+     * {@code NetworkInterface.getAll()}, as {@code java_runtime::net_interfaces} encodes them;
+     * {@code NetworkInterface}'s patch makes its objects of them.
+     */
+    static native byte[] interfaces0();
+
+    /** {@code SIOCGIFFLAGS} of the interface of this name, or -1 with the error recorded. */
+    static native int interfaceFlags0(byte[] name);
+
+    /** {@code SIOCGIFMTU} of the interface of this name, or -1 with the error recorded. */
+    static native int interfaceMtu0(byte[] name);
+
+    /**
+     * {@code SIOCGIFHWADDR} of the interface of this name: its bytes, or none where they are all
+     * zero or with the error recorded where it fails.
+     */
+    static native byte[] hardwareAddress0(byte[] name);
+
+    /** The {@code errno} of this thread's last question about an interface, 0 where it succeeded. */
+    static native int interfaceError0();
+
+    /** {@code strerror(error)}. */
+    static native byte[] systemErrorText0(int error);
+
+    /** The system's text of {@code error}, as the JVM's exceptions about an interface give it. */
+    static String systemErrorText(int error) {
+        return new String(systemErrorText0(error), StandardCharsets.UTF_8);
+    }
 
     /** {@code getLocalHostName()} of {@code Inet4AddressImpl} and {@code Inet6AddressImpl}. */
     static String localHostName() {
@@ -130,10 +159,5 @@ final class TranslatedNet {
             throw new NullPointerException();
         }
         return bound0(addr.getAddress());
-    }
-
-    /** {@code NetworkInterface.getByName0(name)}, which is not supported. */
-    static NetworkInterface getByName0(String name) throws SocketException {
-        throw new UnsupportedOperationException("the network interface \"" + name + "\"");
     }
 }

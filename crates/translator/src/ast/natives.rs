@@ -179,6 +179,10 @@ pub enum Native {
     /// address families: a call of the C library's name service on the bytes of a name or an
     /// address, which records its error rather than failing (`java_runtime::net`, `NET_CALLS`).
     Net(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
+    /// A native of the translator's `sun.nio.ch.TranslatedSockets`, by name: a system call on a
+    /// socket, a pipe or a selector, which records its error rather than failing
+    /// (`java_runtime::socket`, `SOCKET_CALLS`).
+    Socket(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// The natives of the stream under the translator's `System.out` and `System.err` objects
     /// (`java/overlay/java/io/StandardOutput.java`), the runtime's buffered standard output and
     /// error (`java_runtime::out`): `write0(fd, b)`, `writeBytes0(fd, b, off, len)`,
@@ -605,6 +609,7 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
         || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
         || (class == UNIX_DISPATCHER && unix_call(name).is_some())
         || (class == NET_DISPATCHER && net_call(name).is_some())
+        || (class == SOCKET_DISPATCHER && socket_call(name).is_some())
         || channel_call(class, name).is_some()
         || channel_nothing(class, name)
         || matches!(
@@ -722,9 +727,64 @@ pub const NET_CALLS: &[(&str, &str)] = &[
     ("hostname0", "net_hostname"),
     ("hostOf0", "net_host_of"),
     ("bound0", "net_bound"),
+    ("interfaces0", "net_interfaces"),
+    ("interfaceFlags0", "net_interface_flags"),
+    ("interfaceMtu0", "net_mtu"),
+    ("hardwareAddress0", "net_hardware_address"),
+    ("interfaceError0", "net_interface_error"),
+    ("systemErrorText0", "unix_strerror"),
     ("isIPv4Available", "net_ipv4_available"),
     ("isIPv6Supported", "net_ipv6_supported"),
 ];
+
+/// The translator's class of the system calls of `sun.nio.ch`'s sockets, pipes and selectors
+/// (`java/overlay/sun/nio/ch/TranslatedSockets.java`), which the JDK's natives of those are
+/// redirected to (`program::SOCKET_NATIVES`).
+pub const SOCKET_DISPATCHER: &str = "sun.nio.ch.TranslatedSockets";
+
+/// The natives of `SOCKET_DISPATCHER` (`Native::Socket`), with the runtime's function of each
+/// (`java_runtime::socket`).
+pub const SOCKET_CALLS: &[(&str, &str)] = &[
+    ("sysLastError", "socket_last_error"),
+    ("sysErrorText", "unix_strerror"),
+    ("sysIPv6Available", "socket_ipv6_available"),
+    ("sysOpen", "socket_open"),
+    ("sysBind", "socket_bind"),
+    ("sysListen", "socket_listen"),
+    ("sysConnect", "socket_connect"),
+    ("sysAccept", "socket_accept"),
+    ("sysAcceptedPeer", "socket_accepted_peer"),
+    ("sysLocalAddress", "socket_local_address"),
+    ("sysRemoteAddress", "socket_remote_address"),
+    ("sysGetOption", "socket_get_option"),
+    ("sysSetOption", "socket_set_option"),
+    ("sysShutdown", "socket_shutdown"),
+    ("sysPoll", "socket_poll"),
+    ("sysPollConnect", "socket_poll_connect"),
+    ("sysAvailable", "socket_available"),
+    ("sysRead", "socket_read"),
+    ("sysWrite", "socket_write"),
+    ("sysReadv", "socket_readv"),
+    ("sysWritev", "socket_writev"),
+    ("sysClose", "socket_close"),
+    ("sysPreClose", "socket_pre_close"),
+    ("sysConfigureBlocking", "socket_configure_blocking"),
+    ("sysFdLimit", "socket_fd_limit"),
+    ("sysMakePipe", "socket_make_pipe"),
+    ("sysDrain", "socket_drain"),
+    ("sysWriteByte", "socket_write1"),
+    ("sysEpollCreate", "epoll_open"),
+    ("sysEpollControl", "epoll_control"),
+    ("sysEpollWait", "epoll_wait_events"),
+    ("sysEventFdOpen", "event_fd_open"),
+    ("sysEventFdSet", "event_fd_set"),
+];
+
+/// The name of a native of `SOCKET_DISPATCHER` that the runtime implements, as `SOCKET_CALLS`
+/// has it.
+pub fn socket_call(name: &str) -> Option<&'static str> {
+    SOCKET_CALLS.iter().find(|(n, _)| *n == name).map(|(n, _)| *n)
+}
 
 /// The name of a native of `NET_DISPATCHER` that the runtime implements, as `NET_CALLS` has it.
 pub fn net_call(name: &str) -> Option<&'static str> {

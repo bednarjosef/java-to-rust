@@ -420,7 +420,9 @@ Design: [natives-and-input.md](natives-and-input.md).
   without one. The tests run Java with `-Djava.awt.headless=true` to compare.
 - There is no security manager (`System.getSecurityManager()` is null), though a class of the
   program may extend `SecurityManager` and make its objects, as log4j's does; no virtual threads; and
-  no network connections: sockets stay rejected. The collector runs on its own
+  sockets only of TCP: `java.net`'s and `java.nio.channels`' TCP sockets and selectors run on the
+  system's ([natives-and-input.md](natives-and-input.md)), but datagram, Unix domain
+  and SCTP sockets are not translated. The collector runs on its own
   ([collector.md](collector.md)): `gc()` does nothing, and `Runtime`'s memory figures are fixed
   values.
 
