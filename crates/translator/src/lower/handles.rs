@@ -766,12 +766,23 @@ impl<'t> Lowering<'t> {
         self.static_declaration(owner, member, base)
     }
 
-    /// The class that `node` names: a class literal, or a local of the static block `block` that
-    /// holds one.
+    /// The class that `node` names: a class literal, a local of the static block `block` or a
+    /// static final that holds one, or a call of a static method of the program that returns its
+    /// argument, cast to another `Class` type (netty's `cls(Node.class)`).
     fn offset_class(&self, node: Node<'t>, block: Option<Node<'t>>) -> Option<usize> {
         let node = plain(node);
         if node.kind() == "MEMBER_SELECT" && node.str("identifier") == "class" {
             return self.type_index(node.get("expression")?.java_type());
+        }
+        if node.kind() == "METHOD_INVOCATION" {
+            let (_, mut returned, bound) = self.single_return(node, node.list("arguments").collect())?;
+            while returned.kind() == "TYPE_CAST" && returned.java_type().starts_with("java.lang.Class") {
+                returned = plain(returned.get("expression")?);
+            }
+            let returned = plain(returned);
+            (returned.kind() == "IDENTIFIER").then_some(())?;
+            let argument = bind(returned, &bound).filter(|a| !std::ptr::eq(a.0, returned.0))?;
+            return self.offset_class(argument, block);
         }
         let (value, block) = self.defined(node, block)?;
         self.offset_class(value, block)
@@ -1244,15 +1255,23 @@ impl<'t> Lowering<'t> {
         }
         let ty = field.symbol()?.ty;
         let ty = ty.split_once('<').map_or(ty, |(raw, _)| raw);
+        // The value class is the field's type, or the erasure of its type variable (netty's
+        // `volatile V val` with `Object.class`).
+        let same = |named: &str| {
+            named == ty
+                || (!PRIMITIVES.contains(&ty) && self.type_var_around(ty, class, None).is_some() && {
+                    let erased = |name: &str| self.declared_type(field, name, class, None).ok();
+                    erased(named).is_some_and(|n| Some(n) == erased(ty))
+                })
+        };
         match value_class.map(plain) {
             None => (ty == kind).then_some(())?,
-            Some(v) => {
-                let named = (v.kind() == "MEMBER_SELECT" && v.str("identifier") == "class")
-                    .then(|| v.get("expression"))
-                    .flatten()?
-                    .java_type();
-                (named == ty && !PRIMITIVES.contains(&ty)).then_some(())?
+            Some(v) if v.kind() == "MEMBER_SELECT" && v.str("identifier") == "class" => {
+                let named = v.get("expression")?.java_type();
+                (same(named) && !PRIMITIVES.contains(&ty)).then_some(())?
             }
+            // A class of the program that a local or a call names (`offset_class`).
+            Some(v) => same(&self.types[self.offset_class(v, block)?].javac).then_some(())?,
         }
         let outermost = |mut t: usize| {
             while let Some(outer) = self.types[t].node.symbol().and_then(|s| self.type_index(s.owner)) {
@@ -1334,8 +1353,10 @@ impl<'t> Lowering<'t> {
             );
         }
         // Java tests the object after evaluating the other arguments, which the test here comes
-        // before: only arguments that can neither throw nor do anything else may come after it.
-        if checked && !args[1..].iter().all(|a| quiet(*a)) {
+        // before: arguments that can neither throw nor do anything else may come after it, and
+        // an access's others are computed into locals before it (`held_arguments`).
+        let hold = checked && !args[1..].iter().all(|a| quiet(*a));
+        if hold && (looped.is_some() || added.is_some()) {
             return unsupported(
                 node,
                 &format!(
@@ -1344,11 +1365,7 @@ impl<'t> Lowering<'t> {
                 ),
             );
         }
-        let test = checked.then(|| {
-            let null = Box::new(self.synth(ExprKind::Null, object.pos, Type::Null));
-            let object = Box::new(self.reread(&object));
-            self.synth(ExprKind::Binary(BinOp::Eq, object, null), node.pos(), Type::Boolean)
-        });
+        let test = (checked && !hold).then(|| self.updater_test(node, &object));
         let ret = self.ty(node, node.java_type())?;
         let value = match added {
             _ if let Some(function) = looped => {
@@ -1379,6 +1396,23 @@ impl<'t> Lowering<'t> {
                 }
                 self.convert(value, ret)
             }
+            None if hold => {
+                let (held, object, values) = self.held_arguments(node, object, &args[1..])?;
+                let test = self.updater_test(node, &object);
+                let place = Place::Field { object: Box::new(object), name: field.to_string() };
+                let access = self.access_of(node, place, ty, class, values, update, put, false)?;
+                let value = self.synth(access, node.pos(), ret);
+                let refused =
+                    self.synth(ExprKind::Builtin(Builtin::UpdaterRefused, Vec::new()), node.pos(), ret);
+                let tested = ExprKind::Conditional(Box::new(test), Box::new(refused), Box::new(value));
+                let mut body = held;
+                body.push(Stmt::Yield(self.synth(tested, node.pos(), ret)));
+                let block = ExprKind::Switch {
+                    selector: Box::new(self.synth(ExprKind::Int(0), node.pos(), Type::Int)),
+                    cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+                };
+                return Ok(Some(block));
+            }
             None => {
                 let place = Place::Field { object: Box::new(object), name: field.to_string() };
                 let access = self.access_at(node, place, ty, class, &args[1..], update, put, false)?;
@@ -1388,6 +1422,42 @@ impl<'t> Lowering<'t> {
         let Some(test) = test else { return Ok(Some(value.kind)) };
         let refused = self.synth(ExprKind::Builtin(Builtin::UpdaterRefused, Vec::new()), node.pos(), ret);
         Ok(Some(ExprKind::Conditional(Box::new(test), Box::new(refused), Box::new(value))))
+    }
+
+    /// `object == null`, the test of an updater's object (`updater_access`).
+    fn updater_test(&self, node: Node<'t>, object: &Expr) -> Expr {
+        let null = Box::new(self.synth(ExprKind::Null, object.pos, Type::Null));
+        let object = Box::new(self.reread(object));
+        self.synth(ExprKind::Binary(BinOp::Eq, object, null), node.pos(), Type::Boolean)
+    }
+
+    /// The object of an updater's access and its other arguments `args`, computed in Java's
+    /// order before the updater tests the object: the object and each argument up to the last
+    /// that may do something are held in locals (`argument_order`'s `receiver$` and
+    /// `argument$`), declared by the statements returned, and the access reads those.
+    fn held_arguments(
+        &self,
+        node: Node<'t>,
+        object: Expr,
+        args: &[Node<'t>],
+    ) -> Result<(Vec<Stmt>, Expr, Vec<Expr>), Error> {
+        let pos = node.pos();
+        let last = args.iter().rposition(|a| !quiet(*a)).expect("an argument that may do something");
+        let mut held = Vec::new();
+        let mut hold = |value: Expr, prefix: &str| {
+            let name = format!("{prefix}u{}", value.id);
+            let read = self.synth(ExprKind::Var(name.clone()), value.pos, value.ty);
+            held.push(Stmt::Local { ty: value.ty, name, init: Some(value), pos });
+            read
+        };
+        let object = hold(object, RECEIVER);
+        let mut values = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let value = self.expr(*arg)?;
+            let literal = plain(*arg).kind().ends_with("_LITERAL");
+            values.push(if i <= last && !literal { hold(value, ARGUMENT) } else { value });
+        }
+        Ok((held, object, values))
     }
 
     /// `U.getAndUpdate(o, f)`, `U.accumulateAndGet(o, x, f)` and their kin, of the field `field`
@@ -1955,7 +2025,6 @@ impl<'t> Lowering<'t> {
         put: Option<bool>,
         volatile: bool,
     ) -> Result<ExprKind, Error> {
-        let ret = self.ty(node, node.java_type())?;
         // The update method of a static field compares with `==`, which the generator does not
         // write between a string's owned and borrowed forms.
         if ty == Type::String
@@ -1964,9 +2033,26 @@ impl<'t> Lowering<'t> {
         {
             return unsupported(node, "a compare-and-set of a static `String` field");
         }
+        let values = values.iter().map(|a| self.expr(*a)).collect::<Result<Vec<_>, Error>>()?;
+        self.access_of(node, place, ty, class, values, update, put, volatile)
+    }
+
+    /// `access_at` with its values lowered.
+    #[allow(clippy::too_many_arguments)]
+    fn access_of(
+        &self,
+        node: Node<'t>,
+        place: Place,
+        ty: Type,
+        class: usize,
+        values: Vec<Expr>,
+        update: Option<FieldUpdate>,
+        put: Option<bool>,
+        volatile: bool,
+    ) -> Result<ExprKind, Error> {
+        let ret = self.ty(node, node.java_type())?;
         if let Some(update) = update {
-            let operands =
-                values.iter().map(|a| Ok(self.stored(self.expr(*a)?, ty))).collect::<Result<_, Error>>()?;
+            let operands = values.into_iter().map(|v| self.stored(v, ty)).collect();
             let call = match place {
                 Place::Field { object, name } => {
                     self.field_update(Some(*object), class, &name, ty, update, operands)
@@ -1982,7 +2068,8 @@ impl<'t> Lowering<'t> {
             self.volatile_elements.borrow_mut().insert(index.id);
         }
         if put == Some(true) {
-            let value = self.stored(self.expr(values[0])?, ty);
+            let value = values.into_iter().next().expect("a write has its value");
+            let value = self.stored(value, ty);
             return Ok(ExprKind::Assign { op: None, target: place, value: Box::new(value) });
         }
         let read = match place {

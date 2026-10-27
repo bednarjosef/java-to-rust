@@ -513,7 +513,10 @@ name:
   one, and `AtomicReferenceFieldUpdater.newUpdater(C.class, V.class, "f")`, cast to a raw
   updater or held in a static block's local first, as netty does) are handles of a field for
   which `newUpdater` succeeds (`volatile`, not static, of the updater's type, and
-  accessible to the class that makes it). `get`, `set`, `lazySet`, the compare-and-set forms,
+  accessible to the class that makes it). The classes may be class literals, locals of the
+  static block that hold them, or calls of a static method that returns its argument cast
+  (netty's `cls(Node.class)`); the value class of a field whose type is a type variable is that
+  variable's erasure. `get`, `set`, `lazySet`, the compare-and-set forms,
   `getAndSet` and `getAndAdd` are the field's access or update; `getAndIncrement`,
   `incrementAndGet`, `addAndGet` and their kin are its `getAndAdd`, with the new value computed
   from the old as the JDK's updater does. `getAndUpdate`, `updateAndGet`, `getAndAccumulate`
@@ -523,9 +526,11 @@ name:
   and repeat until the field's compare-and-set succeeds. The updater throws
   `ClassCastException` without a message for a null object, where the field's access would
   throw `NullPointerException`: an object other than `this` is tested first
-  (`Builtin::UpdaterRefused`), so it must be a local or an enclosing instance, and the other
-  arguments literals, constant fields, locals, lambdas, references to static methods, or
-  arithmetic of those that cannot throw, which the test may come before. Other objects and arguments, and an updater that is not a constant, are rejected.
+  (`Builtin::UpdaterRefused`), so it must be a local or an enclosing instance. The test may
+  come before other arguments that are literals, constant fields, locals, lambdas, references to
+  static methods, or arithmetic of those that cannot throw; with any other argument, the object
+  and the arguments are first computed into locals (`receiver$`, `argument$`), in Java's order,
+  for the field's access, though not for the forms that compute a new value or loop. Other objects and arguments, and an updater that is not a constant, are rejected.
 - **Atomic updates** (compare-and-set, compare-and-exchange, get-and-add, get-and-set,
   get-and-bitwise, every memory mode) of a field become a method that lowering adds to the
   field's class, one per field and form (`compareAndSetValue(expected, value)`), whose body
