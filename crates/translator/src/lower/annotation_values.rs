@@ -372,6 +372,20 @@ impl<'t> Lowering<'t> {
         };
         let pos = node.pos();
         let ty = self.ty(node, node.java_type())?;
+        // `getParameterAnnotations`' arrays are made as `Annotation[]`s (`rows`' element), and
+        // where the program holds an `Annotation[][]` as an `Object[]` (`covariant`), each is
+        // stored as an `Object`, and `new Annotation[n][0]` is made as `new_array` makes it.
+        let rows = match node.java_type().strip_suffix("[]") {
+            Some(row) if parameters => Type::array(self.ty(node, row)?),
+            _ => ty,
+        };
+        let as_held = |value: Expr| {
+            if rows == ty {
+                return value;
+            }
+            self.note_object_array(rows.element());
+            self.synth(ExprKind::Cast(ty, Box::new(value)), pos, ty)
+        };
         // The members with annotations that Java finds, by the name of their declaration, each
         // with the slots of the table that hold it and what the call gives for it.
         let mut cases: Vec<(Vec<i32>, Expr)> = Vec::new();
@@ -385,7 +399,7 @@ impl<'t> Lowering<'t> {
             }
             seen.insert(key.clone(), None);
             if parameters {
-                let element = ty.element();
+                let element = rows.element();
                 let mut arrays = Vec::new();
                 for (i, param) in decl.list("parameters").enumerate() {
                     let holder = format!("{key} parameter {i}");
@@ -402,6 +416,7 @@ impl<'t> Lowering<'t> {
                     continue;
                 }
                 seen.insert(key, Some(cases.len()));
+                let arrays = arrays.into_iter().map(|a| self.convert(a, ty.element())).collect();
                 cases.push((vec![slot], self.synth(ExprKind::ArrayLit(arrays), pos, ty)));
                 continue;
             }
@@ -436,7 +451,8 @@ impl<'t> Lowering<'t> {
                     ExprKind::Field { object: Box::new(self.copy(&var)), name: "parameterTypes".to_string() };
                 let types = self.synth(types, pos, Type::array(Type::JavaClass));
                 let count = self.synth(ExprKind::Length(Box::new(types)), pos, Type::Int);
-                ExprKind::NewArray(vec![count, self.synth(ExprKind::Int(0), pos, Type::Int)])
+                let empty = ExprKind::NewArray(vec![count, self.synth(ExprKind::Int(0), pos, Type::Int)]);
+                as_held(self.synth(empty, pos, rows)).kind
             }
             _ => ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]),
         };
