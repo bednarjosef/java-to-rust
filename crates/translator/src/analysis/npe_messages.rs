@@ -59,6 +59,18 @@ pub fn npe_messages(
     names: &BytecodeNames,
     approximate: bool,
 ) -> Result<(), Vec<Error>> {
+    npe_messages_kept(class, facts, names, approximate, &mut KeptMessages::default())
+}
+
+/// `npe_messages`, with the messages of each method that `kept` has not forgotten taken from it,
+/// and those of the others found and kept there.
+pub fn npe_messages_kept(
+    class: &Class,
+    facts: &mut Facts,
+    names: &BytecodeNames,
+    approximate: bool,
+    cache: &mut KeptMessages,
+) -> Result<(), Vec<Error>> {
     let first_needed = || {
         facts
             .npe_message_needed
@@ -74,90 +86,52 @@ pub fn npe_messages(
         );
         return Err(vec![Error { pos, message }]);
     }
-    let messages = RefCell::new(HashMap::new());
-    let approximated = RefCell::new(HashSet::new());
-    for method in &class.methods {
-        let Some(outermost) = outermost(class, method.class) else { continue };
-        // The JDK's classes are compiled with the names of their locals (`-g`), so the JVM shows
-        // those. The standard classes of `java.lang` are the translator's own
-        // (`java/Standard.java`, `java/Threads.java`), whose code is not the JDK's; the others are
-        // the JDK's (`CharacterName`), and its overlays get the messages of their own code, as
-        // other overlays do.
-        let decl = &class.types[method.class];
-        let jdk = super::exceptions::from_jdk(class, decl);
-        let outer = decl.name.split('.').take(3).collect::<Vec<_>>().join(".");
-        if jdk && decl.package == "java.lang" && crate::lower::is_standard(&outer) {
-            continue;
-        }
-        // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
-        let jdk = jdk || method.jdk_code;
-        let (mut receivers, mut arguments) = (HashMap::new(), HashMap::new());
-        let mut uninitialized = HashMap::new();
-        for s in &method.body {
-            visit_stmt(s, &mut |_| {}, &mut |s| match s {
-                Stmt::Local { name, init: Some(init), .. } if name.starts_with(crate::lower::RECEIVER) => {
-                    receivers.insert(name.as_str(), init);
-                }
-                Stmt::Local { name, init: Some(init), .. } if name.starts_with(crate::lower::ARGUMENT) => {
-                    arguments.insert(name.as_str(), init);
-                }
-                Stmt::Local { name, init: None, pos, .. } => {
-                    uninitialized.insert(name.as_str(), *pos);
-                }
-                _ => {}
-            });
-        }
-        // The locals that hold an element that a run of statements reads more than once
-        // (`lower/element_reads.rs`): declared where the first read is, which becomes
-        // `(name = element)` there.
-        let mut elements = HashMap::new();
-        for s in &method.body {
-            visit_stmt(
-                s,
-                &mut |e| {
-                    visit_expr(e, &mut |x| {
-                        if let ExprKind::Assign { op: None, target: Place::Var(name), value } = &x.kind
-                            && matches!(value.kind, ExprKind::Index(..))
-                            && uninitialized.get(name.as_str()).is_some_and(|&p| p == x.pos && p == value.pos)
-                        {
-                            elements.insert(name.as_str(), &**value);
-                        }
-                    })
-                },
-                &mut |_| {},
-            );
-        }
-        let at = Messages {
-            class,
-            names,
-            outermost: &outermost,
-            method,
-            jdk,
-            receivers,
-            arguments,
-            elements,
-            declared: Default::default(),
-            proxied: Default::default(),
-            approximated: approximate.then_some(&approximated),
-        };
-        for s in &method.body {
-            visit_stmt(
-                s,
-                &mut |e| visit_expr(e, &mut |x| at.expr(x, &mut messages.borrow_mut())),
-                &mut |s| at.stmt(s, &mut messages.borrow_mut()),
-            );
-        }
-        // The initializers of the instance fields, which every constructor that does not start
-        // with `this(..)` runs: as code of the class's first constructor, as they read nothing of
-        // a constructor's own.
-        let first = class.methods.iter().find(|m| m.class == method.class && m.name == "<init>");
-        if first.is_some_and(|c| std::ptr::eq(c, method)) {
-            for init in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
-                visit_expr(init, &mut |x| at.expr(x, &mut messages.borrow_mut()));
-            }
+    // The first constructor of each class, which has the code of its fields' initializers.
+    let mut first_ctors = HashSet::new();
+    let mut classes = HashSet::new();
+    for (index, method) in class.methods.iter().enumerate() {
+        if method.name == "<init>" && classes.insert(method.class) {
+            first_ctors.insert(index);
         }
     }
-    let mut messages = messages.into_inner();
+    let mut messages = HashMap::new();
+    let mut approximated = HashSet::new();
+    let mut anew = 0;
+    for (index, method) in class.methods.iter().enumerate() {
+        let first = first_ctors.contains(&index);
+        if !cache.keep {
+            let found = method_messages(class, names, approximate, method, first);
+            messages.extend(found.messages);
+            approximated.extend(found.approximated);
+            continue;
+        }
+        let found = cache.methods.entry(index).or_insert_with(|| {
+            anew += 1;
+            method_messages(class, names, approximate, method, first)
+        });
+        messages.extend(found.messages.iter().map(|(id, m)| (*id, m.clone())));
+        approximated.extend(found.approximated.iter().copied());
+    }
+    // To check that the kept messages are those found anew (`docs/performance.md`).
+    if cache.keep && std::env::var_os("JAVA_TO_RUST_CHECK_KEPT_MESSAGES").is_some() {
+        let (mut again, mut again_approximated) = (HashMap::new(), HashSet::new());
+        for (index, method) in class.methods.iter().enumerate() {
+            let found = method_messages(class, names, approximate, method, first_ctors.contains(&index));
+            again.extend(found.messages);
+            again_approximated.extend(found.approximated);
+        }
+        assert!(
+            again == messages && again_approximated == approximated,
+            "the kept messages are not those found anew"
+        );
+    }
+    if cache.keep && crate::timings::enabled() {
+        eprintln!(
+            "timing: messages: {anew} of {} methods found anew, {} messages kept",
+            class.methods.len(),
+            cache.methods.values().map(|m| m.messages.len()).sum::<usize>()
+        );
+    }
     messages.retain(|id, _| facts.null_checked.contains_key(id));
     let mut missing: Vec<(Pos, ExprId)> = facts
         .npe_message_needed
@@ -166,7 +140,6 @@ pub fn npe_messages(
         .filter_map(|id| facts.null_checked.get(id).map(|p| (*p, *id)))
         .collect();
     if approximate {
-        let mut approximated = approximated.into_inner();
         for (_, id) in missing.drain(..) {
             messages.insert(id, None);
             approximated.insert(id);
@@ -202,6 +175,127 @@ pub fn npe_messages(
         Error { pos, message }
     });
     Err(errors.collect())
+}
+
+/// The messages that the code of `method` gives its dereferences, and with `approximate` those it
+/// approximates: from the method's code, the declarations and `names` alone, not the facts.
+///
+/// The initializers of the instance fields, which every constructor that does not start with
+/// `this(..)` runs, are code of the class's first constructor (`first`), as they read nothing of
+/// a constructor's own.
+fn method_messages(
+    class: &Class,
+    names: &BytecodeNames,
+    approximate: bool,
+    method: &Method,
+    first: bool,
+) -> MethodMessages {
+    let found = MethodMessages::default();
+    let messages = RefCell::new(HashMap::new());
+    let approximated = RefCell::new(HashSet::new());
+    let Some(outermost) = outermost(class, method.class) else { return found };
+    // The JDK's classes are compiled with the names of their locals (`-g`), so the JVM shows
+    // those. The standard classes of `java.lang` are the translator's own
+    // (`java/Standard.java`, `java/Threads.java`), whose code is not the JDK's; the others are
+    // the JDK's (`CharacterName`), and its overlays get the messages of their own code, as
+    // other overlays do.
+    let decl = &class.types[method.class];
+    let jdk = super::exceptions::from_jdk(class, decl);
+    let outer = decl.name.split('.').take(3).collect::<Vec<_>>().join(".");
+    if jdk && decl.package == "java.lang" && crate::lower::is_standard(&outer) {
+        return found;
+    }
+    // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
+    let jdk = jdk || method.jdk_code;
+    let (mut receivers, mut arguments) = (HashMap::new(), HashMap::new());
+    let mut uninitialized = HashMap::new();
+    for s in &method.body {
+        visit_stmt(s, &mut |_| {}, &mut |s| match s {
+            Stmt::Local { name, init: Some(init), .. } if name.starts_with(crate::lower::RECEIVER) => {
+                receivers.insert(name.as_str(), init);
+            }
+            Stmt::Local { name, init: Some(init), .. } if name.starts_with(crate::lower::ARGUMENT) => {
+                arguments.insert(name.as_str(), init);
+            }
+            Stmt::Local { name, init: None, pos, .. } => {
+                uninitialized.insert(name.as_str(), *pos);
+            }
+            _ => {}
+        });
+    }
+    // The locals that hold an element that a run of statements reads more than once
+    // (`lower/element_reads.rs`): declared where the first read is, which becomes
+    // `(name = element)` there.
+    let mut elements = HashMap::new();
+    for s in &method.body {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    if let ExprKind::Assign { op: None, target: Place::Var(name), value } = &x.kind
+                        && matches!(value.kind, ExprKind::Index(..))
+                        && uninitialized.get(name.as_str()).is_some_and(|&p| p == x.pos && p == value.pos)
+                    {
+                        elements.insert(name.as_str(), &**value);
+                    }
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    let at = Messages {
+        class,
+        names,
+        outermost: &outermost,
+        method,
+        jdk,
+        receivers,
+        arguments,
+        elements,
+        declared: Default::default(),
+        proxied: Default::default(),
+        approximated: approximate.then_some(&approximated),
+    };
+    for s in &method.body {
+        visit_stmt(s, &mut |e| visit_expr(e, &mut |x| at.expr(x, &mut messages.borrow_mut())), &mut |s| {
+            at.stmt(s, &mut messages.borrow_mut())
+        });
+    }
+    if first {
+        for init in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
+            visit_expr(init, &mut |x| at.expr(x, &mut messages.borrow_mut()));
+        }
+    }
+    MethodMessages { messages: messages.into_inner(), approximated: approximated.into_inner() }
+}
+
+/// What `method_messages` finds for one method.
+#[derive(Default)]
+struct MethodMessages {
+    messages: HashMap<ExprId, Option<String>>,
+    approximated: HashSet<ExprId>,
+}
+
+/// The messages of each method, kept from one run of `npe_messages_kept` to the next where its
+/// code does not change: a census stubs a few hundred methods between its runs of the analyses
+/// (`program/census.rs`), and finding the messages of every method takes minutes in a large one.
+#[derive(Default)]
+pub struct KeptMessages {
+    methods: HashMap<usize, MethodMessages>,
+    /// Whether to keep them: not for a single run.
+    keep: bool,
+}
+
+impl KeptMessages {
+    /// Messages kept from run to run.
+    pub fn new() -> KeptMessages {
+        KeptMessages { methods: HashMap::new(), keep: true }
+    }
+
+    /// Forgets the messages of the method of index `method`, whose code changed.
+    pub fn forget(&mut self, method: usize) {
+        self.methods.remove(&method);
+    }
 }
 
 /// The position of each dereference of `ids` (`Facts::null_checked`), with that of the method it
