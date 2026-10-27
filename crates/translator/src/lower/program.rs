@@ -220,7 +220,13 @@ fn lower_with<'t>(
         Ok(None) | Err(_) => true,
     });
     let live = live.and_then(Result::ok).flatten();
-    let first = rejected.first().map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
+    // The error retried for: one that runs, or, when the walk stopped at one (and says which),
+    // the first that is not of a missing class.
+    let first = rejected
+        .iter()
+        .find(|r| !names_missing_class(&r.error) && live.as_ref().is_none_or(|l| l.runs(r.ty, r.method)))
+        .or(rejected.first())
+        .map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
     let mut sink = census.borrow_mut();
     let string_array_writes = lowering.string_array_writes.take();
     sink.wrote_string_arrays |= !string_array_writes.is_empty();

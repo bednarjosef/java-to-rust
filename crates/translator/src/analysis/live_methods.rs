@@ -271,7 +271,15 @@ impl Walk<'_> {
                 {
                     state.stopped = true;
                     if timings {
-                        eprintln!("timing: live walk stopped after {walks} walks");
+                        let method = &class.methods[m];
+                        let at = if state.unknown.is_some() {
+                            "what the facts do not tell".to_string()
+                        } else if self.stop.methods.contains(&m) {
+                            format!("{}.{}", class.types[method.class].name, method.name)
+                        } else {
+                            "a class of the code initialized or constructed".to_string()
+                        };
+                        eprintln!("timing: live walk stopped after {walks} walks, at {at}");
                     }
                     break;
                 }
