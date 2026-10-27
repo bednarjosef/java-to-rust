@@ -245,13 +245,15 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// the same, as they are plain code over the JDK's other classes: `Runtime.Version`, a version
 /// string parsed and compared (`JarFile`'s and `ModulePath`'s release), with the pattern it
 /// parses with; and the decoder and encoder of each standard charset, which the translator's
-/// `newDecoder` and `newEncoder` make (`CHARSET_CODERS`); and `System.Logger` with its levels,
-/// whose loggers the translator's `System.getLogger` makes (`REDIRECTED_CALLS`).
+/// `newDecoder` and `newEncoder` make (`CHARSET_CODERS`); `System.Logger` with its levels,
+/// whose loggers the translator's `System.getLogger` makes (`REDIRECTED_CALLS`); and
+/// `System.LoggerFinder`, which the JDK's `jdk.internal.logger` and a program's finders extend.
 pub const TRANSLATED_NESTED: &[&str] = &[
     "java.lang.Runtime.Version",
     "java.lang.Runtime.VersionPattern",
     "java.lang.System.Logger",
     "java.lang.System.Logger.Level",
+    "java.lang.System.LoggerFinder",
     "sun.nio.cs.ISO_8859_1.Decoder",
     "sun.nio.cs.ISO_8859_1.Encoder",
     "sun.nio.cs.US_ASCII.Decoder",
