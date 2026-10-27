@@ -1721,8 +1721,10 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
             Vec::new()
         }
         // A range of a `CharSequence` that a builder appends is read with its `length` and
-        // `charAt` (`codegen::char_sequence`), or is a string's or a builder's.
+        // `charAt` (`codegen::char_sequence`), or is a string's or a builder's; one that it
+        // inserts is a string's or a builder's.
         ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args) if args.len() == 4 => Vec::new(),
+        ExprKind::Builtin(Builtin::Builder(BuilderOp::Insert), args) if args.len() == 5 => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()

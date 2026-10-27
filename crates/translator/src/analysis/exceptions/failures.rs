@@ -254,6 +254,9 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         Builtin::Builder(BuilderOp::CodePointCount | BuilderOp::OffsetByCodePoints) => {
             &["java.lang.IndexOutOfBoundsException"]
         }
+        // The offset outside the builder, or the range outside the `char[]`
+        // (`StringIndexOutOfBoundsException`) or the `CharSequence` (`IndexOutOfBoundsException`).
+        Builtin::Builder(BuilderOp::Insert) if args.len() == 5 => &[SIOOBE, "java.lang.IndexOutOfBoundsException"],
         // Inserting at the start is always in bounds.
         Builtin::Builder(BuilderOp::Insert) if matches!(args[1].kind, ExprKind::Int(0)) => &[],
         // The destination range of `getChars` outside the array is an `IndexOutOfBoundsException`.
@@ -942,7 +945,10 @@ pub(super) fn runtime_failures(
                         args.len() == 2 && text(&args[1])
                             || args.len() == 4 && (text(&args[1]) || matches!(args[1].ty, Type::Class(c, _) if c == CHAR_SEQUENCE))
                     }
-                    Builtin::Builder(BuilderOp::Insert) => args.len() == 3 && text(&args[2]),
+                    Builtin::Builder(BuilderOp::Insert) => {
+                        args.len() == 3 && text(&args[2])
+                            || args.len() == 5 && (text(&args[2]) || matches!(args[2].ty, Type::Class(c, _) if c == CHAR_SEQUENCE))
+                    }
                     _ => false,
                 };
                 let checked = if takes_null

@@ -499,6 +499,23 @@ impl<'a> Gen<'a> {
                     self.append_range_call(id, &sb, &format!("{text}, {start}, {end}"))
                 }
             }
+            BuilderOp::Insert if rest.len() == 4 => {
+                let offset = self.int_arg(&rest[0]);
+                if matches!(rest[1].ty, Type::Array(_)) {
+                    let texts = vec![offset, String::new(), self.int_arg(&rest[2]), self.int_arg(&rest[3])];
+                    return self.array_call(rest, 1, texts, |_, t| method("insert_chars_range", t.to_vec()));
+                }
+                // Java asks a `CharSequence` of a program class for its `length` and `charAt` only
+                // after it checks the offset, and inserts as it reads them.
+                if matches!(rest[1].ty, Type::Class(..)) && !self.plain_sequence(&rest[1]) {
+                    let message = "inserting a range of a `CharSequence` that a program class implements";
+                    self.rejected.push(Error { pos: rest[1].pos, message: message.to_string() });
+                    return Code::atom(sb);
+                }
+                let text = self.range_text(&rest[1]);
+                let (start, end) = (self.int_arg(&rest[2]), self.int_arg(&rest[3]));
+                method("insert_range", vec![offset, text, start, end])
+            }
             BuilderOp::Insert => {
                 let offset = self.int_arg(&rest[0]);
                 let (name, value) = self.appended("insert", &rest[1]);

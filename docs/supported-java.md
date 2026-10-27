@@ -89,7 +89,10 @@ included (docs/collector.md).
   builders they are `java::SharedStringBuilder`. Their capacity grows as Java's does (twice
   plus two, from the byte length when text beyond Latin-1 first arrives, with room for the
   longest `double` or `float` text before appending one), so `capacity()` and `trimToSize()`
-  answer what Java's do.
+  answer what Java's do. `append` and `insert` take every overload, ranges of a `char[]` or a
+  `CharSequence` among them, and the bounds checks throw Java 26's exceptions with its
+  messages; inserting a range of a `CharSequence` that a program class implements is rejected
+  (Java reads it with `charAt` after making room for it).
 - **Characters**: the `Character` tests and conversions, with their `int` code point overloads,
   use tables generated from the JDK's data. Case conversion uses Rust's Unicode tables with Java's
   exceptions, and `isAlphabetic` uses Rust's `is_alphabetic`; both may differ from Java on code

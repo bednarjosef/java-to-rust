@@ -490,18 +490,28 @@ impl<'t> Lowering<'t> {
             return self.as_char_sequence(node, Builtin::Builder(op), args);
         }
         // A range of a program class that implements `CharSequence` is a range of that interface.
-        if op == BuilderOp::Append && args.len() == 3 && matches!(args[0].ty, Type::Class(..)) {
-            let first = args.remove(0);
-            args.insert(0, self.convert(first, Type::class(CHAR_SEQUENCE)));
+        let range_of = match op {
+            BuilderOp::Append if args.len() == 3 => Some(0),
+            BuilderOp::Insert if args.len() == 4 => Some(1),
+            _ => None,
+        };
+        if let Some(i) = range_of
+            && matches!(args[i].ty, Type::Class(..))
+        {
+            let sequence = args.remove(i);
+            args.insert(i, self.convert(sequence, Type::class(CHAR_SEQUENCE)));
         }
         let shown = match op {
             BuilderOp::Append if args.len() == 1 => Some(0),
             BuilderOp::Insert if args.len() == 2 => Some(1),
-            BuilderOp::Append
-                if args.len() == 3
-                    && (char_sequence(args[0].ty)
-                        || args[0].ty == Type::class(CHAR_SEQUENCE)
-                        || args[0].ty == Type::array(Type::Char)) =>
+            // A range of a `char[]` or of a `CharSequence`: `append(s, start, end)`,
+            // `insert(offset, s, start, end)`, and with a `char[]` an offset and a length instead.
+            BuilderOp::Append | BuilderOp::Insert
+                if range_of.is_some_and(|i| {
+                    char_sequence(args[i].ty)
+                        || args[i].ty == Type::class(CHAR_SEQUENCE)
+                        || args[i].ty == Type::array(Type::Char)
+                }) =>
             {
                 None
             }
