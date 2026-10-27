@@ -85,8 +85,43 @@ pub type StringBuilder = Builder<Arc<RefCell<Vec<u16>>>>;
 pub type SharedStringBuilder = Builder<Arc<Locked<Vec<u16>>>>;
 
 impl<C: BuilderCell> Default for Builder<C> {
+    /// Room for 16 units, as Java's.
     fn default() -> Self {
-        Builder(C::new(Vec::new()))
+        Builder(C::new(Vec::with_capacity(16)))
+    }
+}
+
+/// Room for `more` units more in a builder's units, grown as Java grows its array
+/// (`AbstractStringBuilder.newCapacity`): to twice the capacity and two more, or to what is
+/// needed if that is more. So the units' capacity is always Java's, which `capacity()` answers.
+fn room(value: &mut Vec<u16>, more: usize) {
+    let needed = value.len() + more;
+    if needed > value.capacity() {
+        let grown = (value.capacity() * 2 + 2).max(needed);
+        value.reserve_exact(grown - value.len());
+    }
+}
+
+/// Room for `incoming`, as Java makes it when the units come from a string, a builder or a
+/// `char` (`ensureCapacityNewCoder`). Java keeps Latin-1 text one byte per unit, so when the
+/// first unit beyond Latin-1 arrives and the array must grow, it grows from the array's length
+/// in bytes, which is the capacity, not from twice it.
+fn room_for(value: &mut Vec<u16>, incoming: &[u16]) {
+    room_widening(value, incoming.len(), incoming.iter().any(|&u| u > 0xFF));
+}
+
+/// Room for `more` units, of which some are beyond Latin-1 when `wide`, as `room_for` makes it.
+fn room_widening(value: &mut Vec<u16>, more: usize, wide: bool) {
+    let needed = value.len() + more;
+    let capacity = value.capacity();
+    if needed > capacity {
+        let widening = wide && value.iter().all(|&u| u <= 0xFF);
+        let grown = if widening {
+            (capacity + (2 * needed - capacity).max(capacity + 4)) / 2
+        } else {
+            (capacity * 2 + 2).max(needed)
+        };
+        value.reserve_exact(grown - value.len());
     }
 }
 
@@ -142,11 +177,12 @@ impl<C: BuilderCell> Builder<C> {
         Builder(C::new(Vec::with_capacity(capacity as usize)))
     }
 
-    /// `new StringBuilder(s)`.
+    /// `new StringBuilder(s)`, with room for 16 units more than `s` has.
     pub fn from_text(s: &Wtf8) -> Self {
-        let b = Self::new();
-        b.append_str(s);
-        b
+        let units: Vec<u16> = s.units().collect();
+        let mut value = Vec::with_capacity(units.len() + 16);
+        value.extend_from_slice(&units);
+        Builder(C::new(value))
     }
 
     /// `a == b`: whether two handles name the same builder.
@@ -157,11 +193,15 @@ impl<C: BuilderCell> Builder<C> {
     /// `sb.append(s)` of a string.
     pub fn append_str(&self, s: &Wtf8) -> &Self {
         let mut value = self.0.units_mut();
-        if s.is_ascii() {
-            value.extend(s.as_bytes().iter().map(|&b| u16::from(b)));
-        } else {
-            value.extend(s.units());
+        if !s.is_ascii() {
+            let units: Vec<u16> = s.units().collect();
+            room_for(&mut value, &units);
+            value.extend_from_slice(&units);
+            drop(value);
+            return self;
         }
+        room(&mut value, s.as_bytes().len());
+        value.extend(s.as_bytes().iter().map(|&b| u16::from(b)));
         drop(value);
         self
     }
@@ -169,26 +209,58 @@ impl<C: BuilderCell> Builder<C> {
     /// `sb.append(x)` of a value whose `Display` is Java's text for it, such as an `int` or a
     /// `java::Double`. It must not read this builder, which is borrowed meanwhile.
     pub fn append<T: fmt::Display>(&self, value: T) -> &Self {
-        let _ = write!(Units(&mut self.0.units_mut()), "{value}");
+        let mut units = Vec::new();
+        let _ = write!(Units(&mut units), "{value}");
+        self.append_chars(&units)
+    }
+
+    /// `sb.append(d)` of a `double`, as `append` shows it: Java first makes room for the longest
+    /// text of one (`DoubleToDecimal.MAX_CHARS`).
+    pub fn append_double<T: fmt::Display>(&self, value: T) -> &Self {
+        self.append_after_room(value, 24)
+    }
+
+    /// `sb.append(f)` of a `float`, with room first for the longest text of one
+    /// (`FloatToDecimal.MAX_CHARS`).
+    pub fn append_float<T: fmt::Display>(&self, value: T) -> &Self {
+        self.append_after_room(value, 15)
+    }
+
+    fn append_after_room<T: fmt::Display>(&self, value: T, most: usize) -> &Self {
+        let mut units = Vec::new();
+        let _ = write!(Units(&mut units), "{value}");
+        let mut value = self.0.units_mut();
+        room(&mut value, most.max(units.len()));
+        value.extend_from_slice(&units);
+        drop(value);
         self
     }
 
     /// `sb.append(c)` of a `char`.
     pub fn append_char(&self, c: u16) -> &Self {
-        self.0.units_mut().push(c);
+        let mut value = self.0.units_mut();
+        room_for(&mut value, &[c]);
+        value.push(c);
+        drop(value);
         self
     }
 
     /// `sb.append(other)` of a builder, which may be this one.
     pub fn append_builder(&self, other: &Self) -> &Self {
         let copy = other.0.units().clone();
-        self.0.units_mut().extend_from_slice(&copy);
+        let mut value = self.0.units_mut();
+        room_for(&mut value, &copy);
+        value.extend_from_slice(&copy);
+        drop(value);
         self
     }
 
     /// `sb.append(chars)` of a `char[]`.
     pub fn append_chars(&self, chars: &[u16]) -> &Self {
-        self.0.units_mut().extend_from_slice(chars);
+        let mut value = self.0.units_mut();
+        room(&mut value, chars.len());
+        value.extend_from_slice(chars);
+        drop(value);
         self
     }
 
@@ -266,6 +338,7 @@ impl<C: BuilderCell> Builder<C> {
     fn insert_units(&self, offset: i32, units: &[u16]) -> &Self {
         let mut value = self.0.units_mut();
         self.check_offset(offset, value.len());
+        room_for(&mut value, units);
         let at = offset as usize;
         value.splice(at..at, units.iter().copied());
         self
@@ -367,7 +440,10 @@ impl<C: BuilderCell> Builder<C> {
     pub fn replace(&self, start: i32, end: i32, s: &Wtf8) -> &Self {
         let mut value = self.0.units_mut();
         let (start, end) = Self::range(start, end, value.len());
-        value.splice(start..end, s.units());
+        let units: Vec<u16> = s.units().collect();
+        let wide = units.iter().any(|&u| u > 0xFF);
+        room_widening(&mut value, units.len().saturating_sub(end - start), wide);
+        value.splice(start..end, units);
         drop(value);
         self
     }
@@ -392,7 +468,10 @@ impl<C: BuilderCell> Builder<C> {
         if len < 0 {
             out_of_bounds(format!("String index out of range: {len}"));
         }
-        self.0.units_mut().resize(len as usize, 0);
+        let mut value = self.0.units_mut();
+        let more = (len as usize).saturating_sub(value.len());
+        room(&mut value, more);
+        value.resize(len as usize, 0);
     }
 
     /// `sb.ensureCapacity(minimumCapacity)`: room for that many characters; a capacity that is
@@ -400,7 +479,17 @@ impl<C: BuilderCell> Builder<C> {
     pub fn ensure_capacity(&self, minimum: i32) {
         let mut value = self.0.units_mut();
         let more = usize::try_from(minimum).unwrap_or(0).saturating_sub(value.len());
-        value.reserve(more);
+        room(&mut value, more);
+    }
+
+    /// `sb.capacity()`: the units it has room for (see `room`).
+    pub fn capacity(&self) -> i32 {
+        self.0.units().capacity() as i32
+    }
+
+    /// `sb.trimToSize()`: room for its units alone.
+    pub fn trim_to_size(&self) {
+        self.0.units_mut().shrink_to_fit();
     }
 
     /// `sb.indexOf(s, from)`.
@@ -452,7 +541,10 @@ impl<C: BuilderCell> Builder<C> {
     pub fn repeat_code_point(&self, cp: i32, count: i32) -> &Self {
         if check_count(count) {
             let units = code_point_units(cp);
-            self.0.units_mut().extend(units.iter().cycle().take(units.len() * count as usize));
+            let total = units.len() * count as usize;
+            let mut value = self.0.units_mut();
+            room(&mut value, total);
+            value.extend(units.iter().cycle().take(total));
         }
         self
     }
@@ -461,7 +553,10 @@ impl<C: BuilderCell> Builder<C> {
     pub fn repeat_str(&self, s: &Wtf8, count: i32) -> &Self {
         if check_count(count) {
             let units: Vec<u16> = s.units().collect();
-            self.0.units_mut().extend(units.iter().cycle().take(units.len() * count as usize));
+            let total = units.len() * count as usize;
+            let mut value = self.0.units_mut();
+            room(&mut value, total);
+            value.extend(units.iter().cycle().take(total));
         }
         self
     }
@@ -470,7 +565,10 @@ impl<C: BuilderCell> Builder<C> {
     pub fn repeat_builder(&self, other: &Self, count: i32) -> &Self {
         if check_count(count) {
             let copy = other.0.units().clone();
-            self.0.units_mut().extend(copy.iter().cycle().take(copy.len() * count as usize));
+            let total = copy.len() * count as usize;
+            let mut value = self.0.units_mut();
+            room(&mut value, total);
+            value.extend(copy.iter().cycle().take(total));
         }
         self
     }

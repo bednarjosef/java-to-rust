@@ -240,7 +240,9 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | BuilderOp::ToString
             | BuilderOp::IsEmpty
             | BuilderOp::CompareTo
-            | BuilderOp::EnsureCapacity,
+            | BuilderOp::EnsureCapacity
+            | BuilderOp::Capacity
+            | BuilderOp::TrimToSize,
         ) => &[],
         // A negative count, an invalid code point.
         Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {

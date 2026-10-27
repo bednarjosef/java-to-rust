@@ -131,6 +131,10 @@ pub enum BuilderOp {
     GetChars,
     /// `sb.ensureCapacity(minimumCapacity)`, which leaves the text as it is.
     EnsureCapacity,
+    /// `sb.capacity()`.
+    Capacity,
+    /// `sb.trimToSize()`, which leaves the text as it is.
+    TrimToSize,
 }
 
 impl BuilderOp {

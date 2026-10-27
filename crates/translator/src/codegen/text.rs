@@ -507,6 +507,8 @@ impl<'a> Gen<'a> {
             BuilderOp::Reverse => method("reverse", vec![]),
             BuilderOp::Length => method("length", vec![]),
             BuilderOp::IsEmpty => method("is_empty", vec![]),
+            BuilderOp::Capacity => method("capacity", vec![]),
+            BuilderOp::TrimToSize => method("trim_to_size", vec![]),
             BuilderOp::ToString => method("text", vec![]),
             BuilderOp::CharAt
             | BuilderOp::DeleteCharAt
@@ -616,6 +618,12 @@ impl<'a> Gen<'a> {
             Type::Boxed(kind) => {
                 let value = self.value(x, *kind).text;
                 (base.to_string(), self.shown(*kind, value))
+            }
+            // Java's `append` makes room for the longest text of the number first.
+            Type::Double | Type::Float if base == "append" => {
+                let value = self.expr(x).text;
+                let name = if x.ty == Type::Double { "double" } else { "float" };
+                (suffixed(name), self.shown(x.ty, value))
             }
             Type::Double | Type::Float => {
                 let value = self.expr(x).text;

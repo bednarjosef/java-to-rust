@@ -2021,6 +2021,8 @@ fn builder_method(op: BuilderOp) -> Option<&'static str> {
         BuilderOp::OffsetByCodePoints => "offsetByCodePoints",
         BuilderOp::GetChars => "getChars",
         BuilderOp::EnsureCapacity => "ensureCapacity",
+        BuilderOp::Capacity => "capacity",
+        BuilderOp::TrimToSize => "trimToSize",
     })
 }
 
