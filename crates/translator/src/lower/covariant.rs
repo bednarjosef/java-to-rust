@@ -31,7 +31,8 @@
 //! own class, and an `instanceof` or a cast to an array class tests that class
 //! (`Class::array_tests`). A class literal of an array type is the array's own class
 //! (`exact_ty`). An array of arrays (`String[][]` as an `Object[][]`, `int[][]` as an
-//! `Object[]`) carries its class too.
+//! `Object[]`) carries its class too, and so does each row of a new array of several dimensions
+//! that the translation holds as an `Object[]` (`Class::object_rows`).
 //!
 //! An array that becomes an `Object` (`Object o = names`) meets each array type that an `Object`
 //! is tested for or cast to where it may be one (`meets_through_object`): a `String[]` and

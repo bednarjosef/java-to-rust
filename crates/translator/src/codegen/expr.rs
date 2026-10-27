@@ -457,7 +457,7 @@ impl<'a> Gen<'a> {
             ExprKind::Index(array, index) => self.index(e.id, array, index),
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
-            // `new int[n][m]` where `int[][]` is an `Object[]` (see `lower::arrays::new_array`).
+            // `new int[n][m]` where `int[][]` is an `Object[]` (see `lower::arrays::sized_array`).
             ExprKind::Cast(to @ Type::Array(_), value)
                 if let ExprKind::NewArray(sizes) = &value.kind
                     && value.ty != *to =>
@@ -466,11 +466,11 @@ impl<'a> Gen<'a> {
                 // `java::catching` where a `catch` sees its exception.
                 if self.facts.catching.contains_key(&value.id) && self.catching_now.insert(value.id) {
                     let mark = self.out.len();
-                    let code = self.new_object_rows(*to, value.ty, sizes);
+                    let code = self.new_object_rows(*to, value, sizes);
                     self.catching_now.remove(&value.id);
                     return self.caught(value.id, code, mark);
                 }
-                self.new_object_rows(*to, value.ty, sizes)
+                self.new_object_rows(*to, value, sizes)
             }
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             // An upcast or a downcast between the program's types, or a string, a box or a

@@ -113,6 +113,9 @@ pub struct ElementClass<T> {
     /// The binary names of the class of an element and of every class and interface above it,
     /// its own first (`None` for null), which the store of the element tests.
     names: fn(&T) -> Option<&'static [&'static str]>,
+    /// The binary names of the array's class and of the classes and interfaces above it, its own
+    /// first, which a store of the array into an array of arrays tests (`array_type_names`).
+    own: &'static [&'static str],
 }
 
 impl<T> ElementClass<T> {
@@ -121,8 +124,9 @@ impl<T> ElementClass<T> {
         element: &'static str,
         module: &'static str,
         names: fn(&T) -> Option<&'static [&'static str]>,
+        own: &'static [&'static str],
     ) -> ElementClass<T> {
-        ElementClass { class, element, module, names }
+        ElementClass { class, element, module, names, own }
     }
 
     /// The binary name of the class of `v` where the array cannot hold it (`java.lang.Integer` in
@@ -135,7 +139,13 @@ impl<T> ElementClass<T> {
 
 impl<T> Clone for ElementClass<T> {
     fn clone(&self) -> ElementClass<T> {
-        ElementClass { class: self.class, element: self.element, module: self.module, names: self.names }
+        ElementClass {
+            class: self.class,
+            element: self.element,
+            module: self.module,
+            names: self.names,
+            own: self.own,
+        }
     }
 }
 
@@ -681,6 +691,16 @@ pub fn tagged<T: Clone, A: MadeElements<T>>(a: A, class: Option<ElementClass<T>>
 /// `a.getClass()` of an `Object[]`: the class of a covariant array, or `exact`, `Object[]`'s.
 pub fn array_class<T>(a: &impl Elements<T>, exact: fn() -> Class) -> Class {
     a.element_class().map_or_else(exact, |c| (c.class)())
+}
+
+/// The binary names of the class of `a`, an `Object[]` that may carry its class, and of the
+/// classes above it (`ElementClass::own`); those of `Object[]`, `object_array`, where it carries
+/// none.
+pub fn array_type_names<T>(
+    a: &impl Elements<T>,
+    object_array: &'static [&'static str],
+) -> &'static [&'static str] {
+    a.element_class().map_or(object_array, |c| c.own)
 }
 
 /// `o instanceof C[]` of an `Object[]` `a`, given the array class `class` (`C[]`) where the

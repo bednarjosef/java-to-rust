@@ -153,28 +153,6 @@ impl<'a> Gen<'a> {
     /// `new T[n]`, or `new T[n][m]` and so on. Every size is evaluated, and checked, before any
     /// array is allocated, as Java does.
     pub(super) fn new_array(&mut self, ty: Type, sizes: &'a [Expr]) -> Code {
-        self.new_rows(ty, sizes, None)
-    }
-
-    /// `new T[n][m]..` of an array type that is translated as an `Object[]` (`to`, see
-    /// `lower::covariant`), whose Java type is `exact`: the rows are made as `new_array` makes
-    /// them, and each becomes an `Object`. Nothing else holds the new rows yet, so no identity is
-    /// lost.
-    pub(super) fn new_object_rows(&mut self, to: Type, exact: Type, sizes: &'a [Expr]) -> Code {
-        let object = self.enum_type(to.element()).expect("`Object` is an enum");
-        let row = self.class.type_of(exact.element()).expect("rows that are `Object`s (see `lower::arrays`)");
-        let variant = self.variant_of(object, row).expect("a variant of `Object` for the rows");
-        let wrapped = if self.nullable_element(to.element()) {
-            format!("Some({variant}(#))")
-        } else {
-            format!("{variant}(#)")
-        };
-        self.new_rows(exact, sizes, Some(wrapped))
-    }
-
-    /// `new_array`, with each row of the outermost level put in place of the `#` of `wrap` when
-    /// given.
-    fn new_rows(&mut self, ty: Type, sizes: &'a [Expr], wrap: Option<String>) -> Code {
         let zero = self.element_zero(ty.element_at(sizes.len()));
         if let [size] = sizes {
             let n = self.value(size, Type::Int).text;
@@ -192,15 +170,69 @@ impl<'a> Gen<'a> {
         for level in (0..last).rev() {
             // The rows built here are elements of level `level`; they are `Some` where that
             // element type is nullable, as the array they fill is.
-            let row = match &wrap {
-                Some(wrap) if level == 0 => wrap.replacen('#', &text, 1),
-                _ if self.nullable_element(ty.element_at(level + 1)) => format!("Some({text})"),
-                _ => text,
+            let row = match self.nullable_element(ty.element_at(level + 1)) {
+                true => format!("Some({text})"),
+                false => text,
             };
             text = format!("{}(dims[{level}], |_| {row})", self.array_maker("tabulate", ty));
         }
         let check = self.runtime("check_sizes");
         Code::new(format!("{{ let dims = [{}]; {check}(&dims); {text} }}", dims.join(", ")), LOWEST)
+    }
+
+    /// `new T[n][m]..` whose arrays at some level are `Object[]`s (`lower::covariant`), as a
+    /// value of type `to`: the arrays of each level are made as their own type
+    /// (`Class::object_rows`), the rows of an `Object[]` become `Object`s, and an `Object[]` of a
+    /// narrower class carries it. All the lengths are checked before any array is made. Nothing
+    /// else holds the new rows yet, so no identity is lost.
+    pub(super) fn new_object_rows(&mut self, to: Type, made: &'a Expr, sizes: &'a [Expr]) -> Code {
+        // A tree saved before `object_rows` has only the rows of the outermost level as `Object`s.
+        let levels = match self.class.object_rows.get(&made.id) {
+            Some(levels) => levels.clone(),
+            None => std::iter::once((to, to))
+                .chain((1..sizes.len()).map(|l| (made.ty.element_at(l), made.ty.element_at(l))))
+                .collect(),
+        };
+        let dims: Vec<String> = sizes.iter().map(|s| self.value(s, Type::Int).text).collect();
+        let last = sizes.len() - 1;
+        let (ty, class) = levels[last];
+        let elem = ty.element();
+        // The rows of an array of no rows are never made, so nothing else gives their elements a
+        // type where the array goes to a generic function (`java::len`).
+        let zero = match self.element_zero(elem) {
+            "None" => format!("None::<{}>", self.ty_name(elem)),
+            zero => zero.to_string(),
+        };
+        let mut text = format!("{}(dims[{last}], {zero})", self.array_maker("filled", ty));
+        text = self.carrying_class(ty, class, text);
+        for level in (0..last).rev() {
+            let (ty, class) = levels[level];
+            let element = ty.element();
+            let row = levels[level + 1].0;
+            if element != row {
+                let object = self.enum_type(element).expect("`Object` is an enum");
+                let row = self.class.type_of(row).expect("rows that are `Object`s (see `lower::arrays`)");
+                let variant = self.variant_of(object, row).expect("a variant of `Object` for the rows");
+                text = format!("{variant}({text})");
+            }
+            // The rows are `Some` where the element type is nullable, as the array they fill is.
+            if self.nullable_element(element) {
+                text = format!("Some({text})");
+            }
+            text = format!("{}(dims[{level}], |_| {text})", self.array_maker("tabulate", ty));
+            text = self.carrying_class(ty, class, text);
+        }
+        let check = self.runtime("check_sizes");
+        Code::new(format!("{{ let dims = [{}]; {check}(&dims); {text} }}", dims.join(", ")), LOWEST)
+    }
+
+    /// `text`, a new array of type `ty` whose Java class is `class`, carrying that class where
+    /// the translation holds it as an `Object[]` (`with_element_class`).
+    fn carrying_class(&mut self, ty: Type, class: Type, text: String) -> String {
+        match ty == class || !self.carries_class(ty) {
+            true => text,
+            false => self.with_element_class(class, Code::atom(text)).text,
+        }
     }
 
     /// `{a, b}` and `new T[] {a, b}`.

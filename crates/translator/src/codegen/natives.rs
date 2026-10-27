@@ -765,6 +765,18 @@ impl<'a> Gen<'a> {
                 let a = self.mut_ref(&self.local(d));
                 self.may_fail(id, "copy_within", "", &format!("{a}, {}, {}, {}", ints[0], ints[1], ints[2]))
             }
+            // Into an `Object[]` that may carry a narrower class (`lower::covariant`), each element
+            // is checked, as `arraycopy` checks it.
+            (_, None) if self.carries_class(dest.ty) => {
+                let s = self.slice_of(src);
+                let d = self.handle(dest);
+                self.may_fail(
+                    id,
+                    "copy_slice_into",
+                    "",
+                    &format!("{s}, {}, {d}, {}, {}", ints[0], ints[1], ints[2]),
+                )
+            }
             _ => {
                 let s = self.slice_of(src);
                 let d = match &dest_plain {

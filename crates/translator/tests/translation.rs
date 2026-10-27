@@ -1912,9 +1912,9 @@ fn program_errors_name_their_file() {
 }
 
 #[test]
-fn a_new_array_whose_inner_rows_are_object_arrays_is_rejected_not_a_panic() {
+fn a_new_array_whose_inner_rows_are_object_arrays_makes_each_level() {
     // `aisle` makes `String[][]` an `Object[]`, so the rows of `new String[2][2][3]` hold
-    // `Object`s where the third level puts its `String[]`s, which the new array cannot type.
+    // `Object`s, each an `Object[]` of class `String[][]` holding the third level's `String[]`s.
     let dir = write_sources(
         "deep_object_rows",
         &[(
@@ -1923,11 +1923,9 @@ fn a_new_array_whose_inner_rows_are_object_arrays_is_rejected_not_a_panic() {
         )],
     );
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
-    let error = java_to_rust::translate_program(&program).expect_err("a deep new array").to_string();
-    assert!(
-        error.ends_with("Main.java:4:30: a new array whose rows are `Object[]`s below its outermost level not supported yet"),
-        "{error}"
-    );
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert!(rust.contains("check_sizes"), "{rust}");
 }
 
 #[test]
@@ -6058,7 +6056,7 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
         &[
             "String(&'a java::JString) = 2,",
             "fn first(a: &[Object]) -> Object {",
-            "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || java::Class::STRING), \"java.lang.String\", java::BASE, |v| Some(v.runtime_type_names()))));",
+            "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || java::Class::STRING), \"java.lang.String\", java::BASE, |v| Some(v.runtime_type_names()), &[\"[Ljava.lang.String;\", \"[Ljava.io.Serializable;\", \"[Ljava.lang.Comparable;\", \"[Ljava.lang.CharSequence;\", \"[Ljava.lang.constant.Constable;\", \"[Ljava.lang.constant.ConstantDesc;\", \"[Ljava.lang.Object;\", \"java.lang.Cloneable\", \"java.io.Serializable\", \"java.lang.Object\"])));",
             "java::join(java::wtf8(\",\"), &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), (\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
         ],
     );

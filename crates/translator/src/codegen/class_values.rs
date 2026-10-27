@@ -71,7 +71,7 @@ impl<'a> Gen<'a> {
     /// Whether an array of type `ty` may carry its class: an `Object[]` in a program that makes
     /// covariant arrays (`Class::element_classes`).
     pub(super) fn carries_class(&self, ty: Type) -> bool {
-        !self.class.element_classes.is_empty() && ty == Type::array(Type::class(OBJECT))
+        self.class.makes_covariant_arrays() && ty == Type::array(Type::class(OBJECT))
     }
 
     /// The Java class of the array that `e` makes, where the translation holds it as an
@@ -118,10 +118,12 @@ impl<'a> Gen<'a> {
         let made = self.type_class(class);
         let module = self.type_module(class);
         let element_class = self.runtime("ElementClass");
+        let own: Vec<String> = self.type_names(class).iter().map(|n| rust_string(n)).collect();
         Code::atom(format!(
-            "{tagged}({}, Some({element_class}::<{item}>::new(|| {made}, {}, {module}, {names})))",
+            "{tagged}({}, Some({element_class}::<{item}>::new(|| {made}, {}, {module}, {names}, &[{}])))",
             code.text,
-            rust_string(&name)
+            rust_string(&name),
+            own.join(", ")
         ))
     }
 

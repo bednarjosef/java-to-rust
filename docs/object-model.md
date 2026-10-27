@@ -710,11 +710,12 @@ source's class. So:
 
 - a store into an `Object[]` (`java::checked_set`, `Class::checks_store`) checks the index, then
   whether the array can hold the object, by the names of the object's class and of every class
-  and interface above it: an object of another class throws `ArrayStoreException` with its class
-  name, as HotSpot's does. A store into an array that carries no class costs one test of the
+  and interface above it (for an array held as an `Object[]`, those of the class it carries,
+  `java::array_type_names`): an object of another class throws `ArrayStoreException` with its
+  class name, as HotSpot's does. A store into an array that carries no class costs one test of the
   handle more than another store;
-- `System.arraycopy` into an array that carries another class than the source's checks each
-  element, and stores those before the first that fails, which throws HotSpot's
+- `System.arraycopy` into an array that carries another class than the source's (a plain array
+  carries none, `java::copy_slice_into`) checks each element, and stores those before the first that fails, which throws HotSpot's
   `ArrayStoreException` ("arraycopy: element type mismatch: ..." where the destination's element
   class is below the source's, else "arraycopy: type mismatch: ...");
 - `getClass()` of an `Object[]` (`java::array_class`), as a value or as an `Object`, is the class
@@ -727,7 +728,11 @@ source's class. So:
   cannot be cast to class [Ljava.lang.String; (...)"), which a `catch` may see.
 
 An array of arrays carries its class too (`String[][]` as an `Object[][]`, `int[][]` as an
-`Object[]`). An array held as an `Object` meets each array type that the code tests an `Object`
+`Object[]`). A `new` of several dimensions makes the arrays of each level as their own type
+(`lower::arrays::sized_array`, `Class::object_rows`): where a level's arrays are `Object[]`s, as in
+`new C[a][b][c]` where `C[][]` is one, or Minecraft's `(C[][][]) Array.newInstance(C.class, a, b,
+c)`, the rows they hold are `Object`s, and each array of the level carries its class. Every length
+is checked before any array is made. An array held as an `Object` meets each array type that the code tests an `Object`
 for or casts one to, where it may be one (`covariant::meets_through_object`): `Object o = names`
 of a `String[]` and `o instanceof Object[]`, `(Comparable<?>[]) o` or `(String[]) o` make both
 `Object[]`s, as does an `int[][]` and `(Object[]) o`, so the test reads the class the array

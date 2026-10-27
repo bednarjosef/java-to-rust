@@ -179,6 +179,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             module_labels,
             thread_statics: None,
             element_classes: lowering.element_classes.take(),
+            object_rows: lowering.object_rows.take(),
             array_tests: lowering.array_tests.take(),
             volatile_elements: lowering.volatile_elements.take(),
             proxy_classes: Default::default(),
@@ -470,6 +471,8 @@ struct Lowering<'t> {
     notes: RefCell<Vec<crate::ast::Note>>,
     /// The classes of the covariant arrays the code makes (`Class::element_classes`).
     element_classes: RefCell<std::collections::HashMap<ExprId, Type>>,
+    /// The levels of the new arrays whose rows at some level are `Object`s (`Class::object_rows`).
+    object_rows: RefCell<std::collections::HashMap<ExprId, Vec<(Type, Type)>>>,
     /// The covariant array types that `instanceof`s and casts test (`Class::array_tests`).
     array_tests: RefCell<std::collections::HashMap<ExprId, Type>>,
     /// The volatile element accesses (`Class::volatile_elements`).
