@@ -618,6 +618,9 @@ impl<'a> Gen<'a> {
                 "java.lang.invoke.TypeDescriptor",
                 CONSTABLE,
             ]),
+            // A charset of an `Object` is of the runtime's one class of charsets, not of the
+            // JDK's class of that charset (`sun.nio.cs.UTF_8`).
+            Type::Charset => list(&["java.nio.charset.Charset", COMPARE]),
             Type::Boxed(primitive) => {
                 let own = class_name(self, ty);
                 match *primitive {

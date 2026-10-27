@@ -85,7 +85,7 @@ impl<'t> Lowering<'t> {
         if let Some(name) = &binding {
             self.forget_alias(name);
         }
-        // `Object` may also hold a string, a box, an array, a builder or a class, `Comparable` a
+        // `Object` may also hold a string, a box, an array, a builder, a class or a charset, `Comparable` a
         // string or a box, `CharSequence` a string or a builder, `Appendable` a builder, `Type` a
         // class, and `Number` a numeric box.
         let char_sequence = matches!(value.ty, Type::Class(name, _) if name == CHAR_SEQUENCE);
@@ -94,7 +94,12 @@ impl<'t> Lowering<'t> {
             || (Self::is_object(value.ty)
                 && matches!(
                     ty,
-                    Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_) | Type::JavaClass
+                    Type::String
+                        | Type::StringBuilder
+                        | Type::Boxed(_)
+                        | Type::Array(_)
+                        | Type::JavaClass
+                        | Type::Charset
                 ))
             || (comparable && matches!(ty, Type::String | Type::Boxed(_)))
             || (char_sequence && matches!(ty, Type::String | Type::StringBuilder))
@@ -240,9 +245,13 @@ impl<'t> Lowering<'t> {
         let types = self.param_types(index)?;
         for (a, &ty) in args.iter().zip(&types) {
             self.fail_on_covariant(a.ty, ty);
-            // A charset is the runtime's value, which is not an object of the translation: it
-            // cannot be passed as an `Object` (`Objects.requireNonNull(cs)` erased).
-            if a.ty == Type::Charset && matches!(ty, Type::Class(..)) && self.param_owner(ty).is_none() {
+            // A charset is the runtime's value, which becomes an `Object` (`Objects.requireNonNull(cs)`
+            // erased) but no value of another of the program's types.
+            if a.ty == Type::Charset
+                && matches!(ty, Type::Class(..))
+                && !Self::is_object(ty)
+                && self.param_owner(ty).is_none()
+            {
                 return error(a.pos, "a charset passed as an object not supported yet".to_string());
             }
         }
@@ -308,7 +317,10 @@ impl<'t> Lowering<'t> {
             // A string, a builder, a box or a class as a value of one of the program's types: a
             // builder is an `Appendable`, a class a `Type`, and the generator rejects the others,
             // which no type's values include (see `codegen::dispatch::class_cast`).
-            (Type::String | Type::StringBuilder | Type::Boxed(_) | Type::JavaClass, Type::Class(..)) => true,
+            (
+                Type::String | Type::StringBuilder | Type::Boxed(_) | Type::JavaClass | Type::Charset,
+                Type::Class(..),
+            ) => true,
             // A primitive boxed into an interface that its box implements (`Serializable`,
             // `Constable`): the value is the box, as it is for `Object` and `Comparable`.
             (

@@ -454,6 +454,7 @@ impl Class {
             Type::Array(_) => self.type_index(&ty.to_string()),
             Type::StringBuilder => self.type_index(STRING_BUILDER),
             Type::JavaClass => self.type_index(CLASS_VALUE),
+            Type::Charset => self.type_index(CHARSET_VALUE),
             _ => self.runtime_index(runtime_name(ty)?),
         }
     }

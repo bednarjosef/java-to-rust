@@ -575,6 +575,9 @@ pub const STRING_BUILDER: &str = "java.lang.StringBuilder";
 /// The runtime class of the classes (`Class<?>` values) that become `Object`s.
 pub const CLASS_VALUE: &str = "java.lang.Class";
 
+/// The runtime class of the charsets that become `Object`s.
+pub const CHARSET_VALUE: &str = "java.nio.charset.Charset";
+
 /// The interfaces of `java.lang.Class` that the runtime's classes implement where the program
 /// has them: `Type` and `TypeDescriptor`, whose `getTypeName()` and `descriptorString()` a class
 /// answers itself (see `codegen::dispatch`), and `Serializable`, which has no methods. `Class`'s

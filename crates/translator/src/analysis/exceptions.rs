@@ -882,6 +882,7 @@ fn instance_name(ty: Type) -> Option<&'static str> {
         Type::Class(name, _) | Type::Enum(name) => Some(name),
         Type::String | Type::Boxed(_) => runtime_name(ty),
         Type::JavaClass => Some(CLASS_VALUE),
+        Type::Charset => Some(CHARSET_VALUE),
         _ => None,
     }
 }

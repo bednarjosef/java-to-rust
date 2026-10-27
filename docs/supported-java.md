@@ -128,7 +128,7 @@ included (docs/collector.md).
   coders (`java/Charsets.java`, `jdk_charsets.rs`), and the translator asks the JDK it runs
   with again where that is another one. A program that looks a charset up by name carries the
   tables it may need: the ones its constant names name, or all of them where it computes a
-  name. A `Charset` is an ordinary value; `forName` resolves aliases and case as Java does, and
+  name. A `Charset` is an ordinary value, which can also be held as an `Object`; `forName` resolves aliases and case as Java does, and
   gives the same value for each name of a charset, and `defaultCharset()` is UTF-8 (JEP 400).
   An unknown or malformed name throws `UnsupportedCharsetException` or
   `IllegalCharsetNameException` with Java's message, which a `catch` sees. A charset that Java
