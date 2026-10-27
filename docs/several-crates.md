@@ -139,8 +139,9 @@ along classes. It splits declarations from code, as C splits headers from source
 - **Each body crate** depends on the header alone and defines those functions for the items
   given to it, each with `#[unsafe(no_mangle)]`. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names
-  everything as it did, `crate::..` paths included: the body crate has every module, and a module
-  without moved code is the re-export alone. It has the header's `recursion_limit`, which a
+  everything as it did, `crate::..` paths included: the body crate has the modules with code of
+  its own and the modules around them, and any other module is the header's, which the glob
+  re-export of its parent names. It has the header's `recursion_limit`, which a
   threaded program raises for the proofs that its statics are `Send`. A method's code moves into
   a private trait that the body crate implements for the header's type (`impl Bodies0 for Circle
   { fn body_area(&self) .. }`), so that `self`, `Self` and calls of the type's other methods mean
@@ -158,9 +159,10 @@ crates, which depend on it; rustc's linker (lld, the default on x86-64 Linux) re
 whatever the order of the libraries.
 
 The moved code goes to the body crates item by item (a function, or an `impl` with its trait), in
-the order of the module tree and of each module's items, each crate taking items until it has its
-share, so the same program is split the same way every time, and neighbouring packages share a
-crate. A module with more code than a share is spread over several crates, each with the module's
+the order of the module tree and of each module's items, cut into runs of about the same size:
+an item goes to the crate in whose share of the whole its middle falls. So the same program is
+split the same way every time, no crate's overshoot passes on to the next ones, and neighbouring
+packages share a crate. A module with more code than a share is spread over several crates, each with the module's
 `use` lines: the Minecraft server's crate root, whose `Object` enum's methods and reflection
 table are 290 MB of code, would otherwise be one crate of its own.
 

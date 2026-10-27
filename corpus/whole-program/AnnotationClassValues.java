@@ -1,39 +1,79 @@
 import java.lang.annotation.Annotation;
-import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.lang.reflect.Field;
 
-// Class literals of annotation types used as values, as javac's Check asks a symbol for
-// `getAnnotation(Documented.class)`: the class is an annotation type and an interface, and what a
-// generic method returns for it is an `Annotation`.
+// Classes named only by the values of annotations, which code that reads the annotations makes
+// objects of, as log4j's `PluginVisitors.findVisitor` does with `@PluginVisitorStrategy` and its
+// `ConstraintValidators` with `@Constraint`.
 public class AnnotationClassValues {
-    static <A extends Annotation> A get(Class<A> type, String[] present) {
-        if (!type.isAnnotation()) {
-            throw new IllegalArgumentException("Not an annotation type: " + type);
+    public interface Visitor {
+        String visit(Field field);
+    }
+
+    public static class ValueVisitor implements Visitor {
+        public ValueVisitor() {}
+
+        public String visit(Field field) {
+            return "value " + field.getName();
         }
-        for (String name : present) {
-            if (name.equals(type.getName())) {
-                System.out.println("found " + type.getSimpleName());
+    }
+
+    public static class RequiredVisitor implements Visitor {
+        public RequiredVisitor() {}
+
+        public String visit(Field field) {
+            return "required " + field.getName();
+        }
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.ANNOTATION_TYPE)
+    public @interface VisitorStrategy {
+        Class<? extends Visitor> value();
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.FIELD)
+    @VisitorStrategy(ValueVisitor.class)
+    public @interface Value {}
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.FIELD)
+    @VisitorStrategy(RequiredVisitor.class)
+    public @interface Required {}
+
+    static class Settings {
+        @Value
+        String name;
+
+        @Required
+        int size;
+
+        String plain;
+    }
+
+    static Visitor findVisitor(Class<? extends Annotation> annotation) throws Exception {
+        VisitorStrategy strategy = annotation.getAnnotation(VisitorStrategy.class);
+        if (strategy == null) {
+            return null;
+        }
+        return strategy.value().getDeclaredConstructor().newInstance();
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (String name : new String[] {"name", "size", "plain"}) {
+            Field field = Settings.class.getDeclaredField(name);
+            Annotation[] annotations = field.getDeclaredAnnotations();
+            if (annotations.length == 0) {
+                System.out.println(name + ": no annotations");
             }
-        }
-        return null;
-    }
-
-    static String describe(Class<?> c) {
-        return c + " " + c.getName() + " " + c.isAnnotation() + " " + c.isInterface();
-    }
-
-    public static void main(String[] args) {
-        String[] present = {"java.lang.annotation.Documented"};
-        System.out.println(get(Documented.class, present) != null);
-        System.out.println(get(Retention.class, present) == null);
-        System.out.println(describe(Documented.class));
-        Class<?> r = Retention.class;
-        System.out.println(Documented.class == r);
-        System.out.println(Documented.class.equals(Documented.class));
-        try {
-            get((Class) String.class, present);
-        } catch (IllegalArgumentException e) {
-            System.out.println(e.getMessage());
+            for (Annotation a : annotations) {
+                Visitor visitor = findVisitor(a.annotationType());
+                System.out.println(name + ": " + (visitor == null ? "no visitor" : visitor.visit(field)));
+            }
         }
     }
 }

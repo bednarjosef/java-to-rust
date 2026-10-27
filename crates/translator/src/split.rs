@@ -12,10 +12,12 @@
 //! - Each **body** crate depends on the header alone and defines those functions, with
 //!   `#[unsafe(no_mangle)]`, for the items given to it. A module of a body crate re-exports its
 //!   header module (`pub use header::a::b::*`) and has the module's own `use` lines, so the moved
-//!   code names everything as it did, and the header's `recursion_limit`. A method's code moves
-//!   into a private trait that the body crate implements for the header's type (`impl Bodies0 for
-//!   X { fn body_m(&self, ..) {..} }`), where `self` and `Self` mean what they did; the trait is
-//!   `Sized`, as `X` is, for a signature that names `Option<Self>`. Its function calls it.
+//!   code names everything as it did, and the header's `recursion_limit`. It has only the modules
+//!   with code of its own and those around them: the parent's glob names any other. A method's
+//!   code moves into a private trait that the body crate implements for the header's type (`impl
+//!   Bodies0 for X { fn body_m(&self, ..) {..} }`), where `self` and `Self` mean what they did;
+//!   the trait is `Sized`, as `X` is, for a signature that names `Option<Self>`. Its function
+//!   calls it.
 //! - The **app** crate is the binary: it depends on all of them, so that the linker finds the
 //!   bodies, and its `main` calls the header's.
 //!
@@ -146,32 +148,47 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     if !failures.is_empty() {
         return Err(failures.join("\n"));
     }
-    // Each body crate takes the next pieces of moved code, module by module, until it has its
-    // share of the code: a module whose code is more than a share (the crate root's, with the
-    // `Object` enum's methods and the reflection table) is spread over several crates.
+    // The pieces of moved code, module by module, are cut into runs of about the same size: a
+    // piece goes to the crate in whose share of the whole its middle falls, so that no crate's
+    // overshoot passes on to the next ones and a module whose code is more than a share (the
+    // crate root's, with the `Object` enum's methods and the reflection table) is spread over
+    // several crates.
     let total: usize = splits.iter().flat_map(|s| &s.pieces).map(|(_, moved)| moved).sum();
     let crates = crates.max(1);
-    let share = total.div_ceil(crates).max(1);
     let mut crate_of: Vec<Vec<usize>> = Vec::new();
-    let (mut current, mut filled) = (0, 0);
+    let mut before = 0;
     for split in &splits {
         let mut of = Vec::with_capacity(split.pieces.len());
         for (_, moved) in &split.pieces {
-            if filled >= share && current + 1 < crates {
-                current += 1;
-                filled = 0;
-            }
-            of.push(current);
-            filled += moved;
+            let middle = (before + moved / 2) as u128;
+            of.push(((middle * crates as u128) / total.max(1) as u128).min(crates as u128 - 1) as usize);
+            before += moved;
         }
         crate_of.push(of);
+    }
+    // A body crate has the modules that hold code of its own and the modules around them; any
+    // other module is the header's, which the glob re-export of its parent names.
+    let index: std::collections::HashMap<&[String], usize> =
+        tree.modules.iter().enumerate().map(|(i, m)| (m.path.as_slice(), i)).collect();
+    let mut kept = vec![vec![false; tree.modules.len()]; crates];
+    for (m, of) in crate_of.iter().enumerate() {
+        for &c in of {
+            let path = &tree.modules[m].path;
+            for len in (0..=path.len()).rev() {
+                match index.get(&path[..len]) {
+                    Some(&outer) if !kept[c][outer] => kept[c][outer] = true,
+                    Some(_) => break,
+                    None => {}
+                }
+            }
+        }
     }
     let splits = std::cell::RefCell::new(splits);
     let tree = &tree;
     let header = format!(
         "{}#![allow(dead_code, unused_imports, unused_mut, unused_variables, non_snake_case)]\n\n{}",
         tree.header,
-        nest(tree, &|m| {
+        nest(tree, &|_| true, &|m| {
             let uses = uses_text(&tree.modules[m].uses);
             format!("{uses}{}", std::mem::take(&mut splits.borrow_mut()[m].header))
         })
@@ -184,8 +201,8 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
         .map(|l| format!("{l}\n"))
         .collect();
     let mut bodies = Vec::new();
-    for c in 0..crates {
-        let text = nest(tree, &|m| {
+    for (c, kept) in kept.iter().enumerate() {
+        let text = nest(tree, &|m| kept[m], &|m| {
             let path = &tree.modules[m].path;
             let reexport =
                 if path.is_empty() { "header".to_string() } else { format!("header::{}", path.join("::")) };
@@ -220,22 +237,28 @@ fn uses_text(uses: &[String]) -> String {
     uses.iter().map(|group| format!("{group}\n\n")).collect()
 }
 
-/// The modules of `tree` as inline modules, from the root, each module's text made by `text`.
-fn nest(tree: &ModuleTree, text: &dyn Fn(usize) -> String) -> String {
-    fn inline(tree: &ModuleTree, index: usize, text: &dyn Fn(usize) -> String) -> String {
+/// The modules of `tree` that `keep` keeps as inline modules, from the root, each module's text
+/// made by `text`.
+fn nest(tree: &ModuleTree, keep: &dyn Fn(usize) -> bool, text: &dyn Fn(usize) -> String) -> String {
+    fn inline(
+        tree: &ModuleTree,
+        index: usize,
+        keep: &dyn Fn(usize) -> bool,
+        text: &dyn Fn(usize) -> String,
+    ) -> String {
         let path = &tree.modules[index].path;
         let mut out = text(index);
         for child in 0..tree.modules.len() {
             let inner = &tree.modules[child].path;
-            if inner.len() == path.len() + 1 && inner.starts_with(path) {
+            if inner.len() == path.len() + 1 && inner.starts_with(path) && keep(child) {
                 let name = inner.last().map_or("", String::as_str);
-                out.push_str(&format!("\npub mod {name} {{\n{}}}\n", inline(tree, child, text)));
+                out.push_str(&format!("\npub mod {name} {{\n{}}}\n", inline(tree, child, keep, text)));
             }
         }
         out
     }
     match tree.modules.iter().position(|m| m.path.is_empty()) {
-        Some(root) => inline(tree, root, text),
+        Some(root) => inline(tree, root, keep, text),
         None => String::new(),
     }
 }

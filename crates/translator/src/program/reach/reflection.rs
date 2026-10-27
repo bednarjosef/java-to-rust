@@ -198,6 +198,21 @@ impl<'t> Walk<'t> {
         }
     }
 
+    /// Notes the classes of the class literals in `value`, the values of an annotation
+    /// (`Walk::annotation_classes`).
+    pub(super) fn note_annotation_classes(&mut self, value: &Value) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(class) = literal_class(value) {
+                    self.annotation_classes.insert(class);
+                }
+                fields.values().for_each(|v| self.note_annotation_classes(v));
+            }
+            Value::Array(items) => items.iter().for_each(|v| self.note_annotation_classes(v)),
+            _ => {}
+        }
+    }
+
     /// Makes reachable what the lookups of reachable code find among the classes found so far
     /// (see the module's comment), and whether that is anything new: the walk then goes on, as
     /// what it reaches may name more classes and more strings.
@@ -248,6 +263,8 @@ impl<'t> Walk<'t> {
                             all.extend(self.reach.found_by_name.iter());
                             if literals {
                                 all.extend(self.class_literals.iter());
+                            } else {
+                                all.extend(self.annotation_classes.iter());
                             }
                             all.into_iter().filter(|c| self.is_subtype(c, &lookup.bound)).cloned().collect()
                         })
