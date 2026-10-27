@@ -270,8 +270,9 @@ pub enum Native {
     WaitForPendingReferences,
     /// `Unsafe.getLoadAverage0(loadavg, nelems)`.
     LoadAverage,
-    /// A native of `com.sun.management.internal.OperatingSystemImpl` without arguments, by the
-    /// runtime's function that answers it (`os_total_memory`, ...).
+    /// A native of `com.sun.management.internal.OperatingSystemImpl` or
+    /// `sun.management.VMManagementImpl` without arguments, by the runtime's function that
+    /// answers it (`os_total_memory`, `vm_startup_time`, ...).
     OperatingSystem(#[serde(deserialize_with = "crate::ast::static_str")] super::StaticStr),
     /// `MappedMemoryUtils.isLoaded0(address, length, pageCount)`: a mapping is a block of memory
     /// of the process holding the file's bytes, so it is loaded.
@@ -554,6 +555,12 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         // JDK's `libmanagement_ext` reads them on Linux (`java_runtime::os_total_memory`, ...).
         // `initialize0` only reads the page size, which each answer reads itself.
         ("com.sun.management.internal.OperatingSystemImpl", "initialize0", "()void") => Native::Nothing,
+        // The JVM's start and uptime are the process's (the JVM's other figures are the
+        // translator's patch, `java/patches/sun/management/VMManagementImpl.java`).
+        ("sun.management.VMManagementImpl", "getStartupTime", "()long") => {
+            Native::OperatingSystem("vm_startup_time")
+        }
+        ("sun.management.VMManagementImpl", "getUptime0", "()long") => Native::OperatingSystem("vm_uptime"),
         ("com.sun.management.internal.OperatingSystemImpl", name, "()long" | "()int") => {
             Native::OperatingSystem(match name {
                 "getTotalMemorySize0" => "os_total_memory",
