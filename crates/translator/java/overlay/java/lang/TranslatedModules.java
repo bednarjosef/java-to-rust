@@ -5,7 +5,9 @@ import java.io.InputStream;
 import java.net.URL;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The translator's methods that calls of the JDK's class loading methods of {@code BootLoader},
@@ -22,6 +24,13 @@ public final class TranslatedModules {
      * its calls reach only that class's methods, as in {@code Module}.)
      */
     private static final LinkedHashMap<String, Package> PACKAGES = new LinkedHashMap<>();
+
+    /**
+     * The values that {@code ClassLoaderValue}s keep, by class loader (the boot loader's under
+     * {@code null}): the map that the JVM's loaders hold in a field each.
+     */
+    private static final IdentityHashMap<ClassLoader, ConcurrentHashMap<?, ?>> LOADER_VALUES =
+            new IdentityHashMap<>();
 
     private TranslatedModules() {
     }
@@ -174,6 +183,21 @@ public final class TranslatedModules {
     /** {@code ClassLoaders.platformClassLoader()}. */
     public static ClassLoader platformClassLoader() {
         return ClassLoader.getPlatformClassLoader();
+    }
+
+    /** {@code BootLoader.getClassLoaderValueMap()}. */
+    public static ConcurrentHashMap<?, ?> bootClassLoaderValueMap() {
+        return classLoaderValueMap(null);
+    }
+
+    /** The map of {@code ClassLoaderValue}s of {@code loader}, made as it is first asked for. */
+    public static synchronized ConcurrentHashMap<?, ?> classLoaderValueMap(ClassLoader loader) {
+        ConcurrentHashMap<?, ?> map = LOADER_VALUES.get(loader);
+        if (map == null) {
+            map = new ConcurrentHashMap<>();
+            LOADER_VALUES.put(loader, map);
+        }
+        return map;
     }
 
     /** {@code Reflection.verifyModuleAccess(currentModule, memberClass)}, as Java's. */

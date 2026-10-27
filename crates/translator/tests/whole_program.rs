@@ -184,11 +184,12 @@ fn input_field(p: &Program, fingerprint: &mut Fingerprint) -> Option<()> {
 }
 
 /// The sources of the JDK's other modules, next to `java.base`'s, that a program uses: those of
-/// `jdk.unsupported` for `sun.misc.Unsafe` and the other classes of `sun.misc`, and of `jdk.net`
-/// for its socket options.
+/// `jdk.unsupported` for `sun.misc.Unsafe` and the other classes of `sun.misc`, of `jdk.net` for
+/// its socket options, and of `java.logging` for `java.util.logging`.
 /// A program whose modules' sources are missing is skipped (`whole_programs_match_java`).
 fn module_libraries(p: &Program, library: &Path) -> Vec<PathBuf> {
-    const MODULES: [(&str, &str); 2] = [("jdk.unsupported", "sun.misc."), ("jdk.net", "jdk.net.")];
+    const MODULES: [(&str, &str); 3] =
+        [("jdk.unsupported", "sun.misc."), ("jdk.net", "jdk.net."), ("java.logging", "java.util.logging.")];
     fn uses(dir: &Path, marker: &str) -> bool {
         std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
             let path = e.path();

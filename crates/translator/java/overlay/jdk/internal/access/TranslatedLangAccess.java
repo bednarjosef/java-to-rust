@@ -5,11 +5,12 @@ import java.nio.charset.Charset;
 import java.nio.charset.MalformedInputException;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.UnmappableCharacterException;
+import java.util.concurrent.ConcurrentHashMap;
 import sun.nio.ch.Interruptible;
 
 /**
  * The methods of {@code JavaLangAccess} that the JDK's {@code java.io}, {@code java.nio.file},
- * channels and charsets' coders call on {@code SharedSecrets.getJavaLangAccess()}, which the JVM
+ * channels, charsets' coders and {@code ClassLoaderValue} call on {@code SharedSecrets.getJavaLangAccess()}, which the JVM
  * sets as it starts and a translated program never has: each call of one of them is a call of the
  * method of the same name here (see {@code lower.rs}), which does what {@code String}'s own code
  * does for it, or, for {@code blockedOn}, what a thread's record of its channel comes to here.
@@ -163,4 +164,9 @@ final class TranslatedLangAccess {
      * closes the channel and its {@code end} throws {@code ClosedByInterruptException}.
      */
     static void blockedOn(Interruptible intr) {}
+
+    /** The map of {@code ClassLoaderValue}s that {@code loader} holds. */
+    static ConcurrentHashMap<?, ?> createOrGetClassLoaderValueMap(ClassLoader loader) {
+        return TranslatedModules.classLoaderValueMap(loader);
+    }
 }
