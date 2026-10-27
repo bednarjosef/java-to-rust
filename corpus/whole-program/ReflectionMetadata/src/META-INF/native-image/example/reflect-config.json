@@ -1,0 +1,15 @@
+[
+  {
+    "name": "plugins.Greeter",
+    "methods": [
+      {"name": "<init>", "parameterTypes": []},
+      {"name": "greet", "parameterTypes": ["java.lang.String"]}
+    ]
+  },
+  {
+    "name": "plugins.Shouter",
+    "condition": {"typeReachable": "Main"},
+    "allPublicConstructors": true,
+    "allPublicMethods": true
+  }
+]

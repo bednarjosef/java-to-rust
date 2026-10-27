@@ -1,0 +1,3 @@
+plugins.Greeter greet
+plugins.Shouter shout
+plugins.Shouter whisper

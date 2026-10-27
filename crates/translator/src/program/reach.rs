@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
 mod initialize;
+mod native_image;
 mod proxies;
 mod reflection;
 mod sequential;
@@ -29,6 +30,7 @@ pub use by_name::{
     module_for_name,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
+pub use native_image::{ReflectEntry, reflect_config};
 pub use proxies::ProxyClass;
 pub use reflection::{Kind as LookupKind, Lookup, lookup};
 pub use services::constructs as constructs_services;
@@ -112,6 +114,9 @@ pub struct Reach {
     /// The classes, by binary name, that providers register for the services that reachable code
     /// looks up, which `TranslatedServices` makes by name (`services.rs`).
     pub service_classes: BTreeSet<String>,
+    /// The classes whose entries of the libraries' reflection metadata apply, which name them
+    /// (`native_image.rs`).
+    pub configured: BTreeSet<String>,
     /// The modules of the program's roots, which its `java.lang.Module` and `ClassLoader` answer with
     /// (`modules::contents`, `lower/modules.rs`); set after reachability.
     pub modules: Vec<super::modules::Contents>,
@@ -146,6 +151,7 @@ impl Reach {
         lines.extend(self.services.iter().map(|s| format!("service {s:?}")));
         lines.extend(self.reflected.iter().map(|r| format!("reflected {r:?}")));
         lines.extend(self.service_classes.iter().map(|c| format!("service class {c}")));
+        lines.extend(self.configured.iter().map(|c| format!("configured {c}")));
         lines.extend(
             self.proxies.iter().map(|(interfaces, made)| format!("proxy {interfaces:?} {}", made.class)),
         );
@@ -288,8 +294,6 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("com.sun.crypto.provider.Tls", "security"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
-    // There is no security manager (`System.getSecurityManager()` is null, see `lower::system`).
-    ("java.lang.SecurityManager", "security"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
@@ -1448,21 +1452,20 @@ pub fn release_query(node: &Value) -> bool {
             == ("java.lang.Runtime", "version")
 }
 
-/// Whether `condition` is `x == null` (`equal`) or `x != null` of a value `x` of a stub's type
-/// (`stubs`), which is only ever null, and which it reads without effects: a variable, or
-/// `System.getSecurityManager()`. So `if (sm != null)` skips what a security manager would check.
+/// Whether `condition` is `x == null` (`equal`) or `x != null` of a value `x` that is only ever
+/// null and that it reads without effects: a variable of a stub's type (`stubs`), or
+/// `System.getSecurityManager()`, which is null as in Java. So
+/// `if (System.getSecurityManager() != null)` skips what a security manager would check. A
+/// variable of type `SecurityManager` is tested as it is: a class of the program may extend it.
 fn stub_null_test(condition: &Value, equal: bool) -> bool {
     let kind = if equal { "EQUAL_TO" } else { "NOT_EQUAL_TO" };
-    let only_null = |v: &Value| {
-        let read = match text(v, "kind") {
-            "IDENTIFIER" => text(&v["symbol"], "kind") != "METHOD",
-            "METHOD_INVOCATION" => {
-                (text(&v["symbol"], "owner"), text(&v["symbol"], "name"))
-                    == ("java.lang.System", "getSecurityManager")
-            }
-            _ => false,
-        };
-        read && stubs::is_stub(text(v, "javaType"))
+    let only_null = |v: &Value| match text(v, "kind") {
+        "IDENTIFIER" => text(&v["symbol"], "kind") != "METHOD" && stubs::is_stub(text(v, "javaType")),
+        "METHOD_INVOCATION" => {
+            (text(&v["symbol"], "owner"), text(&v["symbol"], "name"))
+                == ("java.lang.System", "getSecurityManager")
+        }
+        _ => false,
     };
     let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
     let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
@@ -2429,6 +2432,8 @@ pub struct Rounds<'t> {
     locale_data: Vec<String>,
     /// The service providers of the sources (`Walk::providers`).
     providers: Vec<super::modules::ServiceProvider>,
+    /// The entries of the roots' reflection metadata (`Walk::reflect_config`).
+    reflect_config: Vec<ReflectEntry>,
     /// The walk without the assumption, made once it fails, and then kept up too.
     parallel: Option<Walk<'t>>,
     /// How many times a walk started again (`Walk::stale`).
@@ -2451,6 +2456,7 @@ impl<'t> Rounds<'t> {
             stays_sequential: true,
             locale_data: Vec::new(),
             providers: Vec::new(),
+            reflect_config: Vec::new(),
             parallel: None,
             restarts: 0,
             string_array_writes: false,
@@ -2494,6 +2500,13 @@ impl<'t> Rounds<'t> {
         self
     }
 
+    /// Reachability that takes these entries of the libraries' reflection metadata as names
+    /// that reflection finds (`native_image::reflect_config`).
+    pub fn with_reflect_config(mut self, entries: Vec<ReflectEntry>) -> Rounds<'t> {
+        self.reflect_config = entries;
+        self
+    }
+
     /// How many times a walk started again from `main` over all the units so far, because
     /// what it reached before a unit came differs from what it would have reached with it
     /// (`Walk::stale`).
@@ -2525,7 +2538,7 @@ impl<'t> Rounds<'t> {
                     true,
                     self.string_array_writes,
                     &self.locale_data,
-                    &self.providers,
+                    (&self.providers, &self.reflect_config),
                     self.asked.clone(),
                 )?;
                 self.sequential.insert(walk)
@@ -2547,7 +2560,7 @@ impl<'t> Rounds<'t> {
                     false,
                     self.string_array_writes,
                     &self.locale_data,
-                    &self.providers,
+                    (&self.providers, &self.reflect_config),
                     self.asked.clone(),
                 )?;
                 self.parallel = Some(walk);
@@ -2779,6 +2792,10 @@ struct Walk<'t> {
     registrations: BTreeMap<String, BTreeSet<String>>,
     registered: HashSet<String>,
     constructs_services: bool,
+    /// The entries of the roots' reflection metadata, and those that do not apply yet
+    /// (`native_image.rs`).
+    reflect_config: Vec<ReflectEntry>,
+    config_pending: Vec<usize>,
 }
 
 impl<'t> Walk<'t> {
@@ -2867,7 +2884,7 @@ impl<'t> Walk<'t> {
         sequential: bool,
         string_array_writes: bool,
         locale_data: &[String],
-        providers: &[super::modules::ServiceProvider],
+        (providers, reflect_config): (&[super::modules::ServiceProvider], &[ReflectEntry]),
         asked: Option<HashSet<String>>,
     ) -> Result<Walk<'t>, String> {
         let mut walk = Walk {
@@ -2876,6 +2893,8 @@ impl<'t> Walk<'t> {
             why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::new()),
             locale_data: locale_data.to_vec(),
             providers: providers.to_vec(),
+            config_pending: (0..reflect_config.len()).collect(),
+            reflect_config: reflect_config.to_vec(),
             ..Walk::default()
         };
         walk.reach.sequential = sequential;
@@ -2917,6 +2936,8 @@ impl<'t> Walk<'t> {
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
             providers: std::mem::take(&mut self.providers),
+            config_pending: (0..self.reflect_config.len()).collect(),
+            reflect_config: std::mem::take(&mut self.reflect_config),
             asked: self.asked.take(),
             why: self.why.as_ref().map(|_| HashMap::new()),
             ..Walk::default()
@@ -3764,10 +3785,6 @@ impl<'t> Walk<'t> {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
             }
-            // The security manager, which is null: its type is a stub's (see `stubs`).
-            "METHOD" if owner == "java.lang.System" && name == "getSecurityManager" => {
-                self.stub_type("java.lang.SecurityManager");
-            }
             // The annotations that reflection finds (`ANNOTATION_VALUES`).
             "METHOD"
                 if name == "getAnnotation" && owner == "java.lang.Class"
@@ -4500,6 +4517,29 @@ mod tests {
         assert_eq!(loaded(false), ["Shape"]);
         // A parameter that the code assigns may be any class.
         assert_eq!(loaded(true), ["Other", "Shape"]);
+    }
+
+    #[test]
+    fn reflection_metadata_names_only_reached_classes_whose_condition_is_reached() {
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![call("Used", "run"), call("Guarded", "run")])]),
+            class("Used", &[("run", vec![])]),
+            class("Guarded", &[("run", vec![])]),
+            class("Unused", &[("run", vec![])]),
+            class("Condition", &[("run", vec![])]),
+        ]});
+        let entry = |class: &str, condition: Option<&str>| ReflectEntry {
+            class: class.to_string(),
+            condition: condition.map(str::to_string),
+            members: vec!["run".to_string()],
+            ..ReflectEntry::default()
+        };
+        let config = vec![entry("Used", None), entry("Guarded", Some("Condition")), entry("Unused", None)];
+        let mut rounds = Rounds::new("Main").with_reflect_config(config);
+        rounds.add(&[&unit]).unwrap();
+        let reach = rounds.finish();
+        assert_eq!(reach.configured.into_iter().collect::<Vec<_>>(), ["Used"]);
+        assert!(reach.named.contains("Used") && !reach.named.contains("Guarded"));
     }
 
     /// A pipeline in the shape of `java.util.stream.AbstractPipeline`: a `parallel` field that its

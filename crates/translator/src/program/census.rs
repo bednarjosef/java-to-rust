@@ -39,9 +39,11 @@
 //! Code that translates but knowingly behaves otherwise than Java's is listed apart from the
 //! rejections: the pieces that throw `NoClassDefFoundError` for a missing class, as Java would
 //! (`Piece::missing_class`), the calls of a handle's method that lowering does not follow,
-//! which throw `UnsupportedOperationException` where Java runs them (`unfollowed_handles`), and
-//! the lookups of a charset by a name known only at run time, which throw it for a charset of the
-//! JDK that the translation does not have (`charset_names`).
+//! which throw `UnsupportedOperationException` where Java runs them (`thrown_unsupported`), the
+//! lookups of a charset by a name known only at run time, which throw it for a charset of the
+//! JDK that the translation does not have (`charset_names`), and a security manager's
+//! `getClassContext`, which throws it where Java gives the classes on the call stack
+//! (`class_contexts`).
 
 use super::checkpoint;
 use super::survey::{self, Part, Piece};
@@ -220,7 +222,8 @@ fn analysed(
         super::print_notes(class, &files);
     }
     let mut modules = None;
-    let (mut unfollowed, mut charset_names, mut approximated) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut unfollowed, mut charset_names, mut approximated, mut class_contexts) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
             let names = Names {
@@ -242,11 +245,12 @@ fn analysed(
             approximated = approximated_messages(names.approximated.into_inner());
             fatal
         });
-        unfollowed = unfollowed_handles(&class);
+        unfollowed = thrown_unsupported(&class, lower::UNFOLLOWED_MESSAGE);
         charset_names = computed_charset_names(&class);
+        class_contexts = thrown_unsupported(&class, CLASS_CONTEXT_MESSAGE);
     }
     std::panic::set_hook(hook);
-    let listed = [unfollowed, charset_names, approximated];
+    let listed = [unfollowed, charset_names, approximated, class_contexts];
     let tally = Tally::new(&scan.pieces, &files, rejections, fatal, listed);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
     Census { report, json, modules }
@@ -791,11 +795,17 @@ fn unresolved_calls(class: &mut Class) -> Result<(), Vec<Error>> {
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
-/// The calls of a handle's method that the program, as the census leaves it, makes into a throw of
-/// `UnsupportedOperationException`, as lowering does where it does not follow one
-/// (`lower::handle_values`): code that translates, but behaves otherwise than Java's, each with
-/// the message it throws, at the call, in the method it is in.
-fn unfollowed_handles(class: &Class) -> Vec<Rejection> {
+/// What the `UnsupportedOperationException` of a security manager's `getClassContext` says, which
+/// the translator's patch of `SecurityManager` throws (`java/patches/java/lang/SecurityManager.java`).
+const CLASS_CONTEXT_MESSAGE: &str = "SecurityManager.getClassContext: the classes on the call stack, which a translated program does not have";
+
+/// The places where the program, as the census leaves it, throws an
+/// `UnsupportedOperationException` whose message contains `marker`: code that translates, but
+/// behaves otherwise than Java's, each with the message it throws, in the method it is in. A call
+/// of a handle's method that lowering does not follow (`lower::handle_values`) throws one at the
+/// call, with `lower::UNFOLLOWED_MESSAGE`; a security manager's `getClassContext` throws one with
+/// `CLASS_CONTEXT_MESSAGE`.
+fn thrown_unsupported(class: &Class, marker: &str) -> Vec<Rejection> {
     let Some(exception) = class.types.iter().position(|t| t.name == lower::UNFOLLOWED) else {
         return Vec::new();
     };
@@ -804,7 +814,7 @@ fn unfollowed_handles(class: &Class) -> Vec<Rejection> {
         if let ExprKind::New { class, args, .. } = &x.kind
             && *class == exception
             && let [Expr { kind: ExprKind::Str(message), .. }] = args.as_slice()
-            && message.contains(lower::UNFOLLOWED_MESSAGE)
+            && message.contains(marker)
         {
             let unit = x.pos.unit.map(|u| u as usize);
             let error = Error { pos: x.pos, message: message.clone() };
@@ -924,23 +934,25 @@ struct Tally {
     fatal: Option<(String, String)>,
     /// Code that translates but throws `UnsupportedOperationException` where Java goes on, each
     /// of a `Listed` kind: the piece each is in, if any, its message and its place.
-    listed: [BTreeSet<(Option<usize>, String, String)>; 3],
+    listed: [BTreeSet<(Option<usize>, String, String)>; 4],
 }
 
 /// The kinds of code that translate but throw `UnsupportedOperationException` where Java goes
 /// on, which the census lists apart from the rejections: the index of each in `Tally::listed`.
 #[derive(Clone, Copy)]
 enum Listed {
-    /// The calls of a handle's method that lowering does not follow (`unfollowed_handles`).
+    /// The calls of a handle's method that lowering does not follow (`thrown_unsupported`).
     Handles = 0,
     /// The lookups of a charset by a name known only at run time (`computed_charset_names`).
     CharsetNames = 1,
     /// The `NullPointerException` messages that are approximated (`approximated_messages`).
     Messages = 2,
+    /// A security manager's `getClassContext` (`thrown_unsupported`).
+    ClassContexts = 3,
 }
 
 impl Listed {
-    const ALL: [Listed; 3] = [Listed::Handles, Listed::CharsetNames, Listed::Messages];
+    const ALL: [Listed; 4] = [Listed::Handles, Listed::CharsetNames, Listed::Messages, Listed::ClassContexts];
 
     /// What the report says of the pieces with code of this kind.
     fn heading(self) -> &'static str {
@@ -959,13 +971,17 @@ impl Listed {
                  an approximated message (--approximate-messages): the JVM's words for what failed \
                  without where the null came from, or none"
             }
+            Listed::ClassContexts => {
+                "pieces that translate into code that throws UnsupportedOperationException for the \
+                 classes on the call stack, which a translated program does not have, where Java gives them"
+            }
         }
     }
 
     /// How the report starts each of its rows.
     fn row(self) -> &'static str {
         match self {
-            Listed::Handles => "throws UnsupportedOperationException:",
+            Listed::Handles | Listed::ClassContexts => "throws UnsupportedOperationException:",
             Listed::CharsetNames => "may throw UnsupportedOperationException:",
             Listed::Messages => "approximates",
         }
@@ -978,13 +994,13 @@ impl Tally {
         files: &[String],
         rejections: Vec<Rejection>,
         fatal: Option<Rejection>,
-        listed: [Vec<Rejection>; 3],
+        listed: [Vec<Rejection>; 4],
     ) -> Self {
         let mut tally = Tally {
             errors: vec![BTreeSet::new(); pieces.len()],
             elsewhere: BTreeSet::new(),
             fatal: fatal.map(|f| (f.error.message.clone(), place(files, &f))),
-            listed: [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()],
+            listed: [BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), BTreeSet::new()],
         };
         for rejection in rejections {
             let entry = (rejection.error.message.clone(), place(files, &rejection));
@@ -1263,6 +1279,7 @@ impl Tally {
             "unfollowedHandles": listed(Listed::Handles),
             "charsetNames": listed(Listed::CharsetNames),
             "approximatedMessages": listed(Listed::Messages),
+            "classContexts": listed(Listed::ClassContexts),
             "pieces": pieces.iter().zip(&self.errors).enumerate().map(|(i, (p, errors))| json!({
                 "source": p.part.name(),
                 "class": p.class,
@@ -1275,6 +1292,7 @@ impl Tally {
                 "unfollowedHandles": of_piece(Listed::Handles, i),
                 "charsetNames": of_piece(Listed::CharsetNames, i),
                 "approximatedMessages": of_piece(Listed::Messages, i),
+                "classContexts": of_piece(Listed::ClassContexts, i),
             })).collect::<Vec<_>>(),
             "elsewhere": self.elsewhere.iter().map(|(message, place)| json!({"message": message, "place": place}))
                 .collect::<Vec<_>>(),
@@ -1350,4 +1368,14 @@ pub fn normalize(message: &str) -> String {
 
 fn percent(part: usize, whole: usize) -> String {
     format!("{:.1}%", 100.0 * part as f64 / whole.max(1) as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    /// The census finds the throw of `getClassContext` by its message, which the patch writes.
+    #[test]
+    fn the_patch_of_security_manager_throws_the_listed_message() {
+        let patch = include_str!("../../java/patches/java/lang/SecurityManager.java");
+        assert!(patch.contains(super::CLASS_CONTEXT_MESSAGE));
+    }
 }

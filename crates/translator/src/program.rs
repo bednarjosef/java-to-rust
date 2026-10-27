@@ -443,11 +443,13 @@ fn load_in_rounds(
     let mut changing: Vec<(usize, &Value, Vec<&Value>, javac::Completion)> = Vec::new();
     let locale_data = reach::locale_data_classes(&program.libraries);
     let providers = modules::service_providers(program.sources.iter().chain(&program.libraries));
+    let reflect_config = reach::reflect_config(program.sources.iter().chain(&program.libraries));
     let new_rounds = || {
         let rounds = reach::Rounds::new(&program.main)
             .asking()
             .with_locale_data(locale_data.clone())
-            .with_providers(providers.clone());
+            .with_providers(providers.clone())
+            .with_reflect_config(reflect_config.clone());
         if string_array_writes { rounds.with_string_array_writes() } else { rounds }
     };
     let mut rounds = new_rounds();
@@ -886,7 +888,8 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     let mut rounds = reach::Rounds::new(&program.main)
         .with_locale_data(reach::locale_data_classes(&program.libraries))
-        .with_providers(modules::service_providers(program.sources.iter().chain(&program.libraries)));
+        .with_providers(modules::service_providers(program.sources.iter().chain(&program.libraries)))
+        .with_reflect_config(reach::reflect_config(program.sources.iter().chain(&program.libraries)));
     rounds.add(&trees).map_err(fail)?;
     let reach = rounds.finish();
     Ok(survey::survey(&units, &reach, program, &files))

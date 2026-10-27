@@ -350,6 +350,14 @@ UnsupportedOperationException: `Charset.forName` of a charset name known only at
 pieces``, and `census.json` has them under `charsetNames`, the whole program's and each
 piece's.
 
+So is a security manager's `getClassContext()`, the classes on the call stack, which log4j,
+slf4j and JNA read through a subclass of `SecurityManager`: a translated program has no stack to
+walk, so it throws `UnsupportedOperationException`, which log4j and slf4j catch to fall back
+([supported-java.md](supported-java.md), the caller's class). Its section reads ``throws
+UnsupportedOperationException: SecurityManager.getClassContext: the classes on the call stack,
+which a translated program does not have, N pieces``, and `census.json` has it under
+`classContexts`.
+
 A translation with `--keep-going` does the same, so a program whose library has optional
 dependencies can be built: it stops only at a rejected piece, as any translation does.
 
