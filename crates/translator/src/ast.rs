@@ -426,6 +426,14 @@ pub struct Class {
     /// the expression that makes it: `String[]` for a `new String[n]`, and `Object[]` for a copy
     /// into a class that is not the source's (`Arrays.copyOf(a, n, Object[].class)`).
     pub element_classes: HashMap<ExprId, Type>,
+    /// The arrays of each level of a new array of several dimensions whose rows at some level
+    /// are `Object`s, where the translation holds that level's arrays as `Object[]`s
+    /// (`lower::covariant`), by the `new` (`lower::arrays::sized_array`): from the outermost, the
+    /// type that holds the level's arrays and their Java class. `new String[2][2][3]` where
+    /// `String[][]` is an `Object[]` makes a `String[][][]` of `Object`s, each an `Object[]` of
+    /// class `String[][]` holding `String[]`s.
+    #[serde(default)]
+    pub object_rows: HashMap<ExprId, Vec<(Type, Type)>>,
     /// The array type that Java tests a value held as an `Object` against, where the translation
     /// holds arrays of that type as `Object[]`s (`lower::covariant`), by the tested value: the
     /// value of `o instanceof String[]` or `(String[]) o`. The test passes an array that carries
@@ -450,11 +458,17 @@ pub struct Class {
 }
 
 impl Class {
+    /// Whether the code makes arrays that the translation holds as `Object[]`s carrying their
+    /// class (`element_classes`, `object_rows`).
+    pub fn makes_covariant_arrays(&self) -> bool {
+        !self.element_classes.is_empty() || !self.object_rows.is_empty()
+    }
+
     /// Whether `a[i] = v` into an array of type `array` checks that the array can hold `v`: the
-    /// program makes covariant arrays (`element_classes`), `array` is an `Object[]`, which may be
+    /// program makes covariant arrays (`makes_covariant_arrays`), `array` is an `Object[]`, which may be
     /// one, and `v` is not null.
     pub fn checks_store(&self, array: Type, value: &Expr) -> bool {
-        !self.element_classes.is_empty()
+        self.makes_covariant_arrays()
             && matches!(array, Type::Array(element) if *element == Type::class(OBJECT))
             && !matches!(value.kind, ExprKind::Null)
     }

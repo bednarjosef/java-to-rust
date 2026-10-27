@@ -206,12 +206,21 @@ pub fn flows(
                     edges.insert((throwable, t));
                 }
             }
-            // The rows of `new int[n][m]` as an `Object[]` are `Object`s (`lower::arrays`).
+            // The rows of `new int[n][m]` as an `Object[]` are `Object`s (`lower::arrays`), and
+            // so are those of each level whose arrays are `Object[]`s (`Class::object_rows`).
             if let (ExprKind::NewArray(_), Type::Array(element), Type::Array(row)) =
                 (&value.kind, *to, value.ty)
                 && let (Some(t), Some(s)) = (index(*element), index(*row))
             {
                 edges.insert((s, t));
+            }
+            for pair in class.object_rows.get(&value.id).into_iter().flat_map(|levels| levels.windows(2)) {
+                let (element, row) = (pair[0].0.element(), pair[1].0);
+                if element != row
+                    && let (Some(t), Some(s)) = (index(element), index(row))
+                {
+                    edges.insert((s, t));
+                }
             }
         }
         // A `String[]` that is an `Object[]` (`lower::covariant`), and `main`'s arguments as one:

@@ -15,7 +15,9 @@
 //! - an accessor `c()` returns the field.
 //!
 //! A member the record declares itself is kept. An accessor is written only when something calls
-//! it or an interface of the record declares it, `hashCode` only when it is called (directly or
+//! it, an interface of the record declares it, or the program reads records' components
+//! (`Class.getRecordComponents`, called or found by its name as gson finds it), whose accessors
+//! reflection calls, `hashCode` only when it is called (directly or
 //! through a record holding this one) or `Object`'s may run, and `equals` only when `Object`'s
 //! may run (every call of it is one): whatever else would be dead code. `Object`'s methods may
 //! run when the program uses `Object` and calls a method of the name, or `java.util`. Written
@@ -154,6 +156,9 @@ pub(super) struct Survey {
     enums: HashSet<String>,
     /// The records that get a `hashCode`.
     hashed: BTreeSet<String>,
+    /// Whether the units read records' components: they call `Class.getRecordComponents`, or
+    /// spell its name, to find it by reflection.
+    reads_components: bool,
 }
 
 impl Survey {
@@ -175,6 +180,11 @@ impl Survey {
                 let symbol = &v["symbol"];
                 if matches!(kind, "METHOD_INVOCATION" | "MEMBER_REFERENCE") && symbol.is_object() {
                     self.called.insert((text(symbol, "owner").to_string(), text(symbol, "name").to_string()));
+                    self.reads_components |= (text(symbol, "owner"), text(symbol, "name"))
+                        == ("java.lang.Class", "getRecordComponents");
+                }
+                if kind == "STRING_LITERAL" && v["value"].as_str() == Some("getRecordComponents") {
+                    self.reads_components = true;
                 }
                 if kind == "INTERFACE" {
                     let methods = members(v)
@@ -433,7 +443,9 @@ fn accessor_overrides(
     let implements: Vec<&(String, String, String)> =
         interface_methods.iter().filter(|(_, n, _)| *n == c.name).collect();
     if declares(record, &c.name, 0)
-        || (implements.is_empty() && !survey.called.contains(&(name.to_string(), c.name.clone())))
+        || (implements.is_empty()
+            && !survey.reads_components
+            && !survey.called.contains(&(name.to_string(), c.name.clone())))
     {
         return None;
     }

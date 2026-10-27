@@ -3210,6 +3210,10 @@ impl<'a> Gen<'a> {
                 }
                 Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
+                // So does its names, which a store of it into an array of arrays tests.
+                Need::RuntimeTypeNames(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
+                    (format!("{}(o, {})", g.runtime("array_type_names"), g.names_list(c)), true)
+                }
                 Need::RuntimeTypeNames(_) => (g.names_list(c), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
                 _ => (g.value_hash(c, "o"), true),

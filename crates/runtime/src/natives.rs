@@ -43,15 +43,29 @@ fn checked_copy<T: Clone, A: Elements<T>>(
     length: i32,
     class: &crate::ElementClass<T>,
 ) -> Result<(), Exception> {
-    let (from, to, n) = copy_bounds::<T>(src.length(), src_pos, dest.length(), dest_pos, length)
+    let read = |range| src.reading(range, <[T]>::to_vec);
+    checked_copy_from((src.length(), src.element_class()), read, src_pos, dest, dest_pos, length, class)
+}
+
+/// `checked_copy` from an array of length `src_len` and class `source` (`None` for an `Object[]`,
+/// as a plain array always is), whose elements in a range `read` gives.
+fn checked_copy_from<T: Clone>(
+    (src_len, source): (usize, Option<&crate::ElementClass<T>>),
+    read: impl FnOnce(std::ops::Range<usize>) -> Vec<T>,
+    src_pos: i32,
+    dest: &impl Elements<T>,
+    dest_pos: i32,
+    length: i32,
+    class: &crate::ElementClass<T>,
+) -> Result<(), Exception> {
+    let (from, to, n) = copy_bounds::<T>(src_len, src_pos, dest.length(), dest_pos, length)
         .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
-    let items: Vec<T> = src.reading(from..from + n, <[T]>::to_vec);
+    let items: Vec<T> = read(from..from + n);
     let fits = items.iter().take_while(|v| class.refuses(v).is_none()).count();
     dest.store_from(to, &items[..fits]);
     if fits < n {
         // HotSpot tells whether `dest`'s element type is below `src`'s, which an array without a
         // class (an `Object[]`) always is.
-        let source = src.element_class();
         let name = source.map_or("java.lang.Object", |c| c.element);
         let message = if source.is_none_or(|s| (s.class)().is_assignable_from((class.class)())) {
             format!(
@@ -298,6 +312,38 @@ pub fn try_copy_slice<T: Clone>(
     try_bounds::<T>(src.length(), src_pos, dest.length(), dest_pos, length)?;
     copy_slice(src, src_pos, dest, dest_pos, length);
     Ok(())
+}
+
+/// `System.arraycopy` from a plain array into an array that may be a covariant one (an
+/// `Object[]` carrying its class), which checks each element as `arraycopy` does.
+pub fn copy_slice_into<T: Clone>(
+    src: &(impl Source<T> + ?Sized),
+    src_pos: i32,
+    dest: &impl Elements<T>,
+    dest_pos: i32,
+    length: i32,
+) {
+    try_copy_slice_into(src, src_pos, dest, dest_pos, length).unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `copy_slice_into`, where the program observes the exception (see `try_arraycopy`).
+pub fn try_copy_slice_into<T: Clone>(
+    src: &(impl Source<T> + ?Sized),
+    src_pos: i32,
+    dest: &impl Elements<T>,
+    dest_pos: i32,
+    length: i32,
+) -> Result<(), Exception> {
+    let read = |range| src.range(range).into_owned();
+    match dest.element_class() {
+        Some(class) => checked_copy_from((src.length(), None), read, src_pos, dest, dest_pos, length, class),
+        None => {
+            let (from, to, n) = copy_bounds::<T>(src.length(), src_pos, dest.length(), dest_pos, length)
+                .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
+            dest.store_from(to, &read(from..from + n));
+            Ok(())
+        }
+    }
 }
 
 /// `copy_within`, where the program observes the exception (see `try_arraycopy`).

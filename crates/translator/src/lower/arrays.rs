@@ -24,25 +24,41 @@ impl<'t> Lowering<'t> {
 
     /// A new array of `node`'s type with these lengths, one per dimension from the outermost.
     fn sized_array(&self, node: Node<'t>, sizes: Vec<Expr>) -> Result<ExprKind, Error> {
-        // An array of arrays that is an `Object[]` (see `covariant`), `new int[n][m]` where
-        // `int[][]` is: the rows are made as `int[]`s and become `Object`s.
         let java = node.java_type();
-        if sizes.len() > 1
-            && let Some(row) = java.strip_suffix("[]")
-            && let exact = Type::array(self.ty(node, row)?)
-            && exact != self.ty(node, java)?
-        {
-            if levels(exact) < sizes.len() {
-                return unsupported(node, DEEP_OBJECT_ROWS);
+        let ty = self.ty(node, java)?;
+        if sizes.len() < 2 {
+            return Ok(ExprKind::NewArray(sizes));
+        }
+        // The type of the arrays of each level, from the outermost, and their Java class. Where
+        // the arrays of a level are `Object[]`s (see `covariant`), as in `new int[n][m]` where
+        // `int[][]` is one, or `new C[a][b][c]` where `C[][]` is, the rows they hold are made as
+        // their own arrays and become `Object`s (`Class::object_rows`).
+        let mut javas = Vec::with_capacity(sizes.len());
+        let mut level = java;
+        for _ in 0..sizes.len() {
+            javas.push(level);
+            // javac's type has a level for each length.
+            level = level.strip_suffix("[]").unwrap_or(level);
+        }
+        let tys = javas.iter().map(|&level| self.ty(node, level)).collect::<Result<Vec<_>, _>>()?;
+        let object = Type::class(OBJECT);
+        // An array type with a level for each length, which the analyses read as a new array's.
+        let made = (1..tys.len()).fold(tys[tys.len() - 1], |made, _| Type::array(made));
+        if made == ty || tys.iter().all(|&level| level.element() != object) {
+            return Ok(ExprKind::NewArray(sizes));
+        }
+        let mut levels = Vec::with_capacity(tys.len());
+        for (&level, &java) in tys.iter().zip(&javas) {
+            levels.push((level, self.exact_ty(node, java)?));
+        }
+        for pair in levels.windows(2) {
+            if pair[0].0.element() == object {
+                self.note_object_array(pair[1].0);
             }
-            self.note_object_array(exact.element());
-            let rows = self.synth(ExprKind::NewArray(sizes), node.pos(), exact);
-            return Ok(ExprKind::Cast(self.ty(node, java)?, Box::new(rows)));
         }
-        if levels(self.ty(node, java)?) < sizes.len() {
-            return unsupported(node, DEEP_OBJECT_ROWS);
-        }
-        Ok(ExprKind::NewArray(sizes))
+        let rows = self.synth(ExprKind::NewArray(sizes), node.pos(), made);
+        self.object_rows.borrow_mut().insert(rows.id, levels);
+        Ok(ExprKind::Cast(ty, Box::new(rows)))
     }
 
     /// `a[i]` as an expression or, on the left of an assignment, as a place.
@@ -330,17 +346,4 @@ pub(super) fn reads_name(body: &[Stmt], name: &str) -> bool {
         visit_stmt(stmt, &mut |e| found |= mentions(e, name), &mut |_| {});
     }
     found
-}
-
-/// A new array of several dimensions whose rows below the outermost are `Object[]`s (see
-/// `covariant`), as in `new C[a][b][c]` where `C[][]` is one: an `Object` element of a row has no
-/// type for the array that the next level puts there.
-const DEEP_OBJECT_ROWS: &str = "a new array whose rows are `Object[]`s below its outermost level";
-
-/// How many levels of arrays `ty` has: 2 for `int[][]`, 0 for `Object`.
-fn levels(ty: Type) -> usize {
-    match ty {
-        Type::Array(element) => 1 + levels(*element),
-        _ => 0,
-    }
 }
