@@ -101,7 +101,11 @@ program where such a lookup can happen, so they can be checked before the progra
   the spelled-out name, or for a computed name any string literal of reachable code, or every
   member for `getMethods()` and its relatives. Reachability finds these
   (`program/reach/reflection.rs`, kept in `Reach::reflected`). Of `Object`'s methods, the table
-  holds `hashCode`, `equals` and `toString`, when code looks them up. In a single file the
+  holds `hashCode`, `equals` and `toString`, when code looks them up. Of the boxed classes, which
+  are the runtime's and have no methods of the program, it holds the static `valueOf(String)` of
+  each whose class literal reachable code has (all but `Character`), called as a direct
+  `Integer.valueOf(s)` is: jopt-simple finds the converter of an option's values so, as the
+  Minecraft server's `--port` (`ofType(Integer.class)`). In a single file the
   candidates are its classes and the names in its string literals (`lower/reflection.rs`,
   `file_names`).
   Records' components: `Class.isRecord()` and `getRecordComponents()` are answered by the

@@ -182,7 +182,23 @@ enum Member<'t> {
     Object(&'static str),
     /// One of `Class`'s own methods (`CLASS_METHODS`), looked up in `Class`.
     Class(&'static str),
+    /// The static `valueOf(String)` of a boxed class (`BOX_PARSERS`), by its primitive: the boxed
+    /// classes are the runtime's, with no methods of the program, and jopt-simple finds the
+    /// converter of an option's values (`Integer.class`) so.
+    BoxParse(Type),
 }
+
+/// The boxed classes whose `valueOf(String)` the table holds, with their primitives: all but
+/// `Character`, which has none.
+const BOX_PARSERS: [(&str, Type); 7] = [
+    ("java.lang.Boolean", Type::Boolean),
+    ("java.lang.Byte", Type::Byte),
+    ("java.lang.Short", Type::Short),
+    ("java.lang.Integer", Type::Int),
+    ("java.lang.Long", Type::Long),
+    ("java.lang.Float", Type::Float),
+    ("java.lang.Double", Type::Double),
+];
 
 /// `Object`'s methods in the table: the name, the parameter types and the result, and the bits
 /// of `Modifier` (`hashCode` is `native`).
@@ -715,6 +731,14 @@ impl<'t> Lowering<'t> {
                 let then = Stmt::Block(vec![Stmt::Yield(self.convert(call, object))]);
                 Ok(Some(vec![Stmt::If { cond, then: Box::new(then), otherwise: None }, Stmt::Yield(null())]))
             }
+            (Member::BoxParse(primitive), "invokePart") => {
+                // `Method.invoke` checked the argument before: a `String`, or null, which parses
+                // as Java's `valueOf(null)` does.
+                let text = argument(2, 0, Type::String)?;
+                let parse = ExprKind::Builtin(Builtin::Boxed(BoxedOp::Parse, *primitive), vec![text]);
+                let call = self.synth(parse, pos, Type::boxed(*primitive));
+                Ok(Some(vec![Stmt::Yield(self.convert(call, object))]))
+            }
             (Member::Class(name), "invokePart") => {
                 let (_, ret, helper) =
                     CLASS_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Class`'s");
@@ -788,6 +812,7 @@ impl<'t> Lowering<'t> {
         for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
             let found_on = match entry.member {
                 Member::Class(_) => literal(Type::JavaClass),
+                Member::BoxParse(primitive) => literal(Type::boxed(primitive)),
                 _ => literal(entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t))),
             };
             let args = match &entry.member {
@@ -853,6 +878,21 @@ impl<'t> Lowering<'t> {
                         int(slot as i32),
                     ]
                 }
+                Member::BoxParse(primitive) => {
+                    let boxed = || literal(Type::boxed(*primitive));
+                    let name = self.synth(ExprKind::Str("valueOf".to_string()), pos, Type::String);
+                    // Public and static.
+                    vec![
+                        boxed(),
+                        boxed(),
+                        name,
+                        classes(vec![Type::String], 3),
+                        boxed(),
+                        classes(Vec::new(), 5),
+                        int(1 | 8),
+                        int(slot as i32),
+                    ]
+                }
                 Member::Class(name) => {
                     let (_, ret, _) =
                         CLASS_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Class`'s");
@@ -907,7 +947,7 @@ impl<'t> Lowering<'t> {
                     (slot as i32, decl, format!("{}#{}", self.types[class].javac, decl.str("name")))
                 }
                 // Without a declaration of the program, and so without annotations.
-                Member::Object(_) | Member::Class(_) => continue,
+                Member::Object(_) | Member::Class(_) | Member::BoxParse(_) => continue,
             });
         }
         Ok(out)
@@ -1023,6 +1063,16 @@ impl<'t> Lowering<'t> {
             for (name, ..) in OBJECT_METHODS {
                 if reach.reflected.contains(&("java.lang.Object".to_string(), name.to_string())) {
                     out.push(Entry { found_on: None, member: Member::Object(name) });
+                }
+            }
+        }
+        // The boxed classes' `valueOf(String)`.
+        if kind == LookupKind::Method
+            && let Some(reach) = self.reach
+        {
+            for (class, primitive) in BOX_PARSERS {
+                if reach.reflected.contains(&(class.to_string(), "valueOf".to_string())) {
+                    out.push(Entry { found_on: None, member: Member::BoxParse(primitive) });
                 }
             }
         }

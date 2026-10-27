@@ -839,6 +839,14 @@ impl Uses {
                                 }
                                 self.members.insert(member);
                             }
+                            // A method found by name may be a boxed class's `valueOf(String)`,
+                            // which the table calls (`reflection.rs`, `BOX_PARSERS`) and which
+                            // throws a `NumberFormatException`.
+                            if text(symbol, "name").contains("Method") {
+                                for boxed in ["Byte", "Short", "Integer", "Long", "Float", "Double"] {
+                                    self.operations.insert(format!("java.lang.{boxed}#"));
+                                }
+                            }
                         }
                         self.operations.insert(kind.clone());
                         self.operations.insert(format!("{owner}#{}", text(symbol, "name")));

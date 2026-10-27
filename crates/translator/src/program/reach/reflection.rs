@@ -47,6 +47,16 @@ use crate::value::Value;
 
 const OBJECT: &str = "java.lang.Object";
 const CLASS: &str = "java.lang.Class";
+/// The boxed classes with a `valueOf(String)`.
+const BOXES: [&str; 7] = [
+    "java.lang.Boolean",
+    "java.lang.Byte",
+    "java.lang.Short",
+    "java.lang.Integer",
+    "java.lang.Long",
+    "java.lang.Float",
+    "java.lang.Double",
+];
 const RECORD_COMPONENT: &str = "java.lang.reflect.RecordComponent";
 
 /// The methods of `Class` itself that the reflection table has (`lower/reflection.rs`).
@@ -362,6 +372,20 @@ impl<'t> Walk<'t> {
                     let key = (OBJECT.to_string(), name.to_string());
                     if wanted && !self.reflected_keys.contains(&key) && seen.insert(key.clone()) {
                         found.push((OBJECT.to_string(), name.to_string(), key, true));
+                    }
+                }
+            }
+            // The boxed classes' `valueOf(String)`, which the runtime's boxes have
+            // (`lower/reflection.rs`): jopt-simple's converter of an option's values.
+            if lookup.kind == Kind::Method {
+                for class in classes.iter().filter(|c| BOXES.contains(&c.as_str())) {
+                    let wanted = match &lookup.name {
+                        Some(n) if !lookup.every => n == "valueOf",
+                        _ => lookup.every || self.strings.contains("valueOf"),
+                    };
+                    let key = (class.clone(), "valueOf".to_string());
+                    if wanted && !self.reflected_keys.contains(&key) && seen.insert(key.clone()) {
+                        found.push((class.clone(), "valueOf".to_string(), key, true));
                     }
                 }
             }
