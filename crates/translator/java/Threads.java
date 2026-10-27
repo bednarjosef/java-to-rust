@@ -180,6 +180,19 @@ class Thread {
         join0(tid, millis);
     }
 
+    public final void join(long millis, int nanos) throws InterruptedException {
+        if (millis < 0) {
+            throw new IllegalArgumentException("timeout value is negative");
+        }
+        if (nanos < 0 || nanos > 999999) {
+            throw new IllegalArgumentException("nanosecond timeout value out of range");
+        }
+        if (nanos > 0 && millis < Long.MAX_VALUE) {
+            millis++;
+        }
+        join(millis);
+    }
+
     public void interrupt() {
         interrupt0(tid);
     }
