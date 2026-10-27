@@ -784,9 +784,10 @@ impl<'a> Gen<'a> {
             return code;
         }
         self.dereferenced.insert(id);
-        let call = if code.text.contains('?') {
-            // An operand that throws (`passed_on` writes `?` inside) leaves the closure with its
-            // exception, which goes on as the operation's own would.
+        let call = if code.text.contains('?') || code.text.contains("return Err(") {
+            // An operand that throws (`passed_on` writes `?` inside, a `throw` in a switch
+            // expression `return Err`) leaves the closure with its exception, which goes on as
+            // the operation's own would.
             let throwable = self.throwable_type();
             format!(
                 "{}(|| -> Result<_, {throwable}> {{ Ok({}) }}).map_err({throwable}::from).and_then(|r| r)",

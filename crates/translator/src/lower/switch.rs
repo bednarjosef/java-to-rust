@@ -55,7 +55,9 @@ impl<'t> Lowering<'t> {
         }
         let selector = self.selector(node)?;
         let mut cases = self.cases(node, selector.ty, false)?;
-        let mut hoisted = self.hoist_shared_locals(&mut cases);
+        // The cases of arrows (`case 4 -> { int b = ...; }`) are each a scope of their own.
+        let rules = node.list("cases").any(|c| c.str("caseKind") == "RULE");
+        let mut hoisted = if rules { Vec::new() } else { self.hoist_shared_locals(&mut cases) };
         if hoisted.is_empty() {
             return Ok(Stmt::Switch { selector, cases });
         }
