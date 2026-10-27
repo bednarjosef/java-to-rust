@@ -300,10 +300,16 @@ const RAISED: &[(&str, &[&str])] = &[
         ],
     ),
     // The natives of the descriptor streams (`fd.rs`): reading or writing a closed or failing
-    // descriptor, and opening a file that cannot be opened.
+    // descriptor, and opening a file that cannot be opened; those of file channels
+    // (`file_channel.rs`, mapping a file too), of `Files.copy`'s advice (`file_copy.rs`), and
+    // starting a program that cannot start (`process.rs`).
     (
         "java.io.IOException",
         &[
+            "java.lang.ProcessImpl#spawn0",
+            "sun.nio.ch.UnixFileDispatcherImpl#",
+            "sun.nio.ch.FileKey#init",
+            "sun.nio.fs.LinuxNativeDispatcher#posix_fadvise",
             "java.io.FileInputStream#read0",
             "java.io.FileInputStream#readBytes",
             "java.io.FileInputStream#available0",
