@@ -666,7 +666,8 @@ impl<'a> Gen<'a> {
     /// Whether `value` may be a class that Java lets be a `to`, one of the interfaces that
     /// `java.lang.Class` implements and the program translates as interfaces of its own, which
     /// the runtime's classes do not implement (`Constable`, `TypeDescriptor.OfField`; `Type`,
-    /// `TypeDescriptor` and `Serializable` they do, see `CLASS_VALUE_INTERFACES`): the cast or the
+    /// `TypeDescriptor`, `GenericDeclaration` and `Serializable` they do, see
+    /// `CLASS_VALUE_INTERFACES`): the cast or the
     /// test is rejected.
     fn rejects_class_as(&mut self, value: &Expr, to: Type) -> bool {
         let Type::Class(name, _) = to else { return false };
@@ -2290,7 +2291,8 @@ impl<'a> Gen<'a> {
 
     /// The method of `CLASS_VALUE_INTERFACES` that method `r` is or overrides, by name, when a
     /// class answers it with its own: `Type`'s `getTypeName()`, where the interface's default
-    /// would give the class's `toString()`, and `TypeDescriptor`'s abstract `descriptorString()`.
+    /// would give the class's `toString()`, `TypeDescriptor`'s abstract `descriptorString()`, and
+    /// `GenericDeclaration`'s `getTypeParameters()`, which is rejected.
     fn class_answer(&self, r: usize) -> Option<&'static str> {
         self.class.hierarchy.group(r).into_iter().find_map(|g| {
             let m = &self.class.methods[g];
@@ -2298,6 +2300,7 @@ impl<'a> Gen<'a> {
                 _ if !m.params.is_empty() => None,
                 ("java.lang.reflect.Type", "getTypeName") => Some("getTypeName"),
                 ("java.lang.invoke.TypeDescriptor", "descriptorString") => Some("descriptorString"),
+                ("java.lang.reflect.GenericDeclaration", "getTypeParameters") => Some("getTypeParameters"),
                 _ => None,
             }
         })
@@ -2306,6 +2309,11 @@ impl<'a> Gen<'a> {
     /// Method `r` (see `class_answer`) for a class bound to `o`: `Class`'s own, as the JDK makes
     /// it.
     fn class_answer_arm(&mut self, r: usize) -> String {
+        if self.class_answer(r) == Some("getTypeParameters") {
+            let message = "`getTypeParameters` of a class held as a `GenericDeclaration` not supported yet";
+            self.rejected.push(Error { pos: self.class.methods[r].pos, message: message.to_string() });
+            return "unreachable!()".to_string();
+        }
         let text = match self.class_answer(r) {
             Some("getTypeName") if super::shared_strings() => "o.shared_type_name()".to_string(),
             Some("getTypeName") => "o.get_type_name()".to_string(),

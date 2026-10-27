@@ -581,12 +581,18 @@ pub const CHARSET_VALUE: &str = "java.nio.charset.Charset";
 
 /// The interfaces of `java.lang.Class` that the runtime's classes implement where the program
 /// has them: `Type` and `TypeDescriptor`, whose `getTypeName()` and `descriptorString()` a class
-/// answers itself (see `codegen::dispatch`), and `Serializable`, which has no methods. `Class`'s
-/// others need reflection (`GenericDeclaration`, `AnnotatedElement`) or objects that describe the
-/// class (`Constable`'s `ClassDesc`, `TypeDescriptor.OfField`'s component and array types), and
-/// stay rejected.
-pub const CLASS_VALUE_INTERFACES: [&str; 3] =
-    ["java.io.Serializable", "java.lang.invoke.TypeDescriptor", "java.lang.reflect.Type"];
+/// answers itself (see `codegen::dispatch`), `Serializable`, which has no methods, and
+/// `GenericDeclaration`, what a type variable's `getGenericDeclaration()` gives (whose
+/// `getTypeParameters()` on a class held as one is rejected; the translator's patch of it is no
+/// `AnnotatedElement`). `Class`'s others need reflection (`AnnotatedElement`) or objects that
+/// describe the class (`Constable`'s `ClassDesc`, `TypeDescriptor.OfField`'s component and array
+/// types), and stay rejected.
+pub const CLASS_VALUE_INTERFACES: [&str; 4] = [
+    "java.io.Serializable",
+    "java.lang.invoke.TypeDescriptor",
+    "java.lang.reflect.Type",
+    "java.lang.reflect.GenericDeclaration",
+];
 
 /// The runtime class whose values are of type `ty`, a primitive standing for its box.
 pub fn runtime_name(ty: Type) -> Option<&'static str> {

@@ -28,9 +28,10 @@
 //! The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it too,
 //! with its `append` methods answered by the builder's own (see `codegen::dispatch`), so that a
 //! builder passed as one (to `Formatter`, to `DateTimeFormatter.formatTo`) is one. The runtime's
-//! classes implement `java.lang.reflect.Type` and `Serializable` where the program has them
-//! (`CLASS_VALUE_INTERFACES`), with `Type`'s `getTypeName()` answered by the class's own, so
-//! that a class held as a `Type` (gson's and guava's type tokens) is one.
+//! classes implement `java.lang.reflect.Type`, `GenericDeclaration` and `Serializable` where the
+//! program has them (`CLASS_VALUE_INTERFACES`), with `Type`'s `getTypeName()` answered by the
+//! class's own, so that a class held as a `Type` (gson's and guava's type tokens) or as the
+//! declaration of a type variable is one.
 //! `java.lang.Enum`, when the program uses it as a type, is a type of the same kind, `ENUM`, with
 //! no methods of its own: the program's enums implement it, and `lower::enums` lowers the calls
 //! of `Enum`'s methods on its values. `java.lang.Record`, when the program uses it as a type (an

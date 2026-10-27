@@ -226,7 +226,8 @@ impl<'t> Lowering<'t> {
     }
 
     /// A call of a native of the translator's `Method`, `Field` or `Constructor` (see the
-    /// module's comment), with its arguments; `None` for any other call.
+    /// module's comment), `ServiceLoader` or `TranslatedTypes` (`generic_types`), with its
+    /// arguments; `None` for any other call.
     pub(super) fn reflection_native(
         &self,
         node: Node<'t>,
@@ -235,6 +236,9 @@ impl<'t> Lowering<'t> {
     ) -> Result<Option<ExprKind>, Error> {
         if symbol.owner == SERVICE_LOADER && symbol.native {
             return Ok(Some(self.service_native(node, symbol, std::mem::take(args))?));
+        }
+        if symbol.owner == super::generic_types::TRANSLATED_TYPES && symbol.native {
+            return Ok(Some(self.generic_types_native(node, symbol, std::mem::take(args))?));
         }
         if !matches!(symbol.owner, METHOD | FIELD | CONSTRUCTOR) || !symbol.native {
             return Ok(None);
@@ -508,9 +512,9 @@ impl<'t> Lowering<'t> {
                 }
                 Ok(Some(body))
             }
-            (Member::Field(_, decl), "genericTypePart") => {
+            (Member::Field(class, decl), "genericTypePart") => {
                 let text = decl.symbol().map_or("", |s| s.ty);
-                let made = self.field_generic_type(node, text)?;
+                let made = self.field_generic_type(node, text, *class)?;
                 Ok(made.map(|made| vec![Stmt::Yield(self.convert(made, object))]))
             }
             (Member::Field(class, decl), "getPart" | "setPart") => {

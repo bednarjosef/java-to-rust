@@ -336,6 +336,11 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.reflect.ParameterizedType",
     "java.lang.reflect.Type",
     "java.lang.reflect.WildcardType",
+    // A class's type variables, which the translator makes (`lower::generic_types`), and what
+    // declares one: a class, which the runtime's classes are (`ast::CLASS_VALUE_INTERFACES`).
+    // Neither is an `AnnotatedElement` (`java/patches/java/lang/reflect/`).
+    "java.lang.reflect.GenericDeclaration",
+    "java.lang.reflect.TypeVariable",
     "java.security.AsymmetricKey",
     "java.security.DEREncodable",
     "java.security.Key",
@@ -1723,7 +1728,7 @@ pub const ANNOTATION_VALUES: [JdkMethod; 2] = [
 /// The translator's methods that make the generic types that reflection answers
 /// (`java/overlay/sun/reflect/generics/reflectiveObjects/TranslatedTypes.java`, see
 /// `lower::generic_types`).
-pub const GENERIC_TYPES: [JdkMethod; 5] = [
+pub const GENERIC_TYPES: [JdkMethod; 7] = [
     (
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "parameterized",
@@ -1742,12 +1747,22 @@ pub const GENERIC_TYPES: [JdkMethod; 5] = [
     (
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "typeVariable",
-        "(java.lang.String)java.lang.reflect.Type",
+        "(java.lang.Class<?>,java.lang.String)java.lang.reflect.TypeVariable<?>",
     ),
     (
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "unsupported",
         "(java.lang.String)java.lang.reflect.Type",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "typeParameters",
+        "(java.lang.Class<?>)java.lang.reflect.TypeVariable<?>[]",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "genericInterfaces",
+        "(java.lang.Class<?>)java.lang.reflect.Type[]",
     ),
 ];
 
@@ -3796,7 +3811,8 @@ impl<'t> Walk<'t> {
             }
             // The generic types that reflection answers (`GENERIC_TYPES`).
             "METHOD"
-                if name == "getGenericSuperclass" && owner == "java.lang.Class"
+                if matches!(name, "getGenericSuperclass" | "getGenericInterfaces" | "getTypeParameters")
+                    && owner == "java.lang.Class"
                     || name == "getGenericType" && owner == "java.lang.reflect.Field" =>
             {
                 for (class, method, signature) in GENERIC_TYPES {

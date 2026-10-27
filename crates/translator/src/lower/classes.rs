@@ -122,6 +122,9 @@ impl<'t> Lowering<'t> {
                 return Ok(Some(self.annotation_of(node, receiver, *annotation)?));
             }
             ("getGenericSuperclass", []) => return Ok(Some(self.generic_superclass(node, receiver)?)),
+            ("getGenericInterfaces" | "getTypeParameters", []) => {
+                return Ok(Some(self.generic_declarations(node, symbol.name, receiver)?));
+            }
             ("getEnumConstants", []) => {
                 let class = self.expr(receiver)?;
                 return Ok(Some(self.class_enum_constants(node, class, true)?));
