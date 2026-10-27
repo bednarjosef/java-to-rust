@@ -365,21 +365,47 @@ fn is_reread(e: &Expr) -> bool {
     }
 }
 
-/// Whether evaluating the argument `n` can neither throw nor do anything else: a literal, a local
-/// or `this`, perhaps negated.
+/// Whether evaluating the argument `n` can neither throw nor do anything else: a literal, a
+/// constant (which javac writes as its value), a local or `this`, perhaps negated, and
+/// arithmetic of those that cannot throw.
 fn quiet(n: Node) -> bool {
     let n = plain(n);
+    let constant = || n.symbol().is_some_and(|s| s.kind == "FIELD" && s.constant.is_some());
     match n.kind() {
         "UNARY_MINUS" | "UNARY_PLUS" | "BITWISE_COMPLEMENT" | "LOGICAL_COMPLEMENT" => {
             n.get("expression").is_some_and(quiet)
         }
         "IDENTIFIER" => {
             n.str("name") == "this"
+                || constant()
                 || n.symbol().is_some_and(|s| {
                     matches!(
                         s.kind,
                         "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER" | "RESOURCE_VARIABLE"
                     )
+                })
+        }
+        // Arithmetic on numbers that cannot throw, of quiet operands.
+        "PLUS"
+        | "MINUS"
+        | "MULTIPLY"
+        | "AND"
+        | "OR"
+        | "XOR"
+        | "LEFT_SHIFT"
+        | "RIGHT_SHIFT"
+        | "UNSIGNED_RIGHT_SHIFT"
+            if PRIMITIVES.contains(&n.java_type()) =>
+        {
+            n.get("leftOperand").is_some_and(quiet) && n.get("rightOperand").is_some_and(quiet)
+        }
+        // A constant of a class named by its name.
+        "MEMBER_SELECT" => {
+            constant()
+                && n.get("expression").is_some_and(|e| {
+                    plain(e)
+                        .symbol()
+                        .is_some_and(|s| matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD"))
                 })
         }
         // Making a lambda, or a reference to a static method or one that takes its object,

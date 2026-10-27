@@ -524,8 +524,8 @@ name:
   `ClassCastException` without a message for a null object, where the field's access would
   throw `NullPointerException`: an object other than `this` is tested first
   (`Builtin::UpdaterRefused`), so it must be a local or an enclosing instance, and the other
-  arguments constants, locals, lambdas or references to static methods, which the test may come
-  before. Other objects and arguments, and an updater that is not a constant, are rejected.
+  arguments literals, constant fields, locals, lambdas, references to static methods, or
+  arithmetic of those that cannot throw, which the test may come before. Other objects and arguments, and an updater that is not a constant, are rejected.
 - **Atomic updates** (compare-and-set, compare-and-exchange, get-and-add, get-and-set,
   get-and-bitwise, every memory mode) of a field become a method that lowering adds to the
   field's class, one per field and form (`compareAndSetValue(expected, value)`), whose body
