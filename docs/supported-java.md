@@ -206,7 +206,9 @@ Design: [object-model.md](object-model.md).
   `Object` over the program's implementors and the matching library values.
 - **Generics** translate erased, as javac compiles them, with javac's casts and bridge methods.
   A generic class or method that only stores, returns and passes its type variables is a Rust
-  generic instead (`struct Stack<T>`, `fn choose<T: Clone>`), with no casts.
+  generic instead (`struct Stack<T>`, `fn choose<T: Clone>`), with no casts. A type variable
+  that javac's inference makes up, for a parameter bounded by itself with nothing to infer it
+  from (`<B extends Builder<B>> B newBuilder()`), is its erasure.
 - An array of references used as an `Object[]` is an `Object[]` throughout. Where the code makes
   one, it carries the class it was made of, so storing an object of another class throws
   `ArrayStoreException`, `getClass()` is its own, and `instanceof` and casts to an array class
