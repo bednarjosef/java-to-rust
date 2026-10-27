@@ -366,12 +366,14 @@ impl<'a> Gen<'a> {
             Native::SecureSeed => {
                 let num_bytes = self.value(&args[0], Type::Int).text;
                 let call = Code::atom(format!("{}({num_bytes})", self.runtime("try_secure_seed")));
-                if self.facts.raising.contains(&id) {
+                let seed = if self.facts.raising.contains(&id) {
                     let checked = format!("{}.map_err({})", call.text, self.runtime("Failure::exception"));
-                    Code::atom(self.passed_on(Code::atom(checked)))
+                    self.passed_on(Code::atom(checked))
                 } else {
-                    Code::atom(format!("{}({})", self.runtime("or_throw"), call.text))
-                }
+                    format!("{}({})", self.runtime("or_throw"), call.text)
+                };
+                // The runtime's array, as the program's `byte[]`s are held.
+                Code::atom(self.made_array(seed, Type::array(Type::Byte)))
             }
         }
     }
