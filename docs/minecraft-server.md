@@ -358,6 +358,15 @@ UnsupportedOperationException: SecurityManager.getClassContext: the classes on t
 which a translated program does not have, N pieces``, and `census.json` has it under
 `classContexts`.
 
+So is an `Unsafe` read or write at an offset that the translation resolves to no field or array
+element, which netty's `PlatformDependent0` makes through methods that take any object and
+offset: it reads or writes the field whose number the offset is, and throws
+`UnsupportedOperationException` where none is, where Java reads or writes the memory there
+([multi-threading.md](multi-threading.md), section 5.3). Its section reads ``may throw
+UnsupportedOperationException: `Unsafe.getLong` at an offset that the translation does not
+resolve, N pieces``, and `census.json` has them under `unresolvedOffsets`, the whole program's and
+each piece's.
+
 A translation with `--keep-going` does the same, so a program whose library has optional
 dependencies can be built: it stops only at a rejected piece, as any translation does.
 

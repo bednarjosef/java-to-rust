@@ -93,6 +93,7 @@ pub use exceptions::{
 };
 pub use functional::is_functional;
 pub(crate) use handle_values::{UNFOLLOWED, UNFOLLOWED_MESSAGE};
+pub(crate) use handles::UNRESOLVED_OFFSET;
 pub(crate) use inner::OUTER;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;

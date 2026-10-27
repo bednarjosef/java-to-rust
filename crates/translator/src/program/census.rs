@@ -236,8 +236,8 @@ fn analysed(
         super::print_notes(class, &files);
     }
     let mut modules = None;
-    let (mut unfollowed, mut charset_names, mut approximated, mut class_contexts) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut unfollowed, mut charset_names, mut approximated, mut class_contexts, mut offsets) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
             let names = Names {
@@ -266,9 +266,10 @@ fn analysed(
         unfollowed = thrown_unsupported(&class, lower::UNFOLLOWED_MESSAGE);
         charset_names = computed_charset_names(&class);
         class_contexts = thrown_unsupported(&class, CLASS_CONTEXT_MESSAGE);
+        offsets = thrown_unsupported(&class, lower::UNRESOLVED_OFFSET);
     }
     std::panic::set_hook(hook);
-    let listed = [unfollowed, charset_names, approximated, class_contexts];
+    let listed = [unfollowed, charset_names, approximated, class_contexts, offsets];
     let tally = Tally::new(&scan.pieces, &files, rejections, fatal, listed);
     let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
     Census { report, json, modules }
@@ -851,18 +852,27 @@ const CLASS_CONTEXT_MESSAGE: &str = "SecurityManager.getClassContext: the classe
 /// behaves otherwise than Java's, each with the message it throws, in the method it is in. A call
 /// of a handle's method that lowering does not follow (`lower::handle_values`) throws one at the
 /// call, with `lower::UNFOLLOWED_MESSAGE`; a security manager's `getClassContext` throws one with
-/// `CLASS_CONTEXT_MESSAGE`.
+/// `CLASS_CONTEXT_MESSAGE`; an `Unsafe` access at an offset that lowering does not resolve
+/// (`lower::handles`) throws one with `lower::UNRESOLVED_OFFSET`, at the access or, where the
+/// offset names no field, in the translator's access that it calls with that message.
 fn thrown_unsupported(class: &Class, marker: &str) -> Vec<Rejection> {
     let Some(exception) = class.types.iter().position(|t| t.name == lower::UNFOLLOWED) else {
         return Vec::new();
     };
     let mut found = Vec::new();
     let mut see = |x: &Expr, anchor: Option<Pos>| {
-        if let ExprKind::New { class, args, .. } = &x.kind
-            && *class == exception
-            && let [Expr { kind: ExprKind::Str(message), .. }] = args.as_slice()
-            && message.contains(marker)
-        {
+        let message = match &x.kind {
+            ExprKind::New { class, args, .. } if *class == exception => match args.as_slice() {
+                [Expr { kind: ExprKind::Str(message), .. }] => Some(message),
+                _ => None,
+            },
+            ExprKind::Call { args, .. } => args.iter().find_map(|a| match &a.kind {
+                ExprKind::Str(message) => Some(message),
+                _ => None,
+            }),
+            _ => None,
+        };
+        if let Some(message) = message.filter(|m| m.contains(marker)) {
             let unit = x.pos.source_unit();
             let error = Error { pos: x.pos, message: message.clone() };
             found.push(Rejection { unit, anchor, error });
@@ -986,7 +996,7 @@ struct Tally {
     fatal: Option<(String, String)>,
     /// Code that translates but throws `UnsupportedOperationException` where Java goes on, each
     /// of a `Listed` kind: the piece each is in, if any, its message and its place.
-    listed: [BTreeSet<(Option<usize>, String, String)>; 4],
+    listed: [BTreeSet<(Option<usize>, String, String)>; 5],
 }
 
 /// The kinds of code that translate but throw `UnsupportedOperationException` where Java goes
@@ -1001,10 +1011,18 @@ enum Listed {
     Messages = 2,
     /// A security manager's `getClassContext` (`thrown_unsupported`).
     ClassContexts = 3,
+    /// The accesses of `Unsafe` at an offset that lowering does not resolve (`thrown_unsupported`).
+    UnsafeOffsets = 4,
 }
 
 impl Listed {
-    const ALL: [Listed; 4] = [Listed::Handles, Listed::CharsetNames, Listed::Messages, Listed::ClassContexts];
+    const ALL: [Listed; 5] = [
+        Listed::Handles,
+        Listed::CharsetNames,
+        Listed::Messages,
+        Listed::ClassContexts,
+        Listed::UnsafeOffsets,
+    ];
 
     /// What the report says of the pieces with code of this kind.
     fn heading(self) -> &'static str {
@@ -1027,6 +1045,11 @@ impl Listed {
                 "pieces that translate into code that throws UnsupportedOperationException for the \
                  classes on the call stack, which a translated program does not have, where Java gives them"
             }
+            Listed::UnsafeOffsets => {
+                "pieces that translate into code that throws UnsupportedOperationException for an Unsafe \
+                 access at an offset that the translation does not resolve, unless it is the number of a \
+                 field of the reflection table, where Java reads or writes the memory there"
+            }
         }
     }
 
@@ -1034,7 +1057,7 @@ impl Listed {
     fn row(self) -> &'static str {
         match self {
             Listed::Handles | Listed::ClassContexts => "throws UnsupportedOperationException:",
-            Listed::CharsetNames => "may throw UnsupportedOperationException:",
+            Listed::CharsetNames | Listed::UnsafeOffsets => "may throw UnsupportedOperationException:",
             Listed::Messages => "approximates",
         }
     }
@@ -1046,13 +1069,13 @@ impl Tally {
         files: &[String],
         rejections: Vec<Rejection>,
         fatal: Option<Rejection>,
-        listed: [Vec<Rejection>; 4],
+        listed: [Vec<Rejection>; 5],
     ) -> Self {
         let mut tally = Tally {
             errors: vec![BTreeSet::new(); pieces.len()],
             elsewhere: BTreeSet::new(),
             fatal: fatal.map(|f| (f.error.message.clone(), place(files, &f))),
-            listed: [BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), BTreeSet::new()],
+            listed: std::array::from_fn(|_| BTreeSet::new()),
         };
         for rejection in rejections {
             let entry = (rejection.error.message.clone(), place(files, &rejection));
@@ -1332,6 +1355,7 @@ impl Tally {
             "charsetNames": listed(Listed::CharsetNames),
             "approximatedMessages": listed(Listed::Messages),
             "classContexts": listed(Listed::ClassContexts),
+            "unresolvedOffsets": listed(Listed::UnsafeOffsets),
             "pieces": pieces.iter().zip(&self.errors).enumerate().map(|(i, (p, errors))| json!({
                 "source": p.part.name(),
                 "class": p.class,
@@ -1345,6 +1369,7 @@ impl Tally {
                 "charsetNames": of_piece(Listed::CharsetNames, i),
                 "approximatedMessages": of_piece(Listed::Messages, i),
                 "classContexts": of_piece(Listed::ClassContexts, i),
+                "unresolvedOffsets": of_piece(Listed::UnsafeOffsets, i),
             })).collect::<Vec<_>>(),
             "elsewhere": self.elsewhere.iter().map(|(message, place)| json!({"message": message, "place": place}))
                 .collect::<Vec<_>>(),
