@@ -217,7 +217,9 @@ Design: [object-model.md](object-model.md).
   that `match` on `self`; an enum whose constructor does more (calls, `this(..)`, null or computed
   arguments) keeps its fields in tables indexed by ordinal, filled by running its constructors in
   its static initialization, as Java does. Constant bodies override methods as a
-  `match self`. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
+  `match self`, also an interface's method and `toString()` that the enum itself does not
+  declare: the constants without an override run the interface's default method, or answer
+  their names. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
   message. An enum value that may be null is an `Option` of the enum. Using a constant
   initializes the enum first, as in Java.
   A body's methods that override nothing are methods of the enum. A body's instance field of an
