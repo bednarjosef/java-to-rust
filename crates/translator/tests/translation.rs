@@ -4148,17 +4148,14 @@ fn enum_constant_bodies_become_arms_of_the_enum_method() {
             "AOp::Plus => {\n                let x = a;",
         ],
     );
-    let error = java_to_rust::translate(
+    // `Enum`'s `toString()`, which the enum does not declare, becomes the enum's method.
+    let rust = translate(
         "public class A {
-            enum Op { PLUS { public String toString() { return \"+\"; } } }
+            enum Op { PLUS { public String toString() { return \"+\"; } }, MINUS }
             public static void main(String[] args) { System.out.println(Op.PLUS); }
         }",
-    )
-    .expect_err("a body that overrides a method the enum does not declare is rejected");
-    assert!(
-        error.to_string().contains("a method of an enum constant's body that overrides none of the enum's"),
-        "{error}"
     );
+    assert_contains(&rust, &["fn to_string(self) -> java::JString {\n        match self {"]);
 }
 
 #[test]

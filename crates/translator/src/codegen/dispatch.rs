@@ -1281,6 +1281,9 @@ impl<'a> Gen<'a> {
         if self.class.types[c].kind == TypeKind::Runtime && self.class.types[c].name == CLASS_VALUE {
             return Some(Type::JavaClass);
         }
+        if self.class.types[c].kind == TypeKind::Runtime && self.class.types[c].name == CHARSET_VALUE {
+            return Some(Type::Charset);
+        }
         (self.class.types[c].kind == TypeKind::Runtime)
             .then(|| runtime_type(&self.class.types[c].name))
             .flatten()
@@ -2612,8 +2615,9 @@ impl<'a> Gen<'a> {
             }
             return format!("{}({})", self.runtime("address_hash"), self.address(c, handle));
         };
-        // A class's hash is its identity's in Java: there is one class object for each class.
-        if ty == Type::JavaClass {
+        // A class's hash is its identity's in Java: there is one class object for each class. A
+        // charset's is its name's.
+        if matches!(ty, Type::JavaClass | Type::Charset) {
             return format!("{handle}.hash_code()");
         }
         let value = if self.faithful_box(ty) { format!("**{handle}") } else { format!("*{handle}") };

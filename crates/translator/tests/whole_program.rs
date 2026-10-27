@@ -429,44 +429,71 @@ fn a_resource_of_the_jdk_ends_the_program() {
     }
 }
 
-/// The manifest attributes of a package of the program's unnamed module are those of the jar it
-/// is run from, or null without one, which the translation does not know: asking for them throws
-/// (`java/patches/java/lang/Package.java`), where those of the JDK's packages are null as in Java
-/// (`corpus/whole-program/PackagesOfClasses`). Where the class is known to be the program's, the
-/// call is rejected instead (`uncertain_package_lookups_are_rejected`).
+/// The manifest attributes of a package of the program's unnamed module are those of the
+/// manifest of its root (`META-INF/MANIFEST.MF`, that of the jar its classes come from): from
+/// the package's own section, else from the main attributes. A root without one is a directory
+/// of the class path, whose packages have none, as those of the JDK's packages are null in Java
+/// (`corpus/whole-program/PackagesOfClasses`).
 #[test]
-fn a_program_package_manifest_is_not_in_the_translation() {
-    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+fn a_program_package_has_the_manifest_of_its_root() {
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
         return;
     };
     let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-package-manifest");
-    let sources = work.join("src");
     let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&sources).unwrap();
-    let java = "public class Main {
-    public static void main(String[] args) {
-        Class<?> c = args.length == 0 ? Main.class : String.class;
-        System.out.println(c.getPackage().getImplementationVersion());
+    let files = [
+        (
+            "app/META-INF/MANIFEST.MF",
+            "Manifest-Version: 1.0\r\nSpecification-Title: Shapes Ap\r\n p\r\nSpecification-Version: 2.1\r\n\
+             Implementation-Version: 2.1.7\r\n\r\nName: p/inner/\r\nSpecification-Title: Inner\r\n\r\n",
+        ),
+        ("app/p/inner/Shape.java", "package p.inner;\npublic class Shape {\n}\n"),
+        ("lib/q/Helper.java", "package q;\npublic class Helper {\n}\n"),
+        (
+            "app/p/Main.java",
+            "package p;\npublic class Main {\n    static String show(Package p) {\n        \
+             return p.getSpecificationTitle() + \" \" + p.getSpecificationVersion() + \" \" + p.getImplementationVersion() \
+             + \" \" + p.getImplementationVendor() + \" \" + p.isCompatibleWith(\"2.0\");\n    }\n    \
+             public static void main(String[] a) {\n        Package pkg = Main.class.getPackage();\n        \
+             System.out.println(show(pkg) + \" | \" + pkg);\n        \
+             System.out.println(show(p.inner.Shape.class.getPackage()));\n        \
+             System.out.println(q.Helper.class.getPackage().getImplementationVersion());\n    }\n}\n",
+        ),
+    ];
+    for (path, text) in files {
+        let path = work.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
     }
-}
-";
-    std::fs::write(sources.join("Main.java"), java).unwrap();
     let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
-        .args(["--main", "Main", "--source"])
-        .arg(&sources)
+        .args(["--main", "p.Main", "--source"])
+        .arg(work.join("app"))
         .arg("--library")
-        .arg(library)
-        .arg("-o")
-        .arg(work.join("main.rs"))
+        .arg(work.join("lib"))
+        .arg("--library")
+        .arg(&java_base)
+        .arg("--crate")
+        .arg(work.join("crate"))
         .output()
         .unwrap();
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
-    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
-    assert!(rust.contains("the manifest attributes of package"), "no manifest's failure in the translation");
+    let built = Command::new("cargo")
+        .args(["run", "-q", "--manifest-path"])
+        .arg(work.join("crate/Cargo.toml"))
+        .env("CARGO_TARGET_DIR", work.join("target"))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&built.stdout),
+        "Shapes App 2.1 2.1.7 null true | package p, Shapes App, version 2.1\n\
+         Inner 2.1 2.1.7 null true\n\
+         null\n"
+    );
 }
 
-/// What a package knows of itself where the translation cannot know it, and packages by name
+/// A package's annotations, which the translation does not have, and packages by name
 /// that may or may not have been loaded yet, are rejected (`lower/packages.rs`;
 /// `corpus/whole-program/PackageLookups` has those that are certain).
 #[test]
@@ -477,7 +504,6 @@ fn uncertain_package_lookups_are_rejected() {
     };
     let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-package-lookups");
     let not_loaded = "`Package.getPackage` of a package that the caller has not loaded";
-    let manifest = "the manifest attributes of a package of the class path";
     let cases = [
         ("System.out.println(Package.getPackage(\"javax.swing\"));", not_loaded),
         ("System.out.println(Package.getPackage(args[0]));", not_loaded),
@@ -489,16 +515,9 @@ fn uncertain_package_lookups_are_rejected() {
             "System.out.println(Main.class.getClassLoader().getDefinedPackage(\"p\"));",
             "`ClassLoader.getDefinedPackage`, which depends on the classes",
         ),
-        ("System.out.println(p.Main.class.getPackage().getImplementationVersion());", manifest),
-        ("System.out.println(new Main().getClass().getPackage().isSealed());", manifest),
-        ("System.out.println(Package.getPackage(\"p\").toString());", manifest),
         (
             "System.out.println(String.class.getPackage().getAnnotations());",
             "the annotations of a package (`Package.getAnnotations`)",
-        ),
-        (
-            "Package pkg = Main.class.getPackage();\n        System.out.println(pkg != null ? pkg.getSpecificationTitle() : \"none\");",
-            manifest,
         ),
     ];
     for (i, (statements, message)) in cases.iter().enumerate() {
@@ -627,6 +646,58 @@ public class Main {
     let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
     assert!(rust.contains("Main.Builder#name@org.example.Attribute"), "no `@Attribute` of the field `name`");
     assert!(!rust.contains("@org.example.Nullable"), "`@Nullable` is made as an annotation of a member");
+}
+
+/// An annotation whose class is missing from the class path is not among a member's annotations,
+/// as the JVM skips one it cannot load: a census (`--keep-going`) of code compiled with an
+/// optional library's annotations, as log4j's plugins are, reads the others.
+#[test]
+fn an_annotation_of_a_missing_class_is_not_a_members() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-missing-annotations");
+    let _ = std::fs::remove_dir_all(&work);
+    let (sources, annotations) = (work.join("src"), work.join("lib"));
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::create_dir_all(annotations.join("org/example")).unwrap();
+    let attribute = "package org.example;\nimport java.lang.annotation.*;\n\
+                     @Retention(RetentionPolicy.RUNTIME)\n@Target(ElementType.FIELD)\n\
+                     public @interface Attribute { String value(); }\n";
+    std::fs::write(annotations.join("org/example/Attribute.java"), attribute).unwrap();
+    let java = "import java.lang.annotation.Annotation;
+import org.example.Attribute;
+import org.optional.Checked;
+public class Main {
+    static class Builder {
+        @Checked @Attribute(\"name\") String name;
+        @Checked Integer size;
+    }
+    public static void main(String[] args) throws Exception {
+        for (String n : new String[] {\"name\", \"size\"}) {
+            for (Annotation a : Builder.class.getDeclaredField(n).getDeclaredAnnotations()) {
+                System.out.println(n + \" \" + ((Attribute) a).value());
+            }
+        }
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--keep-going", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(&annotations)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    assert!(rust.contains("Main.Builder#name@org.example.Attribute"), "no `@Attribute` of the field `name`");
 }
 
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see

@@ -11,8 +11,8 @@
 //! have no annotation of the program. Of the JDK's annotations, those classes have only
 //! `PROVIDED_ANNOTATIONS` in the JDK's sources: one of those is rejected unless it can only be on
 //! annotation types (`@Target(ANNOTATION_TYPE)`), and any other (`Deprecated`) is tested as the
-//! program's are. A nested annotation type has no class value (its class literal is rejected), so
-//! it is not tested.
+//! program's are. An annotation type declared in a local or anonymous class has no class value
+//! (its class literal is rejected), so it is not tested.
 
 use super::*;
 
@@ -74,10 +74,10 @@ impl<'t> Lowering<'t> {
             let mut annotation_types: Vec<(&String, &Node<'t>)> = self.annotation_types.iter().collect();
             annotation_types.sort_by_key(|(n, _)| n.as_str());
             for (other, &other_decl) in annotation_types {
-                if self.nested_annotation_types.contains(other) || !self.directly_present(other_decl, name) {
+                if self.annotation_binary_name(other).is_none() || !self.directly_present(other_decl, name) {
                     continue;
                 }
-                self.annotation_classes.borrow_mut().insert(other.clone());
+                self.note_annotation_class(other.clone());
                 let literal = ExprKind::Builtin(Builtin::ClassLiteral(Type::class(other)), Vec::new());
                 tests.push(equals(self.synth(literal, pos, Type::JavaClass)));
             }

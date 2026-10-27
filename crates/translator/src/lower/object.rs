@@ -829,11 +829,12 @@ impl<'t> Lowering<'t> {
             types.push(decl(RECORD, "", TypeKind::Interface, vec![at.decl]));
         }
         // The arrays that become `Object`s, each named after its type (`int[]`), the
-        // `StringBuilder`s and the classes.
+        // `StringBuilder`s, the classes and the charsets.
         for &ty in self.object_arrays.borrow().iter() {
             let name = match ty {
                 Type::StringBuilder => STRING_BUILDER.to_string(),
                 Type::JavaClass => CLASS_VALUE.to_string(),
+                Type::Charset => CHARSET_VALUE.to_string(),
                 _ => ty.to_string(),
             };
             let mut implements = vec![at.decl];
@@ -848,11 +849,13 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// Notes that arrays of type `ty`, if it is an array type, `StringBuilder`s or classes become
-    /// `Object`s.
+    /// Notes that arrays of type `ty`, if it is an array type, `StringBuilder`s, classes or
+    /// charsets become `Object`s.
     pub(super) fn note_object_array(&self, ty: Type) {
         let mut arrays = self.object_arrays.borrow_mut();
-        if matches!(ty, Type::Array(_) | Type::StringBuilder | Type::JavaClass) && !arrays.contains(&ty) {
+        if matches!(ty, Type::Array(_) | Type::StringBuilder | Type::JavaClass | Type::Charset)
+            && !arrays.contains(&ty)
+        {
             arrays.push(ty);
             drop(arrays);
             let tests = self.object_tests.borrow().clone();

@@ -16,6 +16,8 @@ impl<'a> Gen<'a> {
     pub(super) fn stmts(&mut self, stmts: &'a [Stmt], tail: bool) {
         let folded = tail && self.folds_into_return(stmts);
         let end = if folded { stmts.len() - 2 } else { stmts.len() };
+        // A loop's updates, written after this block's statements in their scope.
+        let after = std::mem::take(&mut self.after_body);
         let mut narrowed = Vec::new();
         let mut synchronized = false;
         let outer_steady = self.steady.take();
@@ -32,7 +34,7 @@ impl<'a> Gen<'a> {
                 continue;
             }
             self.steady = Some(self.steady(&[stmt], &[]));
-            if let Some(name) = self.early_null_exit(stmt, rest) {
+            if let Some(name) = self.early_null_exit(stmt, rest, after) {
                 if self.borrowed.insert(name.to_string()) {
                     narrowed.push(name);
                 }
@@ -191,7 +193,9 @@ impl<'a> Gen<'a> {
     /// The body of a loop whose header was just written: the loop is a frame around it.
     pub(super) fn loop_body(&mut self, kind: Loop<'a>, body: &'a Stmt, update: &'a [Expr]) {
         self.open(Kind::Loop(kind));
+        self.after_body = update;
         self.nested(body);
+        self.after_body = &[];
         self.indent += 1;
         for u in update {
             self.update_effect(u);

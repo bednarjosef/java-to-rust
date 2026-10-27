@@ -14,7 +14,10 @@
 //!   comment of `declares0` says;
 //! - `holds0(module, name)`: whether the root of the module (`""` the unnamed one) has the file;
 //! - `classPath0()`: the directories of the class path, the unnamed module's roots, a line each,
-//!   where `Module.classPathResources` reads the class path's resources when the program runs.
+//!   where `Module.classPathResources` reads the class path's resources when the program runs;
+//! - `manifest0(pn)`: the versioning attributes of the package `pn` of the unnamed module from
+//!   the manifest of its root (`program::modules::package_attributes`), or null where its root
+//!   has none, as a directory of the class path has none.
 //!
 //! The translator's `ClassLoader` (`java/Threads.java`) has one such native, `holder0(loader,
 //! name)`: the module that holds the resource `name` that the loader (`bootstrap`, `platform` or
@@ -183,6 +186,20 @@ impl<'t> Lowering<'t> {
                     .collect();
                 switch(var(0), cases, null())
             }
+            ("manifest0", 1) => {
+                // The packages with the same attributes share a case.
+                let mut cases: Vec<(Vec<String>, &str)> = Vec::new();
+                for (package, lines) in
+                    reach.modules.iter().filter(|m| m.name.is_empty()).flat_map(|m| &m.manifests)
+                {
+                    match cases.iter_mut().find(|(_, l)| *l == lines) {
+                        Some((packages, _)) => packages.push(package.clone()),
+                        None => cases.push((vec![package.clone()], lines)),
+                    }
+                }
+                let cases = cases.into_iter().map(|(packages, lines)| (packages, string(lines))).collect();
+                switch(var(0), cases, self.synth(ExprKind::Null, pos, Type::Null))
+            }
             ("classPath0", 0) => {
                 let roots = reach.modules.iter().filter(|m| m.name.is_empty()).flat_map(|m| &m.roots);
                 string(&roots.map(|r| r.to_string_lossy()).collect::<Vec<_>>().join("\n"))
@@ -250,6 +267,7 @@ mod tests {
             resources: vec![],
             classes: vec![],
             roots: vec![],
+            manifests: vec![],
         };
         assert_eq!(
             declared_lines(&m),

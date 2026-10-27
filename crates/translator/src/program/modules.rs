@@ -184,6 +184,10 @@ pub struct Contents {
     /// path for the unnamed module, in their order. Its resources are read from them at run
     /// time, as Java reads the class path's directories (`ClassLoader.classPath0`).
     pub roots: Vec<PathBuf>,
+    /// For the unnamed module, the packages whose root has a manifest (`META-INF/MANIFEST.MF`,
+    /// that of the jar the root's classes come from), each with the attributes that its
+    /// `Package` gives (`package_attributes`), a `Name: value` line each.
+    pub manifests: Vec<(String, String)>,
 }
 
 /// The contents of the modules among `roots`, in their order, then of the unnamed module if a
@@ -208,6 +212,16 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
             }
             None => {
                 any_unnamed = true;
+                // A package in two roots is the first's, as the class path would have it.
+                if let Ok(manifest) = std::fs::read_to_string(root.join("META-INF/MANIFEST.MF")) {
+                    let sections = manifest_sections(&manifest);
+                    for package in &packages {
+                        if !unnamed.packages.contains(package) {
+                            let lines = package_attributes(&sections, package);
+                            unnamed.manifests.push((package.clone(), lines));
+                        }
+                    }
+                }
                 unnamed.packages.extend(packages);
                 unnamed.resources.extend(resources);
                 unnamed.classes.extend(classes);
@@ -223,6 +237,7 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
     if any_unnamed {
         unnamed.packages.sort();
         unnamed.packages.dedup();
+        unnamed.manifests.sort();
         named.push(unnamed);
     }
     named
@@ -305,6 +320,63 @@ fn root_contents(root: &Path) -> (Vec<String>, Vec<String>, Vec<String>) {
     resources.sort();
     classes.sort();
     (packages, resources, classes)
+}
+
+/// The sections of a jar's manifest: the main attributes first, under the name `""`, then each
+/// entry's, under its `Name`; each attribute with its name in lower case, as names are compared
+/// without case. A line that starts with a space continues the one before it.
+fn manifest_sections(manifest: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let mut sections = vec![(String::new(), Vec::new())];
+    let mut lines: Vec<String> = Vec::new();
+    for line in manifest.lines() {
+        match (line.strip_prefix(' '), lines.last_mut()) {
+            (Some(more), Some(last)) if !last.is_empty() => last.push_str(more),
+            _ => lines.push(line.to_string()),
+        }
+    }
+    let mut fresh = false;
+    for line in lines {
+        if line.is_empty() {
+            fresh = true;
+            continue;
+        }
+        let Some((name, value)) = line.split_once(": ") else { continue };
+        let name = name.to_ascii_lowercase();
+        if fresh && name == "name" {
+            sections.push((value.to_string(), Vec::new()));
+        } else if let Some((_, attributes)) = sections.last_mut() {
+            attributes.push((name, value.to_string()));
+        }
+        fresh = false;
+    }
+    sections
+}
+
+/// The versioning attributes of package `package` from the manifest's `sections`, as Java's
+/// `ClassLoader.definePackage(name, manifest, url)` takes them: each from the section of the
+/// package's directory (`a/b/`), else from the main attributes. A `Name: value` line each, in
+/// the order of `Package`'s constructor; one the manifest does not give is left out.
+fn package_attributes(sections: &[(String, Vec<(String, String)>)], package: &str) -> String {
+    const NAMES: [&str; 6] = [
+        "Specification-Title",
+        "Specification-Version",
+        "Specification-Vendor",
+        "Implementation-Title",
+        "Implementation-Version",
+        "Implementation-Vendor",
+    ];
+    let path = format!("{}/", package.replace('.', "/"));
+    let get = |section: &str, name: &str| {
+        let (_, attributes) = sections.iter().find(|(n, _)| n == section)?;
+        attributes.iter().find(|(n, _)| *n == name.to_ascii_lowercase()).map(|(_, v)| v.as_str())
+    };
+    let mut lines = Vec::new();
+    for name in NAMES {
+        if let Some(value) = get(&path, name).or_else(|| get("", name)) {
+            lines.push(format!("{name}: {value}"));
+        }
+    }
+    lines.join("\n")
 }
 
 /// What `source` declares: the module's name, whether it is open, and its `requires`,
@@ -460,7 +532,28 @@ fn system_modules() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Contents, contents, declaration, full_declaration, loader_resources, service_providers};
+    use super::{
+        Contents, contents, declaration, full_declaration, loader_resources, manifest_sections,
+        package_attributes, service_providers,
+    };
+
+    #[test]
+    fn a_package_takes_its_section_s_attributes_then_the_main_ones() {
+        let manifest = "Manifest-Version: 1.0\r\nSpecification-Title: Apache Log4j Co\r\n re\r\n\
+                        specification-version: 2.26.0\r\nImplementation-Vendor: The Apache Software Foundation\r\n\r\n\
+                        Name: a/b/\r\nSpecification-Title: Inner\r\nSealed: true\r\n\r\n";
+        let sections = manifest_sections(manifest);
+        assert_eq!(
+            package_attributes(&sections, "a.b"),
+            "Specification-Title: Inner\nSpecification-Version: 2.26.0\n\
+             Implementation-Vendor: The Apache Software Foundation"
+        );
+        assert_eq!(
+            package_attributes(&sections, "a"),
+            "Specification-Title: Apache Log4j Core\nSpecification-Version: 2.26.0\n\
+             Implementation-Vendor: The Apache Software Foundation"
+        );
+    }
 
     #[test]
     fn providers_come_from_provides_then_service_files() {

@@ -371,6 +371,87 @@ final class Field {
         return type;
     }
 
+    // The type with its type arguments, which Java reads from the field's `Signature`: a
+    // translation has none, and lowering writes `genericTypePart` from the type that javac gives
+    // each field whose type has type arguments (`lower/generic_types.rs`); any other field's is
+    // its class.
+    public java.lang.reflect.Type getGenericType() {
+        Object generic = genericType0(slot);
+        return generic != null ? (java.lang.reflect.Type) generic : type;
+    }
+
+    // The generic types, in the parts of the reads.
+    private static Object genericType0(int slot) {
+        return switch (slot & 31) {
+            case 0 -> genericTypePart0(slot);
+            case 1 -> genericTypePart1(slot);
+            case 2 -> genericTypePart2(slot);
+            case 3 -> genericTypePart3(slot);
+            case 4 -> genericTypePart4(slot);
+            case 5 -> genericTypePart5(slot);
+            case 6 -> genericTypePart6(slot);
+            case 7 -> genericTypePart7(slot);
+            case 8 -> genericTypePart8(slot);
+            case 9 -> genericTypePart9(slot);
+            case 10 -> genericTypePart10(slot);
+            case 11 -> genericTypePart11(slot);
+            case 12 -> genericTypePart12(slot);
+            case 13 -> genericTypePart13(slot);
+            case 14 -> genericTypePart14(slot);
+            case 15 -> genericTypePart15(slot);
+            case 16 -> genericTypePart16(slot);
+            case 17 -> genericTypePart17(slot);
+            case 18 -> genericTypePart18(slot);
+            case 19 -> genericTypePart19(slot);
+            case 20 -> genericTypePart20(slot);
+            case 21 -> genericTypePart21(slot);
+            case 22 -> genericTypePart22(slot);
+            case 23 -> genericTypePart23(slot);
+            case 24 -> genericTypePart24(slot);
+            case 25 -> genericTypePart25(slot);
+            case 26 -> genericTypePart26(slot);
+            case 27 -> genericTypePart27(slot);
+            case 28 -> genericTypePart28(slot);
+            case 29 -> genericTypePart29(slot);
+            case 30 -> genericTypePart30(slot);
+            default -> genericTypePart31(slot);
+        };
+    }
+    private static Object genericTypePart0(int slot) { return genericTypePart(0, slot); }
+    private static Object genericTypePart1(int slot) { return genericTypePart(1, slot); }
+    private static Object genericTypePart2(int slot) { return genericTypePart(2, slot); }
+    private static Object genericTypePart3(int slot) { return genericTypePart(3, slot); }
+    private static Object genericTypePart4(int slot) { return genericTypePart(4, slot); }
+    private static Object genericTypePart5(int slot) { return genericTypePart(5, slot); }
+    private static Object genericTypePart6(int slot) { return genericTypePart(6, slot); }
+    private static Object genericTypePart7(int slot) { return genericTypePart(7, slot); }
+    private static Object genericTypePart8(int slot) { return genericTypePart(8, slot); }
+    private static Object genericTypePart9(int slot) { return genericTypePart(9, slot); }
+    private static Object genericTypePart10(int slot) { return genericTypePart(10, slot); }
+    private static Object genericTypePart11(int slot) { return genericTypePart(11, slot); }
+    private static Object genericTypePart12(int slot) { return genericTypePart(12, slot); }
+    private static Object genericTypePart13(int slot) { return genericTypePart(13, slot); }
+    private static Object genericTypePart14(int slot) { return genericTypePart(14, slot); }
+    private static Object genericTypePart15(int slot) { return genericTypePart(15, slot); }
+    private static Object genericTypePart16(int slot) { return genericTypePart(16, slot); }
+    private static Object genericTypePart17(int slot) { return genericTypePart(17, slot); }
+    private static Object genericTypePart18(int slot) { return genericTypePart(18, slot); }
+    private static Object genericTypePart19(int slot) { return genericTypePart(19, slot); }
+    private static Object genericTypePart20(int slot) { return genericTypePart(20, slot); }
+    private static Object genericTypePart21(int slot) { return genericTypePart(21, slot); }
+    private static Object genericTypePart22(int slot) { return genericTypePart(22, slot); }
+    private static Object genericTypePart23(int slot) { return genericTypePart(23, slot); }
+    private static Object genericTypePart24(int slot) { return genericTypePart(24, slot); }
+    private static Object genericTypePart25(int slot) { return genericTypePart(25, slot); }
+    private static Object genericTypePart26(int slot) { return genericTypePart(26, slot); }
+    private static Object genericTypePart27(int slot) { return genericTypePart(27, slot); }
+    private static Object genericTypePart28(int slot) { return genericTypePart(28, slot); }
+    private static Object genericTypePart29(int slot) { return genericTypePart(29, slot); }
+    private static Object genericTypePart30(int slot) { return genericTypePart(30, slot); }
+    private static Object genericTypePart31(int slot) { return genericTypePart(31, slot); }
+
+    private static native Object genericTypePart(int part, int slot);
+
     public void setAccessible(boolean flag) {
     }
 

@@ -21,8 +21,8 @@
 //! or an array of any of them but annotations, written as one element where the member is an
 //! array; an array that the translation holds as an `Object[]` carries its own class
 //! (`covariant::made_as`), which the JDK's `memberValueToString` tells apart. Rejected: a member
-//! whose type is an array of annotations or of arrays, a nested annotation type, and the
-//! container that a repeated annotation leaves.
+//! whose type is an array of annotations or of arrays, an annotation type declared in a local or
+//! anonymous class, and the container that a repeated annotation leaves.
 //! The call of a member, `a.value()`, is `TranslatedAnnotations.member(a, "value")`, unboxed or
 //! cast to the member's type; it copies an array that is not empty, as the JDK's proxy does.
 
@@ -86,8 +86,11 @@ impl<'t> Lowering<'t> {
                 &format!("`getAnnotation` of `{name}`, which is not an annotation type"),
             );
         };
-        if self.nested_annotation_types.contains(name) {
-            return unsupported(node, &format!("`getAnnotation` of the nested annotation type `{name}`"));
+        if self.annotation_binary_name(name).is_none() {
+            return unsupported(
+                node,
+                &format!("`getAnnotation` of the annotation type `{name}` of a local or anonymous class"),
+            );
         }
         if self.library_annotations.contains(name) {
             return unsupported(node, &format!("`getAnnotation` of the JDK's `{name}`"));
@@ -124,10 +127,10 @@ impl<'t> Lowering<'t> {
             let mut annotation_types: Vec<(&String, &Node<'t>)> = self.annotation_types.iter().collect();
             annotation_types.sort_by_key(|(n, _)| n.as_str());
             for (other, &other_decl) in annotation_types {
-                if self.nested_annotation_types.contains(other) || !self.directly_present(other_decl, name) {
+                if self.annotation_binary_name(other).is_none() || !self.directly_present(other_decl, name) {
                     continue;
                 }
-                self.annotation_classes.borrow_mut().insert(other.clone());
+                self.note_annotation_class(other.clone());
                 let literal = ExprKind::Builtin(Builtin::ClassLiteral(Type::class(other)), Vec::new());
                 found.push((self.synth(literal, pos, Type::JavaClass), other_decl, other.clone()));
             }
@@ -232,7 +235,7 @@ impl<'t> Lowering<'t> {
             let key = format!("{holder}@{name}.{member}");
             values.push(self.member_value(node, make, &key, decl, member, value, objects.element())?);
         }
-        self.annotation_classes.borrow_mut().insert(name.to_string());
+        self.note_annotation_class(name.to_string());
         let literal = ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new());
         let array = |items: Vec<Expr>| self.synth(ExprKind::ArrayLit(items), pos, objects);
         let key = self.synth(ExprKind::Str(format!("{holder}@{name}")), pos, Type::String);
@@ -263,7 +266,7 @@ impl<'t> Lowering<'t> {
         // An annotation, made as the one that has it is.
         if let Some(&nested) = self.annotation_types.get(java)
             && value.kind() == "ANNOTATION"
-            && !self.nested_annotation_types.contains(java)
+            && self.annotation_binary_name(java).is_some()
             && let Some(annotation) = self.type_index(ANNOTATION).map(|t| self.self_type(t))
         {
             let made = self.annotation_object(node, make, key, java, nested, value, annotation)?;
@@ -496,7 +499,12 @@ impl<'t> Lowering<'t> {
         let mut out: Vec<(&'t str, Node<'t>)> = Vec::new();
         for at in modifiers.list("annotations") {
             let name = at.child("annotationType")?.java_type();
-            if wanted.is_some_and(|w| w != name) || NOT_AT_RUN_TIME.contains(&name) {
+            // javac writes an annotation of a missing class as `java.lang.Object`, which no
+            // annotation type is; Java's reflection skips an annotation whose class it cannot load.
+            if wanted.is_some_and(|w| w != name)
+                || NOT_AT_RUN_TIME.contains(&name)
+                || name == "java.lang.Object"
+            {
                 continue;
             }
             let Some(&annotation) = self.annotation_types.get(name) else {
@@ -511,10 +519,12 @@ impl<'t> Lowering<'t> {
             if !runtime || !applies {
                 continue;
             }
-            if self.nested_annotation_types.contains(name) {
+            if self.annotation_binary_name(name).is_none() {
                 return unsupported(
                     node,
-                    &format!("{what} where a member has the nested annotation type `{name}`"),
+                    &format!(
+                        "{what} where a member has the annotation type `{name}` of a local or anonymous class"
+                    ),
                 );
             }
             if out.iter().any(|(n, _)| *n == name) {

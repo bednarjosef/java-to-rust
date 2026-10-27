@@ -685,6 +685,13 @@ class Module {
     @Add
     private static native String classPath0();
 
+    /**
+     * The versioning attributes of the package {@code pn} of the unnamed module, from the
+     * manifest of its root, a {@code Name: value} line each; null where its root has no manifest.
+     */
+    @Add
+    static native String manifest0(String pn);
+
     /** The names of the translation's named modules, in the order of their roots. */
     @Add
     private static native String[] modules0();

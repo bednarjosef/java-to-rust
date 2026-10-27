@@ -193,6 +193,17 @@ impl<'t> Lowering<'t> {
     /// `Enum.valueOf(c, name)`, the constant `name` of the enum whose class is `c`: a test of
     /// `c` against each enum of the program, with that enum's `valueOf`, and for any other class
     /// the JDK's failure (`NotEnumClass`). Both arguments are evaluated first, as for the call.
+    /// The `toString()` that the constants' bodies of the enum of type `ty` declare where the
+    /// enum does not (`body_methods`).
+    fn body_to_string(&self, ty: Type) -> Option<usize> {
+        let Type::Enum(name) = ty else { return None };
+        let e = self.enum_index(name)?;
+        self.body_methods.iter().copied().find(|&m| {
+            let m = &self.methods[m];
+            m.owner == e && m.name == "toString" && m.node.list("parameters").next().is_none()
+        })
+    }
+
     fn value_of_class(&self, node: Node<'t>, args: Vec<Expr>) -> Result<ExprKind, Error> {
         let pos = node.pos();
         let ty = self.ty(node, node.java_type())?;
@@ -289,6 +300,17 @@ impl<'t> Lowering<'t> {
             "toString" if erased => {
                 let receiver = self.convert(receiver, Type::class(OBJECT));
                 return Ok(Some(ExprKind::Builtin(Builtin::ObjectText, vec![receiver])));
+            }
+            // A `toString()` that the constants' bodies declare, which the enum does not
+            // (`body_methods`), is the enum's method.
+            "toString" if let Some(m) = self.body_to_string(erased_ty) => {
+                return Ok(Some(ExprKind::MethodCall {
+                    receiver: Box::new(receiver),
+                    name: "toString".to_string(),
+                    args: Vec::new(),
+                    resolved: Some(m),
+                    is_super: false,
+                }));
             }
             "name" | "toString" => Builtin::EnumName,
             "compareTo" => Builtin::EnumCompareTo,

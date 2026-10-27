@@ -86,7 +86,15 @@ impl<'t> Lowering<'t> {
         let pos = node.pos();
         let rejected = || unsupported(node, "`String.join` of this collection");
         let Some(iterator) = self.no_arg_method(elements.ty, "iterator") else { return rejected() };
-        let start = self.call_of(elements, iterator, pos)?;
+        // Both arguments are evaluated before `String.join` checks either.
+        let [given, parts] = ["given_delimiter", "parts"].map(|n| self.fresh_name(n));
+        let elements_ty = elements.ty;
+        let arguments = [
+            Stmt::Local { ty: Type::String, name: given.clone(), init: Some(delimiter), pos },
+            Stmt::Local { ty: elements_ty, name: parts.clone(), init: Some(elements), pos },
+        ];
+        let delimiter = self.synth(ExprKind::Var(given), pos, Type::String);
+        let start = self.call_of(self.synth(ExprKind::Var(parts), pos, elements_ty), iterator, pos)?;
         let it_ty = start.ty;
         let (Some(has_next), Some(next)) =
             (self.no_arg_method(it_ty, "hasNext"), self.no_arg_method(it_ty, "next"))
@@ -102,14 +110,6 @@ impl<'t> Lowering<'t> {
             init: Some(init),
             pos,
         };
-        let assign = |name: &str, ty: Type, value: Expr| {
-            let kind =
-                ExprKind::Assign { op: None, target: Place::Var(name.to_string()), value: Box::new(value) };
-            Stmt::Expr(self.synth(kind, pos, ty))
-        };
-        let concat = |l: Expr, r: Expr| {
-            self.synth(ExprKind::Binary(BinOp::Add, Box::new(l), Box::new(r)), pos, Type::String)
-        };
         let boolean = |b: bool| self.synth(ExprKind::Bool(b), pos, Type::Boolean);
         // The elements are `CharSequence`s, and the only ones that can be `Object` values are
         // strings, so the erased element is cast to a string.
@@ -118,27 +118,18 @@ impl<'t> Lowering<'t> {
             Type::String => element,
             _ => self.synth(ExprKind::Cast(Type::String, Box::new(element)), pos, Type::String),
         };
-        let first_text = assign(
-            &joined,
-            Type::String,
-            concat(self.synth(ExprKind::Str(String::new()), pos, Type::String), var(&e, Type::String)),
-        );
-        let later_text = assign(
-            &joined,
-            Type::String,
-            concat(concat(var(&joined, Type::String), var(&d, Type::String)), var(&e, Type::String)),
-        );
-        let body = Stmt::If {
-            cond: var(&first, Type::Boolean),
-            then: Box::new(Stmt::Block(vec![assign(&first, Type::Boolean, boolean(false)), first_text])),
-            otherwise: Some(Box::new(Stmt::Block(vec![later_text]))),
-        };
+        let body = self.join_step(&joined, &first, &d, &e, pos);
         let looped = Stmt::While {
             cond: self.call_of(var(&it, it_ty), has_next, pos)?,
             body: Box::new(Stmt::Block(vec![local(&e, Type::String, element), body])),
         };
+        // `String.join` checks the delimiter before it asks for the iterator.
+        let delimiter = ExprKind::Builtin(Builtin::String(StringOp::ToString), vec![delimiter]);
+        let [given, parts] = arguments;
         let block = vec![
-            local(&d, Type::String, delimiter),
+            given,
+            parts,
+            local(&d, Type::String, self.synth(delimiter, pos, Type::String)),
             local(&it, it_ty, start),
             local(&joined, Type::String, self.synth(ExprKind::Str(String::new()), pos, Type::String)),
             local(&first, Type::Boolean, boolean(true)),
@@ -150,6 +141,89 @@ impl<'t> Lowering<'t> {
             selector: Box::new(selector),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
         })
+    }
+
+    /// `String.join(delimiter, elements)` of an array of `CharSequence`s that need not be strings
+    /// (Guava's `Joiner` joins a `CharSequence[]`), as the JDK's does it: the delimiter's
+    /// `toString()`, then `String.valueOf` of each element, joined.
+    ///
+    /// ```text
+    /// switch (0) { default -> { String d = delimiter.toString(); String joined = "";
+    ///     boolean first = true;
+    ///     for (CharSequence c : elements) {
+    ///         String e = String.valueOf(c);
+    ///         if (first) { first = false; joined = "" + e; } else { joined = joined + d + e; } }
+    ///     yield joined; } }
+    /// ```
+    pub(super) fn join_array(&self, delimiter: Expr, elements: Expr, pos: Pos) -> ExprKind {
+        let [d, c, e, joined, first] =
+            ["delimiter", "part", "element", "joined", "first"].map(|n| self.fresh_name(n));
+        let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let local = |name: &str, ty: Type, init: Expr| Stmt::Local {
+            ty,
+            name: name.to_string(),
+            init: Some(init),
+            pos,
+        };
+        let (elements_ty, element_ty) = (elements.ty, elements.ty.element());
+        // Both arguments are evaluated before `String.join` checks either.
+        let [given, parts] = ["given_delimiter", "parts"].map(|n| self.fresh_name(n));
+        let arguments = [
+            Stmt::Local { ty: Type::String, name: given.clone(), init: Some(delimiter), pos },
+            Stmt::Local { ty: elements_ty, name: parts.clone(), init: Some(elements), pos },
+        ];
+        let delimiter =
+            ExprKind::Builtin(Builtin::String(StringOp::ToString), vec![var(&given, Type::String)]);
+        let elements = var(&parts, elements_ty);
+        let element = self.value_of(var(&c, element_ty));
+        let body =
+            Stmt::Block(vec![local(&e, Type::String, element), self.join_step(&joined, &first, &d, &e, pos)]);
+        let looped = Stmt::ForEach { ty: element_ty, name: c, array: elements, body: Box::new(body) };
+        let [given, parts] = arguments;
+        let block = vec![
+            given,
+            parts,
+            local(&d, Type::String, self.synth(delimiter, pos, Type::String)),
+            local(&joined, Type::String, self.synth(ExprKind::Str(String::new()), pos, Type::String)),
+            local(&first, Type::Boolean, self.synth(ExprKind::Bool(true), pos, Type::Boolean)),
+            looped,
+            Stmt::Yield(var(&joined, Type::String)),
+        ];
+        let selector = self.synth(ExprKind::Int(0), pos, Type::Int);
+        ExprKind::Switch {
+            selector: Box::new(selector),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        }
+    }
+
+    /// One element `e` of a join: `if (first) { first = false; joined = "" + e; } else { joined =
+    /// joined + d + e; }`, all of them variables.
+    fn join_step(&self, joined: &str, first: &str, d: &str, e: &str, pos: Pos) -> Stmt {
+        let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let assign = |name: &str, ty: Type, value: Expr| {
+            let kind =
+                ExprKind::Assign { op: None, target: Place::Var(name.to_string()), value: Box::new(value) };
+            Stmt::Expr(self.synth(kind, pos, ty))
+        };
+        let concat = |l: Expr, r: Expr| {
+            self.synth(ExprKind::Binary(BinOp::Add, Box::new(l), Box::new(r)), pos, Type::String)
+        };
+        let first_text = assign(
+            joined,
+            Type::String,
+            concat(self.synth(ExprKind::Str(String::new()), pos, Type::String), var(e, Type::String)),
+        );
+        let later_text = assign(
+            joined,
+            Type::String,
+            concat(concat(var(joined, Type::String), var(d, Type::String)), var(e, Type::String)),
+        );
+        let unset = assign(first, Type::Boolean, self.synth(ExprKind::Bool(false), pos, Type::Boolean));
+        Stmt::If {
+            cond: var(first, Type::Boolean),
+            then: Box::new(Stmt::Block(vec![unset, first_text])),
+            otherwise: Some(Box::new(Stmt::Block(vec![later_text]))),
+        }
     }
 
     /// The method without parameters named `name` that a call on a value of type `ty` runs, as

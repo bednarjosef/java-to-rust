@@ -4,8 +4,9 @@
 #
 #   scripts/minecraft-server-survey.sh [STEP...]      # all steps, or the ones named
 #
-# Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, repair, jdk-sources,
-# parse, census, summary, and on their own (not run by default) trial-write, trial and java-run.
+# Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, multi-release,
+# repair, jdk-sources, parse, census, summary, and on their own (not run by default) trial-write,
+# trial and java-run.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -357,6 +358,64 @@ library-best-of() {
   done
 }
 
+# The classes that a multi-release library jar gives for the Java that runs it, which Java loads
+# instead of the jar's own (log4j-api's StackLocator walks the stack with a StackWalker from
+# META-INF/versions/9, its base one with a SecurityManager): for each class, the one of the highest
+# version up to Java's, decompiled with Vineflower (the jar's other classes and the other libraries
+# as its libraries) over the class's source in each source root of the library, published or
+# decompiled, which have the base class.
+multi-release() {
+  check_vineflower
+  local feature
+  feature=$("$java" -XshowSettings:properties -version 2>&1 | sed -nE 's/^ *java\.specification\.version = //p')
+  local lib
+  library_jars | while IFS= read -r lib; do
+    local name
+    name=$(basename "$lib" .jar)
+    case $name in *-linux-* | *-osx-* | *-windows-*) continue ;; esac
+    local manifest
+    manifest=$(unzip -p "$lib" META-INF/MANIFEST.MF 2>/dev/null | tr -d '\r' || true)
+    grep -qi '^Multi-Release: *true' <<< "$manifest" || continue
+    local work=$cache/multi-release/$name
+    rm -rf "$work" && mkdir -p "$work/classes"
+    # The versioned classes, lowest version first, so that a higher one is unpacked over a lower.
+    local version
+    for version in $(unzip -Z1 "$lib" 'META-INF/versions/*' | sed -nE 's|^META-INF/versions/([0-9]+)/.*\.class$|\1|p' \
+      | sort -un); do
+      [ "$version" -le "$feature" ] || continue
+      (cd "$work" && unzip -qq -o "$lib" "META-INF/versions/$version/*.class" -d unpacked \
+        && cp -r "unpacked/META-INF/versions/$version/." classes/ && rm -rf unpacked) || true
+    done
+    find "$work/classes" -name module-info.class -delete
+    [ -n "$(find "$work/classes" -name '*.class' -print -quit)" ] || { rm -rf "$work"; continue; }
+    (cd "$work/classes" && "${JAR:-jar}" cf ../versioned.jar .)
+    decompile_jar "$work/versioned.jar" "$work/src" yes "-e=$lib" < /dev/null
+    local dir
+    for dir in "$cache/src/libraries/$name" "$cache/src/library-sources/$name"; do
+      if [ -d "$dir" ]; then
+        cp -r "$work/src/." "$dir/"
+      fi
+    done
+    echo "$name: $(cd "$work/src" && find . -name '*.java' | sed 's|^\./||' | paste -sd' ')"
+  done
+}
+
+# Each jar's manifest, put in the source roots of its classes, where a jar has it: the translation
+# reads the versioning attributes of a root's packages from it (`Package.getImplementationVersion`,
+# which log4j prints as it configures itself).
+copy_manifests() {
+  unzip -o -qq "$(server_jar)" META-INF/MANIFEST.MF -d "$cache/src/server" || true
+  local library name dir
+  while IFS= read -r library; do
+    name=$(basename "$library" .jar)
+    for dir in "$cache/src/libraries/$name" "$cache/src/library-sources/$name"; do
+      if [ -d "$dir" ]; then
+        unzip -o -qq "$library" META-INF/MANIFEST.MF -d "$dir" || true
+      fi
+    done
+  done < <(library_jars)
+}
+
 # The source roots of the translation's libraries: each library's published sources, or its
 # decompiled ones where none are published, and each JDK module.
 library_args() {
@@ -453,6 +512,7 @@ census() {
   fi
   mkdir -p "$out"
   [ -f "$jdk_sources/modules.txt" ] || { echo "no $jdk_sources/modules.txt (run the jdk-sources step)" >&2; exit 1; }
+  copy_manifests
   local -a libraries resources
   mapfile -t libraries < <(library_args)
   mapfile -t resources < <(resource_args)
@@ -578,14 +638,14 @@ summary() {
 }
 
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of libraries library-sources library-best-of repair jdk-sources
-  parse census summary)
+[ ${#steps[@]} -gt 0 ] || steps=(extract decompile best-of libraries library-sources library-best-of multi-release
+  repair jdk-sources parse census summary)
 for step in "${steps[@]}"; do
   case $step in
-    extract | decompile | best-of | libraries | library-sources | library-best-of | repair | jdk-sources | parse \
-      | census | summary | trial-write | trial | java-run) "$step" ;;
-    *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of, repair," \
-      "jdk-sources, parse, census, summary, trial-write, trial, java-run)" >&2
+    extract | decompile | best-of | libraries | library-sources | library-best-of | multi-release | repair \
+      | jdk-sources | parse | census | summary | trial-write | trial | java-run) "$step" ;;
+    *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of," \
+      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run)" >&2
       exit 2 ;;
   esac
 done

@@ -17,6 +17,23 @@ const HANDLER: &str = "sun.reflect.annotation.AnnotationInvocationHandler";
 const MEMBERS: &str = "sun.reflect.annotation.TranslatedAnnotations";
 
 impl<'t> Lowering<'t> {
+    /// The binary name of the annotation type `name`, its name unless it is declared in another
+    /// class (`Outer$Annotation`); `None` where lowering does not know it (see
+    /// `nested_annotation_types`).
+    pub(super) fn annotation_binary_name(&self, name: &str) -> Option<String> {
+        match self.nested_annotation_types.get(name) {
+            Some(binary) => binary.clone(),
+            None => Some(name.to_string()),
+        }
+    }
+
+    /// Notes that the code has a class literal of the annotation type `name`
+    /// (`Class::annotation_classes`).
+    pub(super) fn note_annotation_class(&self, name: String) {
+        let binary = self.annotation_binary_name(&name).unwrap_or_else(|| name.clone());
+        self.annotation_classes.borrow_mut().insert(name, binary);
+    }
+
     /// `value instanceof AnnotationInvocationHandler h && h.type == class`, for a value that may
     /// be an annotation object (see the module's comment); `None` when the program has none, or
     /// when `value`'s type cannot hold one. `value` is a read of a local.
@@ -58,7 +75,7 @@ impl<'t> Lowering<'t> {
         let pos = value.pos;
         let binding = binding.unwrap_or_else(|| self.fresh_name("annotation"));
         let var = self.synth(ExprKind::Var(binding.clone()), pos, ty);
-        self.annotation_classes.borrow_mut().insert(name.to_string());
+        self.note_annotation_class(name.to_string());
         let class = ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new());
         let class = self.synth(class, pos, Type::JavaClass);
         let Some(held) = self.annotation_object_test(class, &var) else {
@@ -90,7 +107,7 @@ impl<'t> Lowering<'t> {
         let mut types: Vec<(&String, &Node<'t>)> = self.annotation_types.iter().collect();
         types.sort_by_key(|(name, _)| std::cmp::Reverse(name.as_str()));
         for (name, decl) in types {
-            if self.nested_annotation_types.contains(name) {
+            if self.annotation_binary_name(name).is_none() {
                 continue;
             }
             let members = decl
@@ -102,7 +119,7 @@ impl<'t> Lowering<'t> {
                 })
                 .collect();
             let array = self.synth(ExprKind::ArrayLit(members), pos, strings);
-            self.annotation_classes.borrow_mut().insert(name.clone());
+            self.note_annotation_class(name.clone());
             let literal = ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new());
             let literal = self.synth(literal, pos, Type::JavaClass);
             let test = ExprKind::Builtin(Builtin::ClassMethod(ClassOp::Equals), vec![var(), literal]);

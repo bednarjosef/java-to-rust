@@ -1212,7 +1212,8 @@ impl<'a> Gen<'a> {
     /// `Option`s, and others values.
     pub(super) fn call_args(&mut self, index: usize, args: &'a [Expr]) -> Vec<String> {
         let params = &self.class.methods[index].params;
-        args.iter()
+        let texts: Vec<String> = args
+            .iter()
             .zip(params)
             .enumerate()
             .map(|(i, (a, p))| {
@@ -1238,6 +1239,19 @@ impl<'a> Gen<'a> {
                 } else {
                     self.value(a, p.ty).text
                 }
+            })
+            .collect();
+        // A local that a later argument assigns (`casStack(p, p = p.next)`) is passed as a copy
+        // of its value then, which Java passes: a borrow of the local itself would outlive the
+        // assignment.
+        texts
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| match &args[i].kind {
+                ExprKind::Var(name) if args[i + 1..].iter().any(|later| assigns(later, name)) => {
+                    copied_local(&text, &self.local(name))
+                }
+                _ => text,
             })
             .collect()
     }
@@ -2435,4 +2449,19 @@ fn is_null(e: &Expr) -> bool {
         ExprKind::Cast(_, inner) => is_null(inner),
         _ => false,
     }
+}
+
+/// The text `text` of an argument that reads the local `local`, reading a clone of it instead:
+/// `&p` is `&p.clone()`, `p.as_ref()` is `p.clone().as_ref()`.
+fn copied_local(text: &str, local: &str) -> String {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let mut from = 0;
+    while let Some(at) = text[from..].find(local).map(|at| at + from) {
+        let end = at + local.len();
+        if !word(text[..at].chars().next_back()) && !word(text[end..].chars().next()) {
+            return format!("{}{local}.clone(){}", &text[..at], &text[end..]);
+        }
+        from = end;
+    }
+    text.to_string()
 }

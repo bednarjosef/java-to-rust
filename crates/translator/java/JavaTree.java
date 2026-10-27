@@ -983,6 +983,14 @@ public class JavaTree {
         // `ChronoLocalDateTime<?>.toLocalDate()` is a `ChronoLocalDate`: written as a capture of
         // `? extends` that bound's erasure, which is the capture's erasure.
         String text = typeText(type);
+        // javac writes a capture with the wildcard as the called method declares it, so the
+        // capture of `asSubclass`'s `Class<? extends U>` reads `capture#1 of ? extends U`, a
+        // variable not in scope where the call is: its bound is what `U` stands for there.
+        if (type instanceof com.sun.tools.javac.code.Type.CapturedType captured
+                && captured.wildcard.getExtendsBound() instanceof TypeVariable declared
+                && !types.isSameType(declared, captured.getUpperBound())) {
+            return text.substring(0, text.indexOf(" of ")) + " of ? extends " + typeText(captured.getUpperBound());
+        }
         if (type instanceof TypeVariable variable && text.startsWith("capture#") && !text.contains(" of ? extends ")) {
             String bound = typeText(types.erasure(variable.getUpperBound()));
             if (!bound.equals("java.lang.Object")) {

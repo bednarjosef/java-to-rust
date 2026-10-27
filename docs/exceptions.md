@@ -373,7 +373,8 @@ they are printed, so that the code fails where the JVM fails:
 **A missing class in an annotation** is no error at all, with or without `--keep-going`. The JVM
 ignores an annotation whose class is missing, and a library's compile-only annotations (Error
 Prone's `@CanIgnoreReturnValue`, J2ObjC's `@Weak`, the Checker Framework's) are never shipped, so
-the code they mark translates as if they were not there. javac's errors for the annotation's
+the code they mark translates as if they were not there; reflection leaves them out of a
+member's annotations, as the JVM skips one whose class it cannot load. javac's errors for the annotation's
 name, for a missing class in its arguments (`@ReflectionSupport(Level.FULL)`), and for an import
 that only annotations use, or nothing, are dropped and not printed. An import of a missing class
 that code uses outside annotations is still reported, with that code.
@@ -591,8 +592,9 @@ itself, `n.byteValue()` and `n.shortValue()` of a `Number` (lowered as the narro
 checks `x`) as `java.lang.Class.cast(Object)`, `subSequence` (lowered as `substring`) as
 itself, and a `CharSequence`'s `isEmpty()` (lowered as a zero `length()`) as itself; the
 elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no message, as
-`Objects.requireNonNull` gives none, and a null iterator of them is the JDK's `<local5>`, the
-slot of `String.join`'s own loop. The receiver of a bound method reference, which the
+`Objects.requireNonNull` gives none, nor has its delimiter, and a null iterator of them is the
+JDK's `<local5>`, the slot of `String.join`'s own loop; of a `CharSequence[]` (a loop over the
+array), the delimiter's `toString()` names it, `because "delimiter" is null`. The receiver of a bound method reference, which the
 reference's class holds and its call may first keep in a local, is never null there. A nested
 class's use of a protected member of a superclass in another package goes through javac's
 accessor method in the subclass (`access$000`), which dereferences its own parameter: `because
