@@ -459,6 +459,12 @@ struct Lowering<'t> {
     rejected_classes: RefCell<std::collections::BTreeMap<usize, Error>>,
     /// The methods that are a census's stubs.
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
+    /// In a census, the statements of methods that lowering rejected, each with the class and the
+    /// message of the stub that stands for it and the rest of its block (`census::cut_stub`).
+    cut_stmts: RefCell<std::collections::HashMap<*const Value, (usize, String)>>,
+    /// In a census, the innermost statement of a block whose lowering failed last, with the
+    /// position and message of the error (`census::note_failed_stmt`).
+    failed_stmt: RefCell<Option<(*const Value, Pos, String)>>,
     /// What lowering assumed (see `ast::Note`).
     notes: RefCell<Vec<crate::ast::Note>>,
     /// The classes of the covariant arrays the code makes (`Class::element_classes`).
@@ -815,23 +821,40 @@ impl<'t> Lowering<'t> {
         // The `if`s that test a property that is never set run only their `else` branch.
         let unset = crate::program::unset_property_ifs(node.0);
         for stmt in node.list("statements") {
-            if is_super_call(stmt) {
-                out.extend(self.super_init(stmt)?);
-                continue;
+            // A census's stub of a rejected statement stands for the rest of the block too.
+            if let Some(stub) = self.cut_stub(stmt) {
+                out.push(stub);
+                break;
             }
-            if unset.iter().any(|s| std::ptr::eq(*s, stmt.0)) {
-                if let Some(otherwise) = stmt.get("elseStatement") {
-                    self.stmt_into(otherwise, &mut out)?;
-                }
-                continue;
-            }
-            // A field found by reflection only to make a handle of it, which is no value.
-            if self.handle_field_local(node, stmt) {
-                continue;
-            }
-            self.stmt_into(stmt, &mut out)?;
+            self.block_stmt(node, stmt, &unset, &mut out).inspect_err(|e| self.note_failed_stmt(stmt, e))?;
         }
         Ok(self.exits_into_rest(out))
+    }
+
+    /// Statement `stmt` of block `node` into `out`; `unset` are the block's `if`s that run only
+    /// their `else` branch.
+    fn block_stmt(
+        &self,
+        node: Node<'t>,
+        stmt: Node<'t>,
+        unset: &[&Value],
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), Error> {
+        if is_super_call(stmt) {
+            out.extend(self.super_init(stmt)?);
+            return Ok(());
+        }
+        if unset.iter().any(|s| std::ptr::eq(*s, stmt.0)) {
+            if let Some(otherwise) = stmt.get("elseStatement") {
+                self.stmt_into(otherwise, out)?;
+            }
+            return Ok(());
+        }
+        // A field found by reflection only to make a handle of it, which is no value.
+        if self.handle_field_local(node, stmt) {
+            return Ok(());
+        }
+        self.stmt_into(stmt, out)
     }
 
     /// A statement in a position that takes one statement, such as the body of an `if`.

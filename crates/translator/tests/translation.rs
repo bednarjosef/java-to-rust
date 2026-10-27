@@ -3202,6 +3202,47 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
 }
 
 #[test]
+fn a_census_stubs_a_rejected_statement_and_the_rest_of_its_block_not_the_whole_method() {
+    // `zone` is rejected for `StackWalker.walk`, behind a test that is false in this run, as
+    // jtracy's `TracyClient.beginZone` is when the profiler is not loaded: the rest of `zone`
+    // runs. `twice` is rejected for two statements, each cut with the rest of its block, and the
+    // static initializer for one, after which `ready` is still incremented.
+    let dir = write_sources(
+        "census_cut_statements",
+        &[(
+            "p/Main.java",
+            "package p;\npublic class Main {\n    static boolean loaded = Boolean.getBoolean(\"loaded\");\n    static int ready;\n    static {\n        ready = 1;\n        if (loaded) {\n            ProcessBuilder p = null;\n        }\n        ready += 1;\n    }\n    static void zone(String name, boolean capture) {\n        System.out.println(\"zone \" + name);\n        if (loaded && capture) {\n            System.out.println(\"walking\");\n            Object frame = StackWalker.getInstance().walk(s -> s.findFirst());\n            System.out.println(frame);\n        }\n        System.out.println(\"after \" + name);\n    }\n    static int twice(int n) {\n        if (n > 10) {\n            ProcessBuilder b = null;\n        }\n        if (n > 20) {\n            ProcessBuilder c = null;\n        }\n        return n * 2;\n    }\n    public static void main(String[] a) {\n        zone(\"a\", true);\n        System.out.println(twice(a.length) + ready);\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let census = census(&program);
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let errors = |name: &str| {
+        let piece =
+            pieces.iter().find(|p| p["name"] == name).unwrap_or_else(|| panic!("no {name} in {pieces:?}"));
+        piece["errors"].as_array().expect("errors").len()
+    };
+    assert_eq!((errors("zone"), errors("twice"), errors("main")), (1, 2, 0));
+    let rust = census.modules.expect("a translation").one_file();
+    assert_contains(
+        &rust,
+        &[
+            "java::not_translated(\"p.Main.zone: `StackWalker.walk` not supported yet (line 16)\")",
+            "java::println!(\"walking\");\n            java::not_translated(\"p.Main.zone",
+            "java::println!(\"after {name}\")",
+            "java::not_translated(\"p.Main.twice: type `java.lang.ProcessBuilder` not supported yet (line 23)\")",
+            "java::not_translated(\"p.Main.twice: type `java.lang.ProcessBuilder` not supported yet (line 26)\")",
+            "java::not_translated(\"p.Main: type `java.lang.ProcessBuilder` not supported yet (line 8)\")",
+        ],
+    );
+}
+
+#[test]
 fn a_census_stubs_only_the_code_of_the_file_with_the_rejection() {
     // The generator rejects the local `tasks` of `A.drain` at line 4, column 9, where `B.fine`
     // declares a local and `Main.main` makes a call too.
