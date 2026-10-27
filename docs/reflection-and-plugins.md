@@ -101,7 +101,10 @@ program where such a lookup can happen, so they can be checked before the progra
   candidates are its classes and the names in its string literals (`lower/reflection.rs`,
   `file_names`).
   `Method`, `Field` and `Constructor` are the translator's own classes
-  (`java/Reflection.java`). Each holds a slot in the table, and `Method.invoke`, `Field.get` and
+  (`java/Reflection.java`), with Java's supertypes: `AccessibleObject` (the accessibility
+  methods), `Executable` (what `Method` and `Constructor` share) and the interface `Member`, so
+  code that holds a member as one of these (gson's and log4j's `makeAccessible`) holds the
+  translator's. Each holds a slot in the table, and `Method.invoke`, `Field.get` and
   `set` (with their typed forms) and `Constructor.newInstance` are a `switch` over the slots,
   each case a direct call, read or write. The table and these switches are in 32 parts by
   `slot & 31`, each part a function of its own, so that a big program's table (the Minecraft server's holds about 100,000

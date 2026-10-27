@@ -1,4 +1,5 @@
-// `java.lang.reflect.Method`, `Field` and `Constructor` as the translator provides them, over the
+// `java.lang.reflect.Method`, `Field` and `Constructor` as the translator provides them, with
+// their supertypes `AccessibleObject`, `Executable` and `Member`, over the
 // translation's reflection table: the members of the program's classes that reflection can reach,
 // which the translator chose when translating (see `lower/reflection.rs`). `build.rs` prints the
 // syntax tree of this file with `JavaTree`, and lowering gives its classes their real package and
@@ -15,7 +16,67 @@ package reflection;
 
 import java.lang.reflect.InvocationTargetException;
 
-final class Method {
+// What `Method`, `Field` and `Constructor` have in common, so that code that holds one as an
+// `AccessibleObject` (gson and log4j make members accessible so) holds the translator's.
+abstract class AccessibleObject {
+    AccessibleObject() {
+    }
+
+    public void setAccessible(boolean flag) {
+    }
+
+    public final boolean trySetAccessible() {
+        return true;
+    }
+
+    public final boolean canAccess(Object obj) {
+        return true;
+    }
+
+    // Every member is accessible, as `canAccess` says: the table's members are shared by every
+    // lookup, so there is no flag of one lookup's for `setAccessible` to set.
+    @Deprecated
+    public boolean isAccessible() {
+        return true;
+    }
+}
+
+interface Member {
+    int PUBLIC = 0;
+    int DECLARED = 1;
+
+    Class<?> getDeclaringClass();
+
+    String getName();
+
+    int getModifiers();
+
+    boolean isSynthetic();
+}
+
+// What `Method` and `Constructor` have in common.
+abstract class Executable extends AccessibleObject implements Member {
+    Executable() {
+    }
+
+    public abstract Class<?> getDeclaringClass();
+
+    public abstract String getName();
+
+    public abstract int getModifiers();
+
+    public abstract Class<?>[] getParameterTypes();
+
+    public abstract int getParameterCount();
+
+    public abstract Class<?>[] getExceptionTypes();
+
+    public abstract boolean isVarArgs();
+
+    public abstract boolean isSynthetic();
+}
+
+final class Method extends Executable {
     // The table, made once.
     private static Method[] table;
 
@@ -84,21 +145,6 @@ final class Method {
     }
 
     public void setAccessible(boolean flag) {
-    }
-
-    public boolean trySetAccessible() {
-        return true;
-    }
-
-    public boolean canAccess(Object obj) {
-        return true;
-    }
-
-    // Every member is accessible, as `canAccess` says: the table's members are shared by every
-    // lookup, so there is no flag of one lookup's for `setAccessible` to set.
-    @Deprecated
-    public boolean isAccessible() {
-        return true;
     }
 
     public Object invoke(Object obj, Object... args) throws IllegalAccessException, InvocationTargetException {
@@ -336,7 +382,7 @@ final class Method {
     private static native Object invokePart(int part, int slot, Object obj, Object[] args);
 }
 
-final class Field {
+final class Field extends AccessibleObject implements Member {
     private static Field[] table;
 
     private final Class<?> owner;
@@ -453,21 +499,6 @@ final class Field {
     private static native Object genericTypePart(int part, int slot);
 
     public void setAccessible(boolean flag) {
-    }
-
-    public boolean trySetAccessible() {
-        return true;
-    }
-
-    public boolean canAccess(Object obj) {
-        return true;
-    }
-
-    // Every member is accessible, as `canAccess` says: the table's members are shared by every
-    // lookup, so there is no flag of one lookup's for `setAccessible` to set.
-    @Deprecated
-    public boolean isAccessible() {
-        return true;
     }
 
     public boolean isEnumConstant() {
@@ -858,7 +889,7 @@ final class Field {
     private static native Object setPart(int part, int slot, Object obj, Object value);
 }
 
-final class Constructor<T> {
+final class Constructor<T> extends Executable {
     // The text that the exceptions of a lookup by a name not in the table end with.
     static final String MISSING = ", which is not in the translation";
 
@@ -906,22 +937,11 @@ final class Constructor<T> {
         return (modifiers & 0x80) != 0;
     }
 
+    public boolean isSynthetic() {
+        return (modifiers & 0x1000) != 0;
+    }
+
     public void setAccessible(boolean flag) {
-    }
-
-    public boolean trySetAccessible() {
-        return true;
-    }
-
-    public boolean canAccess(Object obj) {
-        return true;
-    }
-
-    // Every member is accessible, as `canAccess` says: the table's members are shared by every
-    // lookup, so there is no flag of one lookup's for `setAccessible` to set.
-    @Deprecated
-    public boolean isAccessible() {
-        return true;
     }
 
     // The slot of a constructor of an abstract class is negative: there is nothing to create.

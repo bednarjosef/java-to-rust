@@ -2,7 +2,8 @@
 //! and the lists of them, `Class.newInstance()` and `asSubclass`, over the translation's
 //! reflection table.
 //!
-//! `java.lang.reflect.Method`, `Field` and `Constructor` are the translator's own classes
+//! `java.lang.reflect.Method`, `Field` and `Constructor`, with their supertypes
+//! `AccessibleObject`, `Executable` and `Member`, are the translator's own classes
 //! (`java/Reflection.java`), standard classes like the exceptions (`exceptions.rs`), and the
 //! lookups of `Class` are calls of their static methods (`Method.find`, `Field.list`, ...), which
 //! search the table. The table is made here, for each program, by its natives: `tablePart` gives
