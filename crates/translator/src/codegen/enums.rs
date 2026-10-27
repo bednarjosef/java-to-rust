@@ -277,6 +277,20 @@ impl<'a> Gen<'a> {
         if let Some(t) = self.enum_of(&args[0]) {
             return self.erased_enum_builtin(builtin, args, t);
         }
+        // A value of an enum that the program does not translate, a class without objects:
+        // `name()`, `ordinal()` or `compareTo` null-checks it and is never reached otherwise.
+        if let Type::Class(name, _) = args[0].ty
+            && name != OBJECT
+            && name != ENUM
+            && builtin != Builtin::EnumValueOf
+        {
+            let checked = self.receiver_ref(&args[0]);
+            let ret = self.ty_name(ty);
+            let message = format!("no constant of {name} exists");
+            return Code::atom(format!(
+                "{{ let _ = {checked}; let value: {ret} = unreachable!({message:?}); value }}"
+            ));
+        }
         match builtin {
             // An enum that may be null throws `NullPointerException` (`enum_value`).
             Builtin::EnumOrdinal => {

@@ -746,10 +746,14 @@ pub(super) fn runtime_failures(
                 }
             }
             // An enum that may be null is dereferenced with the checked form (`Gen::enum_value`),
-            // the argument of `compareTo` too.
+            // the argument of `compareTo` too. So is a value of an enum that the program does not
+            // translate, a class without objects (`Gen::enum_builtin`).
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo => {
-                for arg in args.iter().filter(|a| matches!(a.ty, Type::Enum(_)) && null(a)) {
-                    out.push((NPE, "this call", true, arg.id));
+                let untranslated = |a: &Expr| matches!(a.ty, Type::Class(name, _) if name != OBJECT && name != ENUM);
+                for (i, arg) in args.iter().enumerate() {
+                    if (matches!(arg.ty, Type::Enum(_)) || i == 0 && untranslated(arg)) && null(arg) {
+                        out.push((NPE, "this call", true, arg.id));
+                    }
                 }
             }
             // The receiver, a string, is dereferenced with the checked form (`Facts::null_checked`).
