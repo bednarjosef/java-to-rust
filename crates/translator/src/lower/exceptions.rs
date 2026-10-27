@@ -793,6 +793,24 @@ impl Uses {
                             self.classes.insert(class.into());
                             self.members.insert((class.into(), name.into(), signature.into()));
                         }
+                        // So are `sun.misc.Unsafe`'s `staticFieldOffset` and `staticFieldBase`,
+                        // and an access at such a number is the translator's (`handles.rs`).
+                        if crate::program::sun_static_field(
+                            &owner,
+                            &text(symbol, "name"),
+                            &text(symbol, "type"),
+                        ) {
+                            for (class, name, signature) in crate::program::STATIC_FIELD_VALUES {
+                                self.classes.insert(class.into());
+                                self.members.insert((class.into(), name.into(), signature.into()));
+                            }
+                        }
+                        if crate::program::offset_numbers(v) {
+                            for (name, signature) in crate::program::unsafe_access_helpers() {
+                                self.classes.insert("java.lang.reflect.Field".into());
+                                self.members.insert(("java.lang.reflect.Field".into(), name, signature));
+                            }
+                        }
                         // A lookup of reflection calls the translator's `Method`, `Field` or
                         // `Constructor` (`reflection.rs`).
                         if owner == "java.lang.Class" && !self.handle_fields.contains(&(v as *const Value)) {

@@ -632,6 +632,59 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
 pub const FIELD_OFFSET_VALUE: (&str, &str, &str) =
     ("java.lang.reflect.Field", "objectFieldOffset", "(java.lang.reflect.Field,boolean)long");
 
+/// The translator's methods that give `sun.misc.Unsafe`'s `staticFieldOffset(Field)` and
+/// `staticFieldBase(Field)`, and `jdk.internal.misc.Unsafe`'s when they make no field handle
+/// (`lower/handles.rs`): the field's number, and its class as the base.
+pub const STATIC_FIELD_VALUES: [(&str, &str, &str); 2] = [
+    ("java.lang.reflect.Field", "staticFieldOffset", "(java.lang.reflect.Field,boolean)long"),
+    ("java.lang.reflect.Field", "staticFieldBase", "(java.lang.reflect.Field,boolean)java.lang.Object"),
+];
+
+/// The translator's method that reads (or with `put`, writes) a value of `kind` (a primitive,
+/// or `reference`) at an offset that lowering resolves to no field or element: the field of the
+/// reflection table whose number the offset is (`lower/handles.rs`), its name and signature.
+pub fn unsafe_access_helper(kind: &str, put: bool) -> (String, String) {
+    let (name, ty) = match kind {
+        "reference" => ("Reference".to_string(), "java.lang.Object"),
+        _ => (kind[..1].to_uppercase() + &kind[1..], kind),
+    };
+    match put {
+        true => (format!("unsafePut{name}"), format!("(java.lang.Object,long,{ty},java.lang.String)void")),
+        false => (format!("unsafeGet{name}"), format!("(java.lang.Object,long,java.lang.String){ty}")),
+    }
+}
+
+/// Every `unsafe_access_helper`: the reads and writes of each kind.
+pub fn unsafe_access_helpers() -> impl Iterator<Item = (String, String)> {
+    ["boolean", "byte", "short", "char", "int", "long", "float", "double", "reference"]
+        .into_iter()
+        .flat_map(|kind| [unsafe_access_helper(kind, false), unsafe_access_helper(kind, true)])
+}
+
+/// Whether `node` calls a method that gives an offset of a field that is no field handle as a
+/// number, or a base of one (`FIELD_OFFSET_VALUE`, `STATIC_FIELD_VALUES`), or one of
+/// `sun.misc.Unsafe`'s accesses at an offset, which a library may make at such a number: the
+/// translator's accesses at the field of a number are reached (`unsafe_access_helper`).
+pub fn offset_numbers(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    let (owner, name, ty) = (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"));
+    text(node, "kind") == "METHOD_INVOCATION"
+        && (field_offset_value(node)
+            || sun_static_field(owner, name, ty)
+            || sun_misc_forwarded(owner, name, ty).is_some())
+}
+
+/// Whether the method is `sun.misc.Unsafe`'s `staticFieldOffset(Field)` or `staticFieldBase(Field)`,
+/// which `STATIC_FIELD_VALUES` give.
+pub fn sun_static_field(owner: &str, name: &str, ty: &str) -> bool {
+    owner == SUN_MISC_UNSAFE
+        && matches!(
+            (name, ty),
+            ("staticFieldOffset", "(java.lang.reflect.Field)long")
+                | ("staticFieldBase", "(java.lang.reflect.Field)java.lang.Object")
+        )
+}
+
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
 /// They take a `Class`, which the translation has no value for: every call that `Unsafe`'s own
@@ -650,6 +703,9 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "staticFieldBase", "(java.lang.reflect.Field)java.lang.Object"),
     // `sun.misc.Unsafe`'s, which forwards to the one above after its warning (`lower/sun_unsafe.rs`).
     (SUN_MISC_UNSAFE, "objectFieldOffset", "(java.lang.reflect.Field)long"),
+    // Its `staticFieldOffset` and `staticFieldBase`, the translator's (`STATIC_FIELD_VALUES`).
+    (SUN_MISC_UNSAFE, "staticFieldOffset", "(java.lang.reflect.Field)long"),
+    (SUN_MISC_UNSAFE, "staticFieldBase", "(java.lang.reflect.Field)java.lang.Object"),
     ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     // A saved property is a property (`lower/system.rs`).
@@ -3997,6 +4053,17 @@ impl<'t> Walk<'t> {
             } else if field_offset_value(value) {
                 let (class, method, signature) = FIELD_OFFSET_VALUE;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            let symbol = &value["symbol"];
+            if sun_static_field(text(symbol, "owner"), text(symbol, "name"), text(symbol, "type")) {
+                for (class, method, signature) in STATIC_FIELD_VALUES {
+                    self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+                }
+            }
+            if offset_numbers(value) {
+                for (method, signature) in unsafe_access_helpers() {
+                    self.work.push(Item::Method(("java.lang.reflect.Field".into(), method, signature)));
+                }
             }
             let field_of = |class: &str, name: &str| {
                 self.classes.get(class).is_some_and(|(decl, _)| {

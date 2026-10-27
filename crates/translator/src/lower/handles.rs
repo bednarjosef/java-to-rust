@@ -23,8 +23,8 @@
 //! with one thread, and in a program with threads the field is the object's, read and written
 //! under its lock, which orders the accesses at least as the plain, opaque, acquire, release and
 //! volatile forms ask. Any other use of a handle is rejected. `objectFieldOffset(f)` of a `Field`
-//! that is no handle is a number of the field's own, which no access can use
-//! (`field_offset_value`).
+//! that is no handle is a number of the field's own, and so is `staticFieldOffset(f)` of
+//! `sun.misc.Unsafe` (`offset_value`).
 //!
 //! An atomic update through a handle, `U.compareAndSetInt(this, VALUE, expect, update)` and the
 //! get-and-add, get-and-bitwise-or (and `And`, `Xor`), get-and-set and compare-and-exchange forms
@@ -72,7 +72,12 @@
 //! kind (`LazyCollections.Mutexes.acquireMutex(long offset)`): only its outermost class can
 //! call it, and no code there may name it otherwise. The local or parameter holds the offset Java
 //! computes, from `Unsafe`'s answers for the base and scale, so the element's index is
-//! `(k - base) / scale`. Any other offset arithmetic is rejected.
+//! `(k - base) / scale`.
+//!
+//! An access at any other offset is the translator's access at the field whose number the offset
+//! is (`unresolved_access`), which throws `UnsupportedOperationException` where there is none, and
+//! a plain read or write of a primitive in an `Object`, a primitive array or null at an offset
+//! that is not a field's number reads or writes the bytes there (`raw_memory`).
 //!
 //! The offset of a static field (`staticFieldOffset(f)`, with `staticFieldBase(f)` as the object,
 //! of a field `f` that `getDeclaredField` finds, as `ForkJoinPool` finds `poolIds`) is a handle of
@@ -179,6 +184,12 @@ const STATIC_OFFSET_OF: (&str, &str, &str) =
     ("jdk.internal.misc.Unsafe", "staticFieldOffset", "(java.lang.reflect.Field)long");
 const STATIC_BASE_OF: (&str, &str, &str) =
     ("jdk.internal.misc.Unsafe", "staticFieldBase", "(java.lang.reflect.Field)java.lang.Object");
+
+/// What the message of the `UnsupportedOperationException` of an access at an offset that
+/// lowering resolves to no field or element says after the access's name, which a census finds it
+/// by (`program::census`): thrown at the access, or by the translator's access at the field of the
+/// reflection table whose number the offset is, where there is none (`unresolved_access`).
+pub const UNRESOLVED_OFFSET: &str = "at an offset that the translation does not resolve";
 
 /// `Unsafe.arrayBaseOffset(Class)` and `arrayIndexScale(Class)`.
 const BASE_OF: (&str, &str, &str) =
@@ -299,6 +310,21 @@ fn access_kind(signature: &str) -> Kind {
     PRIMITIVES.into_iter().find(|p| *p == ty).unwrap_or("reference")
 }
 
+/// The type of the values of an access of kind `kind`.
+fn kind_type(kind: Kind) -> Type {
+    match kind {
+        "boolean" => Type::Boolean,
+        "byte" => Type::Byte,
+        "short" => Type::Short,
+        "char" => Type::Char,
+        "int" => Type::Int,
+        "long" => Type::Long,
+        "float" => Type::Float,
+        "double" => Type::Double,
+        _ => Type::class(OBJECT),
+    }
+}
+
 /// Calls `f` on every node of the tree under `v`.
 pub(super) fn walk<'t>(v: &'t Value, f: &mut impl FnMut(Node<'t>)) {
     match v {
@@ -307,6 +333,24 @@ pub(super) fn walk<'t>(v: &'t Value, f: &mut impl FnMut(Node<'t>)) {
             map.values().for_each(|c| walk(c, f));
         }
         Value::Array(items) => items.iter().for_each(|i| walk(i, f)),
+        _ => {}
+    }
+}
+
+/// Calls `f` on every node of the tree under `v` outside the methods of the classes declared in
+/// it, with the nodes that hold it, outermost first (`holders`, which the caller starts empty).
+fn scoped_walk<'t>(v: &'t Value, holders: &mut Vec<&'t Value>, f: &mut impl FnMut(Node<'t>, &[&'t Value])) {
+    match v {
+        Value::Object(map) => {
+            if Node(v).kind() == "METHOD" {
+                return;
+            }
+            f(Node(v), holders);
+            holders.push(v);
+            map.values().for_each(|c| scoped_walk(c, holders, f));
+            holders.pop();
+        }
+        Value::Array(items) => items.iter().for_each(|i| scoped_walk(i, holders, f)),
         _ => {}
     }
 }
@@ -608,7 +652,7 @@ impl<'t> Lowering<'t> {
                     return false;
                 }
                 // Only in the value given to a handle: an offset used as a number keeps its
-                // `Field` (`field_offset_value`).
+                // `Field` (`offset_value`).
                 walk(block.0, &mut |n| {
                     uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
                     let defines = n.kind() == "ASSIGNMENT" && self.handle_definition_of(n).is_some();
@@ -799,18 +843,32 @@ impl<'t> Lowering<'t> {
         }
         let block = block.filter(|_| symbol.kind == "LOCAL_VARIABLE" && node.kind() == "IDENTIFIER")?;
         let name = symbol.name;
-        // The local's declaration, the only one of that name in the block (in a `try` of it, say)
-        // outside the methods of the classes declared in it, whose locals are others.
+        // The local's declaration: of the declarations of that name in the block (in a `try` of
+        // it, say), outside the methods of the classes declared in it, whose locals are others,
+        // the one in whose scope the use is (`long offset` in each of two blocks, as netty
+        // declares it), by the node that holds each: a block, a `for`, a `try`.
+        let mut uses = Vec::new();
         let mut declarations = Vec::new();
-        walk_in_methods(block.0, None, &mut |n, method| {
-            if method.is_none() && n.kind() == "VARIABLE" && n.str("name") == name {
-                declarations.push(n);
+        scoped_walk(block.0, &mut Vec::new(), &mut |n, holders| {
+            if std::ptr::eq(n.0, node.0) {
+                uses = holders.to_vec();
+            }
+            if n.kind() == "VARIABLE" && n.str("name") == name {
+                declarations.push((n, holders.last().copied()));
             }
         });
-        let [declaration] = declarations[..] else { return None };
+        let in_scope: Vec<_> = declarations
+            .iter()
+            .filter(|(_, holder)| holder.is_some_and(|h| uses.iter().any(|u| std::ptr::eq(*u, h))))
+            .collect();
+        let (declaration, holder) = match (&in_scope[..], &declarations[..]) {
+            ([one], _) => **one,
+            ([], [one]) => *one,
+            _ => return None,
+        };
         let init = declaration.get("initializer")?;
         let mut written = false;
-        walk_in_methods(block.0, None, &mut |n, method| {
+        walk_in_methods(holder.map_or(block.0, |h| h), None, &mut |n, method| {
             written |= method.is_none() && assigns(n, |v| v.kind() == "IDENTIFIER" && v.str("name") == name);
         });
         (!written).then_some((init, Some(block)))
@@ -1868,7 +1926,14 @@ impl<'t> Lowering<'t> {
     ) -> Result<Option<ExprKind>, Error> {
         let key = (symbol.owner, symbol.name, symbol.ty);
         if key == OFFSET_OF_FIELD || key == SUN_OFFSET_OF_FIELD {
-            return self.field_offset_value(node, key == SUN_OFFSET_OF_FIELD).map(Some);
+            let sun = key == SUN_OFFSET_OF_FIELD;
+            return self.offset_value(node, crate::program::FIELD_OFFSET_VALUE, sun).map(Some);
+        }
+        let sun = crate::program::sun_static_field(symbol.owner, symbol.name, symbol.ty);
+        if sun || key == STATIC_OFFSET_OF || key == STATIC_BASE_OF {
+            let [offset, base] = crate::program::STATIC_FIELD_VALUES;
+            let value = if symbol.name == "staticFieldOffset" { offset } else { base };
+            return self.offset_value(node, value, sun).map(Some);
         }
         if key == OFFSET_OF {
             return unsupported(node, "a field offset used as a value");
@@ -1900,16 +1965,35 @@ impl<'t> Lowering<'t> {
                     // `Object` (as `getCharUnaligned` and the buffers' views of a `byte[]` read):
                     // the bytes at the offset, whatever it is, as the JVM reads them; with a
                     // null base (`getInt(long address)`), at an address outside the heap.
+                    // Unless the offset is a field's number, which the base may hold as an
+                    // `Object` (`staticFieldBase`).
                     let kind = access_kind(symbol.ty);
                     let base = plain(args[0]).java_type();
                     let raw_base = base == "java.lang.Object"
                         || plain(args[0]).kind() == "NULL_LITERAL"
                         || base.strip_suffix("[]").is_some_and(|e| PRIMITIVES.contains(&e));
-                    if update.is_none() && kind != "reference" && raw_base && self.object.is_some() {
+                    let numbered = self.field_number(args[1], 0);
+                    if update.is_none()
+                        && kind != "reference"
+                        && raw_base
+                        && self.object.is_some()
+                        && !numbered
+                    {
                         return self.raw_memory(node, &args, kind, put == Some(true)).map(Some);
                     }
-                    let what = "an offset that is neither a field's nor an array element's";
-                    return unsupported(node, &format!("`Unsafe.{}` with {what}", symbol.name));
+                    let name = warned.unwrap_or(symbol.name);
+                    let access = self.unresolved_access(
+                        node,
+                        name,
+                        &args,
+                        kind,
+                        put.filter(|_| update.is_none()),
+                        numbered,
+                    )?;
+                    return match warned {
+                        Some(method) => self.after_memory_access_warning(node, method, access).map(Some),
+                        None => Ok(Some(access)),
+                    };
                 }
             },
         };
@@ -1942,14 +2026,18 @@ impl<'t> Lowering<'t> {
 
     /// `U.objectFieldOffset(f)` of a `Field` that is no field handle, used as a number, with `sun`
     /// `sun.misc.Unsafe`'s: the number that the translator's `Field.objectFieldOffset` gives
-    /// (`program::FIELD_OFFSET_VALUE`), a number of the field's own that no access can use, as
-    /// any access at an offset must name its field or element. So code that checks the layout of
-    /// its fields before it reads them at offsets of its own computing (`joml`'s `MemUtil` checks
-    /// that a matrix's floats are 4 bytes apart) finds that it is not the layout it expects, as on
-    /// a JVM that lays them out otherwise, and takes its other way. `sun.misc.Unsafe`'s warns
-    /// after its checks of the field, as Java's does.
-    fn field_offset_value(&self, node: Node<'t>, sun: bool) -> Result<ExprKind, Error> {
-        let (class, name, signature) = crate::program::FIELD_OFFSET_VALUE;
+    /// (`program::FIELD_OFFSET_VALUE`), a number of the field's own, which an access whose offset
+    /// lowering cannot resolve finds the field by (`unresolved_access`). So code that checks the
+    /// layout of its fields before it reads them at offsets of its own computing (`joml`'s
+    /// `MemUtil` checks that a matrix's floats are 4 bytes apart) finds that it is not the layout
+    /// it expects, as on a JVM that lays them out otherwise, and takes its other way.
+    /// `staticFieldOffset(f)` and `staticFieldBase(f)` of `sun.misc.Unsafe`, and of `Unsafe` where
+    /// they make no handle, are the translator's `Field.staticFieldOffset`, that number, and
+    /// `staticFieldBase`, the field's class (`program::STATIC_FIELD_VALUES`). `value` is the
+    /// translator's method. `sun.misc.Unsafe`'s warns after its checks of the field, as Java's
+    /// does.
+    fn offset_value(&self, node: Node<'t>, value: (&str, &str, &str), sun: bool) -> Result<ExprKind, Error> {
+        let (class, name, signature) = value;
         let Some(method) = self.method_named(class, name, signature) else {
             return unsupported(node, "a field offset used as a value");
         };
@@ -1960,7 +2048,7 @@ impl<'t> Lowering<'t> {
             None => false,
         });
         if !sun && !stateless {
-            return unsupported(node, "`Unsafe.objectFieldOffset` on this receiver");
+            return unsupported(node, &format!("`Unsafe.{name}` on this receiver"));
         }
         let pos = node.pos();
         let Some(field) = node.list("arguments").next() else {
@@ -1971,18 +2059,102 @@ impl<'t> Lowering<'t> {
         if !sun {
             return Ok(call);
         }
+        let ty = if name == "staticFieldBase" { Type::class(OBJECT) } else { Type::Long };
         let local = self.fresh_name("offset");
-        let call = self.synth(call, pos, Type::Long);
-        let warning = self.memory_access_warning(node, "objectFieldOffset")?;
+        let call = self.synth(call, pos, ty);
+        let warning = self.memory_access_warning(node, node.symbol().map_or(name, |s| s.name))?;
         let body = vec![
-            Stmt::Local { ty: Type::Long, name: local.clone(), init: Some(call), pos },
+            Stmt::Local { ty, name: local.clone(), init: Some(call), pos },
             Stmt::Expr(warning),
-            Stmt::Yield(self.synth(ExprKind::Var(local), pos, Type::Long)),
+            Stmt::Yield(self.synth(ExprKind::Var(local), pos, ty)),
         ];
         Ok(ExprKind::Switch {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body }],
         })
+    }
+
+    /// Whether the offset `offset` is a field's number (`offset_value`): a call of
+    /// `objectFieldOffset` or `staticFieldOffset` of a `Field` that makes no handle, or a local of
+    /// the method being lowered, or a static final, whose one value is one.
+    fn field_number(&self, offset: Node<'t>, depth: usize) -> bool {
+        let offset = plain(offset);
+        if offset.kind() == "METHOD_INVOCATION" {
+            return offset.symbol().is_some_and(|s| {
+                let key = (s.owner, s.name, s.ty);
+                key == OFFSET_OF_FIELD
+                    || key == SUN_OFFSET_OF_FIELD
+                    || key == STATIC_OFFSET_OF
+                    || crate::program::sun_static_field(s.owner, s.name, s.ty)
+            });
+        }
+        let body = self.method_ctx.get().and_then(|m| self.methods[m].node.get("body"));
+        depth < 4 && self.defined(offset, body).is_some_and(|(value, _)| self.field_number(value, depth + 1))
+    }
+
+    /// `U.get<Kind>(base, offset)`, or with `put` `U.put<Kind>(base, offset, x)`, of a value of
+    /// kind `kind`, the method `name` of `Unsafe` (of `sun.misc.Unsafe` where it forwards), at an
+    /// offset that resolves to no field or element (`numbered` when it is a field's number): a
+    /// call of the translator's access at the field of the reflection table whose number the
+    /// offset is (`program::unsafe_access_helper`), which throws `UnsupportedOperationException`
+    /// where there is none, as a JVM would read or write other memory. Where the program has no
+    /// such access (no code gives offsets as numbers), and for an atomic update (`put` is `None`),
+    /// the access evaluates its arguments and throws that exception, or is rejected in a program
+    /// without that class. Its message names the
+    /// access, and unless the offset is a field's number says `UNRESOLVED_OFFSET`, which a census
+    /// lists.
+    fn unresolved_access(
+        &self,
+        node: Node<'t>,
+        name: &str,
+        args: &[Node<'t>],
+        kind: Kind,
+        put: Option<bool>,
+        numbered: bool,
+    ) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let what = format!("`Unsafe.{name}`");
+        let unresolved = format!("{what} {UNRESOLVED_OFFSET}");
+        let ty = kind_type(kind);
+        let helper = put.and_then(|put| {
+            let (method, signature) = crate::program::unsafe_access_helper(kind, put);
+            Some((method.clone(), self.method_named("java.lang.reflect.Field", &method, &signature)?, put))
+        });
+        let Some((method, resolved, put)) = helper else {
+            let mut before = Vec::new();
+            for part in node
+                .get("methodSelect")
+                .and_then(|s| s.get("expression"))
+                .into_iter()
+                .chain(args.iter().copied())
+            {
+                if !quiet(part) {
+                    let value = self.expr(part)?;
+                    let name = self.fresh_name("unresolved");
+                    before.push(Stmt::Local { ty: value.ty, name, init: Some(value), pos });
+                }
+            }
+            let result = self.ty(node, node.java_type())?;
+            return match self.standard_thrown(UNFOLLOWED, Some(&unresolved), before, result, pos) {
+                Some(thrown) => Ok(thrown.kind),
+                None => unsupported(node, &unresolved),
+            };
+        };
+        let message = if numbered { format!("{what} at a field's offset") } else { unresolved };
+        let mut operands = vec![
+            self.convert(self.expr(args[0])?, Type::class(OBJECT)),
+            self.convert(self.expr(args[1])?, Type::Long),
+        ];
+        if put {
+            operands.push(self.convert(self.expr(args[2])?, ty));
+        }
+        operands.push(self.synth(ExprKind::Str(message), pos, Type::String));
+        let call = ExprKind::Call { name: method, args: operands, resolved: Some(resolved) };
+        if put {
+            return Ok(call);
+        }
+        let read = self.synth(call, pos, ty);
+        Ok(self.convert(read, self.ty(node, node.java_type())?).kind)
     }
 
     /// `U.get<Kind>(base, offset)` or `U.put<Kind>(base, offset, x)` of a primitive of kind `kind`
@@ -1995,16 +2167,7 @@ impl<'t> Lowering<'t> {
         kind: Kind,
         put: bool,
     ) -> Result<ExprKind, Error> {
-        let ty = match kind {
-            "boolean" => Type::Boolean,
-            "byte" => Type::Byte,
-            "short" => Type::Short,
-            "char" => Type::Char,
-            "int" => Type::Int,
-            "long" => Type::Long,
-            "float" => Type::Float,
-            _ => Type::Double,
-        };
+        let ty = kind_type(kind);
         let base = self.expr(args[0])?;
         self.note_object_array(base.ty);
         let mut operands =

@@ -630,12 +630,158 @@ final class Field extends AccessibleObject implements Member {
         if ((f.modifiers & 8) != 0) {
             throw new IllegalArgumentException();
         }
+        return offset(f);
+    }
+
+    // `Unsafe.staticFieldOffset(f)` (with `sun`, `sun.misc.Unsafe`'s): the field's number, as
+    // `objectFieldOffset` gives an object's field.
+    static long staticFieldOffset(Field f, boolean sun) {
+        if (f == null) {
+            throw new NullPointerException();
+        }
+        if ((f.modifiers & 8) == 0) {
+            throw new IllegalArgumentException();
+        }
+        return offset(f);
+    }
+
+    // `Unsafe.staticFieldBase(f)`: the class that declares the field, as HotSpot keeps the static
+    // fields of a class in its `Class` object.
+    static Object staticFieldBase(Field f, boolean sun) {
+        if (f == null) {
+            throw new NullPointerException();
+        }
+        if ((f.modifiers & 8) == 0) {
+            throw new IllegalArgumentException();
+        }
+        return f.clazz;
+    }
+
+    private static long offset(Field f) {
         Field[] all = table();
         int i = 0;
         while (all[i].clazz != f.clazz || !all[i].name.equals(f.name)) {
             i++;
         }
         return 16L * (i + 1);
+    }
+
+    // The field of the table whose number `offset` is (`objectFieldOffset`, `staticFieldOffset`),
+    // when `base` holds it: the declaring class of a static field (`staticFieldBase`), or an
+    // object of that class; null for any other offset or base.
+    static Field atOffset(Object base, long offset) {
+        Field[] all = table();
+        if (offset <= 0 || offset % 16 != 0 || offset / 16 > all.length) {
+            return null;
+        }
+        Field f = all[(int) (offset / 16) - 1];
+        boolean held = (f.modifiers & 8) != 0 ? base == f.clazz : base != null && f.clazz.isInstance(base);
+        return held ? f : null;
+    }
+
+    // The field that `Unsafe`'s access `access` (as the message names it) of a value of type
+    // `kind` (null for a reference) at `offset` of `base` reads or writes, as `atOffset` finds it;
+    // where there is none, or it holds another type, an `UnsupportedOperationException` that says
+    // so, where Java would read or write whatever memory is there.
+    private static Field accessed(Object base, long offset, Class<?> kind, String access) {
+        Field f = atOffset(base, offset);
+        if (f == null) {
+            throw new UnsupportedOperationException(access + ": no field of the translation is at offset "
+                    + offset + " of " + (base == null ? "null" : base.getClass().getName()));
+        }
+        if (kind == null ? f.type.isPrimitive() : f.type != kind) {
+            throw new UnsupportedOperationException(access + ": the field at offset " + offset + " is "
+                    + Constructor.typeName(f.type) + " " + f.clazz.getName() + "." + f.name);
+        }
+        return f;
+    }
+
+    private static Object unsafeGet(Object base, long offset, Class<?> kind, String access) {
+        return get0(accessed(base, offset, kind, access).slot, base);
+    }
+
+    // A final field keeps its value, as with `set`.
+    private static void unsafePut(Object base, long offset, Class<?> kind, Object value, String access) {
+        Field f = accessed(base, offset, kind, access);
+        if ((f.modifiers & 0x10) != 0) {
+            throw new UnsupportedOperationException(access + ": the field at offset " + offset + " is final "
+                    + f.clazz.getName() + "." + f.name + ", which the translation does not change");
+        }
+        Object written = set0(f.slot, base, value);
+    }
+
+    // `Unsafe`'s reads and writes at an offset that lowering does not resolve to a field or an
+    // element (`lower/handles.rs`), one of each per type: of the field of the table at that offset.
+    static boolean unsafeGetBoolean(Object base, long offset, String access) {
+        return (Boolean) unsafeGet(base, offset, boolean.class, access);
+    }
+
+    static byte unsafeGetByte(Object base, long offset, String access) {
+        return (Byte) unsafeGet(base, offset, byte.class, access);
+    }
+
+    static short unsafeGetShort(Object base, long offset, String access) {
+        return (Short) unsafeGet(base, offset, short.class, access);
+    }
+
+    static char unsafeGetChar(Object base, long offset, String access) {
+        return (Character) unsafeGet(base, offset, char.class, access);
+    }
+
+    static int unsafeGetInt(Object base, long offset, String access) {
+        return (Integer) unsafeGet(base, offset, int.class, access);
+    }
+
+    static long unsafeGetLong(Object base, long offset, String access) {
+        return (Long) unsafeGet(base, offset, long.class, access);
+    }
+
+    static float unsafeGetFloat(Object base, long offset, String access) {
+        return (Float) unsafeGet(base, offset, float.class, access);
+    }
+
+    static double unsafeGetDouble(Object base, long offset, String access) {
+        return (Double) unsafeGet(base, offset, double.class, access);
+    }
+
+    static Object unsafeGetReference(Object base, long offset, String access) {
+        return unsafeGet(base, offset, null, access);
+    }
+
+    static void unsafePutBoolean(Object base, long offset, boolean value, String access) {
+        unsafePut(base, offset, boolean.class, value, access);
+    }
+
+    static void unsafePutByte(Object base, long offset, byte value, String access) {
+        unsafePut(base, offset, byte.class, value, access);
+    }
+
+    static void unsafePutShort(Object base, long offset, short value, String access) {
+        unsafePut(base, offset, short.class, value, access);
+    }
+
+    static void unsafePutChar(Object base, long offset, char value, String access) {
+        unsafePut(base, offset, char.class, value, access);
+    }
+
+    static void unsafePutInt(Object base, long offset, int value, String access) {
+        unsafePut(base, offset, int.class, value, access);
+    }
+
+    static void unsafePutLong(Object base, long offset, long value, String access) {
+        unsafePut(base, offset, long.class, value, access);
+    }
+
+    static void unsafePutFloat(Object base, long offset, float value, String access) {
+        unsafePut(base, offset, float.class, value, access);
+    }
+
+    static void unsafePutDouble(Object base, long offset, double value, String access) {
+        unsafePut(base, offset, double.class, value, access);
+    }
+
+    static void unsafePutReference(Object base, long offset, Object value, String access) {
+        unsafePut(base, offset, null, value, access);
     }
 
     // `c.getField(name)`, or with `declared` `c.getDeclaredField(name)`.

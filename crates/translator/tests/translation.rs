@@ -4929,26 +4929,25 @@ fn an_element_offset_passed_to_a_private_method_is_the_element() {
         ],
     );
     assert_lacks(&rust, &["fn compare_and_set_reference", "fn get_reference_acquire"]);
-    // A call that passes an offset of no element leaves the parameter no element offset.
+    // A call that passes an offset of no element leaves the parameter no element offset: the
+    // access would throw `UnsupportedOperationException`, which this program does not have.
     let error = translate_with_natives("jdk-parameter-stray", "System.out.println(new Names().stray(1));")
         .expect_err("must be rejected");
     assert!(
         error.ends_with(
-            "`Unsafe.getReferenceAcquire` with an offset that is neither a field's nor an array element's \
-             not supported yet"
+            "`Unsafe.getReferenceAcquire` at an offset that the translation does not resolve not supported yet"
         ),
         "{error}"
     );
 }
 
 #[test]
-fn offset_arithmetic_that_is_no_element_offset_is_rejected() {
+fn offset_arithmetic_that_is_no_element_offset_is_rejected_without_the_exception_to_throw() {
     let error = translate_with_natives("jdk-element-stray", "System.out.println(new Slots().stray(1));")
         .expect_err("must be rejected");
     assert!(
         error.ends_with(
-            "`Unsafe.getReferenceAcquire` with an offset that is neither a field's nor an array element's \
-             not supported yet"
+            "`Unsafe.getReferenceAcquire` at an offset that the translation does not resolve not supported yet"
         ),
         "{error}"
     );

@@ -60,8 +60,8 @@ def messages(census):
 
 def listed(census, key):
     """The pieces of each message of the code listed under `key` (`unfollowedHandles`,
-    `charsetNames`, `classContexts`), which throws UnsupportedOperationException where Java goes
-    on (none in an older census)."""
+    `charsetNames`, `classContexts`, `unresolvedOffsets`), which throws
+    UnsupportedOperationException where Java goes on (none in an older census)."""
     pieces = collections.Counter()
     for row in census.get(key, []):
         pieces[row["message"]] += row["pieces"]
@@ -142,6 +142,9 @@ def main():
         ("classContexts",
          "Security managers' class contexts, which throw UnsupportedOperationException where Java "
          "gives the classes on the call stack"),
+        ("unresolvedOffsets",
+         "Unsafe accesses at offsets not resolved, which throw UnsupportedOperationException where "
+         "Java reads or writes the memory there, unless the offset is a field's number"),
     ):
         before, after = listed(old, key), listed(new, key)
         print(f"{title}, by pieces: {sum(before.values())} -> {sum(after.values())}")
