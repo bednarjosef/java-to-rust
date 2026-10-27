@@ -402,6 +402,16 @@ impl Messages<'_> {
             ExprKind::MethodCall { receiver, name, .. } if name == "iterator" && self.joins(x) => {
                 out.insert(receiver.id, None);
             }
+            // The delimiter, whose `toString()` lowering calls first, as `String.join` does: of a
+            // `CharSequence[]`, which names it in its message; of an `Iterable`, after
+            // `Objects.requireNonNull`, whose exception has no message.
+            ExprKind::Builtin(Builtin::String(StringOp::ToString), args) if self.joins(x) => {
+                let message = (!self.joins_iterable(x)).then(|| {
+                    "Cannot invoke \"java.lang.CharSequence.toString()\" because \"delimiter\" is null"
+                        .to_string()
+                });
+                out.insert(args[0].id, message);
+            }
             // The loop's iterator, which may be null where the collection's `iterator()` returns
             // null: the JDK's `String.join` keeps it in its slot 5, after its parameters and the
             // locals `delim`, `elems` and `size`, and it has no name there.
@@ -1571,11 +1581,21 @@ impl Messages<'_> {
 
     /// Whether the call `x` is where the source calls `String.join`.
     fn joins(&self, x: &Expr) -> bool {
+        self.join_call(x).is_some()
+    }
+
+    /// Whether the call `x` is where the source calls `String.join` of an `Iterable`.
+    fn joins_iterable(&self, x: &Expr) -> bool {
+        self.join_call(x).is_some_and(|c| c.contains("Iterable"))
+    }
+
+    /// The `String.join` that the source calls where `x` is, as the class file names it.
+    fn join_call(&self, x: &Expr) -> Option<String> {
         let call = match self.jdk {
             true => self.named_call(x, "join").flatten(),
             false => self.call(x.pos, "join"),
         };
-        call.is_some_and(|c| c.starts_with("String.join(") || c.starts_with("java.lang.String.join("))
+        call.filter(|c| c.starts_with("String.join(") || c.starts_with("java.lang.String.join("))
     }
 
     /// The method `name` of the call `x`, as the class file names it. Of calls of one name that
