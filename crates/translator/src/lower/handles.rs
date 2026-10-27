@@ -799,28 +799,36 @@ impl<'t> Lowering<'t> {
         }
         let block = block.filter(|_| symbol.kind == "LOCAL_VARIABLE" && node.kind() == "IDENTIFIER")?;
         let name = symbol.name;
-        // The local's declaration, the only one of that name in the block (in a `try` of it, say).
+        // The local's declaration, the only one of that name in the block (in a `try` of it, say)
+        // outside the methods of the classes declared in it, whose locals are others.
         let mut declarations = Vec::new();
-        walk(block.0, &mut |n| {
-            if n.kind() == "VARIABLE" && n.str("name") == name {
+        walk_in_methods(block.0, None, &mut |n, method| {
+            if method.is_none() && n.kind() == "VARIABLE" && n.str("name") == name {
                 declarations.push(n);
             }
         });
         let [declaration] = declarations[..] else { return None };
         let init = declaration.get("initializer")?;
         let mut written = false;
-        walk(block.0, &mut |n| {
-            written |= assigns(n, |v| v.kind() == "IDENTIFIER" && v.str("name") == name);
+        walk_in_methods(block.0, None, &mut |n, method| {
+            written |= method.is_none() && assigns(n, |v| v.kind() == "IDENTIFIER" && v.str("name") == name);
         });
         (!written).then_some((init, Some(block)))
     }
 
     /// The field that the expression `offset` names, when it reads a field handle or is the call
-    /// that makes one.
+    /// that makes one, or is a local of the method being lowered that holds that call and is
+    /// assigned only where it is declared (netty's `PlatformDependent0` reads `Buffer.address` so,
+    /// from `objectFieldOffset` of a local `Field` that `getDeclaredField` found).
     fn handle(&self, offset: Node<'t>) -> Option<(usize, &'t str)> {
         let offset = plain(offset);
         if offset.kind() == "METHOD_INVOCATION" {
             return self.field_offset(offset, None);
+        }
+        if offset.kind() == "IDENTIFIER" && offset.symbol().is_some_and(|s| s.kind == "LOCAL_VARIABLE") {
+            let body = self.methods[self.method_ctx.get()?].node.get("body")?;
+            let (value, block) = self.defined(offset, Some(body))?;
+            return (plain(value).kind() == "METHOD_INVOCATION").then(|| self.field_offset(value, block))?;
         }
         let symbol = offset.symbol().filter(|s| s.kind == "FIELD" && s.is_static)?;
         let (owner, member) = self.static_field(&symbol)?;
