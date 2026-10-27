@@ -72,13 +72,14 @@ something a translated program does not have.
 | `FileDescriptor.getHandle(fd)` | `java::fd_handle(fd)` | -1 (Windows handles only) |
 | `FileDescriptor.getAppend(fd)` | `java::fd_append(fd)` | the descriptor's `O_APPEND` (from `/proc/self/fdinfo`, `false` where missing); `true` for a descriptor that is not open, as Java reads `fcntl`'s -1 |
 | `FileInputStream`, `FileOutputStream`, `RandomAccessFile`, `FileDescriptor` natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `write`, `seek0`, `close0`, ...) | `fd.rs` | a descriptor table of the process; 0, 1 and 2 are the standard streams |
-| `sun.nio.ch.UnixFileDispatcherImpl` natives (`read0`, `pread0`, `write0`, `pwrite0`, `seek0`, `size0`, `truncate0`, `available0`, `isOther0`, `setDirect0`, `release0`); `FileDispatcherImpl.init0`, `IOUtil.iovMax`, `IOUtil.writevMax`, `NativeThread.init`, `current0`, `signal0` | `file_channel.rs` | the channel natives of `FileChannelImpl`, on the descriptor table: `read0` and `pread0` give -1 at the end of the file; `seek0` with -1 gives the position; `setDirect0` always fails with an `IOException` ("Operation not supported": the standard library cannot set `O_DIRECT` on an open file); `release0` does nothing (no lock is taken, as `lock0` is not implemented); `signal0` does nothing (no translated thread is blocked in a native call to wake); `current0` is never 0 |
+| `sun.nio.ch.UnixFileDispatcherImpl` natives (`read0`, `pread0`, `write0`, `pwrite0`, `seek0`, `size0`, `truncate0`, `available0`, `isOther0`, `setDirect0`, `force0`, `lock0`, `release0`); `FileKey.init`; `FileDispatcherImpl.init0`, `IOUtil.iovMax`, `IOUtil.writevMax`, `NativeThread.init`, `current0`, `signal0` | `file_channel.rs` | the channel natives of `FileChannelImpl`, on the descriptor table: `read0` and `pread0` give -1 at the end of the file; `seek0` with -1 gives the position; `setDirect0` always fails with an `IOException` ("Operation not supported": the standard library cannot set `O_DIRECT` on an open file); `force0` is `fsync`, or `fdatasync` without the metadata; `lock0` and `release0` are the system's record locks (`fcntl`), as the JVM takes them, and `FileKey.init` gives the file's device and inode, by which `FileLockTable` refuses an overlapping lock of the program's; `signal0` does nothing (no translated thread is blocked in a native call to wake); `current0` is never 0 |
+| `sun.nio.ch`'s natives of sockets, pipes and selectors: `Net` (`socket0`, `bind0`, `listen`, `connect0`, `accept`, `shutdown`, the local and remote addresses, the integer options, `poll`, `pollConnect`, `available` and the platform questions), `IOUtil` (`fdVal`, `setfdVal`, `configureBlocking`, `fdLimit`, `makePipe`, `write1`, `drain`), `SocketDispatcher` (`read0`, `readv0`, `write0`, `writev0`), `UnixDispatcher` (`close0`, `preClose0`), `UnixFileDispatcherImpl.closeIntFD`, `EPoll`, `EventFD` and `NativeThread.supportPendingSignals0` | `socket.rs`, through `java/overlay/sun/nio/ch/TranslatedSockets.java` | each call is redirected to the method of `TranslatedSockets` with the same parameters (`program::SOCKET_NATIVES`), which makes the system call on the descriptor's number (`ast::SOCKET_CALLS`) and throws what the JVM's C code throws for its error: `BindException`, `ConnectException`, `NoRouteToHostException`, `ProtocolException` or `SocketException` with the system's text of the error, as `handleSocketError` does, and `ConnectionResetException` for a reset read. Reads, writes and accepts answer `IOStatus` codes. A socket is IPv6, taking IPv4 too, where the system has IPv6; `readv0` and `writev0` are one `read` and one `write` of the blocks together; `preClose0` shuts the socket down both ways where the JVM moves a closed socket over its descriptor. The answers about the platform are Linux's: no exclusive bind, `SO_REUSEPORT` available, an `epoll_event` of 12 bytes. Unix domain sockets are not supported, as on a platform without them: `UnixDomainSockets.init()` answers false, so the JDK refuses the family. Datagrams, out-of-band data and SCTP are not among them |
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; `getSpace0` is `statvfs`'s block size times its blocks, free or available blocks, 0 where it fails |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing; the path it gives them, `UnixPath.getByteArrayForSysCalls()`, is never null, as the JDK's code shows (`analysis/nullness.rs`: `never_null_result`), so a call has no message of a null path to know |
 | `UnixNativeDispatcher.statvfs0` (the translator's patch, `long[]` fields) | `unix.rs`: `unix_statvfs` | the four fields `UnixFileStoreAttributes.fill` copies (block size, blocks, free and available blocks) |
 | `UnixNativeDispatcher.fgetxattr0`, `fsetxattr0`, `fremovexattr0`, `flistxattr0` and `mknod0` (the translator's patch) | `unix.rs` | the extended attributes of an open file, read from and written to the native memory of the JDK's `NativeBuffer`s, as the DOS and user-defined attribute views and `Files.copy` use them, and `mknod` for the copy of a special file |
 | `LinuxNativeDispatcher.init`, `posix_fadvise`; `UnixFileSystem.directCopy0`, `bufferedCopy0` | `file_copy.rs`, `codegen/file_copy.rs` | `init` does nothing; `posix_fadvise` checks the descriptor is open and gives 0, as its advice has no effect a program can see. `directCopy0` gives `UNSUPPORTED` (-4), so the JDK copies through `bufferedCopy0`, which moves the same bytes between the two descriptors (`copy_file_range` is not used). The JDK's native is `bufferedCopy0Errno` in the translator's patch of `UnixFileSystem`: it answers the `errno` of a failed read or write, and `bufferedCopy` throws `UnixException(errno)` as HotSpot does, so `copyFile` raises the same `IOException` subclass and message (`NoSuchFileException`, `AccessDeniedException`, ...). `posix_fadvise` still raises `java.io.IOException` for a descriptor that is not open; `Files.copy` opens both descriptors first, so it is not reached from there |
-| the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
+| the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service, and the network interfaces: listed from `getifaddrs` (IPv4) and `/proc/net/if_inet6` (IPv6) in the order the JVM lists them on Linux, and an interface's flags, MTU and hardware address by `ioctl`, for the patch of `NetworkInterface` |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers and `sun.misc.Unsafe`'s raw memory |
 | `FileDispatcherImpl.transferTo0`, `transferFrom0` | `file_channels.rs`: `UNSUPPORTED_CASE` | the JDK's `transferToArbitraryChannel` (or its `transferFrom` twin) copies through buffers at the same positions and counts, so `Files.copy` and `FileChannel.transferTo`/`transferFrom` give Java's bytes and positions; `copy_file_range` is not used |
 | `UnixFileDispatcherImpl.map0(fd, prot, position, length, isSync)` | `file_channels.rs`, lowered with the descriptor's number (`lower/file_channels.rs`) | a read-only (`MAP_RO`) or private (`MAP_PV`) mapping is a block of memory outside the heap, at the start of a page as `mmap` places one, holding the file's bytes from `position` (zeros past the end of the file), taken when the map is made. Later writes to the file are not seen, and writes to a private mapping do not reach the file, as in Java. A read-write or synchronous mapping ends the program with a message |
@@ -119,7 +120,12 @@ reference, as a store into it does. The failures without a message (`void`, a nu
 with the class's constructor without arguments, so `getMessage()` is null. The JDK's `(T[])
 Array.newInstance(a.getClass().getComponentType(), n)` (`toArray(T[])`, `TimSort`'s work arrays)
 does not reach the native: it is lowered to a new array of `n` nulls of `a`'s type
-(`lower::arrays::component_array`, `program::component_array`).
+(`lower::arrays::component_array`, `program::component_array`). Nor does `(C[][]..)
+Array.newInstance(C.class, n1, n2, ..)` of a class literal cast to that array type (Minecraft's
+`BlockPatternBuilder`), which would reach the JVM's `multiNewArray`: it is `new C[n1][n2]..`, with
+the same `NegativeArraySizeException` for a negative length (`lower::arrays::literal_array`,
+`program::literal_array`). Any other call of `newInstance` with several lengths stays a missing
+native.
 
 The natives of the runtime's own classes (`System.arraycopy`, `Object.hashCode`,
 `System.identityHashCode`, the bit conversions of `Double` and `Float`, the clocks,
@@ -233,16 +239,19 @@ table above):
   reached: the translator gives the program its own `Throwable` and standard exceptions
   (`java/Standard.java`). Stack traces and helpful null-pointer messages are in
   [exceptions.md](exceptions.md).
-- `UnixFileDispatcherImpl.force0`, which `FileChannel.force` of `FileChannelImpl` (the channel of
-  `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`) reaches. Its reads, writes,
-  positions and sizes go through the channel natives above. `AbstractInterruptibleChannel` calls
+- The interruption of a channel's operation while it runs. `AbstractInterruptibleChannel` calls
   `JavaLangAccess.blockedOn` to record the operation a thread is in, which does nothing in a
   translation (`TranslatedLangAccess`): a file's operations do not wait indefinitely, so an
   interrupt during one is seen just after it, when the next operation's `begin` closes the
-  channel. `FileChannel.open` and `Files.newByteChannel` do not use `FileChannelImpl` at all: they
-  use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
+  channel. This is `FileChannelImpl`, the channel of `RandomAccessFile.getChannel()` and
+  `FileInputStream.getChannel()`. `FileChannel.open` and `Files.newByteChannel` do not use it at
+  all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`), whose locks are the same
+  record locks (`UnixNativeDispatcher.lock`, `unlock`) and which keeps its own table of the
+  locks the program holds. The two tables are apart, so a lock through one kind of channel does
+  not refuse an overlapping one through the other, where Java's single table would.
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
-  definition and module natives, sockets, and every native not in the table.
+  definition and module natives, the sockets that the table leaves out, and every native not in
+  the table.
 - The natives of a library's own classes, outside the JDK (jtracy's `TracyBindings`, JNA's
   `Native`, netty's `epoll` and `kqueue` classes). Their code is in a JNI library that the
   program loads with `System.load` or `System.loadLibrary`, which always throws in a translation

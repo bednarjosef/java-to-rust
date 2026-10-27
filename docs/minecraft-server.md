@@ -578,13 +578,11 @@ These are plans. Work on several of them is under way but not merged yet.
      and the caller);
    - natives: calls of library natives (Netty's epoll, JNA, jtracy) should throw
      `UnsatisfiedLinkError` as on a JVM where the library is not loaded, as loading the library
-     already does, so Netty falls back to NIO; and `NetworkInterface`'s natives;
-   - JDK APIs: NIO networking (channels and selectors, which Netty's server uses),
-     `java.lang.management` and JFR, and service providers
+     already does, so Netty falls back to NIO;
+   - JDK APIs: datagram channels, `java.lang.management` and JFR, and service providers
      that live in JDK modules the code does not name;
    - small ones, one to four pieces each: `Runtime` held as a value, the whole `System.getenv()`
-     map, `Integer.getInteger` with a key that is not a constant, `getProperty` defaults that are
-     not literals, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some
+     map, `Integer.getInteger` with a key that is not a constant, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some
      `String` constructors, switches and patterns on some types, a few lambda forms,
      `JavaLangAccess`'s thread and module calls, `isAnnotationPresent(Deprecated.class)`, and
      DataFixerUpper's generic method types as values.

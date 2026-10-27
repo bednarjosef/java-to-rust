@@ -1263,6 +1263,13 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
 /// `ReferenceQueue.poll` and other code under a lock do.
 pub const FALSE_CALLS: &[(&str, &str)] = &[("jdk.internal.vm.ContinuationSupport", "isSupported")];
 
+/// Static methods that return `false` in every translated program whatever their arguments, by
+/// class, name and type, called with arguments that reading has no effects: there are no virtual
+/// threads, so no thread's token from `NativeThread.current()` is a virtual thread's (-1; the
+/// runtime's `current0` counts up from 1), and the branches that stop a virtual thread's poll
+/// (`Poller.stopPoll`, whose class starts the poller threads) never run.
+pub const FALSE_TESTS: &[JdkMethod] = &[("sun.nio.ch.NativeThread", "isVirtualThread", "(long)boolean")];
+
 /// Static methods without parameters that return `true` in every translated program, as the
 /// `FALSE_CALLS` return false: a translation is headless, as if run with
 /// `-Djava.awt.headless=true` (`lower::system::HEADLESS`), since AWT's natives are not translated.
@@ -1513,8 +1520,9 @@ fn stub_null_test(condition: &Value, equal: bool) -> bool {
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
 /// branch can run: it reads one of the `FALSE_FLAGS` or a constant variable that is `false` by its
-/// simple name (whose branch javac writes no code for), or calls one of the `FALSE_CALLS` or
-/// `FALSE_INSTANCE_CALLS`, or is `!` of a call of one of the `TRUE_CALLS`, or, when the program's streams are all
+/// simple name (whose branch javac writes no code for), or calls one of the `FALSE_CALLS`,
+/// `FALSE_INSTANCE_CALLS` or `FALSE_TESTS`, or is `!` of a call of one of the `TRUE_CALLS`, or `||` of
+/// two that are never true, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
 /// of its nodes has children (`getChildCount() > 0`); alone, or as the first
 /// operand of `&&`, or as the second after one that only computes a value (the lowering drops the
@@ -1544,7 +1552,13 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
                     && receiver.is_object()
                     && !reading_has_effects(receiver))
                 && text(symbol, "type") == "()boolean";
-            false_call || (sequential && sequential::is_parallel_test(condition))
+            let false_test = FALSE_TESTS.contains(&(method.0, method.1, text(symbol, "type")))
+                && condition["arguments"].as_array().is_some_and(|args| !args.iter().any(has_effects));
+            false_call || false_test || (sequential && sequential::is_parallel_test(condition))
+        }
+        "CONDITIONAL_OR" => {
+            never_true(&condition["leftOperand"], sequential)
+                && never_true(&condition["rightOperand"], sequential)
         }
         "LOGICAL_COMPLEMENT" => always_true(&condition["expression"]),
         "NOT_EQUAL_TO" => archived_null_test(condition, false) || stub_null_test(condition, false),
@@ -1635,6 +1649,36 @@ pub fn component_array(node: &Value) -> Option<(&Value, &Value)> {
     }
     let array = &class["methodSelect"]["expression"];
     text(array, "javaType").ends_with("[]").then_some((array, length))
+}
+
+/// The lengths of `(C[]..[]) Array.newInstance(C.class, n1, .., nk)`, a new array of `k`
+/// dimensions of a class that a literal names, cast to that array type (`BlockPatternBuilder`'s
+/// `(Predicate<BlockInWorld>[][][]) Array.newInstance(Predicate.class, a, b, c)`), which is
+/// `new C[n1]..[nk]` (see `lower::arrays::literal_array`): it reaches what the lengths and the
+/// type do, and not `java.lang.reflect.Array`'s `multiNewArray`, a native of the JVM.
+pub fn literal_array(cast: &Value) -> Option<Vec<&Value>> {
+    if text(cast, "kind") != "TYPE_CAST" {
+        return None;
+    }
+    let mut call = &cast["expression"];
+    while text(call, "kind") == "PARENTHESIZED" {
+        call = &call["expression"];
+    }
+    let symbol = &call["symbol"];
+    if text(call, "kind") != "METHOD_INVOCATION"
+        || text(symbol, "owner") != "java.lang.reflect.Array"
+        || text(symbol, "name") != "newInstance"
+    {
+        return None;
+    }
+    let (class, lengths) = call["arguments"].as_array()?.split_first()?;
+    let class = literal_class(class)?;
+    let integral = |l: &&Value| matches!(text(l, "javaType"), "int" | "short" | "char" | "byte");
+    if lengths.is_empty() || lengths.len() > 255 || !lengths.iter().all(|l| integral(&l)) {
+        return None;
+    }
+    let array = format!("{class}{}", "[]".repeat(lengths.len()));
+    (strip_arguments(text(cast, "javaType")) == array).then(|| lengths.iter().collect())
 }
 
 /// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
@@ -2120,15 +2164,11 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         (TRANSLATED_MODULES, "verifyModuleAccess"),
     ),
-    // Whether a network interface has an address, and the interface of a name, which the JVM
-    // asks the system for (`java/net/TranslatedNet.java`).
+    // Whether a network interface has an address, which the JVM asks the system for
+    // (`java/net/TranslatedNet.java`); the patch of `NetworkInterface` answers its other natives.
     (
         ("java.net.NetworkInterface", "boundInetAddress0", "(java.net.InetAddress)boolean"),
         ("java.net.TranslatedNet", "boundInetAddress0"),
-    ),
-    (
-        ("java.net.NetworkInterface", "getByName0", "(java.lang.String)java.net.NetworkInterface"),
-        ("java.net.TranslatedNet", "getByName0"),
     ),
     // Loading a native library, which a translation without JNI does by finding its file as Java
     // does, and the name of a library's file (`java/lang/TranslatedLibraries.java`); a caller
@@ -2252,16 +2292,128 @@ pub fn module_call(owner: &str, name: &str, signature: &str) -> Option<(&'static
 }
 
 /// The translator's class and method that a call of the JDK's method `(owner, name, signature)`
-/// calls instead (`REDIRECTED_CALLS`), where a variable-arity parameter is written as an array
-/// (javac writes `T...`).
+/// calls instead (`REDIRECTED_CALLS`, `SOCKET_NATIVES`), where a variable-arity parameter is
+/// written as an array (javac writes `T...`).
 pub fn redirected_call(owner: &str, name: &str, signature: &str) -> Option<(&'static str, &'static str)> {
     let signature: std::borrow::Cow<str> =
         if signature.contains("...") { signature.replace("...", "[]").into() } else { signature.into() };
-    REDIRECTED_CALLS
+    let socket = SOCKET_NATIVES
         .iter()
         .find(|((o, n, s), _)| (*o, *n, *s) == (owner, name, &*signature))
-        .map(|(_, to)| *to)
+        .map(|(_, to)| (crate::ast::SOCKET_DISPATCHER, *to));
+    socket.or_else(|| {
+        REDIRECTED_CALLS
+            .iter()
+            .find(|((o, n, s), _)| (*o, *n, *s) == (owner, name, &*signature))
+            .map(|(_, to)| *to)
+    })
 }
+
+/// The JVM's natives of `sun.nio.ch`'s sockets, pipes and selectors, each with the method of the
+/// translator's `TranslatedSockets` (`ast::SOCKET_DISPATCHER`) that its calls call instead: the
+/// same parameters, on the runtime's system calls (`java_runtime::socket`). Unix domain sockets
+/// are not supported, as on a platform without them: `UnixDomainSockets.init()` answers false, so
+/// the JDK refuses the family before it would make one, and their other natives throw. The
+/// natives that sockets of other kinds need (datagrams, out-of-band data, SCTP) stay natives the
+/// translation does not have.
+pub const SOCKET_NATIVES: &[(JdkMethod, &str)] = &[
+    (("sun.nio.ch.IOUtil", "fdVal", "(java.io.FileDescriptor)int"), "fdVal"),
+    (("sun.nio.ch.IOUtil", "setfdVal", "(java.io.FileDescriptor,int)void"), "setfdVal"),
+    (("sun.nio.ch.IOUtil", "initIDs", "()void"), "initIDs"),
+    (("sun.nio.ch.IOUtil", "configureBlocking", "(java.io.FileDescriptor,boolean)void"), "configureBlocking"),
+    (("sun.nio.ch.IOUtil", "fdLimit", "()int"), "fdLimit"),
+    (("sun.nio.ch.IOUtil", "makePipe", "(boolean)long"), "makePipe"),
+    (("sun.nio.ch.IOUtil", "write1", "(int,byte)int"), "write1"),
+    (("sun.nio.ch.IOUtil", "drain", "(int)boolean"), "drain"),
+    (("sun.nio.ch.Net", "initIDs", "()void"), "initIDs"),
+    (("sun.nio.ch.Net", "isIPv6Available0", "()boolean"), "isIPv6Available0"),
+    (("sun.nio.ch.Net", "isReusePortAvailable0", "()boolean"), "isReusePortAvailable0"),
+    (("sun.nio.ch.Net", "isExclusiveBindAvailable", "()int"), "isExclusiveBindAvailable"),
+    (("sun.nio.ch.Net", "shouldShutdownWriteBeforeClose0", "()boolean"), "shouldShutdownWriteBeforeClose0"),
+    (("sun.nio.ch.Net", "shouldSetBothIPv4AndIPv6Options0", "()boolean"), "shouldSetBothIPv4AndIPv6Options0"),
+    (("sun.nio.ch.Net", "canIPv6SocketJoinIPv4Group0", "()boolean"), "canIPv6SocketJoinIPv4Group0"),
+    (("sun.nio.ch.Net", "canJoin6WithIPv4Group0", "()boolean"), "canJoin6WithIPv4Group0"),
+    (
+        ("sun.nio.ch.Net", "canUseIPv6OptionsWithIPv4LocalAddress0", "()boolean"),
+        "canUseIPv6OptionsWithIPv4LocalAddress0",
+    ),
+    (("sun.nio.ch.Net", "pollinValue", "()short"), "pollinValue"),
+    (("sun.nio.ch.Net", "polloutValue", "()short"), "polloutValue"),
+    (("sun.nio.ch.Net", "pollerrValue", "()short"), "pollerrValue"),
+    (("sun.nio.ch.Net", "pollhupValue", "()short"), "pollhupValue"),
+    (("sun.nio.ch.Net", "pollnvalValue", "()short"), "pollnvalValue"),
+    (("sun.nio.ch.Net", "pollconnValue", "()short"), "pollconnValue"),
+    (("sun.nio.ch.Net", "socket0", "(boolean,boolean,boolean,boolean)int"), "socket0"),
+    (
+        ("sun.nio.ch.Net", "bind0", "(java.io.FileDescriptor,boolean,boolean,java.net.InetAddress,int)void"),
+        "bind0",
+    ),
+    (("sun.nio.ch.Net", "listen", "(java.io.FileDescriptor,int)void"), "listen"),
+    (
+        ("sun.nio.ch.Net", "connect0", "(boolean,java.io.FileDescriptor,java.net.InetAddress,int)int"),
+        "connect0",
+    ),
+    (
+        (
+            "sun.nio.ch.Net",
+            "accept",
+            "(java.io.FileDescriptor,java.io.FileDescriptor,java.net.InetSocketAddress[])int",
+        ),
+        "accept",
+    ),
+    (("sun.nio.ch.Net", "shutdown", "(java.io.FileDescriptor,int)void"), "shutdown"),
+    (("sun.nio.ch.Net", "localPort", "(java.io.FileDescriptor)int"), "localPort"),
+    (
+        ("sun.nio.ch.Net", "localInetAddress", "(java.io.FileDescriptor)java.net.InetAddress"),
+        "localInetAddress",
+    ),
+    (("sun.nio.ch.Net", "remotePort", "(java.io.FileDescriptor)int"), "remotePort"),
+    (
+        ("sun.nio.ch.Net", "remoteInetAddress", "(java.io.FileDescriptor)java.net.InetAddress"),
+        "remoteInetAddress",
+    ),
+    (("sun.nio.ch.Net", "getIntOption0", "(java.io.FileDescriptor,boolean,int,int)int"), "getIntOption0"),
+    (
+        ("sun.nio.ch.Net", "setIntOption0", "(java.io.FileDescriptor,boolean,int,int,int,boolean)void"),
+        "setIntOption0",
+    ),
+    (("sun.nio.ch.Net", "poll", "(java.io.FileDescriptor,int,long)int"), "poll"),
+    (("sun.nio.ch.Net", "pollConnect", "(java.io.FileDescriptor,long)boolean"), "pollConnect"),
+    (("sun.nio.ch.Net", "available", "(java.io.FileDescriptor)int"), "available"),
+    (("sun.nio.ch.SocketDispatcher", "read0", "(java.io.FileDescriptor,long,int)int"), "read0"),
+    (("sun.nio.ch.SocketDispatcher", "readv0", "(java.io.FileDescriptor,long,int)long"), "readv0"),
+    (("sun.nio.ch.SocketDispatcher", "write0", "(java.io.FileDescriptor,long,int)int"), "write0"),
+    (("sun.nio.ch.SocketDispatcher", "writev0", "(java.io.FileDescriptor,long,int)long"), "writev0"),
+    (("sun.nio.ch.UnixDispatcher", "close0", "(java.io.FileDescriptor)void"), "close0"),
+    (("sun.nio.ch.UnixDispatcher", "preClose0", "(java.io.FileDescriptor)void"), "preClose0"),
+    (("sun.nio.ch.UnixDispatcher", "init", "()void"), "initIDs"),
+    (("sun.nio.ch.UnixFileDispatcherImpl", "closeIntFD", "(int)void"), "closeIntFD"),
+    (("sun.nio.ch.UnixDomainSockets", "init", "()boolean"), "unixDomainInit"),
+    (("sun.nio.ch.UnixDomainSockets", "socket0", "()int"), "unixDomainSocket"),
+    (("sun.nio.ch.UnixDomainSockets", "bind0", "(java.io.FileDescriptor,byte[])void"), "unixDomainBind"),
+    (("sun.nio.ch.UnixDomainSockets", "connect0", "(java.io.FileDescriptor,byte[])int"), "unixDomainConnect"),
+    (
+        (
+            "sun.nio.ch.UnixDomainSockets",
+            "accept0",
+            "(java.io.FileDescriptor,java.io.FileDescriptor,java.lang.Object[])int",
+        ),
+        "unixDomainAccept",
+    ),
+    (
+        ("sun.nio.ch.UnixDomainSockets", "localAddress0", "(java.io.FileDescriptor)byte[]"),
+        "unixDomainLocalAddress",
+    ),
+    (("sun.nio.ch.NativeThread", "supportPendingSignals0", "()boolean"), "supportPendingSignals0"),
+    (("sun.nio.ch.EPoll", "eventSize", "()int"), "eventSize"),
+    (("sun.nio.ch.EPoll", "eventsOffset", "()int"), "eventsOffset"),
+    (("sun.nio.ch.EPoll", "dataOffset", "()int"), "dataOffset"),
+    (("sun.nio.ch.EPoll", "create", "()int"), "epollCreate"),
+    (("sun.nio.ch.EPoll", "ctl", "(int,int,int,int)int"), "epollControl"),
+    (("sun.nio.ch.EPoll", "wait", "(int,long,int,int)int"), "epollWait"),
+    (("sun.nio.ch.EventFD", "eventfd0", "()int"), "eventfd0"),
+    (("sun.nio.ch.EventFD", "set0", "(int)int"), "set0"),
+];
 
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
@@ -3705,6 +3857,13 @@ impl<'t> Walk<'t> {
             self.waiting_branches.entry(class.clone()).or_default().push(self.branches.len());
             self.branches.push(branch);
             self.reach.without_objects.insert(class);
+            return;
+        }
+        if let Some(lengths) = literal_array(value) {
+            self.scan(&value["type"]);
+            for length in lengths {
+                self.scan(length);
+            }
             return;
         }
         if call && let Some((array, length)) = component_array(value) {

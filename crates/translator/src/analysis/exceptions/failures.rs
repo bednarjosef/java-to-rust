@@ -432,6 +432,7 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         Builtin::Native(Native::Unix(_)) => &[],
         // So do the name service calls of `java.net` (`java_runtime::net`).
         Builtin::Native(Native::Net(_)) => &[],
+        Builtin::Native(Native::Socket(_)) => &[],
         // The natives of a file channel fail with an `IOException` where the JVM's do (`file_channel.rs`).
         Builtin::Native(Native::Channel(call)) => {
             if call.fails { &["java.io.IOException"] } else { &[] }

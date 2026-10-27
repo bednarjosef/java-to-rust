@@ -418,6 +418,24 @@ pub fn unix_sync(fd: i32, metadata: bool) {
     record(fd::with_file(fd, |f| if metadata { f.sync_all() } else { f.sync_data() }), ())
 }
 
+/// `lock(fd, blocking, position, size, shared)` of the translator's `FileChannel`: a record
+/// lock of the region (`file_channel::lock_region`), answering 0 once held, 1 where another
+/// process holds one and the call does not wait, 2 where a signal ended the wait.
+pub fn unix_lock(fd: i32, blocking: bool, position: i64, size: i64, shared: bool) -> i32 {
+    let locked =
+        crate::file_channel::lock_region(fd, blocking, position, size, shared).map(|locked| match locked {
+            crate::file_channel::Locked::Held => 0,
+            crate::file_channel::Locked::Refused => 1,
+            crate::file_channel::Locked::Interrupted => 2,
+        });
+    record(locked, -1)
+}
+
+/// `unlock(fd, position, size)`: releases the record lock of the region.
+pub fn unix_unlock(fd: i32, position: i64, size: i64) {
+    record(crate::file_channel::unlock_region(fd, position, size), ())
+}
+
 /// `statvfs(path)` into `out`: `f_frsize`, `f_blocks`, `f_bfree` and `f_bavail`, the four fields
 /// `UnixFileStoreAttributes` keeps.
 pub fn unix_statvfs(p: &[i8], out: &mut [i64]) {

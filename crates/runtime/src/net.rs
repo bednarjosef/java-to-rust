@@ -4,7 +4,8 @@
 //! (`java/overlay/java/net/TranslatedNet.java`), which makes the JDK's objects of them. None of
 //! these opens a connection: they look names up (`getaddrinfo`) and addresses
 //! (`getnameinfo`), name the host (`gethostname`),
-//! list the addresses of the network interfaces (`getifaddrs`), and test whether the system
+//! list the network interfaces and their addresses (`getifaddrs` and `/proc/net/if_inet6`, as
+//! the JVM reads them) and ask about one (`ioctl`), and test whether the system
 //! makes sockets of an address family, closing the one it makes at once, as the JVM does when
 //! it starts. A failed lookup records its `getaddrinfo` error, which `net_last_error` gives.
 
@@ -14,6 +15,9 @@ use std::ffi::{CStr, CString, c_char, c_void};
 thread_local! {
     /// The `getaddrinfo` error of this thread's last lookup, 0 where it succeeded.
     static LAST_ERROR: Cell<i32> = const { Cell::new(0) };
+    /// The `errno` of this thread's last question about a network interface
+    /// (`net_interface_flags`, `net_hardware_address`, `net_mtu`), 0 where it succeeded.
+    static INTERFACE_ERROR: Cell<i32> = const { Cell::new(0) };
 }
 
 const AF_INET: i32 = 2;
@@ -108,6 +112,9 @@ unsafe extern "C" {
     fn freeifaddrs(ifa: *mut IfAddrs);
     fn socket(domain: i32, kind: i32, protocol: i32) -> i32;
     fn close(fd: i32) -> i32;
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
+    fn if_nametoindex(name: *const c_char) -> u32;
+    fn __errno_location() -> *mut i32;
 }
 
 fn to_bytes(text: &[u8]) -> Vec<i8> {
@@ -325,4 +332,205 @@ pub fn net_bound(address: &[i8]) -> bool {
     // Safety: `list` is the list that `getifaddrs` gave, not used after this.
     unsafe { freeifaddrs(list) };
     found
+}
+
+const SIOCGIFFLAGS: u64 = 0x8913;
+const SIOCGIFMTU: u64 = 0x8921;
+const SIOCGIFHWADDR: u64 = 0x8927;
+const SOCK_DGRAM: i32 = 2;
+const IFF_BROADCAST: u32 = 0x2;
+
+/// C's `struct ifreq`: an interface's name, and the union that each `ioctl` answers in.
+#[repr(C)]
+struct IfReq {
+    name: [u8; 16],
+    data: [u8; 24],
+}
+
+/// One network interface as the JVM's `enumInterfaces` lists it: its name and index, and its
+/// addresses, each with its prefix length, an IPv4 address's broadcast address and an IPv6
+/// address's scope (the interface's index).
+struct Interface {
+    name: Vec<u8>,
+    index: i32,
+    addresses: Vec<Address>,
+}
+
+/// An address of a network interface: its bytes, its prefix length, an IPv4 address's broadcast
+/// address and an IPv6 address's scope.
+struct Address {
+    bytes: Vec<u8>,
+    prefix: u8,
+    broadcast: Option<Vec<u8>>,
+    scope: u32,
+}
+
+/// The index of the interface named `name`, -1 where there is none.
+fn index_of(name: &[u8]) -> i32 {
+    let Ok(name) = CString::new(name) else { return -1 };
+    // Safety: a C string.
+    match unsafe { if_nametoindex(name.as_ptr()) } {
+        0 => -1,
+        index => index as i32,
+    }
+}
+
+/// The JVM's `addif`: the address goes first on its interface's list, and an interface not yet
+/// seen goes first on the list of interfaces.
+fn add_address(list: &mut Vec<Interface>, name: &[u8], address: Address) {
+    let at = match list.iter().position(|i| i.name == name) {
+        Some(at) => at,
+        None => {
+            list.insert(0, Interface { name: name.to_vec(), index: index_of(name), addresses: Vec::new() });
+            0
+        }
+    };
+    list[at].addresses.insert(0, address);
+}
+
+/// The interfaces of the system with an address, as the JVM's `NetworkInterface.getAll()` lists
+/// them on Linux: the IPv4 addresses (`getifaddrs`, in the kernel's order) and then the IPv6 ones
+/// (`/proc/net/if_inet6`, in its order), each new interface and address put first. An IPv4
+/// alias (`eth0:1`) is an interface of its own name, where the JVM makes it a virtual child of
+/// its parent.
+fn interfaces() -> Vec<Interface> {
+    let mut list = Vec::new();
+    let mut addrs: *mut IfAddrs = std::ptr::null_mut();
+    // Safety: `addrs` receives the interfaces' addresses, freed below.
+    if unsafe { getifaddrs(&mut addrs) } == 0 {
+        let mut at = addrs;
+        while !at.is_null() {
+            // Safety: `at` is an entry of the list that `getifaddrs` gave; its addresses are
+            // null or of the family they say.
+            let entry = unsafe { &*at };
+            at = entry.ifa_next;
+            let is_v4 =
+                !entry.ifa_addr.is_null() && i32::from(unsafe { (*entry.ifa_addr).sa_family }) == AF_INET;
+            if !is_v4 {
+                continue;
+            }
+            let Some((bytes, _)) = (unsafe { address_of(entry.ifa_addr) }) else { continue };
+            let prefix = unsafe { address_of(entry.ifa_netmask) }
+                .map_or(0, |(mask, _)| mask.iter().map(|b| b.count_ones()).sum::<u32>() as u8);
+            let broadcast = if entry.ifa_flags & IFF_BROADCAST != 0 {
+                unsafe { address_of(entry.ifa_ifu) }.map(|(b, _)| b)
+            } else {
+                None
+            };
+            // Safety: an entry's name is a C string.
+            let name = unsafe { CStr::from_ptr(entry.ifa_name) }.to_bytes();
+            add_address(&mut list, name, Address { bytes, prefix, broadcast, scope: 0 });
+        }
+        // Safety: the list that `getifaddrs` gave, not used after this.
+        unsafe { freeifaddrs(addrs) };
+    }
+    for line in std::fs::read_to_string("/proc/net/if_inet6").unwrap_or_default().lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [hex, index, prefix, _scope, _flags, name] = fields[..] else { continue };
+        let bytes: Option<Vec<u8>> =
+            (0..16).map(|i| hex.get(2 * i..2 * i + 2).and_then(|b| u8::from_str_radix(b, 16).ok())).collect();
+        let (Some(bytes), Ok(index), Ok(prefix)) =
+            (bytes, u32::from_str_radix(index, 16), u8::from_str_radix(prefix, 16))
+        else {
+            continue;
+        };
+        add_address(&mut list, name.as_bytes(), Address { bytes, prefix, broadcast: None, scope: index });
+    }
+    list
+}
+
+/// `NetworkInterface.getAll()`'s interfaces, in its order, for `TranslatedNet` to make the
+/// objects of: for each, the length and bytes of its name, its index (4 bytes, big-endian) and
+/// the number of its addresses; for each address, its length (4 or 16) and bytes, its prefix
+/// length, the length (0 or 4) and bytes of its broadcast address, and its scope (4 bytes).
+pub fn net_interfaces() -> Vec<i8> {
+    let mut out: Vec<u8> = Vec::new();
+    for interface in interfaces() {
+        out.push(interface.name.len() as u8);
+        out.extend(&interface.name);
+        out.extend(interface.index.to_be_bytes());
+        out.push(interface.addresses.len() as u8);
+        for address in interface.addresses {
+            out.push(address.bytes.len() as u8);
+            out.extend(&address.bytes);
+            out.push(address.prefix);
+            let broadcast = address.broadcast.unwrap_or_default();
+            out.push(broadcast.len() as u8);
+            out.extend(&broadcast);
+            out.extend(address.scope.to_be_bytes());
+        }
+    }
+    to_bytes(&out)
+}
+
+/// `ioctl(request)` of the interface named by `name`'s bytes on a datagram socket, as the JVM
+/// asks: the union it answers in, or `None` with the `errno` recorded.
+fn interface_ioctl(name: &[i8], request: u64) -> Option<[u8; 24]> {
+    let mut req = IfReq { name: [0; 16], data: [0; 24] };
+    for (to, &b) in req.name.iter_mut().zip(name.iter().take(15)) {
+        *to = b as u8;
+    }
+    // Safety: plain calls on a descriptor of our own, closed below; `req` is the `ifreq` the
+    // request reads and writes.
+    let (done, error) = unsafe {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if fd < 0 {
+            (false, *__errno_location())
+        } else {
+            let done = ioctl(fd, request, &mut req as *mut IfReq) >= 0;
+            let error = if done { 0 } else { *__errno_location() };
+            close(fd);
+            (done, error)
+        }
+    };
+    INTERFACE_ERROR.with(|e| e.set(error));
+    done.then_some(req.data)
+}
+
+/// The `errno` of this thread's last question about an interface, 0 where it succeeded.
+pub fn net_interface_error() -> i32 {
+    INTERFACE_ERROR.with(Cell::get)
+}
+
+/// `SIOCGIFFLAGS` of the interface named `name`: its flags, or -1 with the error recorded.
+pub fn net_interface_flags(name: &[i8]) -> i32 {
+    interface_ioctl(name, SIOCGIFFLAGS).map_or(-1, |data| i32::from(u16::from_ne_bytes([data[0], data[1]])))
+}
+
+/// `SIOCGIFMTU` of the interface named `name`, or -1 with the error recorded.
+pub fn net_mtu(name: &[i8]) -> i32 {
+    interface_ioctl(name, SIOCGIFMTU)
+        .map_or(-1, |data| i32::from_ne_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+/// `SIOCGIFHWADDR` of the interface named `name`: its 6 bytes, none where they are all zero (no
+/// hardware address, as the loopback's), or none with the error recorded where it fails.
+pub fn net_hardware_address(name: &[i8]) -> Vec<i8> {
+    match interface_ioctl(name, SIOCGIFHWADDR) {
+        // After the address's family, two bytes.
+        Some(data) if data[2..8].iter().any(|&b| b != 0) => to_bytes(&data[2..8]),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_loopback_interface_is_listed_with_its_address_and_flags() {
+        let lo: Vec<i8> = to_bytes(b"lo");
+        let listed = interfaces();
+        let loopback = listed.iter().find(|i| i.name == b"lo").expect("lo is listed");
+        assert!(loopback.index > 0);
+        assert!(loopback.addresses.iter().any(|a| a.bytes == [127, 0, 0, 1] && a.prefix == 8));
+        assert!(!net_interfaces().is_empty());
+        const IFF_LOOPBACK: i32 = 0x8;
+        assert_ne!(net_interface_flags(&lo) & IFF_LOOPBACK, 0);
+        assert!(net_mtu(&lo) > 0);
+        assert!(net_hardware_address(&lo).is_empty());
+        assert_eq!(net_interface_error(), 0);
+        assert_eq!(net_interface_flags(&to_bytes(b"no-such-if")), -1);
+        assert_eq!(net_interface_error(), 19);
+    }
 }

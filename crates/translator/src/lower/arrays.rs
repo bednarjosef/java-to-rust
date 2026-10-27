@@ -19,6 +19,11 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ArrayLit(items));
         }
         let sizes = node.list("dimensions").map(|d| self.expr(d)).collect::<Result<Vec<_>, _>>()?;
+        self.sized_array(node, sizes)
+    }
+
+    /// A new array of `node`'s type with these lengths, one per dimension from the outermost.
+    fn sized_array(&self, node: Node<'t>, sizes: Vec<Expr>) -> Result<ExprKind, Error> {
         // An array of arrays that is an `Object[]` (see `covariant`), `new int[n][m]` where
         // `int[][]` is: the rows are made as `int[]`s and become `Object`s.
         let java = node.java_type();
@@ -250,6 +255,17 @@ impl<'t> Lowering<'t> {
             return unsupported(node, "`Array.newInstance` into an array of another type");
         }
         Ok(ExprKind::NewArray(vec![self.expr(length)?]))
+    }
+
+    /// `(C[]..[]) Array.newInstance(C.class, n1, .., nk)` (`node`, the cast;
+    /// `program::literal_array`): `new C[n1]..[nk]`, which checks the lengths and fails on a
+    /// negative one as `multiNewArray` does.
+    pub(super) fn literal_array(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let Some(lengths) = crate::program::literal_array(node.0) else {
+            unreachable!("only a cast of a new array of a class literal comes here")
+        };
+        let lengths = lengths.into_iter().map(|l| self.expr(Node(l))).collect::<Result<Vec<_>, _>>()?;
+        self.sized_array(node, lengths)
     }
 
     /// `String[] args` of `main`: the program's command-line arguments, declared in the body in

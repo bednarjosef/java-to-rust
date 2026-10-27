@@ -1,8 +1,9 @@
 //! The system calls of `sun.nio.ch`'s sockets, pipes and selectors (`ast::Native::Socket`), for
 //! the translator's `sun.nio.ch.TranslatedSockets` (`java/overlay/sun/nio/ch/TranslatedSockets.java`),
-//! which the patches of `Net`, `IOUtil`, `SocketDispatcher`, `UnixDispatcher`, `EPoll` and
-//! `EventFD` call in place of the JVM's natives. Each descriptor is one of `fd.rs`, holding the
-//! system's descriptor. An address is its bytes (4 for IPv4, 16 for IPv6) and a port.
+//! whose methods the calls of the JVM's natives of `Net`, `IOUtil`, `SocketDispatcher`,
+//! `UnixDispatcher`, `EPoll`, `EventFD` and `NativeThread` are redirected to
+//! (`program::SOCKET_NATIVES`). Each descriptor is one of `fd.rs`, holding the system's
+//! descriptor. An address is its bytes (4 for IPv4, 16 for IPv6) and a port.
 //!
 //! None of these raises an exception: each records the `errno` of its failure, or 0, which
 //! `socket_last_error` gives, and the Java side throws what the JVM's C code throws for it. The
@@ -16,7 +17,7 @@
 //! both ways, where the JVM signals the thread.
 
 use crate::fd;
-use crate::native_memory::{read_native, write_native};
+use crate::native_memory::{get_native, read_native, write_native};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -444,6 +445,62 @@ pub fn socket_write(fd: i32, address: i64, len: i32) -> i32 {
     n as i32
 }
 
+/// The blocks of the `len` C `struct iovec`s at `address` (`IOVecWrapper`'s): each block's
+/// address and length.
+fn io_vectors(address: i64, len: i32) -> Vec<(i64, usize)> {
+    (0..len.max(0) as i64)
+        .map(|i| {
+            let base = get_native::<i64>(address + 16 * i);
+            let size = get_native::<i64>(address + 16 * i + 8);
+            (base, size.max(0) as usize)
+        })
+        .collect()
+}
+
+/// `SocketDispatcher.readv0`: one read into the `len` blocks that the `struct iovec`s at
+/// `address` name, filled in order; the count, `EOF`, or a status, as `socket_read`.
+pub fn socket_readv(fd: i32, address: i64, len: i32) -> i64 {
+    let Some(system) = system(fd) else { return THROWN as i64 };
+    let blocks = io_vectors(address, len);
+    let total: usize = blocks.iter().map(|(_, size)| size).sum();
+    let mut bytes = vec![0u8; total];
+    // Safety: `bytes` holds `total` bytes.
+    let n = unsafe { read(system, bytes.as_mut_ptr().cast(), total) };
+    if n < 0 {
+        return status(errno()) as i64;
+    }
+    record(0);
+    if n == 0 && total > 0 {
+        return EOF as i64;
+    }
+    let mut rest = &bytes[..n as usize];
+    for (base, size) in blocks {
+        let take = size.min(rest.len());
+        write_native(base, &rest[..take]);
+        rest = &rest[take..];
+    }
+    n as i64
+}
+
+/// `SocketDispatcher.writev0`: one write of the `len` blocks that the `struct iovec`s at
+/// `address` name, in order; the count, or a status.
+pub fn socket_writev(fd: i32, address: i64, len: i32) -> i64 {
+    let Some(system) = system(fd) else { return THROWN as i64 };
+    let mut bytes = Vec::new();
+    for (base, size) in io_vectors(address, len) {
+        if size > 0 {
+            bytes.extend(read_native(base, size));
+        }
+    }
+    // Safety: `bytes` holds its length.
+    let n = unsafe { write(system, bytes.as_ptr().cast(), bytes.len()) };
+    if n < 0 {
+        return status(errno()) as i64;
+    }
+    record(0);
+    n as i64
+}
+
 /// `UnixDispatcher.close0`: closes the descriptor.
 pub fn socket_close(fd: i32) {
     record(0);
@@ -655,6 +712,34 @@ mod tests {
         assert_eq!(socket_last_error(), 111);
         socket_close(client);
         socket_close(server);
+    }
+
+    #[test]
+    fn gathered_writes_and_scattered_reads_keep_the_blocks_in_order() {
+        let pipe = socket_make_pipe(true);
+        let (read_end, write_end) = ((pipe >> 32) as i32, pipe as i32);
+        let first = allocate_native(3);
+        let second = allocate_native(4);
+        write_native(first, &[1, 2, 3]);
+        write_native(second, &[4, 5, 6, 7]);
+        let vectors = allocate_native(32);
+        crate::native_memory::put_native(vectors, first);
+        crate::native_memory::put_native(vectors + 8, 3i64);
+        crate::native_memory::put_native(vectors + 16, second);
+        crate::native_memory::put_native(vectors + 24, 4i64);
+        assert_eq!(socket_writev(write_end, vectors, 2), 7);
+
+        write_native(first, &[0; 3]);
+        write_native(second, &[0; 4]);
+        assert_eq!(socket_readv(read_end, vectors, 2), 7);
+        assert_eq!(read_native(first, 3), [1, 2, 3]);
+        assert_eq!(read_native(second, 4), [4, 5, 6, 7]);
+        socket_close(write_end);
+        assert_eq!(socket_readv(read_end, vectors, 2), EOF as i64);
+        socket_close(read_end);
+        for block in [first, second, vectors] {
+            free_native(block);
+        }
     }
 
     #[test]

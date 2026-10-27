@@ -112,7 +112,13 @@ const RAISED: &[(&str, &[&str])] = &[
     ),
     (
         "java.lang.NegativeArraySizeException",
-        &["NEW_ARRAY", "java.util.Arrays#copyOf", "java.lang.reflect.Array#newArray"],
+        &[
+            "NEW_ARRAY",
+            "java.util.Arrays#copyOf",
+            "java.lang.reflect.Array#newArray",
+            // A cast new array (`program::component_array` and `literal_array`).
+            "java.lang.reflect.Array#newInstance",
+        ],
     ),
     // A copy between arrays of objects whose types differ (`failures.rs`, `codegen/dispatch.rs`).
     ("java.lang.ArrayStoreException", &["java.lang.System#arraycopy"]),

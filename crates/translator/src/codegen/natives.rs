@@ -257,6 +257,7 @@ impl<'a> Gen<'a> {
             Native::FileSystem(name) => self.file_system_native(name, args, ty, id),
             Native::Unix(name) => self.unix_native(crate::ast::UNIX_CALLS, name, args, ty),
             Native::Net(name) => self.unix_native(crate::ast::NET_CALLS, name, args, ty),
+            Native::Socket(name) => self.unix_native(crate::ast::SOCKET_CALLS, name, args, ty),
             Native::Channel(call) => self.channel_native(call, args, id),
             Native::TransferUnsupported
             | Native::MapFile

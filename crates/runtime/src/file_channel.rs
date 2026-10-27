@@ -5,10 +5,13 @@
 //! function answers what the Linux JVM's C code answers: the count moved, `-1` (`IOStatus.EOF`)
 //! for a read that gets no bytes, and an `IOException` with the system's reason for a failed call.
 //!
-//! Three natives are not exact, and say so. `setDirect0` always fails, because `O_DIRECT` cannot
+//! File locks are the system's record locks (`fcntl`), as the JVM takes them: they belong to the
+//! process, so two channels of one program do not exclude each other, and `FileLockTable` (by the
+//! file's `FileKey`) keeps a program from locking a region twice, as in Java.
+//!
+//! Two natives are not exact, and say so. `setDirect0` always fails, because `O_DIRECT` cannot
 //! be set on an open file with the standard library. `signal0` does nothing, because a translated
-//! thread is never blocked in a read that another thread could interrupt. `release0` does nothing,
-//! because it only releases a file lock and locks are not implemented.
+//! thread is never blocked in a read that another thread could interrupt.
 
 use crate::fd::{Failure, file_available, last_error, with_file};
 use crate::native_memory::{read_native, write_native};
@@ -130,8 +133,130 @@ pub fn channel_set_direct(fd: i32) -> Result<i32, Failure> {
     file_op(fd, |_| Err::<i32, _>(io::Error::from_raw_os_error(EOPNOTSUPP)))
 }
 
-/// `release0`: releases the region of a file lock. Locks are not implemented, so none is held.
-pub fn channel_release(_fd: i32, _address: i64, _len: i64) {}
+/// `FileDispatcherImpl.NO_LOCK`: another process holds a lock on the region.
+const NO_LOCK: i32 = -1;
+/// `FileDispatcherImpl.INTERRUPTED` and `IOStatus.INTERRUPTED`: a signal ended the call.
+const INTERRUPTED: i32 = 2;
+const IOS_INTERRUPTED: i32 = -3;
+
+const EINTR: i32 = 4;
+const EAGAIN: i32 = 11;
+const EACCES: i32 = 13;
+const F_SETLK: i32 = 6;
+const F_SETLKW: i32 = 7;
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+
+/// C's `struct flock` on Linux, whose `off_t` is 64 bits.
+#[repr(C)]
+struct Flock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+}
+
+unsafe extern "C" {
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+}
+
+/// `fcntl(fd, cmd, lock)` of the region from `position` of `size` bytes, a size of
+/// `Long.MAX_VALUE` meaning to the end of the file however it grows, as the JVM asks.
+fn record_lock(fd: i32, cmd: i32, kind: i16, position: i64, size: i64) -> Result<(), io::Error> {
+    // The system's descriptor is used outside the table's lock, so that a lock that waits for
+    // another process does not hold up the program's other files. Closing a copy of it would
+    // release the process's locks on the file, so no copy is made.
+    let system = system_descriptor(fd)?;
+    let lock = Flock {
+        l_type: kind,
+        l_whence: 0,
+        l_start: position,
+        l_len: if size == i64::MAX { 0 } else { size },
+        l_pid: 0,
+    };
+    // Safety: `lock` is a `struct flock` that lives across the call.
+    if unsafe { fcntl(system, cmd, &lock as *const Flock) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// The system's descriptor of the file of `fd`.
+fn system_descriptor(fd: i32) -> io::Result<i32> {
+    use std::os::fd::AsRawFd;
+    with_file(fd, |f| Ok(f.as_raw_fd()))
+}
+
+/// What a lock of a region came to.
+pub(crate) enum Locked {
+    Held,
+    /// Another process holds a lock on the region, and the call did not wait.
+    Refused,
+    /// A signal ended the wait.
+    Interrupted,
+}
+
+/// A lock of the region, shared or exclusive, that waits for other processes' locks when
+/// `blocking`, as the JVM's `lock0` takes it.
+pub(crate) fn lock_region(
+    fd: i32,
+    blocking: bool,
+    position: i64,
+    size: i64,
+    shared: bool,
+) -> io::Result<Locked> {
+    let cmd = if blocking { F_SETLKW } else { F_SETLK };
+    let kind = if shared { F_RDLCK } else { F_WRLCK };
+    match record_lock(fd, cmd, kind, position, size) {
+        Ok(()) => Ok(Locked::Held),
+        Err(e) if !blocking && matches!(e.raw_os_error(), Some(EAGAIN | EACCES)) => Ok(Locked::Refused),
+        Err(e) if e.raw_os_error() == Some(EINTR) => Ok(Locked::Interrupted),
+        Err(e) => Err(e),
+    }
+}
+
+/// Releases the lock of the region.
+pub(crate) fn unlock_region(fd: i32, position: i64, size: i64) -> io::Result<()> {
+    record_lock(fd, F_SETLK, F_UNLCK, position, size)
+}
+
+/// `lock0`: 0 once the lock is held, `NO_LOCK` where another process holds one and the call
+/// does not wait, `INTERRUPTED` where a signal ended the wait.
+pub fn channel_lock(fd: i32, blocking: bool, position: i64, size: i64, shared: bool) -> Result<i32, Failure> {
+    Ok(match lock_region(fd, blocking, position, size, shared).map_err(last_error)? {
+        Locked::Held => 0,
+        Locked::Refused => NO_LOCK,
+        Locked::Interrupted => INTERRUPTED,
+    })
+}
+
+/// `release0`: releases the lock of the region.
+pub fn channel_release(fd: i32, position: i64, size: i64) -> Result<(), Failure> {
+    unlock_region(fd, position, size).map_err(last_error)
+}
+
+/// `force0`: writes the file's data, and its metadata too when `metadata`, to the device
+/// (`fsync`, else `fdatasync`), and answers 0.
+pub fn channel_force(fd: i32, metadata: bool) -> Result<i32, Failure> {
+    match with_file(fd, |f| if metadata { f.sync_all() } else { f.sync_data() }) {
+        Ok(()) => Ok(0),
+        Err(e) if e.raw_os_error() == Some(EINTR) => Ok(IOS_INTERRUPTED),
+        Err(e) => Err(last_error(e)),
+    }
+}
+
+/// `FileKey.init(fd, finfo)`: the device and the inode of the file, which tell whether two
+/// channels have the same file open.
+pub fn channel_file_key(fd: i32, info: &mut [i64]) -> Result<(), Failure> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file_op(fd, |f| f.metadata())?;
+    info[0] = metadata.dev() as i64;
+    info[1] = metadata.ino() as i64;
+    Ok(())
+}
 
 static NEXT_THREAD: AtomicI64 = AtomicI64::new(1);
 
@@ -297,5 +422,30 @@ mod tests {
     fn io_limits_are_the_linux_ones() {
         assert_eq!(io_iov_max(), 1024);
         assert_eq!(io_writev_max(), i32::MAX as i64);
+    }
+
+    #[test]
+    fn a_file_is_locked_released_forced_and_known_by_its_key() {
+        let (fd, path) = open("locks", b"abc");
+        assert_eq!(channel_lock(fd, false, 0, i64::MAX, false).unwrap(), 0);
+        assert_eq!(channel_lock(fd, true, 1, 2, true).unwrap(), 0);
+        channel_release(fd, 0, i64::MAX).unwrap();
+        assert_eq!(channel_force(fd, true).unwrap(), 0);
+        assert_eq!(channel_force(fd, false).unwrap(), 0);
+        let again = insert_file(File::open(&path).unwrap(), true, false);
+        let other_path = path.with_file_name("other");
+        std::fs::write(&other_path, b"x").unwrap();
+        let other = insert_file(File::open(&other_path).unwrap(), true, false);
+        let key = |fd| {
+            let mut info = [0; 2];
+            channel_file_key(fd, &mut info).unwrap();
+            info
+        };
+        assert_eq!(key(fd), key(again));
+        assert_ne!(key(fd), key(other));
+        fd_close(again);
+        fd_close(other);
+        close(fd, &path);
+        assert_eq!(channel_lock(fd, false, 0, 1, false).unwrap_err().message, "Bad file descriptor");
     }
 }

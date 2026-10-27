@@ -6,8 +6,9 @@ use crate::ast::*;
 
 impl<'t> Lowering<'t> {
     /// A native of `sun.nio.ch` that the runtime implements, as `Native::Channel` with its
-    /// arguments as Java gives them. A `UnixFileDispatcherImpl` native takes a `FileDescriptor`
-    /// first; that argument becomes the descriptor's number, read from its `fd` field. The natives
+    /// arguments as Java gives them. A native of `UnixFileDispatcherImpl` or `FileKey` takes a
+    /// `FileDescriptor` first; that argument becomes the descriptor's number, read from its `fd`
+    /// field. The natives
     /// that do nothing become `Native::Nothing`. `None` for any other method.
     pub(super) fn channel_native_call(
         &self,
@@ -24,7 +25,7 @@ impl<'t> Lowering<'t> {
         let Some(call) = crate::ast::channel_call(symbol.owner, symbol.name) else {
             return Ok(None);
         };
-        if symbol.owner == crate::ast::UNIX_FILE_DISPATCHER {
+        if [crate::ast::UNIX_FILE_DISPATCHER, crate::ast::FILE_KEY].contains(&symbol.owner) {
             let Some(first) = args.first_mut() else {
                 return unsupported(
                     node,

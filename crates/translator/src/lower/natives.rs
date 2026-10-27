@@ -528,6 +528,12 @@ impl<'t> Lowering<'t> {
         {
             return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Net(name)), std::mem::take(args))));
         }
+        if symbol.native
+            && symbol.owner == crate::ast::SOCKET_DISPATCHER
+            && let Some(name) = crate::ast::socket_call(symbol.name)
+        {
+            return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Socket(name)), std::mem::take(args))));
+        }
         if !symbol.native || symbol.owner != "java.io.UnixFileSystem" || symbol.name == "initIDs" {
             return Ok(None);
         }

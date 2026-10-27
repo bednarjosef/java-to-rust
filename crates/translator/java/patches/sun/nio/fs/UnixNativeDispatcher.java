@@ -508,6 +508,18 @@ class UnixNativeDispatcher {
     @Add
     static native void sync(int fd, boolean metadata);
 
+    /**
+     * A record lock of the region ({@code fcntl}), shared or exclusive, that waits for other
+     * processes' locks when {@code blocking}: 0 once held, 1 where another process holds one and
+     * the call does not wait, 2 where a signal ended the wait, and -1 where it fails.
+     */
+    @Add
+    static native int lock(int fd, boolean blocking, long position, long size, boolean shared);
+
+    /** Releases the record lock of the region. */
+    @Add
+    static native void unlock(int fd, long position, long size);
+
     /** Throws the error of the last call of the natives above, if it failed. */
     @Add
     static void checkLast() throws UnixException {
