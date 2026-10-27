@@ -1489,3 +1489,84 @@ final class Constructor<T> extends Executable {
         throw new IllegalArgumentException("argument type mismatch");
     }
 }
+
+// `java.lang.reflect.RecordComponent`, and `Class.isRecord()` and `getRecordComponents()`, which
+// lowering answers with `isRecord` and `of`. The components of a record are its fields that are
+// not static, in their order, which lowering writes into `components` for each record whose
+// components reflection reaches (`program::reach::reflection`); a component's generic type and its
+// accessor are the field's and the method's of the reflection table, where reachability puts them.
+final class RecordComponent {
+    private final Class<?> clazz;
+    private final String name;
+    private final Class<?> type;
+
+    RecordComponent(Class<?> clazz, String name, Class<?> type) {
+        this.clazz = clazz;
+        this.name = name;
+        this.type = type;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public Class<?> getType() {
+        return type;
+    }
+
+    public java.lang.reflect.Type getGenericType() {
+        try {
+            return Field.find(clazz, name, true).getGenericType();
+        } catch (NoSuchFieldException e) {
+            return type;
+        }
+    }
+
+    public String getGenericSignature() {
+        return null;
+    }
+
+    public Method getAccessor() {
+        try {
+            return Method.find(clazz, name, new Class<?>[0], true);
+        } catch (NoSuchMethodException e) {
+            throw new UnsupportedOperationException("the accessor " + clazz.getName() + "." + name + "()"
+                    + Constructor.MISSING);
+        }
+    }
+
+    public Class<?> getDeclaringRecord() {
+        return clazz;
+    }
+
+    public String toString() {
+        return Constructor.typeName(type) + " " + name;
+    }
+
+    // `c.isRecord()`: a record's direct superclass is `Record`, which no other class extends.
+    static boolean isRecord(Class<?> c) {
+        Class<?> superclass = c.getSuperclass();
+        return superclass != null && superclass.getName().equals("java.lang.Record");
+    }
+
+    // `c.getRecordComponents()`: `null` for a class that is not a record.
+    static RecordComponent[] of(Class<?> c) {
+        if (!isRecord(c)) {
+            return null;
+        }
+        RecordComponent[] found = components(c.getName());
+        if (found == null) {
+            throw new UnsupportedOperationException("the components of the record " + c.getName()
+                    + Constructor.MISSING);
+        }
+        RecordComponent[] out = new RecordComponent[found.length];
+        for (int i = 0; i < found.length; i++) {
+            out[i] = found[i];
+        }
+        return out;
+    }
+
+    // The components of the record with binary name `name`, made each time; `null` for a record
+    // whose components reflection does not reach.
+    private static native RecordComponent[] components(String name);
+}

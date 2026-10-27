@@ -55,6 +55,7 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("AccessibleObject", "java.lang.reflect"),
     ("Executable", "java.lang.reflect"),
     ("Member", "java.lang.reflect"),
+    ("RecordComponent", "java.lang.reflect"),
     ("DataFormatException", "java.util.zip"),
     ("UnsupportedCharsetException", "java.nio.charset"),
     ("IllegalCharsetNameException", "java.nio.charset"),
@@ -694,6 +695,23 @@ impl Uses {
                 let owner = text(symbol, "owner");
                 let kind = text(v, "kind");
                 match kind.as_str() {
+                    // Reflection that finds `Class`'s `isRecord` or `getRecordComponents`, or the
+                    // methods of `RecordComponent` by its name, as gson does, calls the
+                    // translator's `RecordComponent` (`reflection.rs`).
+                    "STRING_LITERAL"
+                        if matches!(
+                            v["value"].as_str(),
+                            Some("isRecord" | "getRecordComponents" | "java.lang.reflect.RecordComponent")
+                        ) =>
+                    {
+                        for member in super::reflection::record_members() {
+                            self.classes.insert(member.0.clone());
+                            if member.1 == "<init>" {
+                                self.instantiated.insert(member.0.clone());
+                            }
+                            self.members.insert(member);
+                        }
+                    }
                     "TRY" => {
                         self.recreates |= crate::program::recreated_exception(v).is_some();
                         self.finally |= !v["finallyBlock"].is_null();

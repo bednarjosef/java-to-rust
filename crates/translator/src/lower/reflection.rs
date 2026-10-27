@@ -17,9 +17,12 @@
 //! reachability found (`program::reach::reflection`, `Reach::reflected`); in a file, those whose
 //! names the file's lookups spell out, or any string literal of it for a lookup by a computed name,
 //! or every member for `getMethods()` and its relatives. A generic class or method, an inner, local
-//! or anonymous class's constructor, and a member whose types a value cannot be boxed to (`Class`
-//! itself, or `Constable`, which a class held as an `Object` is not in a translation) are not in
-//! the table, and looking them up throws as for a name that is not.
+//! or anonymous class's constructor, and a member whose types a value cannot be boxed to
+//! (`Constable`, which a class held as an `Object` is not in a translation) are not in the table,
+//! and looking them up throws as for a name that is not. `Class`'s own `isRecord` and
+//! `getRecordComponents` are in the table when reachability finds them, and so are the methods
+//! of a record's component, the translator's `RecordComponent`, whose native `components` lists
+//! the components of the records in `Reach::records`.
 
 use super::*;
 use crate::program::{LookupKind, lookup};
@@ -29,6 +32,7 @@ const SERVICE_LOADER: &str = "java.util.ServiceLoader";
 const METHOD: &str = "java.lang.reflect.Method";
 const FIELD: &str = "java.lang.reflect.Field";
 const CONSTRUCTOR: &str = "java.lang.reflect.Constructor";
+pub(super) const RECORD_COMPONENT: &str = "java.lang.reflect.RecordComponent";
 /// The parts that `java/Reflection.java` divides the slots of the table into, by `slot & 31`, for
 /// the natives that call, read, write or create its members.
 const PARTS: i32 = 32;
@@ -43,6 +47,33 @@ const FIND_CONSTRUCTOR: &str =
 const LIST_CONSTRUCTORS: &str = "(java.lang.Class<?>,boolean)java.lang.reflect.Constructor<?>[]";
 const NEW_INSTANCE_OF: &str = "(java.lang.Class<?>)java.lang.Object";
 const SUBCLASS: &str = "(java.lang.Class<?>,boolean)java.lang.Class<?>";
+const IS_RECORD: &str = "(java.lang.Class<?>)boolean";
+const RECORD_COMPONENTS: &str = "(java.lang.Class<?>)java.lang.reflect.RecordComponent[]";
+
+/// The members of the translator's `RecordComponent` that a program with records' components
+/// has: what answers `Class.isRecord()` and `getRecordComponents()`, the constructor that its
+/// native `components` makes them with, and the methods of a component, which reflection may
+/// call too (`program::reach::reflection::RECORD_COMPONENT_METHODS`).
+const RECORD_MEMBERS: &[(&str, &str)] = &[
+    ("isRecord", IS_RECORD),
+    ("of", RECORD_COMPONENTS),
+    ("<init>", "(java.lang.Class<?>,java.lang.String,java.lang.Class<?>)void"),
+    ("getName", "()java.lang.String"),
+    ("getType", "()java.lang.Class<?>"),
+    ("getGenericType", "()java.lang.reflect.Type"),
+    ("getGenericSignature", "()java.lang.String"),
+    ("getAccessor", "()java.lang.reflect.Method"),
+    ("getDeclaringRecord", "()java.lang.Class<?>"),
+    ("toString", "()java.lang.String"),
+];
+
+/// `Class`'s own methods that the reflection table has, when reachability finds them
+/// (`Reach::reflected`): each with its result and the static method of `RecordComponent` that
+/// answers it for the class it is called on.
+const CLASS_METHODS: [(&str, &str, &str); 2] = [
+    ("isRecord", "boolean", "isRecord"),
+    ("getRecordComponents", "java.lang.reflect.RecordComponent[]", "of"),
+];
 
 /// The methods that the JDK hides from reflection (`Reflection.registerMethodsToFilter`), by
 /// class and name: `sun.misc.Unsafe`'s initialization registers its `getUnsafe`, and the
@@ -80,6 +111,8 @@ const LOOKUPS: &[(&str, &str, &str, &str, Option<bool>)] = &[
     // Not reflection's, but answered the same way (`java/Threads.java`).
     ("getClassLoader", "java.lang.ClassLoader", "of", "(java.lang.Class<?>)java.lang.ClassLoader", None),
     ("descriptorString", CONSTRUCTOR, "descriptor", "(java.lang.Class<?>)java.lang.String", None),
+    ("isRecord", RECORD_COMPONENT, "isRecord", IS_RECORD, None),
+    ("getRecordComponents", RECORD_COMPONENT, "of", RECORD_COMPONENTS, None),
 ];
 
 /// The members of the translator's classes that a call of `Class`'s method `name` uses: the
@@ -87,6 +120,9 @@ const LOOKUPS: &[(&str, &str, &str, &str, Option<bool>)] = &[
 /// `exceptions::Uses`).
 pub(super) fn lookup_members(name: &str) -> Vec<(String, String, String)> {
     let Some(&(_, class, method, sig, _)) = LOOKUPS.iter().find(|l| l.0 == name) else { return Vec::new() };
+    if class == RECORD_COMPONENT {
+        return record_members();
+    }
     let mut out = vec![(class.to_string(), method.to_string(), sig.to_string())];
     if let Some((_, init)) = MEMBER_CONSTRUCTORS.iter().find(|(c, _)| *c == class)
         && !matches!(method, "subclass" | "descriptor")
@@ -94,6 +130,15 @@ pub(super) fn lookup_members(name: &str) -> Vec<(String, String, String)> {
         out.push((class.to_string(), "<init>".to_string(), init.to_string()));
     }
     out
+}
+
+/// The members of the translator's `RecordComponent` that a program that reads records'
+/// components has (`RECORD_MEMBERS`).
+pub(super) fn record_members() -> Vec<(String, String, String)> {
+    RECORD_MEMBERS
+        .iter()
+        .map(|(name, sig)| (RECORD_COMPONENT.into(), name.to_string(), sig.to_string()))
+        .collect()
 }
 
 /// The slot that the `Constructor` at `slot` of the table holds: for a constructor of an
@@ -135,6 +180,8 @@ enum Member<'t> {
     /// (see `object`), looked up in `Object` itself: a proxy class passes them to its handler
     /// (`program/reach/proxies.rs`).
     Object(&'static str),
+    /// One of `Class`'s own methods (`CLASS_METHODS`), looked up in `Class`.
+    Class(&'static str),
 }
 
 /// `Object`'s methods in the table: the name, the parameter types and the result, and the bits
@@ -241,6 +288,9 @@ impl<'t> Lowering<'t> {
         }
         if symbol.owner == super::generic_types::TRANSLATED_TYPES && symbol.native {
             return Ok(Some(self.generic_types_native(node, symbol, std::mem::take(args))?));
+        }
+        if symbol.owner == RECORD_COMPONENT && symbol.native {
+            return Ok(Some(self.record_components(node, std::mem::take(args))?));
         }
         if !matches!(symbol.owner, METHOD | FIELD | CONSTRUCTOR) || !symbol.native {
             return Ok(None);
@@ -407,6 +457,72 @@ impl<'t> Lowering<'t> {
         };
         let body =
             vec![Stmt::Local { ty: arg.ty, name: local.clone(), init: Some(arg), pos }, Stmt::Yield(found)];
+        Ok(block(self, pos, body))
+    }
+
+    /// `RecordComponent.components(name)`: a `switch` over the binary names of the records whose
+    /// components reflection reaches (`Reach::records`; in a file, all of its records), each
+    /// case a new array of its components, the fields that are not static, in their order, each
+    /// with the class of its declared type; `null` for any other name.
+    fn record_components(&self, node: Node<'t>, args: Vec<Expr>) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let [name] = <[Expr; 1]>::try_from(args).map_err(|_| Error {
+            pos,
+            message: "`RecordComponent.components` with other arguments".into(),
+        })?;
+        let Some(t) = self.type_index(RECORD_COMPONENT) else {
+            return unsupported(node, "`RecordComponent` without its class");
+        };
+        let init = RECORD_MEMBERS.iter().find(|(n, _)| *n == "<init>").expect("its constructor").1;
+        let Some(ctor) = self.template_method(RECORD_COMPONENT, "<init>", init) else {
+            return unsupported(node, "`RecordComponent` without its constructor");
+        };
+        // The array may be an `Object[]` (`covariant`), as gson holds it.
+        let element = self.self_type(t);
+        let array = self.covariant_array(Type::array(element));
+        let literal = |ty: Type| {
+            self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass)
+        };
+        let mut cases = Vec::new();
+        for r in
+            (0..self.types.len()).filter(|&r| self.types[r].node.kind() == "RECORD" && self.reflectable(r))
+        {
+            if self.reach.is_some_and(|reach| !reach.records.contains(&self.types[r].javac)) {
+                continue;
+            }
+            let Some(binary) = self.binary_name(r) else { continue };
+            let mut made = Vec::new();
+            for member in
+                self.types[r].node.list("members").filter(|m| m.kind() == "VARIABLE" && !m.has_flag("STATIC"))
+            {
+                let ty = match self.declared_type(member, member.symbol().map_or("", |s| s.ty), r, None)? {
+                    Type::Class(name, _) => Type::class(name),
+                    ty => ty,
+                };
+                let component = member.str("name").to_string();
+                let args = vec![
+                    literal(self.self_type(r)),
+                    self.synth(ExprKind::Str(component), pos, Type::String),
+                    literal(ty),
+                ];
+                let new = ExprKind::New { class: t, args, ctor: Some(ctor) };
+                made.push(self.convert(self.synth(new, pos, element), array.element()));
+            }
+            let components = if made.is_empty() {
+                ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)])
+            } else {
+                ExprKind::ArrayLit(made)
+            };
+            let label = self.synth(ExprKind::Str(binary), pos, Type::String);
+            let body = vec![Stmt::Yield(self.synth(components, pos, array))];
+            cases.push(Case { labels: vec![CaseLabel::Value(label)], body });
+        }
+        let null = self.synth(ExprKind::Null, pos, Type::Null);
+        cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(null)] });
+        let local = self.fresh_name("record");
+        let var = self.synth(ExprKind::Var(local.clone()), pos, name.ty);
+        let switch = self.synth(ExprKind::Switch { selector: Box::new(var), cases }, pos, array);
+        let body = vec![Stmt::Local { ty: name.ty, name: local, init: Some(name), pos }, Stmt::Yield(switch)];
         Ok(block(self, pos, body))
     }
 
@@ -599,6 +715,23 @@ impl<'t> Lowering<'t> {
                 let then = Stmt::Block(vec![Stmt::Yield(self.convert(call, object))]);
                 Ok(Some(vec![Stmt::If { cond, then: Box::new(then), otherwise: None }, Stmt::Yield(null())]))
             }
+            (Member::Class(name), "invokePart") => {
+                let (_, ret, helper) =
+                    CLASS_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Class`'s");
+                let Some(m) =
+                    self.template_method(RECORD_COMPONENT, helper, &format!("(java.lang.Class<?>){ret}"))
+                else {
+                    return Ok(None);
+                };
+                let class = self.unboxed(node, var(1), Type::JavaClass)?;
+                let call = ExprKind::Call { name: helper.to_string(), args: vec![class], resolved: Some(m) };
+                let call = self.synth(call, pos, self.ty(node, ret)?);
+                let null = || self.synth(ExprKind::Null, pos, Type::Null);
+                let cond = ExprKind::Binary(BinOp::Ne, Box::new(var(1)), Box::new(null()));
+                let cond = self.synth(cond, pos, Type::Boolean);
+                let then = Stmt::Block(vec![Stmt::Yield(self.convert(call, object))]);
+                Ok(Some(vec![Stmt::If { cond, then: Box::new(then), otherwise: None }, Stmt::Yield(null())]))
+            }
             _ => Ok(None),
         }
     }
@@ -653,7 +786,10 @@ impl<'t> Lowering<'t> {
         let element = self.covariant_array(Type::array(self.self_type(t))).element();
         let mut made = Vec::new();
         for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
-            let found_on = literal(entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t)));
+            let found_on = match entry.member {
+                Member::Class(_) => literal(Type::JavaClass),
+                _ => literal(entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t))),
+            };
             let args = match &entry.member {
                 Member::Method(m) if class == CONSTRUCTOR => {
                     let owner = self.methods[*m].owner;
@@ -717,6 +853,26 @@ impl<'t> Lowering<'t> {
                         int(slot as i32),
                     ]
                 }
+                Member::Class(name) => {
+                    let (_, ret, _) =
+                        CLASS_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Class`'s");
+                    // The class of the result as declared, not as the program holds it.
+                    let ret = match ret.strip_suffix("[]") {
+                        Some(element) => Type::array(Type::class(element)),
+                        None => self.ty(node, ret)?,
+                    };
+                    let name = self.synth(ExprKind::Str(name.to_string()), pos, Type::String);
+                    vec![
+                        literal(Type::JavaClass),
+                        literal(Type::JavaClass),
+                        name,
+                        classes(Vec::new(), 3),
+                        literal(ret),
+                        classes(Vec::new(), 5),
+                        int(1),
+                        int(slot as i32),
+                    ]
+                }
             };
             let new = ExprKind::New { class: t, args, ctor: Some(ctor) };
             made.push(self.convert(self.synth(new, pos, self.self_type(t)), element));
@@ -751,7 +907,7 @@ impl<'t> Lowering<'t> {
                     (slot as i32, decl, format!("{}#{}", self.types[class].javac, decl.str("name")))
                 }
                 // Without a declaration of the program, and so without annotations.
-                Member::Object(_) => continue,
+                Member::Object(_) | Member::Class(_) => continue,
             });
         }
         Ok(out)
@@ -797,6 +953,8 @@ impl<'t> Lowering<'t> {
         let mut out = Vec::new();
         for t in (0..self.types.len()).filter(|&t| self.reflectable(t)) {
             match kind {
+                // A record's components are listed by `record_components`, not by a table.
+                LookupKind::Record => {}
                 LookupKind::Constructor => {
                     // Without synthetic parameters: no enclosing instance and no captured locals,
                     // whose types are read where the class is declared.
@@ -868,6 +1026,19 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+        // And `Class`'s own, which the translator's `RecordComponent` answers.
+        if kind == LookupKind::Method
+            && let Some(reach) = self.reach
+        {
+            for (name, ret, helper) in CLASS_METHODS {
+                let sig = format!("(java.lang.Class<?>){ret}");
+                if reach.reflected.contains(&("java.lang.Class".to_string(), name.to_string()))
+                    && self.template_method(RECORD_COMPONENT, helper, &sig).is_some()
+                {
+                    out.push(Entry { found_on: None, member: Member::Class(name) });
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -877,7 +1048,7 @@ impl<'t> Lowering<'t> {
         let info = &self.types[t];
         matches!(info.node.kind(), "CLASS" | "INTERFACE" | "ENUM" | "RECORD")
             && info.node.list("typeParameters").next().is_none()
-            && !is_standard(&info.javac)
+            && (!is_standard(&info.javac) || info.javac == RECORD_COMPONENT)
             && !self.functional.has(&info.javac)
             && self.plain_object != Some(t)
     }
@@ -1011,7 +1182,12 @@ fn boxable(ty: Type) -> bool {
     match ty {
         Type::Class(name, args) => args.is_empty() && !crate::ast::class_only_interface(name),
         Type::Array(element) => boxable(*element),
-        Type::Enum(_) | Type::String | Type::Boxed(_) | Type::StringBuilder | Type::Boolean => true,
+        Type::Enum(_)
+        | Type::String
+        | Type::Boxed(_)
+        | Type::StringBuilder
+        | Type::Boolean
+        | Type::JavaClass => true,
         _ => ty.is_numeric(),
     }
 }

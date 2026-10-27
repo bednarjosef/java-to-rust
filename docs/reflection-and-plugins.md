@@ -104,6 +104,18 @@ program where such a lookup can happen, so they can be checked before the progra
   holds `hashCode`, `equals` and `toString`, when code looks them up. In a single file the
   candidates are its classes and the names in its string literals (`lower/reflection.rs`,
   `file_names`).
+  Records' components: `Class.isRecord()` and `getRecordComponents()` are answered by the
+  translator's `RecordComponent` (`java/Reflection.java`). A record's components are its
+  fields that are not static, in order, each with its name and the class of its declared type;
+  its generic type and its accessor come from the table. A read of components, a call of
+  `getRecordComponents` or the method found by its name on `Class`, reads those of the records
+  that a lookup of fields could look in, and of the records that the components' types of
+  those name, type arguments included. gson finds `isRecord`, `getRecordComponents` and
+  `RecordComponent`'s `getName` and `getType` by name, to run on JDKs without records, and so
+  reads a `Map<String, Endpoint>` component's records through its generic type. Each such record
+  has its fields, its accessors and its constructors in the table, so that gson can make it with
+  its canonical constructor; javac's accessors are then written even where nothing calls them
+  (`javac/records.rs`). Those records are kept in `Reach::records`.
   `Method`, `Field` and `Constructor` are the translator's own classes
   (`java/Reflection.java`), with Java's supertypes: `AccessibleObject` (the accessibility
   methods), `Executable` (what `Method` and `Constructor` share) and the interface `Member`, so
