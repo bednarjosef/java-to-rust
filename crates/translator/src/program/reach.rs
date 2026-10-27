@@ -108,6 +108,9 @@ pub struct Reach {
     /// The members that reflection looks up by name, as (the class it looks in, the member's
     /// name), `<init>` for constructors (`reflection.rs`).
     pub reflected: BTreeSet<(String, String)>,
+    /// The records whose components reflection reads (`Class.getRecordComponents`), which the
+    /// translator's `RecordComponent` lists (`reflection.rs`).
+    pub records: BTreeSet<String>,
     /// The proxy classes of the lists of interfaces that reachable code makes proxies of
     /// (`proxies.rs`).
     pub proxies: BTreeMap<Vec<String>, ProxyClass>,
@@ -150,6 +153,7 @@ impl Reach {
         lines.extend(self.found_by_name.iter().map(|c| format!("found {c}")));
         lines.extend(self.services.iter().map(|s| format!("service {s:?}")));
         lines.extend(self.reflected.iter().map(|r| format!("reflected {r:?}")));
+        lines.extend(self.records.iter().map(|c| format!("record {c}")));
         lines.extend(self.service_classes.iter().map(|c| format!("service class {c}")));
         lines.extend(self.configured.iter().map(|c| format!("configured {c}")));
         lines.extend(
@@ -3063,6 +3067,9 @@ struct Walk<'t> {
     /// The classes of the class literals among the values of annotations, which code that
     /// reads the annotation makes objects of (`reflection.rs`).
     annotation_classes: HashSet<String>,
+    /// The classes that the types of the components of the records found so far name, which
+    /// reflection hands out as `Class` values (`reflection.rs`).
+    record_types: HashSet<String>,
     reflected_keys: HashSet<(String, String)>,
     /// The service providers of the sources, and the `Class` values that `ServiceLoader.load` of
     /// reachable code loads services of (`reflection.rs`).

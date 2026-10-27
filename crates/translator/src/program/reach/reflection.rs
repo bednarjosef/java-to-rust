@@ -15,6 +15,16 @@
 //! `Reach::reflected` by the class it is looked up in, which lowering makes the table of.
 //! A constructor looked up without parameter types is only the one without parameters.
 //!
+//! A read of records' components (`getRecordComponents`, called, or found by its name on
+//! `Class.class` as gson finds it) looks in the classes that a lookup of fields does, and in the
+//! classes that the component types of the records found name, with their type arguments: gson
+//! reads a record held in a `Map<String, Endpoint>` component through the field's generic type.
+//! Each record found has its fields, its accessors and its constructors made reachable and noted
+//! in `Reach::reflected`, and is noted in `Reach::records`, whose components lowering lists. The
+//! methods of `Class` itself (`isRecord`, `getRecordComponents`) and of `RecordComponent` are
+//! found as `Object`'s are, also on a `Class` value that may be `Class.class` or
+//! `RecordComponent`'s, which code gets by its name.
+//!
 //! `ServiceLoader.load(S.class)` (and `loadInstalled`) finds the providers of `S` that the
 //! sources declare (`modules::service_providers`): they are reachable, with what makes each (a
 //! module's provider by its public static `provider()` if it has one, as Java makes it),
@@ -36,6 +46,19 @@ use super::{
 use crate::value::Value;
 
 const OBJECT: &str = "java.lang.Object";
+const CLASS: &str = "java.lang.Class";
+const RECORD_COMPONENT: &str = "java.lang.reflect.RecordComponent";
+
+/// The methods of `Class` itself that the reflection table has (`lower/reflection.rs`).
+const CLASS_METHODS: [&str; 2] = ["isRecord", "getRecordComponents"];
+
+/// The methods of the translator's `RecordComponent` that the reflection table has, which gson
+/// looks up by name to run on JDKs without records.
+pub const RECORD_COMPONENT_METHODS: [&str; 6] =
+    ["getName", "getType", "getGenericType", "getAccessor", "getDeclaringRecord", "toString"];
+
+/// The key in `Walk::reflected_keys` of a record whose components are found.
+const RECORD_KEY: &str = "<record>";
 
 /// What a lookup looks for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -43,6 +66,9 @@ pub enum Kind {
     Method,
     Field,
     Constructor,
+    /// The components of a record (`getRecordComponents()`), with their fields, accessors and
+    /// constructors.
+    Record,
 }
 
 /// A lookup of members by name through a `Class` value.
@@ -75,6 +101,7 @@ pub fn lookup(node: &Value) -> Option<Lookup> {
         "getFields" | "getDeclaredFields" => (Kind::Field, false, true),
         "getConstructor" | "getDeclaredConstructor" | "newInstance" => (Kind::Constructor, false, false),
         "getConstructors" | "getDeclaredConstructors" => (Kind::Constructor, false, true),
+        "getRecordComponents" => (Kind::Record, false, true),
         _ => return None,
     };
     let arguments = node["arguments"].as_array()?;
@@ -119,6 +146,20 @@ fn service_load(node: &Value) -> Option<&Value> {
         return None;
     }
     node["arguments"].as_array()?.iter().find(|a| is_class_value(a))
+}
+
+/// Whether the bound of a lookup's `Class` value allows any class.
+fn is_subtype_of_object(bound: &str) -> bool {
+    bound == OBJECT
+}
+
+/// The fields of the record `decl` that are its components: those that are not static, in order.
+fn record_fields(decl: &Value) -> impl Iterator<Item = &Value> {
+    decl["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| text(m, "kind") == "VARIABLE" && !has_flag(m, "STATIC"))
 }
 
 /// Whether the expression `node` is a `Class` value.
@@ -228,14 +269,49 @@ impl<'t> Walk<'t> {
                 self.reflected_methods.insert(key.clone());
             }
         }
+        let mut more = false;
         for (class, name, key, declared) in &found {
             self.reflected_keys.insert(key.clone());
             if *declared {
                 self.reach.reflected.insert((class.clone(), name.clone()));
             }
+            // A record whose components are found: the classes that their types name are
+            // `Class` values that reflection gives, which may be records read the same way.
+            if key.1 == RECORD_KEY && self.reach.records.insert(class.clone()) {
+                for name in self.record_component_types(class) {
+                    more |= self.record_types.insert(name);
+                }
+            }
+            // `Class.getRecordComponents` found by reflection reads the components of any record.
+            if (class.as_str(), name.as_str()) == (CLASS, "getRecordComponents") {
+                more |= self.lookups.insert(Lookup {
+                    kind: Kind::Record,
+                    name: None,
+                    every: true,
+                    no_parameters: false,
+                    literal: None,
+                    bound: OBJECT.to_string(),
+                });
+            }
         }
         self.work.extend(work);
-        loaded || !found.is_empty()
+        loaded || more || !found.is_empty()
+    }
+
+    /// The classes of the program that the declared types of the components of the record
+    /// `class` name, with their type arguments.
+    fn record_component_types(&self, class: &str) -> Vec<String> {
+        let Some((decl, _)) = self.classes.get(class) else { return Vec::new() };
+        let mut out = Vec::new();
+        for member in record_fields(decl) {
+            let ty = text(&member["symbol"], "type");
+            for name in ty.split(|c: char| !(c.is_alphanumeric() || c == '.' || c == '_' || c == '$')) {
+                if self.classes.contains_key(name) && !out.iter().any(|o| o == name) {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        out
     }
 
     /// What the lookups find that they did not find before: each class and member name, its key
@@ -247,7 +323,7 @@ impl<'t> Walk<'t> {
     fn reflected_members(&self) -> (Vec<(String, String, (String, String), bool)>, Vec<Item>) {
         let (methods, fields) = (&self.methods_by_name, &self.fields_by_class);
         let mut supertypes: HashMap<String, Vec<String>> = HashMap::new();
-        let mut candidates: HashMap<(&str, bool), Vec<String>> = HashMap::new();
+        let mut candidates: HashMap<(&str, Kind), Vec<String>> = HashMap::new();
         let mut found = Vec::new();
         let mut work = Vec::new();
         let mut seen = HashSet::new();
@@ -255,18 +331,22 @@ impl<'t> Walk<'t> {
             let classes: Vec<String> = match &lookup.literal {
                 Some(class) => vec![class.clone()],
                 None => {
-                    let literals = lookup.kind != Kind::Constructor;
+                    // Any record's components, whatever the `Class` value's type says.
+                    let bound = if lookup.kind == Kind::Record { OBJECT } else { lookup.bound.as_str() };
                     candidates
-                        .entry((lookup.bound.as_str(), literals))
+                        .entry((bound, lookup.kind))
                         .or_insert_with(|| {
                             let mut all: BTreeSet<&String> = self.named.iter().collect();
                             all.extend(self.reach.found_by_name.iter());
-                            if literals {
-                                all.extend(self.class_literals.iter());
-                            } else {
-                                all.extend(self.annotation_classes.iter());
+                            match lookup.kind {
+                                Kind::Constructor => all.extend(self.annotation_classes.iter()),
+                                Kind::Record => {
+                                    all.extend(self.class_literals.iter());
+                                    all.extend(self.record_types.iter());
+                                }
+                                _ => all.extend(self.class_literals.iter()),
                             }
-                            all.into_iter().filter(|c| self.is_subtype(c, &lookup.bound)).cloned().collect()
+                            all.into_iter().filter(|c| self.is_subtype(c, bound)).cloned().collect()
                         })
                         .clone()
                 }
@@ -284,6 +364,73 @@ impl<'t> Walk<'t> {
                         found.push((OBJECT.to_string(), name.to_string(), key, true));
                     }
                 }
+            }
+            // `Class`'s own `isRecord` and `getRecordComponents`, and the methods of a record's
+            // component, which the translator's `RecordComponent` answers (`lower/reflection.rs`).
+            for (owner, names) in
+                [(CLASS, &CLASS_METHODS[..]), (RECORD_COMPONENT, &RECORD_COMPONENT_METHODS[..])]
+            {
+                // A `Class` value that the lookup cannot tell may be `Class.class` or
+                // `RecordComponent`'s, which code gets by its name.
+                let candidate = classes.iter().any(|c| c == owner)
+                    || lookup.literal.is_none()
+                        && is_subtype_of_object(&lookup.bound)
+                        && match owner {
+                            CLASS => self.class_literals.contains(CLASS),
+                            _ => self.strings.contains(RECORD_COMPONENT),
+                        };
+                if lookup.kind != Kind::Method || !candidate {
+                    continue;
+                }
+                for name in names {
+                    let wanted = match &lookup.name {
+                        Some(n) if !lookup.every => n == name,
+                        _ => lookup.every || self.strings.contains(*name),
+                    };
+                    let key = (owner.to_string(), name.to_string());
+                    if wanted && !self.reflected_keys.contains(&key) && seen.insert(key.clone()) {
+                        found.push((owner.to_string(), name.to_string(), key, true));
+                    }
+                }
+            }
+            if lookup.kind == Kind::Record {
+                for class in classes.iter().filter(|c| self.classes.contains_key(*c)) {
+                    let decl = self.classes[class.as_str()].0;
+                    let key = (class.clone(), RECORD_KEY.to_string());
+                    if text(decl, "kind") != "RECORD"
+                        || self.reflected_keys.contains(&key)
+                        || !seen.insert(key.clone())
+                    {
+                        continue;
+                    }
+                    // Its fields, the accessors of the same names, and its constructors, which
+                    // gson makes a record with: the canonical one, by the components' types.
+                    let mut names: Vec<String> = Vec::new();
+                    for field in record_fields(decl) {
+                        let name = text(field, "name").to_string();
+                        work.push(Item::Field((class.clone(), name.clone())));
+                        for key in methods
+                            .get(class.as_str())
+                            .and_then(|m| m.get(name.as_str()))
+                            .into_iter()
+                            .flatten()
+                        {
+                            if key.2.starts_with("()") {
+                                work.push(Item::Method((*key).clone()));
+                            }
+                        }
+                        names.push(name);
+                    }
+                    for key in methods.get(class.as_str()).and_then(|m| m.get("<init>")).into_iter().flatten()
+                    {
+                        work.push(Item::Method((*key).clone()));
+                    }
+                    names.push("<init>".to_string());
+                    for name in names {
+                        found.push((class.clone(), name, key.clone(), true));
+                    }
+                }
+                continue;
             }
             for class in classes.into_iter().filter(|c| self.classes.contains_key(c)) {
                 let owners = supertypes.entry(class.clone()).or_insert_with(|| self.supertypes_of(&class));
