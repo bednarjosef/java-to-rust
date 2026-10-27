@@ -522,6 +522,11 @@ class NumberFormatException extends IllegalArgumentException {
     public NumberFormatException(String s) {
         super(s);
     }
+
+    // The JDK's factory of the exception of a string that is no number, which its code throws.
+    static NumberFormatException forInputString(String s, int radix) {
+        return new NumberFormatException("For input string: \"" + s + "\"" + (radix == 10 ? "" : " under radix " + radix));
+    }
 }
 
 class IllegalStateException extends RuntimeException {

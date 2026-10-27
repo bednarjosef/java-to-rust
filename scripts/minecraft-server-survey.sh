@@ -357,6 +357,22 @@ library-best-of() {
   done
 }
 
+# Each jar's manifest, put in the source roots of its classes, where a jar has it: the translation
+# reads the versioning attributes of a root's packages from it (`Package.getImplementationVersion`,
+# which log4j prints as it configures itself).
+copy_manifests() {
+  unzip -o -qq "$(server_jar)" META-INF/MANIFEST.MF -d "$cache/src/server" || true
+  local library name dir
+  while IFS= read -r library; do
+    name=$(basename "$library" .jar)
+    for dir in "$cache/src/libraries/$name" "$cache/src/library-sources/$name"; do
+      if [ -d "$dir" ]; then
+        unzip -o -qq "$library" META-INF/MANIFEST.MF -d "$dir" || true
+      fi
+    done
+  done < <(library_jars)
+}
+
 # The source roots of the translation's libraries: each library's published sources, or its
 # decompiled ones where none are published, and each JDK module.
 library_args() {
@@ -453,6 +469,7 @@ census() {
   fi
   mkdir -p "$out"
   [ -f "$jdk_sources/modules.txt" ] || { echo "no $jdk_sources/modules.txt (run the jdk-sources step)" >&2; exit 1; }
+  copy_manifests
   local -a libraries resources
   mapfile -t libraries < <(library_args)
   mapfile -t resources < <(resource_args)

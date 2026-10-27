@@ -5,8 +5,8 @@ import java.util.List;
 import shapes.round.Circle;
 
 // `Class.getPackage()`: one `Package` per package name, null for arrays and primitive types, and
-// the JDK's packages, which have no versioning information. (The manifest attributes of the
-// program's own packages depend on the jar it is run from, which the translation does not know.)
+// the JDK's packages, which have no versioning information. (Those of the program's own packages
+// are its jar's, which a whole-program test checks, as the corpus runs Java from directories.)
 public class Main {
     static String describe(Class<?> c) {
         Package p = c.getPackage();

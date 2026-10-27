@@ -1324,7 +1324,7 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.module_call(node, &symbol, select)? {
             return Ok(kind);
         }
-        if let Some(kind) = self.package_call(node, &symbol, select)? {
+        if let Some(kind) = self.package_call(node, &symbol)? {
             return Ok(kind);
         }
         if let Some(kind) = self.class_call(node, &symbol, select)? {
