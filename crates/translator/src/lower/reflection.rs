@@ -248,7 +248,7 @@ impl<'t> Lowering<'t> {
         let entries = self.table(node, kind)?;
         let pos = node.pos();
         Ok(Some(match symbol.name {
-            "tablePart" | "invokePart" | "newInstancePart" | "getPart" | "setPart" => {
+            "tablePart" | "invokePart" | "newInstancePart" | "getPart" | "setPart" | "genericTypePart" => {
                 // The part, which `java/Reflection.java` spells out.
                 let mut args = args.into_iter();
                 let part = match args.next().map(|a| a.kind) {
@@ -507,6 +507,11 @@ impl<'t> Lowering<'t> {
                     }
                 }
                 Ok(Some(body))
+            }
+            (Member::Field(_, decl), "genericTypePart") => {
+                let text = decl.symbol().map_or("", |s| s.ty);
+                let made = self.field_generic_type(node, text)?;
+                Ok(made.map(|made| vec![Stmt::Yield(self.convert(made, object))]))
             }
             (Member::Field(class, decl), "getPart" | "setPart") => {
                 let decl = *decl;

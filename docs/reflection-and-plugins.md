@@ -306,11 +306,12 @@ handles.
   annotations (`lower/processors.rs`), and `isAnnotationPresent` of an annotation type's class
   literal, a chain of tests of the class against those whose declarations have it
   (`lower/annotation_presence.rs`).
-- **Generic types read by reflection**: `getGenericSuperclass()` is answered from the types
-  javac gives, with the JDK's own `ParameterizedType`, `WildcardType` and `GenericArrayType`
-  objects (`lower/generic_types.rs`), but a type variable in it throws
+- **Generic types read by reflection**: `getGenericSuperclass()` and `Field.getGenericType()`
+  are answered from the types javac gives, with the JDK's own `ParameterizedType`,
+  `WildcardType` and `GenericArrayType` objects (`lower/generic_types.rs`; a field's through the
+  native `genericTypePart` of `java/Reflection.java`, by slot), but a type variable in it throws
   `UnsupportedOperationException` when it is made, and `getGenericInterfaces`,
-  `getTypeParameters`, `Field.getGenericType` and the generic types of a method are rejected.
+  `getTypeParameters` and the generic types of a method are rejected.
 - **Module layers** other than the boot layer, which load code from a module path, and a
   module's `ModuleDescriptor`.
 - **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as
