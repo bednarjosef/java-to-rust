@@ -209,10 +209,11 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
         live[c] = true;
     }
     // A class that only ever types a null reference still needs its struct for the type, and so
-    // does an abstract class without subclasses for its fields (`hierarchy::fields_structs`).
+    // does a class with a fields struct (`hierarchy::fields_structs`) for its enum's `base()`,
+    // even where none of its subclasses has objects either (log4j's `BuiltConfiguration`).
     for t in mentioned(class) {
-        live[t] |= !class.hierarchy.has_subtypes(t)
-            && (class.hierarchy.is_concrete(t) || facts.fields_structs.contains(&t));
+        live[t] |= facts.fields_structs.contains(&t)
+            || !class.hierarchy.has_subtypes(t) && class.hierarchy.is_concrete(t);
     }
     // The lambdas of closure types are closures, not objects.
     for &t in &facts.closure_types {
@@ -1159,9 +1160,16 @@ impl<'a> Gen<'a> {
                     self.need(Need::Convert(s, t));
                     Some(format!("{handle}.{}()", self.to_name(t)))
                 }
-                (None, Some(c)) => {
-                    self.variant_of(t, c).map(|variant| format!("{variant}({handle}.clone())"))
-                }
+                (None, Some(c)) => Some(match self.variant_of(t, c) {
+                    Some(variant) => format!("{variant}({handle}.clone())"),
+                    // No object of the class is created (none is a value of the enum), so the
+                    // call never runs, as `as_enum` writes it.
+                    None => {
+                        let ty = struct_name(&self.class.types[t].name);
+                        let never = super::dispatch::absent(self, c);
+                        format!("{{ let _ = {handle}; None::<{ty}>.unwrap_or_else(|| {never}) }}")
+                    }
+                }),
                 (None, None) => None,
             };
             if let Some(obj) = obj {

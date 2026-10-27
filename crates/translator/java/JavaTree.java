@@ -758,7 +758,9 @@ public class JavaTree {
             out.append(",\"native\":true");
         }
         out.append(",\"type\":");
-        string(typeText(e.asType()), out);
+        // A variable's type as its uses are typed: a lambda's parameter inferred as a capture of
+        // `?` has the bound of the capture's type variable, as the expressions that read it do.
+        string(e.getKind().isVariable() ? typeName(e.asType()) : typeText(e.asType()), out);
         if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {
             overrides((ExecutableElement) e, t, out);
             // The erased signature of an interface's method, which a proxy class declares it
@@ -1066,6 +1068,19 @@ public class JavaTree {
                 // A raw or unrelated qualifier: the declared type stands.
             }
         }
+        // A return type that is a type variable of the qualifier's class, which a raw qualifier
+        // (`Entry::getValue`) leaves as its erasure: javac's inferred type of the reference has
+        // it (`Integer`, which `comparingInt` unboxes).
+        var inferred = ((com.sun.tools.javac.tree.JCTree.JCMemberReference) reference).referentType;
+        if (referent.getTypeParameters().isEmpty() && member instanceof ExecutableType executable
+                && referent.getReturnType().getKind() == javax.lang.model.type.TypeKind.TYPEVAR
+                && inferred != null && inferred.getReturnType().getKind() == javax.lang.model.type.TypeKind.DECLARED) {
+            StringBuilder text = new StringBuilder("(");
+            for (int i = 0; i < executable.getParameterTypes().size(); i++) {
+                text.append(i == 0 ? "" : ",").append(typeText(executable.getParameterTypes().get(i)));
+            }
+            return text.append(')').append(typeText(types.erasure(inferred.getReturnType()))).toString();
+        }
         if (referent.getTypeParameters().isEmpty() || !(member instanceof ExecutableType executable)) {
             return typeText(member);
         }
@@ -1123,6 +1138,10 @@ public class JavaTree {
      * The methods that class {@code c} inherits from a superclass that implement a method of an
      * interface of {@code c} which that superclass does not implement: javac lists such an
      * implementation with neither method, as only {@code c} makes the one implement the other.
+     * Marked {@code "bridge"} where the superclass implements the interface but its method does not
+     * implement that one there, as {@code copyInto(T_ARR, int)} of {@code Nodes.EmptyNode} does
+     * not implement {@code copyInto(T[], int)} of its {@code Node<T>} until its subclass
+     * {@code OfRef} makes {@code T_ARR} a {@code T[]}: javac writes a bridge in {@code c}.
      */
     private void inherits(TypeElement c, StringBuilder out) {
         List<TypeElement> interfaces = new ArrayList<>();
@@ -1148,13 +1167,12 @@ public class JavaTree {
                     continue;
                 }
                 for (TypeElement i : interfaces) {
-                    if (types.isSubtype(types.erasure(s.asType()), types.erasure(i.asType()))) {
-                        continue;
-                    }
+                    boolean bridge = types.isSubtype(types.erasure(s.asType()), types.erasure(i.asType()));
                     for (Element candidate : i.getEnclosedElements()) {
                         if (candidate instanceof ExecutableElement x && candidate.getKind() == ElementKind.METHOD
                                 && !x.getModifiers().contains(Modifier.STATIC)
-                                && x.getSimpleName().equals(m.getSimpleName()) && elements.overrides(m, x, c)) {
+                                && x.getSimpleName().equals(m.getSimpleName()) && elements.overrides(m, x, c)
+                                && !(bridge && (elements.overrides(m, x, s) || declaredBelow(c, s, x)))) {
                             out.append(any ? "," : mark);
                             any = true;
                             out.append("{\"name\":");
@@ -1167,7 +1185,7 @@ public class JavaTree {
                             string(className(i), out);
                             out.append(",\"type\":");
                             string(typeText(x.asType()), out);
-                            out.append("}}");
+                            out.append(bridge ? "},\"bridge\":true}" : "}}");
                         }
                     }
                 }
@@ -1176,6 +1194,23 @@ public class JavaTree {
         if (any) {
             out.append(']');
         }
+    }
+
+    /**
+     * Whether a class from {@code c} up to the superclass {@code s} (not included) declares a
+     * method that implements {@code x} in {@code c}, which then hides what {@code s} has.
+     */
+    private boolean declaredBelow(TypeElement c, TypeElement s, ExecutableElement x) {
+        for (TypeElement k = c; k != null && !k.equals(s);
+                k = types.asElement(k.getSuperclass()) instanceof TypeElement up ? up : null) {
+            for (Element member : k.getEnclosedElements()) {
+                if (member instanceof ExecutableElement own && member.getKind() == ElementKind.METHOD
+                        && own.getSimpleName().equals(x.getSimpleName()) && elements.overrides(own, x, c)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

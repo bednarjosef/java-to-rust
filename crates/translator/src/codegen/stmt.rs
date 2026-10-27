@@ -108,7 +108,16 @@ impl<'a> Gen<'a> {
             Stmt::DoWhile { body, cond } => {
                 let kind = if has_continue(body) { Loop::DoWhile(cond) } else { Loop::Plain };
                 self.line("loop {");
+                let fenced = !matches!(cond.kind, ExprKind::Bool(true)) && self.narrows_for(body, cond);
+                if fenced {
+                    self.indent += 1;
+                    self.line("{");
+                }
                 self.loop_body(kind, body, &[]);
+                if fenced {
+                    self.line("}");
+                    self.indent -= 1;
+                }
                 // `while (true)` never leaves, so the loop is an expression of any type, as
                 // Rust's `loop` without a `break` is.
                 if !matches!(cond.kind, ExprKind::Bool(true)) {

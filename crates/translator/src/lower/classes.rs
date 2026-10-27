@@ -175,12 +175,48 @@ impl<'t> Lowering<'t> {
         let mut values = vec![self.expr(receiver)?];
         for arg in args {
             let value = self.expr(arg)?;
+            if op == ClassOp::Equals && matches!(value.ty, Type::Class(..)) {
+                return Ok(Some(self.class_equals_object(node, values.remove(0), value)));
+            }
             if !matches!(value.ty, Type::JavaClass | Type::Null) {
                 return unsupported(arg, "comparing a class with anything but a class");
             }
             values.push(value);
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassMethod(op), values)))
+    }
+
+    /// `c.equals(o)` of an `o` that is not typed a class (an `Object`, or a `Type` as log4j's
+    /// `TypeUtil.isAssignable` compares): `o instanceof Class k && c.equals(k)`, with `c` and `o`
+    /// evaluated first, in Java's order.
+    fn class_equals_object(&self, node: Node<'t>, class: Expr, other: Expr) -> ExprKind {
+        let pos = node.pos();
+        let (c, o, k) = (self.fresh_name("class"), self.fresh_name("other"), self.fresh_name("held"));
+        let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let ty = other.ty;
+        let test = ExprKind::InstanceOf {
+            value: Box::new(var(&o, ty)),
+            ty: Type::JavaClass,
+            binding: Some(k.clone()),
+        };
+        let same = ExprKind::Builtin(
+            Builtin::ClassMethod(ClassOp::Equals),
+            vec![var(&c, Type::JavaClass), var(&k, Type::JavaClass)],
+        );
+        let both = ExprKind::Binary(
+            BinOp::And,
+            Box::new(self.synth(test, pos, Type::Boolean)),
+            Box::new(self.synth(same, pos, Type::Boolean)),
+        );
+        let body = vec![
+            Stmt::Local { ty: Type::JavaClass, name: c, init: Some(class), pos },
+            Stmt::Local { ty, name: o, init: Some(other), pos },
+            Stmt::Yield(self.synth(both, pos, Type::Boolean)),
+        ];
+        ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        }
     }
 
     /// `X.class.isAssignableFrom(c)` of the class literal `literal`, which the runtime's class
@@ -223,7 +259,7 @@ impl<'t> Lowering<'t> {
         let (class_local, value_local) = (self.fresh_name("class"), self.fresh_name("cast"));
         let class_var = self.synth(ExprKind::Var(class_local.clone()), pos, Type::JavaClass);
         let value_var = self.synth(ExprKind::Var(value_local.clone()), pos, value.ty);
-        if let Some(test) = self.annotation_object_test(&class_var, &value_var) {
+        if let Some(test) = self.annotation_object_test(self.copy(&class_var), &value_var) {
             let check = ExprKind::Builtin(Builtin::ClassCheck, vec![class_var, self.copy(&value_var)]);
             let check = Stmt::Expr(self.synth(check, pos, Type::Void));
             let not = self.synth(ExprKind::Unary(UnOp::Not, Box::new(test)), pos, Type::Boolean);
@@ -281,7 +317,7 @@ impl<'t> Lowering<'t> {
         let (class_local, value_local) = (self.fresh_name("class"), self.fresh_name("object"));
         let class_var = self.synth(ExprKind::Var(class_local.clone()), pos, Type::JavaClass);
         let value_var = self.synth(ExprKind::Var(value_local.clone()), pos, x.ty);
-        let Some(test) = self.annotation_object_test(&class_var, &value_var) else {
+        let Some(test) = self.annotation_object_test(self.copy(&class_var), &value_var) else {
             return ExprKind::Builtin(Builtin::ClassIsInstance, vec![class, x]);
         };
         let plain = ExprKind::Builtin(Builtin::ClassIsInstance, vec![class_var, value_var]);

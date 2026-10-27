@@ -3641,6 +3641,43 @@ fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
 }
 
 #[test]
+fn a_census_approximates_the_null_pointer_message_that_is_not_certain() {
+    // As above, with `--approximate-messages`: `len`'s message is the JVM's words for what failed
+    // alone, and the census lists it rather than rejecting `len`.
+    let dir = write_sources(
+        "census_approximated_messages",
+        &[(
+            "Main.java",
+            "public class Main {\n    static int len(String s, boolean b) {\n        try { if (b) s = null; } finally { System.out.print(s.length()); }\n        return 0;\n    }\n    public static void main(String[] args) {\n        String t = args.length > 3 ? \"a\" : null;\n        try { System.out.println(t.length() + len(t, false)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        approximate_messages: true,
+        ..Default::default()
+    };
+    let census = census(&program);
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 2 pieces; 2 (100.0%) translate, 0 rejected.",
+            "  approximates the message of the `NullPointerException` of this dereference, 1 piece\n          at Main.java:3:61\n",
+        ],
+    );
+    assert_eq!(census.json["approximatedMessages"][0]["pieces"], 1);
+    let rust = census.modules.expect("a translation").one_file();
+    assert_contains(
+        &rust,
+        &[
+            "try_non_null_message(s.as_deref(), \"Cannot invoke \\\"String.length()\\\"\")",
+            "Cannot invoke \\\"String.length()\\\" because \\\"<local1>\\\" is null",
+        ],
+    );
+}
+
+#[test]
 fn a_library_class_reached_only_by_name_has_null_pointer_messages() {
     // No code names `q.Hidden`, so javac would not compile it from the library's root: the
     // names of its class file come from compiling the files that the translation reached.
@@ -3733,6 +3770,30 @@ fn a_census_gives_the_value_of_a_native_that_the_runtime_lacks_the_type_of_the_c
             "let never: java::JString = unreachable!(\"the native method p.Main.name()java.lang.String never runs\"); never }",
         ],
     );
+}
+
+#[test]
+fn a_census_stubs_the_bridge_of_a_lambda_whose_parameter_type_is_not_supported() {
+    // The lambda's own `accept(ProcessBuilder)` is a stub with an `int` for the type; its bridge,
+    // the interface's `accept(Object)`, ends the program the same way rather than pass the object
+    // on (`LogRecord`'s lambdas over `StackWalker.StackFrame`).
+    let dir = write_sources(
+        "census_stubbed_bridge",
+        &[(
+            "p/Main.java",
+            "package p;\ninterface Sink<T> {\n    void accept(T t);\n}\npublic class Main {\n    static <T> void feed(Sink<T> s, T t) {\n        if (t != null) s.accept(t);\n    }\n    public static void main(String[] a) {\n        Sink<ProcessBuilder> print = b -> System.out.println(b);\n        feed(print, null);\n        System.out.println(print == print);\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let rust = census(&program).modules.expect("a translation").one_file();
+    let stub = "type `java.lang.ProcessBuilder` not supported yet (line 10)\")";
+    assert_eq!(rust.matches(stub).count(), 2, "{rust}");
+    assert!(!rust.contains("accept_i32(t"), "{rust}");
 }
 
 #[test]

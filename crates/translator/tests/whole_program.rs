@@ -526,9 +526,11 @@ fn uncertain_package_lookups_are_rejected() {
 }
 
 /// What a translation's secure random numbers cannot do throws (see
-/// `corpus/whole-program/SecureRandoms.java` for what they do): `DRBG`, whose mechanisms read
-/// the security properties, and a seed source that is not a file, which would open a connection
-/// (the translation's `java.security.egd` is unset, but the seed generator's code reads it).
+/// `corpus/whole-program/SecureRandoms.java` for what they do): `DRBG`, whose class the SUN
+/// provider registers but the translation leaves out, so its lookup fails as one of a class
+/// missing from the class path does, and a seed source that is not a file, which would open a
+/// connection (the translation's `java.security.egd` is unset, but the seed generator's code
+/// reads it).
 #[test]
 fn what_secure_randoms_cannot_do_throws() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
@@ -559,9 +561,72 @@ public class Main {
         .unwrap();
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
     let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
-    for wanted in ["DRBG SecureRandom not supported yet", "not a file, which the translation does not read"] {
+    for wanted in [
+        "\"sun.security.provider.DRBG\"",
+        ", which is not in the translation",
+        "not a file, which the translation does not read",
+    ] {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
+}
+
+/// A library's annotation type that reflection reads on a member is lowered from its
+/// declaration, though only an annotation names it: jspecify's `@Nullable`, on the type only
+/// (`@Target(TYPE_USE)`), is never among a field's annotations, as log4j's `PluginBuilder` reads
+/// them, while the library's `@Attribute` is.
+#[test]
+fn a_library_annotation_on_the_type_only_is_not_a_members() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-library-annotations");
+    let _ = std::fs::remove_dir_all(&work);
+    let (sources, annotations) = (work.join("src"), work.join("lib"));
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::create_dir_all(annotations.join("org/example")).unwrap();
+    for (name, target) in [("Nullable", "TYPE_USE"), ("Attribute", "FIELD")] {
+        let value = if name == "Attribute" { "String value();" } else { "" };
+        let java = format!(
+            "package org.example;\nimport java.lang.annotation.*;\n\
+             @Retention(RetentionPolicy.RUNTIME)\n@Target(ElementType.{target})\n\
+             public @interface {name} {{ {value} }}\n"
+        );
+        std::fs::write(annotations.join(format!("org/example/{name}.java")), java).unwrap();
+    }
+    let java = "import java.lang.annotation.Annotation;
+import org.example.Attribute;
+import org.example.Nullable;
+public class Main {
+    static class Builder {
+        @Attribute(\"name\") @Nullable String name;
+        @Nullable Integer size;
+    }
+    public static void main(String[] args) throws Exception {
+        for (String n : new String[] {\"name\", \"size\"}) {
+            for (Annotation a : Builder.class.getDeclaredField(n).getDeclaredAnnotations()) {
+                System.out.println(n + \" \" + ((Attribute) a).value());
+            }
+        }
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(&annotations)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    assert!(rust.contains("Main.Builder#name@org.example.Attribute"), "no `@Attribute` of the field `name`");
+    assert!(!rust.contains("@org.example.Nullable"), "`@Nullable` is made as an annotation of a member");
 }
 
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see

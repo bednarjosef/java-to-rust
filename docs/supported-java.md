@@ -327,7 +327,7 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
 
 - Comparing the classes of the program's objects (`getClass() == o.getClass()`, `x.getClass() ==
   Dog.class`) is a `matches!` of the variant. Any other class is a `java::Class` value, `Copy` and
-  equal by binary name, with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
+  equal by binary name (`equals` of an object that is not a class is false), with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
   `isArray`, `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value
   carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests.
   `getModifiers`, `isMemberClass`, `isLocalClass`, `isAnonymousClass`, `getEnclosingClass` and

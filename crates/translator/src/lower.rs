@@ -1177,11 +1177,12 @@ impl<'t> Lowering<'t> {
         // `printf` returns its stream, which the translation has no type for; it is a statement.
         let ty = match kind {
             ExprKind::Builtin(Builtin::Print, _) if node.kind() == "METHOD_INVOCATION" => Type::Void,
-            // A `CharSequence` conditional of strings stays a string (see `CONDITIONAL_EXPRESSION`).
+            // A `CharSequence` conditional of strings, or of a string and null, stays a string (see
+            // `CONDITIONAL_EXPRESSION`).
             ExprKind::Conditional(_, ref yes, ref no)
                 if node.java_type() == "java.lang.CharSequence"
-                    && yes.ty == Type::String
-                    && no.ty == Type::String =>
+                    && matches!(yes.ty, Type::String | Type::Null)
+                    && matches!(no.ty, Type::String | Type::Null) =>
             {
                 Type::String
             }
@@ -1285,7 +1286,18 @@ impl<'t> Lowering<'t> {
 
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
-        let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        let Some(mut symbol) = node.symbol() else { return unsupported(node, "this call") };
+        // A method that the JDK declares in `AccessibleObject` (`isAccessible`), called on the
+        // translator's `Method`, `Field` or `Constructor`, which declare it themselves.
+        if symbol.owner == "java.lang.reflect.AccessibleObject"
+            && !symbol.is_static
+            && let Some(receiver) = select.0["expression"]["javaType"].as_str()
+            && let receiver = receiver.split('<').next().unwrap_or(receiver)
+            && is_standard(receiver)
+            && self.method_named(receiver, symbol.name, symbol.ty).is_some()
+        {
+            symbol.owner = receiver;
+        }
         self.note_call(node, &symbol, select);
         if let Some(kind) = self.handle_access(node, &symbol)? {
             return Ok(kind);

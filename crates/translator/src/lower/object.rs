@@ -430,7 +430,7 @@ impl<'t> Lowering<'t> {
     /// `Object`'s abstract `equals` and `hashCode`, appended to the lowered methods, which must be
     /// exactly the declared ones; and the program's overrides of them.
     pub(super) fn object_methods(&self, methods: &mut Vec<Method>) -> Result<(), Error> {
-        self.inherited_implementations(methods);
+        let inherited = self.inherited_implementations(methods);
         let Some(at) = self.object else { return Ok(()) };
         debug_assert_eq!(methods.len(), at.equals);
         let object = Type::class(OBJECT);
@@ -593,7 +593,12 @@ impl<'t> Lowering<'t> {
                 methods.push(self.default_get_chars(t, found[0], found[1], s.methods));
             }
         }
-        self.bridges(methods)
+        self.bridges(methods)?;
+        for (c, m, x) in inherited {
+            let bridge = self.bridge(c, &methods[m], m, &methods[x], x);
+            methods.push(bridge);
+        }
+        Ok(())
     }
 
     /// `CharSequence`'s default `getChars(srcBegin, srcEnd, dst, dstBegin)` in class `t`, as the
@@ -685,10 +690,14 @@ impl<'t> Lowering<'t> {
 
     /// The methods that a class inherits from a superclass that does not implement the interface
     /// of the class whose method they implement (javac lists these with the class): they override
-    /// that method too, which gives the class its implementation.
-    fn inherited_implementations(&self, methods: &mut [Method]) {
+    /// that method too, which gives the class its implementation. Where the superclass implements
+    /// the interface but its method implements that one only in the class (a `"bridge"`), the
+    /// class gets a bridge of its own instead, returned as (class, method, interface method):
+    /// another subclass may implement the interface method otherwise.
+    fn inherited_implementations(&self, methods: &mut [Method]) -> Vec<(usize, usize, usize)> {
         let find = |owner: &str, name: &str, sig: &str| self.method_named(owner, name, sig);
-        for t in &self.types {
+        let mut bridges = Vec::new();
+        for (c, t) in self.types.iter().enumerate() {
             let Some(list) = t.node.get("symbol").and_then(|s| s.0["inherits"].as_array()) else { continue };
             for entry in list {
                 let (Some(name), Some(owner), Some(sig)) =
@@ -702,13 +711,15 @@ impl<'t> Lowering<'t> {
                 else {
                     continue;
                 };
-                if let (Some(m), Some(x)) = (find(owner, name, sig), find(i_owner, name, i_sig))
-                    && !methods[m].overrides.contains(&x)
-                {
+                let Some((m, x)) = find(owner, name, sig).zip(find(i_owner, name, i_sig)) else { continue };
+                if entry["bridge"].as_bool() == Some(true) {
+                    bridges.push((c, m, x));
+                } else if !methods[m].overrides.contains(&x) {
                     methods[m].overrides.push(x);
                 }
             }
         }
+        bridges
     }
 
     /// The type of `Object` and the runtime classes, appended to the program's types, which every
@@ -1039,7 +1050,7 @@ impl<'t> Lowering<'t> {
                 methods[b].overrides.push(o);
                 continue;
             }
-            let bridge = self.bridge(&methods[i], i, &methods[o], o);
+            let bridge = self.bridge(methods[i].class, &methods[i], i, &methods[o], o);
             written.push((i, methods.len()));
             methods.push(bridge);
         }
@@ -1053,11 +1064,12 @@ impl<'t> Lowering<'t> {
             && a.params.iter().zip(&b.params).all(|(p, q)| p.ty == q.ty)
     }
 
-    /// The bridge in the class of method `m` (index `i`) for the method `o` (index `index`) that it
-    /// overrides: `o`'s signature, and a body that calls `m` with the arguments converted.
-    fn bridge(&self, m: &Method, i: usize, o: &Method, index: usize) -> Method {
+    /// The bridge in class `class` (that of method `m`, or a subclass that inherits it) for the
+    /// method `o` (index `index`) that `m` (index `i`) implements there: `o`'s signature, and a
+    /// body that calls `m` with the arguments converted.
+    fn bridge(&self, class: usize, m: &Method, i: usize, o: &Method, index: usize) -> Method {
         let pos = m.pos;
-        let name = &self.types[m.class].name;
+        let name = &self.types[class].name;
         let this_ty = if self.enum_index(name).is_some() { Type::enum_type(name) } else { Type::class(name) };
         let args = o
             .params
@@ -1067,6 +1079,12 @@ impl<'t> Lowering<'t> {
                 let var = self.synth(ExprKind::Var(p.name.clone()), pos, p.ty);
                 if p.ty == to.ty {
                     return var;
+                }
+                // An array, a string or a box passed on as the `Object` of an erased type
+                // parameter (`copyInto(int[], int)` of `Node.OfInt` calling `copyInto(T_ARR, int)`
+                // of `Nodes.EmptyNode`) is held in `Object`'s variant for it.
+                if Self::is_object(to.ty) {
+                    return self.convert(var, to.ty);
                 }
                 // An array that the bridge casts to another array type (`Integer[]` for the
                 // `Object[]` of `T[]`, as `Node.OfInt.copyInto` takes it) is one array that
@@ -1080,7 +1098,30 @@ impl<'t> Lowering<'t> {
         let call =
             ExprKind::MethodCall { receiver, name: m.name.clone(), args, resolved: Some(i), is_super: false };
         let call = self.synth(call, pos, m.ret);
-        let body = if o.ret == Type::Void {
+        // A census stub of a method whose types are not supported has `int`s for them, which no
+        // bridge passes a reference on as: the bridge ends the program as the stub does. (An
+        // enum's constant is no reference either, but a method taking one is no stub.)
+        let stub = matches!(
+            &m.body[..],
+            [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
+        );
+        let stubbed = stub
+            && o.params.iter().zip(&m.params).any(|(p, to)| p.ty.is_reference() && !to.ty.is_reference());
+        let body = if stubbed {
+            let message = match &m.body[..] {
+                [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, args), .. })] => {
+                    args.iter().find_map(|a| match &a.kind {
+                        ExprKind::Str(message) => {
+                            Some(self.synth(ExprKind::Str(message.clone()), pos, Type::String))
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            let never = ExprKind::Builtin(Builtin::NoObject { class }, message.into_iter().collect());
+            vec![Stmt::Expr(self.synth(never, pos, Type::Void))]
+        } else if o.ret == Type::Void {
             vec![Stmt::Expr(call)]
         } else {
             vec![Stmt::Return(Some(self.convert(call, o.ret)), pos)]
@@ -1094,7 +1135,7 @@ impl<'t> Lowering<'t> {
             is_main: false,
             is_static: false,
             is_ctor: false,
-            class: m.class,
+            class,
             pos,
             is_abstract: false,
             is_synchronized: false,

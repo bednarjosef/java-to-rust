@@ -94,6 +94,13 @@ final class Method {
         return true;
     }
 
+    // Every member is accessible, as `canAccess` says: the table's members are shared by every
+    // lookup, so there is no flag of one lookup's for `setAccessible` to set.
+    @Deprecated
+    public boolean isAccessible() {
+        return true;
+    }
+
     public Object invoke(Object obj, Object... args) throws IllegalAccessException, InvocationTargetException {
         Object[] arguments = Constructor.arguments(parameterTypes, args);
         if ((modifiers & 8) == 0) {
@@ -372,6 +379,13 @@ final class Field {
     }
 
     public boolean canAccess(Object obj) {
+        return true;
+    }
+
+    // Every member is accessible, as `canAccess` says: the table's members are shared by every
+    // lookup, so there is no flag of one lookup's for `setAccessible` to set.
+    @Deprecated
+    public boolean isAccessible() {
         return true;
     }
 
@@ -819,6 +833,13 @@ final class Constructor<T> {
     }
 
     public boolean canAccess(Object obj) {
+        return true;
+    }
+
+    // Every member is accessible, as `canAccess` says: the table's members are shared by every
+    // lookup, so there is no flag of one lookup's for `setAccessible` to set.
+    @Deprecated
+    public boolean isAccessible() {
         return true;
     }
 

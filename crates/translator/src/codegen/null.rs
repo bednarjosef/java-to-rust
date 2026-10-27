@@ -44,6 +44,18 @@ impl<'a> Gen<'a> {
         {
             return self.nullable(value);
         }
+        // A copy of a `String[]` as an `Object[]` or back is null where the array is, which a
+        // narrowed variable is not (see `array_conversion`).
+        if let ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) = &e.kind {
+            return self.nullable(&args[0]);
+        }
+        // So is an assignment of a value that is not null to a variable that may be (see
+        // `Gen::expr_of`): its value is the assigned one.
+        if let ExprKind::Assign { op: None, target: Place::Var(target), value } = &e.kind
+            && self.optional_var(self.method, e.ty, target)
+        {
+            return self.nullable(value);
+        }
         maybe_null(self.facts, self.method, e)
     }
 
@@ -673,6 +685,19 @@ impl<'a> Gen<'a> {
     /// non-null, so it is bound with `let Some(s) = s.as_deref() else { .. };` (`s.clone()` for an
     /// array). Returns the name
     /// of `s`, or `None`, emitting nothing, when `stmt` is not of that form or `rest` assigns `s`.
+    /// Whether the block `body` of a `do`-`while` may narrow a variable that its condition `cond`
+    /// reads (see `early_null_exit`): the narrowed name is the body's to its end, and the
+    /// condition, written after it, reads the variable itself.
+    pub(super) fn narrows_for(&self, body: &'a Stmt, cond: &Expr) -> bool {
+        let Stmt::Block(stmts) = body else { return false };
+        stmts.iter().any(|s| match s {
+            Stmt::If { cond: test, otherwise: None, .. } => self
+                .null_test_var(test)
+                .is_some_and(|(name, then_non_null, _)| !then_non_null && mentions(cond, name)),
+            _ => false,
+        })
+    }
+
     pub(super) fn early_null_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> Option<&'a str> {
         let Stmt::If { cond, then, otherwise: None } = stmt else { return None };
         let (name, then_non_null, ty) = self.null_test_var(cond)?;

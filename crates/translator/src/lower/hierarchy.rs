@@ -106,6 +106,10 @@ impl<'t> Lowering<'t> {
         }
         self.object_array(node, ty)?;
         let value = self.array_test(type_node, value, ty, type_node.java_type())?;
+        let raw = super::captures::raw(type_node.java_type());
+        if self.annotation_types.contains_key(&raw) {
+            return self.annotation_instance_of(node, value, ty, &raw, binding);
+        }
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
     }
 

@@ -3493,8 +3493,8 @@ impl<'t> Walk<'t> {
     /// anonymous classes declared inside are not scanned with it: their members are reached as
     /// those of any other class, a constructor by its `new` and an instance method by a call or
     /// by dispatch once the class is instantiated. (The body of an enum constant is not such a
-    /// class, see `local_classes`, and is scanned with its constant.) Annotations are skipped:
-    /// without reflection they do nothing at run time. So is the branch of an `if` or a `?:`
+    /// class, see `local_classes`, and is scanned with its constant.) Of an annotation only its
+    /// type is: without reflection annotations do nothing at run time. So is the branch of an `if` or a `?:`
     /// that never runs (`live_branch`), and the `then` branch of an `if` that tests for a class
     /// without objects waits for the class to have some (`objectless`).
     fn scan(&mut self, value: &'t Value) {
@@ -3511,6 +3511,10 @@ impl<'t> Walk<'t> {
         let kind = text(value, "kind");
         let call = kind == "METHOD_INVOCATION";
         if matches!(kind, "ANNOTATION" | "TYPE_ANNOTATION") {
+            // Its type alone, whose declaration says whether reflection finds it on a member
+            // (`lower::annotation_values`): jspecify's `@Nullable` before a field's type is on
+            // the type only.
+            self.scan(&value["annotationType"]);
             return;
         }
         if CLASS_KINDS.contains(&kind) && self.classes.contains_key(&class_name(value)) {

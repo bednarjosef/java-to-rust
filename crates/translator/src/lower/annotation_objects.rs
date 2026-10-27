@@ -4,8 +4,9 @@
 //! annotation itself (`java/patches/sun/reflect/annotation`). Its class is not the annotation
 //! type's, which is not translated, so a class test of an object that may be one also asks
 //! whether it is one holding that type: `c.isInstance(x)` is `x instanceof
-//! AnnotationInvocationHandler h && h.type == c || c.isInstance(x)`, and `c.cast(x)` checks the
-//! same. Only such an object can be of an annotation type: a class implementing one is rejected.
+//! AnnotationInvocationHandler h && h.type == c || c.isInstance(x)`, `c.cast(x)` checks the
+//! same, and `x instanceof A`, of an annotation type `A`, is `x instanceof
+//! AnnotationInvocationHandler h && h.type == A.class`. Only such an object can be of an annotation type: a class implementing one is rejected.
 //! Its `equals` compares the values of the type's members, which the native
 //! `TranslatedAnnotations.members0(type)` names: a chain of tests of the type against the
 //! program's annotation types, each giving the names of its elements in declaration order.
@@ -18,8 +19,8 @@ const MEMBERS: &str = "sun.reflect.annotation.TranslatedAnnotations";
 impl<'t> Lowering<'t> {
     /// `value instanceof AnnotationInvocationHandler h && h.type == class`, for a value that may
     /// be an annotation object (see the module's comment); `None` when the program has none, or
-    /// when `value`'s type cannot hold one. `class` and `value` are reads of locals.
-    pub(super) fn annotation_object_test(&self, class: &Expr, value: &Expr) -> Option<Expr> {
+    /// when `value`'s type cannot hold one. `value` is a read of a local.
+    pub(super) fn annotation_object_test(&self, class: Expr, value: &Expr) -> Option<Expr> {
         let handler = self.type_index(HANDLER)?;
         let may_hold = match value.ty {
             Type::Class(name, _) if name == OBJECT => true,
@@ -38,9 +39,34 @@ impl<'t> Lowering<'t> {
         let object = self.synth(ExprKind::Var(binding), pos, ty);
         let field = ExprKind::Field { object: Box::new(object), name: "type".to_string() };
         let held = self.synth(field, pos, Type::JavaClass);
-        let same = ExprKind::Builtin(Builtin::ClassMethod(ClassOp::Equals), vec![held, self.copy(class)]);
+        let same = ExprKind::Builtin(Builtin::ClassMethod(ClassOp::Equals), vec![held, class]);
         let same = self.synth(same, pos, Type::Boolean);
         Some(self.synth(ExprKind::Binary(BinOp::And, Box::new(test), Box::new(same)), pos, Type::Boolean))
+    }
+
+    /// `value instanceof A`, `A` an annotation type, whose values are `Annotation`s here (`ty`):
+    /// `value instanceof Annotation a && a instanceof AnnotationInvocationHandler h && h.type ==
+    /// A.class`, `a` the pattern's binding if it has one.
+    pub(super) fn annotation_instance_of(
+        &self,
+        node: Node<'t>,
+        value: Expr,
+        ty: Type,
+        name: &str,
+        binding: Option<String>,
+    ) -> Result<ExprKind, Error> {
+        let pos = value.pos;
+        let binding = binding.unwrap_or_else(|| self.fresh_name("annotation"));
+        let var = self.synth(ExprKind::Var(binding.clone()), pos, ty);
+        self.annotation_classes.borrow_mut().insert(name.to_string());
+        let class = ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new());
+        let class = self.synth(class, pos, Type::JavaClass);
+        let Some(held) = self.annotation_object_test(class, &var) else {
+            return unsupported(node, &format!("`instanceof` of the annotation type `{name}`"));
+        };
+        let test = ExprKind::InstanceOf { value: Box::new(value), ty, binding: Some(binding) };
+        let test = self.synth(test, pos, Type::Boolean);
+        Ok(ExprKind::Binary(BinOp::And, Box::new(test), Box::new(held)))
     }
 
     /// A call of the native of `TranslatedAnnotations`, with its arguments (see the module's
