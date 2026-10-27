@@ -739,6 +739,16 @@ impl Uses {
                                 text(symbol, "type"),
                             ));
                         }
+                        // The JDK's own shutdown hooks are the translator's `Thread`'s (`lower.rs`).
+                        if (owner.as_str(), text(symbol, "name").as_str())
+                            == ("jdk.internal.access.JavaLangAccess", "registerShutdownHook")
+                        {
+                            self.members.insert((
+                                "java.lang.Thread".into(),
+                                "registerShutdownHook".into(),
+                                text(symbol, "type"),
+                            ));
+                        }
                         // The carrier thread is the current one (`lower.rs`).
                         if (owner.as_str(), text(symbol, "name").as_str())
                             == ("jdk.internal.access.JavaLangAccess", "currentCarrierThread")

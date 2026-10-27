@@ -1572,6 +1572,19 @@ impl<'t> Lowering<'t> {
                     self.template_method("java.lang.Thread", "currentThread", "()java.lang.Thread");
                 return Ok(ExprKind::Call { name: "currentThread".to_string(), args, resolved });
             }
+            // The JDK's own shutdown hooks (`DeleteOnExitHook`'s) are kept by the translator's
+            // `Thread` too, which runs them in the order of their slots around the program's.
+            ("jdk.internal.access.JavaLangAccess", "registerShutdownHook") => {
+                let resolved = self.template_method("java.lang.Thread", "registerShutdownHook", symbol.ty);
+                if resolved.is_none() {
+                    return unsupported(
+                        node,
+                        "`JavaLangAccess.registerShutdownHook` outside a whole program",
+                    );
+                }
+                let args = self.convert_args(resolved, args)?;
+                return Ok(ExprKind::Call { name: "registerShutdownHook".to_string(), args, resolved });
+            }
             // Any other method of the JVM's `JavaLangAccess`, whose object is null in a
             // translated program: rejected where it can run, rather than a `NullPointerException`
             // there. The branches for virtual threads never run (`program::FALSE_INSTANCE_CALLS`).
