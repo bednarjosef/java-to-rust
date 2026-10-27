@@ -3271,10 +3271,9 @@ impl<'t> Walk<'t> {
                 | "java.lang.Long"
                 | "java.lang.Float"
                 | "java.lang.Double"
-        ) {
-            if let Some(&(class, name, signature)) = CONSTANT_DESC_METHODS.iter().find(|m| m.1 == key.1) {
-                self.work.push(Item::Method((class.into(), name.into(), signature.into())));
-            }
+        ) && let Some(&(class, name, signature)) = CONSTANT_DESC_METHODS.iter().find(|m| m.1 == key.1)
+        {
+            self.work.push(Item::Method((class.into(), name.into(), signature.into())));
         }
         if key.0 == "java.lang.Enum"
             && key.1 == "valueOf"
