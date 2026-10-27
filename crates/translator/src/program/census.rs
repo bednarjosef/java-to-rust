@@ -49,7 +49,8 @@ use super::checkpoint;
 use super::survey::{self, Part, Piece};
 use super::{Program, ProgramError, Reach, Reaching, Writes, class_file_names, load, source_files};
 use crate::ast::{
-    Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt, visit_stmt_exprs,
+    Builtin, Class, Error, Expr, ExprKind, Method, PROVIDED_UNIT, Pos, Stmt, Type, visit_expr, visit_stmt,
+    visit_stmt_exprs,
 };
 use crate::output::ModuleTree;
 use crate::value::{Value, json};
@@ -642,15 +643,19 @@ impl Stubs {
     /// nothing to stub.
     fn stub(&mut self, class: &mut Class, units: &[Option<usize>], error: Error) -> Rejection {
         let pos = error.pos;
-        // An error at a position with its unit is in that unit's code alone (`Pos::unit`).
-        let known = pos.unit.map(|u| u as usize);
-        let mut rejection = Rejection { unit: known, anchor: None, error };
+        // An error at a position with its unit is in that unit's code alone (`Pos::unit`), or in
+        // the code that lowering provides alone (`PROVIDED_UNIT`).
+        let known = pos.unit;
+        let mut rejection = Rejection { unit: pos.source_unit(), anchor: None, error };
         self.owner = None;
         // The code that lowering provides has no position of its own.
         if pos == Pos::default() {
             return rejection;
         }
-        let in_unit = |t: usize| known.is_none() || units.get(t).copied().flatten() == known;
+        let in_unit = |t: usize| {
+            let unit = units.get(t).copied().flatten();
+            known.is_none_or(|k| unit.map_or(PROVIDED_UNIT, |u| u as u32) == k)
+        };
         let ends_rejected = self.ends_rejected;
         let at = |e: &Expr| {
             let mut here = false;
@@ -816,7 +821,7 @@ fn thrown_unsupported(class: &Class, marker: &str) -> Vec<Rejection> {
             && let [Expr { kind: ExprKind::Str(message), .. }] = args.as_slice()
             && message.contains(marker)
         {
-            let unit = x.pos.unit.map(|u| u as usize);
+            let unit = x.pos.source_unit();
             let error = Error { pos: x.pos, message: message.clone() };
             found.push(Rejection { unit, anchor, error });
         }
@@ -844,7 +849,7 @@ fn computed_charset_names(class: &Class) -> Vec<Rejection> {
         if !matches!(lookup.name.kind, ExprKind::Str(_)) {
             let pos = lookup.call.pos;
             let message = format!("`{}` of a charset name known only at run time", lookup.what);
-            let unit = pos.unit.map(|u| u as usize);
+            let unit = pos.source_unit();
             found.push(Rejection { unit, anchor: lookup.method, error: Error { pos, message } });
         }
     });
@@ -858,17 +863,17 @@ fn approximated_messages(places: Vec<(Pos, Option<Pos>)>) -> Vec<Rejection> {
         .into_iter()
         .map(|(pos, anchor)| {
             let message = "the message of the `NullPointerException` of this dereference".to_string();
-            Rejection { unit: pos.unit.map(|u| u as usize), anchor, error: Error { pos, message } }
+            Rejection { unit: pos.source_unit(), anchor, error: Error { pos, message } }
         })
         .collect()
 }
 
 /// Gives the rejections that have a position but no unit (an error that lowering met outside the
 /// code of a class, or one that no stub took away) the unit with code at that position, when one
-/// unit alone has code there.
+/// unit alone has code there; not those in the code that lowering provides.
 fn locate<'a>(trees: &[&Value], rejections: impl Iterator<Item = &'a mut Rejection>) {
     let mut rejections: Vec<&mut Rejection> =
-        rejections.filter(|r| r.unit.is_none() && r.error.pos != Pos::default()).collect();
+        rejections.filter(|r| r.unit.is_none() && r.error.pos != Pos::default() && !provided(r)).collect();
     if rejections.is_empty() {
         return;
     }
@@ -907,6 +912,11 @@ fn locate<'a>(trees: &[&Value], rejections: impl Iterator<Item = &'a mut Rejecti
             rejection.unit = units.first().copied();
         }
     }
+}
+
+/// Whether `rejection` is in the code that lowering provides (`PROVIDED_UNIT`).
+fn provided(rejection: &Rejection) -> bool {
+    rejection.error.pos.unit == Some(PROVIDED_UNIT)
 }
 
 /// The largest id of an expression of the program.

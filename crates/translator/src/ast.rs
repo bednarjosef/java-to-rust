@@ -340,8 +340,10 @@ impl fmt::Display for Type {
 /// `unit` is the source file it is in, as the index of javac's unit, where it is known: the
 /// program stamps it on the code of each class once lowering is done (`program::stamp_units`), so
 /// that an error an analysis or the generator reports at a method, a statement or an expression
-/// names its file, where a line and column alone may be those of code in another file. Positions compare by line and
-/// column alone, as those that javac's class files give (`javac::bytecode_names`) have no unit.
+/// names its file, where a line and column alone may be those of code in another file. The code
+/// of the classes that lowering provides (`java/Reflection.java`, the standard exceptions) is
+/// stamped `PROVIDED_UNIT`. Positions compare by line and column alone, as those that javac's
+/// class files give (`javac::bytecode_names`) have no unit.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default)]
 pub struct Pos {
     pub line: usize,
@@ -349,9 +351,19 @@ pub struct Pos {
     pub unit: Option<u32>,
 }
 
+/// The `Pos::unit` of the code of the classes that lowering provides, which are in no unit of
+/// javac's.
+pub const PROVIDED_UNIT: u32 = u32::MAX;
+
 impl Pos {
     pub fn new(line: usize, column: usize) -> Pos {
         Pos { line, column, unit: None }
+    }
+
+    /// The index of javac's unit that the position is in, where it is known: `None` too in the
+    /// code that lowering provides.
+    pub fn source_unit(self) -> Option<usize> {
+        self.unit.filter(|&u| u != PROVIDED_UNIT).map(|u| u as usize)
     }
 
     /// Whether `self` and `other` are the same place: the same line and column, in the same unit
@@ -593,6 +605,24 @@ pub const CLASS_VALUE_INTERFACES: [&str; 4] = [
     "java.lang.reflect.Type",
     "java.lang.reflect.GenericDeclaration",
 ];
+
+/// The interfaces that `java.lang.Class` implements in Java.
+const CLASS_INTERFACES: [&str; 7] = [
+    "java.io.Serializable",
+    "java.lang.constant.Constable",
+    "java.lang.invoke.TypeDescriptor",
+    "java.lang.invoke.TypeDescriptor.OfField",
+    "java.lang.reflect.AnnotatedElement",
+    "java.lang.reflect.GenericDeclaration",
+    "java.lang.reflect.Type",
+];
+
+/// Whether `name` is an interface that `java.lang.Class` implements in Java but the runtime's
+/// classes do not (one of `CLASS_INTERFACES` outside `CLASS_VALUE_INTERFACES`): a value that may
+/// be a class cannot be cast to it or tested against it (`codegen::dispatch`).
+pub fn class_only_interface(name: &str) -> bool {
+    CLASS_INTERFACES.contains(&name) && !CLASS_VALUE_INTERFACES.contains(&name)
+}
 
 /// The runtime class whose values are of type `ty`, a primitive standing for its box.
 pub fn runtime_name(ty: Type) -> Option<&'static str> {

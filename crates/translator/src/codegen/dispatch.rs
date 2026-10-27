@@ -60,18 +60,6 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
 
-/// The interfaces that `java.lang.Class` implements in Java, of which the runtime's classes
-/// implement only `CLASS_VALUE_INTERFACES`.
-const CLASS_INTERFACES: &[&str] = &[
-    "java.io.Serializable",
-    "java.lang.constant.Constable",
-    "java.lang.invoke.TypeDescriptor",
-    "java.lang.invoke.TypeDescriptor.OfField",
-    "java.lang.reflect.AnnotatedElement",
-    "java.lang.reflect.GenericDeclaration",
-    "java.lang.reflect.Type",
-];
-
 /// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
 /// generation and every translation.
 pub(super) fn receiver_key(classes: &[usize]) -> u64 {
@@ -670,7 +658,7 @@ impl<'a> Gen<'a> {
     /// `CLASS_VALUE_INTERFACES`): the cast or the test is rejected.
     fn rejects_class_as(&mut self, value: &Expr, to: Type) -> bool {
         let Type::Class(name, _) = to else { return false };
-        if !CLASS_INTERFACES.contains(&name) || CLASS_VALUE_INTERFACES.contains(&name) {
+        if !crate::ast::class_only_interface(name) {
             return false;
         }
         let holds_class = value.ty == Type::JavaClass
