@@ -20,7 +20,7 @@
 use super::Program;
 use super::reach::{
     CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, component_array, created_by_name, has_flag,
-    instanceof_guard, live_branch, members, outside, provided, replaced, runtime_arrays_call,
+    instanceof_guard, literal_array, live_branch, members, outside, provided, replaced, runtime_arrays_call,
     runtime_stream_call, strip_arguments, symbol_type, text, untranslated,
 };
 use crate::ast::{Pos, runtime_native};
@@ -325,6 +325,11 @@ impl Census {
             // An object created from a class name translates (`reach::by_name`): only the name is
             // code.
             Value::Object(_) if let Some(name) = created_by_name(node) => self.body(name, scan),
+            // A new array of a class literal's class cast to its type is a new array of it.
+            Value::Object(_) if let Some(lengths) = literal_array(node) => {
+                scan.calls.insert("Array.newInstance".to_string());
+                lengths.into_iter().for_each(|length| self.body(length, scan));
+            }
             // A new array of another array's class is a new array of its type.
             Value::Object(_) if let Some((array, length)) = component_array(node) => {
                 scan.calls.insert("Array.newInstance".to_string());

@@ -1644,6 +1644,36 @@ pub fn component_array(node: &Value) -> Option<(&Value, &Value)> {
     text(array, "javaType").ends_with("[]").then_some((array, length))
 }
 
+/// The lengths of `(C[]..[]) Array.newInstance(C.class, n1, .., nk)`, a new array of `k`
+/// dimensions of a class that a literal names, cast to that array type (`BlockPatternBuilder`'s
+/// `(Predicate<BlockInWorld>[][][]) Array.newInstance(Predicate.class, a, b, c)`), which is
+/// `new C[n1]..[nk]` (see `lower::arrays::literal_array`): it reaches what the lengths and the
+/// type do, and not `java.lang.reflect.Array`'s `multiNewArray`, a native of the JVM.
+pub fn literal_array(cast: &Value) -> Option<Vec<&Value>> {
+    if text(cast, "kind") != "TYPE_CAST" {
+        return None;
+    }
+    let mut call = &cast["expression"];
+    while text(call, "kind") == "PARENTHESIZED" {
+        call = &call["expression"];
+    }
+    let symbol = &call["symbol"];
+    if text(call, "kind") != "METHOD_INVOCATION"
+        || text(symbol, "owner") != "java.lang.reflect.Array"
+        || text(symbol, "name") != "newInstance"
+    {
+        return None;
+    }
+    let (class, lengths) = call["arguments"].as_array()?.split_first()?;
+    let class = literal_class(class)?;
+    let integral = |l: &&Value| matches!(text(l, "javaType"), "int" | "short" | "char" | "byte");
+    if lengths.is_empty() || lengths.len() > 255 || !lengths.iter().all(|l| integral(&l)) {
+        return None;
+    }
+    let array = format!("{class}{}", "[]".repeat(lengths.len()));
+    (strip_arguments(text(cast, "javaType")) == array).then(|| lengths.iter().collect())
+}
+
 /// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
 /// source, such as `Arrays.sort` of an `int[]`.
 pub fn runtime_arrays_call(node: &Value) -> bool {
@@ -3820,6 +3850,13 @@ impl<'t> Walk<'t> {
             self.waiting_branches.entry(class.clone()).or_default().push(self.branches.len());
             self.branches.push(branch);
             self.reach.without_objects.insert(class);
+            return;
+        }
+        if let Some(lengths) = literal_array(value) {
+            self.scan(&value["type"]);
+            for length in lengths {
+                self.scan(length);
+            }
             return;
         }
         if call && let Some((array, length)) = component_array(value) {

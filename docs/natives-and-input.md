@@ -120,7 +120,12 @@ reference, as a store into it does. The failures without a message (`void`, a nu
 with the class's constructor without arguments, so `getMessage()` is null. The JDK's `(T[])
 Array.newInstance(a.getClass().getComponentType(), n)` (`toArray(T[])`, `TimSort`'s work arrays)
 does not reach the native: it is lowered to a new array of `n` nulls of `a`'s type
-(`lower::arrays::component_array`, `program::component_array`).
+(`lower::arrays::component_array`, `program::component_array`). Nor does `(C[][]..)
+Array.newInstance(C.class, n1, n2, ..)` of a class literal cast to that array type (Minecraft's
+`BlockPatternBuilder`), which would reach the JVM's `multiNewArray`: it is `new C[n1][n2]..`, with
+the same `NegativeArraySizeException` for a negative length (`lower::arrays::literal_array`,
+`program::literal_array`). Any other call of `newInstance` with several lengths stays a missing
+native.
 
 The natives of the runtime's own classes (`System.arraycopy`, `Object.hashCode`,
 `System.identityHashCode`, the bit conversions of `Double` and `Float`, the clocks,

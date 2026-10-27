@@ -1067,6 +1067,7 @@ impl<'t> Lowering<'t> {
                 self.created_by_name(node, Node(name))?
             }
             "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
+            "TYPE_CAST" if crate::program::literal_array(node.0).is_some() => self.literal_array(node)?,
             "TYPE_CAST" if let Some(cast) = self.intersection_cast(node).transpose() => return cast,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;

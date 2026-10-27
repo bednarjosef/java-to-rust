@@ -182,6 +182,12 @@ impl<'a> Gen<'a> {
         }
         let dims: Vec<String> = sizes.iter().map(|s| self.value(s, Type::Int).text).collect();
         let last = sizes.len() - 1;
+        // The rows of an array of no rows are never made, so nothing else gives their elements a
+        // type where the array goes to a generic function (`java::len`).
+        let zero = match zero {
+            "None" => format!("None::<{}>", self.ty_name(ty.element_at(sizes.len()))),
+            _ => zero.to_string(),
+        };
         let mut text = format!("{}(dims[{last}], {zero})", self.array_maker("filled", ty));
         for level in (0..last).rev() {
             // The rows built here are elements of level `level`; they are `Some` where that
