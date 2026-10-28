@@ -121,8 +121,10 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.reflect.Array#newInstance",
         ],
     ),
-    // A copy between arrays of objects whose types differ (`failures.rs`, `codegen/dispatch.rs`).
-    ("java.lang.ArrayStoreException", &["java.lang.System#arraycopy"]),
+    // A copy between arrays of objects whose types differ (`failures.rs`, `codegen/dispatch.rs`),
+    // and a store into an `Object[]` that may carry a narrower class (`Class::checks_store`),
+    // which a program makes once any array does, as a varargs array of strings.
+    ("java.lang.ArrayStoreException", &["ARRAY_ACCESS", "java.lang.System#arraycopy"]),
     // `super.clone()` of an object whose class is not `Cloneable`.
     ("java.lang.CloneNotSupportedException", &["java.lang.Object#clone"]),
     (
