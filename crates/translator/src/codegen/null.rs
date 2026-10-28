@@ -77,9 +77,16 @@ impl<'a> Gen<'a> {
     /// `e` as an `Option` of the type `ty`: a possibly-null value as it is, any other value in
     /// `Some`, converted to `ty` (boxing it when `ty` is boxed).
     pub(super) fn optional_to(&mut self, e: &'a Expr, ty: Type) -> Code {
-        if let ExprKind::Var(name) = &e.kind
+        // A cast to the variable's own type, `(String) key`, changes nothing.
+        let mut plain = e;
+        while let ExprKind::Cast(_, inner) = &plain.kind
+            && inner.ty == plain.ty
+        {
+            plain = inner;
+        }
+        if let ExprKind::Var(name) = &plain.kind
             && self.borrowed_optional.contains(name)
-            && self.nullable(e)
+            && self.nullable(plain)
         {
             return Code::atom(format!("{}.map(ToOwned::to_owned)", self.local(name)));
         }
