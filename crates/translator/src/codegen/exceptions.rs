@@ -882,15 +882,19 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         let outer = self.method;
         for new in &self.class.raised {
-            let ExprKind::New { class: c, args, ctor: Some(ctor) } = &new.kind else { continue };
-            if !self.facts.raised_classes.contains(c) {
+            let Some((c, ctor, args)) = self.class.raised_object(new) else { continue };
+            if !self.facts.raised_classes.contains(&c) {
                 continue;
             }
-            self.method = *ctor;
-            let object = self.new_object_as(new.id, *ctor, args, Some(throwable)).text;
+            self.method = ctor;
+            let object = match new.kind {
+                ExprKind::New { .. } => self.new_object_as(new.id, ctor, args, Some(throwable)).text,
+                // The factory of a class tree built in Java's order (`analysis::whole_objects`).
+                _ => self.value(new, Type::class("java.lang.Throwable")).text,
+            };
             // The form without a message comes first (`Lowering::raised_objects`).
             let bare = if args.is_empty() { " if e.message.is_none()" } else { "" };
-            self.line(&format!("{}{bare} => {object},", rust_string(&self.class.types[*c].name)));
+            self.line(&format!("{}{bare} => {object},", rust_string(&self.class.types[c].name)));
         }
         self.method = outer;
         let uncaught = self.uncaught("uncaught");

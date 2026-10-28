@@ -399,7 +399,9 @@ pub struct Class {
     pub hierarchy: Hierarchy,
     /// `new C(message)` for each standard class `C` whose objects the runtime may raise where
     /// the program could catch them, `message` a `String` variable: how a failure of the runtime
-    /// becomes the program's exception (see `lower/exceptions.rs`).
+    /// becomes the program's exception (see `lower/exceptions.rs`). Where `C`'s class tree is
+    /// built in Java's order, the call of its factory `newC(message)` (`analysis::whole_objects`);
+    /// `raised_object` reads either.
     pub raised: Vec<Expr>,
     /// What the class files name that lowering knows from javac's tree.
     pub class_file: ClassFileNames,
@@ -458,6 +460,18 @@ pub struct Class {
 }
 
 impl Class {
+    /// The class and the constructor, or the factory that stands for it, of an object of
+    /// `raised`.
+    pub fn raised_object<'e>(&self, e: &'e Expr) -> Option<(usize, usize, &'e [Expr])> {
+        match &e.kind {
+            ExprKind::New { class, args, ctor: Some(ctor) } => Some((*class, *ctor, args)),
+            ExprKind::Call { args, resolved: Some(factory), .. } => {
+                Some((self.methods[*factory].class, *factory, args))
+            }
+            _ => None,
+        }
+    }
+
     /// Whether the code makes arrays that the translation holds as `Object[]`s carrying their
     /// class (`element_classes`, `object_rows`).
     pub fn makes_covariant_arrays(&self) -> bool {

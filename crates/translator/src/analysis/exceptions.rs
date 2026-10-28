@@ -635,10 +635,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         // failure into an object (`codegen::exceptions::raised_impl`), which cannot fail. (An
         // exception that the program builds passes its constructor's failure on from the `new`.)
         let decl = &class.types[method.class];
-        let raised_with = |new: &Expr| matches!(new.kind, ExprKind::New { ctor: Some(c), .. } if c == m);
+        // (Or the factory that stands for its constructor, `Class::raised_object`.)
+        let raised_with = |new: &Expr| class.raised_object(new).is_some_and(|(_, c, _)| c == m);
         if method.is_ctor && decl.enum_constants.is_some() {
             reject(method.pos, "a constructor of an enum that throws not supported yet");
-        } else if method.is_ctor && class.raised.iter().any(raised_with) {
+        } else if class.raised.iter().any(raised_with) {
             reject(
                 method.pos,
                 "a constructor that throws, of an exception the runtime raises, not supported yet",
