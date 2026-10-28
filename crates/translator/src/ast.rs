@@ -428,6 +428,16 @@ pub struct Class {
     /// the expression that makes it: `String[]` for a `new String[n]`, and `Object[]` for a copy
     /// into a class that is not the source's (`Arrays.copyOf(a, n, Object[].class)`).
     pub element_classes: HashMap<ExprId, Type>,
+    /// The array whose class each array that the code makes as a copy of another's class takes,
+    /// a variable or a field, by the expression that makes it (`lower::covariant`):
+    /// `Arrays.copyOf(x, n, a.getClass())` and `(T[]) Array.newInstance(a.getClass()
+    /// .getComponentType(), n)` take `a`'s, which only the running program knows.
+    #[serde(default)]
+    pub array_likes: HashMap<ExprId, Expr>,
+    /// The array types that the translation holds as `Object[]`s (`lower::covariant`), in the
+    /// order of their names: those `Array.newInstance` of a class known at run time makes.
+    #[serde(default)]
+    pub covariant_arrays: Vec<Type>,
     /// The arrays of each level of a new array of several dimensions whose rows at some level
     /// are `Object`s, where the translation holds that level's arrays as `Object[]`s
     /// (`lower::covariant`), by the `new` (`lower::arrays::sized_array`): from the outermost, the
@@ -475,7 +485,7 @@ impl Class {
     /// Whether the code makes arrays that the translation holds as `Object[]`s carrying their
     /// class (`element_classes`, `object_rows`).
     pub fn makes_covariant_arrays(&self) -> bool {
-        !self.element_classes.is_empty() || !self.object_rows.is_empty()
+        !self.element_classes.is_empty() || !self.object_rows.is_empty() || !self.array_likes.is_empty()
     }
 
     /// Whether `a[i] = v` into an array of type `array` checks that the array can hold `v`: the

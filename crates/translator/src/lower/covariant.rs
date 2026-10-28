@@ -200,6 +200,17 @@ impl<'t> Lowering<'t> {
         }
         let (java, made) = match node.kind() {
             "NEW_ARRAY" => (node.java_type().to_string(), x),
+            // `(T[]) Array.newInstance(a.getClass().getComponentType(), n)`, of `a`'s class.
+            "TYPE_CAST" if super::arrays::casts_component_array(node) => {
+                let mut call = node.child("expression")?;
+                while call.kind() == "PARENTHESIZED" {
+                    call = call.child("expression")?;
+                }
+                if let Some((array, _)) = crate::program::component_array(call.0) {
+                    self.made_like(x, Node(array))?;
+                }
+                return Ok(());
+            }
             // An enum's `values()` and a class literal's `getInterfaces()`, which make a new
             // array of the call's type.
             "METHOD_INVOCATION"
@@ -232,6 +243,12 @@ impl<'t> Lowering<'t> {
                     class = class.child("expression")?;
                 }
                 let literal = class.kind() == "MEMBER_SELECT" && class.str("identifier") == "class";
+                // `Arrays.copyOf(x, n, a.getClass())`, of `a`'s class.
+                if class.kind() == "METHOD_INVOCATION"
+                    && let Some(array) = class.get("methodSelect").and_then(|s| s.get("expression"))
+                {
+                    return self.made_like(made, array);
+                }
                 let java = match literal {
                     true => class.child("expression")?.java_type().to_string(),
                     false => "java.lang.Object[]".to_string(),
@@ -249,6 +266,32 @@ impl<'t> Lowering<'t> {
             return Ok(());
         }
         self.element_classes.borrow_mut().insert(made.id, exact);
+        Ok(())
+    }
+
+    /// The array types that the translation holds as `Object[]`s, in the order of their names
+    /// (`Class::covariant_arrays`).
+    pub(super) fn covariant_arrays(&self) -> Vec<Type> {
+        let mut types: Vec<Type> = self.covariant.known.iter().copied().collect();
+        types.sort_by_cached_key(|t| t.to_string());
+        types
+    }
+
+    /// Notes that `made`, a new array, is of the class of the array that `array` holds, a variable
+    /// or a field of one (`Class::array_likes`), where the translation holds both as `Object[]`s.
+    fn made_like(&self, made: &Expr, array: Node<'t>) -> Result<(), Error> {
+        let named = match array.kind() {
+            "IDENTIFIER" => true,
+            "MEMBER_SELECT" => array.child("expression")?.kind() == "IDENTIFIER",
+            _ => false,
+        };
+        if !named || !Self::is_object_array(made.ty) {
+            return Ok(());
+        }
+        let source = self.expr(array)?;
+        if source.ty == made.ty {
+            self.array_likes.borrow_mut().insert(made.id, source);
+        }
         Ok(())
     }
 

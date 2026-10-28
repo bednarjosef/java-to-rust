@@ -254,6 +254,9 @@ impl<'a> Gen<'a> {
         if !outside_catch && let Some(class) = self.made_class(e) {
             return self.with_element_class(class, code);
         }
+        if !outside_catch && let Some(like) = self.class.array_likes.get(&e.id) {
+            return self.with_class_of(like, code);
+        }
         code
     }
 

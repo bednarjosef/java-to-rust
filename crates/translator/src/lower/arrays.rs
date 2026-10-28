@@ -256,9 +256,9 @@ impl<'t> Lowering<'t> {
 
     /// `(T[]) Array.newInstance(a.getClass().getComponentType(), n)` (`node`, the cast), the new
     /// array of `a`'s own class that the JDK's `toArray(T[])` and sorts make: `n` nulls of `a`'s
-    /// type, which is the cast's, an `Object[]` when it is covariant (see `covariant`), whose
-    /// arrays keep no class of their own. `a` is a variable or a field, not read: a null `a`
-    /// does not throw `NullPointerException` here.
+    /// type, which is the cast's, an `Object[]` when it is covariant (see `covariant`), and then
+    /// of the class `a` carries (`covariant::note_element_class`). `a` is a variable or a field,
+    /// read only for its class: a null `a` does not throw `NullPointerException` here.
     pub(super) fn component_array(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let ty = self.ty(node, node.java_type())?;
         let mut call = node.child("expression")?;

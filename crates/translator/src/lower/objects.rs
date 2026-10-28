@@ -139,6 +139,7 @@ impl<'t> Lowering<'t> {
             failed_stmt: Default::default(),
             notes: Default::default(),
             element_classes: Default::default(),
+            array_likes: Default::default(),
             object_rows: Default::default(),
             array_tests: Default::default(),
             volatile_elements: Default::default(),
