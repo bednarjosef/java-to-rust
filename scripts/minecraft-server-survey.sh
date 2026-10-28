@@ -527,7 +527,8 @@ census() {
   local -a cap trial=()
   mapfile -t cap < <(memory_cap_command "$memory_cap")
   if [ -n "${TRIAL_CRATES:-}" ]; then
-    rm -rf "$cache/trial"
+    # The earlier trial's files stay: the translator rewrites only the files that change and
+    # removes the body crates it no longer has, so the trial step builds only what changed.
     trial=(--crate "$cache/trial" --crates "$TRIAL_CRATES" --save-tree "$cache/trial-tree.bin")
   fi
   set +e
@@ -591,7 +592,6 @@ run_server() {
 trial-write() {
   [ -f "$cache/trial-tree.bin" ] || { echo "no saved trial translation (run the census with TRIAL_CRATES)" >&2; exit 1; }
   [ -n "${TRIAL_CRATES:-}" ] || { echo "TRIAL_CRATES is needed" >&2; exit 1; }
-  rm -rf "$cache/trial"
   "${slot[@]}" "$translator" --timings --main "$(cat "$cache/jar/META-INF/main-class")" \
     --from-tree "$cache/trial-tree.bin" --crate "$cache/trial" --crates "$TRIAL_CRATES"
 }

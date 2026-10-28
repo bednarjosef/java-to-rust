@@ -143,8 +143,8 @@ along classes. It splits declarations from code, as C splits headers from source
   its own and the modules around them, and any other module is the header's, which the glob
   re-export of its parent names. It has the header's `recursion_limit`, which a
   threaded program raises for the proofs that its statics are `Send`. A method's code moves into
-  a private trait that the body crate implements for the header's type (`impl Bodies0 for Circle
-  { fn body_area(&self) .. }`), so that `self`, `Self` and calls of the type's other methods mean
+  a private trait that the body crate implements for the header's type, named after it (`impl
+  Bodies_Circle for Circle { fn body_area(&self) .. }`), so that `self`, `Self` and calls of the type's other methods mean
   what they did; the trait is `Sized`, as the type is, for a signature that names `Option<Self>`.
   The exported function calls the trait's method. The trait's methods are named `body_<name>`, so
   that a call of the original name finds the header's method, never the trait's.
@@ -159,12 +159,23 @@ crates, which depend on it; rustc's linker (lld, the default on x86-64 Linux) re
 whatever the order of the libraries.
 
 The moved code goes to the body crates item by item (a function, or an `impl` with its trait), in
-the order of the module tree and of each module's items, cut into runs of about the same size:
-an item goes to the crate in whose share of the whole its middle falls. So the same program is
-split the same way every time, no crate's overshoot passes on to the next ones, and neighbouring
-packages share a crate. A module with more code than a share is spread over several crates, each with the module's
-`use` lines: the Minecraft server's crate root, whose `Object` enum's methods and reflection
-table are 290 MB of code, would otherwise be one crate of its own.
+the order of the module tree and of each module's items, cut into runs of about the same size,
+about `N` of them (`split.rs`, `chunks`). Where a run ends is chosen by the items' names, not
+their positions: a run ends before an item whose first function's name hashes to a multiple of a
+power of two, once the run has half a share of the code, or anyway at twice a share (the share
+and the power of two rounded to powers of two, so that a program that grows a little keeps them).
+Each body crate is named after the hash of its first item's name (`body-1f3a..`). So the same
+program is split the same way every time, neighbouring packages share a crate, and a change to
+one item, or an item added or removed, moves only the cuts around it: the crates beyond keep
+their names and their code. A module with more code than a share is spread over several crates,
+each with the module's `use` lines: the Minecraft server's crate root, whose `Object` enum's
+methods and reflection table are 290 MB of code, would otherwise be one crate of its own.
+
+Writing the workspace leaves alone each file whose text is already there and removes the body
+crates of an earlier split that this one does not have, so Cargo, which goes by the files' times
+of change, builds again only the crates whose code changed. A change that touches the header
+(any declaration: a class, a field, a function's signature, a function added) still builds every
+body crate again, as each depends on the header.
 
 `--crates N` with `--crate DIR` writes the split workspace, for a translation or for a census's
 trial translation (`--census --crate DIR --crates N`, each rejected piece ending the program with

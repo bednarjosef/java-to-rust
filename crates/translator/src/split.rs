@@ -15,7 +15,7 @@
 //!   code names everything as it did, and the header's `recursion_limit`. It has only the modules
 //!   with code of its own and those around them: the parent's glob names any other. A method's
 //!   code moves into a private trait that the body crate implements for the header's type (`impl
-//!   Bodies0 for X { fn body_m(&self, ..) {..} }`), where `self` and `Self` mean what they did;
+//!   Bodies_X for X { fn body_m(&self, ..) {..} }`), where `self` and `Self` mean what they did;
 //!   the trait is `Sized`, as `X` is, for a signature that names `Option<Self>`. Its function
 //!   calls it.
 //! - The **app** crate is the binary: it depends on all of them, so that the linker finds the
@@ -25,9 +25,11 @@
 //! what cannot move: generic functions and impls (Rust needs their code where they are used),
 //! `const` functions (statics call them), functions with an `impl Trait` in their signature, and
 //! the initializers of statics. The items' moved code goes to the body crates in the order of the
-//! modules and their items, in runs of about the same size of code, so the same program is split
-//! the same way every time, and a module with more code than a crate's share is spread over
-//! several.
+//! modules and their items, in runs of about the same size of code whose ends the items' names
+//! choose (`chunks`), so the same program is split the same way every time, a change moves only
+//! the cuts around it, and a module with more code than a crate's share is spread over several.
+//! Writing the workspace leaves unchanged files as they are, so Cargo builds again only the
+//! crates that changed.
 
 use crate::output::{ModuleTree, SourceFile};
 use proc_macro2::Span;
@@ -37,26 +39,43 @@ use syn::spanned::Spanned;
 /// The crates of a split program, each as its files under `src/`.
 pub struct Workspace {
     pub header: Vec<SourceFile>,
-    pub bodies: Vec<Vec<SourceFile>>,
+    /// The body crates, each by its name (`chunks`).
+    pub bodies: Vec<(String, Vec<SourceFile>)>,
     pub app: Vec<SourceFile>,
 }
 
 impl Workspace {
-    /// The workspace in directory `dir`: the header crate, the body crates `body-0`, .., and the
+    /// The workspace in directory `dir`: the header crate, the body crates by their names, and the
     /// binary, named after the program (`name`), with the profiles and target of a translation's
-    /// one crate (`write_crate` in `main.rs`).
+    /// one crate (`write_crate` in `main.rs`). A file whose text is already there is left as it is,
+    /// and the body crates of an earlier split that this one does not have are removed, so that
+    /// Cargo builds again only the crates that changed.
     pub fn write(&self, dir: &Path, name: &str) -> std::io::Result<()> {
         let workspace = self;
         let name = name.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let runtime: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime").canonicalize()?;
         let runtime = format!("java-runtime = {{ path = {:?} }}\n", runtime.display().to_string());
-        let bodies: Vec<String> = (0..workspace.bodies.len()).map(|c| format!("body-{c}")).collect();
-        let members: Vec<String> =
-            ["header".to_string()].into_iter().chain(bodies.iter().cloned()).chain([name.clone()]).collect();
+        let bodies: Vec<&String> = workspace.bodies.iter().map(|(body, _)| body).collect();
+        let members: Vec<String> = ["header".to_string()]
+            .into_iter()
+            .chain(bodies.iter().map(|b| b.to_string()))
+            .chain([name.clone()])
+            .collect();
         std::fs::create_dir_all(dir)?;
-        std::fs::write(
-            dir.join("Cargo.toml"),
-            format!(
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let stale = entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|f| f.starts_with("body-") && !bodies.iter().any(|b| *b == f));
+                if stale && entry.path().is_dir() {
+                    std::fs::remove_dir_all(entry.path())?;
+                }
+            }
+        }
+        write_if_changed(
+            &dir.join("Cargo.toml"),
+            &format!(
                 "[workspace]\nmembers = [{}]\nresolver = \"3\"\n\n\
                  [profile.dev]\ndebug = \"line-tables-only\"\nincremental = false\n\n[profile.release]\nlto = \"fat\"\n",
                 members.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>().join(", ")
@@ -64,34 +83,53 @@ impl Workspace {
         )?;
         if cfg!(target_arch = "x86_64") {
             std::fs::create_dir_all(dir.join(".cargo"))?;
-            std::fs::write(
-                dir.join(".cargo/config.toml"),
+            write_if_changed(
+                &dir.join(".cargo/config.toml"),
                 "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\"]\n",
             )?;
         }
         let package = |crate_dir: &str, deps: &str, files: &[SourceFile]| -> std::io::Result<()> {
             let root = dir.join(crate_dir);
             std::fs::create_dir_all(root.join("src"))?;
-            std::fs::write(
-                root.join("Cargo.toml"),
-                format!(
+            write_if_changed(
+                &root.join("Cargo.toml"),
+                &format!(
                     "[package]\nname = \"{crate_dir}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{runtime}{deps}"
                 ),
             )?;
             for file in files {
-                std::fs::write(root.join("src").join(&file.path), &file.text)?;
+                write_if_changed(&root.join("src").join(&file.path), &file.text)?;
             }
             Ok(())
         };
         package("header", "", &workspace.header)?;
-        for (c, files) in workspace.bodies.iter().enumerate() {
-            package(&bodies[c], "header = { path = \"../header\" }\n", files)?;
+        for (body, files) in &workspace.bodies {
+            package(body, "header = { path = \"../header\" }\n", files)?;
         }
         let app_deps: String = std::iter::once("header = { path = \"../header\" }\n".to_string())
             .chain(bodies.iter().map(|b| format!("{b} = {{ path = \"../{b}\" }}\n")))
             .collect();
         package(&name, &app_deps, &workspace.app)
     }
+}
+
+/// Writes `text` to `path` unless the file has it already, which keeps its time of change, by
+/// which Cargo decides what to build again.
+fn write_if_changed(path: &Path, text: &str) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|old| old == text.as_bytes()) {
+        return Ok(());
+    }
+    std::fs::write(path, text)
+}
+
+/// An item's moved code.
+struct Piece {
+    text: String,
+    /// The size of its text, wrappers and traits included: the crate root's many small methods
+    /// are more wrapper than code.
+    size: usize,
+    /// The exported name of its first function, which no other piece has.
+    key: String,
 }
 
 /// A replacement of the text from `start` to `end`.
@@ -106,9 +144,9 @@ struct Split {
     header: String,
     /// The `use` lines among the module's items, which the moved code has wherever it goes.
     uses: String,
-    /// The moved code, item by item, each with the size of its functions' code, which decides
-    /// its body crate.
-    pieces: Vec<(String, usize)>,
+    /// The moved code, item by item, each with its size and the name of its first function, which
+    /// decide its body crate (`chunks`).
+    pieces: Vec<Piece>,
 }
 
 /// The program `tree` as a header crate, `crates` body crates and the binary. The code is held
@@ -125,7 +163,7 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
         // modules of a program like the Minecraft server are hundreds of megabytes.
         let mut split = Split { header: String::new(), uses: String::new(), pieces: Vec::new() };
         let mut externs = String::new();
-        let mut traits = 0;
+        let mut traits = std::collections::HashSet::new();
         for item in std::mem::take(&mut module.items) {
             let part = match split_module(&item.text, &module.path, &mut used, &mut traits) {
                 Ok(part) => part,
@@ -148,24 +186,10 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     if !failures.is_empty() {
         return Err(failures.join("\n"));
     }
-    // The pieces of moved code, module by module, are cut into runs of about the same size: a
-    // piece goes to the crate in whose share of the whole its middle falls, so that no crate's
-    // overshoot passes on to the next ones and a module whose code is more than a share (the
-    // crate root's, with the `Object` enum's methods and the reflection table) is spread over
-    // several crates.
-    let total: usize = splits.iter().flat_map(|s| &s.pieces).map(|(_, moved)| moved).sum();
-    let crates = crates.max(1);
-    let mut crate_of: Vec<Vec<usize>> = Vec::new();
-    let mut before = 0;
-    for split in &splits {
-        let mut of = Vec::with_capacity(split.pieces.len());
-        for (_, moved) in &split.pieces {
-            let middle = (before + moved / 2) as u128;
-            of.push(((middle * crates as u128) / total.max(1) as u128).min(crates as u128 - 1) as usize);
-            before += moved;
-        }
-        crate_of.push(of);
-    }
+    let sizes: Vec<Vec<(usize, &str)>> =
+        splits.iter().map(|s| s.pieces.iter().map(|p| (p.size, p.key.as_str())).collect()).collect();
+    let (crate_of, names) = chunks(&sizes, crates.max(1));
+    let crates = names.len();
     // A body crate has the modules that hold code of its own and the modules around them; any
     // other module is the header's, which the glob re-export of its parent names.
     let index: std::collections::HashMap<&[String], usize> =
@@ -210,7 +234,7 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
             let split = &mut splits[m];
             let mut code = String::new();
             for (piece, _) in split.pieces.iter_mut().zip(&crate_of[m]).filter(|(_, of)| **of == c) {
-                code.push_str(&std::mem::take(&mut piece.0));
+                code.push_str(&std::mem::take(&mut piece.text));
             }
             if !code.is_empty() {
                 code.insert_str(0, &split.uses);
@@ -221,15 +245,71 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
             "//! Code of the translated program (see the header crate).\n\
              #![allow(warnings)]\n{limit}\n{text}"
         );
-        bodies.push(vec![SourceFile { path: "lib.rs".into(), text }]);
+        bodies.push((names[c].clone(), vec![SourceFile { path: "lib.rs".into(), text }]));
     }
-    let links: String = (0..crates).map(|c| format!("use body_{c} as _;\n")).collect();
+    let links: String = names.iter().map(|name| format!("use {} as _;\n", name.replace('-', "_"))).collect();
     let app = format!("{links}\nfn main() {{\n    header::main()\n}}\n\n{}", tree.footer);
     Ok(Workspace {
         header: vec![SourceFile { path: "lib.rs".into(), text: header }],
         bodies,
         app: vec![SourceFile { path: "main.rs".into(), text: app }],
     })
+}
+
+/// The body crate of each piece, module by module, from each piece's size and key, and the names
+/// of the crates, about `crates` of them. The pieces, in the order of the modules and their items,
+/// are cut into runs of about the same size of code, at places that the pieces' keys choose
+/// rather than their positions: a run ends before a piece whose key's hash is a multiple of a
+/// power of two, once it has half a share of the code, or at twice a share. So a piece added,
+/// removed or changed moves the cuts around it only, the cuts beyond come back to where they
+/// were, and each run's crate, named after the hash of its first piece's key, has the same name
+/// and code as before: after a change, Cargo builds again only the crates whose code changed. The
+/// share and the power of two are rounded to powers of two, so that a program that grows a
+/// little keeps them. A module whose code is more than a share (the crate root's, with the
+/// `Object` enum's methods and the reflection table) is spread over several crates.
+fn chunks(pieces: &[Vec<(usize, &str)>], crates: usize) -> (Vec<Vec<usize>>, Vec<String>) {
+    let total: usize = pieces.iter().flatten().map(|(size, _)| size).sum();
+    let count = pieces.iter().map(Vec::len).sum::<usize>().max(1);
+    let round = |x: usize| 1usize << (x.max(1) as f64).log2().round() as u32;
+    let share = round(total / crates);
+    // A piece starts a run once in `every` pieces on average: about a share's worth of pieces
+    // after the run's first half.
+    let every = round(count * share / 2 / total.max(1));
+    let mut names: Vec<String> = Vec::new();
+    let mut size = 0;
+    let crate_of = pieces
+        .iter()
+        .map(|module| {
+            module
+                .iter()
+                .map(|&(piece, key)| {
+                    let hash = stable_hash(key);
+                    let cut = names.is_empty()
+                        || (size >= share / 2 && hash.is_multiple_of(every as u64))
+                        || size + piece > 2 * share;
+                    if cut {
+                        let mut name = format!("body-{:010x}", hash >> 24);
+                        while names.contains(&name) {
+                            name.push('x');
+                        }
+                        names.push(name);
+                        size = 0;
+                    }
+                    size += piece;
+                    names.len() - 1
+                })
+                .collect()
+        })
+        .collect();
+    if names.is_empty() {
+        names.push("body-empty".into());
+    }
+    (crate_of, names)
+}
+
+/// FNV-1a: a hash that every build of the translator computes the same.
+fn stable_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| (hash ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// The `use` lines of a module, a blank line after each group.
@@ -354,13 +434,14 @@ struct Part {
     externs: String,
 }
 
-/// Splits `text`, items of the module at `path`; `traits` numbers the module's traits of moved
-/// methods.
+/// Splits `text`, items of the module at `path`; `traits` holds the names of the module's traits
+/// of moved methods, each named after its type (`Bodies_Circle`), so that a trait keeps its
+/// name whatever is added before it.
 fn split_module(
     text: &str,
     path: &[String],
     used: &mut std::collections::HashSet<String>,
-    traits: &mut usize,
+    traits: &mut std::collections::HashSet<String>,
 ) -> Result<Part, String> {
     let file = syn::parse_file(text).map_err(|e| {
         // The code around the error, which a translator's fault in the generated text names.
@@ -374,7 +455,7 @@ fn split_module(
     let mut uses = String::new();
     let mut pieces = Vec::new();
     for item in &file.items {
-        let (mut body, mut moved) = (String::new(), 0);
+        let (mut body, mut key) = (String::new(), None);
         match item {
             syn::Item::Struct(s) => {
                 publish(&s.vis, s.struct_token.span.byte_range().start, &mut edits);
@@ -417,6 +498,7 @@ fn split_module(
                 if movable(&f.sig, text) {
                     let name = f.sig.ident.to_string();
                     let symbol = symbol(path, "", &name, used);
+                    key.get_or_insert_with(|| symbol.clone());
                     let (params, args) = rename_params(&f.sig, text, &mut edits, None);
                     let ret = at_or_empty(text, &f.sig.output);
                     let block = f.block.span().byte_range();
@@ -439,7 +521,6 @@ fn split_module(
                     body.push_str(&format!(
                         "{attrs}#[unsafe(no_mangle)]\npub fn {symbol}({inputs}){ret} {code}\n\n"
                     ));
-                    moved += code.len();
                 }
             }
             syn::Item::Impl(imp) => {
@@ -452,7 +533,19 @@ fn split_module(
                 let mut decls = String::new();
                 let mut impls = String::new();
                 let mut functions = String::new();
-                let bodies = format!("Bodies{}", *traits);
+                let clean = |s: &str| {
+                    s.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect::<String>()
+                };
+                let owner_name = match &trait_name {
+                    Some(t) => format!("{}__{}", clean(&self_ty), clean(t)),
+                    None => clean(&self_ty),
+                };
+                let mut bodies = format!("Bodies_{owner_name}");
+                let mut n = 1;
+                while traits.contains(&bodies) {
+                    n += 1;
+                    bodies = format!("Bodies_{owner_name}_{n}");
+                }
                 for impl_item in &imp.items {
                     let syn::ImplItem::Fn(f) = impl_item else {
                         if let syn::ImplItem::Const(c) = impl_item
@@ -478,6 +571,7 @@ fn split_module(
                         None => self_ty.clone(),
                     };
                     let symbol = symbol(path, &owner, &name, used);
+                    key.get_or_insert_with(|| symbol.clone());
                     let receiver = f.sig.receiver();
                     let this_ty = receiver.map(|r| {
                         if r.colon_token.is_some() {
@@ -528,13 +622,12 @@ fn split_module(
                     functions.push_str(&format!(
                         "#[unsafe(no_mangle)]\npub fn {symbol}({this_param}{params}){ret_here} {{\n    <{self_ty} as {bodies}>::body_{name}({this_arg}{args})\n}}\n\n"
                     ));
-                    moved += code.len();
                 }
                 if !decls.is_empty() {
                     body.push_str(&format!(
                         "trait {bodies}: Sized {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
                     ));
-                    *traits += 1;
+                    traits.insert(bodies);
                 }
             }
             // A `use` among the items is the moved code's too.
@@ -544,8 +637,8 @@ fn split_module(
             }
             _ => {}
         }
-        if !body.is_empty() {
-            pieces.push((body, moved));
+        if let Some(key) = key.filter(|_| !body.is_empty()) {
+            pieces.push(Piece { size: body.len(), text: body, key });
         }
     }
     edits.sort_by_key(|e| (e.start, e.end));
@@ -650,10 +743,47 @@ mod tests {
         assert!(e.contains("package `a`") && e.contains("package `c`") && !e.contains("package `b`"), "{e}");
     }
 
+    /// A piece that grows, and one added, change the crates around them only: the others keep
+    /// their names and their pieces.
+    #[test]
+    fn a_change_moves_the_cuts_around_it_only() {
+        let keys: Vec<String> = (0..20_000).map(|i| format!("j2r__p{}__C{i}__m", i / 500)).collect();
+        let sizes = |keys: &[String], grown: usize| -> Vec<Vec<(usize, String)>> {
+            keys.chunks(500)
+                .map(|m| {
+                    m.iter()
+                        .map(|k| (if *k == keys[grown] { 90_000 } else { 1_000 + k.len() * 7 }, k.clone()))
+                        .collect()
+                })
+                .collect()
+        };
+        let crates_of =
+            |modules: &[Vec<(usize, String)>]| -> std::collections::BTreeMap<String, Vec<String>> {
+                let borrowed: Vec<Vec<(usize, &str)>> =
+                    modules.iter().map(|m| m.iter().map(|(s, k)| (*s, k.as_str())).collect()).collect();
+                let (of, names) = chunks(&borrowed, 16);
+                let mut crates = std::collections::BTreeMap::new();
+                for (module, of) in modules.iter().zip(&of) {
+                    for ((_, key), &c) in module.iter().zip(of) {
+                        crates.entry(names[c].clone()).or_insert_with(Vec::new).push(key.clone());
+                    }
+                }
+                crates
+            };
+        let before = crates_of(&sizes(&keys, 0));
+        assert!((8..=32).contains(&before.len()), "{} crates", before.len());
+        let mut added = keys.clone();
+        added.insert(12_345, "j2r__p24__New__m".into());
+        for after in [crates_of(&sizes(&keys, 7_000)), crates_of(&sizes(&added, 0))] {
+            let kept = before.iter().filter(|(name, keys)| after.get(*name) == Some(keys)).count();
+            assert!(kept + 3 >= before.len(), "{kept} of {} crates kept", before.len());
+        }
+    }
+
     #[test]
     fn thread_local_statics_of_any_visibility_become_public() {
         let text = "thread_local! {\n    pub(crate) static A__INITIALIZED: Cell<bool> = const { Cell::new(false) };\n    static B: Cell<i32> = const { Cell::new(0) };\n    pub static C: Cell<i32> = const { Cell::new(0) };\n}\n";
-        let split = split_module(text, &["p".to_string()], &mut std::collections::HashSet::new(), &mut 0)
+        let split = split_module(text, &["p".to_string()], &mut Default::default(), &mut Default::default())
             .unwrap()
             .split;
         for name in ["A__INITIALIZED", "B", "C"] {
