@@ -133,7 +133,13 @@ program where such a lookup can happen, so they can be checked before the progra
   exception of the called code is wrapped in an `InvocationTargetException` (by
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final
   field is never written, even after `setAccessible(true)`; `set` throws
-  `IllegalAccessException`, since the analyses rely on final fields keeping their value. Generic methods, and members
+  `IllegalAccessException`, since the analyses rely on final fields keeping their value. A
+  member's parameter, result and field types are the classes it declares, also where the
+  translation holds a `String[]` as an `Object[]` (see [object-model.md](object-model.md) on
+  covariant arrays): log4j finds a pattern converter's `newInstance(String[])` by the name of its
+  parameter's class. Generic classes and methods are in the table as they are erased, with
+  log4j's appenders' `<B extends Builder<B>> B newBuilder()` and their builders' fields. Those
+  that are Rust generics (`lower/real_generics.rs`), and members
   whose types do not box to and from `Object`, are not in the table: among them those that take
   or hold a `Constable`, `TypeDescriptor.OfField` or `AnnotatedElement`, which a class held as an
   `Object` is in Java but not in a translation, and the instance methods of those interfaces.
