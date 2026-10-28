@@ -73,7 +73,12 @@ that answer for the object's class: `runtime_class()`, `runtime_class_name()`,
 code uses it: the generator writes the program again with the items asked for until no new one
 is asked for (two or three passes), so an enum has no dead code. A `match` over every variant is
 written once, in such a method, and not at each use: `Object`'s enum has a variant for every
-class whose objects the program creates (javac's has thousands).
+class whose objects the program creates (javac's has thousands, the Minecraft server's some
+20 000). A method's `match` over more than 2048 classes is cut by class number into methods of
+2048 numbers each (`fmt_of_part_3`), which a `match` on the number's high bits calls: rustc
+holds one function whole while it compiles it, and the server's `Display` alone was 9 MB of code,
+past 20 GB to compile; the parts are items of their own, which the split into crates spreads
+over the body crates (docs/several-crates.md).
 
 Terms:
 

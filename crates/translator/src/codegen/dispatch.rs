@@ -66,6 +66,20 @@ const OPTIONAL: &str = "java.util.Optional";
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
 
+/// How many class numbers each method of a cut `match` on the class number takes
+/// (`match_arms_or`).
+const PART_CLASSES: usize = 2048;
+
+/// A method that `match_arms_or` writes the `match` of: its name, its parameters after `&self`
+/// (`, f: &mut fmt::Formatter`), their names (`f`) and its return type (` -> fmt::Result`).
+#[derive(Clone)]
+pub(super) struct ArmsMethod {
+    name: &'static str,
+    params: String,
+    args: &'static str,
+    ret: String,
+}
+
 /// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
 /// generation and every translation.
 pub(super) fn receiver_key(classes: &[usize]) -> u64 {
@@ -1878,6 +1892,45 @@ impl<'a> Gen<'a> {
         self.match_arms_or(variants, None, arm)
     }
 
+    /// `match_arms` as the whole body of method `name`, whose `match` may be cut into methods of
+    /// its own, which `flush_arm_parts` then writes.
+    fn method_arms(
+        &mut self,
+        (name, params, args, ret): (&'static str, &str, &'static str, &str),
+        variants: &[usize],
+        arm: &dyn Fn(&mut Self, usize) -> (String, bool),
+    ) {
+        let method = ArmsMethod { name, params: params.to_string(), args, ret: ret.to_string() };
+        let outer = self.arms_method.replace(method);
+        self.match_arms(variants, arm);
+        self.arms_method = outer;
+    }
+
+    /// The methods that cut `match`es made (`match_arms_or`), in an `impl` of `name` of their own
+    /// if `own_impl` (after a trait's), else in the `impl` being written.
+    fn flush_arm_parts(&mut self, name: &str, own_impl: bool) {
+        if self.arm_parts.is_empty() {
+            return;
+        }
+        let parts = std::mem::take(&mut self.arm_parts);
+        if own_impl {
+            self.gap();
+            self.line(&format!("impl {name} {{"));
+            self.indent += 1;
+        }
+        for line in parts.lines() {
+            for _ in 0..self.indent {
+                self.out.push_str("    ");
+            }
+            self.out.push_str(line);
+            self.out.push('\n');
+        }
+        if own_impl {
+            self.indent -= 1;
+            self.line("}");
+        }
+    }
+
     /// `match_arms`, where an object of a class outside `variants` runs `otherwise`, if given.
     pub(super) fn match_arms_or(
         &mut self,
@@ -1901,6 +1954,50 @@ impl<'a> Gen<'a> {
             self.line(&arms[0].1);
             return;
         }
+        // A `match` over the classes of a whole program (`Object`'s enum has a variant for every
+        // class it makes, the Minecraft server's some 20 000) is one function that rustc holds
+        // whole, past 20 GB: it is cut by class number into methods of `PART_CLASSES` numbers
+        // each, which the method's `match` on the number's high bits calls, and which the split
+        // of a program into crates (`split.rs`) spreads over the body crates.
+        if variants.len() > PART_CLASSES
+            && let Some(method) = self.arms_method.clone()
+        {
+            let mut parts: BTreeMap<u16, Vec<(usize, String, bool)>> = BTreeMap::new();
+            for arm in arms {
+                parts.entry(self.class_tag(arm.0) / PART_CLASSES as u16).or_default().push(arm);
+            }
+            self.line(&format!("match self.0.tag() / {PART_CLASSES} {{"));
+            for part in parts.keys() {
+                self.line(&format!("    {part} => self.{}_of_part_{part}({}),", method.name, method.args));
+            }
+            match &otherwise {
+                Some(text) => self.line(&format!("    _ => {text},")),
+                None => self.line("    _ => java::bad_tag(self.0.tag()),"),
+            }
+            self.line("}");
+            let (out, indent) = (std::mem::take(&mut self.out), self.indent);
+            for (part, arms) in parts {
+                self.indent = 0;
+                self.line(&format!(
+                    "pub(crate) fn {}_of_part_{part}(&self{}){} {{",
+                    method.name, method.params, method.ret
+                ));
+                self.indent += 1;
+                let classes: Vec<usize> = arms.iter().map(|arm| arm.0).collect();
+                self.tag_match(&classes, arms, otherwise.clone());
+                self.indent -= 1;
+                self.line("}");
+            }
+            let parts = std::mem::replace(&mut self.out, out);
+            self.indent = indent;
+            self.arm_parts.push_str(&parts);
+            return;
+        }
+        self.tag_match(variants, arms, otherwise);
+    }
+
+    /// The `match` on the class number that `match_arms_or` writes, of the arms of `variants`.
+    fn tag_match(&mut self, variants: &[usize], arms: Vec<(usize, String, bool)>, otherwise: Option<String>) {
         // A match on the class number, whose arm lends the object where it lies, as `view()`
         // does: one jump to the class's code rather than one to the view and one to the code.
         self.line("match self.0.tag() {");
@@ -3030,23 +3127,19 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
         self.indent += 1;
-        self.line("match self.view() {");
-        self.indent += 1;
-        let unkept = self.runtime("unkept_monitor");
-        for (&c, handle) in variants.iter().zip(handles) {
-            let v = self.view_pattern(t, c);
-            if handle {
-                self.line(&format!("{v}(o) => {has}::monitor(o),"));
-            } else {
-                self.line(&format!("{v}(_) => {unkept}(),"));
-            }
-        }
+        let unkept = format!("{}()", self.runtime("unkept_monitor"));
+        let handles: std::collections::HashSet<usize> =
+            variants.iter().zip(handles).filter(|(_, handle)| *handle).map(|(&c, _)| c).collect();
+        let ret = format!(" -> {of}<'_>");
+        self.method_arms(("monitor", "", "", &ret), variants, &|_, c| match handles.contains(&c) {
+            true => (format!("{has}::monitor(o)"), true),
+            false => (unkept.clone(), false),
+        });
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
-        self.indent -= 1;
-        self.line("}");
+        self.flush_arm_parts(&name, true);
     }
 
     /// `Display`: each object shows as its class's `toString` makes it.
@@ -3057,7 +3150,8 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         self.indent += 1;
-        self.match_arms(variants, &|g: &mut Self, c| {
+        let method = ("fmt", ", f: &mut fmt::Formatter", "f", " -> fmt::Result");
+        self.method_arms(method, variants, &|g: &mut Self, c| {
             match g.runtime_of(c) {
                 Some(Type::String) => return ("fmt::Display::fmt(o, f)".to_string(), true),
                 // A builder shows its text, as its `toString` makes it.
@@ -3089,6 +3183,7 @@ impl<'a> Gen<'a> {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        self.flush_arm_parts(&name, true);
     }
 
     /// `try_text()`: the text of a value whose class's `toString`, or the `hashCode` that
@@ -3103,34 +3198,38 @@ impl<'a> Gen<'a> {
         let text = self.string_type();
         self.line(&format!("pub(crate) fn try_text(&self) -> Result<{text}, {throwable}> {{"));
         self.indent += 1;
-        self.match_arms(variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
-            Some(i) if g.facts.throwing.contains(&i) => {
-                let (call, uses) = g.arm_call(t, c, i, "");
-                if g.facts.nullable_returns.contains(&i) {
-                    let null = g.string_literal("\"null\"");
-                    (format!("{call}.map(|text| text.unwrap_or_else(|| {null}))"), uses)
-                } else {
-                    (call, uses)
+        let ret = format!(" -> Result<{text}, {throwable}>");
+        self.method_arms(("try_text", "", "", &ret), variants, &|g: &mut Self, c| {
+            match hierarchy::to_string_impl(g.class, c) {
+                Some(i) if g.facts.throwing.contains(&i) => {
+                    let (call, uses) = g.arm_call(t, c, i, "");
+                    if g.facts.nullable_returns.contains(&i) {
+                        let null = g.string_literal("\"null\"");
+                        (format!("{call}.map(|text| text.unwrap_or_else(|| {null}))"), uses)
+                    } else {
+                        (call, uses)
+                    }
                 }
-            }
-            None if g.hash_index(c).is_some_and(|i| g.facts.throwing.contains(&i)) => {
-                let i = g.hash_index(c).expect("a hashCode that throws");
-                let (call, uses) = g.arm_call(t, c, i, "");
-                let text = g.default_text(c, "hash".to_string());
-                let text = if super::shared_strings() {
-                    format!("{}({text})", g.runtime("JStr::new"))
-                } else {
-                    text
-                };
-                (format!("{call}.map(|hash| {text})"), uses)
-            }
-            _ => {
-                let (text, uses) = g.java_string_arm(t, c);
-                (format!("Ok({text})"), uses)
+                None if g.hash_index(c).is_some_and(|i| g.facts.throwing.contains(&i)) => {
+                    let i = g.hash_index(c).expect("a hashCode that throws");
+                    let (call, uses) = g.arm_call(t, c, i, "");
+                    let text = g.default_text(c, "hash".to_string());
+                    let text = if super::shared_strings() {
+                        format!("{}({text})", g.runtime("JStr::new"))
+                    } else {
+                        text
+                    };
+                    (format!("{call}.map(|hash| {text})"), uses)
+                }
+                _ => {
+                    let (text, uses) = g.java_string_arm(t, c);
+                    (format!("Ok({text})"), uses)
+                }
             }
         });
         self.indent -= 1;
         self.line("}");
+        self.flush_arm_parts(&name, false);
         self.indent -= 1;
         self.line("}");
     }
@@ -3145,9 +3244,11 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("pub(crate) fn java_string(&self) -> {text} {{"));
         self.indent += 1;
-        self.match_arms(variants, &|g: &mut Self, c| g.java_string_arm(t, c));
+        let ret = format!(" -> {text}");
+        self.method_arms(("java_string", "", "", &ret), variants, &|g: &mut Self, c| g.java_string_arm(t, c));
         self.indent -= 1;
         self.line("}");
+        self.flush_arm_parts(&name, false);
         self.indent -= 1;
         self.line("}");
         // In a concatenation, the string as it is.
@@ -3235,24 +3336,28 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         let throws = self.enum_text_throws(t);
         let ok = |text: String| if fallible { format!("Ok({text})") } else { text };
-        self.match_arms(variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
-            Some(i) if g.facts.throwing.contains(&i) || g.facts.nullable_returns.contains(&i) => {
-                let (call, uses) = g.arm_call(t, c, i, "");
-                let call = match (g.facts.throwing.contains(&i), g.facts.nullable_returns.contains(&i)) {
-                    (true, true) => call,
-                    (true, false) => format!("{call}.map(Some)"),
-                    (false, _) => ok(call),
-                };
-                (call, uses)
-            }
-            _ if throws => ("self.try_text().map(Some)".to_string(), false),
-            _ => {
-                let (text, uses) = g.java_string_arm(t, c);
-                (ok(format!("Some({text})")), uses)
+        let returns = format!(" -> {ret}");
+        self.method_arms(("nullable_text", "", "", &returns), variants, &|g: &mut Self, c| {
+            match hierarchy::to_string_impl(g.class, c) {
+                Some(i) if g.facts.throwing.contains(&i) || g.facts.nullable_returns.contains(&i) => {
+                    let (call, uses) = g.arm_call(t, c, i, "");
+                    let call = match (g.facts.throwing.contains(&i), g.facts.nullable_returns.contains(&i)) {
+                        (true, true) => call,
+                        (true, false) => format!("{call}.map(Some)"),
+                        (false, _) => ok(call),
+                    };
+                    (call, uses)
+                }
+                _ if throws => ("self.try_text().map(Some)".to_string(), false),
+                _ => {
+                    let (text, uses) = g.java_string_arm(t, c);
+                    (ok(format!("Some({text})")), uses)
+                }
             }
         });
         self.indent -= 1;
         self.line("}");
+        self.flush_arm_parts(&name, false);
         self.indent -= 1;
         self.line("}");
     }
@@ -3281,11 +3386,15 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             self.line(&format!("fn cast_class(&self) -> {class} {{"));
             self.indent += 1;
-            self.match_arms(variants, &|g: &mut Self, c| (g.cast_class(c), false));
+            let ret = format!(" -> {class}");
+            self.method_arms(("cast_class", "", "", &ret), variants, &|g: &mut Self, c| {
+                (g.cast_class(c), false)
+            });
             self.indent -= 1;
             self.line("}");
             self.indent -= 1;
             self.line("}");
+            self.flush_arm_parts(&name, true);
         }
         if methods.is_empty() {
             return;
@@ -3296,7 +3405,8 @@ impl<'a> Gen<'a> {
         for (need, method, ret) in methods {
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
-            self.match_arms(variants, &|g: &mut Self, c| match need {
+            let ret = format!(" -> {ret}");
+            self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
                 // An `Object[]` that may be a covariant array, which carries its class.
                 Need::RuntimeClass(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
                     (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
@@ -3314,6 +3424,7 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}");
         }
+        self.flush_arm_parts(&name, false);
         self.indent -= 1;
         self.line("}");
     }
