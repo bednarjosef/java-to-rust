@@ -310,8 +310,9 @@ says.)
   however the block ends, so `?`, `break` and `return` release it as `monitorexit` does.
 - A synchronized method's body starts with `let _monitor = java::enter(this);` (or
   `java::enter_class(&C__MONITOR)` for a static one). A method that uses its object's monitor
-  takes the handle rather than `&self`; a method that lives on the enum of a class tree enters
-  the monitor of the enum's value, whose variant has it. `wait` asserts that the thread holds no
+  takes the handle rather than `&self`; a method that lives on the enum of a class tree,
+  synchronized or holding `synchronized (this)`, enters the monitor of the enum's value, whose
+  variant has it. `wait` asserts that the thread holds no
   borrow of the object, which would let another thread in while it lasts.
 - **The monitor of a thread-local `RefCell` object** (a builder's cell, in a program that
   observes monitors) is a thread-local list of the addresses the thread has entered. `holdsLock` and the

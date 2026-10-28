@@ -84,13 +84,13 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the monitor of `lock` is kept. A constructor's object, which no other thread has
-    /// yet, keeps none.
+    /// yet, keeps none; a method on an enum has its value's, as a synchronized method does.
     fn kept_lock(&self, lock: &Expr) -> bool {
         match lock.kind {
             ExprKind::Builtin(Builtin::ClassLiteral(ty), _) => {
                 self.class.class_index(ty).is_some_and(|t| self.facts.class_monitors.contains(&t))
             }
-            ExprKind::This if self.this_form != ThisForm::Shared => false,
+            ExprKind::This if !matches!(self.this_form, ThisForm::Shared | ThisForm::Enum) => false,
             _ => {
                 matches!(lock.ty, Type::Class(..) | Type::StringBuilder | Type::Array(_))
                     && self.facts.kept_monitor(self.class, lock.ty)
