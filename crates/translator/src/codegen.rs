@@ -763,9 +763,20 @@ impl<'a> Gen<'a> {
                     self.ty_name(p.ty)
                 };
                 // A body that ignores a parameter (a default that overrides replace) names it `_x`.
+                // A copy into the class of an array reads that array for its class only, beside
+                // the copy (`Class::array_likes`).
                 let mut used = !body;
                 for s in &m.body {
-                    visit_stmt(s, &mut |e| used |= mentions(e, &p.name), &mut |_| {});
+                    visit_stmt(
+                        s,
+                        &mut |e| {
+                            used |= mentions(e, &p.name);
+                            if let Some(like) = self.class.array_likes.get(&e.id) {
+                                visit_expr(like, &mut |x| used |= mentions(x, &p.name));
+                            }
+                        },
+                        &mut |_| {},
+                    );
                 }
                 let name = self.local(&p.name);
                 let name = if used { name } else { format!("_{}", name.trim_start_matches("r#")) };

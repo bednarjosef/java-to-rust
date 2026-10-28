@@ -1,13 +1,15 @@
 import java.lang.reflect.Array;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
  * Arrays whose class the program learns only at run time, as log4j's configuration makes them:
  * `options.toArray(EMPTY)` copies a list into an array of the given array's class, which a
  * reflective call then checks against its parameter's `String[]`; and `Array.newInstance` of a
- * plugin's element class, filled through an `Object[]` and passed to a factory method.
+ * plugin's element class, filled through an `Object[]` and passed to a factory method. Guava's
+ * `copy` reads its last parameter only for its class.
  */
 public class RuntimeArrayClasses {
     interface Policy {
@@ -48,6 +50,11 @@ public class RuntimeArrayClasses {
         return array;
     }
 
+    @SuppressWarnings("unchecked")
+    static <T> T[] copy(Object[] source, int from, int to, T[] arrayOfType) {
+        return Arrays.copyOfRange(source, from, to, (Class<? extends T[]>) arrayOfType.getClass());
+    }
+
     public static void main(String[] args) throws Exception {
         List<String> options = new ArrayList<>(List.of("HH:mm", "UTC"));
         String[] copied = options.toArray(EMPTY);
@@ -55,6 +62,8 @@ public class RuntimeArrayClasses {
         Method join = RuntimeArrayClasses.class.getMethod("join", String[].class);
         System.out.println(join.invoke(null, (Object) copied));
         System.out.println(join.invoke(null, (Object) new ArrayList<String>().toArray(EMPTY)));
+        String[] part = copy(new Object[] {"a", "b", "c"}, 1, 3, EMPTY);
+        System.out.println(part.getClass().getName() + " " + join.invoke(null, (Object) part));
 
         Method policies = RuntimeArrayClasses.class.getMethod("policies", Policy[].class);
         Class<?> element = policies.getParameterTypes()[0].getComponentType();
