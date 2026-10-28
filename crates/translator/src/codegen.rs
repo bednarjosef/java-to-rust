@@ -937,11 +937,18 @@ impl<'a> Gen<'a> {
             if !crate::lower::rewritten_clinit(&self.class.types[m.class]) {
                 self.init_guard(m.class);
             }
-            // Java initializes the superclass first.
+            // Java initializes the superclass first, then the superinterfaces that declare
+            // default methods (`default_superinterfaces`).
             let superclass = self.class.hierarchy.superclass(m.class);
             if let Some(s) = superclass.and_then(|s| self.facts.init_class(self.class, s)) {
                 let call = self.init_run(s);
                 self.line(&format!("{call};"));
+            }
+            for i in default_superinterfaces(self.class, m.class) {
+                if self.facts.eager_init.contains(&i) {
+                    let call = self.init_run(i);
+                    self.line(&format!("{call};"));
+                }
             }
         } else if self.facts.entry_init.contains(&index)
             && let Some(t) = self.facts.init_class(self.class, m.class)
@@ -1118,6 +1125,34 @@ fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {
             &mut |_| {},
         );
     }
+}
+
+/// The superinterfaces of class `t` that its initialization initializes, in Java's order: those
+/// that declare a method with code that is not static (a default or private one), by a walk of
+/// the interfaces it implements in the order of its `implements` clause, each interface after its
+/// own superinterfaces (JLS 12.4.2; HotSpot counts private methods too). An interface's own
+/// initialization initializes none, so `t` that is an interface has none. Only the methods that
+/// the translation has count, so an interface whose default methods are all unreachable is left
+/// out, which only its initializer's effects could tell.
+pub(crate) fn default_superinterfaces(class: &Class, t: usize) -> Vec<usize> {
+    fn walk(class: &Class, t: usize, out: &mut Vec<usize>) {
+        for interface in &class.types[t].interfaces {
+            let Interface::Type(i) = *interface else { continue };
+            walk(class, i, out);
+            let has_code = class.hierarchy.methods_of(i).iter().any(|&m| {
+                let m = &class.methods[m];
+                !m.is_static && !m.is_abstract && !m.is_ctor && m.name != "<clinit>"
+            });
+            if has_code && !out.contains(&i) {
+                out.push(i);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if class.types[t].kind != TypeKind::Interface {
+        walk(class, t, &mut out);
+    }
+    out
 }
 
 #[cfg(test)]

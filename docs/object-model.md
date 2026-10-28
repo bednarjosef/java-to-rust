@@ -347,8 +347,13 @@ object before the superclass's `construct<Name>`, which may call a method that r
 Java. Before a `super()` of `Object` (which is left out), the statements are the start of the
 body; a class with field initializers is rejected there, as they would run first.
 
-**Static initialization**: a superclass is initialized before its subclass, and code in a class
-or its subclass does not initialize the class again (`codegen/statics.rs::init_call`).
+**Static initialization**: a superclass is initialized before its subclass, then the class's
+superinterfaces that declare a method with code that is not static (a default or private one),
+in the order of its `implements` clauses, each interface after its own superinterfaces; an
+interface's initialization initializes none (`codegen::default_superinterfaces`, and
+reachability keeps those initializers, `Walk::default_interfaces`). Code in a class or its
+subclass does not initialize the class again (`codegen/statics.rs::init_call`), nor does a
+default method its interface, which the class's initialization has initialized.
 
 ### 1.5 `instanceof`, patterns and casts
 

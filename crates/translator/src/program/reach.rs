@@ -3532,6 +3532,40 @@ impl<'t> Walk<'t> {
         }
         self.work.push(Item::Class(class.clone()));
         self.initializers(decl, &class, true);
+        // A class's initialization initializes its superinterfaces that declare a method with
+        // code that is not static (`codegen::default_superinterfaces`).
+        if !matches!(text(decl, "kind"), "INTERFACE" | "ANNOTATION_TYPE") {
+            let mut interfaces = Vec::new();
+            self.default_interfaces(decl, &mut interfaces);
+            for interface in interfaces {
+                self.work.push(Item::Init(interface));
+            }
+        }
+    }
+
+    /// The interfaces that the declaration `decl` implements, directly or not, that declare a
+    /// method with code that is not static, and those that no unit declares yet, which `init`
+    /// waits for.
+    fn default_interfaces(&self, decl: &Value, out: &mut Vec<String>) {
+        let named = match &decl["implementsClause"] {
+            Value::Array(items) => items.iter().filter_map(supertype).collect(),
+            _ => Vec::new(),
+        };
+        for name in named {
+            if out.contains(&name) {
+                continue;
+            }
+            let Some(&(interface, _)) = self.classes.get(&name) else {
+                out.push(name);
+                continue;
+            };
+            self.default_interfaces(interface, out);
+            let has_code = members(interface)
+                .any(|m| text(m, "kind") == "METHOD" && !m["body"].is_null() && !has_flag(m, "STATIC"));
+            if has_code && !out.contains(&name) {
+                out.push(name);
+            }
+        }
     }
 
     /// The initializers that run for the class's static initialization (`statics`) or for every
