@@ -1180,6 +1180,14 @@ impl<'a> Gen<'a> {
         let obj = self.handle_object(handle, e, index);
         if self.facts.self_methods.contains(&index) {
             format!("{obj}.{}{}()", self.method_path(e, index), self.fn_names[index])
+        } else if let Home::Class(c) = self.homes[index]
+            && let Some(other) = self.struct_class(e).filter(|&other| other != c)
+        {
+            // A method of the one class whose objects run it, on an object of another class: no
+            // object of that class is created (a cast that always fails), so the call never runs.
+            // It is called on a never-made object of its own class, which gives it its type.
+            let never = super::dispatch::absent(self, other);
+            format!("{}(&{{ let _ = {handle}; None.unwrap_or_else(|| {never}) }})", self.qualified_fn(index))
         } else {
             format!("{}({handle})", self.qualified_fn(index))
         }
