@@ -492,6 +492,10 @@ struct Lowering<'t> {
     /// The methods of enums that a constant's body declares and that override nothing, which only
     /// that body's code calls (see `constant_bodies::body_methods`).
     body_helpers: std::collections::HashSet<usize>,
+    /// For each method of an enum that a constant's body calls with `super`, the copy of the
+    /// enum's own method that those calls run, as `constant_bodies` makes the method a switch over
+    /// the constants (see `constant_bodies::body_methods`).
+    super_twins: std::collections::HashMap<usize, usize>,
     /// The annotation types (`@interface`) that were left out, by javac's name, with their
     /// declarations: an annotation does nothing when the program runs, but a value of one is not
     /// translated, and `isAnnotationPresent` reads them (`annotation_presence`).
@@ -630,7 +634,9 @@ impl<'t> Lowering<'t> {
         }
         let is_ctor = node.str("name") == "<init>";
         let is_static = node.has_flag("STATIC");
-        let name = node.str("name").to_string();
+        // A copy of an enum's method for its constants' `super` calls has a name of its own.
+        let twin = self.super_twins.values().any(|&t| t == index);
+        let name = if twin { info.name.to_string() } else { node.str("name").to_string() };
         let ret = if is_ctor {
             Type::Void
         } else {
@@ -1705,6 +1711,8 @@ impl<'t> Lowering<'t> {
                 // enum's own (see `constant_bodies::body_methods`).
                 let resolved = match receiver.ty {
                     Type::Enum(e) if !is_super => self.body_method(e, resolved).or(resolved),
+                    // `super.m()` in a constant's body runs the enum's own `m` (`super_twins`).
+                    Type::Enum(_) => resolved.map(|r| self.super_twins.get(&r).copied().unwrap_or(r)),
                     _ => resolved,
                 };
                 let receiver = Box::new(receiver);

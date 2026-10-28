@@ -717,7 +717,9 @@ and a store converts to `Object`. Every other array keeps its exact type.
 Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle
 next to its elements; every other array carries `None`, one word). Lowering notes the class of
 each array the code makes where it is an `Object[]` (`Class::element_classes`): a `new String[n]`
-or `{a, b}`, an enum's `values()`, a class literal's `getInterfaces()`, the value of an annotation's
+or `{a, b}`, the array that a variable-arity call packs its trailing arguments into (of the class
+javac gives its elements, `varargsElement`: `String[]` for `Arrays.asList("a", "b")`), an enum's
+`values()`, a class literal's `getInterfaces()`, the value of an annotation's
 member, and an `Arrays.copyOf` or `copyOfRange` into a class literal, or into a class held in
 a variable, which is taken as `Object[]`. The `String[]`s that the runtime makes as `Object[]`s
 (`split`, `main`'s arguments) carry `String[]`. A clone or a copy without a class keeps its
@@ -734,7 +736,8 @@ source's class. So:
   `ArrayStoreException` ("arraycopy: element type mismatch: ..." where the destination's element
   class is below the source's, else "arraycopy: type mismatch: ...");
 - `getClass()` of an `Object[]` (`java::array_class`), as a value or as an `Object`, is the class
-  it carries, and so are its `getName()` and `getSimpleName()`; a class literal of an array type
+  it carries, and so are its `getName()` and `getSimpleName()` and the text that `toString()`
+  makes of it (`[Ljava.lang.String;@1b6d3586`, `java::array_default_text`); a class literal of an array type
   (`String[].class`) is that array's own class, not `Object[]`'s (`covariant::exact_ty`);
 - `o instanceof String[]`, `o instanceof String[] s` and `(String[]) o` of an `Object`, and
   `(String[]) objects` of an `Object[]`, test the class the array carries
@@ -754,8 +757,10 @@ of a `String[]` and `o instanceof Object[]`, `(Comparable<?>[]) o` or `(String[]
 carries; an `int[]` is not an `Object[]`, and a cast of it throws `ClassCastException`.
 
 An array that a method keeps to itself as a plain `Vec` (`analysis::arrays`), an array that
-`new Object[n]` makes, or one that `Array.newInstance` makes of a component class that the code
-neither makes nor tests arrays of carries no class:
+`new Object[n]` makes, one that `Array.newInstance` makes of a component class that the code
+neither makes nor tests arrays of, or a copy into the class of another array (the JDK's
+`toArray(a)`, `Arrays.copyOf(x, n, a.getClass())` and `(T[]) Array.newInstance(
+a.getClass().getComponentType(), n)`, `lower::arrays::component_array`) carries no class:
 storing an object of another class in one of them does not throw, its `getClass()` is
 `Object[]`'s, and it passes every `instanceof` and cast to an array class held as an `Object[]`,
 as an array of that class would (an `Object[]` passes `instanceof String[]`). Also:

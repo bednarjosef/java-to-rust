@@ -146,6 +146,7 @@ impl<'t> Lowering<'t> {
             nested_annotation_types: Default::default(),
             body_methods: Default::default(),
             body_helpers: Default::default(),
+            super_twins: Default::default(),
             body_returns: Default::default(),
             annotation_types: Default::default(),
             library_annotations: Default::default(),

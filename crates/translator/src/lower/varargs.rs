@@ -62,6 +62,13 @@ impl<'t> Lowering<'t> {
         };
         let rest = args.split_off(fixed).into_iter().map(|a| self.convert(a, element)).collect();
         let packed = self.synth(ExprKind::ArrayLit(rest), node.pos(), ty);
+        // Java makes the array of the class javac gives its elements (`String[]` for
+        // `Arrays.asList("a", "b")`), which it carries where the translation holds it as an
+        // `Object[]` (`covariant`).
+        let made = node.str("varargsElement");
+        if !made.is_empty() && !self.covariant.known.is_empty() {
+            self.made_as(&packed, self.exact_ty(node, &format!("{made}[]"))?);
+        }
         args.push(packed);
         Ok(args)
     }

@@ -671,6 +671,17 @@ public class JavaTree {
                     string(typeText(expected), out);
                 }
             }
+            // The class of the elements of the array that a variable-arity call packs its
+            // trailing arguments into: `String` for `Arrays.asList("a", "b")`.
+            com.sun.tools.javac.code.Type varargs = switch (tree) {
+                case com.sun.tools.javac.tree.JCTree.JCMethodInvocation m -> m.varargsElement;
+                case com.sun.tools.javac.tree.JCTree.JCNewClass n -> n.varargsElement;
+                default -> null;
+            };
+            if (varargs != null) {
+                out.append(",\"varargsElement\":");
+                string(typeName(types.erasure(varargs)), out);
+            }
         }
         if (tree instanceof IdentifierTree || tree instanceof MemberSelectTree || tree instanceof MethodInvocationTree
                 || tree instanceof NewClassTree || tree instanceof VariableTree || tree instanceof MethodTree

@@ -819,7 +819,7 @@ impl<'t> Lowering<'t> {
                 Member::Method(m) if class == CONSTRUCTOR => {
                     let owner = self.methods[*m].owner;
                     let slot = constructor_slot(self.types[owner].node.has_flag("ABSTRACT"), slot);
-                    let types = classes(self.param_types(*m)?, 1);
+                    let types = classes(self.declared_param_classes(*m)?, 1);
                     vec![
                         found_on,
                         types,
@@ -832,8 +832,10 @@ impl<'t> Lowering<'t> {
                     let declaring = literal(self.self_type(self.methods[*m].owner));
                     let name =
                         self.synth(ExprKind::Str(self.methods[*m].name.to_string()), pos, Type::String);
-                    let ret = literal(self.return_type(node, *m)?);
-                    let types = classes(self.param_types(*m)?, 3);
+                    let info = &self.methods[*m];
+                    let ret = info.sig.rsplit(')').next().unwrap_or_default();
+                    let ret = literal(self.declared_class(node, ret, info.owner, Some(*m))?);
+                    let types = classes(self.declared_param_classes(*m)?, 3);
                     let thrown = classes(self.thrown_types(*m)?, 5);
                     vec![
                         found_on,
@@ -849,7 +851,8 @@ impl<'t> Lowering<'t> {
                 Member::Field(declaring, decl) => {
                     let decl = *decl;
                     let name = self.synth(ExprKind::Str(decl.str("name").to_string()), pos, Type::String);
-                    let ty = literal(self.reflected_field_type(decl)?);
+                    let ty = decl.symbol().map_or("", |s| s.ty);
+                    let ty = literal(self.declared_class(decl, ty, *declaring, None)?);
                     let mut modifiers = flags(decl, self.types[*declaring].node.kind() == "INTERFACE", false);
                     // An enum's constant is public, static and final, and `ENUM`, which
                     // `isEnumConstant` reads.
@@ -1093,22 +1096,23 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether the class `t` can have members in the table: a class, interface, enum or record
-    /// of the program, not generic, nor one of the translator's standard classes.
+    /// of the program, erased if generic (not a Rust generic, `real_generics`), nor one of the
+    /// translator's standard classes.
     fn reflectable(&self, t: usize) -> bool {
         let info = &self.types[t];
         matches!(info.node.kind(), "CLASS" | "INTERFACE" | "ENUM" | "RECORD")
-            && info.node.list("typeParameters").next().is_none()
+            && !self.is_real(real_generics::Owner::Class(t))
             && (!is_standard(&info.javac) || info.javac == RECORD_COMPONENT)
             && !self.functional.has(&info.javac)
             && self.plain_object != Some(t)
     }
 
-    /// Whether the method or constructor `m` can be called through the table: not generic, with
-    /// parameters and a result that are boxed to and from `Object`, and exceptions that are
+    /// Whether the method or constructor `m` can be called through the table: erased if generic,
+    /// with parameters and a result that are boxed to and from `Object`, and exceptions that are
     /// classes of the translation (its `getExceptionTypes`).
     fn callable(&self, node: Node<'t>, m: usize) -> Result<bool, Error> {
         let info = &self.methods[m];
-        if info.node.list("typeParameters").next().is_some() || self.thrown_types(m).is_err() {
+        if self.is_real(real_generics::Owner::Method(m)) || self.thrown_types(m).is_err() {
             return Ok(false);
         }
         let Ok(params) = self.param_types(m) else { return Ok(false) };
@@ -1142,6 +1146,24 @@ impl<'t> Lowering<'t> {
     /// The type of the field that `decl` declares.
     fn reflected_field_type(&self, decl: Node<'t>) -> Result<Type, Error> {
         self.ty(decl, decl.symbol().map_or("", |s| s.ty))
+    }
+
+    /// The class that reflection gives for the type `name` declared by a member of class `t`
+    /// (or by method `m`): an array's own class where the translation holds it as an `Object[]`
+    /// (`covariant`), as log4j finds a converter's `newInstance(String[])` by the name of its
+    /// parameter's class.
+    fn declared_class(&self, node: Node<'t>, name: &str, t: usize, m: Option<usize>) -> Result<Type, Error> {
+        let outer = self.scope.replace(Some((t, m)));
+        let ty = self.exact_ty(node, name);
+        self.scope.set(outer);
+        ty
+    }
+
+    /// The classes of the parameters of method or constructor `m` as declared (`declared_class`).
+    fn declared_param_classes(&self, m: usize) -> Result<Vec<Type>, Error> {
+        let owner = self.methods[m].owner;
+        let params = self.methods[m].node.list("parameters");
+        params.map(|p| self.declared_class(p, p.symbol().map_or("", |s| s.ty), owner, Some(m))).collect()
     }
 
     /// The bits of `Modifier` of method or constructor `m`.

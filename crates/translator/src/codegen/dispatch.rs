@@ -2755,6 +2755,11 @@ impl<'a> Gen<'a> {
             }
             None => self.value_hash(c, "o"),
         };
+        // An array of references may be a covariant array, which carries its own class.
+        if self.class.array_of(c).is_some_and(|a| a.element().is_reference()) {
+            let name = rust_string(&self.binary_name(c));
+            return format!("{}(o, {name}, {hash})", self.runtime("array_default_text"));
+        }
         self.default_text(c, hash)
     }
 
