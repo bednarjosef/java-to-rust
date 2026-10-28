@@ -7,8 +7,9 @@ import jdk.internal.reflect.Reflection;
 /**
  * The translator's {@code System.loadLibrary}, {@code System.load} and
  * {@code System.mapLibraryName}. A translated program has no JNI: the natives it can call are
- * the runtime's, and a call of any other native is rejected where the translator meets it (see
- * {@code lower/natives.rs}). Loading a library therefore adds nothing that the program could
+ * the runtime's, a call of a library's native throws {@code UnsatisfiedLinkError} as where its
+ * library was never loaded, and a call of any other native is rejected where the translator meets
+ * it (see {@code lower/natives.rs}). Loading a library therefore adds nothing that the program could
  * call, and only its outcome is left: it succeeds where Java finds the library's file and throws
  * Java's {@code UnsatisfiedLinkError} where Java finds none, searching the same directories in
  * the same order ({@code sun.boot.library.path}, then {@code java.library.path} for a class that

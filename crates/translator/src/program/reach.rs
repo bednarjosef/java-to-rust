@@ -2297,6 +2297,10 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
 /// class whose module does not export its package to the code's (`lower/modules.rs`).
 pub const ILLEGAL_ACCESS: (&str, &str) = ("java.lang.IllegalAccessError", "(java.lang.String)void");
 
+/// The error, and the signature of its constructor, that a call of a native throws where the
+/// program cannot have the native's code: a library's, or JFR's (`lower/natives.rs`).
+pub const UNLINKED: (&str, &str) = ("java.lang.UnsatisfiedLinkError", "(java.lang.String)void");
+
 /// The restricted methods among `REDIRECTED_CALLS`, with the translator's method of the same
 /// class that a call from outside the modules of `NATIVE_ACCESS_MODULES` calls instead
 /// (`lower.rs`). Java lets such code load a library after it prints a warning that names where
@@ -3657,6 +3661,12 @@ impl<'t> Walk<'t> {
             }
             return;
         };
+        // A native that the runtime does not have may throw `UnsatisfiedLinkError`
+        // (`lower/natives.rs`).
+        if has_flag(node, "NATIVE") && crate::ast::declared_native(&key.0, &key.1, &key.2).is_none() {
+            let (class, signature) = UNLINKED;
+            self.work.push(Item::Method((class.into(), "<init>".into(), signature.into())));
+        }
         // A method called before a unit declared its class was taken for one of the runtime's.
         let was_external = self.reach.external.remove(&key);
         let class = key.0.clone();

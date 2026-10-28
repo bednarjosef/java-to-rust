@@ -2,12 +2,95 @@
 //! `Math` and `StrictMath`, the bit conversions of `Double` and `Float`, identity hashes, clocks,
 //! `System.err` and the rest of `System.out`), recognised by the method's owner and name, and the
 //! natives of translated JDK classes (`declared_native`). A native method's declaration is never
-//! lowered; a call of one the runtime does not implement is rejected with its name.
+//! lowered; a call of one the runtime does not implement is rejected with its name, unless the
+//! program cannot have its code (`unlinked`): then it throws `UnsatisfiedLinkError`, as Java does
+//! where the native was never linked.
 
 use super::{Lowering, Node, Symbol, unsupported};
 use crate::ast::*;
 
+/// The class of JFR's natives, which the JVM links only where it is built with JFR. A translated
+/// program is a JVM without it, where `JVMSupport.checkAvailability` catches the
+/// `UnsatisfiedLinkError` of `JVM.isAvailable()` and JFR is not available.
+const JFR_NATIVES: &str = "jdk.jfr.internal.JVM";
+
 impl<'t> Lowering<'t> {
+    /// Whether the natives of class `owner` are code that a translated program cannot have: a
+    /// library's, outside the JDK's modules, whose JNI library the program never loads
+    /// (`java/lang/TranslatedLibraries.java`), and JFR's (`JFR_NATIVES`). Only in a whole
+    /// program, which knows the modules.
+    fn unlinked(&self, owner: usize) -> bool {
+        let Some(reach) = self.reach else { return false };
+        let javac = &self.types[owner].javac;
+        if javac == JFR_NATIVES {
+            return true;
+        }
+        let package = self.package_of(owner);
+        let package = package.strip_suffix('.').unwrap_or(&package);
+        match reach.module_of(package) {
+            Some(m) => !(m.name.starts_with("java.") || m.name.starts_with("jdk.")),
+            None => !crate::program::in_jdk(javac),
+        }
+    }
+
+    /// The message of the `UnsatisfiedLinkError` of the native `name` of type `sig` (javac's,
+    /// `(int,java.lang.String)void`) of class `owner`: the method in quotes, its return type first,
+    /// its parameters separated by `, `, each type erased and by its binary name, a variable arity
+    /// as an array (`'void com.mojang.jtracy.TracyBindings.markFrameStart(long)'`).
+    fn unlinked_message(&self, owner: usize, name: &str, sig: &str) -> String {
+        let erased = |ty: &str| {
+            let mut out = String::new();
+            let mut depth = 0;
+            for c in ty.chars() {
+                match c {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    _ if depth == 0 => out.push(c),
+                    _ => {}
+                }
+            }
+            let out = out.replace("...", "[]");
+            let base = out.trim_end_matches("[]");
+            match self.type_index(base).and_then(|t| self.binary_name(t)) {
+                Some(binary) => format!("{binary}{}", &out[base.len()..]),
+                None => out,
+            }
+        };
+        let sig = erased(sig);
+        let (params, ret) = sig.strip_prefix('(').and_then(|s| s.split_once(')')).unwrap_or(("", &sig));
+        let params: Vec<String> = params.split(',').filter(|p| !p.is_empty()).map(erased).collect();
+        let class = self.binary_name(owner).unwrap_or_else(|| self.types[owner].javac.clone());
+        format!("'{ret} {class}.{name}({})'", params.join(", "))
+    }
+
+    /// A call of the static native `symbol` that the runtime does not have and the program cannot
+    /// (`unlinked`): its arguments that do something evaluated, then `UnsatisfiedLinkError`
+    /// thrown. `None` for any
+    /// other call.
+    pub(super) fn unlinked_native_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        args: &mut Vec<Expr>,
+    ) -> Result<Option<ExprKind>, Error> {
+        if !symbol.native || !symbol.is_static || self.method_index(symbol).is_some() {
+            return Ok(None);
+        }
+        let Some(owner) = self.type_index(symbol.owner) else { return Ok(None) };
+        if declared_native(symbol.owner, symbol.name, symbol.ty).is_some() || !self.unlinked(owner) {
+            return Ok(None);
+        }
+        let ty = self.ty(node, node.java_type())?;
+        let message = self.unlinked_message(owner, symbol.name, symbol.ty);
+        let before = std::mem::take(args).into_iter().filter(has_effects).map(Stmt::Expr).collect();
+        match self.standard_thrown(crate::program::UNLINKED.0, Some(&message), before, ty, node.pos()) {
+            Some(thrown) => Ok(Some(thrown.kind)),
+            None => {
+                unsupported(node, &format!("native method `{}.{}{}`", symbol.owner, symbol.name, symbol.ty))
+            }
+        }
+    }
+
     /// The builtin for a call of a native-layer method, `None` for any other method. `args` are
     /// the lowered arguments; an instance method's receiver is put first.
     pub(super) fn native_call(
@@ -188,11 +271,28 @@ impl<'t> Lowering<'t> {
     /// The body of native instance method `index`, which a call of a method it implements may run
     /// (`native_dispatch`): the call of the native on `this` and the parameters, the runtime's
     /// (`declared_native`) or, where the runtime does not implement it, `Native::Missing`, which
-    /// rejects the program where it can run, and in a census is the stub of that.
+    /// rejects the program where it can run, and in a census is the stub of that; or the
+    /// `UnsatisfiedLinkError` of a native the program cannot have (`unlinked`).
     pub(super) fn native_body(&self, index: usize, params: &[Param], ret: Type) -> Vec<Stmt> {
         let info = &self.methods[index];
         let pos = info.node.pos();
         let owner = &self.types[info.owner].javac;
+        if declared_native(owner, info.name, info.sig).is_none()
+            && self.unlinked(info.owner)
+            && let Some(thrown) = self.standard_thrown(
+                crate::program::UNLINKED.0,
+                Some(&self.unlinked_message(info.owner, info.name, info.sig)),
+                Vec::new(),
+                ret,
+                pos,
+            )
+        {
+            return vec![if ret == Type::Void {
+                Stmt::Expr(thrown)
+            } else {
+                Stmt::Return(Some(thrown), pos)
+            }];
+        }
         let native = declared_native(owner, info.name, info.sig).unwrap_or_else(|| Native::Missing {
             what: Box::leak(format!("{owner}.{}{}", info.name, info.sig).into_boxed_str()),
         });
