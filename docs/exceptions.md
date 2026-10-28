@@ -335,10 +335,14 @@ A static block or static field initializer that throws is wrapped in
   }
   ```
 
-  The state is its own guard, so the rewritten `<clinit>` gets no `init_guard`; its callers
-  return `Result`, and so does a method that starts by running it (`Facts::entry_init`,
-  `analysis/exceptions/entry.rs`). In a program that starts a thread, the two fields are
-  process-wide or thread-local with the class's other statics.
+  The state is its own guard for the thread that runs it; its callers return `Result`, and so
+  does a method that starts by running it (`Facts::entry_init`, `analysis/exceptions/entry.rs`).
+  In a program that starts a thread, the two fields are process-wide or thread-local with the
+  class's other statics. Where they are process-wide, the state says only that some thread
+  started, so the class's `java::ClassInit` still makes another thread wait while one runs the
+  initialization, as Java does (`init_guard`): the `init` function's fast path asks that the
+  state be 1 and the run done, and the run is done at whichever return ends it, so that the
+  threads that waited for a failed one see state 2 and throw `NoClassDefFoundError`.
 - **The JDK's static initializers** run on the JDK's own constants and flags and none of the
   program's code, so they throw only for bugs: one lets out nothing, and the `catch` clauses
   around a use of its class are not looked for in its own code. A `catch` inside a rewritten JDK

@@ -199,9 +199,18 @@ impl<'a> Gen<'a> {
     /// At the start of an `init` function: returns if initialization has started, else records
     /// that it has, so that a use during initialization, from the same thread, sees the class as
     /// initialized, as Java does. When its statics are the process's, another thread's
-    /// initialization is waited for, and `init_done` ends the function.
+    /// initialization is waited for, and `init_done` ends the function. A rewritten `<clinit>`
+    /// keeps its own state, which is its guard (`lower/clinit_errors.rs`): when its statics are
+    /// the process's, another thread's initialization is waited for all the same, and the run
+    /// this thread starts is done at whichever return ends it, failed or not.
     pub(super) fn init_guard(&mut self, t: usize) {
         let class = &self.class.types[t].name;
+        if crate::lower::rewritten_clinit(&self.class.types[t]) {
+            if self.facts.process_statics(t) {
+                self.line(&format!("let _run = {}.run();", flag(class)));
+            }
+            return;
+        }
         if self.facts.process_statics(t) {
             self.line(&format!("if !{}.start() {{", flag(class)));
             self.line("    return;");
@@ -220,7 +229,11 @@ impl<'a> Gen<'a> {
     /// out of line. A class is used far more often than it is initialized.
     pub(super) fn init_fast_path(&mut self, t: usize, name: &str, ret: &str) {
         let decl = &self.class.types[t];
-        let started = if crate::lower::rewritten_clinit(decl) {
+        // A rewritten `<clinit>` records that it started before it runs; another thread waits
+        // until it is done.
+        let started = if crate::lower::rewritten_clinit(decl) && self.facts.process_statics(t) {
+            format!("{}.get() == 1 && {}.done()", self.cell_name(t, crate::lower::STATE), flag(&decl.name))
+        } else if crate::lower::rewritten_clinit(decl) {
             format!("{}.get() == 1", self.cell_name(t, crate::lower::STATE))
         } else if self.facts.process_statics(t) {
             format!("{}.done()", flag(&decl.name))
@@ -243,8 +256,12 @@ impl<'a> Gen<'a> {
     }
 
     /// At the end of the `init` function of a class whose statics are the process's: the
-    /// initialization is done, for the threads that wait for it.
+    /// initialization is done, for the threads that wait for it. (A rewritten `<clinit>`'s run is
+    /// done as it returns, see `init_guard`.)
     pub(super) fn init_done(&mut self, t: usize) {
+        if crate::lower::rewritten_clinit(&self.class.types[t]) {
+            return;
+        }
         let class = &self.class.types[t].name;
         self.line(&format!("{}.finish();", flag(class)));
     }
