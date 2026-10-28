@@ -93,11 +93,21 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>, java: bool) {
     }
 }
 
-/// The program's run on Java, compiled with javac into `classes` first, or its result stored in
-/// `cache` by an earlier run with the same sources, input and Java version.
-/// The packages of `java.base` that are not exported but that the programs may use.
+/// The packages of `java.base` that are not exported but that the programs may use: Java and the
+/// translator are given them.
 const INTERNAL_EXPORTS: [&str; 2] = ["--add-exports", "java.base/sun.util.logging=ALL-UNNAMED"];
 
+/// The packages of `java.base` that the programs are compiled against but run without, as a
+/// library built against the JDK's internals is: using them throws `IllegalAccessError`.
+const COMPILE_ONLY_EXPORTS: [&str; 4] = [
+    "--add-exports",
+    "java.base/jdk.internal.misc=ALL-UNNAMED",
+    "--add-exports",
+    "java.base/jdk.internal.util=ALL-UNNAMED",
+];
+
+/// The program's run on Java, compiled with javac into `classes` first, or its result stored in
+/// `cache` by an earlier run with the same sources, input and Java version.
 fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
     let mut sources = Vec::new();
     files(&p.sources, &mut sources, true);
@@ -119,6 +129,7 @@ fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
     // which reads `java.base` from its sources, sees all of its packages.
     let javac = Command::new("javac")
         .args(INTERNAL_EXPORTS)
+        .args(COMPILE_ONLY_EXPORTS)
         .arg("-d")
         .arg(classes)
         .args(&sources)
@@ -226,6 +237,7 @@ fn run_rust(
     let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
         .args(crates.into_iter().flat_map(|n| ["--crates".to_string(), n.to_string()]))
         .args(["--main", &p.main])
+        .args(INTERNAL_EXPORTS)
         .arg("--source")
         .arg(&p.sources)
         .arg("--library")

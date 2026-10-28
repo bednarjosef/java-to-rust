@@ -60,13 +60,17 @@ fn resource_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The runs of `bytes` that could be a class's binary name: identifiers joined by dots, at least
-/// two, a nested class's after a `$`.
+/// two, a nested class's after a `$`. A binary file writes a name after its length (Java's
+/// `writeUTF`, two bytes), whose low byte may read as a letter or a digit, so a run without its
+/// first byte is a name too.
 fn class_names(bytes: &[u8]) -> Vec<String> {
     let part = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'.');
     bytes
         .split(|b| !part(b))
         .filter_map(|run| std::str::from_utf8(run).ok())
         .map(|run| run.trim_matches('.'))
+        .flat_map(|run| [Some(run), run.get(1..)])
+        .flatten()
         .filter(|run| could_name_class(run))
         .map(str::to_string)
         .collect()
@@ -95,8 +99,17 @@ mod tests {
     #[test]
     fn names_are_runs_that_look_like_classes() {
         let bytes = b"\x00\x0aappender\x00\x2aorg.apache.logging.log4j.core.Appender$Nested\x00\
-            Export-Package: org.apache.logging.log4j.core,a.b;version=2.26 x.Y. 1.2.Three";
-        assert_eq!(class_names(bytes), vec!["org.apache.logging.log4j.core.Appender$Nested", "x.Y"]);
+            Export-Package: org.apache.logging.log4j.core,a.b;version=2.26 x.Y. 1.2.Three\x00Eorg.a.Layout";
+        assert_eq!(
+            class_names(bytes),
+            vec![
+                "org.apache.logging.log4j.core.Appender$Nested",
+                "rg.apache.logging.log4j.core.Appender$Nested",
+                "x.Y",
+                "Eorg.a.Layout",
+                "org.a.Layout"
+            ]
+        );
     }
 
     #[test]

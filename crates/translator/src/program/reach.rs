@@ -124,9 +124,28 @@ pub struct Reach {
     /// The modules of the program's roots, which its `java.lang.Module` and `ClassLoader` answer with
     /// (`modules::contents`, `lower/modules.rs`); set after reachability.
     pub modules: Vec<super::modules::Contents>,
+    /// The exports that the program adds to its modules' (`Program::add_exports`).
+    pub added_exports: Vec<(String, String, String)>,
+    /// The index in `modules` of the module of each package (`module_of`), made when first asked.
+    module_of_package: std::sync::OnceLock<HashMap<String, usize>>,
 }
 
 impl Reach {
+    /// The module that holds `package`: of two roots with it, the first's, as the class path
+    /// would have it (`moduleOf0`).
+    pub fn module_of(&self, package: &str) -> Option<&super::modules::Contents> {
+        let packages = self.module_of_package.get_or_init(|| {
+            let mut packages = HashMap::new();
+            for (i, m) in self.modules.iter().enumerate() {
+                for p in &m.packages {
+                    packages.entry(p.clone()).or_insert(i);
+                }
+            }
+            packages
+        });
+        packages.get(package).map(|&i| &self.modules[i])
+    }
+
     /// What was reached, one sorted line per item, for comparing two reachabilities
     /// (`JAVA_TO_RUST_REACH_DUMP`).
     pub fn dump(&self) -> String {
@@ -2274,6 +2293,10 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
     ),
 ];
 
+/// The error, and the signature of its constructor, that code throws where it names a member of a
+/// class whose module does not export its package to the code's (`lower/modules.rs`).
+pub const ILLEGAL_ACCESS: (&str, &str) = ("java.lang.IllegalAccessError", "(java.lang.String)void");
+
 /// The restricted methods among `REDIRECTED_CALLS`, with the translator's method of the same
 /// class that a call from outside the modules of `NATIVE_ACCESS_MODULES` calls instead
 /// (`lower.rs`). Java lets such code load a library after it prints a warning that names where
@@ -4181,6 +4204,18 @@ impl<'t> Walk<'t> {
             && let Some((to, signature)) = module_call("java.lang.Class", "getPackage", "()java.lang.Package")
         {
             self.work.push(Item::Method((TRANSLATED_MODULES.into(), to.into(), signature.into())));
+        }
+        // A member of a JDK class outside `java` and `javax` that code outside the JDK names may be
+        // in a package that its module does not export, where the lowering throws
+        // `IllegalAccessError` (`lower/modules.rs`).
+        if matches!(text(symbol, "kind"), "METHOD" | "CONSTRUCTOR" | "FIELD")
+            && in_jdk(owner)
+            && !owner.starts_with("java.")
+            && !owner.starts_with("javax.")
+            && self.lookup_class.as_deref().is_some_and(|class| !in_jdk(class))
+        {
+            let (class, signature) = ILLEGAL_ACCESS;
+            self.work.push(Item::Method((class.into(), "<init>".into(), signature.into())));
         }
         match text(symbol, "kind") {
             "METHOD"

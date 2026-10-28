@@ -74,10 +74,72 @@ impl<'t> Lowering<'t> {
         let Some(reach) = self.reach else { return false };
         let package = self.package_of(self.lambda_holder(self.current.get()));
         let package = package.strip_suffix('.').unwrap_or(&package);
-        // A package in two roots is the first's, as the class path would have it (`moduleOf0`).
-        reach.modules.iter().find(|m| m.packages.iter().any(|p| p == package)).is_some_and(|m| {
+        reach.module_of(package).is_some_and(|m| {
             !m.name.is_empty() && crate::program::NATIVE_ACCESS_MODULES.contains(&m.name.as_str())
         })
+    }
+
+    /// The `IllegalAccessError` that Java throws where the code being lowered names a member of a
+    /// class whose package another named module holds and does not export to the code's module,
+    /// as the JVM checks when it resolves the reference: a call, a `new` or a field access, unless
+    /// the program adds that export (`--add-exports`, `Program::add_exports`). A
+    /// library compiled with `--add-exports` against the JDK's internals (joml's
+    /// `MemUtilInternalUnsafe`, of `jdk.internal.misc.Unsafe`) fails so at run time, which it
+    /// catches to fall back. `None` for any other node, and outside a whole program.
+    pub(super) fn inaccessible(&self, node: Node<'t>) -> Option<Expr> {
+        let reach = self.reach?;
+        if !matches!(node.kind(), "METHOD_INVOCATION" | "NEW_CLASS" | "MEMBER_SELECT" | "IDENTIFIER") {
+            return None;
+        }
+        let symbol = node.symbol()?;
+        // Only the JDK's modules are named when Java runs: a library's `module-info.java` names
+        // none on the class path, which the server and the corpus run on. The JDK's own code
+        // names only what its module may.
+        if !matches!(symbol.kind, "METHOD" | "CONSTRUCTOR" | "FIELD") || !crate::program::in_jdk(symbol.owner)
+        {
+            return None;
+        }
+        let module_of = |package: &str| reach.module_of(package);
+        let from = self.lambda_holder(self.current.get());
+        if crate::program::in_jdk(&self.types[from].javac) {
+            return None;
+        }
+        let here = self.package_of(from);
+        let here = module_of(here.strip_suffix('.').unwrap_or(&here)).map_or("", |m| m.name.as_str());
+        // The owner's package: the longest prefix of its name that a module holds.
+        let mut package = symbol.owner;
+        let (package, there) = loop {
+            let (outer, _) = package.rsplit_once('.')?;
+            if let Some(m) = module_of(outer) {
+                break (outer, m);
+            }
+            package = outer;
+        };
+        let exported = |list: &Vec<String>| list.is_empty() || list.iter().any(|m| m == here);
+        let target = if here.is_empty() { "ALL-UNNAMED" } else { here };
+        if there.name.is_empty()
+            || there.name == here
+            || there.exports.iter().any(|(p, to)| p == package && exported(to))
+            || reach.added_exports.iter().any(|(m, p, to)| *m == there.name && p == package && to == target)
+        {
+            return None;
+        }
+        let module = |name: &str| match name {
+            "" => "unnamed module".to_string(),
+            name => format!("module {name}"),
+        };
+        // The classes by their binary names (`Outer$Inner`), as the JVM writes them.
+        let owner = format!("{package}.{}", symbol.owner[package.len() + 1..].replace('.', "$"));
+        let message = format!(
+            "class {} (in {}) cannot access class {owner} (in {}) because {} does not export {package} to {}",
+            self.binary_name(from).unwrap_or_else(|| self.types[from].javac.clone()),
+            module(here),
+            module(&there.name),
+            module(&there.name),
+            module(here),
+        );
+        let ty = self.ty(node, node.java_type()).ok()?;
+        self.standard_thrown(crate::program::ILLEGAL_ACCESS.0, Some(&message), Vec::new(), ty, node.pos())
     }
 
     /// The method `name` of `java.lang.TranslatedModules` with javac's signature `signature`, if

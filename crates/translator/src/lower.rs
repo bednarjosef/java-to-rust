@@ -1010,6 +1010,9 @@ impl<'t> Lowering<'t> {
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
         self.javac_error(node)?;
+        if let Some(thrown) = self.inaccessible(node) {
+            return Ok(thrown);
+        }
         self.check_handle_value(node)?;
         if let Some(code) = self.reference_native(node)? {
             return Ok(code);

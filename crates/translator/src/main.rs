@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [--keep-going]
-                    [--named-locals] [--approximate-messages]
+                    [--named-locals] [--approximate-messages] [--add-exports <module>/<package>=<to>]...
                     [<File.java>]... [-o <output.rs> | --crate <directory> [--crates <n>]
                      | --survey [--survey-json <file>]
                      | --census [--census-json <file>] [--save-tree <file>]
@@ -141,6 +141,18 @@ fn run_program(args: &[String]) -> Result<(), String> {
             "--keep-going" => program.keep_going = true,
             "--named-locals" => program.named_locals = true,
             "--approximate-messages" => program.approximate_messages = true,
+            "--add-exports" => {
+                let export = value()?;
+                let parsed = export.split_once('/').and_then(|(module, rest)| {
+                    rest.split_once('=').map(|(package, to)| (module, package, to))
+                });
+                let Some((module, package, to)) = parsed else {
+                    return Err(format!("--add-exports {export}: not <module>/<package>=<to>\n{USAGE}"));
+                };
+                for to in to.split(',') {
+                    program.add_exports.push((module.into(), package.into(), to.into()));
+                }
+            }
             "--modules-json" => modules_json = Some(value()?),
             "--save-tree" => save_tree = Some(value()?),
             "--from-tree" => from_tree = Some(value()?),
