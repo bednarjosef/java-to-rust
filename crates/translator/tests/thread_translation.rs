@@ -208,7 +208,7 @@ fn a_string_builder_of_a_program_with_threads_is_shared() {
         &[
             "static A_LOG: LazyLock<java::Locked<java::SharedStringBuilder>>",
             "StringBuilder(&'a java::SharedStringBuilder) = 22,",
-            "ObjectView::StringBuilder(o) => java::HasMonitor::monitor(o),",
+            "22 => { let o: &java::SharedStringBuilder = unsafe { self.0.as_pointer() }; java::HasMonitor::monitor(o) }",
             "let _monitor = java::enter(&A_LOG",
         ],
     );
