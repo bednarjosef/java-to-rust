@@ -362,6 +362,8 @@ fn generate_with(
         class_value_names: Vec::new(),
         class_details: false,
         class_interfaces: false,
+        arms_method: None,
+        arm_parts: String::new(),
     };
     g.conversion_names = setup.conversion_names.get_or_insert_with(|| g.conversion_names().into()).clone();
     g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
@@ -634,6 +636,11 @@ struct Gen<'a> {
     /// Whether the code asks a class for its interfaces (`ClassOp::InterfaceCount`), which the
     /// constants then carry (`class_value`).
     class_interfaces: bool,
+    /// The method whose `match` on the class number `match_arms_or` writes, while one is set, so
+    /// that a `match` over thousands of classes is cut into methods of its own.
+    arms_method: Option<dispatch::ArmsMethod>,
+    /// The methods those cuts make, which `flush_arm_parts` writes after the method.
+    arm_parts: String,
 }
 
 impl<'a> Gen<'a> {

@@ -788,6 +788,82 @@ public class Main {
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "3 false\n");
 }
 
+/// A `match` on the class number over more classes than one method of it takes (`PART_CLASSES` in
+/// `codegen/dispatch.rs`, 2048) is cut into methods by number: a program with 2100 classes that
+/// shows each object and its class's name runs as Java does, through methods of two parts.
+#[test]
+fn a_match_over_thousands_of_classes_is_cut_into_parts() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-thousands-of-classes");
+    let _ = std::fs::remove_dir_all(&work);
+    let sources = work.join("src");
+    std::fs::create_dir_all(&sources).unwrap();
+    let count = 2100;
+    let mut java = String::from("public class Main {\n");
+    for i in 0..count {
+        java.push_str(&format!(
+            "    static class K{i} {{ public String toString() {{ return \"K\" + {i}; }} }}\n"
+        ));
+    }
+    let made: Vec<String> = (0..count).map(|i| format!("new K{i}()")).collect();
+    java.push_str(&format!(
+        "    public static void main(String[] args) {{
+        Object[] all = {{ {} }};
+        int total = 0;
+        for (Object o : all) total += o.toString().length() + o.getClass().getName().length();
+        System.out.println(all.length + \" \" + total);
+        System.out.println(all[0] + \" \" + all[{last}] + \" \" + all[{last}].getClass().getName());
+        System.out.println(all[{last}].getClass() == all[args.length].getClass());
+        try {{
+            K0 first = (K0) all[{last} - args.length];
+            System.out.println(first);
+        }} catch (ClassCastException e) {{
+            System.out.println(e.getMessage());
+        }}
+    }}
+}}
+",
+        made.join(", "),
+        last = count - 1
+    ));
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let dir = work.join("crate");
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("--crate")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let code = std::fs::read_to_string(dir.join("src/main.rs")).unwrap();
+    assert!(code.contains("_of_part_1("), "the class matches were not cut");
+    let target = work.join("cargo");
+    let built = Command::new("cargo")
+        .args(["build", "-q", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let ran = Command::new(target.join("debug/main")).env_remove("LD_LIBRARY_PATH").output().unwrap();
+    let total: usize = (0..count).map(|i| format!("K{i}").len() + format!("Main$K{i}").len()).sum();
+    let last = count - 1;
+    let cast = format!(
+        "class Main$K{last} cannot be cast to class Main$K0 (Main$K{last} and Main$K0 are in unnamed module of \
+         loader 'app')"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        format!("{count} {total}\nK0 K{last} Main$K{last}\nfalse\n{cast}\n")
+    );
+}
+
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see
 /// `corpus/whole-program/ClassesAsReflectTypes.java`), but not `Constable`, whose
 /// `describeConstable()` would need the class's descriptor as an object: a class converted to a
