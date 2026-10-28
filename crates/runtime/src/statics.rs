@@ -262,6 +262,25 @@ impl ClassInit {
         self.state.store(DONE, Ordering::Release);
         self.done.notify_all();
     }
+
+    /// `start`, for an initialization that keeps its own state of success or failure (a class
+    /// whose `<clinit>` the translator rewrites to rethrow): the run that the calling thread is to
+    /// do now, which finishes when it is dropped, at whichever return ends it, failed or not.
+    /// `None` once it is done, or while this thread runs it; another thread's run is waited for
+    /// first.
+    #[inline]
+    pub fn run(&self) -> Option<InitRun<'_>> {
+        self.start().then_some(InitRun(self))
+    }
+}
+
+/// An initialization that the calling thread runs (`ClassInit::run`): done when dropped.
+pub struct InitRun<'a>(&'a ClassInit);
+
+impl Drop for InitRun<'_> {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
 }
 
 impl Default for ClassInit {
@@ -311,5 +330,28 @@ mod tests {
             assert_eq!(t.join().unwrap(), 42);
         }
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_run_that_fails_is_done_for_the_threads_that_wait() {
+        crate::locked::begin_threads();
+        static INIT: ClassInit = ClassInit::new();
+        static STATE: Atomic<i32> = Atomic::new(0);
+        fn init() -> Result<(), &'static str> {
+            let _run = INIT.run();
+            match STATE.get() {
+                2 => return Err("no class"),
+                1 => return Ok(()),
+                _ => STATE.set(1),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            STATE.set(2);
+            Err("failed")
+        }
+        let threads: Vec<_> = (0..4).map(|_| std::thread::spawn(init)).collect();
+        let mut results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        results.sort();
+        assert_eq!(results, [Err("failed"), Err("no class"), Err("no class"), Err("no class")]);
+        assert!(INIT.done());
     }
 }

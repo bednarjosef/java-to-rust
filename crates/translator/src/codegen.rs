@@ -951,10 +951,7 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.declare_slots(&sites);
         if m.name == "<clinit>" {
-            // A rewritten `<clinit>` keeps its own state, which is its guard (`lower/clinit_errors.rs`).
-            if !crate::lower::rewritten_clinit(&self.class.types[m.class]) {
-                self.init_guard(m.class);
-            }
+            self.init_guard(m.class);
             // Java initializes the superclass first, then the superinterfaces that declare
             // default methods (`default_superinterfaces`).
             let superclass = self.class.hierarchy.superclass(m.class);
