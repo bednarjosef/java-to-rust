@@ -888,11 +888,21 @@ impl<'t> Lowering<'t> {
             }
             "VARIABLE" => {
                 let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
-                let init = match node.get("initializer") {
+                let mut init = match node.get("initializer") {
                     Some(v) => Some(self.convert(self.expr(v)?, ty)),
                     None => None,
                 };
-                Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
+                let (name, pos) = (node.str("name").to_string(), node.pos());
+                // A local that its own value assigns (`T x = c ? x = a : b`, which Java allows) is
+                // declared first and then assigned: the value names it.
+                if let Some(value) = init.take_if(|value| assigns(value, &name)) {
+                    out.push(Stmt::Local { ty, name: name.clone(), init: None, pos });
+                    let assign =
+                        ExprKind::Assign { op: None, target: Place::Var(name), value: Box::new(value) };
+                    Stmt::Expr(self.synth(assign, pos, ty))
+                } else {
+                    Stmt::Local { ty, name, init, pos }
+                }
             }
             "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
             // The value of a field handle is no field's (see `handles`).

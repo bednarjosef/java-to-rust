@@ -889,8 +889,9 @@ impl<'a> Gen<'a> {
             self.method = ctor;
             let object = match new.kind {
                 ExprKind::New { .. } => self.new_object_as(new.id, ctor, args, Some(throwable)).text,
-                // The factory of a class tree built in Java's order (`analysis::whole_objects`).
-                _ => self.value(new, Type::class("java.lang.Throwable")).text,
+                // The factory of a class tree built in Java's order (`analysis::whole_objects`),
+                // which returns its class's own type.
+                _ => self.class_cast(Type::class("java.lang.Throwable"), new).text,
             };
             // The form without a message comes first (`Lowering::raised_objects`).
             let bare = if args.is_empty() { " if e.message.is_none()" } else { "" };
