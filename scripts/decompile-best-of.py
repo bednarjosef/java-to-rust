@@ -17,6 +17,11 @@ A setup without a tree (CFR is not run where the base has no errors) is skipped.
    file that is not swapped and has more errors than in the base. The round with the fewest
    errors over the whole tree is kept, if it has fewer than the base.
 
+A method that a decompiler could not decompile, which it writes as one that throws (Procyon's
+"An error occurred while decompiling this method."), compiles but fails where it runs: each counts
+as STUB_ERRORS errors of its file, more than javac finds in any file, so a version that javac
+rejects, which the repair step may mend, is taken before it.
+
 Every compile is of the whole tree, against the other jars only (CLASSPATH), at most
 MAX_COMPILES of them, counting the base's. Writes OUT (the tree kept) and DIR/chosen.txt
 ("setup<TAB>file<TAB>base errors<TAB>errors"), and prints the counts.
@@ -37,6 +42,32 @@ dir, out, classpath, max_compiles, *setups = args
 max_compiles = int(max_compiles)
 base_setup = setups[0]
 compiles = 1  # the base's, already done
+with open(f"{dir}/all-files.txt") as f:
+    all_files = [line.strip() for line in f if line.strip()]
+
+STUB = re.compile(r"An error occurred while decompiling this method|Decompilation failed|\$(?:VF|FF): Couldn't be decompiled")
+STUB_ERRORS = 1000
+stub_counts = {}
+
+
+def stubs(setup, file):
+    """The methods that SETUP's version of FILE has in place of ones it could not decompile."""
+    if (setup, file) not in stub_counts:
+        try:
+            with open(f"{dir}/{setup}/{file}", errors="replace") as f:
+                stub_counts[setup, file] = len(STUB.findall(f.read()))
+        except FileNotFoundError:
+            stub_counts[setup, file] = 0
+    return stub_counts[setup, file]
+
+
+def with_stubs(counts, choice):
+    """COUNTS of the tree with the files of CHOICE swapped in, and STUB_ERRORS for each stub."""
+    for file in all_files:
+        n = stubs(choice.get(file, base_setup), file)
+        if n:
+            counts[file] += n * STUB_ERRORS
+    return counts
 
 
 def counts_of(log):
@@ -71,10 +102,10 @@ def compile_with(choice, name):
             cwd=tree, stdout=f, stderr=subprocess.STDOUT)
     shutil.rmtree(classes)
     shutil.rmtree(tree)
-    return counts_of(log)
+    return with_stubs(counts_of(log), choice)
 
 
-base = counts_of(f"{dir}/{base_setup}-javac.txt")
+base = with_stubs(counts_of(f"{dir}/{base_setup}-javac.txt"), {})
 base_total = sum(base.values())
 print(f"{base_setup} alone: {base_total} errors in {len(base)} files")
 

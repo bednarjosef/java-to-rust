@@ -209,6 +209,11 @@ bytecode the class file already has:
 - **A diamond in an argument** `new C(..)` of a generic class C, written raw, of a call whose
   type variables javac then cannot infer (`register(registry, "resource", ..., new
   ResourceArgument.Info())`): `new C<>(..)`, tried before a cast at the same error.
+- **A type argument for a method reference's raw qualifier**: a method reference on a raw `new
+  C(..)` of a class with one type variable, or on a call that returns it, whose method returns
+  that variable where the function type wants `R`: `Util.make(new Int2ObjectOpenHashMap<String>(),
+  m -> ..)::get` for an `IntFunction<String>` (`DataFixers`). The original's diamond took the
+  type from its target, which a qualifier does not give it, so `<>` does not do.
 - **Type arguments for a diamond** that javac cannot infer, copied from the declared type of
   the variable it initializes or the method result it is returned as, when that is the same
   class: `return new SortedArraySet<T>(...)`. Type arguments are inference only, with no
@@ -528,10 +533,17 @@ all name missing classes throws as Java would; any other marked piece is rejecte
      swapped and has gained errors. The round with the fewest errors in the whole tree is kept,
      if it has fewer than Vineflower alone.
 
+  A method that a decompiler could not decompile, which it writes as one that throws (Procyon's
+  `throw new IllegalStateException("An error occurred while decompiling this method.")`),
+  compiles but fails where it runs: each counts as 1000 errors of its file, so the step takes a
+  version that javac rejects, which `repair` may mend, before it. Procyon's `DataFixers`, with
+  no javac error but its 4000-line `addFixers` written that way, had been taken over
+  Vineflower's, whose 2 errors the repair mends: the server's start failed in it.
+
   Measured with the `parse` step (which attributes every file even when one does not parse):
   from 186 errors in 118 files to 151 in 100, with 10 files from Vineflower without the
   libraries, 8 from CFR and 5 from Procyon (among them `TypedDataComponent`, whose static
-  methods Vineflower writes with the record's type variable, and `DataFixers`), in 6 compiles.
+  methods Vineflower writes with the record's type variable), in 6 compiles.
   The `repair` step then puts back the type arguments, unchecked casts and catch variable names
   that javac's errors and the class files show ([above](#repairing-what-the-decompiler-left-out)),
   which leaves 42 errors in 18 files, all imports and annotations of annotation packages that no
