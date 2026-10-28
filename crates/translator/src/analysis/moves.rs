@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
     for method in &class.methods {
-        let mut walk = Walk::default();
+        let mut walk = Walk { likes: Some(&class.array_likes), ..Walk::default() };
         for p in &method.params {
             walk.declare(&p.name);
         }
@@ -50,7 +50,9 @@ struct Use {
 /// The mentions of variables in evaluation order. Each declaration is a variable of its own, so
 /// two locals of one name in different blocks are told apart.
 #[derive(Default)]
-struct Walk {
+struct Walk<'c> {
+    /// The arrays read for their class beside the copies made into it (`Class::array_likes`).
+    likes: Option<&'c HashMap<ExprId, Expr>>,
     /// The variables in scope, innermost last: (Java name, variable).
     scope: Vec<(String, usize)>,
     /// How many loops enclose each variable's declaration.
@@ -65,7 +67,7 @@ struct Walk {
     arguments: usize,
 }
 
-impl Walk {
+impl Walk<'_> {
     fn declare(&mut self, name: &str) {
         self.scope.push((name.to_string(), self.declared_in.len()));
         self.declared_in.push(self.loops);
@@ -188,6 +190,19 @@ impl Walk {
     }
 
     fn expr(&mut self, e: &Expr) {
+        self.kind(e);
+        // A copy into the class of an array reads that array after the copy, for its class only:
+        // a mention that is never a move.
+        if let Some(like) = self.likes.and_then(|likes| likes.get(&e.id)) {
+            visit_expr(like, &mut |x| {
+                if let ExprKind::Var(name) = &x.kind {
+                    self.mention(name, None);
+                }
+            });
+        }
+    }
+
+    fn kind(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::Var(name) => self.mention(name, Some(e.id)),
             // `s += t` reads `s` after `t`.

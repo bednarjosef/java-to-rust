@@ -9,7 +9,8 @@ import java.util.List;
  * `options.toArray(EMPTY)` copies a list into an array of the given array's class, which a
  * reflective call then checks against its parameter's `String[]`; and `Array.newInstance` of a
  * plugin's element class, filled through an `Object[]` and passed to a factory method. Guava's
- * `copy` reads its last parameter only for its class.
+ * `copy` reads its last parameter only for its class, and `Arrays.parallelSort` passes an array on
+ * before it makes a workspace of the array's class.
  */
 public class RuntimeArrayClasses {
     interface Policy {
@@ -55,6 +56,22 @@ public class RuntimeArrayClasses {
         return Arrays.copyOfRange(source, from, to, (Class<? extends T[]>) arrayOfType.getClass());
     }
 
+    static class Sorter {
+        final Object[] items;
+        final Object[] work;
+
+        Sorter(Object[] items, Object[] work) {
+            this.items = items;
+            this.work = work;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    static <T> Sorter sorter(T[] a) {
+        int n = a.length;
+        return new Sorter(a, (T[]) Array.newInstance(a.getClass().getComponentType(), n));
+    }
+
     public static void main(String[] args) throws Exception {
         List<String> options = new ArrayList<>(List.of("HH:mm", "UTC"));
         String[] copied = options.toArray(EMPTY);
@@ -64,6 +81,8 @@ public class RuntimeArrayClasses {
         System.out.println(join.invoke(null, (Object) new ArrayList<String>().toArray(EMPTY)));
         String[] part = copy(new Object[] {"a", "b", "c"}, 1, 3, EMPTY);
         System.out.println(part.getClass().getName() + " " + join.invoke(null, (Object) part));
+        Sorter sorter = sorter(copied);
+        System.out.println(sorter.work.getClass().getName() + " " + sorter.work.length + " " + sorter.items.length);
 
         Method policies = RuntimeArrayClasses.class.getMethod("policies", Policy[].class);
         Class<?> element = policies.getParameterTypes()[0].getComponentType();
