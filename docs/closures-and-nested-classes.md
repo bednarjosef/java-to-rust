@@ -334,7 +334,11 @@ A constant with a body (`PLUS { int apply(int a, int b) { .. } }`) is an anonymo
 enum; since an enum is a Rust `enum`, `lower/constant_bodies.rs` turns its overrides into arms of
 a `match` on `self` in the enum's method. A body may override the enum's methods, or the
 methods of an interface the enum leaves to its constants; a method that overrides nothing is a
-method of the enum, which only that body's code calls. An override is matched by its name and
+method of the enum, which only that body's code calls. A body's `super.m(..)` runs the enum's
+own `m`, which the `match` no longer is for an overriding constant, so the enum's own code is
+also a method of its own, `m$super` (`m_super` in Rust), which those calls run, as Guava's
+`LocalCache.EntryFactory` copies an entry (`corpus/whole-program/EnumConstantSuperCalls.java`).
+An override is matched by its name and
 parameters, so one that narrows the result type (`Double readNumber` of Gson's `ToNumberPolicy`
 beside the others' `Number readNumber`) is an arm of the same method, which returns the enum's
 type, or the interface's where the bodies narrow it differently

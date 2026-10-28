@@ -18,6 +18,27 @@ fn params_of(sig: &str) -> &str {
     sig.find(')').map_or(sig, |end| &sig[..=end])
 }
 
+/// The names and javac signatures of the methods that `super.m(..)` calls in the tree `v`.
+fn super_calls<'t>(v: &'t crate::value::Value, out: &mut Vec<(&'t str, &'t str)>) {
+    match v {
+        crate::value::Value::Object(map) => {
+            let select = &v["methodSelect"];
+            if v["kind"] == "METHOD_INVOCATION"
+                && select["kind"] == "MEMBER_SELECT"
+                && select["expression"]["kind"] == "IDENTIFIER"
+                && select["expression"]["name"] == "super"
+                && let (Some(name), Some(sig)) = (v["symbol"]["name"].as_str(), v["symbol"]["type"].as_str())
+                && !out.contains(&(name, sig))
+            {
+                out.push((name, sig));
+            }
+            map.values().for_each(|x| super_calls(x, out));
+        }
+        crate::value::Value::Array(items) => items.iter().for_each(|x| super_calls(x, out)),
+        _ => {}
+    }
+}
+
 /// Whether a case's statements always leave it, so that it needs no `break`.
 fn leaves(body: &[Stmt]) -> bool {
     matches!(body.last(), Some(Stmt::Return(..) | Stmt::Break | Stmt::Continue))
@@ -42,7 +63,7 @@ impl<'t> Lowering<'t> {
     pub(super) fn body_methods(&mut self, class: usize) {
         let constants: Vec<Node<'t>> =
             self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).collect();
-        for constant in constants {
+        for &constant in &constants {
             let Some(body) = constant.get("initializer").and_then(|i| i.get("classBody")) else { continue };
             for member in body.list("members").filter(|m| m.kind() == "METHOD" && m.str("name") != "<init>") {
                 let (name, sig) = (member.str("name"), member.symbol().map_or("", |s| s.ty));
@@ -83,6 +104,33 @@ impl<'t> Lowering<'t> {
                     // of the enum, which those calls resolve to (`constant_body_call`).
                     self.body_helpers.insert(self.methods.len() - 1);
                 }
+            }
+        }
+        // A body's `super.m(..)` runs the enum's own `m`, whose method `constant_bodies` makes a
+        // switch that runs the body's override for this constant: the enum's own code is
+        // declared again, named `m$super`, as the method that those calls run (`super_twins`).
+        for body in constants.iter().filter_map(|c| c.get("initializer").and_then(|i| i.get("classBody"))) {
+            let mut called = Vec::new();
+            super_calls(body.0, &mut called);
+            for (name, sig) in called {
+                let base = self.methods.iter().position(|m| {
+                    m.owner == class
+                        && m.name == name
+                        && params_of(m.sig) == params_of(sig)
+                        && m.node.get("body").is_some()
+                });
+                let Some(base) =
+                    base.filter(|b| !self.body_helpers.contains(b) && !self.body_methods.contains(b))
+                else {
+                    continue;
+                };
+                if self.super_twins.contains_key(&base) {
+                    continue;
+                }
+                let MethodInfo { node, sig, .. } = self.methods[base];
+                let name: &'t str = Box::leak(format!("{name}$super").into_boxed_str());
+                self.methods.push(MethodInfo { owner: class, node, name, sig });
+                self.super_twins.insert(base, self.methods.len() - 1);
             }
         }
     }
