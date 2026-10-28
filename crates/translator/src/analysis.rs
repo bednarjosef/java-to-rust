@@ -539,7 +539,7 @@ fn analyze_with(
         // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
         if threads::handles_uncaught(class) {
             for new in &class.raised {
-                if let ExprKind::New { class: c, .. } = new.kind {
+                if let Some((c, _, _)) = class.raised_object(new) {
                     facts.raised_classes.insert(c);
                 }
             }

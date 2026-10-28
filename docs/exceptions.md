@@ -264,7 +264,9 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
   class, an enum's `Cannot invoke "Object.getClass()"` included (`dispatch.rs`, `compare_arm`).
 
 `impl From<java::Exception> for Throwable` builds an object of the standard class with its
-`(String)` constructor, so `getMessage` and `toString` read as Java's. Lowering declares such a
+`(String)` constructor, so `getMessage` and `toString` read as Java's, or with the factory that
+stands for that constructor where the class's tree is built in Java's order
+(`analysis/whole_objects.rs`). Lowering declares such a
 class (and that constructor) when the program has an operation that may raise it and a `finally`
 or a `catch` of it or a superclass, a syntactic over-approximation; the analysis decides which a
 handler really sees (`Facts::raised_classes`), and only those get a variant and a `From` arm.
