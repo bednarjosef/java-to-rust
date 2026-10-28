@@ -249,6 +249,16 @@ program where such a lookup can happen, so they can be checked before the progra
   that a root holds. Two differences from Java: `addExports` and the other `add` methods do not
   check that their caller is in the module, and the boot layer holds only the translation's
   named modules, where the JVM's also holds the system modules that service binding resolves.
+- **Access to packages that a module does not export.** Code outside the JDK that names a
+  member of a JDK class whose module does not export its package to the code's module (a call,
+  a `new` or a field access) throws `IllegalAccessError` there, with Java's message, as the JVM
+  does when it resolves the reference: a library compiled with `--add-exports` against
+  `jdk.internal.misc.Unsafe` (joml's `MemUtilInternalUnsafe`) catches it and falls back
+  (`lower/modules.rs`, `inaccessible`; reachability keeps the error's constructor when code
+  outside the JDK names a JDK class outside `java` and `javax`, `ILLEGAL_ACCESS`). The
+  translator's `--add-exports module/package=to` adds an export as `java`'s option does
+  (`ALL-UNNAMED` for the class path). Only the JDK's modules are checked: a library's
+  `module-info.java` names no module on the class path, which the server runs on.
 - **Packages.** With the JDK's sources, `Class.getPackage()` goes to `TranslatedModules` too
   (without them it is rejected): `null` for an array, a
   primitive type and `void`, and otherwise one `Package` per package name (`""` for the unnamed

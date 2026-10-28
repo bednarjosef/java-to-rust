@@ -14,7 +14,7 @@ pub use census::{Census, census_program, messages_found_anew, round_by_round};
 pub use modules::{Contents as ModuleContents, loader_name, loader_resources};
 pub use reach::{
     ANNOTATION_VALUES, CHANGED_PROPERTY, CLASS_KINDS, CLEANER_CHECK, FIELD_OFFSET_VALUE, FORMAT_IN_LOCALE,
-    FieldUpdate, GENERIC_TYPES, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS,
+    FieldUpdate, GENERIC_TYPES, ILLEGAL_ACCESS, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS,
     NATIVE_ACCESS_CALLS, NATIVE_ACCESS_MODULES, PRINT_FORMATTED, REGEX_CALLS, Reach, STATIC_FIELD_VALUES,
     STRING_STREAMS, SUN_MISC_UNSAFE, TRANSLATED_BUFFER_VIEWS, TRANSLATED_LANG_ACCESS,
     TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES,
@@ -68,6 +68,10 @@ pub struct Program {
     /// words for what failed without where the null came from, or no message where even that is
     /// not certain (`analysis::npe_messages`). A census lists each such place.
     pub approximate_messages: bool,
+    /// The packages that a module exports beyond its declaration, as Java's `--add-exports
+    /// module/package=to` adds them: the module, the package, and the module it is exported to,
+    /// `ALL-UNNAMED` for the class path's code (`Reach::added_exports`, `lower/modules.rs`).
+    pub add_exports: Vec<(String, String, String)>,
     /// For a census only: its translation is written, and each piece of rejected code in it ends
     /// the program with the rejection's message, where a census otherwise leaves a rejected
     /// initializer out (`lower::census_lower_program`, `census::Stubs`).
@@ -554,6 +558,7 @@ fn load_in_rounds(
     }
     let roots = program.sources.iter().chain(&program.libraries);
     reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
+    reach.added_exports = program.add_exports.clone();
     let changing: Vec<usize> = changing.iter().map(|&(index, ..)| index).collect();
     let mut units = given.into_values();
     for index in changing {
