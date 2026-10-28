@@ -598,10 +598,7 @@ These are plans. Work on several of them is under way but not merged yet.
      updaters' `getAndUpdate`/`accumulateAndGet` loops;
    - logging: JDK logging at the levels it prints (the console handler's header line has the date
      and the caller);
-   - natives: calls of library natives (Netty's epoll, JNA, jtracy) should throw
-     `UnsatisfiedLinkError` as on a JVM where the library is not loaded, as loading the library
-     already does, so Netty falls back to NIO;
-   - JDK APIs: datagram channels, `java.lang.management` and JFR, and service providers
+   - JDK APIs: datagram channels, `java.lang.management`, and service providers
      that live in JDK modules the code does not name;
    - small ones, one to four pieces each: `Runtime` held as a value, the whole `System.getenv()`
      map, `Integer.getInteger` with a key that is not a constant, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some

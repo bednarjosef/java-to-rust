@@ -3805,17 +3805,22 @@ fn a_census_takes_the_arguments_of_a_native_that_the_runtime_lacks_as_code_that_
 
 #[test]
 fn a_census_gives_the_value_of_a_native_that_the_runtime_lacks_the_type_of_the_call() {
-    // The value of a JNI native is code that never runs; a local declared with it, a comparison
-    // and a borrow of it take the type of the call, as `!` can do none of these.
+    // The value of a native of the JDK that the runtime lacks is code that never runs; a local
+    // declared with it, a comparison and a borrow of it take the type of the call, as `!` can do
+    // none of these. (A class outside the JDK's modules would be a library's, whose natives throw
+    // `UnsatisfiedLinkError`.)
     let dir = write_sources(
         "census_native_type",
-        &[(
-            "p/Main.java",
-            "package p;\npublic class Main {\n    static native int level();\n    static native String name();\n    static boolean loaded = Boolean.getBoolean(\"x\");\n    static int size(String s) {\n        return s.length();\n    }\n    public static void main(String[] a) {\n        if (loaded) {\n            int l = level();\n            System.out.println(l >= 0 ? size(name()) : 0);\n        }\n    }\n}\n",
-        )],
+        &[
+            ("module-info.java", "module jdk.census {}\n"),
+            (
+                "jdk/census/Main.java",
+                "package jdk.census;\npublic class Main {\n    static native int level();\n    static native String name();\n    static boolean loaded = Boolean.getBoolean(\"x\");\n    static int size(String s) {\n        return s.length();\n    }\n    public static void main(String[] a) {\n        if (loaded) {\n            int l = level();\n            System.out.println(l >= 0 ? size(name()) : 0);\n        }\n    }\n}\n",
+            ),
+        ],
     );
     let program = java_to_rust::Program {
-        main: "p.Main".into(),
+        main: "jdk.census.Main".into(),
         sources: vec![dir],
         ends_rejected: true,
         ..Default::default()
@@ -3824,8 +3829,8 @@ fn a_census_gives_the_value_of_a_native_that_the_runtime_lacks_the_type_of_the_c
     assert_contains(
         &rust,
         &[
-            "let never: i32 = unreachable!(\"the native method p.Main.level()int never runs\"); never }",
-            "let never: java::JString = unreachable!(\"the native method p.Main.name()java.lang.String never runs\"); never }",
+            "let never: i32 = unreachable!(\"the native method jdk.census.Main.level()int never runs\"); never }",
+            "let never: java::JString = unreachable!(\"the native method jdk.census.Main.name()java.lang.String never runs\"); never }",
         ],
     );
 }

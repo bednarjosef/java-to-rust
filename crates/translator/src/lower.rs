@@ -1496,6 +1496,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.processor_annotations_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.unlinked_native_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
             return Ok(ExprKind::Builtin(builtin, args));
         }

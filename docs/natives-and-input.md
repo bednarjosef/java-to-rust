@@ -172,8 +172,8 @@ a few percent of zlib's size at each level.
 ### Loading native libraries
 
 A translated program has no JNI: the natives it can call are the runtime's, and a call of any
-other native is rejected where the translator meets it. Loading a library therefore adds nothing
-the program could call, and what is left of it is its outcome. In a whole program,
+other native of the JDK is rejected where the translator meets it. Loading a library therefore
+adds nothing the program could call, and what is left of it is its outcome. In a whole program,
 `System.loadLibrary`, `System.load` and `System.mapLibraryName` are the translator's
 (`java/overlay/java/lang/TranslatedLibraries.java`, by `REDIRECTED_CALLS`):
 
@@ -202,6 +202,24 @@ the program could call, and what is left of it is its outcome. In a whole progra
 
 `BootLoader.loadLibrary`, the JDK's own loading of `zip` or `net`, does nothing
 (`lower/libraries.rs`).
+
+The natives of a library's own classes, outside the JDK's modules (jtracy's `TracyBindings`,
+JNA's `Native`, netty's `epoll` and `kqueue` classes), are code in a JNI library that a
+translation never loads. A call of one is what Java does where that library was never loaded
+(`unlinked_native_call` in `lower/natives.rs`, and `native_body` for an instance native that a
+call of the method it implements runs): the JVM finds no function for the method and throws
+`UnsatisfiedLinkError` at each call, after the arguments are evaluated, with the method in
+quotes, its return type first, its parameters separated by `, `, each erased and by its binary
+name, a variable arity as an array (`'void com.mojang.jtracy.TracyBindings.markFrameStart(long)'`).
+Libraries that check for their native code catch that error and fall back to Java (netty to
+NIO); jtracy calls its natives only once its loader has succeeded. A library is told from the JDK
+by the module of its class's source root: the JDK's are named `java.*` and `jdk.*`; a class whose
+package no source root has is the JDK's when its name is (`program::in_jdk`).
+
+JFR's natives (`jdk.jfr.internal.JVM`) are the same: the JVM links them only where it is built
+with JFR, and a translated program is a JVM without it. `JVMSupport.checkAvailability` catches the
+`UnsatisfiedLinkError` of `JVM.isAvailable()`, so JFR is not available and nothing records;
+`FlightRecorder.isAvailable()` is `false`, where Java with JFR says `true`.
 
 ### Processes
 
@@ -253,19 +271,6 @@ table above):
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
   definition and module natives, the sockets that the table leaves out, and every native not in
   the table.
-- The natives of a library's own classes, outside the JDK (jtracy's `TracyBindings`, JNA's
-  `Native`, netty's `epoll` and `kqueue` classes). Their code is in a JNI library that the
-  program loads with `System.load` or `System.loadLibrary`, which always throws in a translation
-  (see "Loading native libraries"). Planned:
-  a call of one becomes what Java does where that library was never loaded, since an accepted
-  program never loads one: the JVM finds no function for the method and throws
-  `UnsatisfiedLinkError` at each call, after the arguments are evaluated, with the message of the
-  method in quotes, its return type first and its parameters separated by `, ` (`'void
-  com.mojang.jtracy.TracyBindings.markFrameStart(long)'`). Libraries that check for their
-  native code catch that error and fall back to Java (netty to NIO); jtracy calls its natives only
-  once its loader has succeeded. Telling a library's class from the JDK's needs the module of the
-  class's source root (`java.*` and `jdk.*` modules are the JDK's), which lowering does not know
-  yet, and the error needs `UnsatisfiedLinkError` among the translator's standard exceptions.
 
 ## The reachability boundary
 
