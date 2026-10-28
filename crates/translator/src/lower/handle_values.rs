@@ -206,6 +206,11 @@ pub(super) struct Calls<'t> {
 }
 
 /// javac's type `ty` without type arguments.
+/// Whether javac's type `ty` is a primitive type or `void`.
+fn primitive(ty: &str) -> bool {
+    matches!(ty, "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void")
+}
+
 fn erased(ty: &str) -> &str {
     ty.split_once('<').map_or(ty, |(raw, _)| raw)
 }
@@ -1123,6 +1128,31 @@ impl<'t> Lowering<'t> {
         }))
     }
 
+    /// The reference `value` as a `to`, which `invoke` converts it to: as it is, an upcast, or
+    /// `Class.cast`'s check (`Cannot cast A to B`) and the cast, as `MethodHandle.asType` does.
+    ///
+    /// ```text
+    /// switch (0) { default -> { T cast = value; check(to.class, cast); yield (to) cast; } }
+    /// ```
+    fn fitted(&self, value: Expr, to: Type) -> Expr {
+        if value.ty == to || self.upcast_to(value.ty, to) {
+            return self.convert(value, to);
+        }
+        let (pos, ty, name) = (value.pos, value.ty, self.fresh_name("cast"));
+        let read = || self.synth(ExprKind::Var(name.clone()), pos, ty);
+        let class =
+            self.synth(ExprKind::Builtin(Builtin::ClassLiteral(to), Vec::new()), pos, Type::JavaClass);
+        let check = self.synth(ExprKind::Builtin(Builtin::ClassCheck, vec![class, read()]), pos, Type::Void);
+        let body = vec![
+            Stmt::Local { ty, name: name.clone(), init: Some(value), pos },
+            Stmt::Expr(check),
+            Stmt::Yield(self.class_result(read, to)),
+        ];
+        let selector = Box::new(self.synth(ExprKind::Int(0), pos, Type::Int));
+        let cases = vec![Case { labels: vec![CaseLabel::Default], body }];
+        self.synth(ExprKind::Switch { selector, cases }, pos, to)
+    }
+
     /// Whether reading the handle `node` again gives the same value and does nothing: a local,
     /// or a static field of the class being lowered.
     fn rereadable(&self, node: Node<'t>) -> bool {
@@ -1135,10 +1165,10 @@ impl<'t> Lowering<'t> {
     /// `invokeExact` or `invoke` (`name`) of the `MethodHandle` `receiver`, which holds the
     /// handle of a static method, or null (`held`): the call of that method, or a full fence for
     /// one of `VarHandle`'s, with the call's arguments, which must have exactly the method's types
-    /// (as `invokeExact` requires, and `invoke` without a conversion). As in Java, the receiver is
-    /// evaluated, then the arguments, then the receiver checked for null. A handle that may be
-    /// one of several methods, as netty's fence is `VarHandle`'s or its own, calls the one whose
-    /// token the receiver holds (`static_token`).
+    /// (as `invokeExact` requires), or for `invoke` differ only in reference types, which are
+    /// cast. As in Java, the receiver is evaluated, then the arguments, then the receiver checked
+    /// for null. A handle that may be one of several methods, as netty's fence is `VarHandle`'s
+    /// or its own, calls the one whose token the receiver holds (`static_token`).
     fn static_handle_call(
         &self,
         node: Node<'t>,
@@ -1164,8 +1194,16 @@ impl<'t> Lowering<'t> {
                 }
             });
         }
+        // `invoke` converts the arguments to the method's types and its result to the call's
+        // (`MethodHandle.asType`): a reference type may differ, as it is cast; a primitive may not.
         let site = self.site_type(node);
-        if targets.iter().any(|(_, ty)| site.as_ref() != Some(ty)) {
+        let fits = |ty: &Vec<&str>| match &site {
+            Some(site) if name == "invoke" && site.len() == ty.len() => {
+                site.iter().zip(ty).all(|(a, b)| a == b || (!primitive(a) && !primitive(b)))
+            }
+            site => site.as_ref() == Some(ty),
+        };
+        if targets.iter().any(|(_, ty)| !fits(ty)) {
             return unsupported(
                 node,
                 &format!("{what} of a static method's handle with other types than the method's"),
@@ -1238,11 +1276,16 @@ impl<'t> Lowering<'t> {
         let call = |method: Option<usize>| -> Result<Expr, Error> {
             let kind = match method {
                 None => ExprKind::Builtin(Builtin::Native(Native::FullFence), Vec::new()),
-                Some(m) => ExprKind::Call {
-                    name: self.methods[m].name.to_string(),
-                    args: values.iter().map(read).collect::<Result<_, _>>()?,
-                    resolved: Some(m),
-                },
+                Some(m) => {
+                    let (params, returns) = method_signature(self.methods[m].sig);
+                    let mut args = Vec::new();
+                    for (value, param) in values.iter().zip(params) {
+                        args.push(self.fitted(read(value)?, self.ty(node, erased(param))?));
+                    }
+                    let name = self.methods[m].name.to_string();
+                    let call = ExprKind::Call { name, args, resolved: Some(m) };
+                    return Ok(self.fitted(self.synth(call, pos, self.ty(node, erased(returns))?), ty));
+                }
             };
             Ok(self.synth(kind, pos, ty))
         };

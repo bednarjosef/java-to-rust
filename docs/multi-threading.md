@@ -588,7 +588,10 @@ name:
   `findStatic` of those factories, and `invokeExact` of the `MethodHandle`s that finds, are
   followed when none of them can fail. So is `findStatic` of a static method of the program
   (reached by its name) or of `VarHandle`'s fences: `invokeExact` or `invoke` with exactly the
-  method's types is a direct call of it (a full fence for a fence). A handle that may be one of
+  method's types is a direct call of it (a full fence for a fence). `invoke` may also differ from
+  the method in reference types, as netty takes `getRuntimeMXBean()` as an `Object`: an argument
+  or the result that is not an upcast gets `Class.cast`'s check and message (`Cannot cast A to
+  B`), as `MethodHandle.asType` gives it; primitive types must match. A handle that may be one of
   several such methods, as netty's skip list takes `VarHandle.acquireFence` or its own fallback,
   holds its method's class as its token, and the call tests it. An access through a value that holds one handle, or null,
   is that handle's access after a null check that throws Java's `NullPointerException`, message

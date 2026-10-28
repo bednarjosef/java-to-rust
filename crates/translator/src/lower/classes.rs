@@ -303,7 +303,7 @@ impl<'t> Lowering<'t> {
     /// The checked value that `read` gives, as the cast's type `to`: a conversion for an upcast,
     /// as `convert` gives it, and a `Cast` for a downcast, which `convert` leaves as it is. The
     /// block's type is the call's, so a value still of the wrong type would not compile.
-    fn class_result(&self, read: impl Fn() -> Expr, to: Type) -> Expr {
+    pub(super) fn class_result(&self, read: impl Fn() -> Expr, to: Type) -> Expr {
         let converted = self.convert(read(), to);
         if converted.ty == to {
             return converted;
