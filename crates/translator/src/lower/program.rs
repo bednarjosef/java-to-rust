@@ -382,6 +382,8 @@ fn lower_into<'t>(
         module_labels: module_labels(reach),
         thread_statics: None,
         element_classes: lowering.element_classes.take(),
+        array_likes: lowering.array_likes.take(),
+        covariant_arrays: lowering.covariant_arrays(),
         object_rows: lowering.object_rows.take(),
         array_tests: lowering.array_tests.take(),
         volatile_elements: lowering.volatile_elements.take(),

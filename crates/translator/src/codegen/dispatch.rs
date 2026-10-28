@@ -992,7 +992,8 @@ impl<'a> Gen<'a> {
     }
 
     /// `Array.newArray(componentType, length)`: a new array of the component type among the
-    /// arrays that become `Object`s, found by the type's name. `void` has no arrays (an
+    /// arrays that become `Object`s, found by the type's name, or among the array types that the
+    /// translation holds as `Object[]`s, which carries its class. `void` has no arrays (an
     /// `IllegalArgumentException`); a type of which the program makes no array as an `Object`
     /// ends the program, as no value of the translation can be that array.
     pub(super) fn reflect_new_array(&mut self, args: &'a [Expr], id: ExprId) -> Code {
@@ -1029,7 +1030,10 @@ impl<'a> Gen<'a> {
                 found.sort_unstable_by_key(|&(id, _)| id);
                 found.into_iter().map(|(_, ty)| ty)
             };
-            for class in in_order(&self.class.element_classes).chain(in_order(&self.class.array_tests)) {
+            let held = self.class.covariant_arrays.iter().copied();
+            for class in
+                in_order(&self.class.element_classes).chain(in_order(&self.class.array_tests)).chain(held)
+            {
                 if class != object_array && !covariant.contains(&class) {
                     covariant.push(class);
                 }

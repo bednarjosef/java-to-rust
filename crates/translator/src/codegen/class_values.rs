@@ -95,6 +95,16 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `code`, a new `Object[]`, as an array of the class of the array `like` holds, a variable or
+    /// a field (`Class::array_likes`, `java::tagged_like`).
+    pub(super) fn with_class_of(&mut self, like: &'a Expr, code: Code) -> Code {
+        let like = match self.nullable(like) {
+            true => format!("{}.as_ref()", self.object_place(like)),
+            false => format!("Some({})", self.handle(like)),
+        };
+        Code::atom(format!("{}({}, {like})", self.runtime("tagged_like"), code.text))
+    }
+
     /// `code`, a new `Object[]`, as an array of class `class` (`java::tagged`): one that carries
     /// `String[]`, or none for `Object[]`.
     pub(super) fn with_element_class(&mut self, class: Type, code: Code) -> Code {

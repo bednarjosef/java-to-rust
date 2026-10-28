@@ -721,9 +721,14 @@ or `{a, b}`, the array that a variable-arity call packs its trailing arguments i
 javac gives its elements, `varargsElement`: `String[]` for `Arrays.asList("a", "b")`), an enum's
 `values()`, a class literal's `getInterfaces()`, the value of an annotation's
 member, and an `Arrays.copyOf` or `copyOfRange` into a class literal, or into a class held in
-a variable, which is taken as `Object[]`. The `String[]`s that the runtime makes as `Object[]`s
-(`split`, `main`'s arguments) carry `String[]`. A clone or a copy without a class keeps its
-source's class. So:
+a variable, which is taken as `Object[]`. A copy into another array's class, `Arrays.copyOf(x,
+n, a.getClass())` and `(T[]) Array.newInstance(a.getClass().getComponentType(), n)` as the
+JDK's `toArray(a)` makes it, carries the class that `a` carries at run time (`Class::array_likes`,
+`java::tagged_like`). `Array.newInstance` of a class known only at run time makes an array of
+any array type that the translation holds as an `Object[]` (`Class::covariant_arrays`), which
+carries its class: log4j makes its plugins' element arrays so. The `String[]`s that the runtime
+makes as `Object[]`s (`split`, `main`'s arguments) carry `String[]`. A clone or a copy without a
+class keeps its source's class. So:
 
 - a store into an `Object[]` (`java::checked_set`, `Class::checks_store`) checks the index, then
   whether the array can hold the object, by the names of the object's class and of every class
@@ -757,10 +762,7 @@ of a `String[]` and `o instanceof Object[]`, `(Comparable<?>[]) o` or `(String[]
 carries; an `int[]` is not an `Object[]`, and a cast of it throws `ClassCastException`.
 
 An array that a method keeps to itself as a plain `Vec` (`analysis::arrays`), an array that
-`new Object[n]` makes, one that `Array.newInstance` makes of a component class that the code
-neither makes nor tests arrays of, or a copy into the class of another array (the JDK's
-`toArray(a)`, `Arrays.copyOf(x, n, a.getClass())` and `(T[]) Array.newInstance(
-a.getClass().getComponentType(), n)`, `lower::arrays::component_array`) carries no class:
+`new Object[n]` makes, or a copy into the class of an array that carries none carries no class:
 storing an object of another class in one of them does not throw, its `getClass()` is
 `Object[]`'s, and it passes every `instanceof` and cast to an array class held as an `Object[]`,
 as an array of that class would (an `Object[]` passes `instanceof String[]`). Also:

@@ -688,6 +688,13 @@ pub fn tagged<T: Clone, A: MadeElements<T>>(a: A, class: Option<ElementClass<T>>
     A::made_as(a.take_items(), class)
 }
 
+/// The array `made` just made, as an array of the class of `like` (the class `None` of a null
+/// `like` keeps): `Arrays.copyOf(x, n, a.getClass())` and `Array.newInstance(a.getClass()
+/// .getComponentType(), n)`, the copy that the JDK's `toArray(a)` makes of `a`'s class.
+pub fn tagged_like<T: Clone, A: MadeElements<T>, L: Elements<T>>(made: A, like: Option<&L>) -> A {
+    tagged(made, like.and_then(|a| a.element_class().cloned()))
+}
+
 /// `a.getClass()` of an `Object[]`: the class of a covariant array, or `exact`, `Object[]`'s.
 pub fn array_class<T>(a: &impl Elements<T>, exact: fn() -> Class) -> Class {
     a.element_class().map_or_else(exact, |c| (c.class)())
