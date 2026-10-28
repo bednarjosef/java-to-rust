@@ -728,7 +728,8 @@ impl<'t> Lowering<'t> {
             pos: node.pos(),
             is_abstract,
             is_synchronized: node.has_flag("SYNCHRONIZED"),
-            overrides: self.overrides(node),
+            // The copy shares the method's node, but overrides nothing: it is called only by name.
+            overrides: if twin { Vec::new() } else { self.overrides(node) },
             type_params: self.method_type_params(index),
             jdk_code: self.is_proxy_class(info.owner),
             field_update: None,
