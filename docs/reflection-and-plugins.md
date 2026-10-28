@@ -165,7 +165,9 @@ program where such a lookup can happen, so they can be checked before the progra
   `Log4j2Plugins.dat` under `META-INF`, which its plugin registry reads, and its configuration's
   parsers, layouts and appenders are those plugins. The files under a root's `META-INF` (but for
   its service files, its reflection metadata and class files) are read for runs of bytes that
-  could be a binary name (`a.b.C`, `a.b.C$D`) and that name a class whose source a root has; each
+  could be a binary name (`a.b.C`, `a.b.C$D`), with or without their first byte (a binary file
+  writes a name after its length, whose low byte may be a letter), and that name a class whose
+  source a root has; each
   such class is named as a literal would name it, as soon as javac gives its unit, which
   reachability asks for (`program/reach/resource_names.rs`). Words of a manifest or a properties
   file that are not classes of the roots name nothing, and the data files outside `META-INF`
