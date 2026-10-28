@@ -604,9 +604,14 @@ trial() {
   mapfile -t cap < <(memory_cap_command "${TRIAL_MEMORY_CAP:-16G}")
   local start
   start=$(date +%s)
-  (cd "$cache/trial" && CARGO_TARGET_DIR=$cache/trial-target CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} \
-    "${slot[@]}" "${cap[@]}" cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}" \
-    --config 'profile.dev.package.java-runtime.opt-level=2' > "$cache/trial-build.txt" 2>&1) \
+  # The header crate, which every body crate needs, first and alone: rustc's memory for it grows
+  # with the jobs that its code generation takes (TRIAL_HEADER_JOBS), past 20 GB at 2. The body
+  # crates then build CARGO_BUILD_JOBS at a time, each far smaller.
+  local -a build=(cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}"
+    --config 'profile.dev.package.java-runtime.opt-level=2')
+  (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
+    && CARGO_BUILD_JOBS=${TRIAL_HEADER_JOBS:-1} "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
+    && CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} "${slot[@]}" "${cap[@]}" "${build[@]}") > "$cache/trial-build.txt" 2>&1 \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
   run_server "$cache/trial-run" "$(trial_binary)"
