@@ -369,7 +369,9 @@ they are printed, so that the code fails where the JVM fails:
   branch that does not run costs nothing, and one that does throws as the JVM would.
 - **A class whose superclass or an interface is missing, or that catches a missing exception
   class**, cannot be loaded (the verifier loads the classes of its `catch` clauses): each of its
-  methods and constructors throws, naming the missing class.
+  methods and constructors throws, naming the missing class. The methods it would inherit from
+  the missing class (`size()` of log4j's `MpscBlockingQueue` without JCTools) are missing from it:
+  their dispatch has an `unreachable!` arm for it, as no object of it is ever made.
 - **Any other compile error** rejects the piece of code that it is in, as before.
 
 **A missing class in an annotation** is no error at all, with or without `--keep-going`. The JVM

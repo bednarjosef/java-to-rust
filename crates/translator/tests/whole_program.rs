@@ -728,6 +728,66 @@ public class Main {
     assert!(rust.contains("Main.Builder#name@org.example.Attribute"), "no `@Attribute` of the field `name`");
 }
 
+/// A library class that extends one missing from the class path, so that it implements an
+/// interface's methods only through what it cannot inherit (log4j's `MpscBlockingQueue` without
+/// JCTools), is translated by a census (`--keep-going`) into a crate that compiles: Java could
+/// never load it, and the interface's dispatch runs the others.
+#[test]
+fn a_class_of_a_missing_superclass_still_compiles() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-missing-superclass");
+    let _ = std::fs::remove_dir_all(&work);
+    let (sources, pools) = (work.join("src"), work.join("lib"));
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::create_dir_all(pools.join("org/example")).unwrap();
+    let sized = "package org.example;\npublic interface Sized { int size(); boolean isEmpty(); }\n";
+    std::fs::write(pools.join("org/example/Sized.java"), sized).unwrap();
+    let pool = "package org.example;\n\
+                public class Pool extends org.optional.Queue implements Sized {\n\
+                    public Pool(int capacity) { super(capacity); }\n\
+                }\n";
+    std::fs::write(pools.join("org/example/Pool.java"), pool).unwrap();
+    let java = "import org.example.*;
+public class Main {
+    static class Fixed implements Sized {
+        public int size() { return 3; }
+        public boolean isEmpty() { return false; }
+    }
+    public static void main(String[] args) {
+        Sized sized = args.length > 5 ? new Pool(4) : new Fixed();
+        System.out.println(sized.size() + \" \" + sized.isEmpty());
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let dir = work.join("crate");
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--census", "--keep-going", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(&pools)
+        .arg("--library")
+        .arg(library)
+        .arg("--crate")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(dir.join("Cargo.toml").exists(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let target = work.join("cargo");
+    let built = Command::new("cargo")
+        .args(["build", "-q", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let ran = Command::new(target.join("debug/main")).env_remove("LD_LIBRARY_PATH").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "3 false\n");
+}
+
 /// The runtime's classes implement `java.lang.reflect.Type` and `Serializable` (see
 /// `corpus/whole-program/ClassesAsReflectTypes.java`), but not `Constable`, whose
 /// `describeConstable()` would need the class's descriptor as an object: a class converted to a
