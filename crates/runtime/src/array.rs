@@ -693,6 +693,13 @@ pub fn array_class<T>(a: &impl Elements<T>, exact: fn() -> Class) -> Class {
     a.element_class().map_or_else(exact, |c| (c.class)())
 }
 
+/// `Object.toString()` of `a`, an array of references that may carry its class: the binary
+/// name of its own class, or `exact` (`[Ljava.lang.Object;`) where it carries none, `@` and
+/// `hash` in hexadecimal.
+pub fn array_default_text<T>(a: &impl Elements<T>, exact: &str, hash: i32) -> crate::JString {
+    crate::default_text(a.element_class().map_or(exact, |c| (c.class)().binary_name()), hash)
+}
+
 /// The binary names of the class of `a`, an `Object[]` that may carry its class, and of the
 /// classes above it (`ElementClass::own`); those of `Object[]`, `object_array`, where it carries
 /// none.
