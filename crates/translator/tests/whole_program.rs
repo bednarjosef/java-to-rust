@@ -817,6 +817,9 @@ fn a_match_over_thousands_of_classes_is_cut_into_parts() {
         System.out.println(all.length + \" \" + total);
         System.out.println(all[0] + \" \" + all[{last}] + \" \" + all[{last}].getClass().getName());
         System.out.println(all[{last}].getClass() == all[args.length].getClass());
+        synchronized (all[{last} - args.length]) {{
+            System.out.println(\"locked\");
+        }}
         try {{
             K0 first = (K0) all[{last} - args.length];
             System.out.println(first);
@@ -860,7 +863,7 @@ fn a_match_over_thousands_of_classes_is_cut_into_parts() {
     );
     assert_eq!(
         String::from_utf8_lossy(&ran.stdout),
-        format!("{count} {total}\nK0 K{last} Main$K{last}\nfalse\n{cast}\n")
+        format!("{count} {total}\nK0 K{last} Main$K{last}\nfalse\nlocked\n{cast}\n")
     );
 }
 

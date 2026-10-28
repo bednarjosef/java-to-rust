@@ -3127,23 +3127,19 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
         self.indent += 1;
-        self.line("match self.view() {");
-        self.indent += 1;
-        let unkept = self.runtime("unkept_monitor");
-        for (&c, handle) in variants.iter().zip(handles) {
-            let v = self.view_pattern(t, c);
-            if handle {
-                self.line(&format!("{v}(o) => {has}::monitor(o),"));
-            } else {
-                self.line(&format!("{v}(_) => {unkept}(),"));
-            }
-        }
+        let unkept = format!("{}()", self.runtime("unkept_monitor"));
+        let handles: std::collections::HashSet<usize> =
+            variants.iter().zip(handles).filter(|(_, handle)| *handle).map(|(&c, _)| c).collect();
+        let ret = format!(" -> {of}<'_>");
+        self.method_arms(("monitor", "", "", &ret), variants, &|_, c| match handles.contains(&c) {
+            true => (format!("{has}::monitor(o)"), true),
+            false => (unkept.clone(), false),
+        });
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
-        self.indent -= 1;
-        self.line("}");
+        self.flush_arm_parts(&name, true);
     }
 
     /// `Display`: each object shows as its class's `toString` makes it.
