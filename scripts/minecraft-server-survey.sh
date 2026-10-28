@@ -606,12 +606,18 @@ trial() {
   start=$(date +%s)
   # The header crate, which every body crate needs, first and alone: rustc's memory for it grows
   # with the jobs that its code generation takes (TRIAL_HEADER_JOBS), past 20 GB at 2. The body
-  # crates then build CARGO_BUILD_JOBS at a time, each far smaller.
+  # crates then build CARGO_BUILD_JOBS at a time, each far smaller; when two of the largest
+  # together pass the memory cap and the build is killed without a compile error, the rest build
+  # one at a time, past the crates already built.
   local -a build=(cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}"
     --config 'profile.dev.package.java-runtime.opt-level=2')
   (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
     && CARGO_BUILD_JOBS=${TRIAL_HEADER_JOBS:-1} "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
     && CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} "${slot[@]}" "${cap[@]}" "${build[@]}") > "$cache/trial-build.txt" 2>&1 \
+    || { [ "${CARGO_BUILD_JOBS:-4}" -gt 1 ] && ! grep -q '^error' "$cache/trial-build.txt" \
+      && echo "the trial build was killed; building the rest one crate at a time" >&2 \
+      && (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
+        && CARGO_BUILD_JOBS=1 "${slot[@]}" "${cap[@]}" "${build[@]}") >> "$cache/trial-build.txt" 2>&1; } \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
   run_server "$cache/trial-run" "$(trial_binary)"
