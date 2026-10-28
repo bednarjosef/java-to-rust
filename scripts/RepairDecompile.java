@@ -78,7 +78,11 @@
 //   name) left out, and a cast to a type variable erased to `Object` that is a lambda's whole
 //   body (`a -> (T) f.apply(a)`) left out (no checkcast either way);
 // - `new Outer.Inner<>(..)` of an inner class of a generic class that the enclosing class is or
-//   extends, which javac rejects with the raw qualifier, written `new Inner<>(..)`.
+//   extends, which javac rejects with the raw qualifier, written `new Inner<>(..)`;
+// - a method reference on a raw `new C(..)` of a class with one type variable, or on a call that
+//   returns it (`Util.make(new Int2ObjectOpenHashMap(), m -> ..)::get`), whose method returns that
+//   variable where the function type wants `R`: `new C<R>(..)`, the type the original's diamond
+//   took from its target.
 //
 // Each round takes, for every error, its first option not tried before. A file whose errors
 // outside imports and annotations do not go down after a round gets its previous text back; an
@@ -437,8 +441,11 @@ public class RepairDecompile {
                     case "compiler.err.prob.found.req" -> {
                         JCDiagnostic detail = inconvertible(diag);
                         List<Edit> diamonds = rawArguments(cu, path);
+                        List<Edit> typed = typedRawQualifier(types, cu, path, detail);
                         JCDiagnostic notFunctional = detail("compiler.misc.not.a.functional.intf", diag);
-                        if (notFunctional != null && notFunctional.getArgs()[0] instanceof Symbol.ClassSymbol written) {
+                        if (!typed.isEmpty()) {
+                            edits.addAll(typed);
+                        } else if (notFunctional != null && notFunctional.getArgs()[0] instanceof Symbol.ClassSymbol written) {
                             Edit edit = functionalCast(types, cu, tree, targetOf(path, written, types), named);
                             if (edit != null) edits.add(edit);
                         } else if (!diamonds.isEmpty()) {
@@ -2072,6 +2079,46 @@ public class RepairDecompile {
                 TreeInfo.getStartPos(created), end)) + "<>"));
         }
         return edits;
+    }
+
+    // A method reference around the error whose qualifier has the raw type of a class C with one
+    // type variable, which the referenced method returns, where the function type wants `R`
+    // (DETAIL, javac's "found cannot be converted to R"): the type argument R for the one raw
+    // `new C(..)` in the qualifier (`Util.make(new Int2ObjectOpenHashMap<String>(), ..)::get`).
+    static List<Edit> typedRawQualifier(Types types, JCTree.JCCompilationUnit cu, TreePath path, JCDiagnostic detail)
+            throws Unprintable {
+        if (detail == null || !(detail.getArgs()[1] instanceof Type required) || !required.hasTag(TypeTag.CLASS))
+            return List.of();
+        while (path != null && !(path.getLeaf() instanceof JCTree.JCMemberReference)) {
+            if (path.getLeaf() instanceof JCTree.JCStatement) return List.of();
+            path = path.getParentPath();
+        }
+        if (path == null) return List.of();
+        JCTree.JCMemberReference reference = (JCTree.JCMemberReference) path.getLeaf();
+        Type qualifier = reference.expr.type;
+        if (!(reference.sym instanceof Symbol.MethodSymbol method) || qualifier == null
+                || !qualifier.hasTag(TypeTag.CLASS) || !qualifier.isRaw()) return List.of();
+        List<Type> variables = qualifier.tsym.type.getTypeArguments();
+        Type owner = types.asSuper(qualifier.tsym.type, method.owner);
+        int returned = method.owner.type.getTypeArguments().stream().map(t -> t.tsym).toList()
+            .indexOf(method.getReturnType().tsym);
+        if (variables.size() != 1 || owner == null || returned < 0
+                || owner.getTypeArguments().get(returned).tsym != variables.get(0).tsym) return List.of();
+        List<JCTree.JCNewClass> made = new ArrayList<>();
+        new TreeScanner<Void, Void>() {
+            public Void visitNewClass(NewClassTree node, Void v) {
+                JCTree.JCNewClass created = (JCTree.JCNewClass) node;
+                if (!(created.clazz instanceof JCTree.JCTypeApply) && created.clazz.type != null
+                        && created.clazz.type.tsym == qualifier.tsym) made.add(created);
+                return super.visitNewClass(node, v);
+            }
+        }.scan(reference.expr, null);
+        if (made.size() != 1) return List.of();
+        String argument = print(cu, required, false);
+        JCTree.JCNewClass created = made.get(0);
+        int end = TreeInfo.getEndPos(created.clazz, cu.endPositions);
+        return List.of(new Edit(end, end, "<" + argument + ">", "type argument of a method reference's raw "
+            + "qualifier: " + oneLine(source(cu, TreeInfo.getStartPos(created), end)) + "<" + argument + ">"));
     }
 
     static Edit diamond(JCTree.JCCompilationUnit cu, TreePath path) throws Unprintable {
