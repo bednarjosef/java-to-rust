@@ -488,7 +488,7 @@ Runtime variants are types of kind `TypeKind::Runtime` beside it:
 
 `equals(Object)` and `hashCode()` are two abstract methods of `Object`, which the program's
 own `equals(Object)` and `hashCode()` override. A variant whose class overrides neither gets an
-arm in the dispatcher: identity (`Arc::ptr_eq`, `java::address_hash`) for an object; value
+arm in the dispatcher: identity for an object; value
 equality and Java's hash for a string or a box (`Double` and `Float` compare `to_bits`, as
 `Double.equals` does); `==` and the ordinal for an enum constant (Java's hash there is an identity
 hash, which no program can depend on). The same call on a single class without an enum is the
@@ -499,6 +499,16 @@ them), which then reaches the enum's own method, a constant body's too. An inter
 that declares `equals` or `hashCode` again (`Comparator`) dispatches a class without its own to
 `Object`'s. `Object.toString()` is the enum's `java_string()`, which calls each class's
 `toString` and makes the text of the classes without one.
+
+An object's identity there is read from the value's bits rather than from its handle: the bits
+of two values are equal exactly when they are one object, and their address is the handle's
+(`java::Thin::address`), so `equals` is `b.0 == self.0` and `hashCode` is
+`java::address_hash(self.0.address())`, one text for every such class. A dispatcher writes an
+arm whose text does not read the object once, for all the classes that run it
+(`match_arms_or`), so the arms of the classes that keep `Object`'s methods are one range of class
+numbers rather than one arm each; `java::SameObject` tests the bits for them the same way. In a
+program as large as the Minecraft server, these three functions were otherwise millions of
+bytes each, one `match` that rustc compiled for most of an hour.
 
 The identity hash is the address of the class's struct (`java::address_hash` of
 `RefCell::as_ptr`, `Arc::as_ptr` or `ptr::from_ref`), so a method that borrows the object hashes the same as code holding its handle. `System.identityHashCode` uses it too. A class
