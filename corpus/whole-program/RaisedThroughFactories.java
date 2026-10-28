@@ -30,6 +30,13 @@ public class RaisedThroughFactories {
         }
     }
 
+    /** A subclass that is never built, so the objects of its superclass are all of one class. */
+    static class NeverBuilt extends UnsupportedOperationException {
+        NeverBuilt() {
+            super("never built");
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println(new Described("plain").notes);
         try {
@@ -49,6 +56,13 @@ public class RaisedThroughFactories {
             Integer.parseInt(args.length > 7 ? args[0] : "x1");
         } catch (IllegalArgumentException e) {
             System.out.println("caught " + e.getClass().getName() + ": " + e.getMessage());
+        }
+        try {
+            List.of("a").add("b");
+        } catch (NeverBuilt e) {
+            System.out.println("never");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("caught " + e.getClass().getName());
         }
     }
 }
