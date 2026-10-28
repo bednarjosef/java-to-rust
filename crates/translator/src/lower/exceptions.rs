@@ -523,6 +523,13 @@ pub fn standard_local_name(name: &str) -> &str {
     name
 }
 
+/// The binary name of the standard class `name`, which `Class.getName` gives:
+/// `java.lang.Thread$UncaughtExceptionHandler` for `java.lang.Thread.UncaughtExceptionHandler`.
+pub fn standard_binary_name(name: &str) -> String {
+    let local = standard_local_name(name);
+    format!("{}{}", &name[..name.len() - local.len()], local.replace('.', "$"))
+}
+
 /// The classes that are not standard but that the runtime raises (`regex.rs`), each with its
 /// standard superclass. A translation cannot catch them: a `catch` that would is rejected.
 const RAISED_NOT_STANDARD: &[(&str, &str)] =

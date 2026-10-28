@@ -89,7 +89,8 @@ pub(crate) use classes::ENUM_CONSTANTS;
 pub(crate) use clinit_errors::{STATE, rewritten_clinit};
 pub(crate) use enum_tables::{ORDINAL as TABLE_ORDINAL, tabled_field};
 pub use exceptions::{
-    is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
+    is_standard, standard_binary_name, standard_field_type, standard_local_name, standard_names,
+    standard_subclass,
 };
 pub use functional::is_functional;
 pub(crate) use handle_values::{UNFOLLOWED, UNFOLLOWED_MESSAGE};

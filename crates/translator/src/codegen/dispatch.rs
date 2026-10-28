@@ -605,6 +605,9 @@ impl<'a> Gen<'a> {
         if let Some((binary, _)) = decl.origin.java_names() {
             return binary.to_string();
         }
+        if crate::lower::is_standard(&decl.name) {
+            return crate::lower::standard_binary_name(&decl.name);
+        }
         // The types of `java.lang` that lowering adds are named without their package.
         if decl.package.is_empty()
             && matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD)
@@ -1213,8 +1216,9 @@ impl<'a> Gen<'a> {
     }
 
     /// The module and class loader of class `c` as HotSpot names them with the class: the JDK's
-    /// `java.base` (`java::BASE`) for the classes that the runtime holds, an array's element's,
-    /// and for any other class its package's (`Class::module_labels`), else the unnamed module of
+    /// `java.base` (`java::BASE`) for the classes that the runtime holds and the standard classes
+    /// the translator provides (all of `java.lang`, `java.util` and `java.io`), an array's
+    /// element's, and for any other class its package's (`Class::module_labels`), else the unnamed module of
     /// the system class loader (`java::APP`).
     fn cast_module(&mut self, c: usize) -> String {
         if let Some(ty) = self.runtime_of(c).or_else(|| self.class.array_of(c)) {
@@ -1222,7 +1226,7 @@ impl<'a> Gen<'a> {
         }
         let decl = &self.class.types[c];
         let jdk = matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD);
-        if jdk || decl.origin == Origin::Object {
+        if jdk || decl.origin == Origin::Object || crate::lower::is_standard(&decl.name) {
             return self.runtime("BASE");
         }
         match self.class.module_labels.get(&decl.package) {

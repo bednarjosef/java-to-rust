@@ -1457,7 +1457,9 @@ impl<'a> Gen<'a> {
             (if simple { simple_name } else { binary }).to_string()
         } else if simple {
             decl.name.rsplit('.').next().unwrap_or_default().to_string()
-        } else if decl.kind == TypeKind::Runtime || crate::lower::is_standard(&decl.name) {
+        } else if crate::lower::is_standard(&decl.name) {
+            crate::lower::standard_binary_name(&decl.name)
+        } else if decl.kind == TypeKind::Runtime {
             decl.name.clone()
         } else if decl.package.is_empty() {
             decl.name.replace('.', "$")

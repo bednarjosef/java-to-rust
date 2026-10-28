@@ -386,8 +386,10 @@ default method its interface, which the class's initialization has initialized.
   `java::CastSource`, a `match` written once per enum; the target's is written at the cast. A
   class's module is its package's named module, with the loader the JVM gives it (`bootstrap`,
   `platform`, or `app`, `program::loader_name`), or the unnamed module of the system class loader;
-  the runtime's own classes (strings, boxes, arrays of primitives) are `java.base`'s, and an array
-  is in its element's module.
+  the runtime's own classes (strings, boxes, arrays of primitives) and the standard classes the
+  translator supplies (`java.lang.Thread`) are `java.base`'s, and an array is in its element's
+  module. A class is named by its binary name, `java.lang.Thread$UncaughtExceptionHandler` for a
+  nested one.
   A cast whose operand's class is known and not below the target
   always fails, and is written as that failure. A cast or test to a supertype is the implicit
   upcast.
