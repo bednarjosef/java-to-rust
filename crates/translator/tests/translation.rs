@@ -5075,7 +5075,7 @@ fn default_methods_live_on_the_interface_enum() {
     assert_contains(
         &rust,
         &[
-            "            1 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.kind() }\n            2 => self.kind_in_shape(),",
+            "            1 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.kind() }\n            2..=4 => self.kind_in_shape(),",
             "    fn kind_in_shape(&self) -> java::JString {\n        java::JString::from(\"shape\")\n    }",
             "    fn describe(&self) -> java::JString {\n        java::concat!(self.kind(), format_args!(\" {}\", java::Double(self.area())))\n    }",
         ],
@@ -5821,8 +5821,8 @@ fn equals_takes_the_object_enum() {
         &rust,
         &[
             "fn equals(&self, o: &Object) -> bool {",
-            "fn equals(&self, other: &Object) -> bool {\n        match self.0.tag() {\n            1 => { let o: &Arc<Key> = unsafe { self.0.as_pointer() }; o.equals(other) }\n            2 => { let o: &Arc<Plain> = unsafe { self.0.as_pointer() }; matches!(other.view(), ObjectView::Plain(b) if Arc::ptr_eq(o, b)) }\n            4 => { let o: &java::JString = unsafe { self.0.as_value() }; matches!(other.view(), ObjectView::String(b) if o == b) }",
-            "2 => { let o: &Arc<Plain> = unsafe { self.0.as_pointer() }; java::address_hash(Arc::as_ptr(o)) }",
+            "fn equals(&self, other: &Object) -> bool {\n        match self.0.tag() {\n            1 => { let o: &Arc<Key> = unsafe { self.0.as_pointer() }; o.equals(other) }\n            2 => other.0 == self.0,\n            4 => { let o: &java::JString = unsafe { self.0.as_value() }; matches!(other.view(), ObjectView::String(b) if o == b) }",
+            "2 => java::address_hash(self.0.address()),",
             "4 => { let o: &java::JString = unsafe { self.0.as_value() }; java::string_hash(o) }",
             "2 => { let o: &Arc<Plain> = unsafe { self.0.as_pointer() }; fmt::Display::fmt(&java::default_text(\"Plain\", java::address_hash(Arc::as_ptr(o))), f) }",
         ],

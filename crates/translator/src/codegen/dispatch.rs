@@ -1897,17 +1897,35 @@ impl<'a> Gen<'a> {
         // does: one jump to the class's code rather than one to the view and one to the code.
         self.line("match self.0.tag() {");
         self.indent += 1;
+        // An arm that does not read the object is written once for every class that runs its
+        // text, where the first of them is.
+        let mut lines: Vec<Result<String, usize>> = Vec::new();
+        let mut alike: Vec<(String, Vec<usize>)> = Vec::new();
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (c, text, uses) in arms {
             let tag = self.class_tag(c);
             if uses {
                 let payload = self.payload(c);
                 let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
                 // The class number is the one its constructor gives.
-                self.line(&format!(
+                lines.push(Ok(format!(
                     "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; {text} }}"
-                ));
+                )));
+            } else if let Some(&i) = index.get(&text) {
+                alike[i].1.push(c);
             } else {
-                self.line(&format!("{tag} => {text},"));
+                index.insert(text.clone(), alike.len());
+                lines.push(Err(alike.len()));
+                alike.push((text, vec![c]));
+            }
+        }
+        for line in lines {
+            match line {
+                Ok(line) => self.line(&line),
+                Err(i) => {
+                    let tags = self.tags(&alike[i].1, variants);
+                    self.line(&format!("{tags} => {},", alike[i].0));
+                }
             }
         }
         match otherwise {
@@ -2105,6 +2123,11 @@ impl<'a> Gen<'a> {
                 let (text, uses) = g.arm_call(t, c, i, &args);
                 (g.covariant_ret(i, r, text), uses)
             }
+            // `Object`'s identity, the same text for every class it reads the address of.
+            None if let Some(text) = g.identity_arm(r, c) => match g.facts.throwing.contains(&r) {
+                true => (format!("Ok({text})"), false),
+                false => (text, false),
+            },
             // What runs no method of the program cannot throw, but the group may (a `hashCode`
             // that iterates a map), and then every arm gives a `Result`.
             None if g.facts.throwing.contains(&r) => (format!("Ok({})", g.builtin_arm(r, c)), true),
@@ -2550,6 +2573,38 @@ impl<'a> Gen<'a> {
         self.equals_test(c, &place, optional, same)
     }
 
+    /// `Object`'s `equals` or `hashCode` (method `r`) for an object of class `c` that overrides
+    /// neither and whose identity is the address of its handle (`address`), which its value's
+    /// bits hold (`java::Thin::address`): read from those bits, so the text is the same for every
+    /// such class and their arms are one (`match_arms_or`). `Object`'s own values are `Thin`s.
+    fn identity_arm(&mut self, r: usize, c: usize) -> Option<String> {
+        let name = &self.class.types[c].name;
+        let by_address = self.runtime_of(c).is_none()
+            && self.thin_pointer(c)
+            && self.class.shared_of(c).is_none()
+            && !self.facts.owned.contains(name)
+            && (self.facts.immutable.contains(name) || self.celled(name));
+        let object = self.object_index()?;
+        if !by_address
+            || self.enum_for(object).is_none()
+            || !self.class.hierarchy.group_members(r).iter().any(|&g| self.is_object_method(g))
+        {
+            return None;
+        }
+        let m = &self.class.methods[r];
+        if m.name == "hashCode" {
+            return Some(format!("{}(self.0.address())", self.runtime("address_hash")));
+        }
+        let p = &m.params[0];
+        let other = self.local(&p.name);
+        let optional = self.optional_var(r, p.ty, &p.name);
+        let place = if self.lends(r) { other } else { format!("&{other}") };
+        Some(match optional {
+            true => format!("{}.as_ref().is_some_and(|b| b.0 == self.0)", operand(&place)),
+            false => format!("{}.0 == self.0", operand(&place)),
+        })
+    }
+
     /// Whether `place`, a reference to an `Object` (an `Option` of one when `optional`), is a
     /// value of class `c` that binds `b` and passes `same`.
     fn equals_test(&mut self, c: usize, place: &str, optional: bool, same: &str) -> String {
@@ -2850,12 +2905,30 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
         self.indent += 1;
-        if variants.is_empty() {
+        // The objects whose identity is their handle's: the same object exactly when the two
+        // values have the same bits (`java::Thin`), one test for all of them.
+        let by_bits: Vec<usize> = variants
+            .iter()
+            .copied()
+            .filter(|&c| {
+                self.runtime_of(c).is_none() && self.thin_pointer(c) && self.same_variant(c) == IDENTITY
+            })
+            .collect();
+        let others: Vec<usize> = variants.iter().copied().filter(|c| !by_bits.contains(c)).collect();
+        if by_bits.len() == variants.len() && !variants.is_empty() {
+            self.line("self.0 == other.0");
+        } else if variants.is_empty() {
             self.line("match self.view() {}");
         } else {
+            if !by_bits.is_empty() {
+                let tags = self.tags(&by_bits, variants);
+                self.line(&format!("if matches!(self.0.tag(), {tags}) {{"));
+                self.line("    return self.0 == other.0;");
+                self.line("}");
+            }
             self.line("match (self.view(), other.view()) {");
             self.indent += 1;
-            for &c in variants {
+            for &c in &others {
                 let v = self.view_pattern(t, c);
                 let mut same = self.same_variant(c);
                 // A `Boolean` or a `Byte` is one of `valueOf`'s cached objects, the same object

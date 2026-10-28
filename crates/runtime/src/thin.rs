@@ -44,6 +44,13 @@ impl Thin {
         (self.0.get() >> 48) as u16
     }
 
+    /// The address that the value holds: for a handle (`pointer`), its object's, which is
+    /// `java::Arc::as_ptr` of the handle.
+    #[inline(always)]
+    pub fn address(self) -> *const u8 {
+        (self.0.get() as usize & ADDRESS) as *const u8
+    }
+
     /// The handle `p` of an object of class `tag`.
     #[inline(always)]
     pub fn pointer<P: Pointer>(tag: u16, p: P) -> Thin {
