@@ -2180,6 +2180,13 @@ impl<'a> Gen<'a> {
         if let Some(text) = self.constant_desc_arm(r, c) {
             return text;
         }
+        // Another class lacks the method only where it would inherit it from a class missing
+        // from the class path (log4j's `MpscBlockingQueue` without JCTools), which Java cannot
+        // load, so no object of it exists.
+        if self.class.types[c].kind != TypeKind::Enum && self.runtime_of(c).is_none() {
+            let message = format!("{} has no `{}`", self.binary_name(c), self.class.methods[r].name);
+            return format!("unreachable!({})", rust_string(&message));
+        }
         let text = match self.class.methods[r].name.as_str() {
             "ordinal" => return "*o as i32".to_string(),
             "name" => "o.enum_name()",
