@@ -541,8 +541,8 @@ all name missing classes throws as Java would; any other marked piece is rejecte
   Vineflower's, whose 2 errors the repair mends: the server's start failed in it.
 
   Measured with the `parse` step (which attributes every file even when one does not parse):
-  from 186 errors in 118 files to 151 in 100, with 10 files from Vineflower without the
-  libraries, 8 from CFR and 5 from Procyon (among them `TypedDataComponent`, whose static
+  from 186 errors in 118 files to 153 in 101, with 10 files from Vineflower without the
+  libraries, 8 from CFR and 4 from Procyon (among them `TypedDataComponent`, whose static
   methods Vineflower writes with the record's type variable), in 6 compiles.
   The `repair` step then puts back the type arguments, unchecked casts and catch variable names
   that javac's errors and the class files show ([above](#repairing-what-the-decompiler-left-out)),
