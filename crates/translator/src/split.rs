@@ -428,6 +428,19 @@ fn inlinable(attrs: &[syn::Attribute]) -> bool {
     !attrs.iter().any(|a| a.path().is_ident("inline") || a.path().is_ident("cold"))
 }
 
+/// Whether a function with attributes `attrs` and block `code` stays in the header for its size
+/// (`small`): it is neither `#[cold]` nor `#[inline(never)]`. One that the generator marked
+/// `#[inline]` itself stays as one that the split marks does: a class's initialization check
+/// (`init_x`, whose `init_x_slow` moves), a variant's constructor, the view of an enum.
+fn stays(attrs: &[syn::Attribute], code: &str) -> bool {
+    let never = |a: &syn::Attribute| {
+        a.path().is_ident("cold")
+            || a.path().is_ident("inline")
+                && matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string() == "never")
+    };
+    !attrs.iter().any(never) && small(code)
+}
+
 /// An edit that marks a function `#[inline]` in a build that optimizes (without debug
 /// assertions), before its visibility or its signature. A build at `opt-level = 0` inlines
 /// nothing, and there each crate that calls an `#[inline]` function compiles a copy of it.
@@ -580,7 +593,7 @@ fn split_module(
                 let block = f.block.span().byte_range();
                 let can_move = movable(&f.sig, text);
                 // A `#[cold]` function is not inlined, so it moves whatever its size.
-                let moves = can_move && !(inlinable(&f.attrs) && small(&text[block.clone()]));
+                let moves = can_move && !stays(&f.attrs, &text[block.clone()]);
                 if !moves {
                     // A function kept in the header for its size is inlined where it is called.
                     // The mark goes before the edit that makes the function public, at the same
@@ -671,7 +684,7 @@ fn split_module(
                     if trait_name.is_none() {
                         publish(&f.vis, sig_start(&f.sig), &mut edits);
                     }
-                    if !can_move || (inlinable(&f.attrs) && small(at(text, f.block.span()))) {
+                    if !can_move || stays(&f.attrs, at(text, f.block.span())) {
                         continue;
                     }
                     let name = f.sig.ident.to_string();
@@ -956,6 +969,7 @@ mod tests {
         let text = format!(
             "fn get(x: i32) -> i32 {{ x + 1 }}\n\nfn sum(x: i32) -> i32 {{\n{large}    x\n}}\n\n\
              #[cold]\n#[inline(never)]\nfn slow() {{}}\n\n\
+             #[inline]\nfn init_a() {{ if A.get() {{ return; }} slow() }}\n\n\
              pub struct S;\n\nimpl S {{\n    fn size(&self) -> i32 {{ 3 }}\n    fn total(&self, x: i32) -> i32 {{\n{large}        x\n    }}\n}}\n"
         );
         let part = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
@@ -965,6 +979,8 @@ mod tests {
         let header = &split.header;
         assert!(header.contains(&format!("{inline}pub fn get(x: i32) -> i32 {{ x + 1 }}")), "{header}");
         assert!(!header.contains("fn sum(") && !header.contains("fn slow("), "{header}");
+        // So does one that the generator marked `#[inline]` itself, a class's initialization check.
+        assert!(header.contains("#[inline]\npub fn init_a() { if A.get() { return; } slow() }"), "{header}");
         assert!(header.contains(&format!("{inline}pub fn size(&self) -> i32 {{ 3 }}")), "{header}");
         assert!(header.contains(&format!("{inline}pub fn total(&self, p0: i32)")), "{header}");
         // A moved function is its declaration, which keeps its attributes but `#[inline]`.
@@ -978,7 +994,10 @@ mod tests {
             "{externs}"
         );
         let moved: String = split.pieces.iter().map(|p| p.text.as_str()).collect();
-        assert!(!moved.contains("fn get") && !moved.contains("body_size"), "{moved}");
+        assert!(
+            !moved.contains("fn get") && !moved.contains("body_size") && !moved.contains("init_a"),
+            "{moved}"
+        );
         assert!(moved.contains("fn j2r__p__sum") && moved.contains("fn body_total"), "{moved}");
         assert!(moved.contains("fn j2r__p__slow"), "{moved}");
     }
