@@ -362,7 +362,7 @@ fn a_synchronized_method_of_a_shared_object_holds_its_monitor() {
         &rust,
         &[
             "fn add(this: &Arc<java::Monitored<ACounter>>) {\n        let _monitor = java::enter(this);",
-            "let _monitor = java::enter(&this.lock.get());",
+            "let _monitor = java::enter(&(*this.lock.fixed()));",
             "static A__MONITOR: java::Locked<()> = java::Locked::new(());",
             "fn hit() {\n    let _monitor = java::enter_class(&A__MONITOR);",
             "java::monitor_wait(this, 0);",

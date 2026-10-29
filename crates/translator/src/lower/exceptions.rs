@@ -56,6 +56,7 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("Executable", "java.lang.reflect"),
     ("Member", "java.lang.reflect"),
     ("RecordComponent", "java.lang.reflect"),
+    ("MemberIndex", "java.lang.reflect"),
     ("DataFormatException", "java.util.zip"),
     ("UnsupportedCharsetException", "java.nio.charset"),
     ("IllegalCharsetNameException", "java.nio.charset"),

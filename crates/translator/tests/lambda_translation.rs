@@ -365,7 +365,7 @@ fn a_closure_in_a_field_only_constructors_write_is_called_in_place() {
             }
         }",
     );
-    assert_contains(&rust, &["(a.op.get())(3)"]);
+    assert_contains(&rust, &["((*a.op.fixed()))(3)"]);
 }
 
 #[test]

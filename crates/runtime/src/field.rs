@@ -37,6 +37,15 @@ impl<T> Field<T> {
         unsafe { (*self.0.get()).clone() }
     }
 
+    /// The value where it is, of a field that nothing writes once its object is built (a fixed
+    /// field, see `fixed.rs`), read outside its constructor and field initializers, which write
+    /// it: no write can come while the reference lives.
+    #[inline(always)]
+    pub fn fixed(&self) -> &T {
+        // Nothing writes the cell while the reference lives (above).
+        unsafe { &*self.0.get() }
+    }
+
     /// Replaces the value.
     #[inline(always)]
     pub fn set(&self, value: T) {
@@ -180,6 +189,17 @@ impl<T> SharedField<T> {
         }
         // Under the stripe, nothing writes the value while it is copied.
         striped(self.0.get() as usize, || unsafe { (*self.0.get()).clone() })
+    }
+
+    /// The value where it is, of a fixed field (`Field::fixed`): no lock is taken and nothing is
+    /// copied, since nothing writes the field once its object is built. Another thread reaches
+    /// the object only after its constructor, through a field, an element or a static written
+    /// with release and read with acquire, or through `Thread.start`, which order the
+    /// constructor's writes before the reads (`fixed.rs`).
+    #[inline(always)]
+    pub fn fixed(&self) -> &T {
+        // Nothing writes the value while the reference lives (above).
+        unsafe { &*self.0.get() }
     }
 
     /// Replaces the value.

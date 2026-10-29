@@ -142,7 +142,7 @@ fn outer_this_is_the_outer_field_chain() {
             }
         }",
     );
-    assert_contains(&rust, &["self.outer.width.get().wrapping_add(self.outer.outer.get().width)"]);
+    assert_contains(&rust, &["self.outer.width.get().wrapping_add((*self.outer.outer.fixed()).width)"]);
 }
 
 #[test]

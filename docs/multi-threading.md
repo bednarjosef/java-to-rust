@@ -65,7 +65,7 @@ The translation maps every Java memory action to one of:
 | Java action | Rust |
 | --- | --- |
 | read/write of a field of an object only one thread reaches | plain read/write |
-| read/write of a field of a thread-shared object | its `java::SharedField`: an acquire load or release store of a word, under a striped lock for a wider value |
+| read/write of a field of a thread-shared object | its `java::SharedField`: an acquire load or release store of a word, under a striped lock for a wider value; a fixed field's read borrows the value |
 | read/write of a `volatile` field of a thread-shared object | its `java::SharedField`, sequentially consistent |
 | read/write of an element of an array that threads share | the element's cell (`java::SharedArray`): an acquire load or release store of a word, under a striped lock for a wider value |
 | `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on a field | one atomic action of its `java::SharedField` (5.3) |
@@ -162,7 +162,9 @@ text for both forms: `o.n.set(o.n.get() + 1)`. A value of 1, 2, 4 or 8 bytes wit
 (a primitive, an object's handle, a string with an identity) is an atomic word, loaded with
 acquire and stored with release, which on x86-64 are plain moves; any other value (a closure, a
 string without an identity) is copied and replaced under one of 64 striped spin locks, picked by
-the field's address and taken only once a second thread runs. The object's `java::Monitored`
+the field's address and taken only once a second thread runs. A field that only constructors
+write (a fixed field, [object-model.md](object-model.md) 1.8) is read where it is, `fixed()`,
+with no lock and no copy, outside the constructors and field initializers. The object's `java::Monitored`
 holds the fields first and then the monitor's lock, so the object's address is its fields', as
 `&self` of a method sees it. A class tree is celled and monitored together, so an enum over it
 lends every variant's fields struct as `&XFields`. A class tree with a Java enum keeps its

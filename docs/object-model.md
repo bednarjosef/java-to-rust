@@ -579,7 +579,12 @@ to run.
   object could not last (`{ c.borrow().name.clone() }`). In a program with threads, the fields of
   a class whose constructors, or whose subclasses' constructors, may start a thread are not
   fixed, since that thread could read one while the constructor writes it. The runtime's
-  `fixed.rs` gives the reasons that the borrow cannot alias a write.
+  `fixed.rs` gives the reasons that the borrow cannot alias a write. A fixed field of a celled
+  object is read where it is too, `(*c.name.fixed())`, outside the constructors and field
+  initializers, which write it (`Gen::fixed_cell`): a `java::SharedField` of a value that is not
+  one word (a `Class`, a lambda) is otherwise copied out under a striped spin lock, and a
+  lambda's handle counted, at each read. The Minecraft server's reflection table read each
+  member's class so.
 - A fields struct has no representation of its own: it is always inside a concrete object.
 
 ### 1.9 Comparable, Number, CharSequence, Enum, Record and other JDK interfaces
