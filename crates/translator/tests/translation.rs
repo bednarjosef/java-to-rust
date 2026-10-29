@@ -4061,6 +4061,64 @@ fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
 }
 
 #[test]
+fn a_census_stubs_a_class_converted_to_an_interface_the_runtime_lacks_before_the_analyses_run() {
+    // A class as an `AnnotatedElement` or a `TypeDescriptor.OfField`, which `java.lang.Class`
+    // implements but the runtime's classes do not, is rejected by the generator; the census finds
+    // it in the code before the analyses first run, which then run once.
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(std::path::PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this test");
+        return;
+    };
+    let main = r#"import java.lang.invoke.TypeDescriptor;
+import java.lang.reflect.AnnotatedElement;
+
+public class Main {
+    static String shown(AnnotatedElement e) {
+        return String.valueOf(e);
+    }
+
+    static String descriptor(TypeDescriptor.OfField<?> d) {
+        return d.descriptorString();
+    }
+
+    static void annotated() {
+        System.out.println(shown(Main.class));
+    }
+
+    static void primitive() {
+        System.out.println(descriptor(int.class));
+    }
+
+    public static void main(String[] args) {
+        if (args.length > 0) {
+            annotated();
+            primitive();
+        }
+        System.out.println("done");
+    }
+}
+"#;
+    let dir = write_sources("census_class_interfaces", &[("app/Main.java", main)]);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![java_base],
+        ..Default::default()
+    };
+    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 5 pieces; 3 (60.0%) translate, 2 rejected.",
+            "1  a `java.lang.Class` as a `java.lang.invoke.TypeDescriptor.OfField` not supported yet\n",
+            "1  a `java.lang.Class` as a `java.lang.reflect.AnnotatedElement` not supported yet\n",
+            "          at Main.java:14:34, Main.java:18:39\n",
+        ],
+    );
+    assert_eq!(rounds, 1, "{}", census.report);
+}
+
+#[test]
 fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
     // A census takes the errors of every check of the analyses, and of the messages and the
     // generator after them, in one round (`analysis::analyze_collecting`); here the generator

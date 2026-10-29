@@ -14,10 +14,10 @@
 //! analysis or of the generator, which only has a line and column, stubs the methods whose code
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
 //! the generator run again. The errors that they would find in the code alone (the checks of
-//! the analyses that read no facts) are found before the analyses first run
-//! (`known_before_analyses`), and so cost no round of their own. The generator and the analysis
-//! of exceptions report every error they find, which are stubbed together; the other analyses
-//! report their first. A run of the
+//! the analyses that read no facts, a class converted to an interface that the runtime's classes
+//! do not implement) are found before the analyses first run (`known_before_analyses`), and so
+//! cost no round of their own. The generator and the analysis of exceptions report every error
+//! they find, which are stubbed together; the other analyses report their first. A run of the
 //! analyses goes on past a check that rejects code, to the checks and the messages after it
 //! (`analysis::analyze_collecting`), so that the errors of all of them are stubbed in one round,
 //! and the census is the one that a round per check finds (`round_by_round`). A panic while the
@@ -860,11 +860,31 @@ fn unresolved_calls(class: &mut Class) -> Result<(), Vec<Error>> {
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
-/// The errors that the analyses would find in the code alone, without their facts, found before
-/// the analyses so that the code they reject is stubbed before the analyses first run, rather
-/// than in a round of the analyses and the generator of its own (`analysis::code_checks`).
+/// The errors that the analyses and the generator would find in the code alone, without their
+/// facts, found before the analyses so that the code they reject is stubbed before the analyses
+/// first run, rather than in a round of the analyses and the generator of its own: the checks of
+/// the analyses that read the code alone (`analysis::code_checks`), and a class converted to an
+/// interface of `java.lang.Class` that the runtime's classes do not implement, which the generator
+/// rejects (`codegen::dispatch::class_cast`).
 fn known_before_analyses(class: &mut Class) -> Result<(), Vec<Error>> {
-    let errors = analysis::code_checks(class);
+    let mut errors = analysis::code_checks(class);
+    let mut see = |e: &Expr| {
+        visit_expr(e, &mut |x| {
+            if let ExprKind::Cast(Type::Class(name, _), value) = &x.kind
+                && value.ty == Type::JavaClass
+                && crate::ast::class_only_interface(name)
+            {
+                let message = format!("a `java.lang.Class` as a `{name}` not supported yet");
+                errors.push(Error { pos: value.pos, message });
+            }
+        })
+    };
+    for method in &class.methods {
+        method.body.iter().for_each(|s| visit_stmt(s, &mut see, &mut |_| {}));
+    }
+    for decl in &class.types {
+        decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()).for_each(&mut see);
+    }
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
