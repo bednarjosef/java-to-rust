@@ -162,6 +162,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.object_types(&mut types);
         lowering.param_decls(&mut types);
         let failed = lowering.verify(&types, &methods);
+        lowering.noted_later();
         let hierarchy = Hierarchy::new(&types, &methods);
         let raised = lowering.raised_objects(&types, &methods);
         let name = first.str("simpleName").to_string();
@@ -417,6 +418,11 @@ struct Lowering<'t> {
     real: real_generics::Real,
     /// Those of `real` that lowering found cannot be: the program is lowered again without them.
     failed: RefCell<real_generics::Real>,
+    /// Whether the code being lowered uses a Rust generic, a class or method of `real` or one of
+    /// their type variables (`real_generics::Lowering::is_real`), since the method, field
+    /// initializers or initializer block being lowered began (`census::method_or_stub`): a census
+    /// records it with each rejection, as only an error in such code may go away without them.
+    uses_real: Cell<bool>,
     /// The pattern variables in scope that name a value without testing it (see `patterns`).
     aliases: RefCell<Vec<patterns::Alias>>,
     /// The JDK's functional interfaces that the program uses and lowering provides (see `functional`).
@@ -519,8 +525,9 @@ struct Lowering<'t> {
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
 /// position of the method being lowered, the index of that method when the code rejected is part
-/// of its body alone, and the error.
-type CensusError = (usize, Option<Pos>, Option<usize>, Error);
+/// of its body alone, the error, and whether the code lowered so far uses Rust generics
+/// (`Lowering::uses_real`).
+type CensusError = (usize, Option<Pos>, Option<usize>, Error, bool);
 
 /// What `finish_types` keeps from one enum to the next.
 struct EnumsKept {
