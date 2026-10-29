@@ -724,7 +724,8 @@ supertype (a `Version[]` is an `Object[]`), and erasure makes `T[]` an array of 
 `list.toArray(new Version[0])` passes a `Version[]` where `T[]` is an `Object[]`, and `toArray(a)`
 fills `a` and returns it. Copying at the boundary would lose that identity. Instead, two different
 array types of references that meet (an argument, an assignment, a return, a cast, a substitution
-for an array of a type variable, an array passed for `Object...`) are each an `Object[]`
+for an array of a type variable, an array passed for `Object...` or, where javac does not pack the
+call's arguments, for any varargs) are each an `Object[]`
 everywhere in the program: lowering notes each such type and the program is lowered again
 (`real_generics::retry`). Types that meet only once others are `Object[]`s (a `String[][]` is an
 `Object[][]` once `String[]` is one; an array held as an `Object` meets an `Object[]` once a type
