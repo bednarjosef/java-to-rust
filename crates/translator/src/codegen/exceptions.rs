@@ -510,10 +510,28 @@ pub(super) fn check_try_assigned(
     found
 }
 
-/// Checks that no `?` or `java::or_break!` of the generated code is inside a closure, where it
-/// would not leave the method or the `try` block. The generator writes some expressions as
-/// closures (an update of an array element or a static field), and a call that throws inside one
-/// is not supported yet.
+/// The arm of a `match` that `Gen::pass_on` writes where a failure leaves the method.
+const RETURNS: &str = "=> return Err(";
+
+/// The arm of a `match` that `Gen::pass_on` writes where a failure leaves a `try` block.
+const BREAKS: &str = "=> break '";
+
+/// Whether generated code `text` leaves a `try` block where an operation fails: a
+/// `java::or_break!`, or a `match` of `Gen::pass_on`.
+pub(super) fn leaves_attempt(text: &str) -> bool {
+    text.contains("or_break!") || text.contains(BREAKS)
+}
+
+/// Whether generated code `text` passes a failure on (`Gen::pass_on`): with a `?`, a
+/// `java::or_break!` or a `match` that leaves the method or a `try` block.
+pub(super) fn passes_on(text: &str) -> bool {
+    text.contains('?') || leaves_attempt(text) || text.contains(RETURNS)
+}
+
+/// Checks that nothing that passes a failure on (`passes_on`) is inside a closure of the generated
+/// code, where it would not leave the method or the `try` block. The generator writes some
+/// expressions as closures (an update of an array element or a static field), and a call that
+/// throws inside one is not supported yet.
 pub(super) fn check_closures(code: &str) -> Result<(), Error> {
     let bytes = code.as_bytes();
     // The closures being read, each by the bracket depth of its body and whether the body is a
@@ -561,11 +579,28 @@ pub(super) fn check_closures(code: &str) -> Result<(), Error> {
             }
             b'?' if !closures.is_empty() => return fail(),
             b'o' if !closures.is_empty() && code[i..].starts_with("or_break!") => return fail(),
+            b'=' if !closures.is_empty()
+                && (code[i..].starts_with(RETURNS) || code[i..].starts_with(BREAKS)) =>
+            {
+                return fail();
+            }
             _ => {}
         }
         i += 1;
     }
     Ok(())
+}
+
+/// What fails in an operation whose failure goes on from where it is (`Gen::pass_on`).
+enum Failing<'m> {
+    /// A `Result` whose error is a `Throwable`: a call of a method that throws.
+    Thrown,
+    /// A `Result` whose error is a `java::Exception` that the runtime raised.
+    Raised,
+    /// An `Option` whose `None` is a `NullPointerException` with this message (a Rust `&str`).
+    Null(&'m str),
+    /// A `Result` whose error converts to the block's or the method's with `From`.
+    Inferred,
 }
 
 /// A `try` block being written, which an exception (and, with a `finally`, a `return` or a jump)
@@ -709,8 +744,6 @@ impl<'a> Gen<'a> {
         if completion { format!("{}({e})", self.runtime("Completion::Throw")) } else { format!("Err({e})") }
     }
 
-    /// The call `code` of method `callee`: as it is when the method does not throw, else with
-    /// what its failure does here (see the module's documentation).
     /// The value that a local that `try_assigned` names starts as, which Java's definite
     /// assignment never lets the code read: the value Java would give a field, an empty array,
     /// the first constant of an enum, or the zero of a plain box; `None` for a type without one.
@@ -727,25 +760,92 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The call `code` of method `callee`: as it is when the method does not throw, else with
+    /// what its failure does here (`passed_on_thrown`).
     pub(super) fn raising(&mut self, code: Code, callee: usize) -> Code {
         if !self.facts.throwing.contains(&callee) {
             return code;
         }
-        Code::atom(self.passed_on(code))
+        Code::atom(self.passed_on_thrown(code))
+    }
+
+    /// A `Result` of the runtime, whose error is a `java::Exception` (`code`), whose `Ok` value
+    /// is used and whose error goes on from here as a thrown exception does (`pass_on`).
+    pub(super) fn passed_on(&mut self, code: Code) -> String {
+        self.pass_on(code, Failing::Raised)
     }
 
     /// A `Result` whose error is a `Throwable` (`code`), whose `Ok` value is used and whose error
-    /// goes on from here: it leaves the enclosing `try` block or the method, or ends the program.
-    pub(super) fn passed_on(&mut self, code: Code) -> String {
-        // Inside `java::catching` (see `caught`), the closure returns it.
-        if !self.catching_now.is_empty() {
-            return format!("{}?", code.at(ATOM));
+    /// goes on from here (`pass_on`).
+    pub(super) fn passed_on_thrown(&mut self, code: Code) -> String {
+        self.pass_on(code, Failing::Thrown)
+    }
+
+    /// The `Result` of a `try` block with a `finally` (`code`), which goes on from after the
+    /// `finally` (`pass_on`); its error is a `Throwable` where the program has `exceptions`, else
+    /// `Infallible`.
+    fn passed_on_finally(&mut self, code: Code, exceptions: bool) -> String {
+        self.pass_on(code, if exceptions { Failing::Thrown } else { Failing::Inferred })
+    }
+
+    /// The object of `option`, a reference that may be null, whose `NullPointerException` with
+    /// Java's message (`message`, a Rust `&str`) goes on from here (`pass_on`).
+    pub(super) fn passed_on_null(&mut self, option: &str, message: &str) -> String {
+        self.pass_on(Code::atom(option.to_string()), Failing::Null(message))
+    }
+
+    /// The value of `code`, whose failure (`failing`) leaves the enclosing `try` block or the
+    /// method, or ends the program. Where it leaves the block or the method, a `match` writes it
+    /// with its conversion to `Throwable` named: rustc checks and compiles that with a seventh to
+    /// a quarter less work than a `?` or a `java::or_break!`, which leave the conversion (`From`)
+    /// and the `Try` trait to be worked out at each one, and the optimized code is the same.
+    /// Inside `java::catching` (see `caught`), the closure returns the failure with `?`; and a
+    /// method that does not throw ends the program with it.
+    fn pass_on(&mut self, code: Code, failing: Failing<'_>) -> String {
+        let throwable = self.raised_conversions();
+        let named = self.catching_now.is_empty()
+            && (self.throwing || !self.attempts.is_empty())
+            && match failing {
+                Failing::Thrown => true,
+                Failing::Inferred => false,
+                Failing::Raised | Failing::Null(_) => throwable.is_some(),
+            };
+        if !named {
+            let code = match failing {
+                Failing::Null(message) => {
+                    Code::atom(format!("{}({}, {message})", self.runtime("try_non_null_message"), code.text))
+                }
+                _ => code,
+            };
+            if !self.catching_now.is_empty() {
+                return format!("{}?", code.at(ATOM));
+            }
+            return match self.innermost_attempt() {
+                Some((label, _)) => format!("{}({}, '{label})", self.runtime("or_break!"), code.text),
+                None if self.throwing => format!("{}?", code.at(ATOM)),
+                None => format!("{}.unwrap_or_else({})", code.at(ATOM), self.uncaught("uncaught")),
+            };
         }
-        match self.innermost_attempt() {
-            Some((label, _)) => format!("{}({}, '{label})", self.runtime("or_break!"), code.text),
-            None if self.throwing => format!("{}?", code.at(ATOM)),
-            None => format!("{}.unwrap_or_else({})", code.at(ATOM), self.uncaught("uncaught")),
+        let throwable = throwable.unwrap_or_default();
+        let (value, failure, error) = match failing {
+            Failing::Thrown => ("Ok(v)", "Err(e)", "e".to_string()),
+            Failing::Raised => ("Ok(v)", "Err(e)", format!("{throwable}::j2r_raised(e)")),
+            Failing::Null(message) => {
+                ("Some(v)", "None", format!("{throwable}::j2r_null_pointer({message})"))
+            }
+            Failing::Inferred => unreachable!("written with `?` or `java::or_break!`"),
+        };
+        let leave = self.propagate(&error);
+        format!("match {} {{ {value} => v, {failure} => {leave} }}", code.text)
+    }
+
+    /// The type of `Throwable` when it has the functions that turn a failure of the runtime into
+    /// an exception object without a conversion for rustc to infer (`raised_impl`).
+    fn raised_conversions(&mut self) -> Option<String> {
+        if !self.has_throwable() || self.facts.raised_classes.is_empty() {
+            return None;
         }
+        Some(self.throwable_type()).filter(|t| !t.contains('<'))
     }
 
     /// A call of the runtime's function `name` (`generics` after its name, such as `::<i32>`)
@@ -781,12 +881,12 @@ impl<'a> Gen<'a> {
     }
 
     /// `code`, the operation `id` of `Facts::catching`, run inside `java::catching`, whose failure
-    /// goes on from here as a thrown exception does. An operation whose own code passes a
-    /// failure on (`?`, `or_break!`) cannot be in its closure, and is rejected.
+    /// goes on from here as a thrown exception does. An operation whose own code leaves a `try`
+    /// block where it fails (`leaves_attempt`) cannot be in its closure, and is rejected.
     pub(super) fn caught(&mut self, id: ExprId, code: Code, mark: usize) -> Code {
         // Lines written before the operation (from `mark`) run outside the closure.
         let before = &self.out[mark..];
-        if code.text.contains("or_break!") || before.contains('?') || before.contains("or_break!") {
+        if leaves_attempt(&code.text) || passes_on(before) {
             let pos = self.facts.catching[&id];
             let message = "catching the exception of an operation that holds another one that is caught not supported yet";
             self.rejected.push(Error { pos, message: message.to_string() });
@@ -798,15 +898,17 @@ impl<'a> Gen<'a> {
             // expression `return Err`) leaves the closure with its exception, which goes on as
             // the operation's own would.
             let throwable = self.throwable_type();
-            format!(
+            let call = format!(
                 "{}(|| -> Result<_, {throwable}> {{ Ok({}) }}).map_err({throwable}::from).and_then(|r| r)",
                 self.runtime("catching"),
                 code.text
-            )
+            );
+            self.passed_on_thrown(Code::atom(call))
         } else {
-            format!("{}(|| {})", self.runtime("catching"), code.text)
+            let call = format!("{}(|| {})", self.runtime("catching"), code.text);
+            self.passed_on(Code::atom(call))
         };
-        Code::atom(self.passed_on(Code::atom(call)))
+        Code::atom(call)
     }
 
     /// Rejects the program when an operation of `Facts::catching` that is written does not run
@@ -913,6 +1015,26 @@ impl<'a> Gen<'a> {
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        if name.contains('<') {
+            return;
+        }
+        // The conversion as functions that the code names where a failure goes on (`pass_on`).
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        self.line("#[cold]");
+        self.line(&format!("pub fn j2r_raised(e: java::Exception) -> {name} {{"));
+        self.line(&format!("    <{name} as From<java::Exception>>::from(e)"));
+        self.line("}");
+        self.gap();
+        self.line("#[cold]");
+        self.line(&format!("pub fn j2r_null_pointer(message: &'static str) -> {name} {{"));
+        self.line(&format!(
+            "    {name}::j2r_raised(java::Exception::new(\"java.lang.NullPointerException\", message))"
+        ));
         self.line("}");
         self.indent -= 1;
         self.line("}");
@@ -1323,13 +1445,13 @@ impl<'a> Gen<'a> {
             return;
         }
         if !completion && ends && carried.is_empty() {
-            let text = self.passed_on(Code::atom(result));
+            let text = self.passed_on_finally(Code::atom(result), exceptions);
             self.line(&format!("{text};"));
             return;
         }
         if !completion && ends {
             let values: Vec<String> = rust.iter().map(|r| self.temp(&format!("{r}_value"))).collect();
-            let text = self.passed_on(Code::atom(result));
+            let text = self.passed_on_finally(Code::atom(result), exceptions);
             self.line(&format!("let {} = {text};", tuple(&values)));
             for (r, v) in rust.iter().zip(&values) {
                 self.line(&format!("{r} = {v};"));

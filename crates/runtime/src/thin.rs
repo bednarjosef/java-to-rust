@@ -66,8 +66,10 @@ impl Thin {
     /// The value was made by `pointer` with a handle of type `P`.
     #[inline(always)]
     pub unsafe fn as_pointer<P: Pointer>(&self) -> &P {
-        // The handle's pointer is these bits, whose tag it ignores.
-        unsafe { &*(self as *const Thin as *const P) }
+        // The handle's pointer is these bits, whose tag it ignores. (A reference made of the
+        // reference rather than of a raw pointer has no checks of the pointer in a build without
+        // optimizations, which would be written out at each class's arm.)
+        unsafe { std::mem::transmute::<&Thin, &P>(self) }
     }
 
     /// The start of the object whose handle the value holds, read as a `T` and lent while the
@@ -90,7 +92,7 @@ impl Thin {
     /// The value `v` of class `tag`: in the low bytes when it fits in six, else in a box.
     #[inline(always)]
     pub fn value<T>(tag: u16, v: T) -> Thin {
-        if Thin::fits::<T>() {
+        if const { Thin::fits::<T>() } {
             let mut bits = 0u64;
             // It fits, and the bits are aligned for it.
             unsafe { std::ptr::write(&mut bits as *mut u64 as *mut T, v) };
@@ -107,7 +109,7 @@ impl Thin {
     /// The value was made by `value` with a value of type `T`.
     #[inline(always)]
     pub unsafe fn as_value<T>(&self) -> &T {
-        if Thin::fits::<T>() {
+        if const { Thin::fits::<T>() } {
             // The value lies in the low bytes, which come first.
             unsafe { &*(self as *const Thin as *const T) }
         } else {

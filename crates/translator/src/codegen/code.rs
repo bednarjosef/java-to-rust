@@ -99,8 +99,10 @@ impl Code {
         }
     }
 
+    /// Whether the text starts with a block, or with a `match` (`Gen::pass_on`), which would end
+    /// a statement or a `match` arm that it starts before an operator after it.
     fn starts_with_block(&self) -> bool {
-        self.text.starts_with('{')
+        self.text.starts_with('{') || self.text.starts_with("match ")
     }
 
     /// The text with a type suffix on a numeric literal, so that its type does not depend on

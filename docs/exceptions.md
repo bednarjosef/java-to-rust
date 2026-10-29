@@ -1,7 +1,7 @@
 # Exceptions: `throw`, `try`/`catch`/`finally`, the standard exception classes
 
 Exceptions are values: a method that can throw something its callers catch returns
-`Result<T, Throwable>`, `?` passes the exception on, and every other method keeps its plain
+`Result<T, Throwable>`, a `match` passes the exception on, and every other method keeps its plain
 signature. This document describes how that works, why, and what is still rejected. It builds on
 the object model (`docs/object-model.md`): exception classes are ordinary class trees there.
 
@@ -19,7 +19,7 @@ the object model (`docs/object-model.md`): exception classes are ordinary class 
 3. **`Throwable` is an enum** with one variant per exception class whose objects exist (created
    by the program, or raised by the runtime where the program can see it). It stays an enum even
    with one variant, so the runtime's failures convert into it (`impl From<java::Exception> for
-   Throwable`, which `?` uses). Standard types between `Throwable` and the concrete classes
+   Throwable`, which the generated code calls as `Throwable::j2r_raised`). Standard types between `Throwable` and the concrete classes
    (`Exception`, `RuntimeException`, ...) declare no members of their own, so they are represented
    by `Throwable` too: no conversions between them are needed, and `catch (RuntimeException e)`
    binds the matched value as it is.
@@ -96,11 +96,25 @@ are immutable unless the program writes their fields after construction.
 ## Methods that throw
 
 In a method that returns `Result`, `return v` is `return Ok(v)`, a body that completes normally
-ends with `Ok(())`, `throw e` is `return Err(..)`, a call of a throwing method is `call?`, and an
-observed runtime failure is a `java::try_` function of the runtime with `?` (`java::try_non_null(..)?`, `java::try_floor_div(..)?`). In a method that does not return `Result`, a
-call of one that does (because other callers observe it) is `call.unwrap_or_else(java::uncaught)`,
-and `throw e` where nothing catches it is `java::throw_uncaught(e)`: nothing here observes the
-exception, so ending the program at once is what propagating it would do.
+ends with `Ok(())`, `throw e` is `return Err(..)`, a call of a throwing method is
+`match call { Ok(v) => v, Err(e) => return Err(e) }`, and an observed runtime failure is a
+`java::try_` function of the runtime whose `java::Exception` the `match` turns into the
+exception object with `Throwable::j2r_raised(e)` (`java::try_floor_div(..)`). A dereference that
+Java's message reaches matches the `Option` itself: `None => return
+Err(Throwable::j2r_null_pointer("Cannot invoke ..."))`. In a method that does not return `Result`,
+a call of one that does (because other callers observe it) is
+`call.unwrap_or_else(java::uncaught)`, and `throw e` where nothing catches it is
+`java::throw_uncaught(e)`: nothing here observes the exception, so ending the program at once is
+what propagating it would do.
+
+The `match` is written out, rather than a `?` or a macro, for the time rustc takes: a `?` leaves
+the `Try` trait and the `From` conversion to be worked out at each one, and a macro is expanded
+and parsed again at each use. On javac's code, written out, one of its crates checks and compiles
+with about a tenth less work (`docs/performance.md`, "Compile time"); the optimized code is the
+same. Inside
+`java::catching`'s closure (below), and where the program's `Throwable` has no `j2r_raised` (no
+failure of the runtime reaches a `catch`), a failure still goes on with `?` or
+`java::or_break!(expr, 'label)`, which convert with `From`.
 
 ```java
 static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty"); return Integer.parseInt(s); }
@@ -111,14 +125,16 @@ fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
     if s.is_empty() {
         return Err(Throwable::Bad(Arc::new(Bad::new(java::wtf8("empty")))));
     }
-    Ok(java::try_parse_radix::<i32>(Some(s), 10)?)   // checked only if a caller observes it
+    // checked only if a caller observes it
+    Ok(match java::try_parse_radix::<i32>(Some(s), 10) { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) })
 }
 ```
 
 - **Override groups agree**: if one member returns `Result`, all do, since a call may run any of
   them; the dispatcher forwards it unchanged.
 - **Constructors** that throw something a caller catches return `Result<C, Throwable>`; `new`,
-  `this(...)` and `super(...)` pass the failure on with `?`. A partly built object is dropped,
+  `this(...)` and `super(...)` pass the failure on (a constructor that only calls `this(...)`
+  returns that one's `Result`). A partly built object is dropped,
   which Java's program could not see either. An exception's own constructor may throw too:
   `throw new Fatal(d)` whose `d.toString()` fails throws that failure in place of the `Fatal`.
   The exception: the `(String)` constructors that the `From` impl builds the runtime's
@@ -141,7 +157,7 @@ A `try` is one of three forms, the plainest that is equivalent:
 
   ```rust
   let attempt: Result<(), Throwable> = 'attempt: {
-      java::or_break!(from.borrow_mut().withdraw(amount), 'attempt);
+      match from.borrow_mut().withdraw(amount) { Ok(v) => v, Err(e) => break 'attempt Err(e) };
       to.borrow_mut().balance += amount;
       Ok(())
   };
@@ -150,11 +166,11 @@ A `try` is one of three forms, the plainest that is equivalent:
       other => other,
   };
   java::println!("done");          // the finally
-  attempt?;                        // or or_break!, or unwrap_or_else(java::uncaught)
+  match attempt { Ok(v) => v, Err(e) => return Err(e) };   // or break, or unwrap_or_else(java::uncaught)
   ```
 
-  `java::or_break!(expr, 'label)` matches `expr` and breaks out of the labeled block with the
-  error converted by `From`. Without a `finally`, the catch bodies are plain arms and the last arm
+  Inside the block a failure breaks out of it with the error, converted as in a method
+  (`Throwable::j2r_raised` for the runtime's). Without a `finally`, the catch bodies are plain arms and the last arm
   passes on what no clause matches. A body that cannot complete normally is a block of
   `Result<Infallible, Throwable>`, its `return` is Rust's own, and the `match` has no `Ok` arm.
 - **The `java::Completion` form** when a `return`, `break` or `continue` leaves the `try` and a
@@ -294,8 +310,9 @@ Specific cases:
   `try_parse_range` (`codegen/parse_range.rs`); that of another `CharSequence`, which a whole
   program parses with the JDK's sources through `TranslatedNumbers` (`program::REDIRECTED_CALLS`),
   throws it from `Objects.requireNonNull`, as Java's does.
-- **Checked operations inside a closure of the translation** would put a `?` where it cannot
-  leave the method; `codegen::exceptions::check_closures` rejects them on the generated text.
+- **Checked operations inside a closure of the translation** would put a `?`, or a `match` arm
+  that returns or breaks, where it cannot leave the method;
+  `codegen::exceptions::check_closures` rejects them on the generated text.
   An operation run inside `java::catching` whose own code also passes a failure on is rejected
   too.
 

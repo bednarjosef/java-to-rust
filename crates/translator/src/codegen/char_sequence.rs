@@ -55,8 +55,12 @@ impl<'a> Gen<'a> {
             if throws.contains(&true) { self.throwable_type() } else { "java::Exception".to_string() };
         let args = format!("{range}, {length_call}, |{index}| {char_call}");
         let call = if self.facts.raising.contains(&id) || throws.contains(&true) {
-            let call = format!("{builder}.try_append_seq_range::<{error}>({args})");
-            Code::atom(self.passed_on(Code::atom(call)))
+            let call = Code::atom(format!("{builder}.try_append_seq_range::<{error}>({args})"));
+            Code::atom(if throws.contains(&true) {
+                self.passed_on_thrown(call)
+            } else {
+                self.passed_on(call)
+            })
         } else {
             Code::atom(format!("{builder}.append_seq_range::<{error}>({args})"))
         };

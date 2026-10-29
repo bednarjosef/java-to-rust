@@ -865,14 +865,20 @@ impl<'a> Gen<'a> {
         };
         self.dereferenced.insert(id);
         // Java's message, where a `catch` may read it.
-        let call = match ids.iter().find_map(|id| self.facts.npe_messages.get(id)) {
+        let text = match ids.iter().find_map(|id| self.facts.npe_messages.get(id)) {
             Some(Some(message)) => {
                 let message = self.npe_message(message, self.facts.null_checked[&id]);
-                format!("{}({option}, {message})", self.runtime("try_non_null_message"))
+                self.passed_on_null(option, &message)
             }
-            _ => format!("{}({option})", self.runtime("try_non_null")),
+            _ => {
+                let call = format!("{}({option})", self.runtime("try_non_null"));
+                self.passed_on(Code::atom(call))
+            }
         };
-        self.passed_on(Code::atom(call))
+        // The object is mostly the receiver of a call or a field access, which a `match` before
+        // it would end where it starts a statement or a `match` arm (syn, which splits a program
+        // into crates, ends it there in an arm too).
+        if text.starts_with("match ") { format!("({text})") } else { text }
     }
 
     /// A message of `Facts::npe_messages`, at `pos`, as a Rust `&str`. One that names a variable
