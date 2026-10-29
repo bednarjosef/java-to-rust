@@ -258,11 +258,13 @@ impl FdTable {
         read_bytes_with(|bytes| self.read_into(fd, bytes), buf, off, len)
     }
 
-    /// What a read or a write of descriptor `fd` goes to, taken out of the table (`Handle`).
-    fn handle(&self, fd: i32) -> Option<Handle> {
-        match self.entries.get(fd as usize).and_then(Option::as_ref)? {
-            Entry::Stdin if self.stdin.is_none() => Some(Handle::Stdin),
-            Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file) => {
+    /// What a read (`write` false) or a write of descriptor `fd` goes to, taken out of the table
+    /// (`Handle`); `None` where the table answers itself, as for a file open the other way, which
+    /// is `Bad file descriptor`.
+    fn handle(&self, fd: i32, write: bool) -> Option<Handle> {
+        match (self.entries.get(fd as usize).and_then(Option::as_ref)?, write) {
+            (Entry::Stdin, false) if self.stdin.is_none() => Some(Handle::Stdin),
+            (Entry::Read(file), false) | (Entry::Write(file), true) | (Entry::ReadWrite(file), _) => {
                 Some(Handle::File(file.clone()))
             }
             _ => None,
@@ -466,7 +468,7 @@ fn read_bytes_with(
 
 /// Reads once from descriptor `fd` into `bytes`, with the table unlocked where it can be.
 fn read_into(fd: i32, bytes: &mut [u8]) -> Result<usize, Failure> {
-    let count = match with(|t| t.handle(fd)) {
+    let count = match with(|t| t.handle(fd, false)) {
         Some(Handle::Stdin) => {
             out::drain_stdout();
             process_stdin().read(bytes)
@@ -479,7 +481,7 @@ fn read_into(fd: i32, bytes: &mut [u8]) -> Result<usize, Failure> {
 
 /// Writes `bytes` to descriptor `fd`, with the table unlocked where it can be.
 fn write(fd: i32, bytes: &[u8]) -> Result<(), Failure> {
-    match with(|t| t.handle(fd)) {
+    match with(|t| t.handle(fd, true)) {
         Some(Handle::File(file)) => (&*file).write_all(bytes).map_err(io_failure),
         _ => with(|t| t.write(fd, bytes)),
     }
@@ -832,6 +834,21 @@ mod tests {
         let (read, buf) = waiting.join().unwrap();
         assert_eq!((read, &buf[..2]), (Ok(2), &[111i8, 107][..]));
         fd_close(pipe);
+    }
+
+    #[test]
+    fn a_file_open_the_other_way_is_a_bad_descriptor() {
+        let name = std::env::temp_dir().join(format!("fd-direction-{}", std::process::id()));
+        let name = name.to_string_lossy().into_owned();
+        std::fs::write(&name, b"ab").unwrap();
+        let read = fd_open_read(crate::Wtf8::new(&name)).unwrap();
+        assert_eq!(fd_write_bytes(read, &[104i8][..], 0, 1), Err(bad_descriptor()));
+        fd_close(read);
+        let write = fd_open_write(crate::Wtf8::new(&name), true).unwrap();
+        let mut buf = vec![0i8; 1];
+        assert_eq!(fd_read_bytes(write, &mut buf[..], 0, 1), Err(bad_descriptor()));
+        fd_close(write);
+        std::fs::remove_file(&name).unwrap();
     }
 
     #[test]
