@@ -590,7 +590,9 @@ the program's classes implement:
   strings, builders and the program's classes that implement it. `length()`, `charAt`,
   `subSequence` and `getChars` answer as the string, the builder or the class does
   (`char_sequence_arm`); a class without `getChars` gets the interface's default, written as the
-  JDK has it. `toString()` is the value's text, `isEmpty()` a zero length. The JDK's
+  JDK has it. `toString()` is the value's text, `isEmpty()` a zero length. The `subSequence` of
+  a string or a builder is a string: a builder made from it, or appending it, copies that
+  string (`substring_text` in `lower/strings.rs`), and no class's `toString` runs. The JDK's
   `CharSequence` is not translated (it is among `RUNTIME_CLASSES`), and its other methods are
   rejected.
 - `ENUM` (`<E extends Enum<E>>`, the JDK's `EnumMap` and `EnumSet`): the program's enums, with

@@ -255,6 +255,7 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.String#charAt",
             "java.lang.String#getChars",
             "java.lang.String#substring",
+            "java.lang.String#subSequence",
             "java.lang.String#valueOf",
             "java.lang.String#copyValueOf",
             "java.lang.String#codePointAt",
@@ -293,6 +294,9 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.AbstractStringBuilder#substring",
             "java.lang.StringBuilder#substring",
             "java.lang.StringBuffer#substring",
+            "java.lang.AbstractStringBuilder#subSequence",
+            "java.lang.StringBuilder#subSequence",
+            "java.lang.StringBuffer#subSequence",
             // A string's or a builder's, as a `CharSequence`.
             "java.lang.CharSequence#charAt",
             "java.lang.CharSequence#subSequence",

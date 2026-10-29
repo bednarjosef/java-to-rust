@@ -531,6 +531,8 @@ impl<'t> Lowering<'t> {
             _ => None,
         };
         if let Some(i) = shown {
+            let x = args.remove(i);
+            args.insert(i, substring_text(x));
             let ty = args[i].ty;
             if matches!(ty, Type::Array(_)) && ty != Type::array(Type::Char) {
                 return unsupported(node, "appending an array that is not a `char[]`");
@@ -552,7 +554,8 @@ impl<'t> Lowering<'t> {
         {
             return Ok(None);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> =
+            node.list("arguments").map(|a| self.expr(a).map(substring_text)).collect::<Result<_, _>>()?;
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
         let bytes = Type::array(Type::Byte);
@@ -634,5 +637,27 @@ impl<'t> Lowering<'t> {
             _ => return None,
         };
         symbol.is_static.then_some(Builtin::Bits(op, kind))
+    }
+}
+
+/// `e` as the string it is, where it is the `subSequence` of a string or a builder, which gives a
+/// string as a `CharSequence` (`as_char_sequence`): a builder made from it, or appending it,
+/// copies a string, as Java's does, rather than showing an object that may be of a program class
+/// with a `toString` of its own. Such a string is never null.
+fn substring_text(e: Expr) -> Expr {
+    match e.kind {
+        ExprKind::Cast(Type::Class(name, _), inner)
+            if name == CHAR_SEQUENCE
+                && matches!(
+                    inner.kind,
+                    ExprKind::Builtin(
+                        Builtin::String(StringOp::Substring) | Builtin::Builder(BuilderOp::Substring),
+                        _
+                    )
+                ) =>
+        {
+            *inner
+        }
+        kind => Expr { kind, ..e },
     }
 }
