@@ -208,11 +208,14 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
 /// The least set holding `seeds` with every method of the override group of each member, since a
 /// call may run any of them, and every method that `callers` lists for a member.
 fn closed(h: &Hierarchy, callers: &[Vec<usize>], seeds: impl Iterator<Item = usize>) -> HashSet<usize> {
+    // A flag for each method while the walk runs: it looks at every caller of each method.
+    let mut seen = vec![false; callers.len()];
     let mut set = HashSet::new();
     let mut queue: Vec<usize> = seeds.collect();
     while let Some(m) = queue.pop() {
-        if set.insert(m) {
-            queue.extend(h.group_members(m).iter().chain(&callers[m]).filter(|n| !set.contains(*n)));
+        if !std::mem::replace(&mut seen[m], true) {
+            set.insert(m);
+            queue.extend(h.group_members(m).iter().chain(&callers[m]).filter(|&&n| !seen[n]));
         }
     }
     set

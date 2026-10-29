@@ -256,8 +256,12 @@ pub(crate) fn leaked<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de
     T::deserialize(d).map(|t| &*Box::leak(Box::new(t)))
 }
 
+/// What is interned, hashed as the hierarchy hashes names: the default hash is made to resist
+/// chosen keys, which a translator's own names need not.
+type FastInterned<T> = HashSet<T, std::hash::BuildHasherDefault<hierarchy::IndexHasher>>;
+
 pub(crate) fn interned_name(name: &str) -> &'static str {
-    static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
+    static NAMES: LazyLock<Mutex<FastInterned<&'static str>>> = LazyLock::new(Default::default);
     let mut names = NAMES.lock().unwrap();
     match names.get(name) {
         Some(&n) => n,
@@ -273,7 +277,7 @@ fn intern_types(types: &[Type]) -> &'static [Type] {
     if types.is_empty() {
         return &[];
     }
-    static LISTS: LazyLock<Mutex<HashSet<&'static [Type]>>> = LazyLock::new(Default::default);
+    static LISTS: LazyLock<Mutex<FastInterned<&'static [Type]>>> = LazyLock::new(Default::default);
     let mut lists = LISTS.lock().unwrap();
     match lists.get(types) {
         Some(&l) => l,
@@ -286,7 +290,7 @@ fn intern_types(types: &[Type]) -> &'static [Type] {
 }
 
 fn intern(ty: Type) -> &'static Type {
-    static TYPES: LazyLock<Mutex<HashSet<&'static Type>>> = LazyLock::new(Default::default);
+    static TYPES: LazyLock<Mutex<FastInterned<&'static Type>>> = LazyLock::new(Default::default);
     let mut types = TYPES.lock().unwrap();
     match types.get(&ty) {
         Some(&t) => t,
