@@ -116,7 +116,7 @@ impl<'a> Gen<'a> {
                 let pattern = if src_nullable { format!("Some({pattern})") } else { pattern };
                 let object = match self.rep(d) {
                     hierarchy::Rep::Object(_) => "x.clone()".to_string(),
-                    hierarchy::Rep::Enum(t) if self.enum_variants(t).contains(&c) => {
+                    hierarchy::Rep::Enum(t) if self.is_enum_variant(t, c) => {
                         format!("{}(x.clone())", self.variant(t, c))
                     }
                     hierarchy::Rep::Enum(_) => {

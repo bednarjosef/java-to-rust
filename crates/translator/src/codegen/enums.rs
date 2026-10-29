@@ -377,7 +377,7 @@ impl<'a> Gen<'a> {
             .into_iter()
             .filter(|&c| self.class.types[c].kind == TypeKind::Enum)
             .collect();
-        let all = enums.len() == self.enum_variants(t).len();
+        let all = enums.len() == self.shared_enum_variants(t).len();
         let ordinal = |g: &mut Self, e: &'a Expr| {
             let obj = g.object(e);
             // A constant is held in the value's bits, which are its ordinal (`java::Thin::ordinal`):

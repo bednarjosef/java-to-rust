@@ -1829,7 +1829,7 @@ impl<'a> Gen<'a> {
 
     /// A name for a temporary that no Java local or function of this method uses.
     pub(super) fn temp(&self, base: &str) -> String {
-        let taken = |n: &str| self.locals.values().any(|v| v == n) || self.fn_names.iter().any(|f| f == n);
+        let taken = |n: &str| self.locals.values().any(|v| v == n) || self.fn_name_set.contains(n);
         let mut name = base.to_string();
         let mut i = 1;
         while taken(&name) {

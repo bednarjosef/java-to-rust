@@ -472,6 +472,9 @@ impl Found {
     }
 }
 
+/// A list of classes shared between the users of a generator's caches.
+type Classes = std::rc::Rc<[usize]>;
+
 /// What the generator finds of the program before it writes it, the same in every round
 /// (`generate_all`).
 #[derive(PartialEq)]
@@ -482,6 +485,8 @@ struct Setup {
     group_names: HashMap<usize, String>,
     struct_methods: HashMap<usize, Vec<usize>>,
     static_fn_names: HashSet<String>,
+    /// `fn_names` as a set, for the temporaries that must not take one.
+    fn_name_set: HashSet<String>,
     receiver_sets: HashMap<u64, std::sync::Arc<[usize]>>,
     class_tags: Vec<u16>,
     runs: Vec<bool>,
@@ -524,10 +529,12 @@ impl Setup {
             .filter(|&i| class.methods[i].is_static)
             .map(|i| fn_names[i].clone())
             .collect();
+        let fn_name_set = fn_names.iter().cloned().collect();
         let mut setup = Setup {
             live: live_types(class, facts),
             homes,
             fn_names,
+            fn_name_set,
             group_names,
             struct_methods,
             static_fn_names,
@@ -653,6 +660,7 @@ impl<'a> Gen<'a> {
             class,
             facts,
             fn_names: &setup.fn_names,
+            fn_name_set: &setup.fn_name_set,
             static_fn_names: &setup.static_fn_names,
             variant_names: Default::default(),
             cell_names: Default::default(),
@@ -661,6 +669,8 @@ impl<'a> Gen<'a> {
             reps: Default::default(),
             variant_lists: Default::default(),
             enum_variant_lists: Default::default(),
+            passing_lists: Default::default(),
+            enum_variant_sets: Default::default(),
             variant_types: Default::default(),
             checked_value_ofs: &setup.checked_value_ofs,
             group_names: &setup.group_names,
@@ -841,6 +851,11 @@ struct Gen<'a> {
     /// The variants of the enum of each type that have objects (`dispatch::enum_variants`), once
     /// found.
     enum_variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<[usize]>>>,
+    /// The variants of the enum of each type whose objects are of another type
+    /// (`dispatch::passing`), by the two, once found.
+    passing_lists: std::cell::RefCell<HashMap<(usize, usize), Classes>>,
+    /// `enum_variant_lists` as sets, for `dispatch::is_enum_variant`.
+    enum_variant_sets: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashSet<usize>>>>,
     /// The types whose `enum_variants` the code written asked for, which depend on which classes
     /// are live: a census that stubs code writes the modules that asked again where a stub
     /// changes that (`generate_all_stubbing`).
@@ -930,6 +945,8 @@ struct Gen<'a> {
     /// annotation).
     annotations: Vec<(String, Type, String)>,
     fn_names: &'a [String],
+    /// `fn_names` as a set.
+    fn_name_set: &'a HashSet<String>,
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
     /// The boxed types of the current method's parameters and locals, by Java name.

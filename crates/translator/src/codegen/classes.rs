@@ -41,7 +41,7 @@ impl<'a> Gen<'a> {
             let is = self.struct_class(object) == Some(c);
             return self.after_object(object, if is == same { "true" } else { "false" });
         };
-        if !self.enum_variants(t).contains(&c) {
+        if !self.is_enum_variant(t, c) {
             return self.after_object(object, if same { "false" } else { "true" });
         }
         let (obj, tag) = (self.object(object), self.class_tag(c));
