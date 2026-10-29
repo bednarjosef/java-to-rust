@@ -13,7 +13,10 @@ Each program is compiled with `javac`, translated with `java-to-rust --crate`, b
 and exit with the same code as Java's, or the program is reported and not timed. Times are the
 median of the runs, wall clock. Java runs with its default flags, so JVM start-up is included. A
 program that warms up prints `kernel-ms N` on standard error; that is the time of the timed loop
-measured inside the program, and it is reported in the two kernel columns.
+measured inside the program, and it is reported in the two kernel columns. The last two columns
+are each side's peak memory: the most resident memory the process held, its `ru_maxrss`, the
+median over the runs. The table below is of the times; the memory of translated programs and the
+benchmarks that measure it are in "Memory".
 
 ## Results
 
@@ -155,6 +158,58 @@ made on the stack (`java::count_allocation`).
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
+
+## Memory
+
+`scripts/benchmark.py` reports each side's peak resident memory beside its time. Three of the
+programs measure memory rather than time: `ReflectionTableMemory` (a reflection table of 14,400
+methods, of which three classes' are read), `LargeArrays` (arrays of 64, 128 and 256 KB alive
+together) and `MonitoredObjects` (3 million small objects in a program that waits and notifies,
+in which every object keeps its monitor). Peak memory, median of three runs, in MB:
+
+| program               | before | after | Java |
+|-----------------------|-------:|------:|-----:|
+| ReflectionTableMemory |   20.2 |  14.9 | 42.0 |
+| LargeArrays           |  134.4 |  88.4 |  143 |
+| MonitoredObjects      |  124.5 |  76.6 |  148 |
+
+### Where the Minecraft server's memory went
+
+The release trial of the server peaked at 1,498 MB on the bench (`minecraft-server.md`, step
+`bench`), Java at 1,092 MB. Measured on that binary after the tick sprint, from its block table
+(the collector's live bytes per slot size), its memory map and the contents of sampled slots:
+
+- **The binary's own pages: 485 MB**, against Java's 26 MB of mapped files. The code the server
+  ran: 292 MB of its 591 MB of `.text` were in memory, 278 MB with the kernel's mapping of the
+  neighbours of each faulted page turned off. The 105 MB of the loader's fix-ups of a
+  position-independent binary (`.rela.dyn`, 4.6 million of them: the place of every panic
+  message, every table of functions), all read at start, and the 61 MB of data that fixing them
+  up writes (`.data.rel.ro`, `.got`). The translator now builds binaries at a fixed address
+  (`split::CARGO_CONFIG`), which have neither: the pointers are in the file, read where used.
+  The saving grows with the binary: `ReflectionTableMemory`'s 6 MB binary loses 5,357 fix-ups
+  (126 KB) and 89 KB of `.data.rel.ro`, too little to move its peak (15.0 MB either way), and
+  runs the same.
+- **The heap: about 1,000 MB of blocks for 530 MB alive**, against Java's 186 MB alive (a full
+  collection's `jmap -histo:live`) in a heap of 442 MB. Both collect when the program has taken
+  about as much as is alive, so the heaps are about twice what is alive; the difference is
+  what is alive. Of the 530 MB:
+  - **the reflection table's objects, about 120 MB**: all 160,000 methods and 80,000 fields made
+    at the first lookup, each with three classes of 88 bytes held in it, its name, and lists of
+    parameter classes in which each class is a boxed copy. Java makes a class's member objects
+    when it is reflected on. The translation now makes each member's object the first time a
+    lookup returns it (docs/reflection-and-plugins.md).
+  - **monitors**: a program that waits and notifies keeps every object's monitor, and each
+    `java::Monitored` object held its lock, 16 bytes. It now holds a pointer to a lock made the
+    first time a thread takes it (`LazyMonitor`), 8 bytes, which puts about half of the objects
+    in a smaller slot.
+  - **large allocations of whole blocks**: 361 buffers of exactly 128 KB (a `Vec` that doubled)
+    took three blocks of 64 KB each, the third only for the cache-line color of its start, 23 MB
+    in all. A large allocation's color now stays within the blocks its size needs
+    (docs/collector.md).
+- What remains larger than Java's: a `java::Class` is an 88-byte value wherever it is held (a
+  field, a boxed `Class` as an `Object`), a string field is a 24-byte `Vec` with its own copy of
+  the text, and the heap keeps free blocks until a whole huge page of them is free (167 MB of
+  free blocks in the sample).
 
 ## Translating whole programs
 

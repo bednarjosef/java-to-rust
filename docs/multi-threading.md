@@ -165,8 +165,8 @@ string without an identity) is copied and replaced under one of 64 striped spin 
 the field's address and taken only once a second thread runs. A field that only constructors
 write (a fixed field, [object-model.md](object-model.md) 1.8) is read where it is, `fixed()`,
 with no lock and no copy, outside the constructors and field initializers. The object's `java::Monitored`
-holds the fields first and then the monitor's lock, so the object's address is its fields', as
-`&self` of a method sees it. A class tree is celled and monitored together, so an enum over it
+holds the fields first and then a pointer to the monitor's lock, made the first time a thread
+takes it (`LazyMonitor`), so the object's address is its fields', as `&self` of a method sees it. A class tree is celled and monitored together, so an enum over it
 lends every variant's fields struct as `&XFields`. A class tree with a Java enum keeps its
 `java::Locked`, whose `RefCell` API (`borrow`, `borrow_mut`, mapped guards) the generator writes
 as for a `RefCell`. Identity is `Arc::ptr_eq`; `Option` for null is unchanged.
@@ -304,9 +304,10 @@ Everywhere else `synchronized` is the null check of its lock, so a program witho
 thread has the object yet.
 
 An array's monitor is kept in any program with threads. An array that threads share
-(`java::SharedArray`) makes its lock the first time a thread takes it (`LazyMonitor` in
-`monitor.rs`, a pointer that stays null for the many arrays never locked); one that a single
-thread uses keeps its monitor by address, as a `RefCell` object does.
+(`java::SharedArray`), like a `java::Monitored` object, makes its lock the first time a thread
+takes it (`LazyMonitor` in `monitor.rs`, a pointer that stays null for the many objects and
+arrays never locked, eight bytes where the lock is sixteen); one that a single thread uses keeps
+its monitor by address, as a `RefCell` object does.
 
 Rejected, by name: `synchronized` on a string, a box, a Java enum's constant, or the class of a
 value (`o.getClass()`) where the monitor would be kept (they are values without a lock), and
@@ -745,7 +746,8 @@ unchanged and that a class no thread reaches has no monitor.
 - **A thread-shared mutable object** costs nothing more than an object of one thread on a field
   access of a word: an acquire load or a release store is a plain move on x86-64. A `volatile`
   store is an exchange. A wider value costs a striped spin lock once a second thread runs. Each
-  object carries its monitor's lock, 16 bytes. An immutable shared object costs nothing on reads,
+  object carries a pointer to its monitor's lock, 8 bytes, and the 16 bytes of the lock once a
+  thread first takes it. An immutable shared object costs nothing on reads,
   and copying a handle is copying a pointer, shared or not.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock. Until the
   program starts its first thread, taking the lock and giving it back are a plain increment and

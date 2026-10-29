@@ -88,9 +88,10 @@ abstract class Executable extends AccessibleObject implements Member {
 }
 
 final class Method extends Executable {
-    // The table, made once.
+    // The table's data, read once, and its methods, each made the first time a lookup reaches it
+    // (`TableData`).
+    private static TableData data;
     private static Method[] table;
-    private static MemberIndex owners;
 
     // The class that `getMethod` and `getDeclaredMethod` find the method on: the declaring class,
     // or for a public method a class that inherits it.
@@ -204,13 +205,16 @@ final class Method extends Executable {
     // `c.getMethod(name, types)`, or with `declared` `c.getDeclaredMethod(name, types)`.
     static Method find(Class<?> c, String name, Class<?>[] types, boolean declared) throws NoSuchMethodException {
         annotationMembers(c);
-        Method[] all = table();
-        MemberIndex owners = owners();
+        TableData d = data();
+        MemberIndex owners = d.owners;
         int s = owners.slot(c);
         for (int k = owners.start(s); k < owners.end(s); k++) {
-            Method m = all[owners.member(k)];
-            if (m.name.equals(name) && m.found(c, declared) && Constructor.same(m.parameterTypes, types)) {
-                return m;
+            int slot = owners.member(k);
+            if (d.name(slot, 3).equals(name) && found(d, slot, c, declared)) {
+                Method m = member(d, slot);
+                if (Constructor.same(m.parameterTypes, types)) {
+                    return m;
+                }
             }
         }
         throw new NoSuchMethodException(c.getName() + "." + name + "(" + Constructor.names(types) + ")"
@@ -220,21 +224,21 @@ final class Method extends Executable {
     // `c.getMethods()`, or with `declared` `c.getDeclaredMethods()`: those of the table.
     static Method[] list(Class<?> c, boolean declared) {
         annotationMembers(c);
-        Method[] all = table();
-        MemberIndex owners = owners();
+        TableData d = data();
+        MemberIndex owners = d.owners;
         int s = owners.slot(c);
         int n = 0;
         for (int k = owners.start(s); k < owners.end(s); k++) {
-            if (all[owners.member(k)].found(c, declared)) {
+            if (found(d, owners.member(k), c, declared)) {
                 n++;
             }
         }
         Method[] out = new Method[n];
         n = 0;
         for (int k = owners.start(s); k < owners.end(s); k++) {
-            Method m = all[owners.member(k)];
-            if (m.found(c, declared)) {
-                out[n] = m;
+            int slot = owners.member(k);
+            if (found(d, slot, c, declared)) {
+                out[n] = member(d, slot);
                 n++;
             }
         }
@@ -251,91 +255,95 @@ final class Method extends Executable {
         }
     }
 
-    private boolean found(Class<?> c, boolean declared) {
-        return declared ? clazz == c : (modifiers & 1) != 0;
+    // Whether the method in `slot` is one of `c.getMethods()`, or with `declared` of
+    // `c.getDeclaredMethods()`: declared by `c`, or public.
+    private static boolean found(TableData d, int slot, Class<?> c, boolean declared) {
+        return declared ? d.classAt(slot, 1) == c : (d.number(slot, 4) & 1) != 0;
     }
 
-    private static Method[] table() {
-        if (table == null) {
-            table = table0();
-        }
-        return table;
+    // The table's data, read the first time a lookup needs it.
+    private static TableData data() {
+        TableData d = data;
+        return d != null ? d : load();
     }
 
-    // The table's methods by the class that finds them, made once.
-    private static MemberIndex owners() {
-        if (owners == null) {
-            Method[] all = table();
-            Class<?>[] of = new Class<?>[all.length];
-            for (int i = 0; i < all.length; i++) {
-                of[i] = all[i].owner;
-            }
-            owners = new MemberIndex(of);
+    private static synchronized TableData load() {
+        if (data == null) {
+            TableData d = new TableData();
+            loadPart0(d);
+            loadPart1(d);
+            loadPart2(d);
+            loadPart3(d);
+            loadPart4(d);
+            loadPart5(d);
+            loadPart6(d);
+            loadPart7(d);
+            loadPart8(d);
+            loadPart9(d);
+            loadPart10(d);
+            loadPart11(d);
+            loadPart12(d);
+            loadPart13(d);
+            loadPart14(d);
+            loadPart15(d);
+            loadPart16(d);
+            loadPart17(d);
+            loadPart18(d);
+            loadPart19(d);
+            loadPart20(d);
+            loadPart21(d);
+            loadPart22(d);
+            loadPart23(d);
+            loadPart24(d);
+            loadPart25(d);
+            loadPart26(d);
+            loadPart27(d);
+            loadPart28(d);
+            loadPart29(d);
+            loadPart30(d);
+            loadPart31(d);
+            d.finish(6, true);
+            table = new Method[d.length()];
+            data = d;
         }
-        return owners;
+        return data;
     }
 
-    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
-    // on, in order, each made from the data that lowering writes for it.
-    private static Method[] table0() {
-        Method[][] parts = {
-            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
-            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
-            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
-            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
-            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
-            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
-            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
-            tablePart28(), tablePart29(), tablePart30(), tablePart31()
-        };
-        int length = 0;
-        for (Method[] part : parts) {
-            length += part.length;
-        }
-        Method[] table = new Method[length];
-        for (int p = 0; p < 32; p++) {
-            for (int i = 0; i < parts[p].length; i++) {
-                table[i * 32 + p] = parts[p][i];
-            }
-        }
-        return table;
-    }
-
-    private static Method[] tablePart0() { return part(tableClasses(0), tableInts(0), tableNames(0)); }
-    private static Method[] tablePart1() { return part(tableClasses(1), tableInts(1), tableNames(1)); }
-    private static Method[] tablePart2() { return part(tableClasses(2), tableInts(2), tableNames(2)); }
-    private static Method[] tablePart3() { return part(tableClasses(3), tableInts(3), tableNames(3)); }
-    private static Method[] tablePart4() { return part(tableClasses(4), tableInts(4), tableNames(4)); }
-    private static Method[] tablePart5() { return part(tableClasses(5), tableInts(5), tableNames(5)); }
-    private static Method[] tablePart6() { return part(tableClasses(6), tableInts(6), tableNames(6)); }
-    private static Method[] tablePart7() { return part(tableClasses(7), tableInts(7), tableNames(7)); }
-    private static Method[] tablePart8() { return part(tableClasses(8), tableInts(8), tableNames(8)); }
-    private static Method[] tablePart9() { return part(tableClasses(9), tableInts(9), tableNames(9)); }
-    private static Method[] tablePart10() { return part(tableClasses(10), tableInts(10), tableNames(10)); }
-    private static Method[] tablePart11() { return part(tableClasses(11), tableInts(11), tableNames(11)); }
-    private static Method[] tablePart12() { return part(tableClasses(12), tableInts(12), tableNames(12)); }
-    private static Method[] tablePart13() { return part(tableClasses(13), tableInts(13), tableNames(13)); }
-    private static Method[] tablePart14() { return part(tableClasses(14), tableInts(14), tableNames(14)); }
-    private static Method[] tablePart15() { return part(tableClasses(15), tableInts(15), tableNames(15)); }
-    private static Method[] tablePart16() { return part(tableClasses(16), tableInts(16), tableNames(16)); }
-    private static Method[] tablePart17() { return part(tableClasses(17), tableInts(17), tableNames(17)); }
-    private static Method[] tablePart18() { return part(tableClasses(18), tableInts(18), tableNames(18)); }
-    private static Method[] tablePart19() { return part(tableClasses(19), tableInts(19), tableNames(19)); }
-    private static Method[] tablePart20() { return part(tableClasses(20), tableInts(20), tableNames(20)); }
-    private static Method[] tablePart21() { return part(tableClasses(21), tableInts(21), tableNames(21)); }
-    private static Method[] tablePart22() { return part(tableClasses(22), tableInts(22), tableNames(22)); }
-    private static Method[] tablePart23() { return part(tableClasses(23), tableInts(23), tableNames(23)); }
-    private static Method[] tablePart24() { return part(tableClasses(24), tableInts(24), tableNames(24)); }
-    private static Method[] tablePart25() { return part(tableClasses(25), tableInts(25), tableNames(25)); }
-    private static Method[] tablePart26() { return part(tableClasses(26), tableInts(26), tableNames(26)); }
-    private static Method[] tablePart27() { return part(tableClasses(27), tableInts(27), tableNames(27)); }
-    private static Method[] tablePart28() { return part(tableClasses(28), tableInts(28), tableNames(28)); }
-    private static Method[] tablePart29() { return part(tableClasses(29), tableInts(29), tableNames(29)); }
-    private static Method[] tablePart30() { return part(tableClasses(30), tableInts(30), tableNames(30)); }
-    private static Method[] tablePart31() { return part(tableClasses(31), tableInts(31), tableNames(31)); }
+    private static void loadPart0(TableData d) { d.part(0, tableClasses(0), tableInts(0), tableNames(0)); }
+    private static void loadPart1(TableData d) { d.part(1, tableClasses(1), tableInts(1), tableNames(1)); }
+    private static void loadPart2(TableData d) { d.part(2, tableClasses(2), tableInts(2), tableNames(2)); }
+    private static void loadPart3(TableData d) { d.part(3, tableClasses(3), tableInts(3), tableNames(3)); }
+    private static void loadPart4(TableData d) { d.part(4, tableClasses(4), tableInts(4), tableNames(4)); }
+    private static void loadPart5(TableData d) { d.part(5, tableClasses(5), tableInts(5), tableNames(5)); }
+    private static void loadPart6(TableData d) { d.part(6, tableClasses(6), tableInts(6), tableNames(6)); }
+    private static void loadPart7(TableData d) { d.part(7, tableClasses(7), tableInts(7), tableNames(7)); }
+    private static void loadPart8(TableData d) { d.part(8, tableClasses(8), tableInts(8), tableNames(8)); }
+    private static void loadPart9(TableData d) { d.part(9, tableClasses(9), tableInts(9), tableNames(9)); }
+    private static void loadPart10(TableData d) { d.part(10, tableClasses(10), tableInts(10), tableNames(10)); }
+    private static void loadPart11(TableData d) { d.part(11, tableClasses(11), tableInts(11), tableNames(11)); }
+    private static void loadPart12(TableData d) { d.part(12, tableClasses(12), tableInts(12), tableNames(12)); }
+    private static void loadPart13(TableData d) { d.part(13, tableClasses(13), tableInts(13), tableNames(13)); }
+    private static void loadPart14(TableData d) { d.part(14, tableClasses(14), tableInts(14), tableNames(14)); }
+    private static void loadPart15(TableData d) { d.part(15, tableClasses(15), tableInts(15), tableNames(15)); }
+    private static void loadPart16(TableData d) { d.part(16, tableClasses(16), tableInts(16), tableNames(16)); }
+    private static void loadPart17(TableData d) { d.part(17, tableClasses(17), tableInts(17), tableNames(17)); }
+    private static void loadPart18(TableData d) { d.part(18, tableClasses(18), tableInts(18), tableNames(18)); }
+    private static void loadPart19(TableData d) { d.part(19, tableClasses(19), tableInts(19), tableNames(19)); }
+    private static void loadPart20(TableData d) { d.part(20, tableClasses(20), tableInts(20), tableNames(20)); }
+    private static void loadPart21(TableData d) { d.part(21, tableClasses(21), tableInts(21), tableNames(21)); }
+    private static void loadPart22(TableData d) { d.part(22, tableClasses(22), tableInts(22), tableNames(22)); }
+    private static void loadPart23(TableData d) { d.part(23, tableClasses(23), tableInts(23), tableNames(23)); }
+    private static void loadPart24(TableData d) { d.part(24, tableClasses(24), tableInts(24), tableNames(24)); }
+    private static void loadPart25(TableData d) { d.part(25, tableClasses(25), tableInts(25), tableNames(25)); }
+    private static void loadPart26(TableData d) { d.part(26, tableClasses(26), tableInts(26), tableNames(26)); }
+    private static void loadPart27(TableData d) { d.part(27, tableClasses(27), tableInts(27), tableNames(27)); }
+    private static void loadPart28(TableData d) { d.part(28, tableClasses(28), tableInts(28), tableNames(28)); }
+    private static void loadPart29(TableData d) { d.part(29, tableClasses(29), tableInts(29), tableNames(29)); }
+    private static void loadPart30(TableData d) { d.part(30, tableClasses(30), tableInts(30), tableNames(30)); }
+    private static void loadPart31(TableData d) { d.part(31, tableClasses(31), tableInts(31), tableNames(31)); }
 
     // A part of the table, which lowering writes as data: the classes and the names that its
-    // members have, and for each member in turn the numbers of its own, which `part` reads. The
+    // members have, and for each member in turn the numbers of its own, which `member` reads. The
     // numbers are how many members there are, then for each the indices in `classes` of the class
     // that finds it, of its declaring class and of its result, the index in `names` of its name,
     // its modifiers, its slot, and its parameters' and its exceptions' classes (`Executable.classList`).
@@ -345,18 +353,20 @@ final class Method extends Executable {
 
     private static native String[] tableNames(int part);
 
-    private static Method[] part(Class<?>[] classes, int[] ints, String[] names) {
-        Method[] part = new Method[ints[0]];
-        int at = 1;
-        for (int i = 0; i < part.length; i++) {
+    // The method in `slot`, made from its part's data the first time it is asked for.
+    private static Method member(TableData d, int slot) {
+        Method m = table[slot];
+        if (m == null) {
+            Class<?>[] classes = d.classes[slot & 31];
+            int[] ints = d.ints[slot & 31];
+            int at = d.starts[slot];
             Class<?>[] parameterTypes = classList(classes, ints, at + 6);
-            int thrown = at + 7 + parameterTypes.length;
-            Class<?>[] exceptionTypes = classList(classes, ints, thrown);
-            part[i] = new Method(classes[ints[at]], classes[ints[at + 1]], names[ints[at + 3]], parameterTypes,
+            Class<?>[] exceptionTypes = classList(classes, ints, at + 7 + parameterTypes.length);
+            m = new Method(classes[ints[at]], classes[ints[at + 1]], d.names[slot & 31][ints[at + 3]], parameterTypes,
                     classes[ints[at + 2]], exceptionTypes, ints[at + 4], ints[at + 5]);
-            at = thrown + 1 + exceptionTypes.length;
+            table[slot] = m;
         }
-        return part;
+        return m;
     }
 
     // The calls of the table's members, in 32 parts: slot `s` is in part `s & 31`, whose native
@@ -435,8 +445,10 @@ final class Method extends Executable {
 }
 
 final class Field extends AccessibleObject implements Member {
+    // The table's data, read once, and its fields, each made the first time a lookup reaches it
+    // (`TableData`).
+    private static TableData data;
     private static Field[] table;
-    private static MemberIndex owners;
 
     private final Class<?> owner;
     private final Class<?> clazz;
@@ -711,9 +723,9 @@ final class Field extends AccessibleObject implements Member {
     }
 
     private static long offset(Field f) {
-        Field[] all = table();
+        TableData d = data();
         int i = 0;
-        while (all[i].clazz != f.clazz || !all[i].name.equals(f.name)) {
+        while (d.classAt(i, 1) != f.clazz || !d.name(i, 3).equals(f.name)) {
             i++;
         }
         return 16L * (i + 1);
@@ -723,11 +735,11 @@ final class Field extends AccessibleObject implements Member {
     // when `base` holds it: the declaring class of a static field (`staticFieldBase`), or an
     // object of that class; null for any other offset or base.
     static Field atOffset(Object base, long offset) {
-        Field[] all = table();
-        if (offset <= 0 || offset % 16 != 0 || offset / 16 > all.length) {
+        TableData d = data();
+        if (offset <= 0 || offset % 16 != 0 || offset / 16 > d.length()) {
             return null;
         }
-        Field f = all[(int) (offset / 16) - 1];
+        Field f = member(d, (int) (offset / 16) - 1);
         boolean held = (f.modifiers & 8) != 0 ? base == f.clazz : base != null && f.clazz.isInstance(base);
         return held ? f : null;
     }
@@ -839,122 +851,126 @@ final class Field extends AccessibleObject implements Member {
 
     // `c.getField(name)`, or with `declared` `c.getDeclaredField(name)`.
     static Field find(Class<?> c, String name, boolean declared) throws NoSuchFieldException {
-        Field[] all = table();
-        MemberIndex owners = owners();
+        TableData d = data();
+        MemberIndex owners = d.owners;
         int s = owners.slot(c);
         for (int k = owners.start(s); k < owners.end(s); k++) {
-            Field f = all[owners.member(k)];
-            if (f.name.equals(name) && f.found(c, declared)) {
-                return f;
+            int slot = owners.member(k);
+            if (d.name(slot, 3).equals(name) && found(d, slot, c, declared)) {
+                return member(d, slot);
             }
         }
         throw new NoSuchFieldException(name + Constructor.MISSING);
     }
 
     static Field[] list(Class<?> c, boolean declared) {
-        Field[] all = table();
-        MemberIndex owners = owners();
+        TableData d = data();
+        MemberIndex owners = d.owners;
         int s = owners.slot(c);
         int n = 0;
         for (int k = owners.start(s); k < owners.end(s); k++) {
-            if (all[owners.member(k)].found(c, declared)) {
+            if (found(d, owners.member(k), c, declared)) {
                 n++;
             }
         }
         Field[] out = new Field[n];
         n = 0;
         for (int k = owners.start(s); k < owners.end(s); k++) {
-            Field f = all[owners.member(k)];
-            if (f.found(c, declared)) {
-                out[n] = f;
+            int slot = owners.member(k);
+            if (found(d, slot, c, declared)) {
+                out[n] = member(d, slot);
                 n++;
             }
         }
         return out;
     }
 
-    private boolean found(Class<?> c, boolean declared) {
-        return declared ? clazz == c : (modifiers & 1) != 0;
+    // Whether the field in `slot` is one of `c.getFields()`, or with `declared` of
+    // `c.getDeclaredFields()`: declared by `c`, or public.
+    private static boolean found(TableData d, int slot, Class<?> c, boolean declared) {
+        return declared ? d.classAt(slot, 1) == c : (d.number(slot, 4) & 1) != 0;
     }
 
-    private static Field[] table() {
-        if (table == null) {
-            table = table0();
-        }
-        return table;
+    // The table's data, read the first time a lookup needs it.
+    private static TableData data() {
+        TableData d = data;
+        return d != null ? d : load();
     }
 
-    // The table's fields by the class that finds them, made once.
-    private static MemberIndex owners() {
-        if (owners == null) {
-            Field[] all = table();
-            Class<?>[] of = new Class<?>[all.length];
-            for (int i = 0; i < all.length; i++) {
-                of[i] = all[i].owner;
-            }
-            owners = new MemberIndex(of);
+    private static synchronized TableData load() {
+        if (data == null) {
+            TableData d = new TableData();
+            loadPart0(d);
+            loadPart1(d);
+            loadPart2(d);
+            loadPart3(d);
+            loadPart4(d);
+            loadPart5(d);
+            loadPart6(d);
+            loadPart7(d);
+            loadPart8(d);
+            loadPart9(d);
+            loadPart10(d);
+            loadPart11(d);
+            loadPart12(d);
+            loadPart13(d);
+            loadPart14(d);
+            loadPart15(d);
+            loadPart16(d);
+            loadPart17(d);
+            loadPart18(d);
+            loadPart19(d);
+            loadPart20(d);
+            loadPart21(d);
+            loadPart22(d);
+            loadPart23(d);
+            loadPart24(d);
+            loadPart25(d);
+            loadPart26(d);
+            loadPart27(d);
+            loadPart28(d);
+            loadPart29(d);
+            loadPart30(d);
+            loadPart31(d);
+            d.finish(6, false);
+            table = new Field[d.length()];
+            data = d;
         }
-        return owners;
+        return data;
     }
 
-    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
-    // on, in order, each made from the data that lowering writes for it.
-    private static Field[] table0() {
-        Field[][] parts = {
-            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
-            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
-            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
-            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
-            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
-            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
-            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
-            tablePart28(), tablePart29(), tablePart30(), tablePart31()
-        };
-        int length = 0;
-        for (Field[] part : parts) {
-            length += part.length;
-        }
-        Field[] table = new Field[length];
-        for (int p = 0; p < 32; p++) {
-            for (int i = 0; i < parts[p].length; i++) {
-                table[i * 32 + p] = parts[p][i];
-            }
-        }
-        return table;
-    }
-
-    private static Field[] tablePart0() { return part(tableClasses(0), tableInts(0), tableNames(0)); }
-    private static Field[] tablePart1() { return part(tableClasses(1), tableInts(1), tableNames(1)); }
-    private static Field[] tablePart2() { return part(tableClasses(2), tableInts(2), tableNames(2)); }
-    private static Field[] tablePart3() { return part(tableClasses(3), tableInts(3), tableNames(3)); }
-    private static Field[] tablePart4() { return part(tableClasses(4), tableInts(4), tableNames(4)); }
-    private static Field[] tablePart5() { return part(tableClasses(5), tableInts(5), tableNames(5)); }
-    private static Field[] tablePart6() { return part(tableClasses(6), tableInts(6), tableNames(6)); }
-    private static Field[] tablePart7() { return part(tableClasses(7), tableInts(7), tableNames(7)); }
-    private static Field[] tablePart8() { return part(tableClasses(8), tableInts(8), tableNames(8)); }
-    private static Field[] tablePart9() { return part(tableClasses(9), tableInts(9), tableNames(9)); }
-    private static Field[] tablePart10() { return part(tableClasses(10), tableInts(10), tableNames(10)); }
-    private static Field[] tablePart11() { return part(tableClasses(11), tableInts(11), tableNames(11)); }
-    private static Field[] tablePart12() { return part(tableClasses(12), tableInts(12), tableNames(12)); }
-    private static Field[] tablePart13() { return part(tableClasses(13), tableInts(13), tableNames(13)); }
-    private static Field[] tablePart14() { return part(tableClasses(14), tableInts(14), tableNames(14)); }
-    private static Field[] tablePart15() { return part(tableClasses(15), tableInts(15), tableNames(15)); }
-    private static Field[] tablePart16() { return part(tableClasses(16), tableInts(16), tableNames(16)); }
-    private static Field[] tablePart17() { return part(tableClasses(17), tableInts(17), tableNames(17)); }
-    private static Field[] tablePart18() { return part(tableClasses(18), tableInts(18), tableNames(18)); }
-    private static Field[] tablePart19() { return part(tableClasses(19), tableInts(19), tableNames(19)); }
-    private static Field[] tablePart20() { return part(tableClasses(20), tableInts(20), tableNames(20)); }
-    private static Field[] tablePart21() { return part(tableClasses(21), tableInts(21), tableNames(21)); }
-    private static Field[] tablePart22() { return part(tableClasses(22), tableInts(22), tableNames(22)); }
-    private static Field[] tablePart23() { return part(tableClasses(23), tableInts(23), tableNames(23)); }
-    private static Field[] tablePart24() { return part(tableClasses(24), tableInts(24), tableNames(24)); }
-    private static Field[] tablePart25() { return part(tableClasses(25), tableInts(25), tableNames(25)); }
-    private static Field[] tablePart26() { return part(tableClasses(26), tableInts(26), tableNames(26)); }
-    private static Field[] tablePart27() { return part(tableClasses(27), tableInts(27), tableNames(27)); }
-    private static Field[] tablePart28() { return part(tableClasses(28), tableInts(28), tableNames(28)); }
-    private static Field[] tablePart29() { return part(tableClasses(29), tableInts(29), tableNames(29)); }
-    private static Field[] tablePart30() { return part(tableClasses(30), tableInts(30), tableNames(30)); }
-    private static Field[] tablePart31() { return part(tableClasses(31), tableInts(31), tableNames(31)); }
+    private static void loadPart0(TableData d) { d.part(0, tableClasses(0), tableInts(0), tableNames(0)); }
+    private static void loadPart1(TableData d) { d.part(1, tableClasses(1), tableInts(1), tableNames(1)); }
+    private static void loadPart2(TableData d) { d.part(2, tableClasses(2), tableInts(2), tableNames(2)); }
+    private static void loadPart3(TableData d) { d.part(3, tableClasses(3), tableInts(3), tableNames(3)); }
+    private static void loadPart4(TableData d) { d.part(4, tableClasses(4), tableInts(4), tableNames(4)); }
+    private static void loadPart5(TableData d) { d.part(5, tableClasses(5), tableInts(5), tableNames(5)); }
+    private static void loadPart6(TableData d) { d.part(6, tableClasses(6), tableInts(6), tableNames(6)); }
+    private static void loadPart7(TableData d) { d.part(7, tableClasses(7), tableInts(7), tableNames(7)); }
+    private static void loadPart8(TableData d) { d.part(8, tableClasses(8), tableInts(8), tableNames(8)); }
+    private static void loadPart9(TableData d) { d.part(9, tableClasses(9), tableInts(9), tableNames(9)); }
+    private static void loadPart10(TableData d) { d.part(10, tableClasses(10), tableInts(10), tableNames(10)); }
+    private static void loadPart11(TableData d) { d.part(11, tableClasses(11), tableInts(11), tableNames(11)); }
+    private static void loadPart12(TableData d) { d.part(12, tableClasses(12), tableInts(12), tableNames(12)); }
+    private static void loadPart13(TableData d) { d.part(13, tableClasses(13), tableInts(13), tableNames(13)); }
+    private static void loadPart14(TableData d) { d.part(14, tableClasses(14), tableInts(14), tableNames(14)); }
+    private static void loadPart15(TableData d) { d.part(15, tableClasses(15), tableInts(15), tableNames(15)); }
+    private static void loadPart16(TableData d) { d.part(16, tableClasses(16), tableInts(16), tableNames(16)); }
+    private static void loadPart17(TableData d) { d.part(17, tableClasses(17), tableInts(17), tableNames(17)); }
+    private static void loadPart18(TableData d) { d.part(18, tableClasses(18), tableInts(18), tableNames(18)); }
+    private static void loadPart19(TableData d) { d.part(19, tableClasses(19), tableInts(19), tableNames(19)); }
+    private static void loadPart20(TableData d) { d.part(20, tableClasses(20), tableInts(20), tableNames(20)); }
+    private static void loadPart21(TableData d) { d.part(21, tableClasses(21), tableInts(21), tableNames(21)); }
+    private static void loadPart22(TableData d) { d.part(22, tableClasses(22), tableInts(22), tableNames(22)); }
+    private static void loadPart23(TableData d) { d.part(23, tableClasses(23), tableInts(23), tableNames(23)); }
+    private static void loadPart24(TableData d) { d.part(24, tableClasses(24), tableInts(24), tableNames(24)); }
+    private static void loadPart25(TableData d) { d.part(25, tableClasses(25), tableInts(25), tableNames(25)); }
+    private static void loadPart26(TableData d) { d.part(26, tableClasses(26), tableInts(26), tableNames(26)); }
+    private static void loadPart27(TableData d) { d.part(27, tableClasses(27), tableInts(27), tableNames(27)); }
+    private static void loadPart28(TableData d) { d.part(28, tableClasses(28), tableInts(28), tableNames(28)); }
+    private static void loadPart29(TableData d) { d.part(29, tableClasses(29), tableInts(29), tableNames(29)); }
+    private static void loadPart30(TableData d) { d.part(30, tableClasses(30), tableInts(30), tableNames(30)); }
+    private static void loadPart31(TableData d) { d.part(31, tableClasses(31), tableInts(31), tableNames(31)); }
 
     // A part of the table, which lowering writes as data: the classes and the names that its
     // fields have, and for each field in turn the numbers of its own: how many fields there are,
@@ -966,13 +982,18 @@ final class Field extends AccessibleObject implements Member {
 
     private static native String[] tableNames(int part);
 
-    private static Field[] part(Class<?>[] classes, int[] ints, String[] names) {
-        Field[] part = new Field[ints[0]];
-        for (int i = 0, at = 1; i < part.length; i++, at += 6) {
-            part[i] = new Field(classes[ints[at]], classes[ints[at + 1]], names[ints[at + 3]], classes[ints[at + 2]],
+    // The field in `slot`, made from its part's data the first time it is asked for.
+    private static Field member(TableData d, int slot) {
+        Field f = table[slot];
+        if (f == null) {
+            Class<?>[] classes = d.classes[slot & 31];
+            int[] ints = d.ints[slot & 31];
+            int at = d.starts[slot];
+            f = new Field(classes[ints[at]], classes[ints[at + 1]], d.names[slot & 31][ints[at + 3]], classes[ints[at + 2]],
                     ints[at + 4], ints[at + 5]);
+            table[slot] = f;
         }
-        return part;
+        return f;
     }
 
     // The reads of the table's fields, in 32 parts: slot `s` is in part `s & 31`, whose native
@@ -1127,8 +1148,10 @@ final class Constructor<T> extends Executable {
     // The text that the exceptions of a lookup by a name not in the table end with.
     static final String MISSING = ", which is not in the translation";
 
+    // The table's data, read once, and its constructors, each made the first time a lookup
+    // reaches it (`TableData`).
+    private static TableData data;
     private static Constructor<?>[] table;
-    private static MemberIndex owners;
 
     private final Class<T> clazz;
     private final Class<?>[] parameterTypes;
@@ -1225,34 +1248,37 @@ final class Constructor<T> extends Executable {
 
     // `c.getConstructor(types)`, or with `declared` `c.getDeclaredConstructor(types)`.
     static Constructor<?> find(Class<?> c, Class<?>[] types, boolean declared) throws NoSuchMethodException {
-        Constructor<?>[] all = table();
-        MemberIndex owners = owners();
+        TableData d = data();
+        MemberIndex owners = d.owners;
         int s = owners.slot(c);
         for (int i = owners.start(s); i < owners.end(s); i++) {
-            Constructor<?> k = all[owners.member(i)];
-            if ((declared || (k.modifiers & 1) != 0) && same(k.parameterTypes, types)) {
-                return k;
+            int slot = owners.member(i);
+            if (declared || (d.number(slot, 1) & 1) != 0) {
+                Constructor<?> k = member(d, slot);
+                if (same(k.parameterTypes, types)) {
+                    return k;
+                }
             }
         }
         throw new NoSuchMethodException(c.getName() + ".<init>(" + names(types) + ")" + MISSING);
     }
 
     static Constructor<?>[] list(Class<?> c, boolean declared) {
-        Constructor<?>[] all = table();
-        MemberIndex owners = owners();
+        TableData d = data();
+        MemberIndex owners = d.owners;
         int s = owners.slot(c);
         int n = 0;
         for (int i = owners.start(s); i < owners.end(s); i++) {
-            if (declared || (all[owners.member(i)].modifiers & 1) != 0) {
+            if (declared || (d.number(owners.member(i), 1) & 1) != 0) {
                 n++;
             }
         }
         Constructor<?>[] out = new Constructor<?>[n];
         n = 0;
         for (int i = owners.start(s); i < owners.end(s); i++) {
-            Constructor<?> k = all[owners.member(i)];
-            if (declared || (k.modifiers & 1) != 0) {
-                out[n] = k;
+            int slot = owners.member(i);
+            if (declared || (d.number(slot, 1) & 1) != 0) {
+                out[n] = member(d, slot);
                 n++;
             }
         }
@@ -1276,84 +1302,86 @@ final class Constructor<T> extends Executable {
         return c;
     }
 
-    private static Constructor<?>[] table() {
-        if (table == null) {
-            table = table0();
-        }
-        return table;
+    // The table's data, read the first time a lookup needs it.
+    private static TableData data() {
+        TableData d = data;
+        return d != null ? d : load();
     }
 
-    // The table's constructors by their class, made once.
-    private static MemberIndex owners() {
-        if (owners == null) {
-            Constructor<?>[] all = table();
-            Class<?>[] of = new Class<?>[all.length];
-            for (int i = 0; i < all.length; i++) {
-                of[i] = all[i].clazz;
-            }
-            owners = new MemberIndex(of);
+    private static synchronized TableData load() {
+        if (data == null) {
+            TableData d = new TableData();
+            loadPart0(d);
+            loadPart1(d);
+            loadPart2(d);
+            loadPart3(d);
+            loadPart4(d);
+            loadPart5(d);
+            loadPart6(d);
+            loadPart7(d);
+            loadPart8(d);
+            loadPart9(d);
+            loadPart10(d);
+            loadPart11(d);
+            loadPart12(d);
+            loadPart13(d);
+            loadPart14(d);
+            loadPart15(d);
+            loadPart16(d);
+            loadPart17(d);
+            loadPart18(d);
+            loadPart19(d);
+            loadPart20(d);
+            loadPart21(d);
+            loadPart22(d);
+            loadPart23(d);
+            loadPart24(d);
+            loadPart25(d);
+            loadPart26(d);
+            loadPart27(d);
+            loadPart28(d);
+            loadPart29(d);
+            loadPart30(d);
+            loadPart31(d);
+            d.finish(3, true);
+            table = new Constructor<?>[d.length()];
+            data = d;
         }
-        return owners;
+        return data;
     }
 
-    // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
-    // on, in order, each made from the data that lowering writes for it.
-    private static Constructor<?>[] table0() {
-        Constructor<?>[][] parts = {
-            tablePart0(), tablePart1(), tablePart2(), tablePart3(),
-            tablePart4(), tablePart5(), tablePart6(), tablePart7(),
-            tablePart8(), tablePart9(), tablePart10(), tablePart11(),
-            tablePart12(), tablePart13(), tablePart14(), tablePart15(),
-            tablePart16(), tablePart17(), tablePart18(), tablePart19(),
-            tablePart20(), tablePart21(), tablePart22(), tablePart23(),
-            tablePart24(), tablePart25(), tablePart26(), tablePart27(),
-            tablePart28(), tablePart29(), tablePart30(), tablePart31()
-        };
-        int length = 0;
-        for (Constructor<?>[] part : parts) {
-            length += part.length;
-        }
-        Constructor<?>[] table = new Constructor<?>[length];
-        for (int p = 0; p < 32; p++) {
-            for (int i = 0; i < parts[p].length; i++) {
-                table[i * 32 + p] = parts[p][i];
-            }
-        }
-        return table;
-    }
-
-    private static Constructor<?>[] tablePart0() { return part(tableClasses(0), tableInts(0)); }
-    private static Constructor<?>[] tablePart1() { return part(tableClasses(1), tableInts(1)); }
-    private static Constructor<?>[] tablePart2() { return part(tableClasses(2), tableInts(2)); }
-    private static Constructor<?>[] tablePart3() { return part(tableClasses(3), tableInts(3)); }
-    private static Constructor<?>[] tablePart4() { return part(tableClasses(4), tableInts(4)); }
-    private static Constructor<?>[] tablePart5() { return part(tableClasses(5), tableInts(5)); }
-    private static Constructor<?>[] tablePart6() { return part(tableClasses(6), tableInts(6)); }
-    private static Constructor<?>[] tablePart7() { return part(tableClasses(7), tableInts(7)); }
-    private static Constructor<?>[] tablePart8() { return part(tableClasses(8), tableInts(8)); }
-    private static Constructor<?>[] tablePart9() { return part(tableClasses(9), tableInts(9)); }
-    private static Constructor<?>[] tablePart10() { return part(tableClasses(10), tableInts(10)); }
-    private static Constructor<?>[] tablePart11() { return part(tableClasses(11), tableInts(11)); }
-    private static Constructor<?>[] tablePart12() { return part(tableClasses(12), tableInts(12)); }
-    private static Constructor<?>[] tablePart13() { return part(tableClasses(13), tableInts(13)); }
-    private static Constructor<?>[] tablePart14() { return part(tableClasses(14), tableInts(14)); }
-    private static Constructor<?>[] tablePart15() { return part(tableClasses(15), tableInts(15)); }
-    private static Constructor<?>[] tablePart16() { return part(tableClasses(16), tableInts(16)); }
-    private static Constructor<?>[] tablePart17() { return part(tableClasses(17), tableInts(17)); }
-    private static Constructor<?>[] tablePart18() { return part(tableClasses(18), tableInts(18)); }
-    private static Constructor<?>[] tablePart19() { return part(tableClasses(19), tableInts(19)); }
-    private static Constructor<?>[] tablePart20() { return part(tableClasses(20), tableInts(20)); }
-    private static Constructor<?>[] tablePart21() { return part(tableClasses(21), tableInts(21)); }
-    private static Constructor<?>[] tablePart22() { return part(tableClasses(22), tableInts(22)); }
-    private static Constructor<?>[] tablePart23() { return part(tableClasses(23), tableInts(23)); }
-    private static Constructor<?>[] tablePart24() { return part(tableClasses(24), tableInts(24)); }
-    private static Constructor<?>[] tablePart25() { return part(tableClasses(25), tableInts(25)); }
-    private static Constructor<?>[] tablePart26() { return part(tableClasses(26), tableInts(26)); }
-    private static Constructor<?>[] tablePart27() { return part(tableClasses(27), tableInts(27)); }
-    private static Constructor<?>[] tablePart28() { return part(tableClasses(28), tableInts(28)); }
-    private static Constructor<?>[] tablePart29() { return part(tableClasses(29), tableInts(29)); }
-    private static Constructor<?>[] tablePart30() { return part(tableClasses(30), tableInts(30)); }
-    private static Constructor<?>[] tablePart31() { return part(tableClasses(31), tableInts(31)); }
+    private static void loadPart0(TableData d) { d.part(0, tableClasses(0), tableInts(0), null); }
+    private static void loadPart1(TableData d) { d.part(1, tableClasses(1), tableInts(1), null); }
+    private static void loadPart2(TableData d) { d.part(2, tableClasses(2), tableInts(2), null); }
+    private static void loadPart3(TableData d) { d.part(3, tableClasses(3), tableInts(3), null); }
+    private static void loadPart4(TableData d) { d.part(4, tableClasses(4), tableInts(4), null); }
+    private static void loadPart5(TableData d) { d.part(5, tableClasses(5), tableInts(5), null); }
+    private static void loadPart6(TableData d) { d.part(6, tableClasses(6), tableInts(6), null); }
+    private static void loadPart7(TableData d) { d.part(7, tableClasses(7), tableInts(7), null); }
+    private static void loadPart8(TableData d) { d.part(8, tableClasses(8), tableInts(8), null); }
+    private static void loadPart9(TableData d) { d.part(9, tableClasses(9), tableInts(9), null); }
+    private static void loadPart10(TableData d) { d.part(10, tableClasses(10), tableInts(10), null); }
+    private static void loadPart11(TableData d) { d.part(11, tableClasses(11), tableInts(11), null); }
+    private static void loadPart12(TableData d) { d.part(12, tableClasses(12), tableInts(12), null); }
+    private static void loadPart13(TableData d) { d.part(13, tableClasses(13), tableInts(13), null); }
+    private static void loadPart14(TableData d) { d.part(14, tableClasses(14), tableInts(14), null); }
+    private static void loadPart15(TableData d) { d.part(15, tableClasses(15), tableInts(15), null); }
+    private static void loadPart16(TableData d) { d.part(16, tableClasses(16), tableInts(16), null); }
+    private static void loadPart17(TableData d) { d.part(17, tableClasses(17), tableInts(17), null); }
+    private static void loadPart18(TableData d) { d.part(18, tableClasses(18), tableInts(18), null); }
+    private static void loadPart19(TableData d) { d.part(19, tableClasses(19), tableInts(19), null); }
+    private static void loadPart20(TableData d) { d.part(20, tableClasses(20), tableInts(20), null); }
+    private static void loadPart21(TableData d) { d.part(21, tableClasses(21), tableInts(21), null); }
+    private static void loadPart22(TableData d) { d.part(22, tableClasses(22), tableInts(22), null); }
+    private static void loadPart23(TableData d) { d.part(23, tableClasses(23), tableInts(23), null); }
+    private static void loadPart24(TableData d) { d.part(24, tableClasses(24), tableInts(24), null); }
+    private static void loadPart25(TableData d) { d.part(25, tableClasses(25), tableInts(25), null); }
+    private static void loadPart26(TableData d) { d.part(26, tableClasses(26), tableInts(26), null); }
+    private static void loadPart27(TableData d) { d.part(27, tableClasses(27), tableInts(27), null); }
+    private static void loadPart28(TableData d) { d.part(28, tableClasses(28), tableInts(28), null); }
+    private static void loadPart29(TableData d) { d.part(29, tableClasses(29), tableInts(29), null); }
+    private static void loadPart30(TableData d) { d.part(30, tableClasses(30), tableInts(30), null); }
+    private static void loadPart31(TableData d) { d.part(31, tableClasses(31), tableInts(31), null); }
 
     // A part of the table, which lowering writes as data: the classes that its constructors have,
     // and for each constructor in turn the numbers of its own: how many constructors there are,
@@ -1363,17 +1391,19 @@ final class Constructor<T> extends Executable {
 
     private static native int[] tableInts(int part);
 
-    private static Constructor<?>[] part(Class<?>[] classes, int[] ints) {
-        Constructor<?>[] part = new Constructor<?>[ints[0]];
-        int at = 1;
-        for (int i = 0; i < part.length; i++) {
+    // The constructor in `slot`, made from its part's data the first time it is asked for.
+    private static Constructor<?> member(TableData d, int slot) {
+        Constructor<?> k = table[slot];
+        if (k == null) {
+            Class<?>[] classes = d.classes[slot & 31];
+            int[] ints = d.ints[slot & 31];
+            int at = d.starts[slot];
             Class<?>[] parameterTypes = classList(classes, ints, at + 3);
-            int thrown = at + 4 + parameterTypes.length;
-            Class<?>[] exceptionTypes = classList(classes, ints, thrown);
-            part[i] = new Constructor<>(classes[ints[at]], parameterTypes, exceptionTypes, ints[at + 1], ints[at + 2]);
-            at = thrown + 1 + exceptionTypes.length;
+            Class<?>[] exceptionTypes = classList(classes, ints, at + 4 + parameterTypes.length);
+            k = new Constructor<>(classes[ints[at]], parameterTypes, exceptionTypes, ints[at + 1], ints[at + 2]);
+            table[slot] = k;
         }
-        return part;
+        return k;
     }
 
     // The constructions of the table's constructors, in 32 parts: slot `s` is in part `s & 31`, whose native
@@ -1620,6 +1650,74 @@ final class Constructor<T> extends Executable {
 // class reads that class's members rather than the whole table (the Minecraft server's has
 // 160,000 methods, and log4j and gson look up members class by class): a hash table, open
 // addressing, from each class to the run of its members' indices in `order`, in the table's order.
+// The data of a reflection table (`Method`, `Field` or `Constructor`), as lowering writes it in 32
+// parts: per part the classes, the numbers and the names (`tableClasses`, `tableInts`,
+// `tableNames`), read once, with where each slot's member starts in its part's numbers and the
+// index of the slots by the class that finds them. A member's object is made from it the first
+// time a lookup reaches the member, as Java makes the objects of a class's members when it is
+// reflected on: a big program's table has 160,000 methods, whose objects with their lists of
+// classes held 100 MB that a program reflecting on a few thousand classes never reads. A lookup
+// tests a member's class, name and modifiers in the numbers before it makes the object.
+final class TableData {
+    final Class<?>[][] classes = new Class<?>[32][];
+    final int[][] ints = new int[32][];
+    final String[][] names = new String[32][];
+    int[] starts;
+    MemberIndex owners;
+
+    void part(int p, Class<?>[] classes, int[] ints, String[] names) {
+        this.classes[p] = classes;
+        this.ints[p] = ints;
+        this.names[p] = names;
+    }
+
+    // Finds where each slot's member starts: a member is `fixed` numbers, the first the index of
+    // the class that finds it, then with `lists` the lists of its parameters' and exceptions'
+    // classes, each its length and the indices.
+    void finish(int fixed, boolean lists) {
+        int length = 0;
+        for (int p = 0; p < 32; p++) {
+            length += ints[p][0];
+        }
+        starts = new int[length];
+        Class<?>[] of = new Class<?>[length];
+        for (int p = 0; p < 32; p++) {
+            int[] data = ints[p];
+            int at = 1;
+            for (int i = 0; i < data[0]; i++) {
+                int slot = i * 32 + p;
+                starts[slot] = at;
+                of[slot] = classes[p][data[at]];
+                at += fixed;
+                if (lists) {
+                    at += 1 + data[at];
+                    at += 1 + data[at];
+                }
+            }
+        }
+        owners = new MemberIndex(of);
+    }
+
+    int length() {
+        return starts.length;
+    }
+
+    // The number at `offset` in the member of `slot`.
+    int number(int slot, int offset) {
+        return ints[slot & 31][starts[slot] + offset];
+    }
+
+    // The class whose index is at `offset` in the member of `slot`.
+    Class<?> classAt(int slot, int offset) {
+        return classes[slot & 31][number(slot, offset)];
+    }
+
+    // The name whose index is at `offset` in the member of `slot`.
+    String name(int slot, int offset) {
+        return names[slot & 31][number(slot, offset)];
+    }
+}
+
 final class MemberIndex {
     private final Class<?>[] keys;
     private final int[] starts;

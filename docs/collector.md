@@ -46,7 +46,10 @@ owned, and that Rust therefore never freed, is found unreachable too.
   that held each iteration's loads behind the last one's store: 2.05 s for 10^9 iterations, and
   1.21 s with colors, Java's time. A power-of-two slot stays aligned to its size, which
   allocations aligned to more than 16 bytes need, and blocks of 1 KB slots and larger are not
-  moved.
+  moved. A large allocation's color stays within the room that the blocks its size needs leave,
+  so a size of whole blocks starts at its first block: a `Vec` that doubles grows to sizes of
+  whole blocks (128 KB), and colored it took one block more. The Minecraft server held 361 such
+  allocations, 23 MB of blocks that only their colors took.
 - **Bitmaps.** Each small block has a bit per slot saying that the slot is taken (an object, or
   a free slot that a thread holds) and a bit per slot for marking.
 

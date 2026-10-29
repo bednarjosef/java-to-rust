@@ -928,10 +928,13 @@ fn allocate_large(layout: Layout) -> *mut u8 {
     }
     let g = prepare();
     let h = heap(&g);
-    // Each starts at another of the 64 cache lines of a page (see `color`).
-    let color = if layout.align() <= 64 { (h.larges * 23 % 64) * 64 } else { 0 };
+    // Each starts at another of the 64 cache lines of a page (see `color`), within the room that
+    // the blocks its size needs leave: a size of whole blocks, as a `Vec` that doubled to 128 KB
+    // asks for, starts at its first block rather than taking one more block for its color.
+    let n = layout.size().div_ceil(BLOCK).max(1);
+    let lines = (n * BLOCK - layout.size()) / 64 + 1;
+    let color = if layout.align() <= 64 { (h.larges * 23 % 64 % lines) * 64 } else { 0 };
     h.larges += 1;
-    let n = (color + layout.size()).div_ceil(BLOCK).max(1);
     let b = h.take_blocks(n);
     // A large allocation is handed out zeroed.
     for k in b..b + n {
