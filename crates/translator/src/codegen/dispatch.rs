@@ -508,7 +508,7 @@ impl<'a> Gen<'a> {
 
     fn in_package_name(&self, c: usize) -> String {
         let (element, arrays) = self.element_name(c);
-        modules::split(element).1.replace(['.', '$'], "") + &arrays
+        modules::name_in_package(element).replace(['.', '$'], "") + &arrays
     }
 
     fn full_variant_name(&self, c: usize) -> String {

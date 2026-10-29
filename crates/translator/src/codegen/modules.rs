@@ -241,13 +241,7 @@ fn take_refers() -> Named {
 /// The path prefix that names a class from the module being written (empty inside its own
 /// module), and its name inside its package (`Outer.Inner` for a nested class).
 pub(super) fn split(name: &str) -> (String, &str) {
-    // The standard exception classes are items of the crate's root, named by their simple names,
-    // and so are the functional interfaces lowering provides, which have no package (the JDK's
-    // own, translated from its sources, are in theirs).
-    let provided = crate::lower::is_functional(name)
-        && RESOLVER
-            .with_borrow(|r| r.as_ref().is_none_or(|r| r.packages.get(name).is_some_and(String::is_empty)));
-    if crate::lower::is_standard(name) || provided {
+    if at_root(name) {
         let simple = crate::lower::standard_local_name(name);
         let nested = with(|r| match r.current.as_deref() {
             None => false,
@@ -272,6 +266,30 @@ pub(super) fn split(name: &str) -> (String, &str) {
     })
     .flatten()
     .unwrap_or((String::new(), name))
+}
+
+/// Whether class `name` is an item of the crate's root named by its simple name: the standard
+/// exception classes are, and so are the functional interfaces lowering provides, which have no
+/// package (the JDK's own, translated from its sources, are in theirs).
+fn at_root(name: &str) -> bool {
+    let provided = crate::lower::is_functional(name)
+        && RESOLVER
+            .with_borrow(|r| r.as_ref().is_none_or(|r| r.packages.get(name).is_some_and(String::is_empty)));
+    crate::lower::is_standard(name) || provided
+}
+
+/// The name of class `name` inside its package, as `split` gives it, without the item being
+/// written naming the class: for names made once for the whole program, wherever they are first
+/// asked for (`variant_names_of`).
+pub(super) fn name_in_package(name: &str) -> &str {
+    if at_root(name) {
+        return crate::lower::standard_local_name(name);
+    }
+    let package = RESOLVER.with_borrow(|r| r.as_ref().and_then(|r| r.packages.get(name).map(String::len)));
+    match package {
+        Some(len) if len > 0 => &name[len + 1..],
+        _ => name,
+    }
 }
 
 /// Whether a class belongs to the module being written; always, outside a whole program.
