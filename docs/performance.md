@@ -187,11 +187,16 @@ been. A method of a class that no unit declares waits for javac's answer: it is 
 external one (whose overriders may run) only once javac was asked for the class and gave no unit
 that declares it (`Walk::asked`), which can take a round more. So do the other decisions that
 depend on whether a class is declared: whether an `instanceof` of a class without objects
-guards a branch (`objectless`, which looks at the class's supertypes) and whether a class is an
-exception's (`recreatable`). Nothing is then decided on a class that may still come, and each
-round reaches what a walk from scratch over its units, with the same classes asked for, reaches;
-`JAVA_TO_RUST_REACH_CHECK=1` makes `load` check that after every round, and it holds in every
-round of javac's translation and of 18 whole programs of the corpus. Before, such a method was
+guards a branch (`objectless`, which looks at the class's supertypes), whether a class is an
+exception's (`recreatable`), and which superinterfaces with code a class's initialization
+initializes (`default_superinterfaces`). Nothing is then decided on a class that may still come,
+and each round reaches what a walk from scratch over its units, with the same classes asked for,
+reaches; `JAVA_TO_RUST_REACH_CHECK=1` makes `load` check that after every round. On javac's
+census it holds in every round but for one name noted missing, which javac has no class of: the
+string literal `prob.found.req`, which javac also registers as a service's class name
+(`services.rs`); the rounds meet the literal before the registration and note it, a walk from
+scratch meets the registration first. It held in every round of 18 whole programs of the corpus
+when it was written. Before, such a method was
 taken for an external one at once, and when a later unit declared its class and it turned out
 dormant, its overriders had been reached for nothing (`Walk::stale`) and the walk started again
 from `main`: four times in javac's 10 rounds, two or three times in those of `ScannerGrades` and

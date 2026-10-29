@@ -3048,6 +3048,9 @@ enum Item {
     /// The constructor that makes a new exception of this class from another, once reachable
     /// code makes one (`Walk::recreatable`), which waited for a supertype of the class.
     Recreate(String),
+    /// The superinterfaces with code that an initialized class initializes
+    /// (`Walk::default_superinterfaces`).
+    Interfaces(String),
 }
 
 /// The declarations of the program, and the worklist over them.
@@ -3267,6 +3270,7 @@ impl<'t> Walk<'t> {
                         None => "branch of an instanceof in an initializer".to_string(),
                     },
                     Item::Recreate(c) => format!("new exception of class {c} from another"),
+                    Item::Interfaces(c) => format!("superinterfaces with code of {c}"),
                 };
                 eprintln!("  {line}");
                 match why.get(&item) {
@@ -3500,6 +3504,7 @@ impl<'t> Walk<'t> {
                     Item::Field(key) => self.field(key),
                     Item::Branch(index) => self.branch(index),
                     Item::Recreate(class) => self.recreatable(&class),
+                    Item::Interfaces(class) => self.default_superinterfaces(class),
                 }
                 if let (Some(why), Some(current)) = (&mut self.why, current) {
                     for pushed in &self.work[before.min(self.work.len())..] {
@@ -3553,34 +3558,45 @@ impl<'t> Walk<'t> {
         }
         self.work.push(Item::Class(class.clone()));
         self.initializers(decl, &class, true);
-        // A class's initialization initializes its superinterfaces that declare a method with
-        // code that is not static (`codegen::default_superinterfaces`).
         if !matches!(text(decl, "kind"), "INTERFACE" | "ANNOTATION_TYPE") {
-            let mut interfaces = Vec::new();
-            self.default_interfaces(decl, &mut interfaces);
-            for interface in interfaces {
-                self.work.push(Item::Init(interface));
-            }
+            self.work.push(Item::Interfaces(class));
+        }
+    }
+
+    /// A class's initialization initializes its superinterfaces that declare a method with code
+    /// that is not static (`codegen::default_superinterfaces`). Which those are may depend on
+    /// interfaces that no unit declares yet: this waits for each of them (`block`), and is
+    /// decided again once a unit declares it, as it would have been with that unit from the
+    /// start.
+    fn default_superinterfaces(&mut self, class: String) {
+        let decl = self.classes[&class].0;
+        let (mut with_code, mut undeclared) = (Vec::new(), Vec::new());
+        self.default_interfaces(decl, &mut with_code, &mut undeclared);
+        for interface in with_code {
+            self.work.push(Item::Init(interface));
+        }
+        for interface in undeclared {
+            self.block(&interface, Item::Interfaces(class.clone()));
         }
     }
 
     /// The interfaces that the declaration `decl` implements, directly or not, that declare a
-    /// method with code that is not static, and those that no unit declares yet, which `init`
-    /// waits for.
-    fn default_interfaces(&self, decl: &Value, out: &mut Vec<String>) {
+    /// method with code that is not static (`out`), and those that no unit declares
+    /// (`undeclared`).
+    fn default_interfaces(&self, decl: &Value, out: &mut Vec<String>, undeclared: &mut Vec<String>) {
         let named = match &decl["implementsClause"] {
             Value::Array(items) => items.iter().filter_map(supertype).collect(),
             _ => Vec::new(),
         };
         for name in named {
-            if out.contains(&name) {
+            if out.contains(&name) || undeclared.contains(&name) {
                 continue;
             }
             let Some(&(interface, _)) = self.classes.get(&name) else {
-                out.push(name);
+                undeclared.push(name);
                 continue;
             };
-            self.default_interfaces(interface, out);
+            self.default_interfaces(interface, out, undeclared);
             let has_code = members(interface)
                 .any(|m| text(m, "kind") == "METHOD" && !m["body"].is_null() && !has_flag(m, "STATIC"));
             if has_code && !out.contains(&name) {
@@ -4654,6 +4670,47 @@ mod tests {
             // have any is not known, and the branch is reached.
             assert_eq!(reach.methods.contains(&inside), !base_comes, "{reach:?}");
             assert_eq!(reach.without_objects.contains("Target"), base_comes, "{reach:?}");
+        }
+    }
+
+    /// A walk from scratch over these units, in rounds that ask javac, with these classes asked
+    /// for.
+    fn from_scratch(units: &[&Value], asked: &[String]) -> String {
+        let mut rounds = Rounds::new("Main").asking();
+        rounds.asked(asked);
+        rounds.add(units).unwrap();
+        rounds.dump()
+    }
+
+    #[test]
+    fn a_class_initializes_an_interface_that_a_later_unit_declares_only_when_it_has_code() {
+        // `main` makes a `Point`, which implements `Shape`, whose unit comes in the next round:
+        // `Shape` without code is not initialized, and with a default method it is.
+        let new_point = json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "Point", "name": "<init>", "type": "()void"}}});
+        let first = json!({"typeDecls": [
+            class("Main", &[("main", vec![new_point])]),
+            {"kind": "CLASS", "symbol": {"type": "Point"},
+             "implementsClause": [{"kind": "IDENTIFIER", "symbol": {"type": "Shape"}}],
+             "members": [{"kind": "METHOD", "name": "<init>", "symbol": {"type": "()void", "static": false},
+                          "body": {"kind": "BLOCK", "statements": []}}]},
+        ]});
+        for has_code in [false, true] {
+            let methods: Vec<Value> = if has_code {
+                vec![json!({"kind": "METHOD", "name": "area", "symbol": {"type": "()int", "static": false},
+                            "body": {"kind": "BLOCK", "statements": []}})]
+            } else {
+                Vec::new()
+            };
+            let shape = json!({"typeDecls": [{"kind": "INTERFACE", "symbol": {"type": "Shape"}, "members": methods}]});
+            let mut rounds = Rounds::new("Main").asking();
+            rounds.add(&[&first]).unwrap();
+            assert_eq!(rounds.missing(), ["Shape"]);
+            let asked = rounds.missing();
+            rounds.asked(&asked);
+            rounds.add(&[&shape]).unwrap();
+            assert_eq!(rounds.dump(), from_scratch(&[&first, &shape], &asked));
+            assert_eq!(rounds.finish().initialized.contains("Shape"), has_code);
         }
     }
 
