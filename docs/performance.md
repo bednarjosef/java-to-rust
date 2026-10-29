@@ -161,13 +161,14 @@ made on the stack (`java::count_allocation`).
 
 ## Memory
 
-`scripts/benchmark.py` reports each side's peak resident memory beside its time. Four of the
+`scripts/benchmark.py` reports each side's peak resident memory beside its time. Five of the
 programs measure memory rather than time: `ReflectionTableMemory` (a reflection table of 14,400
 methods, of which three classes' are read), `LargeArrays` (arrays of 64, 128 and 256 KB alive
-together), `MonitoredObjects` (3 million small objects in a program that waits and notifies,
-in which every object keeps its monitor) and `ManyThreadsAllocating` (32 threads that allocate
-arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak memory in MB, before
-and after the change that each measures (the median of three runs; of eight for
+together), `MonitoredObjects` (3 million small objects in a program that waits and notifies, of a
+class it locks, so every object keeps its monitor), `UnlockedObjects` (the same, of a class whose
+objects become `Object`s but no monitor site can lock) and `ManyThreadsAllocating` (32 threads
+that allocate arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak memory in
+MB, before and after the change that each measures (the median of three runs; of eight for
 `ManyThreadsAllocating`, 0.101 s before and 0.105 s after):
 
 | program               | before | after | Java |
@@ -175,6 +176,7 @@ and after the change that each measures (the median of three runs; of eight for
 | ReflectionTableMemory |   20.2 |  14.9 | 42.0 |
 | LargeArrays           |  134.4 |  88.4 |  143 |
 | MonitoredObjects      |  124.5 |  76.6 |  148 |
+| UnlockedObjects       |  124.5 |  76.5 |  166 |
 | ManyThreadsAllocating |  235.5 | 197.7 |  417 |
 
 ### Where the Minecraft server's memory went
@@ -202,10 +204,11 @@ The release trial of the server peaked at 1,498 MB on the bench (`minecraft-serv
     parameter classes in which each class is a boxed copy. Java makes a class's member objects
     when it is reflected on. The translation now makes each member's object the first time a
     lookup returns it (docs/reflection-and-plugins.md).
-  - **monitors**: a program that waits and notifies keeps every object's monitor, and each
+  - **monitors**: the server waits and notifies, which kept every object's monitor, and each
     `java::Monitored` object held its lock, 16 bytes. It now holds a pointer to a lock made the
     first time a thread takes it (`LazyMonitor`), 8 bytes, which puts about half of the objects
-    in a smaller slot.
+    in a smaller slot (`MonitoredObjects`), and only the objects that a monitor site may lock
+    have one (docs/multi-threading.md 3.1, `UnlockedObjects`).
   - **large allocations of whole blocks**: 361 arrays of exactly 128 KB (`float[32768]`, the
     density buffers of world generation) took three blocks of 64 KB each, the third only for
     the cache-line color of its start, 23 MB in all. A large allocation's color now stays
@@ -228,8 +231,10 @@ The release trial of the server peaked at 1,498 MB on the bench (`minecraft-serv
     (now 8), and slots grow by 16 bytes where Java's objects grow by 8. From the furthest
     nonzero word of each class's objects (slots that may hold pointers are zeroed when handed
     out), the 214 MB of objects reached through numbered handles take 200 MB with the 8-byte
-    lock, would take 190 MB with no lock word in the classes no `synchronized`, `wait` or
-    `notify` reaches, and 185 MB with slot sizes in steps of 8 bytes to 128 as well;
+    lock, 190 MB with no lock word in the classes no `synchronized`, `wait` or `notify`
+    reaches (as the translation now makes them; how many of the server's classes that frees
+    is not yet measured), and would take 185 MB with slot sizes in steps of 8 bytes to 128 as
+    well;
   - world generation's density buffers (`float[32768]` and `float[98304]`) come and go: up to
     120 MB of them in one dump, a few MB in another. Their pools drop a buffer unused for 20
     ticks, so they are not kept; Java's histogram was taken between them.
@@ -748,9 +753,9 @@ from rustup's `llvm-tools`). It takes a third off the time of fat LTO alone, and
 build with PGO takes about 30 minutes.
 
 javac starts one thread, the file manager's deferred close, which a normal run never starts, but
-its reachable `Thread.start()` makes the program threaded and most of its classes
-`java::Arc<java::Monitored<..>>` (docs/multi-threading.md, section 4), whose fields are
-`java::SharedField`s: an acquire load or release store of a word, a plain move on x86-64. Until a
+its reachable `Thread.start()` makes the program threaded and most of its classes thread-shared
+(docs/multi-threading.md, section 4), whose fields are `java::SharedField`s: an acquire load or
+release store of a word, a plain move on x86-64. Until a
 second thread starts, a monitor costs plain loads and stores only (`locked.rs`).
 Object parameters that may be null are borrowed (`&Option<java::Arc<..>>`,
 docs/supported-java.md) rather than copied. `charAt` and `String.hashCode` read a string's

@@ -79,15 +79,17 @@ is read and written by value, through the object's address, the way Java does it
   object is an `Arc<C>` whose fields are `java::Field` cells, read with `get()` and written with
   `set()`.
 - Built for the classes that threads share, which are nearly all of javac's: an object is an
-  `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s, acquire loads and release
+  `Arc<C>` whose fields are `java::SharedField`s (an `Arc<java::Monitored<C>>` where a monitor
+  site may lock it), acquire loads and release
   stores of a word (the same instructions as plain ones on x86-64), sequentially consistent for a
   `volatile` field, a striped lock for a wider value (docs/multi-threading.md, 2.1).
 - Built for the arrays that threads share, which are nearly all of javac's: a
   `java::SharedArray` keeps each element in a `java::SharedField` cell, so `a[i]` is a bounds
   check and one load, with no lock taken (docs/multi-threading.md, 2.2). Arrays of one thread
   keep their `RefCell`.
-- Planned: `synchronized` and `wait`/`notify` use monitors kept in a side table, only for the
-  objects that are locked, so that no object carries a lock word.
+- Built for the classes whose objects no monitor site can lock: they carry no lock word
+  (docs/multi-threading.md, 3.1). Planned: `synchronized` and `wait`/`notify` use monitors kept
+  in a side table, only for the objects that are locked, so that no object carries one.
 - Planned: identity hash codes are also kept in a side table, only for classes whose identity
   hash is used.
 
@@ -155,7 +157,8 @@ Each part lands on its own and passes the gate (all checks and the 28 targets):
    on the class number.
 4. Fields as cells, monitors and identity hashes in side tables, removing `RefCell` and
    `Locked`. Built: fields as cells, for one thread and for threads, and the elements of the
-   arrays that threads share; the monitors still live in each object's `java::Monitored`, and
+   arrays that threads share; the monitors still live in the `java::Monitored` of each object a
+   monitor site may lock, and
    identity hashes are addresses.
 5. Strings and arrays in the heap; boxed values in references.
 6. Young generation, huge pages, field order.

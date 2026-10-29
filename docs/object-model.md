@@ -569,8 +569,9 @@ to run.
   (`o.count.get()`), a write puts a new one in (`o.count.set(v)`), so no borrow is held and
   none can conflict, and there is no borrow flag. Methods take `&self`, and `base()` lends the
   fields struct as `&XFields`. A field assignment whose object may be null computes the value
-  first, as Java does. A family that threads share, or whose monitor is kept, is an
-  `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s (docs/multi-threading.md, 2.1).
+  first, as Java does. A family that threads share has `java::SharedField`s, and one whose
+  objects a monitor site may lock is an `Arc<java::Monitored<C>>` (docs/multi-threading.md,
+  2.1).
 - **Fixed fields** (`analysis/fixed_fields.rs`): a field of a mutable class that only
   constructors write, through `this` (a `final` field, or one written the same way), keeps its
   value once the object is built. Its read on a concrete receiver is `java::fixed!(c, base.name)`

@@ -1,5 +1,5 @@
-// Many small objects in a program that waits and notifies, in which every object keeps its
-// monitor, as in the Minecraft server: 3 million points of one `long` each, all alive at once.
+// Many small objects in a program that waits and notifies, of a class whose objects it locks, so
+// that every one keeps its monitor: 3 million points of one `long` each, all alive at once.
 // What it measures is the memory they take (`scripts/benchmark.py` reports the peak).
 public class MonitoredObjects {
     static class Point {

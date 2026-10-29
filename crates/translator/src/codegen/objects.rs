@@ -578,9 +578,15 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the celled objects of the class named `name` keep a monitor (`Facts::monitored`):
-    /// an `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s.
+    /// an `Arc<java::Monitored<C>>`.
     pub(super) fn monitored(&self, name: &str) -> bool {
         self.facts.monitored.contains(name)
+    }
+
+    /// Whether the fields of the celled objects of the class named `name` are
+    /// `java::SharedField`s (`Facts::shared_cells`): threads share them, or they keep a monitor.
+    pub(super) fn shared_cells(&self, name: &str) -> bool {
+        self.facts.shared_cells.contains(name)
     }
 
     /// The handle of a celled object of class `t` whose struct is `structure`.
@@ -609,16 +615,16 @@ impl<'a> Gen<'a> {
         matches!(object.ty, Type::Class(name, _) if self.celled(self.rep_name(name)))
     }
 
-    /// Whether the fields of `object` are `java::SharedField`s: it is an object of a monitored
-    /// class.
-    pub(super) fn monitored_object(&self, object: &Expr) -> bool {
-        matches!(object.ty, Type::Class(name, _) if self.monitored(self.rep_name(name)))
+    /// Whether the fields of `object` are `java::SharedField`s: it is an object of a class with
+    /// shared cells.
+    pub(super) fn shared_object(&self, object: &Expr) -> bool {
+        matches!(object.ty, Type::Class(name, _) if self.shared_cells(self.rep_name(name)))
     }
 
     /// Whether the field `name` of `object` is a `volatile` field's `java::SharedField`, whose
     /// accesses are sequentially consistent (`get_volatile`, `set_volatile`).
     pub(super) fn volatile_cell(&self, object: &Expr, name: &str) -> bool {
-        if !self.monitored_object(object) {
+        if !self.shared_object(object) {
             return false;
         }
         let owner = self.class.field_owner(object.ty, name);
@@ -630,11 +636,11 @@ impl<'a> Gen<'a> {
         owner.is_some_and(|o| self.volatile_field(o, name))
     }
 
-    /// Whether the field `name` that class `owner` declares is a `volatile` field of a monitored
-    /// class.
+    /// Whether the field `name` that class `owner` declares is a `volatile` field of a class with
+    /// shared cells.
     pub(super) fn volatile_field(&self, owner: usize, name: &str) -> bool {
         let decl = &self.class.types[owner];
-        self.monitored(&decl.name) && decl.fields.iter().any(|f| f.name == name && f.volatile)
+        self.shared_cells(&decl.name) && decl.fields.iter().any(|f| f.name == name && f.volatile)
     }
 
     /// The accessors of the cell of field `name` of `object`: `get` and `set`, or for a
@@ -645,7 +651,7 @@ impl<'a> Gen<'a> {
 
     /// The cell type of a field of class `t` whose value is of type `ty`.
     pub(super) fn cell_type(&self, t: usize, ty: &str) -> String {
-        if self.monitored(&self.class.types[t].name) {
+        if self.shared_cells(&self.class.types[t].name) {
             format!("java::SharedField<{ty}>")
         } else {
             format!("java::Field<{ty}>")
@@ -655,7 +661,7 @@ impl<'a> Gen<'a> {
     /// The value of a field in a struct literal of class `t`: a cell for a celled class.
     pub(super) fn field_cell(&self, t: usize, value: String) -> String {
         let name = &self.class.types[t].name;
-        if self.monitored(name) {
+        if self.shared_cells(name) {
             format!("java::SharedField::new({value})")
         } else if self.celled(name) {
             format!("java::Field::new({value})")
