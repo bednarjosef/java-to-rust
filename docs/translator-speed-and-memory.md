@@ -257,8 +257,10 @@ the same text.
 In order of payoff for the effort:
 
 1. **Use every core.** Lowering, codegen and the per-method parts of the analyses are independent
-   per method or class, so they can run in parallel. The whole-program fixpoints (points-to,
-   exceptions, reachability) are harder and come later.
+   per method or class, so they can run in parallel. The generator can already write a round's
+   modules on several threads, but does so only when asked, until the allocator lets its threads
+   gain (see "Generator threads" in [performance.md](performance.md)). The whole-program
+   fixpoints (points-to, exceptions, reachability) are harder and come later.
 2. **Lower again only what an attempt changes.** A failed generics attempt should redo the methods
    it affects, not the program. Up to 4x on lowering for StreamPipeline.
 3. **Keep javac running.** `JavaTree --serve` already exists; a server kept between translations

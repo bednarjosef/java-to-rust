@@ -79,6 +79,8 @@ mod shared_strings;
 mod sliced_loops;
 mod stack_objects;
 mod sync;
+mod threads;
+pub use threads::on_threads;
 
 use arrays::name_part;
 use boxing::boxed_locals;
@@ -210,13 +212,34 @@ struct OnlyEnums {
 /// line that may start it (`Gen::module`).
 struct Kept {
     modules: Vec<modules::Written>,
-    /// What writing it found that the checks and the classes' constants read: `Gen::written`,
-    /// `Gen::dereferenced`, `Gen::class_values`, `Gen::class_details`, `Gen::class_interfaces`.
+    found: Found,
+}
+
+/// What writing modules finds besides their text (`threads::write_modules`): the enum items
+/// that the code uses, and what the checks after the writing and the classes' constants read
+/// (`Gen::written`, `Gen::dereferenced`, `Gen::class_values`, `Gen::class_details`,
+/// `Gen::class_interfaces`).
+#[derive(Clone, Default)]
+struct Found {
+    needs: Needs,
     written: HashSet<usize>,
     dereferenced: HashSet<ExprId>,
     class_values: std::collections::BTreeSet<usize>,
     class_details: bool,
     class_interfaces: bool,
+}
+
+impl Found {
+    /// Adds what another generator found. Each part only grows as the program is written, so
+    /// what generators of parts of it found together is what one of all of it finds.
+    fn add(&mut self, more: Found) {
+        self.needs.extend(more.needs);
+        self.written.extend(more.written);
+        self.dereferenced.extend(more.dereferenced);
+        self.class_values.extend(more.class_values);
+        self.class_details |= more.class_details;
+        self.class_interfaces |= more.class_interfaces;
+    }
 }
 
 /// What the generator finds of the program before it writes it, the same in every round
@@ -232,6 +255,8 @@ struct Setup {
     class_tags: Vec<u16>,
     runs: Vec<bool>,
     super_targets: HashSet<usize>,
+    /// The program's modules, in the order they are written.
+    plans: Vec<modules::Plan>,
     /// `Gen::conversion_names` and `Gen::stack_forms`, which a generator finds from the rest.
     conversion_names: std::sync::Arc<[String]>,
     stack_forms: HashSet<usize>,
@@ -274,6 +299,7 @@ impl Setup {
             class_tags: dispatch::class_numbers(class),
             runs: running_types(class, facts),
             super_targets: super_targets(class),
+            plans: modules::plans(class),
             conversion_names: std::sync::Arc::from([]),
             stack_forms: HashSet::new(),
         };
@@ -336,14 +362,13 @@ fn generate_with(
     if only_enums.is_none()
         && let Some(kept) = kept
     {
-        g.written = kept.written.clone();
-        g.dereferenced = kept.dereferenced.clone();
-        g.class_values = kept.class_values.clone();
-        g.class_details = kept.class_details;
-        g.class_interfaces = kept.class_interfaces;
+        g.add_found(kept.found.clone());
     }
     let first = kept.as_ref().filter(|_| only_enums.is_none()).map(|kept| &kept.modules[..]);
-    let written = g.program(&setup.live, first);
+    let (mut written, found) = threads::write_modules(class, facts, setup, &round, first);
+    g.add_found(found);
+    // What the modules reject, in the order they are written.
+    g.rejected = written.iter_mut().flat_map(|module| std::mem::take(&mut module.rejected)).collect();
     let needs = g.needs.take();
     if only_enums.is_some() {
         return (None, needs, g.rejected, Vec::new());
@@ -360,14 +385,7 @@ fn generate_with(
         }
         None if done => written,
         None => {
-            *kept = Some(Kept {
-                modules: written,
-                written: std::mem::take(&mut g.written),
-                dereferenced: std::mem::take(&mut g.dereferenced),
-                class_values: std::mem::take(&mut g.class_values),
-                class_details: g.class_details,
-                class_interfaces: g.class_interfaces,
-            });
+            *kept = Some(Kept { modules: written, found: g.take_found() });
             return (None, needs, g.rejected, Vec::new());
         }
     };
@@ -395,8 +413,6 @@ impl<'a> Gen<'a> {
             cell_names: Default::default(),
             object_hash_code: Default::default(),
             enum_bodies: Default::default(),
-            package_types: HashMap::new(),
-            package_methods: HashMap::new(),
             reps: Default::default(),
             variant_lists: Default::default(),
             enum_variant_lists: Default::default(),
@@ -479,6 +495,32 @@ impl<'a> Gen<'a> {
     }
 }
 
+impl Gen<'_> {
+    /// Adds what other generators found (`Found`) to what this one has.
+    fn add_found(&mut self, found: Found) {
+        let mut all = self.take_found();
+        all.add(found);
+        *self.needs.get_mut() = all.needs;
+        self.written = all.written;
+        self.dereferenced = all.dereferenced;
+        self.class_values = all.class_values;
+        self.class_details = all.class_details;
+        self.class_interfaces = all.class_interfaces;
+    }
+
+    /// What this generator found, taken.
+    fn take_found(&mut self) -> Found {
+        Found {
+            needs: self.needs.take(),
+            written: std::mem::take(&mut self.written),
+            dereferenced: std::mem::take(&mut self.dereferenced),
+            class_values: std::mem::take(&mut self.class_values),
+            class_details: self.class_details,
+            class_interfaces: self.class_interfaces,
+        }
+    }
+}
+
 /// How deep rustc follows a trait such as `Send` through the fields of nested types.
 /// The classes without objects in a translation, which are no type of it, whose class literals
 /// are the runtime's classes (`java::Class::RUNTIME`, `java::Class::SYSTEM`).
@@ -544,9 +586,6 @@ struct Gen<'a> {
     /// The body that a call of a method on the enum of a type calls directly, by type and method
     /// (`dispatch::enum_body`), once found.
     enum_bodies: std::cell::RefCell<HashMap<(usize, usize), Option<usize>>>,
-    /// The types of each package, and the methods of its types, in index order (`Gen::program`).
-    package_types: HashMap<String, std::rc::Rc<Vec<usize>>>,
-    package_methods: HashMap<String, std::rc::Rc<Vec<usize>>>,
     /// How the values of each type are represented, and the variants of its enum, once found.
     reps: std::cell::RefCell<HashMap<usize, hierarchy::Rep>>,
     variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<Vec<usize>>>>,

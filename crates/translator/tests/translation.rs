@@ -4119,6 +4119,76 @@ public class Main {
 }
 
 #[test]
+fn the_generator_writes_the_same_on_several_threads() {
+    // The generator can write the modules of a round on several threads, each with a generator
+    // of its own (`codegen::on_threads`). Programs of several packages translate the same on one
+    // thread and on three, and so does a census whose generator rejects code, with the JDK's
+    // packages as modules.
+    for (project, main) in
+        [("zoo", "zoo.app.Main"), ("library", "library.app.Main"), ("statics", "com.shop.Main")]
+    {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/projects").join(project);
+        let program = java_to_rust::Program {
+            main: main.into(),
+            sources: vec![root.join("src")],
+            ..Default::default()
+        };
+        let translate = |threads| {
+            java_to_rust::codegen::on_threads(threads, || java_to_rust::translate_program_modules(&program))
+                .unwrap_or_else(|e| panic!("translation failed: {e}"))
+        };
+        let (one, three) = (translate(1), translate(3));
+        assert!(one.modules.len() > 2, "{project} has modules");
+        assert_eq!(one.one_file(), three.one_file(), "{project}");
+        assert_eq!(one.dependencies(), three.dependencies(), "{project}");
+    }
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(std::path::PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run the census");
+        return;
+    };
+    let main = r#"import java.lang.reflect.AnnotatedElement;
+import java.util.*;
+
+public class Main {
+    static String shown(AnnotatedElement e) {
+        return String.valueOf(e);
+    }
+
+    public static void main(String[] args) {
+        if (args.length > 0) {
+            System.out.println(shown(Main.class));
+        }
+        List<String> names = new ArrayList<>(List.of("b", "a", "c"));
+        Collections.sort(names);
+        Map<String, Integer> lengths = new TreeMap<>();
+        for (String name : names) {
+            lengths.merge(name, name.length(), Integer::sum);
+        }
+        System.out.println(names + " " + lengths);
+    }
+}
+"#;
+    let dir = write_sources("generator_threads", &[("app/Main.java", main)]);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![java_base],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let one = java_to_rust::codegen::on_threads(1, || census(&program));
+    let three = java_to_rust::codegen::on_threads(3, || census(&program));
+    // The generator's rejection of the class as an `AnnotatedElement`.
+    assert_contains(&one.report, &["not supported yet\n          at Main.java:11:38\n"]);
+    assert_eq!(one.report, three.report);
+    assert_eq!(one.json, three.json);
+    let (one, three) = (one.modules.expect("a translation"), three.modules.expect("a translation"));
+    assert_eq!(one.one_file(), three.one_file());
+    assert_eq!(one.dependencies(), three.dependencies());
+}
+
+#[test]
 fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
     // A census takes the errors of every check of the analyses, and of the messages and the
     // generator after them, in one round (`analysis::analyze_collecting`); here the generator

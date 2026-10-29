@@ -266,6 +266,8 @@ pub(super) struct Written {
     imports: BTreeSet<String>,
     /// The extension traits whose methods the items call (`Gen::traits`).
     traits: BTreeSet<String>,
+    /// What writing the module found that cannot be translated (`Gen::rejected`), in order.
+    pub(super) rejected: Vec<Error>,
 }
 
 /// An item of a module as the generator writes it (`Written`).
@@ -279,7 +281,7 @@ struct WrittenItem {
 }
 
 /// The first round's modules `kept` with the last round's enum items of class types, `enums`
-/// (`Gen::program`), which write the same modules in the same order.
+/// (`plans`), which are of the same modules in the same order.
 pub(super) fn merge(kept: Vec<Written>, enums: Vec<Written>) -> Vec<Written> {
     kept.into_iter()
         .zip(enums)
@@ -290,6 +292,7 @@ pub(super) fn merge(kept: Vec<Written>, enums: Vec<Written>) -> Vec<Written> {
             kept.items.extend(after.into_iter().skip(skip));
             kept.imports.extend(enums.imports);
             kept.traits.extend(enums.traits);
+            kept.rejected.extend(enums.rejected);
             kept
         })
         .collect()
@@ -333,6 +336,50 @@ pub(super) fn split(name: &str) -> (String, &str) {
     })
     .flatten()
     .unwrap_or((String::new(), name))
+}
+
+/// A module of the program as every round writes it (`Gen::module`): its package, its path from
+/// the crate root, and the types and the methods of the package, in index order.
+pub(super) struct Plan {
+    package: String,
+    path: Vec<String>,
+    types: Vec<usize>,
+    methods: Vec<usize>,
+}
+
+/// The program's modules in the order they are written, one per package: the crate root first,
+/// and each module before the modules inside it, which are in the order of their names.
+pub(super) fn plans(class: &Class) -> Vec<Plan> {
+    let packages = all_packages(class);
+    let mut members: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
+    for (index, decl) in class.types.iter().enumerate() {
+        members.entry(decl.package.as_str()).or_default().0.push(index);
+    }
+    for (index, m) in class.methods.iter().enumerate() {
+        members.entry(class.types[m.class].package.as_str()).or_default().1.push(index);
+    }
+    fn add(
+        package: &str,
+        path: Vec<String>,
+        packages: &BTreeSet<String>,
+        members: &mut HashMap<&str, (Vec<usize>, Vec<usize>)>,
+        plans: &mut Vec<Plan>,
+    ) {
+        let (types, methods) = members.remove(package).unwrap_or_default();
+        plans.push(Plan { package: package.to_string(), path: path.clone(), types, methods });
+        let prefix = if package.is_empty() { String::new() } else { format!("{package}.") };
+        let children = packages
+            .iter()
+            .filter(|p| p.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('.')));
+        for child in children {
+            let mut child_path = path.clone();
+            child_path.push(module_name(&child[prefix.len()..]));
+            add(child, child_path, packages, members, plans);
+        }
+    }
+    let mut plans = Vec::new();
+    add("", Vec::new(), &packages, &mut members, &mut plans);
+    plans
 }
 
 /// Whether class `name` is an item of the crate's root named by its simple name: the standard
@@ -460,28 +507,6 @@ impl<'a> Gen<'a> {
         format!("{}{}", split(owner).0, self.fn_names[index])
     }
 
-    /// The whole program as modules, one per package, in the order they are written (the crate
-    /// root first), before their `use` lines are found (`finish`). With `kept`, the first round's
-    /// modules, it writes only the enum items of class types, which go among those (`merge`).
-    pub(super) fn program(&mut self, live: &[bool], kept: Option<&[Written]>) -> Vec<Written> {
-        let packages = all_packages(self.class);
-        // The types of each package, and the methods of its types, in index order.
-        let mut members: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
-        for (index, decl) in self.class.types.iter().enumerate() {
-            members.entry(decl.package.as_str()).or_default().0.push(index);
-        }
-        for (index, m) in self.class.methods.iter().enumerate() {
-            members.entry(self.class.types[m.class].package.as_str()).or_default().1.push(index);
-        }
-        self.package_types =
-            members.iter().map(|(p, (types, _))| (p.to_string(), std::rc::Rc::new(types.clone()))).collect();
-        self.package_methods =
-            members.into_iter().map(|(p, (_, methods))| (p.to_string(), std::rc::Rc::new(methods))).collect();
-        let mut modules = Vec::new();
-        self.module("", Vec::new(), live, &packages, kept, &mut modules);
-        modules
-    }
-
     /// The program's modules as a tree, `header` starting the crate root, and the methods written
     /// with a call that throws inside a closure (`Gen::closures`), in the order of the items.
     pub(super) fn finish(&mut self, header: String, written: Vec<Written>) -> (ModuleTree, Vec<Error>) {
@@ -601,25 +626,16 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The module of a package, then the modules inside it, into `modules`. With `kept`, the
-    /// first round's modules, only the enum items of class types (see `program`).
-    fn module(
-        &mut self,
-        package: &str,
-        path: Vec<String>,
-        live: &[bool],
-        packages: &BTreeSet<String>,
-        kept: Option<&[Written]>,
-        modules: &mut Vec<Written>,
-    ) {
+    /// The module of `plan`, before its `use` lines are found (`finish`). With `kept_module`,
+    /// the first round's, only the enum items of class types, which go among its items
+    /// (`merge`).
+    pub(super) fn module(&mut self, plan: &Plan, live: &[bool], kept_module: Option<&Written>) -> Written {
         let class = self.class;
+        let Plan { package, path, types, methods } = plan;
         set_current(package);
-        let kept_module = kept.map(|kept| &kept[modules.len()]);
         let outer = std::mem::take(&mut self.out);
         let outer_traits = std::mem::take(&mut self.traits);
         self.indent = 0;
-        let types = self.package_types.get(package).cloned().unwrap_or_default();
-        let methods = self.package_methods.get(package).cloned().unwrap_or_default();
         let mut items: Vec<WrittenItem> = Vec::new();
         // Each piece the generator writes is an item: the text it added, and what it named.
         let write = |g: &mut Self, piece: Piece, items: &mut Vec<WrittenItem>| {
@@ -688,7 +704,7 @@ impl<'a> Gen<'a> {
         self.out = outer;
         let traits = std::mem::replace(&mut self.traits, outer_traits);
         let imports = with(|r| std::mem::take(&mut r.imports)).unwrap_or_default();
-        modules.push(Written {
+        Written {
             package: package.to_string(),
             path: path.clone(),
             items,
@@ -696,15 +712,7 @@ impl<'a> Gen<'a> {
             imports,
             traits,
             replaces,
-        });
-        let prefix = if package.is_empty() { String::new() } else { format!("{package}.") };
-        let children = packages
-            .iter()
-            .filter(|p| p.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('.')));
-        for child in children {
-            let mut child_path = path.clone();
-            child_path.push(module_name(&child[prefix.len()..]));
-            self.module(child, child_path, live, packages, kept, modules);
+            rejected: std::mem::take(&mut self.rejected),
         }
     }
 
