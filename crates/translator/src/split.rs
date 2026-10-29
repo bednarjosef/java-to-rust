@@ -6,9 +6,11 @@
 //! classes but between declarations and code, as C splits headers from sources:
 //!
 //! - The **header** crate has every module and item of the program, made `pub`: the structs,
-//!   enums, statics and traits, and every function and method. A function or method whose code
-//!   can move (`movable`) keeps only its signature there; its body calls a function declared in an
-//!   `extern "Rust"` block of its module, by a name of its own (`j2r_..`).
+//!   enums, statics and traits, and every function and method. A function whose code can move
+//!   (`movable`) is only declared there, in an `extern "Rust"` block of its module, by its own
+//!   name, with the name of its code (`#[link_name = "j2r_.."]`). A method whose code can move
+//!   keeps only its signature; its body calls a function declared in that block, by the name of
+//!   its code.
 //! - Each **body** crate depends on the header alone and defines those functions, with
 //!   `#[unsafe(no_mangle)]`, for the items given to it. A module of a body crate re-exports its
 //!   header module (`pub use header::a::b::*`) and has the module's own `use` lines, so the moved
@@ -579,32 +581,51 @@ fn split_module(
                 let can_move = movable(&f.sig, text);
                 // A `#[cold]` function is not inlined, so it moves whatever its size.
                 let moves = can_move && !(inlinable(&f.attrs) && small(&text[block.clone()]));
-                // A function kept in the header for its size, and the header's call of a moved
-                // one, is inlined where it is called. The mark goes before the edit that makes
-                // the function public, at the same place.
-                if can_move && inlinable(&f.attrs) {
-                    edits.push(mark_inline(&f.vis, &f.sig));
-                }
-                publish(&f.vis, sig_start(&f.sig), &mut edits);
-                if moves {
+                if !moves {
+                    // A function kept in the header for its size is inlined where it is called.
+                    // The mark goes before the edit that makes the function public, at the same
+                    // place.
+                    if can_move && inlinable(&f.attrs) {
+                        edits.push(mark_inline(&f.vis, &f.sig));
+                    }
+                    publish(&f.vis, sig_start(&f.sig), &mut edits);
+                } else {
                     let name = f.sig.ident.to_string();
                     let symbol = symbol(path, "", &name, used);
                     key.get_or_insert_with(|| symbol.clone());
-                    let (params, args) = rename_params(&f.sig, text, &mut edits, None);
+                    let (params, _) = rename_params(&f.sig, text, &mut Vec::new(), None);
                     let ret = at_or_empty(text, &f.sig.output);
-                    edits.push(Edit {
-                        start: block.start,
-                        end: block.end,
-                        text: format!("{{ {symbol}({args}) }}"),
-                    });
-                    externs.push_str(&format!("    safe fn {symbol}({params}){ret};\n"));
-                    // `#[inline]` does nothing on an exported function.
-                    let attrs: String = f
+                    // `#[inline]` does nothing on an exported function, and is not allowed on a
+                    // declaration.
+                    let kept: Vec<&str> = f
                         .attrs
                         .iter()
-                        .filter(|a| !a.path().is_ident("inline"))
-                        .map(|a| format!("{}\n", at(text, a.span())))
+                        .map(|a| at(text, a.span()))
+                        .filter(|a| {
+                            !(a.starts_with("#[inline")
+                                || a.starts_with("#[cfg_attr") && has_word(a, "inline"))
+                        })
                         .collect();
+                    // The function is its declaration, by its own name, which callers name as
+                    // they did: a function in the header that called the declaration would cost
+                    // rustc three times what the declaration does (`docs/several-crates.md`).
+                    let vis = match f.vis {
+                        syn::Visibility::Inherited => None,
+                        _ => Some(f.vis.span()),
+                    };
+                    let start = [f.attrs.first().map(|a| a.span()), vis]
+                        .into_iter()
+                        .flatten()
+                        .map(|s| s.byte_range().start)
+                        .chain([sig_start(&f.sig)])
+                        .min()
+                        .unwrap_or(block.start);
+                    edits.push(Edit { start, end: block.end, text: String::new() });
+                    let decl_attrs: String = kept.iter().map(|a| format!("    {a}\n")).collect();
+                    externs.push_str(&format!(
+                        "{decl_attrs}    #[link_name = \"{symbol}\"]\n    pub safe fn {name}({params}){ret};\n"
+                    ));
+                    let attrs: String = kept.iter().map(|a| format!("{a}\n")).collect();
                     let inputs = f.sig.inputs.span().byte_range();
                     let inputs = if f.sig.inputs.is_empty() { "" } else { &text[inputs] };
                     let code = &text[block];
@@ -927,7 +948,8 @@ mod tests {
     }
 
     /// A small function or method keeps its code in the header, inlined where an optimized build
-    /// calls it; a larger one moves, and the header's call of it is inlined so.
+    /// calls it; a larger one moves: a function is then declared alone, and the header's call of
+    /// a method is inlined so.
     #[test]
     fn small_functions_stay_in_the_header() {
         let large = (0..40).map(|i| format!("    let v{i} = x + {i};\n")).collect::<String>();
@@ -936,19 +958,25 @@ mod tests {
              #[cold]\n#[inline(never)]\nfn slow() {{}}\n\n\
              pub struct S;\n\nimpl S {{\n    fn size(&self) -> i32 {{ 3 }}\n    fn total(&self, x: i32) -> i32 {{\n{large}        x\n    }}\n}}\n"
         );
-        let split = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
-            .unwrap()
-            .split;
+        let part = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
+            .unwrap();
+        let split = &part.split;
         let inline = "#[cfg_attr(not(debug_assertions), inline)] ";
         let header = &split.header;
         assert!(header.contains(&format!("{inline}pub fn get(x: i32) -> i32 {{ x + 1 }}")), "{header}");
-        assert!(
-            header.contains(&format!("{inline}pub fn sum(p0: i32) -> i32 {{ j2r__p__sum(p0) }}")),
-            "{header}"
-        );
+        assert!(!header.contains("fn sum(") && !header.contains("fn slow("), "{header}");
         assert!(header.contains(&format!("{inline}pub fn size(&self) -> i32 {{ 3 }}")), "{header}");
         assert!(header.contains(&format!("{inline}pub fn total(&self, p0: i32)")), "{header}");
-        assert!(header.contains("#[inline(never)]\npub fn slow() { j2r__p__slow() }"), "{header}");
+        // A moved function is its declaration, which keeps its attributes but `#[inline]`.
+        let externs = &part.externs;
+        assert!(
+            externs.contains("    #[link_name = \"j2r__p__sum\"]\n    pub safe fn sum(p0: i32) -> i32;"),
+            "{externs}"
+        );
+        assert!(
+            externs.contains("    #[cold]\n    #[link_name = \"j2r__p__slow\"]\n    pub safe fn slow();"),
+            "{externs}"
+        );
         let moved: String = split.pieces.iter().map(|p| p.text.as_str()).collect();
         assert!(!moved.contains("fn get") && !moved.contains("body_size"), "{moved}");
         assert!(moved.contains("fn j2r__p__sum") && moved.contains("fn body_total"), "{moved}");
