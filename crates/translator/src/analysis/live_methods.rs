@@ -701,12 +701,11 @@ impl Walk<'_> {
         }
         let targets = self.values.targets(self.class, m, ctx, x);
         let mut memos = self.memos.borrow_mut();
-        let list = match memos.lists.get(targets.as_slice()) {
+        let list = match memos.lists.get(&*targets) {
             Some(list) => list.clone(),
             None => {
-                let list: Targets = targets.into();
-                memos.lists.insert(list.clone());
-                list
+                memos.lists.insert(targets.clone());
+                targets
             }
         };
         memos.targets.insert((x.id, ctx), list.clone());
