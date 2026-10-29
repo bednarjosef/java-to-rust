@@ -906,7 +906,7 @@ real generic (a class or method of them, or one of their type variables, while t
 field initializers or initializer block was lowered), and erase only the real generics that
 code used before the rejection: code that uses none is lowered the same without them, and so is
 a class the program does not have (`type`, `new`, `extending` or `implementing` a missing
-class).
+class) and asking for the caller (`getCallerClass`) where that is not supported.
 
 A type variable of a real generic is a synthetic type of kind `TypeKind::Param`, named
 `Owner#T`, with no members and no implementors, so every analysis sees an opaque value that is
