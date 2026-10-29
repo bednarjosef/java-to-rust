@@ -137,7 +137,6 @@ pub fn generate_all_stubbing(
 ) -> Result<ModuleTree, Vec<Error>> {
     SHARED_STRINGS.set(class.shared_strings);
     let setup = Setup::new(class, facts);
-    let checked = enums::checked_value_ofs(class, facts);
     let start = std::time::Instant::now();
     let mut kept = None;
     let wanted = Needs::new();
@@ -172,7 +171,7 @@ pub fn generate_all_stubbing(
         // nothing else of the setup does where the stubs replace bodies alone.
         let mut stubbed = Setup::new(class, facts);
         let live = std::mem::replace(&mut stubbed.live, setup.live.clone());
-        if stubbed != setup || enums::checked_value_ofs(class, facts) != checked {
+        if stubbed != setup {
             if crate::timings::enabled() {
                 eprintln!("timing: codegen: the stubs change what the whole program is written with");
             }
@@ -492,6 +491,9 @@ struct Setup {
     /// `Gen::conversion_names` and `Gen::stack_forms`, which a generator finds from the rest.
     conversion_names: std::sync::Arc<[String]>,
     stack_forms: HashSet<usize>,
+    /// The enums whose `valueOf` a `catch` or `finally` sees fail (`enums::checked_value_ofs`),
+    /// found once rather than by each round's generators.
+    checked_value_ofs: HashSet<&'static str>,
 }
 
 impl Setup {
@@ -534,6 +536,7 @@ impl Setup {
             plans: modules::plans(class),
             conversion_names: std::sync::Arc::from([]),
             stack_forms: HashSet::new(),
+            checked_value_ofs: enums::checked_value_ofs(class, facts),
         };
         let wanted = Needs::new();
         let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
@@ -651,7 +654,7 @@ impl<'a> Gen<'a> {
             variant_lists: Default::default(),
             enum_variant_lists: Default::default(),
             variant_types: Default::default(),
-            checked_value_ofs: Default::default(),
+            checked_value_ofs: &setup.checked_value_ofs,
             group_names: &setup.group_names,
             receiver_sets: &setup.receiver_sets,
             conversion_names: setup.conversion_names.clone(),
@@ -834,7 +837,7 @@ struct Gen<'a> {
     /// changes that (`generate_all_stubbing`).
     variant_types: std::cell::RefCell<HashSet<usize>>,
     /// The enums whose `valueOf` a `catch` or `finally` sees fail (see `enums::checked_value_of`).
-    checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
+    checked_value_ofs: &'a HashSet<&'static str>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: &'a HashMap<usize, String>,
     /// The sets of classes in `Class::receivers`, by their key (`receiver_key`).

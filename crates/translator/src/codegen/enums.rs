@@ -276,8 +276,7 @@ impl<'a> Gen<'a> {
 
     /// Whether a `valueOf` of the enum `index` is somewhere a `catch` or `finally` sees its failure.
     fn checked_value_of(&self, index: usize) -> bool {
-        let checked = self.checked_value_ofs.get_or_init(|| checked_value_ofs(self.class, self.facts));
-        checked.contains(self.class.types[index].name.as_str())
+        self.checked_value_ofs.contains(self.class.types[index].name.as_str())
     }
 
     /// `try_enum_value_of`, the checked form of `enum_value_of`, whose failure is an exception the
