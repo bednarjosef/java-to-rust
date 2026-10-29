@@ -237,7 +237,8 @@ names and call keys are copied only when an item is made of them; a field of a t
 found by its first byte before its whole name (`value::Map::search`). A stale walk stops as
 soon as it goes stale, as all it reached is thrown away. Reflection's lookups use an index of
 the declared methods and fields that the walk keeps as it declares them, and the check that
-streams stay sequential indexes calls by the names in javac's symbols without copying them.
+streams stay sequential indexes calls by the names in javac's symbols without copying them, and
+copies the key of a reached method, field or class only when it was not indexed yet.
 Whether the records' members changed with a round's units is told by comparing what completing
 them would write (which accessors and what they override, whether `hashCode` and `equals` are
 written, which components are plain values; `javac::Completion`), decided by the functions
@@ -299,7 +300,8 @@ of every target's return, so that it runs again only when the join grows. A read
 element joins every element place, one per element type; that join is kept too, grown with the
 places. The analysis reaches the same facts, as the smallest set closed under its rules does not
 depend on the order, and javac's census is byte for byte the same. On javac its readers go from
-442,000 to 199,000, and each run of it from about 6.7 s to 5.5 s.
+442,000 to 199,000, and each run of it takes about a sixth less time (8.2 to 6.7 s on average
+over four runs, on a busy machine).
 
 **Early static reads by groups.** `analysis/early_reads.rs` walks, for each class with an eager
 static initializer, what each statement of the initializer runs. It used to walk method by method
