@@ -236,9 +236,11 @@ pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + 
 /// (`Thread.installShutdown0()`): a function that starts the hooks and waits until they end.
 static SHUTDOWN_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
-/// `Thread.installShutdown0()`: the program runs `run` as it exits.
+/// `Thread.installShutdown0()`: the program runs `run` as it exits, and as `SIGTERM`, `SIGINT`
+/// or `SIGHUP` ends it.
 pub fn set_shutdown_hook(run: fn()) {
     *lock(&SHUTDOWN_HOOK) = Some(run);
+    crate::signals::install();
 }
 
 /// The start of the program's exit, Java's shutdown sequence: the shutdown hooks run, on the

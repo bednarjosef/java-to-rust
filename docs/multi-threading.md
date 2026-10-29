@@ -654,8 +654,11 @@ field that is not `volatile` asks for more (section 7).
   `DeleteOnExitHook` registers) are the translator's `Thread.registerShutdownHook`'s, kept by
   slot with the JDK's checks: the exit runs them in the order of their slots, the program's hooks
   in slot 1 as the JDK's `ApplicationShutdownHooks` does, so the files go after every hook of the
-  program has ended. `Runtime.halt` runs none, as in Java. A signal (`SIGINT`, `SIGTERM`) ends
-  the process without running them, where Java runs them; and an exit while the hooks run ends
+  program has ended. `Runtime.halt` runs none, as in Java. `SIGTERM`, `SIGINT` and `SIGHUP`
+  (unless it is ignored, as under `nohup`) end a program with hooks as the JDK's `Terminator`
+  does: a thread named `SIGTERM handler` (`SIGINT`, `SIGHUP`) exits with status 128 + the
+  signal, running the hooks; a later signal changes nothing (`runtime/src/signals.rs`). A
+  program without hooks ends as the signal ends any process. An exit while the hooks run ends
   the process at once, where Java's blocks.
 - `InterruptedException`, `IllegalMonitorStateException` and `IllegalThreadStateException` are
   standard classes of `Standard.java`.
