@@ -23,7 +23,7 @@ use crate::analysis::closures;
 
 /// The method-level state of the generator, set aside while a closure's body is written inside
 /// another method.
-struct Saved {
+struct Saved<'a> {
     method: usize,
     ret: Type,
     throwing: bool,
@@ -51,7 +51,7 @@ struct Saved {
     out: String,
     indent: usize,
     guarded: bool,
-    steady: Option<strings::Steady>,
+    steady: Option<strings::SteadyOf<'a>>,
     chain: bool,
     formatting: bool,
     printing: bool,
@@ -492,7 +492,7 @@ impl<'a> Gen<'a> {
         self.object_type(&self.class.types[t].name)
     }
 
-    fn set_aside(&mut self) -> Saved {
+    fn set_aside(&mut self) -> Saved<'a> {
         Saved {
             method: self.method,
             ret: self.ret,
@@ -531,7 +531,7 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn restore(&mut self, s: Saved) {
+    fn restore(&mut self, s: Saved<'a>) {
         self.method = s.method;
         self.ret = s.ret;
         self.throwing = s.throwing;

@@ -280,7 +280,11 @@ impl Hierarchy {
 
     /// The root of the class tree of `t`: its topmost superclass in the program.
     pub fn root(&self, t: usize) -> usize {
-        self.ancestors(t).last().copied().unwrap_or(t)
+        let mut at = t;
+        while let Some(s) = self.superclass[at] {
+            at = s;
+        }
+        at
     }
 
     /// The concrete classes of the class tree of `t`, which decide immutability together.
