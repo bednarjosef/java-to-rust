@@ -406,8 +406,10 @@ A translated program is closed: it knows all its classes. So:
   program, or the descriptor of an array of one, throws `ClassNotFoundException` when the call
   runs.
 - `(T) Class.forName(name).getDeclaredConstructor().newInstance()` with a computed name is a
-  `switch` over the classes whose binary names reachable code writes as string literals
-  (`program/reach/by_name.rs`, `lower/by_name.rs`); any other name throws a
+  `switch` over the classes whose binary names reachable code writes as string literals, or
+  makes of a constant package, one computed part and a constant rest of a name (`URL`'s
+  `"sun.net.www.protocol." + protocol + ".Handler"` names every protocol's handler in the
+  sources) (`program/reach/by_name.rs`, `lower/by_name.rs`); any other name throws a
   `ClassNotFoundException` that says so (`Builtin::UnknownClass`). A computed
   `Class.forName(module, name)` finds the locale data classes of the root locale, `en` and
   `en_US` (`Reach::found_by_name`), and `null` for any other name, as for a bundle the JDK lacks.

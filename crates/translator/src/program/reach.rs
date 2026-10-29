@@ -15,6 +15,7 @@
 
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 
 mod by_name;
 mod initialize;
@@ -28,7 +29,7 @@ mod stubs;
 
 pub use by_name::{
     array_for_name, class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes,
-    module_for_name,
+    module_for_name, name_pattern,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
 pub use native_image::{ReflectEntry, reflect_config};
@@ -2811,6 +2812,8 @@ pub struct Rounds<'t> {
     stays_sequential: bool,
     /// The locale data classes of the libraries (`Walk::locale_data`).
     locale_data: Vec<String>,
+    /// The source roots (`Walk::class_roots`).
+    class_roots: Vec<PathBuf>,
     /// The service providers of the sources (`Walk::providers`).
     providers: Vec<super::modules::ServiceProvider>,
     /// The entries of the roots' reflection metadata (`Walk::reflect_config`).
@@ -2836,6 +2839,7 @@ impl<'t> Rounds<'t> {
             check: sequential::Index::default(),
             stays_sequential: true,
             locale_data: Vec::new(),
+            class_roots: Vec::new(),
             providers: Vec::new(),
             reflect_config: Vec::new(),
             parallel: None,
@@ -2871,6 +2875,13 @@ impl<'t> Rounds<'t> {
     /// classes of the libraries (`by_name::locale_data_classes`).
     pub fn with_locale_data(mut self, classes: Vec<String>) -> Rounds<'t> {
         self.locale_data = classes;
+        self
+    }
+
+    /// Reachability in which a class name that code makes of a prefix, a computed part and a
+    /// suffix names the classes of these source roots that fit it (`by_name::name_pattern`).
+    pub fn with_class_roots(mut self, roots: Vec<PathBuf>) -> Rounds<'t> {
+        self.class_roots = roots;
         self
     }
 
@@ -2918,7 +2929,7 @@ impl<'t> Rounds<'t> {
                     &self.main,
                     true,
                     self.string_array_writes,
-                    &self.locale_data,
+                    (&self.locale_data, &self.class_roots),
                     (&self.providers, &self.reflect_config),
                     self.asked.clone(),
                 )?;
@@ -2940,7 +2951,7 @@ impl<'t> Rounds<'t> {
                     &self.main,
                     false,
                     self.string_array_writes,
-                    &self.locale_data,
+                    (&self.locale_data, &self.class_roots),
                     (&self.providers, &self.reflect_config),
                     self.asked.clone(),
                 )?;
@@ -3106,6 +3117,10 @@ struct Walk<'t> {
     /// can find (`by_name::locale_data_classes`), and whether reachable code has one.
     locale_data: Vec<String>,
     finds_locale_data: bool,
+    /// The source roots, in which a class name that code makes of a prefix, a computed part and
+    /// a suffix finds the classes it can name (`by_name::name_pattern`), and the patterns seen.
+    class_roots: Vec<PathBuf>,
+    patterns: HashSet<(String, String)>,
     /// Whether reachable code finds a class by a name it computes, `Class.forName(name)`, which
     /// initializes every class that it can find (`by_name.rs`).
     finds_named: bool,
@@ -3270,7 +3285,7 @@ impl<'t> Walk<'t> {
         main: &str,
         sequential: bool,
         string_array_writes: bool,
-        locale_data: &[String],
+        (locale_data, class_roots): (&[String], &[PathBuf]),
         (providers, reflect_config): (&[super::modules::ServiceProvider], &[ReflectEntry]),
         asked: Option<HashSet<String>>,
     ) -> Result<Walk<'t>, String> {
@@ -3279,6 +3294,7 @@ impl<'t> Walk<'t> {
             asked,
             why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::new()),
             locale_data: locale_data.to_vec(),
+            class_roots: class_roots.to_vec(),
             providers: providers.to_vec(),
             config_pending: (0..reflect_config.len()).collect(),
             reflect_config: reflect_config.to_vec(),
@@ -3322,6 +3338,7 @@ impl<'t> Walk<'t> {
             overriders: std::mem::take(&mut self.overriders),
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
+            class_roots: std::mem::take(&mut self.class_roots),
             providers: std::mem::take(&mut self.providers),
             config_pending: (0..self.reflect_config.len()).collect(),
             reflect_config: std::mem::take(&mut self.reflect_config),
@@ -4216,6 +4233,11 @@ impl<'t> Walk<'t> {
             && let Some(literal) = value["value"].as_str()
         {
             self.named(literal);
+        }
+        if kind == "PLUS"
+            && let Some(pattern) = name_pattern(value)
+        {
+            self.named_by_pattern(pattern);
         }
         // A lambda creates an object of a class that implements its interface with the
         // interface's abstract method.

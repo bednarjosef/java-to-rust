@@ -453,6 +453,7 @@ fn load_in_rounds(
         let rounds = reach::Rounds::new(&program.main)
             .asking()
             .with_locale_data(locale_data.clone())
+            .with_class_roots(program.sources.iter().chain(&program.libraries).cloned().collect())
             .with_providers(providers.clone())
             .with_reflect_config(reflect_config.clone());
         if string_array_writes { rounds.with_string_array_writes() } else { rounds }
@@ -903,6 +904,7 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     let mut rounds = reach::Rounds::new(&program.main)
         .with_locale_data(reach::locale_data_classes(&program.libraries))
+        .with_class_roots(program.sources.iter().chain(&program.libraries).cloned().collect())
         .with_providers(modules::service_providers(program.sources.iter().chain(&program.libraries)))
         .with_reflect_config(reach::reflect_config(program.sources.iter().chain(&program.libraries)));
     rounds.add(&trees).map_err(fail)?;
