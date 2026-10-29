@@ -711,7 +711,9 @@ impl Gen<'_> {
         if labels.len() <= BYTE_LABELS {
             return text;
         }
+        // A label written twice (the resources of several jars) matches its first case.
         labels.sort();
+        labels.dedup_by(|later, first| later.0 == first.0);
         let entries: Vec<String> =
             labels.iter().map(|(bytes, i)| format!("({}, {i})", byte_string(bytes))).collect();
         self.indexed = true;
