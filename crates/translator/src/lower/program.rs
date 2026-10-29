@@ -196,15 +196,20 @@ fn lower_with<'t>(
     // Whether each rejection may go away with the Rust generics erased: it is in code that uses
     // them (`Lowering::uses_real`), and not of a missing class (`names_missing_class`), which
     // stays missing. Code that uses none of them is lowered the same without them.
-    let generic: Vec<bool> =
-        rejected.iter().map(|(.., error, uses_real)| *uses_real && !names_missing_class(error)).collect();
-    let rejected: Vec<Rejected> = rejected
-        .into_iter()
-        .map(|(t, anchor, method, error, _)| Rejected { unit: unit(t), anchor, error, ty: t, method })
+    let generic: Vec<bool> = rejected
+        .iter()
+        .map(|(.., error, uses_real)| !uses_real.is_empty() && !names_missing_class(error))
         .collect();
-    // As without a census, an error with Rust generics is retried with all of them erased, but
-    // only an error in code that can run (`analysis::live_methods`) and that may go away without
-    // them (`generic`): the others leave the program as it is, and the Rust generics may stay. A
+    let (rejected, uses): (Vec<Rejected>, Vec<super::real_generics::Real>) = rejected
+        .into_iter()
+        .map(|(t, anchor, method, error, uses)| {
+            (Rejected { unit: unit(t), anchor, error, ty: t, method }, uses)
+        })
+        .unzip();
+    // An error with Rust generics is retried without the Rust generics that the rejected code
+    // uses (where a lowering without a census retries with all of them erased), but only an error
+    // in code that can run (`analysis::live_methods`) and that may go away without them
+    // (`generic`): the others leave the program as it is, and the Rust generics may stay. A
     // lowering that noted covariant arrays is lowered again whatever it found
     // (`real_generics::retry`), so its methods that can run are not looked for; nor are they for
     // one with Rust generics that failed (`real_generics::verify`) and no such error, which is
@@ -241,6 +246,13 @@ fn lower_with<'t>(
         .map(|(r, _)| r)
         .or(rejected.first())
         .map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
+    // The Rust generics that the code of the errors retried for uses, which are erased.
+    let mut erased = super::real_generics::Real::default();
+    for ((r, uses), _) in rejected.iter().zip(&uses).zip(&generic).filter(|(_, g)| **g) {
+        if live.as_ref().is_none_or(|l| l.runs(r.ty, r.method)) {
+            erased.extend(uses);
+        }
+    }
     let mut sink = census.borrow_mut();
     let string_array_writes = lowering.string_array_writes.take();
     sink.wrote_string_arrays |= !string_array_writes.is_empty();
@@ -252,7 +264,10 @@ fn lower_with<'t>(
             if crate::timings::enabled() {
                 eprintln!("timing: lowering with Rust generics rejects code that can run: {}", error.message);
             }
-            Err((None, error))
+            lowered.map(|(class, used, mut failed)| {
+                failed.extend(&erased);
+                (class, used, failed)
+            })
         }
         _ => lowered,
     }

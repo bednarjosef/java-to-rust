@@ -477,6 +477,109 @@ fn covariant_arrays_found_step_by_step_take_one_more_lowering() {
     assert_eq!(attempts, 2, "{stderr}");
 }
 
+/// A Rust generic whose values go to `System.arraycopy` (`copy`) is failed where lowering meets
+/// it, so the lowering that notes `Block[]` drops it too: the program is lowered twice. Were the
+/// call rejected instead, the next lowering would erase every Rust generic, `requireNonNull`'s
+/// among them, whose `Query[]` would then become an `Object` that meets the `(Object[])` cast,
+/// and be lowered twice more.
+const ARRAYCOPY_OF_A_TYPE_VARIABLE: &str = r#"
+import java.util.Objects;
+
+public class Main {
+    static class Block { int id; Block(int i) { id = i; } }
+    static class Query { String name; Query(String n) { name = n; } }
+
+    static <T> T copy(T source, T dest, int length) {
+        System.arraycopy(source, 0, dest, 0, length);
+        return dest;
+    }
+
+    static <T> T pick(T a, T b, boolean first) { return first ? a : b; }
+
+    static int count(Query... queries) {
+        Objects.requireNonNull(queries, "queries");
+        return queries.length;
+    }
+
+    static Object hold(Object o) { return o; }
+
+    public static void main(String[] args) {
+        Block[] blocks = { new Block(1) };
+        Object[] objects = blocks;
+        int[] copied = copy(new int[] { 1, 2, 3 }, new int[3], 3);
+        Object held = hold(new Object[] { "x" });
+        Object[] back = (Object[]) held;
+        System.out.println(objects.length + " " + copied[2] + " " + back[0] + " " + count(new Query("q"))
+            + " " + pick("a", "b", false));
+    }
+}
+"#;
+
+/// A rejection that can run, in code that uses the Rust generic `id`, erases `id` alone: `pick`
+/// stays a Rust generic.
+const REJECTED_WITH_A_RUST_GENERIC: &str = r#"
+public class Main {
+    static <T> T id(T x) { return x; }
+
+    static <T> T pick(T a, T b, boolean first) { return first ? a : b; }
+
+    static void odd() {
+        String s = id("a");
+        System.out.println(s + System.identityHashCode(5));
+    }
+
+    public static void main(String[] args) {
+        System.out.println(pick("a", "b", false));
+        odd();
+    }
+}
+"#;
+
+#[test]
+fn a_rust_generic_that_fails_erases_only_itself() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let translate = |name: &str, java: &str| {
+        let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+        let sources = work.join("src");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("Main.java"), java).unwrap();
+        let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+            .args(["--timings", "--main", "Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join("main.rs"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr).into_owned();
+        (
+            translated.status.success(),
+            stderr,
+            std::fs::read_to_string(work.join("main.rs")).unwrap_or_default(),
+        )
+    };
+    let (ok, stderr, rust) = translate("whole-program-arraycopy-generic", ARRAYCOPY_OF_A_TYPE_VARIABLE);
+    assert!(ok, "the translation failed:\n{stderr}");
+    let attempts = stderr
+        .lines()
+        .filter(|l| l.strip_prefix("timing: lowering attempt ").is_some_and(|l| l.contains(": ")))
+        .count();
+    assert_eq!(attempts, 2, "{stderr}");
+    for generic in ["fn pick<T", "fn require_non_null<T"] {
+        assert!(rust.contains(generic), "no {generic} in the translation:\n{stderr}");
+    }
+    let (_, stderr, _) = translate("whole-program-rejected-generic", REJECTED_WITH_A_RUST_GENERIC);
+    assert!(
+        stderr.contains("is lowered again without 0 of 0 Rust generic classes and 1 of 2 methods (Main.id)"),
+        "{stderr}"
+    );
+}
+
 /// A resource of a class of the JDK is not in the translation: `Character.getName` reads
 /// `uniName.dat`, a data file of the JDK that is generated when the JDK is built and is not in
 /// its sources, and the program ends there, naming it (`TranslatedModules.classResource`). The

@@ -163,7 +163,8 @@ How fast the translator itself runs in whole-program mode (`--main`, `--library`
 the environment variable `JAVA_TO_RUST_TIMINGS`) prints the time of each phase to standard error:
 javac with the number of units it attributed, reachability with its rounds, lowering (each
 attempt of the Rust generics, and why the next one is needed: the covariant arrays it noted, the
-generic classes and methods that failed, or an error that erases them all), the analyses and the
+generic classes and methods that failed, or an error that erases those its code uses, or all of
+them outside a census and a whole program), the analyses and the
 generator. A census run with `JAVA_TO_RUST_STOP_AFTER_LOWER=1` set exits once lowering is done,
 which times lowering alone on a program whose census takes long.
 
