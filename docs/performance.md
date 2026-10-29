@@ -505,7 +505,10 @@ for each other at the allocator: on javac's census from its checkpoint, eight th
 first round 3.1 s instead of 3.4 s, and each small round 0.3 s slower. With an arena for each
 thread (`M_ARENA_MAX` of 9) the first round takes 1.3 s and the generator 4.4 s instead of 7.4
 s, but the census's peak memory goes from 0.53 to 0.79 GB, 0.14 GB of that the analyses'
-threads; with mimalloc as the translator's allocator the first round takes 1.1 s, the generator
+threads. `MALLOC_ARENA_MAX` in the environment, which glibc reads itself, sets the number of
+arenas in place of the one: on javac's census from its checkpoint, four generator threads and
+five arenas take the generator's two passes from 6.0 to 3.5 s and the census from 25.6 to 21.3
+s, at a peak of 0.78 GB instead of 0.63 GB; with mimalloc as the translator's allocator the first round takes 1.1 s, the generator
 3.8 s (6.5 s on one thread) and the analyses 6.3 s instead of 7.9 s, at a peak of 0.64 GB (0.58
 GB on one thread). Plan: pick the allocator by a census of the Minecraft server, whose peak of 16
 GB must stay well under the machine's 24 GB, and then write on several threads by default.

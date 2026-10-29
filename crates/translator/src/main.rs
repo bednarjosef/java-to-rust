@@ -34,10 +34,13 @@ fn main() -> ExitCode {
     // The analyses run some steps on threads of their own (`analysis::analyze_from`). glibc gives
     // each thread an arena of its own, whose freed memory the others do not reuse: a third more
     // memory on javac's census. One arena keeps it as with one thread.
+    // `MALLOC_ARENA_MAX`, which glibc reads itself, sets another number.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: `mallopt` only sets a parameter of the allocator, before any other thread starts.
-    unsafe {
-        mallopt(M_ARENA_MAX, 1);
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        // SAFETY: `mallopt` only sets a parameter of the allocator, before any other thread starts.
+        unsafe {
+            mallopt(M_ARENA_MAX, 1);
+        }
     }
     let args = std::env::args().skip(1).collect();
     let translation = std::thread::Builder::new().stack_size(STACK).spawn(move || run(args));
