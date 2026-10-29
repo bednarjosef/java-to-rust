@@ -57,11 +57,13 @@ const MAX_BLOCKS: usize = HEAP_BYTES >> BLOCK_SHIFT;
 const MAX_SLOTS: usize = BLOCK / 16;
 const BITMAP_WORDS: usize = MAX_SLOTS / 64;
 
-/// The sizes of the slots of small blocks. Larger allocations take whole blocks.
-const SIZES: [u32; 40] = [
-    16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280,
-    1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384, 20480,
-    24576, 28672, 32768,
+/// The sizes of the slots of small blocks. Larger allocations take whole blocks. Up to 128 bytes,
+/// where most objects are, the sizes grow by 8 bytes, a handle or a `long`, so that an object
+/// takes at most 7 bytes more than it needs; above, by a quarter of a power of two.
+const SIZES: [u32; 47] = [
+    16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 160, 192, 224, 256, 320, 384, 448, 512,
+    640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192, 10240,
+    12288, 14336, 16384, 20480, 24576, 28672, 32768,
 ];
 const SIZE_COUNT: usize = SIZES.len();
 const LARGEST_SMALL: usize = 32768;
@@ -84,14 +86,14 @@ const PREFETCH_SPAN: usize = 4096;
 /// out, about a 64 KB block per thread and class of the larger sizes.
 const SPAN_BYTES: usize = 8192;
 
-/// The class of a size up to 1024 bytes, by `(size + 15) / 16`.
-static SMALL_CLASS: [u8; 65] = small_classes();
+/// The size index of a size up to 1024 bytes, by `(size + 7) / 8`.
+static SMALL_CLASS: [u8; 129] = small_classes();
 
-const fn small_classes() -> [u8; 65] {
-    let mut table = [0u8; 65];
+const fn small_classes() -> [u8; 129] {
+    let mut table = [0u8; 129];
     let mut i = 0;
-    while i <= 64 {
-        let size = i * 16;
+    while i <= 128 {
+        let size = i * 8;
         let mut c = 0;
         while (SIZES[c] as usize) < size {
             c += 1;
@@ -103,8 +105,9 @@ const fn small_classes() -> [u8; 65] {
 }
 
 /// The size index of a slot for `size` bytes aligned to `align`, or `None` for a large
-/// allocation. A slot is aligned to 16 bytes, and to its size when that is a power of two, so an
-/// alignment above 16 takes the smallest power of two that holds the size.
+/// allocation. A slot is aligned to 8 bytes, to 16 when its size is a multiple of 16, and to its
+/// size when that is a power of two, so an alignment of 16 takes a multiple of 16 and one above
+/// 16 the smallest power of two that holds the size.
 #[inline(always)]
 fn size_index(size: usize, align: usize) -> Option<usize> {
     if align > 16 {
@@ -114,8 +117,9 @@ fn size_index(size: usize, align: usize) -> Option<usize> {
         }
         return SIZES.iter().position(|&s| s as usize == wanted);
     }
+    let size = if align > 8 { size.next_multiple_of(16) } else { size };
     if size <= 1024 {
-        return Some(SMALL_CLASS[size.div_ceil(16)] as usize);
+        return Some(SMALL_CLASS[size.div_ceil(8)] as usize);
     }
     if size > LARGEST_SMALL {
         return None;
@@ -1816,7 +1820,11 @@ mod tests {
     fn sizes_take_the_smallest_class_that_holds_them() {
         assert_eq!(size_index(1, 1), Some(0));
         assert_eq!(size_index(16, 8), Some(0));
-        assert_eq!(size_index(17, 8), Some(1));
+        assert_eq!(size_index(17, 8).map(|i| SIZES[i]), Some(24));
+        assert_eq!(size_index(17, 16).map(|i| SIZES[i]), Some(32));
+        assert_eq!(size_index(24, 16).map(|i| SIZES[i]), Some(32));
+        assert_eq!(size_index(121, 8).map(|i| SIZES[i]), Some(128));
+        assert_eq!(size_index(129, 8).map(|i| SIZES[i]), Some(160));
         assert_eq!(size_index(1000, 8).map(|i| SIZES[i]), Some(1024));
         assert_eq!(size_index(1025, 8).map(|i| SIZES[i]), Some(1280));
         assert_eq!(size_index(32768, 8).map(|i| SIZES[i]), Some(32768));

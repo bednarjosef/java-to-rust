@@ -32,9 +32,12 @@ owned, and that Rust therefore never freed, is found unreachable too.
   measured difference on a system that gives them to every aligned range anyway. A free block
   whose memory stays keeps what it held, so a large allocation zeroes such blocks when it takes
   them.
-- **Small blocks** hold slots of one size: one of 40 sizes from 16 bytes to 32 KB. Allocations
-  that may hold pointers and those that cannot (an alignment below 8, as in the bytes of a
-  string) use blocks of their own, and the collector does not scan the second kind.
+- **Small blocks** hold slots of one size: one of 47 sizes from 16 bytes to 32 KB, in steps of
+  8 bytes up to 128, where most objects are, so that an object takes at most 7 bytes more than
+  it needs, and then of a quarter of a power of two. A slot is aligned to 8 bytes, and to 16 when
+  its size is a multiple of 16, which an allocation aligned to 16 takes. Allocations that may
+  hold pointers and those that cannot (an alignment below 8, as in the bytes of a string) use
+  blocks of their own, and the collector does not scan the second kind.
 - **Large allocations** take whole blocks.
 - **Colors.** A small block's first slot is at one of eight cache lines past the block's start,
   chosen by the block's number, and each large allocation starts at one of the 64 cache lines of

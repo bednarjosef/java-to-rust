@@ -161,15 +161,18 @@ made on the stack (`java::count_allocation`).
 
 ## Memory
 
-`scripts/benchmark.py` reports each side's peak resident memory beside its time. Five of the
+`scripts/benchmark.py` reports each side's peak resident memory beside its time. Six of the
 programs measure memory rather than time: `ReflectionTableMemory` (a reflection table of 14,400
 methods, of which three classes' are read), `LargeArrays` (arrays of 64, 128 and 256 KB alive
 together), `MonitoredObjects` (3 million small objects in a program that waits and notifies, of a
 class it locks, so every object keeps its monitor), `UnlockedObjects` (the same, of a class whose
-objects become `Object`s but no monitor site can lock) and `ManyThreadsAllocating` (32 threads
-that allocate arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak memory in
-MB, before and after the change that each measures (the median of three runs; of eight for
-`ManyThreadsAllocating`, 0.101 s before and 0.105 s after):
+objects become `Object`s but no monitor site can lock), `SmallObjects` (3 million objects of 24
+and 40 bytes alive together, then 30 million that die young) and `ManyThreadsAllocating` (32
+threads that allocate arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak
+memory in MB, before and after the change that each measures (the median of three runs; of eight
+for `ManyThreadsAllocating`, 0.101 s before and 0.105 s after; of ten for `SmallObjects`, 1.05 s
+before and 0.92 s after, against Java's 0.25 s, with 7.7 and 5.7 s of processor time across the
+collector's threads):
 
 | program               | before | after | Java |
 |-----------------------|-------:|------:|-----:|
@@ -177,6 +180,7 @@ MB, before and after the change that each measures (the median of three runs; of
 | LargeArrays           |  134.4 |  88.4 |  143 |
 | MonitoredObjects      |  124.5 |  76.6 |  148 |
 | UnlockedObjects       |  124.5 |  76.5 |  166 |
+| SmallObjects          |  153.2 | 145.6 |  734 |
 | ManyThreadsAllocating |  235.5 | 197.7 |  417 |
 
 ### Where the Minecraft server's memory went
@@ -228,17 +232,17 @@ The release trial of the server peaked at 1,498 MB on the bench (`minecraft-serv
     48 bytes against Java's 24, `BlockPos` (313,000) 32 against 24, `BlockState` 224 against
     104, DataFixerUpper's `ProductType`, `NamedType`, `SumType` and `TagType` 64 against 32. A
     handle is 8 bytes where Java's compressed references are 4, each object held a 16-byte lock
-    (now 8), and slots grow by 16 bytes where Java's objects grow by 8. From the furthest
+    (now 8), and slots grew by 16 bytes where Java's objects grow by 8. From the furthest
     nonzero word of each class's objects (slots that may hold pointers are zeroed when handed
     out), the 214 MB of objects reached through numbered handles take 200 MB with the 8-byte
     lock, 190 MB with no lock word in the classes no `synchronized`, `wait` or `notify`
-    reaches (as the translation now makes them; how many of the server's classes that frees
-    is not yet measured), and would take 185 MB with slot sizes in steps of 8 bytes to 128 as
-    well;
+    reaches, and 185 MB with slot sizes in steps of 8 bytes to 128 as well. The translation now
+    does both (docs/multi-threading.md 3.1, docs/collector.md; `UnlockedObjects` and
+    `SmallObjects` above); how much of it the server gains is not yet measured;
   - world generation's density buffers (`float[32768]` and `float[98304]`) come and go: up to
     120 MB of them in one dump, a few MB in another. Their pools drop a buffer unused for 20
     ticks, so they are not kept; Java's histogram was taken between them.
-- What remains larger than Java's: the handles and slot sizes above, a `java::Class` is an
+- What remains larger than Java's: the handles above, a `java::Class` is an
   88-byte value wherever it is held (a field, a boxed `Class` as an `Object`), a string field is
   a 24-byte `Vec` with its own copy of the text, and the heap keeps free blocks until a whole
   huge page of them is free (167 MB of free blocks in the sample).
