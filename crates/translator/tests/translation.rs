@@ -4193,7 +4193,8 @@ fn a_census_stubs_every_cast_the_generator_misses_in_one_round() {
     // A cast whose `ClassCastException` a `catch` sees, in the argument of a native that the
     // runtime lacks, is not written (the call is code that never runs), so the generator rejects
     // it (`Gen::check_casts`). Each such cast is rejected, not only the first, so that one round
-    // stubs both methods and the next passes.
+    // stubs both methods, and the next runs the generator again on the facts of the analyses,
+    // which run once.
     let peers = r#"package jdk.peers;
 
 public class Peers {
@@ -4266,7 +4267,7 @@ public class Main {
             "       2  catching the `ClassCastException` of this cast not supported yet\n          at jdk/peers/Peers.java:22:22, jdk/peers/Peers.java:26:18\n",
         ],
     );
-    assert_eq!(rounds, 2, "{}", census.report);
+    assert_eq!(rounds, 1, "{}", census.report);
 }
 
 #[test]

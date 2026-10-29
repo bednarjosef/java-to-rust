@@ -113,8 +113,10 @@ A large project will not translate on the first try; the work is to burn its blo
 the order that unblocks the most.
 
 - **Every blocker at once.** `--census` already runs past every rejection and counts what each
-  blocks. It must become fast enough for a large project: today it reruns the analyses after
-  each round of stubs, which took about an hour for the two `Scanner` programs.
+  blocks. It must become fast enough for a large project: it runs the analyses again after a
+  round of stubs only when a stub changed more than a method's body or an error stayed (see
+  docs/performance.md, "Facts kept across rounds of stubs"), and runs the generator again after
+  every round of stubs.
 - **A ranked list**: blockers by how many reached pieces each one blocks, which is the to-do list.
 - **An opt-in preview build** for exploring: rejected methods become stubs that end the program
   with "not translated: <method>" if they are ever reached, so the rest of the project can be
