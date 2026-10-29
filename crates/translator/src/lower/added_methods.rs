@@ -193,6 +193,7 @@ impl<'t> Lowering<'t> {
             type_params: Vec::new(),
             jdk_code: false,
             field_update: None,
+            added: true,
         }));
         for m in methods.iter_mut() {
             for s in &mut m.body {
