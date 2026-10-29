@@ -531,6 +531,15 @@ impl Messages<'_> {
                 };
                 add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
             }
+            // The length of the `CharSequence` of `new StringBuilder(seq)`, which the JDK's
+            // constructor asks for (`lower::sequence_texts`; `-g`, so the parameter has its name).
+            ExprKind::MethodCall { receiver, name, .. }
+                if name == "length"
+                    && matches!(&receiver.kind, ExprKind::Var(v) if v.starts_with(crate::lower::SEQUENCE)) =>
+            {
+                let message = "Cannot invoke \"java.lang.CharSequence.length()\" because \"seq\" is null";
+                out.insert(receiver.id, Some(message.to_string()));
+            }
             ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. }
                 if !self.class.methods[*r].is_static =>
             {

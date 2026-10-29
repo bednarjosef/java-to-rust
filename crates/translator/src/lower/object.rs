@@ -54,6 +54,9 @@ pub(super) struct ObjectIndexes {
     /// The type of `CharSequence`, after `Enum`'s, and of the first of its
     /// `CHAR_SEQUENCE_METHODS`, after `Number`'s, when the program uses it.
     pub(super) char_sequence: Option<NumberIndexes>,
+    /// Whether a class of the program is a `CharSequence` (`is_char_sequence`), so that a
+    /// `CharSequence` may be other than a string or a builder (see `lower::strings::append_sequence`).
+    pub(super) sequence_classes: bool,
     /// The index of `Enum`'s type, after `Number`'s, when the program uses it.
     pub(super) enumeration: Option<usize>,
     /// The index of `Record`'s type, after `CharSequence`'s, when the program uses it.
@@ -388,6 +391,10 @@ impl<'t> Lowering<'t> {
                     + usize::from(enumeration.is_some())
                     + usize::from(char_sequence.is_some()),
             );
+            let sequence_classes = char_sequence.is_some()
+                && (0..decl).any(|t| {
+                    self.types[t].node.kind() != "INTERFACE" && self.is_char_sequence(t).unwrap_or(false)
+                });
             self.object = Some(ObjectIndexes {
                 decl,
                 equals,
@@ -397,6 +404,7 @@ impl<'t> Lowering<'t> {
                 enumeration,
                 record,
                 char_sequence,
+                sequence_classes,
                 appendable,
             });
         }

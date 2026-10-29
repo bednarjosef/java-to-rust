@@ -154,6 +154,12 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.AbstractStringBuilder#append(java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#append(java.lang.CharSequence,int,int)java.lang.StringBuilder",
             "java.lang.StringBuffer#append(java.lang.CharSequence,int,int)java.lang.StringBuffer",
+            // A `CharSequence` whose length changes between its calls (`lower::sequence_texts`).
+            "java.lang.AbstractStringBuilder#append(java.lang.CharSequence)java.lang.AbstractStringBuilder",
+            "java.lang.StringBuilder#append(java.lang.CharSequence)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(java.lang.CharSequence)java.lang.StringBuffer",
+            "java.lang.StringBuilder#<init>(java.lang.CharSequence)void",
+            "java.lang.StringBuffer#<init>(java.lang.CharSequence)void",
             // A range of the text to insert outside it.
             "java.lang.AbstractStringBuilder#insert(int,java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#insert(int,java.lang.CharSequence,int,int)java.lang.StringBuilder",
@@ -886,6 +892,17 @@ impl Uses {
                     // A constructor, by its class, as `owner#<init>`.
                     "NEW_CLASS" => {
                         self.operations.insert(format!("{owner}#<init>"));
+                        self.operations.insert(format!("{owner}#<init>{}", text(symbol, "type")));
+                        // A builder made from a `CharSequence` throws for a negative length
+                        // (`lower::sequence_texts`).
+                        if matches!(owner.as_str(), "java.lang.StringBuilder" | "java.lang.StringBuffer")
+                            && text(symbol, "type") == "(java.lang.CharSequence)void"
+                        {
+                            let negative = "java.lang.NegativeArraySizeException".to_string();
+                            self.classes.insert(negative.clone());
+                            self.instantiated.insert(negative.clone());
+                            self.members.insert((negative, "<init>".into(), "(java.lang.String)void".into()));
+                        }
                         self.operations.insert(kind);
                     }
                     // A local `Field` that only a field's handle uses (`handles.rs`).

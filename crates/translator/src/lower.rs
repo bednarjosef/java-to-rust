@@ -27,6 +27,7 @@ mod objects;
 mod real_generics;
 mod references;
 mod scans;
+mod sequence_texts;
 mod statics;
 mod strings;
 mod stubs;
@@ -99,6 +100,7 @@ pub(crate) use inner::OUTER;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
+pub(crate) use sequence_texts::SEQUENCE;
 
 /// The UTF-16 code units of a string that `JavaTree` wrote: a JSON string, or the array of its code
 /// units where it has a lone surrogate, which JSON cannot hold (`JavaTree.string`).

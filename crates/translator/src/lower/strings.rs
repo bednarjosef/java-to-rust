@@ -499,6 +499,19 @@ impl<'t> Lowering<'t> {
             args.insert(0, receiver);
             return self.as_char_sequence(node, Builtin::Builder(op), args);
         }
+        // `append(s)` of a `CharSequence` that may be an object of a class of the program, which
+        // the builder reads with `length` and `charAt`.
+        if op == BuilderOp::Append
+            && args.len() == 1
+            && symbol.ty.starts_with("(java.lang.CharSequence)")
+            && self.sequence_classes()
+        {
+            let sequence = substring_text(args.remove(0));
+            if matches!(sequence.ty, Type::Class(..)) {
+                return Ok(self.append_sequence(node.pos(), receiver, sequence));
+            }
+            args.push(sequence);
+        }
         // A range of a program class that implements `CharSequence` is a range of that interface.
         let range_of = match op {
             BuilderOp::Append if args.len() == 3 => Some(0),
@@ -556,6 +569,16 @@ impl<'t> Lowering<'t> {
         }
         let args: Vec<Expr> =
             node.list("arguments").map(|a| self.expr(a).map(substring_text)).collect::<Result<_, _>>()?;
+        // A builder made from a `CharSequence` that may be an object of a class of the program.
+        if symbol.owner != "java.lang.String"
+            && symbol.ty == "(java.lang.CharSequence)void"
+            && matches!(args[..], [Expr { ty: Type::Class(..), .. }])
+            && self.sequence_classes()
+            && let Some(negative) = self.message_ctor("java.lang.NegativeArraySizeException")
+        {
+            let sequence = args.into_iter().next().expect("one argument");
+            return Ok(Some(self.sequence_builder(node.pos(), sequence, negative)));
+        }
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
         let bytes = Type::array(Type::Byte);
