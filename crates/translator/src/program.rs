@@ -356,16 +356,17 @@ fn narrow(
     }
     class.thread_statics = live.thread_statics.as_ref().map(|t| t.iter().copied().collect());
     let mut lists: std::collections::HashMap<Vec<usize>, std::sync::Arc<[usize]>> = Default::default();
-    class.receivers = live
-        .receivers
-        .iter()
-        .map(|(&id, classes)| {
-            let list: Vec<usize> = classes.iter().collect();
-            (id, lists.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone())
-        })
-        .collect();
+    class.receivers = crate::timings::phase("live methods: receivers", || {
+        live.receivers
+            .iter()
+            .map(|(&id, classes)| {
+                let list: Vec<usize> = classes.iter().collect();
+                (id, lists.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone())
+            })
+            .collect()
+    });
     let watched_runs = watched.iter().any(|&(ty, method)| live.runs(ty, method));
-    analysis::live_methods::prune(class, &live);
+    crate::timings::phase("live methods: prune", || analysis::live_methods::prune(class, &live));
     Some((running, live.unresolved, watched_runs))
 }
 
@@ -467,6 +468,7 @@ fn load_in_rounds(
     loop {
         round += 1;
         let start = std::time::Instant::now();
+        let reach_before = reaching;
         let units = given.push(std::mem::take(&mut new));
         let changes = records.add(units);
         let complete = |unit: &Value| {
@@ -515,6 +517,7 @@ fn load_in_rounds(
             asked_in_rounds = None;
         }
         reaching += start.elapsed();
+        let round_reach = (reaching - reach_before).as_secs_f64();
         // The proxy classes that javac is to add, by their files, rather than by name.
         let made = rounds.proxy_classes();
         let mut asked = rounds.missing();
@@ -538,8 +541,10 @@ fn load_in_rounds(
         if crate::timings::enabled() {
             // Each round as it ends, for a program whose loading takes long.
             let received = session.received as f64 / 1e6;
+            let again = if restart { ", from the start again" } else { "" };
             eprintln!(
-                "timing: round {round}: {} units, {} more asked for, {received:.0} MB of trees{}",
+                "timing: round {round}: {} units, {} more asked for, {received:.0} MB of trees, reach \
+                 {round_reach:.3} s{again}{}",
                 trees.len(),
                 new.len(),
                 crate::timings::memory()

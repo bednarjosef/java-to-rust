@@ -107,10 +107,8 @@ pub fn live_methods_unless(
     class: &Class,
     code: &[(usize, Option<usize>)],
 ) -> Result<Option<LiveMethods>, String> {
-    let values = object_values::analyze_for_dispatch(class);
-    if crate::timings::enabled() {
-        eprintln!("timing: points-to for dispatch done{}", crate::timings::memory());
-    }
+    let values =
+        crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
     let found = crate::timings::phase("live walk", || walk(class, code, &values, true));
     if std::env::var_os("JAVA_TO_RUST_LIVE_CHECK").is_some() {
         let slow =
@@ -183,7 +181,11 @@ fn walk(
     walk.run();
     let thread_statics = {
         let state = walk.state.borrow();
-        if state.unknown.is_none() && !state.stopped { walk.thread_statics() } else { None }
+        if state.unknown.is_none() && !state.stopped {
+            crate::timings::phase("live walk of the started threads", || walk.thread_statics())
+        } else {
+            None
+        }
     };
     let Walk { state, .. } = walk;
     let State { unknown, mut live, stopped, .. } = state.into_inner();
