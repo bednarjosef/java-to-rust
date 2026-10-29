@@ -565,7 +565,8 @@ struct Gen<'a> {
     frames: Vec<Frame<'a>>,
     /// The Java label of the statement whose frame opens next.
     pending: Option<String>,
-    /// How many Rust labels have been made for statements without a Java label.
+    /// How many Rust labels have been made for statements without a Java label in the item being
+    /// written: each item of a module numbers its own (`item_start`).
     labels: usize,
     /// The return type of the current method.
     ret: Type,

@@ -410,6 +410,13 @@ impl<'a> Gen<'a> {
         tree
     }
 
+    /// Starts an item of a module, which numbers its own labels (`Gen::labels`): its text then
+    /// does not depend on the items written before it. Returns where its text starts.
+    fn item_start(&mut self) -> usize {
+        self.labels = 0;
+        self.out.len()
+    }
+
     /// The module of a package, then the modules inside it, into `modules`.
     fn module(
         &mut self,
@@ -436,7 +443,7 @@ impl<'a> Gen<'a> {
         for &index in types.iter() {
             let decl = &class.types[index];
             if live[index] && self.only_enums.is_none() {
-                let start = self.out.len();
+                let start = self.item_start();
                 self.type_items(index);
                 item(self, Origin::Class(decl.name.clone()), start);
             }
@@ -446,7 +453,7 @@ impl<'a> Gen<'a> {
             if self.wanted.contains(&Need::Enum(index))
                 && self.only_enums.as_ref().is_none_or(|only| only.types.contains(&index))
             {
-                let start = self.out.len();
+                let start = self.item_start();
                 self.type_enum_items(index);
                 item(self, Origin::ClassEnum(decl.name.clone()), start);
             }
@@ -455,22 +462,22 @@ impl<'a> Gen<'a> {
             for &index in types.iter() {
                 let decl = &class.types[index];
                 if decl.enum_constants.is_some() {
-                    let start = self.out.len();
+                    let start = self.item_start();
                     self.enum_items(index);
                     item(self, Origin::Enum(decl.name.clone()), start);
                 }
             }
-            let start = self.out.len();
+            let start = self.item_start();
             self.statics();
             item(self, Origin::Statics, start);
-            let start = self.out.len();
+            let start = self.item_start();
             self.class_monitors();
             item(self, Origin::Monitors, start);
             let methods = self.package_methods.get(package).cloned().unwrap_or_default();
             for &index in methods.iter() {
                 let m = &class.methods[index];
                 if self.emitted_free(index) {
-                    let start = self.out.len();
+                    let start = self.item_start();
                     self.gap();
                     self.method(index);
                     item(self, Origin::Function(class.types[m.class].name.clone()), start);
@@ -480,7 +487,7 @@ impl<'a> Gen<'a> {
             if let Some(main) = main
                 .filter(|&m| package.is_empty() && !class.types[class.methods[m].class].package.is_empty())
             {
-                let start = self.out.len();
+                let start = self.item_start();
                 self.gap();
                 self.line("fn main() {");
                 self.indent += 1;
