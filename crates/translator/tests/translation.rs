@@ -2243,26 +2243,35 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_catches_it(
 }
 
 #[test]
-fn a_catch_around_the_text_of_an_enum_constant_whose_to_string_throws_is_rejected() {
-    // An enum's text is its `Display`, which cannot pass the exception on to the `catch`.
-    let error = java_to_rust::translate(
-        "public class A {
-            enum Color {
-                RED;
-                public String toString() { throw new IllegalStateException(\"no text\"); }
-            }
-            public static void main(String[] args) {
-                try {
-                    System.out.println(\"color \" + Color.RED);
-                } catch (IllegalStateException e) {
-                    System.out.println(\"caught\");
-                }
-            }
-        }",
-    )
-    .expect_err("an enum's toString whose exception a catch around the text sees");
+fn a_catch_around_the_text_of_an_enum_constant_whose_to_string_throws_sees_it() {
+    // Where the generator makes the text, it calls the enum's `toString`, whose exception goes on
+    // to the `catch`; `printf` makes its text through the enum's `Display`, which cannot.
+    let program = |print: &str| {
+        format!(
+            "public class A {{
+                enum Color {{
+                    RED;
+                    public String toString() {{ throw new IllegalStateException(\"no text\"); }}
+                }}
+                public static void main(String[] args) {{
+                    try {{
+                        {print}
+                    }} catch (IllegalStateException e) {{
+                        System.out.println(\"caught\");
+                    }}
+                }}
+            }}"
+        )
+    };
+    let rust = java_to_rust::translate(&program("System.out.println(\"color \" + Color.RED);")).unwrap();
+    assert_contains(
+        &rust,
+        &["java::println!(\"color {}\", java::or_break!(AColor::to_string(AColor::Red), 'attempt));"],
+    );
+    let error = java_to_rust::translate(&program("System.out.printf(\"color %s%n\", Color.RED);"))
+        .expect_err("an enum's toString whose exception a catch around a printf sees");
     assert!(
-        error.to_string().ends_with("a toString that throws an exception that is caught not supported yet"),
+        error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
         "{error}"
     );
 }
@@ -3938,6 +3947,14 @@ const ROUNDS: &str = r#"public class Main {
         System.out.println(c.compareTo("x"));
     }
 
+    static void level() {
+        try {
+            System.out.printf("level %s%n", Level.LOW);
+        } catch (IllegalStateException e) {
+            System.out.println("no level");
+        }
+    }
+
     public static void main(String[] args) throws InterruptedException {
         System.out.println(blank(args.length > 2 ? (Object) 1 : " "));
         Thread t = new Thread(Main::count);
@@ -3945,11 +3962,7 @@ const ROUNDS: &str = r#"public class Main {
         t.join();
         System.out.println(n);
         compare(new Name());
-        try {
-            System.out.println("level " + Level.LOW);
-        } catch (IllegalStateException e) {
-            System.out.println("no level");
-        }
+        level();
         String u = args.length > 3 ? "a" : null;
         try {
             System.out.println(u.length() + len(u, false));
@@ -3996,8 +4009,8 @@ class Drain {
 #[test]
 fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
     // The checks of the analyses reject a pattern variable and `synchronized` on a string (the
-    // checks that come before the range analysis and nullness), a `toString` whose exception is
-    // caught (exceptions) and the message of a `NullPointerException` (after the analyses); the
+    // checks that come before the range analysis and nullness), a `toString` whose exception a
+    // `catch` around a `printf` sees (exceptions) and the message of a `NullPointerException` (after the analyses); the
     // census stubs the code of each.
     let dir = write_sources("census_rounds", &[("Main.java", ROUNDS)]);
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
@@ -4005,11 +4018,11 @@ fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
     assert_contains(
         &census.report,
         &[
-            "  Program: 11 pieces; 6 (54.5%) translate, 5 rejected.",
-            "a parameter of a method that the runtime calls\n          at Main.java:51:16\n",
+            "  Program: 12 pieces; 7 (58.3%) translate, 5 rejected.",
+            "a parameter of a method that the runtime calls\n          at Main.java:55:16\n",
             "`synchronized` on a string not supported yet\n          at Main.java:10:9\n",
             "a pattern variable used here not supported yet\n          at Main.java:6:18\n",
-            "a toString that throws an exception that is caught not supported yet\n          at Main.java:58:5\n",
+            "catching an exception that this toString may throw not supported yet\n          at Main.java:30:45\n",
             "the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:19:30\n",
         ],
     );
@@ -4330,7 +4343,7 @@ fn a_census_finds_the_same_with_the_messages_of_unchanged_code_kept_from_round_t
 fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
     // The analyses run the steps that read none of each other's facts alongside each other
     // (`analysis::analyze_from`). Over a census whose analyses reject a pattern variable,
-    // `synchronized` on a string, a `toString` whose exception is caught and the message of a
+    // `synchronized` on a string, a `toString` whose exception a `catch` around a `printf` sees and the message of a
     // `NullPointerException`, and then whose generator rejects a local, the census is the same as
     // with the steps run one after another, its translation too.
     let dir = write_sources(
@@ -4363,7 +4376,7 @@ fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
         &[
             "`synchronized` on a string not supported yet",
             "a pattern variable used here not supported yet",
-            "a toString that throws an exception that is caught not supported yet",
+            "catching an exception that this toString may throw not supported yet",
             "the message of the `NullPointerException` of this dereference not supported yet",
             "a local of type `Object` declared without a value",
         ],
