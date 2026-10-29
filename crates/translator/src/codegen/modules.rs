@@ -349,6 +349,11 @@ pub(super) struct Plan {
 }
 
 impl Plan {
+    /// The module's package: empty for the crate root.
+    pub(super) fn package(&self) -> &str {
+        &self.package
+    }
+
     /// The module's types, in index order.
     pub(super) fn types(&self) -> &[usize] {
         &self.types
