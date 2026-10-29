@@ -799,6 +799,10 @@ pub struct Field {
     /// Declared `volatile`: in an object that threads share, its accesses are sequentially
     /// consistent.
     pub volatile: bool,
+    /// Declared `final` (as every field of an interface is): Java assigns it once, a static one
+    /// in its class's static initializer.
+    #[serde(default)]
+    pub is_final: bool,
     pub pos: Pos,
 }
 

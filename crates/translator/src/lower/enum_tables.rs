@@ -121,6 +121,8 @@ impl<'t> Lowering<'t> {
                 init: None,
                 constant: false,
                 volatile: false,
+                // Only the enum's `<clinit>` assigns the table, once; its rows are filled after.
+                is_final: true,
                 pos: field.pos,
             });
         }

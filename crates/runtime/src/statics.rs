@@ -10,6 +10,8 @@
 //!   (release), the same text as a thread-local `Cell`'s; on x86-64 both are plain moves;
 //! - an object or a string is a `java::Locked<T>` (`with_borrow`, `with_borrow_mut`, as a
 //!   thread-local `RefCell`'s), behind a `LazyLock` when its initializer is not a constant;
+//! - one that only its class's static initialization assigns, once (a `static final`), is a
+//!   `java::Final<T>`, which a thread reads with no lock: `get()` lends the value in place;
 //! - the flag that a class's static initialization has run is a `java::ClassInit`, which runs it
 //!   once for the whole process, as JLS 12.4.2 describes.
 
@@ -19,7 +21,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize,
     Ordering,
 };
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 /// A static field of a program that starts no thread: a `Cell` or a `RefCell` (`C`), which
 /// `Deref` reaches. `with_borrow`, `with_borrow_mut` and `set` of a `RefCell` are those of a
@@ -200,6 +202,44 @@ impl<T: Primitive> Atomic<T> {
     }
 }
 
+/// A `static final` object, array or string that threads share, which only its class's static
+/// initialization assigns, once (`set`). Until then it holds the value it starts with, Java's
+/// default (or, for a class initialized lazily, its initializer's value, which nothing replaces),
+/// as the initializer's own reads before the assignment see it. A reader lends the value with no
+/// lock (`get`): once the class is initialized it never changes, and the `OnceLock` publishes it
+/// to every thread that sees it set. A thread that reads it during another thread's initialization
+/// (code of the class itself, which waits for no initialization) sees one of the two values.
+pub struct Final<T> {
+    value: OnceLock<T>,
+    default: T,
+}
+
+impl<T> Final<T> {
+    pub const fn new(default: T) -> Final<T> {
+        Final { value: OnceLock::new(), default }
+    }
+
+    /// The value: the one assigned, or the one it starts with.
+    #[inline(always)]
+    pub fn get(&self) -> &T {
+        self.value.get().unwrap_or(&self.default)
+    }
+
+    /// The assignment of the class's static initialization. Java assigns a `final` once, so a
+    /// second assignment is a translation bug.
+    pub fn set(&self, value: T) {
+        if self.value.set(value).is_err() {
+            panic!("a static final assigned twice");
+        }
+    }
+
+    /// Runs `f` on the value, as a `java::Locked` static's read but with no lock.
+    #[inline(always)]
+    pub fn with_borrow<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        f(self.get())
+    }
+}
+
 /// The state of a class's static initialization, for the whole process: not started, being run
 /// by the thread with a token, or done.
 const NOT_STARTED: usize = 0;
@@ -302,6 +342,26 @@ mod tests {
         N.set(N.get().wrapping_mul(2));
         D.set(D.get() * 3.0);
         assert_eq!((N.get(), D.get(), C.get()), (-6, 1.5, 65));
+    }
+
+    #[test]
+    fn a_final_reads_its_default_until_it_is_set_and_then_its_value() {
+        static NAME: Final<Option<&str>> = Final::new(None);
+        assert_eq!(*NAME.get(), None);
+        NAME.set(Some("set"));
+        let read: Vec<_> = (0..4).map(|_| std::thread::spawn(|| *NAME.get())).collect();
+        for t in read {
+            assert_eq!(t.join().unwrap(), Some("set"));
+        }
+        assert!(NAME.with_borrow(|v| v.is_some()));
+    }
+
+    #[test]
+    #[should_panic(expected = "a static final assigned twice")]
+    fn a_final_is_assigned_once() {
+        let once = Final::new(0);
+        once.set(1);
+        once.set(2);
     }
 
     #[test]

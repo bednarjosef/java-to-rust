@@ -128,6 +128,7 @@ impl<'t> Lowering<'t> {
             init: None,
             constant: false,
             volatile: false,
+            is_final: false,
             pos,
         });
         decl.statics.push(Field {
@@ -136,6 +137,7 @@ impl<'t> Lowering<'t> {
             init: None,
             constant: false,
             volatile: false,
+            is_final: false,
             pos,
         });
     }

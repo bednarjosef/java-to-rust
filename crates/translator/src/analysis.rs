@@ -208,6 +208,11 @@ pub struct Facts {
     /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
     /// an `init` function; the other classes initialize each static lazily on first access.
     pub eager_init: HashSet<usize>,
+    /// The statics, as (class index, name), that Java assigns once and only in their class's
+    /// static initialization: declared `final`, not constants, and assigned by no other method.
+    /// Where they are the process's, those of object, array or string type are `java::Final`
+    /// cells, which a thread reads without a lock (see `codegen/statics.rs`).
+    pub final_statics: HashSet<(usize, String)>,
     /// The static methods and constructors that run their class's `init` when they start.
     pub entry_init: HashSet<usize>,
     /// The class of `main`, when the program has exactly one, which `main` initializes first.
@@ -370,6 +375,7 @@ struct FromCode {
     ranges: Facts,
     fixed_fields: HashSet<(usize, String)>,
     eager_init: HashSet<usize>,
+    final_statics: HashSet<(usize, String)>,
     entry_init: HashSet<usize>,
     early_static_reads: HashSet<ExprId>,
     /// `Facts::ascii_length`, from the ranges' `ascii_chars`.
@@ -461,10 +467,10 @@ fn analyze_with(
             let threaded = threads::threaded(class);
             let fixed_fields =
                 phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, threaded));
-            let (eager_init, entry_init) = phase("analysis: statics", || {
-                let eager = statics::eager_classes(class);
+            let (eager_init, final_statics, entry_init) = phase("analysis: statics", || {
+                let (eager, finals) = statics::eager_and_final(class);
                 let entry = statics::entry_inits(class, &eager);
-                (eager, entry)
+                (eager, finals, entry)
             });
             let early_static_reads =
                 phase("analysis: early static reads", || early_reads::early_reads(class, &eager_init));
@@ -473,7 +479,15 @@ fn analyze_with(
                 phase("analysis: ascii", || ascii_strings(class, &mut facts));
                 facts.ascii_length
             });
-            FromCode { ranges, fixed_fields, eager_init, entry_init, early_static_reads, ascii_length }
+            FromCode {
+                ranges,
+                fixed_fields,
+                eager_init,
+                final_statics,
+                entry_init,
+                early_static_reads,
+                ascii_length,
+            }
         });
         let found = found.get_or_insert_with(|| represented(class));
         // The representation finds no boxes compared by identity (`boxing`, below), and a panic
@@ -486,14 +500,22 @@ fn analyze_with(
         // is done.
         let mut facts = found.facts.clone();
         let nullness = Alongside::start(scope, move || {
-            let FromCode { ranges, fixed_fields, eager_init, entry_init, early_static_reads, ascii_length } =
-                from_code.join();
+            let FromCode {
+                ranges,
+                fixed_fields,
+                eager_init,
+                final_statics,
+                entry_init,
+                early_static_reads,
+                ascii_length,
+            } = from_code.join();
             facts.no_overflow = ranges.no_overflow.clone();
             facts.safe_division = ranges.safe_division.clone();
             facts.ascii_chars = ranges.ascii_chars.clone();
             facts.index_ranges = ranges.index_ranges.clone();
             facts.fixed_fields = fixed_fields;
             facts.eager_init = eager_init;
+            facts.final_statics = final_statics;
             facts.entry_init = entry_init;
             facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
                 [main] => Some(main.class),

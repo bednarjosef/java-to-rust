@@ -72,7 +72,7 @@ The translation maps every Java memory action to one of:
 | `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on an element | one atomic action of the element's cell, sequentially consistent in the volatile mode (5.3) |
 | monitor enter/exit, `wait`, `notify` | the object's reentrant lock and its wait set (section 3) |
 | `Thread.start`, `join`, `park`/`unpark` | `std::thread` spawn, the thread record's condition variables |
-| static field access | `java::Atomic` (acquire/release) or `java::Locked` statics |
+| static field access | `java::Atomic` (acquire/release) or `java::Locked` statics; a `java::Final` static's one write is a release, and its reads acquire |
 | `Unsafe.fullFence` and the `VarHandle` fences | `fence(SeqCst)` |
 
 Each is at least as strong as the Java action: a lock makes the access part of a total order,
@@ -224,7 +224,24 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | compile-time constant | `const` | `X` |
 | primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
+| object or string that only its class's initialization assigns | `java::Final<T>`, behind a `LazyLock` likewise | `X.get().clone()`, or the place `(*X.get())`; `X.set(v)` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
+
+A `static final` of object, array or string type that no code but its class's static
+initialization assigns (`Facts::final_statics`, from `analysis/statics.rs`) is a `java::Final`:
+a `OnceLock` that the initializer's one assignment sets, next to the value it starts with (Java's
+default, or the initializer's value for a class initialized lazily). Its value never changes once
+the class is initialized, so a read takes no lock: `get()` lends the value set, or the starting
+value before that, which is what a read during the initializer sees (null for a static not yet
+assigned, as in Java). Where the read is only borrowed (the object of a call or a field access,
+an array that is indexed or measured, a string that is lent, a null test), the generator writes
+the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clone; a static that
+starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is
+unchanged: a reader from another class calls the class's `init` first, which waits for a run in
+progress. The Minecraft server's noise functions index a `static final` array millions of times
+from every worker thread; behind a `java::Locked`, most of those threads stood in its lock. A
+small program of eight threads doing the same runs 25 times faster in a debug build, and over
+100 times faster in a release one, with a `java::Final`.
 
 `java::ClassInit` is the JLS 12.4.2 procedure: the thread that finds the class not started runs
 the initializer, another thread finding it in progress waits, and the same thread finding its
