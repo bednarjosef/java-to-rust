@@ -117,6 +117,15 @@ made on the stack (`java::count_allocation`).
   whose address it does not know: each iteration stored the state and the next read it back
   (2.6 s). Reading or writing one element of a `java::Array` checks no borrow flag
   (`array.rs`, `ArrayData::raw`), whose store and reload also chained the iterations.
+- **Objects of many classes behind one type (ObjectDispatch).** 48 enums held as `Comparable`
+  and `Object`: a palette that also holds strings searched by `==` (`java::same_object`), casts
+  back to an enum (`as_<type>()`) and `ordinal()` through `Enum`, the operations at the top of
+  the Minecraft server's profile. Each tests the value's class number: `same_object` is false
+  for two numbers and compares bits for all but the strings and boxes, a cast tests the one
+  number it passes, and an ordinal is the constant's bits (`java::Thin::ordinal`). Through
+  `view()` and a `match` over every class, the kernel took 1132 ms in release (fat LTO,
+  `opt-level = 3`) and 14751 ms at `opt-level = 1`, against 781 ms and 4183 ms now (medians of
+  five, at a load of 6; Java's kernel is about 120 ms).
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
