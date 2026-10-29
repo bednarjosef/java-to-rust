@@ -40,8 +40,9 @@
 #                    step writes the trial again without a census, after a change to how a
 #                    translation is written or split; the trial step builds and runs it (default:
 #                    none)
-# TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G),
-#                    with CARGO_BUILD_JOBS crates built at once (default 10)
+# TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G)
+# TRIAL_BODY_MB      how many megabytes of the body crates' Rust the trial step builds at once
+#                    (default 64), with CARGO_BUILD_JOBS threads among them (default: the cores)
 # TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
 #                    memory and time to build; its runtime crate is built optimized all the same)
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
@@ -606,15 +607,37 @@ trial() {
   start=$(date +%s)
   # The header crate, which every body crate needs, first and alone: rustc's memory for it grows
   # with the jobs that its code generation takes (TRIAL_HEADER_JOBS), past 20 GB at 2. The body
-  # crates then build CARGO_BUILD_JOBS at a time, each far smaller; when two of the largest
-  # together pass the memory cap and the build is killed without a compile error, the rest build
-  # one at a time, past the crates already built.
+  # crates then build in groups of at most TRIAL_BODY_MB of Rust, the largest first: a crate's
+  # memory grows with its size, and the CARGO_BUILD_JOBS threads go to the code generation of the
+  # few crates of a group (one alone builds 16 MB of Rust in 40 s on 16 threads at opt-level 1,
+  # and in minutes on one). When a group passes the memory cap and the build is killed without a
+  # compile error, the rest build one crate at a time, past the crates already built.
   local -a build=(cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}"
     --config 'profile.dev.package.java-runtime.opt-level=2')
+  local jobs=${CARGO_BUILD_JOBS:-$(nproc)} group=() size total=0 crate
+  local -a groups=()
+  while read -r size crate; do
+    if [ ${#group[@]} -gt 0 ] && [ $((total + size)) -gt $((${TRIAL_BODY_MB:-64} << 20)) ]; then
+      groups+=("${group[*]}")
+      group=() total=0
+    fi
+    group+=("-p $crate") total=$((total + size))
+  done < <(cd "$cache/trial" && for dir in body-*/; do
+    echo "$(cat "$dir"src/*.rs | wc -c) ${dir%/}"
+  done | sort -rn)
+  [ ${#group[@]} -gt 0 ] && groups+=("${group[*]}")
+  bodies() {
+    local g
+    for g in "${groups[@]}"; do
+      # shellcheck disable=SC2086 # each group is its `-p` arguments
+      CARGO_BUILD_JOBS=$jobs "${slot[@]}" "${cap[@]}" "${build[@]}" $g || return
+    done
+    CARGO_BUILD_JOBS=$jobs "${slot[@]}" "${cap[@]}" "${build[@]}"
+  }
   (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
     && CARGO_BUILD_JOBS=${TRIAL_HEADER_JOBS:-1} "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
-    && CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} "${slot[@]}" "${cap[@]}" "${build[@]}") > "$cache/trial-build.txt" 2>&1 \
-    || { [ "${CARGO_BUILD_JOBS:-4}" -gt 1 ] && ! grep -q '^error' "$cache/trial-build.txt" \
+    && bodies) > "$cache/trial-build.txt" 2>&1 \
+    || { [ "$jobs" -gt 1 ] && ! grep -q '^error' "$cache/trial-build.txt" \
       && echo "the trial build was killed; building the rest one crate at a time" >&2 \
       && (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
         && CARGO_BUILD_JOBS=1 "${slot[@]}" "${cap[@]}" "${build[@]}") >> "$cache/trial-build.txt" 2>&1; } \

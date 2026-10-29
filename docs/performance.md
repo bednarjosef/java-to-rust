@@ -493,6 +493,25 @@ messages anew in each round (`program::messages_found_anew`), and with
 `JAVA_TO_RUST_CHECK_KEPT_MESSAGES=1` each round also finds every method's messages anew and
 panics if they are not the ones kept, which on the Minecraft server costs back the 100 s a round.
 
+**Facts kept across rounds of stubs.** On the Minecraft server, pass 3 of a census took two or
+three rounds, each running the analyses (about 430 to 490 s), the messages and the generator
+(about 260 s), only to take away a few pieces each: a `toString` whose exception is caught,
+messages of `NullPointerException`s, casts whose `ClassCastException` is caught in the
+arguments of natives the runtime lacks. A stub ends the program where its code would run
+(`java::not_translated`), so it only takes behaviour away: the facts of the analyses still hold
+for the program after the stubs, which may do less than they say but nothing more, as they held
+for the generator that ran on them in the same round past those errors. So a round whose errors
+the stubs all took away by replacing method bodies keeps its facts, and the next round runs only
+the messages of the changed methods and the generator on them (`program/census.rs`, `analyse`).
+A stub that changes more than a body (an abstract method made concrete, a field initializer
+changed: `Stubs::reshaped`), an error that no stub took away, or a round that stopped before the
+analyses finished runs the analyses again, as does a census round by round. The translation of a
+census that kept its facts may differ from one that ran the analyses again where the facts of
+stubbed code reach, as a stubbed method keeps the form its callers saw (it may still return a
+`Result`); a stub never runs past its first line, so the program behaves the same.
+`a_census_stubs_every_cast_the_generator_misses_in_one_round` (`tests/translation.rs`) runs the
+analyses once for its two rounds.
+
 Further speed-ups, not done:
 
 - The walk from scratch when the members written into a record change is what is left of the
@@ -506,18 +525,10 @@ Further speed-ups, not done:
 - Lowering of `ScannerGrades` and `TextAdventure` now takes 1 to 2.5 s, twice (two attempts
   of the Rust generics, `lower::real_generics`); keeping what the first attempt learned
   instead of lowering everything again would halve it.
-- The later rounds of a census. On the Minecraft server, pass 3 takes two rounds: the first
-  stubs 5 pieces, 3 of them the analysis of exceptions' (a `toString` whose exception is
-  caught, two messages of `NullPointerException`s) and 2 the generator's (casts whose
-  `ClassCastException` is caught, in the arguments of natives that the runtime lacks); the
-  second passes and writes the translation. Each round runs the analyses (about 490 s in the
-  first and 430 s after), the messages, and the generator (about 260 s for its first round
-  of writing, which finds its rejections). The analyses that take long, and that the round
-  waits for, are the object values (186 s), then exceptions (147 s), after the structs and
-  the representation (34 s); the ranges, nullness, early static reads, ASCII strings and the
-  objects on the stack run alongside them. Each is a fixpoint over the whole program, and a
-  stub, by taking code away, can change the facts of any code its method's values or
-  exceptions reach, so a second round needs more than the stubbed methods' facts again.
+- The generator's later rounds in a census. The round after stubs that only replaced method
+  bodies runs the messages of the changed methods and the generator again (about 260 s on the
+  Minecraft server) to write the stubbed methods. Writing a stub's body in the place of a method
+  that the generator rejects would leave one run of the generator.
   Ways to make it cheaper, each to be checked by a census that stays byte for byte the same:
   - Predicting the first round's rejections before it runs does not apply: every one of them
     reads the facts (the exceptions that a `catch` sees, `Facts::raising`).
