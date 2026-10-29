@@ -107,10 +107,8 @@ pub fn live_methods_unless(
     class: &Class,
     code: &[(usize, Option<usize>)],
 ) -> Result<Option<LiveMethods>, String> {
-    let values = object_values::analyze_for_dispatch(class);
-    if crate::timings::enabled() {
-        eprintln!("timing: points-to for dispatch done{}", crate::timings::memory());
-    }
+    let values =
+        crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
     let found = crate::timings::phase("live walk", || walk(class, code, &values, true));
     if std::env::var_os("JAVA_TO_RUST_LIVE_CHECK").is_some() {
         let slow =
@@ -183,7 +181,11 @@ fn walk(
     walk.run();
     let thread_statics = {
         let state = walk.state.borrow();
-        if state.unknown.is_none() && !state.stopped { walk.thread_statics() } else { None }
+        if state.unknown.is_none() && !state.stopped {
+            crate::timings::phase("live walk of the started threads", || walk.thread_statics())
+        } else {
+            None
+        }
     };
     let Walk { state, .. } = walk;
     let State { unknown, mut live, stopped, .. } = state.into_inner();
@@ -551,7 +553,7 @@ struct Walk<'a> {
     /// (`Memos::handed`, `State::glued_classes`), initializing a type again
     /// (`State::initialized_above`), finding the values and dead code of a method again while
     /// nothing they relied on changed (`State::prepared`), and asking whether the classes with
-    /// objects return the same literal while no other has objects (`same_literal`).
+    /// objects return the same literal again (`same_literal`).
     /// `JAVA_TO_RUST_LIVE_CHECK` checks that the walk finds the same without.
     fast: bool,
     glue: Vec<usize>,
@@ -623,8 +625,6 @@ struct Memos {
     /// handing them again hands the runtime nothing new.
     handed: HashSet<(usize, ExprId, usize)>,
     thrown: HashSet<(usize, ExprId, usize)>,
-    /// What `same_literal` found, by method and type, with how many classes had objects then.
-    literals: HashMap<(usize, usize), (usize, Option<i128>)>,
 }
 
 /// What a call passed the methods it runs (`Walk::call`): what was known of the argument at
@@ -701,12 +701,11 @@ impl Walk<'_> {
         }
         let targets = self.values.targets(self.class, m, ctx, x);
         let mut memos = self.memos.borrow_mut();
-        let list = match memos.lists.get(targets.as_slice()) {
+        let list = match memos.lists.get(&*targets) {
             Some(list) => list.clone(),
             None => {
-                let list: Targets = targets.into();
-                memos.lists.insert(list.clone());
-                list
+                memos.lists.insert(targets.clone());
+                targets
             }
         };
         memos.targets.insert((x.id, ctx), list.clone());

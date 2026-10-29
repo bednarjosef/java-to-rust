@@ -81,26 +81,30 @@ impl<'t> Index<'t> {
             return false;
         }
         for key in &walk.reach.methods {
-            if let Some(node) = walk.methods.get(key)
-                && self.methods.insert(key.clone())
+            if !self.methods.contains(key)
+                && let Some(node) = walk.methods.get(key)
             {
+                self.methods.insert(key.clone());
                 self.contexts.push(key.clone());
                 self.scan(&walk.classes, node, Some(self.contexts.len() - 1));
             }
         }
         for key in &walk.reach.fields {
-            if let Some(node) = walk.fields.get(key)
-                && self.fields.insert(key.clone())
+            if !self.fields.contains(key)
+                && let Some(node) = walk.fields.get(key)
             {
+                self.fields.insert(key.clone());
                 self.scan(&walk.classes, &node["initializer"], None);
             }
         }
         for (class, (decl, _)) in &walk.classes {
             for is_static in [true, false] {
                 let runs = if is_static { &walk.reach.initialized } else { &walk.reach.instantiated };
-                if !runs.contains(class) || !self.blocks.insert((class.clone(), is_static)) {
+                let indexed = &mut self.blocks[usize::from(is_static)];
+                if !runs.contains(class) || indexed.contains(class) {
                     continue;
                 }
+                indexed.insert(class.clone());
                 for member in members(decl).filter(|m| text(m, "kind") == "BLOCK") {
                     if (member["static"].as_bool() == Some(true)) == is_static {
                         self.scan(&walk.classes, member, None);
@@ -128,7 +132,7 @@ impl<'t> Index<'t> {
 /// the methods that a method reference names, the parameters that are assigned, and every write
 /// of the field with the value written (`None` for a compound assignment); and what of the code
 /// it has indexed: the methods, the fields' initializers, and the initializer blocks of classes,
-/// static (`true`) or not. A call and a write are made in the code of the method whose parameters
+/// not static (first) or static. A call and a write are made in the code of the method whose parameters
 /// its names refer to, by its position in `contexts`.
 #[derive(Default)]
 pub(super) struct Index<'t> {
@@ -139,7 +143,7 @@ pub(super) struct Index<'t> {
     contexts: Vec<MethodKey>,
     methods: HashSet<MethodKey>,
     fields: HashSet<FieldKey>,
-    blocks: HashSet<(String, bool)>,
+    blocks: [HashSet<String>; 2],
 }
 
 impl<'t> Index<'t> {

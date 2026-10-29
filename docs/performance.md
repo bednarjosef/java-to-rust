@@ -237,7 +237,8 @@ names and call keys are copied only when an item is made of them; a field of a t
 found by its first byte before its whole name (`value::Map::search`). A stale walk stops as
 soon as it goes stale, as all it reached is thrown away. Reflection's lookups use an index of
 the declared methods and fields that the walk keeps as it declares them, and the check that
-streams stay sequential indexes calls by the names in javac's symbols without copying them.
+streams stay sequential indexes calls by the names in javac's symbols without copying them, and
+copies the key of a reached method, field or class only when it was not indexed yet.
 Whether the records' members changed with a round's units is told by comparing what completing
 them would write (which accessors and what they override, whether `hashCode` and `equals` are
 written, which components are plain values; `javac::Completion`), decided by the functions
@@ -269,6 +270,38 @@ find the same methods, classes, receivers and unresolved calls in the same order
 javac's census and every test with it set, and the javac census report and the 28 targets'
 translations are byte for byte the same. On javac, whose visits rarely repeat a call's targets,
 the walk itself goes from 1.47 to 1.29 s (the rest of the phase is the points-to analysis).
+
+**Walking a method again only when the literal it relied on changes.** A call such as
+`buffer.isDirect()` is known when every class with objects below the receiver's type returns the
+same literal from it (`same_literal` in `live_methods/known.rs`). A method whose code relied on
+that used to be walked again whenever an object of any class below the type was created, so a
+call on an `Object` or a wide interface walked its method again for nearly every class of the
+program: on the Minecraft server, 3.5 million of the main walk's 4.2 million walks. What the
+classes return is now kept for each method and type that was asked for, and brought up to date as
+each class gets its first object; the methods that relied on it are walked again only when the
+literal changes (none, then one, then none for good). The methods, classes, receivers and
+unresolved calls are the same (`JAVA_TO_RUST_LIVE_CHECK`), and so is javac's census. On javac's
+census the main walk goes from about 90,000 walks (36,800 of them for an object) to 50,000 (223),
+and the phase from 2.3 to 1.6 s, 0.8 s of which is the walk of the started threads.
+
+**A points-to analysis that works per call, not per target.** The points-to analysis for dispatch
+(`object_values::analyze_for_dispatch`) runs before each walk of the methods that can run, and
+on the Minecraft server it took about 290 s each time (3.3 million runs of 1.1 million visits).
+A visit runs again whenever a place it read grows, and on each run its calls used to find their
+targets again (an implementation looked up for each class of the receiver), pass every target
+its arguments again, and read and join the return of every target, though a call on a receiver
+of a wide type runs thousands of methods and most calls have the receiver and arguments they had
+before. While the analysis runs, a call of four targets or more now keeps, in each context, the
+receiver's flow with the targets found for it and the argument flows it last passed them: the
+targets are taken again while the receiver holds the same, and arguments that hold the same are
+not passed again, as places only grow. The returns of each list of sixteen targets or more are
+joined into a place of their own, grown with the returns (`Joined`), which a visit reads instead
+of every target's return, so that it runs again only when the join grows. A read of an array
+element joins every element place, one per element type; that join is kept too, grown with the
+places. The analysis reaches the same facts, as the smallest set closed under its rules does not
+depend on the order, and javac's census is byte for byte the same. On javac its readers go from
+442,000 to 199,000, and each run of it takes about a sixth less time (8.2 to 6.7 s on average
+over four runs, on a busy machine).
 
 **Early static reads by groups.** `analysis/early_reads.rs` walks, for each class with an eager
 static initializer, what each statement of the initializer runs. It used to walk method by method
