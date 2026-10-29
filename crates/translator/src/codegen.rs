@@ -107,7 +107,7 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
     // (`Kept`). What an enum item asks for depends on the item alone, so a round of enum items
     // writes those asked for anew (`Gen::only_enums`): the others ask for what they asked for
     // before. What does not depend on the wanted items is worked out once (`Setup`).
-    let mut setup = Setup::new(class, facts);
+    let setup = Setup::new(class, facts);
     let mut wanted = Needs::new();
     let mut only_enums: Option<OnlyEnums> = None;
     let mut kept: Option<Kept> = None;
@@ -115,7 +115,7 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
         let start = std::time::Instant::now();
         let last = only_enums.is_none() && kept.is_some();
         let (tree, needs, rejected, closures) =
-            generate_with(class, facts, &mut setup, &wanted, only_enums.as_ref(), &mut kept);
+            generate_with(class, facts, &setup, &wanted, only_enums.as_ref(), &mut kept);
         if crate::timings::enabled() {
             let new = needs.iter().filter(|n| !wanted.contains(n)).count();
             let written = match &only_enums {
@@ -232,9 +232,9 @@ struct Setup {
     class_tags: Vec<u16>,
     runs: Vec<bool>,
     super_targets: HashSet<usize>,
-    /// `Gen::conversion_names` and `Gen::stack_forms`, which the first round finds.
-    conversion_names: Option<std::sync::Arc<[String]>>,
-    stack_forms: Option<HashSet<usize>>,
+    /// `Gen::conversion_names` and `Gen::stack_forms`, which a generator finds from the rest.
+    conversion_names: std::sync::Arc<[String]>,
+    stack_forms: HashSet<usize>,
 }
 
 impl Setup {
@@ -263,7 +263,7 @@ impl Setup {
             .filter(|&i| class.methods[i].is_static)
             .map(|i| fn_names[i].clone())
             .collect();
-        Setup {
+        let mut setup = Setup {
             live: live_types(class, facts),
             homes,
             fn_names,
@@ -274,9 +274,16 @@ impl Setup {
             class_tags: dispatch::class_numbers(class),
             runs: running_types(class, facts),
             super_targets: super_targets(class),
-            conversion_names: None,
-            stack_forms: None,
-        }
+            conversion_names: std::sync::Arc::from([]),
+            stack_forms: HashSet::new(),
+        };
+        let wanted = Needs::new();
+        let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
+        let g = Gen::new(class, facts, &setup, &round);
+        let (conversion_names, stack_forms) = (g.conversion_names().into(), g.stack_forms());
+        setup.conversion_names = conversion_names;
+        setup.stack_forms = stack_forms;
+        setup
     }
 }
 
@@ -288,95 +295,15 @@ impl Setup {
 fn generate_with(
     class: &Class,
     facts: &Facts,
-    setup: &mut Setup,
+    setup: &Setup,
     wanted: &Needs,
     only_enums: Option<&OnlyEnums>,
     kept: &mut Option<Kept>,
 ) -> (Option<ModuleTree>, Needs, Vec<Error>, Vec<Error>) {
-    let live = setup.live.clone();
     let _modules = modules::enter(class);
-    let mut g = Gen {
-        class,
-        facts,
-        fn_names: setup.fn_names.clone(),
-        static_fn_names: setup.static_fn_names.clone(),
-        variant_names: Default::default(),
-        cell_names: Default::default(),
-        object_hash_code: Default::default(),
-        enum_bodies: Default::default(),
-        package_types: HashMap::new(),
-        package_methods: HashMap::new(),
-        reps: Default::default(),
-        variant_lists: Default::default(),
-        enum_variant_lists: Default::default(),
-        checked_value_ofs: Default::default(),
-        group_names: setup.group_names.clone(),
-        receiver_sets: setup.receiver_sets.clone(),
-        conversion_names: std::sync::Arc::from([]),
-        live: live.clone(),
-        class_tags: setup.class_tags.clone(),
-        runs: setup.runs.clone(),
-        wanted: wanted.clone(),
+    let round = Round {
+        wanted,
         impl_needs: dispatch::impl_needs(wanted, &setup.homes),
-        needs: std::cell::RefCell::new(Needs::new()),
-        homes: setup.homes.clone(),
-        struct_methods: setup.struct_methods.clone(),
-        super_targets: setup.super_targets.clone(),
-        this_struct: 0,
-        method: 0,
-        borrowed: HashSet::new(),
-        borrowed_optional: HashSet::new(),
-        after_body: &[],
-        borrowed_optional_objects: HashSet::new(),
-        int_receiver: false,
-        double_receiver: false,
-        this_form: ThisForm::Shared,
-        lazy_text: false,
-        formatting: false,
-        chars: false,
-        exhaustive: false,
-        chain: false,
-        field_locals: HashMap::new(),
-        bound_params: None,
-        traits: std::collections::BTreeSet::new(),
-        ctor_result: None,
-        printing: false,
-        printing_format: false,
-        guarded: false,
-        steady: None,
-        annotations: Vec::new(),
-        locals: HashMap::new(),
-        boxed: HashMap::new(),
-        elements: HashMap::new(),
-        sliced: HashMap::new(),
-        sliced_accesses: HashSet::new(),
-        out: String::new(),
-        indent: 0,
-        frames: Vec::new(),
-        pending: None,
-        labels: 0,
-        ret: Type::Void,
-        uses_runtime: false,
-        throwing: false,
-        attempts: Vec::new(),
-        finallies: Vec::new(),
-        finally_ends: Vec::new(),
-        yield_slots: Vec::new(),
-        optional_yield: false,
-        attempt_count: 0,
-        try_assigned: HashSet::new(),
-        unset_locals: HashMap::new(),
-        dereferenced: HashSet::new(),
-        checked_cast: None,
-        catching_now: HashSet::new(),
-        discarded: None,
-        written: HashSet::new(),
-        rejected: Vec::new(),
-        closures: Vec::new(),
-        slots: HashMap::new(),
-        slot_param: String::new(),
-        on_stack: false,
-        stack_forms: HashSet::new(),
         only_enums: match (only_enums, &kept) {
             (Some(only), _) => Some(only.clone()),
             // The last round writes every enum item, which are all asked for anew.
@@ -392,15 +319,8 @@ fn generate_with(
             }),
             (None, None) => None,
         },
-        class_values: Default::default(),
-        class_value_names: Vec::new(),
-        class_details: false,
-        class_interfaces: false,
-        arms_method: None,
-        arm_parts: String::new(),
     };
-    g.conversion_names = setup.conversion_names.get_or_insert_with(|| g.conversion_names().into()).clone();
-    g.stack_forms = setup.stack_forms.get_or_insert_with(|| g.stack_forms()).clone();
+    let mut g = Gen::new(class, facts, setup, &round);
     let header = match class.types.iter().any(|t| !t.package.is_empty()) {
         true => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         false => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
@@ -423,7 +343,7 @@ fn generate_with(
         g.class_interfaces = kept.class_interfaces;
     }
     let first = kept.as_ref().filter(|_| only_enums.is_none()).map(|kept| &kept.modules[..]);
-    let written = g.program(&live, first);
+    let written = g.program(&setup.live, first);
     let needs = g.needs.take();
     if only_enums.is_some() {
         return (None, needs, g.rejected, Vec::new());
@@ -453,6 +373,110 @@ fn generate_with(
     };
     let (tree, closures) = g.finish(header, written);
     (Some(tree), needs, g.rejected, closures)
+}
+
+/// What every module of a round is written with (`generate_with`).
+struct Round<'r> {
+    wanted: &'r Needs,
+    /// The items of `wanted` in the `impl` of the enum of each type (`dispatch::impl_needs`).
+    impl_needs: HashMap<usize, Vec<Need>>,
+    only_enums: Option<OnlyEnums>,
+}
+
+impl<'a> Gen<'a> {
+    /// A generator for a round that writes with `round`, before it writes anything.
+    fn new(class: &'a Class, facts: &'a Facts, setup: &'a Setup, round: &'a Round<'a>) -> Gen<'a> {
+        Gen {
+            class,
+            facts,
+            fn_names: &setup.fn_names,
+            static_fn_names: &setup.static_fn_names,
+            variant_names: Default::default(),
+            cell_names: Default::default(),
+            object_hash_code: Default::default(),
+            enum_bodies: Default::default(),
+            package_types: HashMap::new(),
+            package_methods: HashMap::new(),
+            reps: Default::default(),
+            variant_lists: Default::default(),
+            enum_variant_lists: Default::default(),
+            checked_value_ofs: Default::default(),
+            group_names: &setup.group_names,
+            receiver_sets: &setup.receiver_sets,
+            conversion_names: setup.conversion_names.clone(),
+            live: &setup.live,
+            class_tags: &setup.class_tags,
+            runs: &setup.runs,
+            wanted: round.wanted,
+            impl_needs: &round.impl_needs,
+            needs: std::cell::RefCell::new(Needs::new()),
+            homes: &setup.homes,
+            struct_methods: &setup.struct_methods,
+            super_targets: &setup.super_targets,
+            this_struct: 0,
+            method: 0,
+            borrowed: HashSet::new(),
+            borrowed_optional: HashSet::new(),
+            after_body: &[],
+            borrowed_optional_objects: HashSet::new(),
+            int_receiver: false,
+            double_receiver: false,
+            this_form: ThisForm::Shared,
+            lazy_text: false,
+            formatting: false,
+            chars: false,
+            exhaustive: false,
+            chain: false,
+            field_locals: HashMap::new(),
+            bound_params: None,
+            traits: std::collections::BTreeSet::new(),
+            ctor_result: None,
+            printing: false,
+            printing_format: false,
+            guarded: false,
+            steady: None,
+            annotations: Vec::new(),
+            locals: HashMap::new(),
+            boxed: HashMap::new(),
+            elements: HashMap::new(),
+            sliced: HashMap::new(),
+            sliced_accesses: HashSet::new(),
+            out: String::new(),
+            indent: 0,
+            frames: Vec::new(),
+            pending: None,
+            labels: 0,
+            ret: Type::Void,
+            uses_runtime: false,
+            throwing: false,
+            attempts: Vec::new(),
+            finallies: Vec::new(),
+            finally_ends: Vec::new(),
+            yield_slots: Vec::new(),
+            optional_yield: false,
+            attempt_count: 0,
+            try_assigned: HashSet::new(),
+            unset_locals: HashMap::new(),
+            dereferenced: HashSet::new(),
+            checked_cast: None,
+            catching_now: HashSet::new(),
+            discarded: None,
+            written: HashSet::new(),
+            rejected: Vec::new(),
+            closures: Vec::new(),
+            slots: HashMap::new(),
+            slot_param: String::new(),
+            on_stack: false,
+            stack_forms: &setup.stack_forms,
+            only_enums: round.only_enums.as_ref(),
+            class_values: Default::default(),
+            class_value_names: Vec::new(),
+            class_details: false,
+            class_interfaces: false,
+            arms_method: None,
+            arm_parts: String::new(),
+        }
+    }
 }
 
 /// How deep rustc follows a trait such as `Send` through the fields of nested types.
@@ -505,11 +529,11 @@ struct Gen<'a> {
     class: &'a Class,
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
-    homes: Vec<Home>,
+    homes: &'a [Home],
     /// The methods that may be emitted in the `impl` of each class's struct, in index order.
-    struct_methods: HashMap<usize, Vec<usize>>,
+    struct_methods: &'a HashMap<usize, Vec<usize>>,
     /// The names of the static methods, which are free functions in the namespace of locals.
-    static_fn_names: HashSet<String>,
+    static_fn_names: &'a HashSet<String>,
     /// The names of the variants of the enum of each type (see `dispatch::variant`), once made.
     variant_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashMap<usize, String>>>>,
     /// The names of the cells of each type's statics, by field (see `objects::cell_names`), once
@@ -532,26 +556,26 @@ struct Gen<'a> {
     /// The enums whose `valueOf` a `catch` or `finally` sees fail (see `enums::checked_value_of`).
     checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
-    group_names: HashMap<usize, String>,
+    group_names: &'a HashMap<usize, String>,
     /// The sets of classes in `Class::receivers`, by their key (`receiver_key`).
-    receiver_sets: HashMap<u64, std::sync::Arc<[usize]>>,
+    receiver_sets: &'a HashMap<u64, std::sync::Arc<[usize]>>,
     /// The name of each type in the names of its conversions, unique in the program
     /// (`conversion_names`).
     conversion_names: std::sync::Arc<[String]>,
     /// Which classes have a struct (see `live_types`).
-    live: Vec<bool>,
+    live: &'a [bool],
     /// The number of each type in a `java::Thin` (see `dispatch::class_numbers`).
-    class_tags: Vec<u16>,
+    class_tags: &'a [u16],
     /// Which classes' instance methods can run (see `running_types`).
-    runs: Vec<bool>,
+    runs: &'a [bool],
     /// The enum items to write, which an earlier pass found used (see `generate`).
-    wanted: Needs,
+    wanted: &'a Needs,
     /// The items of `wanted` in the `impl` of the enum of each type (`dispatch::impl_needs`).
-    impl_needs: HashMap<usize, Vec<Need>>,
+    impl_needs: &'a HashMap<usize, Vec<Need>>,
     /// The enum items that the code written so far uses.
     needs: std::cell::RefCell<Needs>,
     /// The methods that a `super.m(...)` call names, which run although a subclass overrides them.
-    super_targets: HashSet<usize>,
+    super_targets: &'a HashSet<usize>,
     /// The class (index into `Class::types`) whose struct `this` is in the code being written:
     /// the class of the `impl` that the method is emitted in.
     this_struct: usize,
@@ -613,7 +637,7 @@ struct Gen<'a> {
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
     /// annotation).
     annotations: Vec<(String, Type, String)>,
-    fn_names: Vec<String>,
+    fn_names: &'a [String],
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
     /// The boxed types of the current method's parameters and locals, by Java name.
@@ -688,10 +712,10 @@ struct Gen<'a> {
     /// its object in the slot it is given.
     on_stack: bool,
     /// The constructors and factories that get a form on the stack (see `stack_objects`).
-    stack_forms: HashSet<usize>,
+    stack_forms: &'a HashSet<usize>,
     /// The enum items written in a round of them alone, to find what they ask for, or all of
     /// them in the last round, which takes the other items from the first (`generate_all`).
-    only_enums: Option<OnlyEnums>,
+    only_enums: Option<&'a OnlyEnums>,
     /// The classes of the program whose `java::Class` values the code names, each declared once
     /// as a constant at the crate root (`class_value_constants`).
     class_values: std::collections::BTreeSet<usize>,
@@ -1107,7 +1131,7 @@ impl<'a> Gen<'a> {
         self.locals.clear();
         for name in java_names {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.locals.entry(name) {
-                let rust = unique_beside(snake_case(entry.key()), &mut used, &self.static_fn_names);
+                let rust = unique_beside(snake_case(entry.key()), &mut used, self.static_fn_names);
                 entry.insert(rust);
             }
         }
