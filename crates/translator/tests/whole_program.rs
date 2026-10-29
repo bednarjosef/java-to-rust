@@ -420,6 +420,63 @@ fn a_program_using_collections_has_only_reachable_units_attributed() {
     assert!(elapsed.as_secs() < 120, "the translation took {elapsed:?}:\n{stderr}");
 }
 
+/// Array types that become `Object[]`s one after another: `Block[]` meets the `Object[]` it is
+/// stored in; then `(Block[]) other` casts an `Object` to an `Object[]`, which the `Item[]` held
+/// as an `Object` may be; and `String[][]` with `String[]` noted is an `Object[][]`, which meets
+/// the `Object[]` it is stored in. The first lowering notes them all, the later steps by meeting
+/// again the types that met (`lower::covariant`), so the program is lowered twice, not four times.
+const COVARIANT_STEPS: &str = r#"
+public class Main {
+    static class Item { String name; Item(String n) { name = n; } }
+    static class Block { int id; Block(int i) { id = i; } }
+
+    static Object hold(Object o) { return o; }
+
+    public static void main(String[] args) {
+        Item[] items = { new Item("a"), new Item("b") };
+        Block[] blocks = { new Block(1) };
+        Object[] objects = blocks;
+        Object held = hold(items);
+        Object other = hold(blocks);
+        Block[] back = (Block[]) other;
+        System.out.println(objects.length + " " + back[0].id + " " + (held instanceof Block[]));
+        String[][] grid = { { "x" }, { "y", "z" } };
+        Object[] rows = grid;
+        System.out.println(rows.length + " " + ((String[]) rows[1])[1]);
+    }
+}
+"#;
+
+#[test]
+fn covariant_arrays_found_step_by_step_take_one_more_lowering() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-covariant-steps");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), COVARIANT_STEPS).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--timings", "--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&translated.stderr);
+    assert!(translated.status.success(), "the translation failed:\n{stderr}");
+    // `timing: lowering attempt 2: 0.001 s, ...`
+    let attempts = stderr
+        .lines()
+        .filter(|l| l.strip_prefix("timing: lowering attempt ").is_some_and(|l| l.contains(": ")))
+        .count();
+    assert_eq!(attempts, 2, "{stderr}");
+}
+
 /// A resource of a class of the JDK is not in the translation: `Character.getName` reads
 /// `uniName.dat`, a data file of the JDK that is generated when the JDK is built and is not in
 /// its sources, and the program ends there, naming it (`TranslatedModules.classResource`). The

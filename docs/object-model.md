@@ -723,7 +723,11 @@ fills `a` and returns it. Copying at the boundary would lose that identity. Inst
 array types of references that meet (an argument, an assignment, a return, a cast, a substitution
 for an array of a type variable, an array passed for `Object...`) are each an `Object[]`
 everywhere in the program: lowering notes each such type and the program is lowered again
-(`real_generics::retry`). Element reads get the checked cast back, a for-each casts each element,
+(`real_generics::retry`). Types that meet only once others are `Object[]`s (a `String[][]` is an
+`Object[][]` once `String[]` is one; an array held as an `Object` meets an `Object[]` once a type
+an `Object` is cast to is one) are noted by the same lowering, which meets again the types that
+met as they would be translated then (`covariant::noted_later`), so one lowering more takes
+them all. Element reads get the checked cast back, a for-each casts each element,
 and a store converts to `Object`. Every other array keeps its exact type.
 
 Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle

@@ -6,8 +6,9 @@
 //! copying one at the boundary would lose that identity, so two different array types of
 //! references that meet (an argument, an assignment, a return or a cast between the two, or a use
 //! where javac substituted one for the array of a type variable) are each an `Object[]`
-//! everywhere in the program. Lowering notes each such type, and the program is lowered again with
-//! it as an `Object[]` (`Lowering::ty`), whose element reads get the checked cast back that
+//! everywhere in the program. Lowering notes each such type, and those that would meet only once
+//! the noted ones are `Object[]`s (`noted_later`), and the program is lowered again with them as
+//! `Object[]`s (`Lowering::ty`), whose element reads get the checked cast back that
 //! erasure writes (`generics::erased_use`), whose stores convert to `Object`, and whose for-each
 //! variable is cast from `Object` (`arrays::for_each`). Every other array keeps its exact type.
 //!
@@ -42,12 +43,23 @@
 use super::*;
 use std::rc::Rc;
 
+/// Type `ty` as lowering translates it with the array types `known` as `Object[]`s, from the
+/// innermost element out (`Lowering::covariant_array`).
+fn lowered_as(ty: Type, known: &std::collections::HashSet<Type>) -> Type {
+    let Type::Array(element) = ty else { return ty };
+    let array = Type::array(lowered_as(*element, known));
+    if known.contains(&array) { Type::array(Type::class(OBJECT)) } else { array }
+}
+
 /// The array types that are `Object[]`s in this lowering (`known`), and those that it found
-/// covariant (`noted`), shared with `real_generics::retry`, which lowers again with them.
+/// covariant (`noted`), shared with `real_generics::retry`, which lowers again with them; and
+/// the array types that met in this lowering (`meets_object_array`), which `noted_later` meets
+/// again as the next lowering would.
 #[derive(Clone, Default)]
 pub(super) struct Covariant {
     pub(super) known: std::collections::HashSet<Type>,
     pub(super) noted: Rc<RefCell<Vec<Type>>>,
+    met: RefCell<std::collections::HashSet<(Type, Type)>>,
 }
 
 impl<'t> Lowering<'t> {
@@ -57,6 +69,9 @@ impl<'t> Lowering<'t> {
     /// `Object[]` is then noted to be one. Once they are, they no longer differ: arrays that
     /// still do are not covariant.
     pub(super) fn meets_object_array(&self, a: Type, b: Type) -> bool {
+        if a != b {
+            self.covariant.met.borrow_mut().insert((a, b));
+        }
         match (a, b) {
             (Type::Array(x), Type::Array(y)) if matches!((x, y), (Type::Array(_), Type::Array(_))) => {
                 self.meets_object_array(*x, *y)
@@ -76,6 +91,67 @@ impl<'t> Lowering<'t> {
     /// `int[][]` and `Object[]`. The test then reads the class the array carries.
     pub(super) fn meets_through_object(&self, array: Type, tested: Type) -> bool {
         array != tested && self.may_hold(array, tested) && self.meets_object_array(array, tested)
+    }
+
+    /// Notes the array types that the lowerings after this one would note once those it noted are
+    /// `Object[]`s, as far as they meet as here: each pair of types that met here
+    /// (`meets_object_array`, `meets_through_object`) meets again as lowering translates it then
+    /// (`covariant_array`, from the innermost element), and so on until no more are noted. A
+    /// `String[][]` that met an `Object[]` with `String[]` noted is an `Object[][]`, which meets
+    /// that `Object[]` as well; an array that becomes an `Object` meets every `Object[]` that an
+    /// `Object` is cast to once some type it was cast to is one. So the program is lowered again
+    /// once for what one lowering finds, not once more for each step of it; a type that only a
+    /// changed lowering meets is noted by the next attempt as before.
+    pub(super) fn noted_later(&self) {
+        if self.object.is_none() || self.covariant.noted.borrow().is_empty() {
+            return;
+        }
+        let mut known = self.covariant.known.clone();
+        known.extend(self.covariant.noted.borrow().iter().copied());
+        let met: Vec<(Type, Type)> = self.covariant.met.borrow().iter().copied().collect();
+        loop {
+            let lowered = |ty: Type| lowered_as(ty, &known);
+            let mut more = Vec::new();
+            for &(a, b) in &met {
+                self.meet_again(lowered(a), lowered(b), &known, &mut more);
+            }
+            let arrays: Vec<Type> = self.object_arrays.borrow().iter().map(|&t| lowered(t)).collect();
+            let tests: Vec<Type> = self.object_tests.borrow().iter().map(|&t| lowered(t)).collect();
+            for &array in &arrays {
+                for &tested in &tests {
+                    if array != tested && self.may_hold(array, tested) {
+                        self.meet_again(array, tested, &known, &mut more);
+                    }
+                }
+            }
+            if more.is_empty() {
+                return;
+            }
+            known.extend(more.iter().copied());
+            self.covariant.noted.borrow_mut().extend(more);
+        }
+    }
+
+    /// `meets_object_array` of `a` and `b` with the array types `known` as `Object[]`s, each type
+    /// it would note pushed onto `more`.
+    fn meet_again(&self, a: Type, b: Type, known: &std::collections::HashSet<Type>, more: &mut Vec<Type>) {
+        match (a, b) {
+            (Type::Array(x), Type::Array(y)) if matches!((x, y), (Type::Array(_), Type::Array(_))) => {
+                self.meet_again(*x, *y, known, more)
+            }
+            (Type::Array(x), Type::Array(y)) if x != y && Self::of_objects(*x) && Self::of_objects(*y) => {
+                for (ty, element) in [(a, *x), (b, *y)] {
+                    if !Self::is_object(element)
+                        && !self.has_param(ty)
+                        && !known.contains(&ty)
+                        && !more.contains(&ty)
+                    {
+                        more.push(ty);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Whether an array of type `array` may be one of type `tested`: an array of references whose
