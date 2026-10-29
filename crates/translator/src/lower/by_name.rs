@@ -16,7 +16,8 @@
 //! reflection table (`lower/reflection.rs`), whose constructors are those of the classes that
 //! names in reachable code find. `Class.forName(module, name)` with a name that code computes
 //! is a `switch` over the locale data that reachability found (`Reach::found_by_name`), with
-//! `null` for any other name, and `Class.forName(name)` over the classes named
+//! `null` for any other name, and `Class.forName(name)` is a call of a method that lowering adds
+//! once for all such calls (`added_methods::shared_method`), a `switch` over the classes named
 //! (`Reach::named`), each initialized, with a `ClassNotFoundException` for any other name.
 
 use super::*;
@@ -404,9 +405,9 @@ impl<'t> Lowering<'t> {
     }
 
     /// `Class.forName(name)`, or `Class.forName(name, initialize, loader)` with a literal
-    /// `initialize`, of a name that code computes: a `switch` over the classes that names in
-    /// reachable code find (`Reach::named`), or in a file over its classes that are not local
-    /// nor anonymous, by binary name, each initialized if the call says so.
+    /// `initialize`, of a name that code computes: a call of the method with a `switch` over the
+    /// classes that names in reachable code find (`Reach::named`), or in a file over its classes
+    /// that are not local nor anonymous, by binary name, each initialized if the call says so.
     pub(super) fn computed_for_name(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let arguments: Vec<Node<'t>> = node.list("arguments").collect();
         let initialize = match arguments.get(1) {
@@ -431,31 +432,53 @@ impl<'t> Lowering<'t> {
                 block.push(Stmt::Expr(loader));
             }
         }
-        let var = || self.synth(ExprKind::Var(class_name.clone()), pos, Type::String);
-        block.push(self.checked_name(&class_name, &given, Some(FOR_NAME_NULL), pos));
-        let mut cases = Vec::new();
-        // A class is found by its binary name (`a.B$C` for a member class).
-        let found = |t: usize| match self.reach {
-            Some(reach) => reach
-                .named
-                .contains(&self.types[t].javac)
-                .then(|| self.binary_name(t).unwrap_or_else(|| self.types[t].javac.clone())),
-            None => self.binary_name(t),
-        };
-        for (t, name) in (0..self.types.len()).filter_map(|t| found(t).map(|name| (t, name))) {
-            let label = self.synth(ExprKind::Str(name), pos, Type::String);
+        // The `switch` over the names is the same at every call (thousands of cases in a big
+        // program): one method has it, which each call calls (`shared_method`).
+        let key = format!("Class.forName, initialize {initialize}");
+        let method = self.shared_method(&key, &mut || {
             let mut body = Vec::new();
-            if initialize {
-                let init = ExprKind::Builtin(Builtin::InitializeClass { class: t }, Vec::new());
-                body.push(Stmt::Expr(self.synth(init, pos, Type::Void)));
+            let var = || self.synth(ExprKind::Var(class_name.clone()), pos, Type::String);
+            body.push(self.checked_name(&class_name, &given, Some(FOR_NAME_NULL), pos));
+            let mut cases: Vec<(String, Vec<Stmt>)> = Vec::new();
+            // A class is found by its binary name (`a.B$C` for a member class).
+            let found = |t: usize| match self.reach {
+                Some(reach) => reach
+                    .named
+                    .contains(&self.types[t].javac)
+                    .then(|| self.binary_name(t).unwrap_or_else(|| self.types[t].javac.clone())),
+                None => self.binary_name(t),
+            };
+            for (t, name) in (0..self.types.len()).filter_map(|t| found(t).map(|name| (t, name))) {
+                let mut body = Vec::new();
+                if initialize {
+                    let init = ExprKind::Builtin(Builtin::InitializeClass { class: t }, Vec::new());
+                    body.push(Stmt::Expr(self.synth(init, pos, Type::Void)));
+                }
+                body.push(Stmt::Yield(self.class_literal_of(node, t)?));
+                cases.push((name, body));
             }
-            body.push(Stmt::Yield(self.class_literal_of(node, t)?));
-            cases.push(Case { labels: vec![CaseLabel::Value(label)], body });
-        }
-        let unknown = self.synth(ExprKind::Builtin(Builtin::UnknownClass, vec![var()]), pos, Type::Void);
-        cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Expr(unknown)] });
-        let switch = ExprKind::Switch { selector: Box::new(var()), cases };
-        block.push(Stmt::Yield(self.synth(switch, pos, Type::JavaClass)));
+            let unknown = || {
+                let unknown = ExprKind::Builtin(Builtin::UnknownClass, vec![var()]);
+                vec![Stmt::Expr(self.synth(unknown, pos, Type::Void))]
+            };
+            // A big program's thousands of names go to methods by their length.
+            let base = if initialize { "classForName" } else { "classForNameUninitialized" };
+            let params = [(class_name.clone(), Type::String)];
+            let at = super::added_methods::Chunked {
+                class: self.current.get(),
+                base,
+                params: &params,
+                ty: Type::JavaClass,
+                pos,
+            };
+            let switch = self.chunked_string_switch(&at, cases, &unknown);
+            body.push(Stmt::Return(Some(switch), pos));
+            let params = vec![Param { name: given.clone(), ty: Type::String }];
+            let (class, name, ret) = (self.current.get(), base.to_string(), Type::JavaClass);
+            Ok(super::added_methods::AddedMethod { class, name, params, ret, body, pos })
+        })?;
+        let given = self.synth(ExprKind::Var(given.clone()), pos, Type::String);
+        block.push(Stmt::Yield(self.added_call(&method, vec![given], pos, Type::JavaClass)));
         Ok(ExprKind::Switch {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],

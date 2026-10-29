@@ -17,7 +17,9 @@
 //!   code moves into a private trait that the body crate implements for the header's type (`impl
 //!   Bodies_X for X { fn body_m(&self, ..) {..} }`), where `self` and `Self` mean what they did;
 //!   the trait is `Sized`, as `X` is, for a signature that names `Option<Self>`. Its function
-//!   calls it.
+//!   calls it. An `impl` with much code is cut into several such traits, and a module's code in
+//!   a body crate into modules of about `CODEGEN_UNIT` each, as rustc compiles a module's code on
+//!   one thread.
 //! - The **app** crate is the binary: it depends on all of them, so that the linker finds the
 //!   bodies, and its `main` calls the header's.
 //!
@@ -35,6 +37,10 @@ use crate::output::{ModuleTree, SourceFile};
 use proc_macro2::Span;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
+
+/// About how much moved code (`Piece::size`) a module of a body crate holds before the rest goes
+/// to another module: rustc compiles a module's code in one codegen unit, on one thread.
+const CODEGEN_UNIT: usize = 512 * 1024;
 
 /// The crates of a split program, each as its files under `src/`.
 pub struct Workspace {
@@ -232,13 +238,30 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
                 if path.is_empty() { "header".to_string() } else { format!("header::{}", path.join("::")) };
             let mut splits = splits.borrow_mut();
             let split = &mut splits[m];
-            let mut code = String::new();
+            // rustc puts a module's code in one codegen unit, which one thread compiles: the
+            // module's code is cut into modules of its own of about `CODEGEN_UNIT` each, which
+            // rustc compiles in parallel.
+            let mut units: Vec<String> = Vec::new();
+            let mut size = 0;
             for (piece, _) in split.pieces.iter_mut().zip(&crate_of[m]).filter(|(_, of)| **of == c) {
-                code.push_str(&std::mem::take(&mut piece.text));
+                if units.is_empty() || (size > 0 && size + piece.size > CODEGEN_UNIT) {
+                    units.push(String::new());
+                    size = 0;
+                }
+                units.last_mut().expect("a unit").push_str(&std::mem::take(&mut piece.text));
+                size += piece.size;
             }
-            if !code.is_empty() {
-                code.insert_str(0, &split.uses);
-            }
+            let code: String = match units.len() {
+                0 => String::new(),
+                1 => format!("{}{}", split.uses, units[0]),
+                _ => units
+                    .iter()
+                    .enumerate()
+                    .map(|(i, unit)| {
+                        format!("\nmod j2r_code_{i} {{\nuse super::*;\n{}{unit}}}\n", split.uses)
+                    })
+                    .collect(),
+            };
             format!("pub use {reexport}::*;\n{}{code}", uses_text(&tree.modules[m].uses))
         });
         let text = format!(
@@ -530,9 +553,9 @@ fn split_module(
                     && !self_ty.contains('<')
                     && matches!(*imp.self_ty, syn::Type::Path(_));
                 let trait_name = imp.trait_.as_ref().map(|(_, p, _)| at(text, p.span()).to_string());
-                let mut decls = String::new();
-                let mut impls = String::new();
-                let mut functions = String::new();
+                // Each moved method: its exported name, its declaration and code in the trait, and
+                // its exported function before and after the trait's name.
+                let mut moved: Vec<(String, String, String, String, String)> = Vec::new();
                 let clean = |s: &str| {
                     s.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect::<String>()
                 };
@@ -540,12 +563,6 @@ fn split_module(
                     Some(t) => format!("{}__{}", clean(&self_ty), clean(t)),
                     None => clean(&self_ty),
                 };
-                let mut bodies = format!("Bodies_{owner_name}");
-                let mut n = 1;
-                while traits.contains(&bodies) {
-                    n += 1;
-                    bodies = format!("Bodies_{owner_name}_{n}");
-                }
                 for impl_item in &imp.items {
                     let syn::ImplItem::Fn(f) = impl_item else {
                         if let syn::ImplItem::Const(c) = impl_item
@@ -571,7 +588,6 @@ fn split_module(
                         None => self_ty.clone(),
                     };
                     let symbol = symbol(path, &owner, &name, used);
-                    key.get_or_insert_with(|| symbol.clone());
                     let receiver = f.sig.receiver();
                     let this_ty = receiver.map(|r| {
                         if r.colon_token.is_some() {
@@ -611,23 +627,48 @@ fn split_module(
                         None => String::new(),
                     };
                     let decl_params = trait_params(&f.sig, text);
-                    decls.push_str(&format!("    fn body_{name}({decl_receiver}{decl_params}){ret};\n"));
+                    let decl = format!("    fn body_{name}({decl_receiver}{decl_params}){ret};\n");
                     let attrs: String =
                         f.attrs.iter().map(|a| format!("    {}\n", at(text, a.span()))).collect();
                     let inputs =
                         if f.sig.inputs.is_empty() { "" } else { &text[f.sig.inputs.span().byte_range()] };
                     let code = &text[block];
-                    impls.push_str(&format!("{attrs}    fn body_{name}({inputs}){ret} {code}\n"));
+                    let code = format!("{attrs}    fn body_{name}({inputs}){ret} {code}\n");
                     let this_arg = if this_ty.is_some() { "this, " } else { "" };
-                    functions.push_str(&format!(
-                        "#[unsafe(no_mangle)]\npub fn {symbol}({this_param}{params}){ret_here} {{\n    <{self_ty} as {bodies}>::body_{name}({this_arg}{args})\n}}\n\n"
-                    ));
+                    let before = format!(
+                        "#[unsafe(no_mangle)]\npub fn {symbol}({this_param}{params}){ret_here} {{\n    <{self_ty} as "
+                    );
+                    let after = format!(">::body_{name}({this_arg}{args})\n}}\n\n");
+                    moved.push((symbol, decl, code, before, after));
                 }
-                if !decls.is_empty() {
-                    body.push_str(&format!(
+                // An `impl` with much code (`Object`'s methods over every class) is cut into
+                // traits of about `CODEGEN_UNIT` of code each, each a piece of its own, which the
+                // split spreads over crates and modules as it does any item.
+                let mut start = 0;
+                while start < moved.len() {
+                    let mut end = start + 1;
+                    let mut size = moved[start].2.len();
+                    while end < moved.len() && size + moved[end].2.len() <= CODEGEN_UNIT {
+                        size += moved[end].2.len();
+                        end += 1;
+                    }
+                    let mut bodies = format!("Bodies_{owner_name}");
+                    let mut n = 1;
+                    while traits.contains(&bodies) {
+                        n += 1;
+                        bodies = format!("Bodies_{owner_name}_{n}");
+                    }
+                    let methods = &moved[start..end];
+                    let decls: String = methods.iter().map(|m| m.1.as_str()).collect();
+                    let impls: String = methods.iter().map(|m| m.2.as_str()).collect();
+                    let functions: String =
+                        methods.iter().map(|m| format!("{}{bodies}{}", m.3, m.4)).collect();
+                    let text = format!(
                         "trait {bodies}: Sized {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
-                    ));
+                    );
+                    pieces.push(Piece { size: text.len(), text, key: methods[0].0.clone() });
                     traits.insert(bodies);
+                    start = end;
                 }
             }
             // A `use` among the items is the moved code's too.

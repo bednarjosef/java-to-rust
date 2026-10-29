@@ -4,6 +4,7 @@
 //! outside it is reported as an error naming the construct.
 
 mod abstract_sequence;
+mod added_methods;
 mod code_point;
 mod covariant;
 mod element_reads;
@@ -399,6 +400,10 @@ struct Lowering<'t> {
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
+    /// The methods that lowering adds for the code it writes (see `added_methods`).
+    added_methods: RefCell<Vec<added_methods::AddedMethod>>,
+    /// The added methods that many places share, by what they are for (`shared_method`).
+    shared_methods: RefCell<std::collections::HashMap<String, String>>,
     /// The calls of the program's methods, found the first time the value of a handle's
     /// parameter is asked for (see `handle_values`).
     handle_calls: RefCell<Option<handle_values::Calls<'t>>>,
@@ -588,6 +593,7 @@ impl<'t> Lowering<'t> {
             }
         }
         self.field_update_methods(methods);
+        self.added_methods(methods);
         Ok(())
     }
 

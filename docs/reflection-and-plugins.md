@@ -82,8 +82,9 @@ program where such a lookup can happen, so they can be checked before the progra
   `Runtime.class` and `System.class`, classes that have no objects and so are no types of a
   translation, are the runtime's classes of those names (`java::Class::RUNTIME`, `SYSTEM`).
   `isAssignableFrom` of any two classes tests the names of the classes and interfaces above the
-  second, which each class value carries. A computed name becomes a `switch` over the binary
-  names of the classes that code can find by name. The value of each class of the program that
+  second, which each class value carries. A computed name becomes a call of one method that
+  every such call shares, a `switch` over the binary names of the classes that code can find by
+  name, cut by the names' lengths into methods of a hundred or so names in a big program. The value of each class of the program that
   code names is a constant at the crate root (`const CLASS__COM_FOO_BAR: java::Class`), written
   once: the reflection table names a class for each of its members and their types, and written
   out at each of those, with the names above it, the Minecraft server's table had lines of 20 MB.
@@ -127,8 +128,13 @@ program where such a lookup can happen, so they can be checked before the progra
   translator's. Each holds a slot in the table, and `Method.invoke`, `Field.get` and
   `set` (with their typed forms) and `Constructor.newInstance` are a `switch` over the slots,
   each case a direct call, read or write. The table and these switches are in 32 parts by
-  `slot & 31`, each part a function of its own, so that a big program's table (the Minecraft server's holds about 100,000
-  methods) makes functions of a few thousand cases that rustc compiles one by one. Arguments are checked and unboxed as Java does: a wrong
+  `slot & 31`, each part a function of its own, and a part's switch of more than 128 cases is
+  cut into methods of 128 cases each, which a switch on the slot's high bits calls, so that a
+  big program's table (the Minecraft server's holds about 160,000 methods) makes functions of a
+  few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
+  size. The table itself is data: each part is three constant arrays, of the classes its members
+  name, of their names, and of numbers (indices into those two, modifiers and slots), which a
+  loop of `java/Reflection.java` makes the objects from, not code that makes each. Arguments are checked and unboxed as Java does: a wrong
   type is an `IllegalArgumentException` and a null receiver a `NullPointerException`, and an
   exception of the called code is wrapped in an `InvocationTargetException` (by
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final

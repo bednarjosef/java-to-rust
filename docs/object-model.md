@@ -75,10 +75,12 @@ is asked for (two or three passes), so an enum has no dead code. A `match` over 
 written once, in such a method, and not at each use: `Object`'s enum has a variant for every
 class whose objects the program creates (javac's has thousands, the Minecraft server's some
 20 000). A method's `match` over more than 2048 classes is cut by class number into methods of
-2048 numbers each (`fmt_of_part_3`), which a `match` on the number's high bits calls: rustc
+256 numbers each (`fmt_of_part_3`), which a `match` on the number's high bits calls: rustc
 holds one function whole while it compiles it, and the server's `Display` alone was 9 MB of code,
-past 20 GB to compile; the parts are items of their own, which the split into crates spreads
-over the body crates (docs/several-crates.md).
+past 20 GB to compile; LLVM's time grows faster than a function's size, so the parts are small;
+they are items of their own, which the split into crates spreads over the body crates
+(docs/several-crates.md). A `match` over 2048 classes or fewer stays whole, so that its call is
+one jump, not two.
 
 Terms:
 
@@ -515,11 +517,12 @@ that declares `equals` or `hashCode` again (`Comparator`) dispatches a class wit
 An object's identity there is read from the value's bits rather than from its handle: the bits
 of two values are equal exactly when they are one object, and their address is the handle's
 (`java::Thin::address`), so `equals` is `b.0 == self.0` and `hashCode` is
-`java::address_hash(self.0.address())`, one text for every such class. A dispatcher writes an
+`java::address_hash(self.0.address())`, one text for every such class, and so is their arm of
+`object_identity_hash()`, which `System.identityHashCode` calls. A dispatcher writes an
 arm whose text does not read the object once, for all the classes that run it
 (`match_arms_or`), so the arms of the classes that keep `Object`'s methods are one range of class
 numbers rather than one arm each; `java::SameObject` tests the bits for them the same way. In a
-program as large as the Minecraft server, these three functions were otherwise millions of
+program as large as the Minecraft server, these four functions were otherwise millions of
 bytes each, one `match` that rustc compiled for most of an hour.
 
 The identity hash is the address of the class's struct (`java::address_hash` of
