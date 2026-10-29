@@ -80,7 +80,12 @@ holds one function whole while it compiles it, and the server's `Display` alone 
 past 20 GB to compile; LLVM's time grows faster than a function's size, so the parts are small;
 they are items of their own, which the split into crates spreads over the body crates
 (docs/several-crates.md). A `match` over 2048 classes or fewer stays whole, so that its call is
-one jump, not two.
+one jump, not two. `runtime_type_names()`, which `isInstance`, `cast` and array stores ask on
+every call, has no `match`: it reads a static at the crate root that holds each class's names by
+class number (`TYPE_NAMES_BY_CLASS_NUMBER`, `class_values::type_names_table`), one load at any
+optimization level, where a `match` over the thousand classes that implement `Comparable` is a
+thousand compares without optimizations; only an `Object[]` that carries its own class answers
+from its value first.
 
 Terms:
 
@@ -255,7 +260,11 @@ Rules:
   string, a box, a Java enum constant, an array, a builder) is held in the low six bytes when it
   fits there and in a box otherwise; an array, a builder, a box with identity and a string with
   identity (`java::JStr`) are their own handles. A number that no class of the type has is a bug
-  the view reports (`java::bad_tag`).
+  the view reports (`java::bad_tag`). In a `match` of a method on the number, though, the arm
+  whose classes are in the most runs (more than four) is the last arm, `_`, in place of that
+  report: rustc tests a pattern's runs one by one before it switches on the other numbers, and
+  the Minecraft server's `Object::hash_code` spent its time walking the 3 750 runs of the classes
+  whose hash is their address.
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.
@@ -264,8 +273,10 @@ Rules:
   the root of a class tree is at offset 0 of every object of the tree, and a
   `java::Monitored` keeps the object first too. For an immutable or celled family, `base()` is
   then one read with no `match`: `unsafe { self.0.as_prefix() }` (`java::Thin::as_prefix`)
-  lends the start of the object as the `&XFields`, after a `const` block that asserts each
-  variant's offset is 0. A dispatcher whose every variant runs one field-level body at or above
+  lends the start of the object as the `&XFields`, after it uses a constant, `BASE_AT_START`,
+  that asserts each variant's offset is 0. The checks are in that constant rather than in
+  `base()`, which stays small enough for a program split into crates to keep in the header,
+  inlined where it is called (`docs/several-crates.md`). A dispatcher whose every variant runs one field-level body at or above
   that fields struct calls it there, `self.base().get_name()`. A family behind `RefCell`s or
   `java::Locked`s keeps the `match` above, whose `Ref::map` takes the borrow of the class's
   cell (std's `RefCell` gives no fixed place to its borrow flag), as does an enum with a Java

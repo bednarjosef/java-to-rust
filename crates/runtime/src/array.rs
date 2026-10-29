@@ -133,7 +133,8 @@ impl<T> ElementClass<T> {
     /// a `String[]`), which the `ArrayStoreException` gives. A null fits any array.
     pub(crate) fn refuses(&self, v: &T) -> Option<&'static str> {
         let names = (self.names)(v)?;
-        (!names.contains(&self.element)).then(|| names.first().copied().unwrap_or("java.lang.Object"))
+        (!crate::class::names_contain(names, self.element))
+            .then(|| names.first().copied().unwrap_or("java.lang.Object"))
     }
 }
 

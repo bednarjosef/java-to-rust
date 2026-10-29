@@ -69,6 +69,10 @@ const AMONG_MOST: usize = 4;
 /// The most classes that a `match` on the class number is written whole for (`match_arms_or`).
 const CUT_ABOVE: usize = 2048;
 
+/// The most runs of class numbers that an arm of a `match` on the class number is written with,
+/// where it could be the match's last arm, `_`, instead (`tag_match`).
+const LAST_ARM_RUNS: usize = 4;
+
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
 const PART_CLASSES: usize = 256;
@@ -2030,18 +2034,28 @@ impl<'a> Gen<'a> {
                 alike.push((text, vec![c]));
             }
         }
+        let patterns: Vec<String> = alike.iter().map(|(_, classes)| self.tags(classes, variants)).collect();
+        // The arm of the most runs of class numbers, where the match has no other: rustc tests a
+        // pattern's runs one by one before the `match` on the numbers of the other arms, and the
+        // Minecraft server's `Object::hash_code` spent its time in the 3 750 runs of the classes
+        // whose hash is their address. As the match's last arm, `_`, it costs nothing: no value has
+        // a number that no variant has.
+        let runs = |pattern: &String| pattern.matches(" | ").count() + 1;
+        let last = (0..alike.len())
+            .filter(|_| otherwise.is_none())
+            .max_by_key(|&i| (runs(&patterns[i]), std::cmp::Reverse(i)))
+            .filter(|&i| runs(&patterns[i]) > LAST_ARM_RUNS);
         for line in lines {
             match line {
                 Ok(line) => self.line(&line),
-                Err(i) => {
-                    let tags = self.tags(&alike[i].1, variants);
-                    self.line(&format!("{tags} => {},", alike[i].0));
-                }
+                Err(i) if Some(i) == last => {}
+                Err(i) => self.line(&format!("{} => {},", patterns[i], alike[i].0)),
             }
         }
-        match otherwise {
-            Some(text) => self.line(&format!("_ => {text},")),
-            None => self.line("tag => java::bad_tag(tag),"),
+        match (otherwise, last) {
+            (Some(text), _) => self.line(&format!("_ => {text},")),
+            (None, Some(i)) => self.line(&format!("_ => {},", alike[i].0)),
+            (None, None) => self.line("tag => java::bad_tag(tag),"),
         }
         self.indent -= 1;
         self.line("}");
@@ -2060,17 +2074,14 @@ impl<'a> Gen<'a> {
         let vis = self.vis();
         // The borrows of a `java::Locked` are the runtime's.
         let java = if self.facts.thread_shared.contains(&root) { "java::" } else { "" };
-        self.line(&match (mutable, immutable) {
-            (false, true) => format!("{vis}fn base(&self) -> &{structure} {{"),
-            (false, false) => format!("{vis}fn base(&self) -> {java}Ref<'_, {structure}> {{"),
-            _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
-        });
-        self.indent += 1;
-        if immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c)) {
-            // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the
-            // root's fields struct is at the start of every object, which is a `java::Monitored`
-            // only around it, fields first: one read, whatever the class. rustc checks the offsets.
-            let checks: Vec<String> = variants
+        let prefix = immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c));
+        // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the root's
+        // fields struct is at the start of every object, which is a `java::Monitored` only around
+        // it, fields first: one read, whatever the class. rustc checks the offsets in a constant
+        // of their own, which keeps `base()` small enough for a program split into crates to keep
+        // it in the header, inlined where it is called (`split.rs`, `small`).
+        let checks: Vec<String> = if prefix {
+            variants
                 .iter()
                 .filter_map(|&c| {
                     let path = hierarchy::base_path(self.facts, self.class, c, root);
@@ -2079,13 +2090,27 @@ impl<'a> Gen<'a> {
                     (!path.is_empty())
                         .then(|| format!("assert!(std::mem::offset_of!({object}, {path}) == 0);"))
                 })
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !checks.is_empty() {
+            self.line("const BASE_AT_START: () = {");
+            for check in &checks {
+                self.line(&format!("    {check}"));
+            }
+            self.line("};");
+            self.gap();
+        }
+        self.line(&match (mutable, immutable) {
+            (false, true) => format!("{vis}fn base(&self) -> &{structure} {{"),
+            (false, false) => format!("{vis}fn base(&self) -> {java}Ref<'_, {structure}> {{"),
+            _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
+        });
+        self.indent += 1;
+        if prefix {
             if !checks.is_empty() {
-                self.line("const {");
-                for check in checks {
-                    self.line(&format!("    {check}"));
-                }
-                self.line("}");
+                self.line("let () = Self::BASE_AT_START;");
             }
             self.line("// Every variant is an object that starts with the fields struct (above).");
             self.line("unsafe { self.0.as_prefix() }");
@@ -3443,6 +3468,23 @@ impl<'a> Gen<'a> {
         for (need, method, ret) in methods {
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
+            if let Need::RuntimeTypeNames(_) = need {
+                // Read from the table by class number (`type_names_table`), but for the arrays that
+                // carry their class.
+                let carried: Vec<usize> =
+                    variants.iter().copied().filter(|&c| self.names_carried(c)).collect();
+                let table = format!("crate::{}[self.0.tag() as usize]", super::class_values::TYPE_NAMES);
+                if carried.is_empty() {
+                    self.line(&table);
+                } else {
+                    self.match_arms_or(&carried, Some(table), &|g: &mut Self, c| {
+                        (format!("{}(o, {})", g.runtime("array_type_names"), g.names_list(c)), true)
+                    });
+                }
+                self.indent -= 1;
+                self.line("}");
+                continue;
+            }
             let ret = format!(" -> {ret}");
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
                 // An `Object[]` that may be a covariant array, which carries its class.
@@ -3451,11 +3493,6 @@ impl<'a> Gen<'a> {
                 }
                 Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
-                // So does its names, which a store of it into an array of arrays tests.
-                Need::RuntimeTypeNames(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
-                    (format!("{}(o, {})", g.runtime("array_type_names"), g.names_list(c)), true)
-                }
-                Need::RuntimeTypeNames(_) => (g.names_list(c), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
                 // Read from the value's bits, the same text for every such class, whose arms
                 // are one (`match_arms_or`): the Minecraft server's were 6 MB of the same code.

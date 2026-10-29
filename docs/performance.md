@@ -126,6 +126,32 @@ made on the stack (`java::count_allocation`).
   `view()` and a `match` over every class, the kernel took 1132 ms in release (fat LTO,
   `opt-level = 3`) and 14751 ms at `opt-level = 1`, against 781 ms and 4183 ms now (medians of
   five, at a load of 6; Java's kernel is about 120 ms).
+- **Classes known only at run time (ClassCast).** `Class.cast` and `Class.isInstance` of values
+  of 258 classes behind `Comparable` with their own class and another, as the Minecraft server's
+  `StateHolder.getValue` casts each property's value. Each asks the value for the names above
+  its class, which is one read of a table by class number (`TYPE_NAMES_BY_CLASS_NUMBER`), and
+  compares each name by its length and last eight bytes before it compares it whole. Through a
+  `match` over the 258 classes and a `memcmp` of each name, the kernel took 184 ms in release,
+  446 ms at `opt-level = 1` and 1450 ms at `opt-level = 0` (the runtime at 2), against 89, 242
+  and 1030 ms now (medians of five, three at 0, at a load of 7; Java's kernel is about 48 ms).
+- **Objects of many classes hashed as `Object`s (ObjectHash).** An open-addressing set of 300
+  objects probed for each, as `ImmutableCollections.SetN.probe` is in the Minecraft server: two
+  classes in three hash by their address and the others override `hashCode`, numbered in turn,
+  so the classes that hash by address are 100 runs of class numbers. With them as the last arm
+  of `Object::hash_code`'s `match` (`_`) rather than 100 range tests before it, the kernel takes
+  70 ms in release against 192 ms, and 870 ms at `opt-level = 0` (the runtime at 2) against
+  1800 ms; at `opt-level = 1` both take about 140 ms (medians of five to nine, at a load of 7 to
+  9; Java's kernel is about 94 ms).
+- **Fields read through a type of several classes, split into crates (BaseFields).** Two final
+  fields of an abstract class read from an array of four subclasses, in a translation split into
+  three body crates (`--crates 3`), as the Minecraft server's noise chunk reads its density
+  buffers. `base()` is one read, and its layout checks are in a constant of their own, so it is
+  small enough to stay in the header, inlined where it is called (`docs/several-crates.md`).
+  When every function moved to a body crate behind a header wrapper, the kernel took about
+  730 ms at `opt-level = 1` (with the release profile's fat LTO), against 87 ms now; release
+  takes about 70 ms either way. Without LTO, at `opt-level = 3`, it took 93 ms while `base()`,
+  its checks inside it, was too long to stay, against 70 ms (medians of five, at a load of 7;
+  Java's kernel is about 160 to 220 ms there).
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.

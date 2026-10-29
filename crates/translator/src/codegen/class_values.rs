@@ -10,6 +10,10 @@
 
 use super::*;
 
+/// The static at the crate root that holds the binary names above each class by its class
+/// number (`Gen::type_names_table`).
+pub(super) const TYPE_NAMES: &str = "TYPE_NAMES_BY_CLASS_NUMBER";
+
 /// `match obj.view() { arms }` over the variants of an enum of classes, whose arms match the
 /// view's variants (`dispatch::view_pattern`). With no arms, for an interface that no created class
 /// implements, `obj` has no value to match, so it is run and then the code is unreachable.
@@ -537,6 +541,47 @@ impl<'a> Gen<'a> {
             return format!("{{ let _ = {text}; Some({names}) }}");
         }
         format!("Some({names})")
+    }
+
+    /// Whether an object of class `c` carries the names of its class, as an `Object[]` that may be
+    /// a covariant array does (`java::array_type_names`), which a store of it into an array of
+    /// arrays tests: they are not those of `c`.
+    pub(super) fn names_carried(&self, c: usize) -> bool {
+        self.class.array_of(c).is_some_and(|ty| self.carries_class(ty))
+    }
+
+    /// The static `TYPE_NAMES` at the crate root, if an enum of classes reads it: each class's
+    /// `names_list` at its class number, for the classes of those enums, whose
+    /// `runtime_type_names()` reads it (`dispatch::class_value_impls`). One read by number, where a
+    /// `match` over the thousand classes that implement `Comparable` is a thousand compares
+    /// without optimizations and a search with them.
+    pub(super) fn type_names_table(&mut self) -> String {
+        let enums: Vec<usize> = self
+            .wanted
+            .iter()
+            .filter_map(|need| match need {
+                Need::RuntimeTypeNames(t) => Some(*t),
+                _ => None,
+            })
+            .collect();
+        let mut by_number = std::collections::BTreeMap::new();
+        for t in enums {
+            for c in self.enum_variants(t) {
+                if !self.names_carried(c) {
+                    by_number.insert(self.class_tag(c), c);
+                }
+            }
+        }
+        let Some((&last, _)) = by_number.last_key_value() else { return String::new() };
+        let mut entries = vec!["&[]".to_string(); usize::from(last) + 1];
+        for (number, c) in by_number {
+            entries[usize::from(number)] = self.names_list(c);
+        }
+        format!(
+            "static {TYPE_NAMES}: [&[&str]; {}] = [\n{}];\n",
+            entries.len(),
+            entries.iter().map(|e| format!("    {e},\n")).collect::<String>()
+        )
     }
 
     /// `decl_names(c)` as a slice: `&["Main$Dog", .., "java.lang.Object"]`.

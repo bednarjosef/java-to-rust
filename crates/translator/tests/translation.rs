@@ -882,7 +882,7 @@ fn a_type_with_several_concrete_classes_is_an_enum() {
             // reads it whatever the class.
             "#[repr(C)]\nstruct Circle {\n    base: BaseFields,",
             "#[repr(C)]\nstruct Rect {\n    base: BaseFields,",
-            "    fn base(&self) -> &BaseFields {\n        const {\n            assert!(std::mem::offset_of!(Circle, base) == 0);\n            assert!(std::mem::offset_of!(Rect, base) == 0);\n        }\n        // Every variant is an object that starts with the fields struct (above).\n        unsafe { self.0.as_prefix() }\n    }",
+            "    const BASE_AT_START: () = {\n        assert!(std::mem::offset_of!(Circle, base) == 0);\n        assert!(std::mem::offset_of!(Rect, base) == 0);\n    };\n\n    fn base(&self) -> &BaseFields {\n        let () = Self::BASE_AT_START;\n        // Every variant is an object that starts with the fields struct (above).\n        unsafe { self.0.as_prefix() }\n    }",
             // A method that only touches the fields runs on the fields struct that `base()` lends.
             "    fn get_name(&self) -> java::JString {\n        self.base().get_name()\n    }",
             "b.base().name",
