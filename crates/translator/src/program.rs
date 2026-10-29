@@ -381,8 +381,10 @@ fn narrow(
 /// were asked for, so that the first unsupported construct reported is near the program's code.
 ///
 /// Each round walks only what its units add (`reach::Rounds`), over the units with their records
-/// complete (`javac::Records`). Which members a record gets depends on every unit, so when a new
-/// unit changes those of a unit walked before, the round walks all of them again.
+/// complete (`javac::Records`). Which members a record gets depends on every unit, so a new unit
+/// can add members to a record of a unit walked before: the walks take up the unit with them as
+/// they go on (`reach::Rounds::replace`). Were a member to go, the round would walk all the units
+/// again.
 ///
 /// With `Program::keep_going`, javac goes on past compile errors.
 ///
@@ -462,7 +464,7 @@ fn load_in_rounds(
     let mut rounds = new_rounds();
     // The classes javac has been asked for (`reach::Rounds::asked`).
     let mut asked_so_far: BTreeSet<String> = BTreeSet::new();
-    let (mut round, mut for_records, mut stale) = (0, 0, 0);
+    let (mut round, mut for_records, mut stale, mut in_place) = (0, 0, 0, 0);
     let check = std::env::var_os("JAVA_TO_RUST_REACH_CHECK").is_some();
     let mut asked_in_rounds = (!string_array_writes).then(Vec::new);
     loop {
@@ -476,15 +478,21 @@ fn load_in_rounds(
             records.complete(&mut copy);
             copy
         };
+        // The units walked before whose records get other members with this round's units, and
+        // whether those only add to the members they had, which the walks take up as they go on
+        // (`reach::Rounds::replace`); otherwise every unit is walked again.
         let mut changed: Vec<(usize, Value)> = Vec::new();
+        let mut adds_only = true;
         for (index, unit, of, completed) in &mut changing {
             let now = records.completion(of);
             if now != *completed {
+                adds_only &= now.only_adds_to(completed);
                 changed.push((*index, complete(unit)));
                 *completed = now;
             }
         }
-        let restart = !changed.is_empty();
+        let walked: Vec<usize> = changed.iter().map(|&(index, _)| index).collect();
+        let restart = !adds_only;
         let old = trees.len();
         for (unit, &changes) in units.iter().zip(&changes) {
             if changes {
@@ -505,6 +513,10 @@ fn load_in_rounds(
             rounds.asked(&asked_so_far.iter().cloned().collect::<Vec<_>>());
             rounds.add(&trees).map_err(fail)?;
         } else {
+            in_place += usize::from(!walked.is_empty());
+            for &index in &walked {
+                rounds.replace(index, trees[index]);
+            }
             rounds.add(&trees[old..]).map_err(fail)?;
         }
         if check {
@@ -541,7 +553,11 @@ fn load_in_rounds(
         if crate::timings::enabled() {
             // Each round as it ends, for a program whose loading takes long.
             let received = session.received as f64 / 1e6;
-            let again = if restart { ", from the start again" } else { "" };
+            let again = match walked.len() {
+                _ if restart => ", from the start again".to_string(),
+                0 => String::new(),
+                n => format!(", {n} units with new members in their records"),
+            };
             eprintln!(
                 "timing: round {round}: {} units, {} more asked for, {received:.0} MB of trees, reach \
                  {round_reach:.3} s{again}{}",
@@ -578,7 +594,8 @@ fn load_in_rounds(
         eprintln!("timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees{memory}", units.len());
         eprintln!(
             "timing: reach: {reaching:.3} s, {round} rounds ({} walks from the start again: {for_records} for records, \
-             {stale} stale), {classes} classes and {methods} methods",
+             {stale} stale; {in_place} rounds added members to records walked before), {classes} classes and \
+             {methods} methods",
             for_records + stale
         );
     }

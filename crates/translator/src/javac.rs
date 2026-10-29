@@ -281,7 +281,8 @@ impl Session {
 }
 
 /// The members that javac adds to records written (see `records`), into units that come in
-/// rounds (`Session`): which members a record gets depends on every unit so far.
+/// rounds (`Session`): which members a record gets depends on every unit so far, and only grows
+/// with them (`Completion::only_adds_to`).
 #[derive(Default)]
 pub struct Records {
     survey: records::Survey,
