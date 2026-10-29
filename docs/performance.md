@@ -161,17 +161,21 @@ made on the stack (`java::count_allocation`).
 
 ## Memory
 
-`scripts/benchmark.py` reports each side's peak resident memory beside its time. Three of the
+`scripts/benchmark.py` reports each side's peak resident memory beside its time. Four of the
 programs measure memory rather than time: `ReflectionTableMemory` (a reflection table of 14,400
 methods, of which three classes' are read), `LargeArrays` (arrays of 64, 128 and 256 KB alive
-together) and `MonitoredObjects` (3 million small objects in a program that waits and notifies,
-in which every object keeps its monitor). Peak memory, median of three runs, in MB:
+together), `MonitoredObjects` (3 million small objects in a program that waits and notifies,
+in which every object keeps its monitor) and `ManyThreadsAllocating` (32 threads that allocate
+arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak memory in MB, before
+and after the change that each measures (the median of three runs; of eight for
+`ManyThreadsAllocating`, 0.101 s before and 0.105 s after):
 
 | program               | before | after | Java |
 |-----------------------|-------:|------:|-----:|
 | ReflectionTableMemory |   20.2 |  14.9 | 42.0 |
 | LargeArrays           |  134.4 |  88.4 |  143 |
 | MonitoredObjects      |  124.5 |  76.6 |  148 |
+| ManyThreadsAllocating |  235.5 | 197.7 |  417 |
 
 ### Where the Minecraft server's memory went
 
@@ -202,14 +206,37 @@ The release trial of the server peaked at 1,498 MB on the bench (`minecraft-serv
     `java::Monitored` object held its lock, 16 bytes. It now holds a pointer to a lock made the
     first time a thread takes it (`LazyMonitor`), 8 bytes, which puts about half of the objects
     in a smaller slot.
-  - **large allocations of whole blocks**: 361 buffers of exactly 128 KB (a `Vec` that doubled)
-    took three blocks of 64 KB each, the third only for the cache-line color of its start, 23 MB
-    in all. A large allocation's color now stays within the blocks its size needs
-    (docs/collector.md).
-- What remains larger than Java's: a `java::Class` is an 88-byte value wherever it is held (a
-  field, a boxed `Class` as an `Object`), a string field is a 24-byte `Vec` with its own copy of
-  the text, and the heap keeps free blocks until a whole huge page of them is free (167 MB of
-  free blocks in the sample).
+  - **large allocations of whole blocks**: 361 arrays of exactly 128 KB (`float[32768]`, the
+    density buffers of world generation) took three blocks of 64 KB each, the third only for
+    the cache-line color of its start, 23 MB in all. A large allocation's color now stays
+    within the blocks its size needs (docs/collector.md).
+- **The heap by class.** A dump of the heap and its block table right after a collection, with
+  the server stopped (424 MB in taken slots, against Java's 186 MB alive), each object named by
+  the class number in the handles that point at it (`java::Thin`), or else by the chain of
+  objects that hold it up to one that has a number:
+  - the reflection table, 110 MB in this dump (above);
+  - **thread spans, 28 MB**: 641 words of the blocks' bitmaps whose taken slots nothing points
+    at, 1 to 2 MB in each slot size from 896 bytes to 32 KB, one 64 KB block for about each of
+    the 41 threads and the sizes it allocates. A thread took every untaken slot of a bitmap
+    word at once, which from slots of 1 KB is a whole block, and the collector kept all of the
+    word's taken slots. A span now takes at most 8 KB of slots, and the collector keeps only
+    its own (docs/collector.md, `ManyThreadsAllocating` above);
+  - **the same objects, larger**: `StructureTemplate$StructureBlockInfo` (308,000 of them) is
+    48 bytes against Java's 24, `BlockPos` (313,000) 32 against 24, `BlockState` 224 against
+    104, DataFixerUpper's `ProductType`, `NamedType`, `SumType` and `TagType` 64 against 32. A
+    handle is 8 bytes where Java's compressed references are 4, each object held a 16-byte lock
+    (now 8), and slots grow by 16 bytes where Java's objects grow by 8. From the furthest
+    nonzero word of each class's objects (slots that may hold pointers are zeroed when handed
+    out), the 214 MB of objects reached through numbered handles take 200 MB with the 8-byte
+    lock, would take 190 MB with no lock word in the classes no `synchronized`, `wait` or
+    `notify` reaches, and 185 MB with slot sizes in steps of 8 bytes to 128 as well;
+  - world generation's density buffers (`float[32768]` and `float[98304]`) come and go: up to
+    120 MB of them in one dump, a few MB in another. Their pools drop a buffer unused for 20
+    ticks, so they are not kept; Java's histogram was taken between them.
+- What remains larger than Java's: the handles and slot sizes above, a `java::Class` is an
+  88-byte value wherever it is held (a field, a boxed `Class` as an `Object`), a string field is
+  a 24-byte `Vec` with its own copy of the text, and the heap keeps free blocks until a whole
+  huge page of them is free (167 MB of free blocks in the sample).
 
 ## Translating whole programs
 
