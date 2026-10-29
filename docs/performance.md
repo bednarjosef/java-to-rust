@@ -716,8 +716,10 @@ function that moves costs about 19 KB (its stub and its declaration), an empty f
 holds an item for every function of the program, so it sets a build's peak: the Minecraft
 server's, 219 MB, needs 16 to 20 GB in release. Half of its text is the 274,000 functions that
 moved, a stub and a declaration each; then come the 178,000 small functions that keep their code
-there, and the 43,000 class constants (`CLASS__..`), whose superclass and interfaces are closures,
-93,000 of them, each a function body for rustc.
+there, and the 43,000 classes as values (`CLASS__..`). Those are statics that name their
+superclass, interfaces and declaring class by references: as constants that named them by
+closures, 93,000 function bodies for rustc, they alone took rustc 2.8 GB and 15.9 s in release,
+and as statics 1.8 GB and 13.0 s.
 
 Cranelift (`-Zcodegen-backend=cranelift`, nightly) builds javac's translation in debug in 55 s
 instead of 82 s with LLVM (two jobs), but the binary it builds ends with status 101 at once on

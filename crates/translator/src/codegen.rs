@@ -997,7 +997,7 @@ struct Gen<'a> {
     /// them in the last round, which takes the other items from the first (`generate_all`).
     only_enums: Option<&'a OnlyEnums>,
     /// The classes of the program whose `java::Class` values the code names, each declared once
-    /// as a constant at the crate root (`class_value_constants`).
+    /// as a static at the crate root (`class_value_constants`).
     class_values: std::collections::BTreeSet<usize>,
     /// The name of each class's constant, made when the first is named (`class_value_names`).
     class_value_names: Vec<String>,

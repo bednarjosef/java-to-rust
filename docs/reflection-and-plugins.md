@@ -85,8 +85,8 @@ program where such a lookup can happen, so they can be checked before the progra
   second, which each class value carries. A computed name becomes a call of one method that
   every such call shares, a `switch` over the binary names of the classes that code can find by
   name, cut by the names' lengths into methods of a hundred or so names in a big program. The value of each class of the program that
-  code names is a constant at the crate root (`const CLASS__COM_FOO_BAR: java::Class`), written
-  once: the reflection table names a class for each of its members and their types, and written
+  code names is a static at the crate root (`static CLASS__COM_FOO_BAR: java::Class`), which
+  names its superclass, interfaces and declaring class by references to theirs, written once: the reflection table names a class for each of its members and their types, and written
   out at each of those, with the names above it, the Minecraft server's table had lines of 20 MB.
 - **The reflection table.** `getMethod`, `getDeclaredMethod`, `getField`, `getConstructor`,
   `newInstance` and the rest look members up in a table that the translation builds in. The
