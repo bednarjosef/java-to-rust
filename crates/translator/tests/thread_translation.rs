@@ -132,8 +132,8 @@ fn the_started_thread_runs_the_thread_object_it_was_given() {
     assert_contains(
         &rust,
         &[
-            "{ let t = t.clone(); move || { let t = &t; java::set_current_thread(t.clone()); t.run(); } }",
-            "java::join_thread(self.base().tid.get(), 0);",
+            "{ let t = t.clone(); move || { java::set_current_thread(t.clone()); Thread__run(t); } }",
+            "java::join_thread(this.base().tid.get(), 0);",
         ],
     );
 }
@@ -161,7 +161,7 @@ fn a_thread_object_is_never_borrowed_across_a_join() {
     // `join` waits for the other thread, which may need the object's lock: it is no method of the
     // fields struct, which would hold the lock for the call.
     let rust = translate(WORKER);
-    assert_contains(&rust, &["Thread::Worker(w.clone()).join();"]);
+    assert_contains(&rust, &["Thread__join(Thread::Worker(w.clone()));"]);
     assert_lacks(&rust, &[".borrow().base.join()"]);
 }
 

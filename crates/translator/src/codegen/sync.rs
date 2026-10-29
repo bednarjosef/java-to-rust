@@ -78,7 +78,8 @@ impl<'a> Gen<'a> {
             {
                 return;
             }
-            format!("{}({})", self.runtime("enter"), self.this_name())
+            let this = if self.thin_this { "&this" } else { self.this_name() };
+            format!("{}({this})", self.runtime("enter"))
         };
         self.line(&format!("let _monitor = {enter};"));
     }

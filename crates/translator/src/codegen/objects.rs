@@ -798,7 +798,11 @@ impl<'a> Gen<'a> {
     /// The name of `this` in the code being written: `self` in a method that borrows its object,
     /// else `this`.
     pub(super) fn this_name(&self) -> &'static str {
-        if matches!(self.this_form, ThisForm::SelfRef | ThisForm::Enum) { "self" } else { "this" }
+        match self.this_form {
+            ThisForm::Enum if self.thin_this => "this",
+            ThisForm::SelfRef | ThisForm::Enum => "self",
+            ThisForm::Shared | ThisForm::Local => "this",
+        }
     }
 
     /// Whether the constructors of class `name` build a plain value, which `new` then shares.
@@ -1048,7 +1052,9 @@ impl<'a> Gen<'a> {
     pub(super) fn object_ref(&mut self, e: &'a Expr) -> String {
         let e = self.peel(e);
         match &e.kind {
-            // A method that uses `this` as a value has it as a `&Rc<..>`.
+            // A method that uses `this` as a value has it as a `&Rc<..>`, a function of an enum's
+            // module as the value itself.
+            ExprKind::This if self.thin_this => "&this".to_string(),
             ExprKind::This => self.this_name().to_string(),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             _ => format!("&{}", self.object_place(e)),
@@ -1187,7 +1193,7 @@ impl<'a> Gen<'a> {
             };
             if let Some(obj) = obj {
                 self.need(Need::Body(index));
-                return format!("{obj}.{}()", self.fn_names[index]);
+                return self.enum_fn_call(t, &self.fn_names[index], &obj, "");
             }
         }
         let obj = self.handle_object(handle, e, index);
@@ -1439,6 +1445,7 @@ impl<'a> Gen<'a> {
     /// `impl` has it.
     pub(super) fn qualified_fn(&self, index: usize) -> String {
         let owner = match self.homes[index] {
+            Home::Enum(t) if self.thin_fn(index) => return self.enum_fn(t, &self.fn_names[index]),
             Home::Enum(t) => {
                 return format!("{}::{}", struct_name(&self.class.types[t].name), self.fn_names[index]);
             }

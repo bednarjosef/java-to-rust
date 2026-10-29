@@ -45,7 +45,7 @@ fn a_lambda_is_a_variant_of_its_interface() {
             "struct OpLambdaInMain {",
             "fn apply(&self, a: i32, b: i32) -> i32 {\n        a + b\n    }",
             "OpLambdaInMain(&'a Arc<OpLambdaInMain>) = 3,",
-            "3 => { let o: &Arc<OpLambdaInMain> = unsafe { self.0.as_pointer() }; o.apply(a, b) }",
+            "3 => { let o: &Arc<OpLambdaInMain> = unsafe { this.0.as_pointer() }; o.apply(a, b) }",
             "AOp::OpLambdaInMain({ thread_local! { static LAMBDA: std::cell::OnceCell<Arc<OpLambdaInMain>> = \
              const { std::cell::OnceCell::new() }; } LAMBDA.with(|lambda| lambda.get_or_init(|| Arc::new(OpLambdaInMain__new())).clone()) })",
         ],

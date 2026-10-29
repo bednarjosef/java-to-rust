@@ -1434,6 +1434,14 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `as_enum`, as the value that a function of the enum's module takes (`thin_receiver`).
+    pub(super) fn thin_as_enum(&mut self, t: usize, e: &'a Expr) -> String {
+        match self.enum_of(e) {
+            Some(s) if s == t => self.thin_receiver(t, e),
+            _ => self.as_enum(t, e),
+        }
+    }
+
     /// A conversion of an object to a supertype: the same object as a value of the supertype's
     /// enum. Where both types have the same representation it changes nothing.
     pub(super) fn class_cast(&mut self, to: Type, value: &'a Expr) -> Code {
@@ -1620,9 +1628,9 @@ impl<'a> Gen<'a> {
             }
             _ => self.dispatch_name(t, resolved),
         };
-        let obj = self.object(receiver);
+        let obj = self.thin_receiver(t, receiver);
         let args = self.call_args(resolved, args).join(", ");
-        Code::atom(format!("{obj}.{name}({args})"))
+        Code::atom(self.enum_fn_call(t, &name, &obj, &args))
     }
 
     /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
@@ -1663,6 +1671,56 @@ impl<'a> Gen<'a> {
         let group = self.class.hierarchy.group_id(resolved);
         self.need(Need::Dispatch(t, group));
         self.group_names[&group].clone()
+    }
+
+    /// Whether method `index` is a function of the module of a type's enum rather than a method
+    /// of its `impl`: a method emitted on the enum of a type that is not a closure type, whose
+    /// methods are those of a trait of the closure (`closure_trait`). It is named after the enum
+    /// and the method, `Shape__area` (`enum_fn`), and takes the enum's value itself, which is
+    /// `Copy`: `this: Shape`. A split's header crate declares such a function alone, where a
+    /// method whose code moves keeps a function that calls the declaration (`split.rs`).
+    pub(super) fn thin_fn(&self, index: usize) -> bool {
+        matches!(self.homes[index], Home::Enum(t) if !self.facts.closure_types.contains(&t))
+            && !self.class.methods[index].is_ctor
+    }
+
+    /// The name of the function `name` of the module of the enum of `t`: `Shape__area`.
+    pub(super) fn enum_fn(&self, t: usize, name: &str) -> String {
+        format!("{}__{name}", struct_name(&self.class.types[t].name))
+    }
+
+    /// `this` as the value that a function of an enum's module takes: `this` in such a function,
+    /// `*self` in a method of the enum's `impl` or one of its traits, which borrows it.
+    pub(super) fn this_value(&self) -> &'static str {
+        if self.thin_this { "this" } else { "*self" }
+    }
+
+    /// The receiver of the code of the enum being written, as a method call's receiver: `this`
+    /// in a function of the enum's module, else `self`.
+    fn me(&self) -> &'static str {
+        if self.thin_this { "this" } else { "self" }
+    }
+
+    /// The receiver `e`, a value of the enum of `t`, as the value that a function of the enum's
+    /// module takes (`thin_fn`): `this`, a variable, or else the enum's struct of the receiver's
+    /// bits, `Shape(r.0)`, which reads the same whether `r` is the value or a reference to it.
+    pub(super) fn thin_receiver(&mut self, t: usize, e: &'a Expr) -> String {
+        let peeled = self.peel(e);
+        match &peeled.kind {
+            ExprKind::This => return self.this_value().to_string(),
+            ExprKind::Var(name) if !self.borrowed.contains(name) && !self.nullable(peeled) => {
+                return self.object(e);
+            }
+            _ => {}
+        }
+        let obj = self.object(e);
+        format!("{}({obj}.0)", struct_name(&self.class.types[t].name))
+    }
+
+    /// A call of function `name` of the module of the enum of `t` on `obj`, the value it takes.
+    pub(super) fn enum_fn_call(&self, t: usize, name: &str, obj: &str, args: &str) -> String {
+        let all = if args.is_empty() { obj.to_string() } else { format!("{obj}, {args}") };
+        format!("{}({all})", self.enum_fn(t, name))
     }
 
     /// The body that a call of `resolved` on the enum of `t` calls directly, when it calls no
@@ -1711,9 +1769,9 @@ impl<'a> Gen<'a> {
         match self.homes[index] {
             Home::Enum(d) => {
                 self.need(Need::Body(index));
-                let obj = self.as_enum(d, receiver);
+                let obj = self.thin_as_enum(d, receiver);
                 let args = self.call_args(index, args).join(", ");
-                Some(Code::atom(format!("{obj}.{}({args})", self.fn_names[index])))
+                Some(Code::atom(self.enum_fn_call(d, &self.fn_names[index], &obj, &args)))
             }
             Home::Fields(d) => {
                 let t = self.enum_of(receiver)?;
@@ -1845,18 +1903,28 @@ impl<'a> Gen<'a> {
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
         let start = self.out.len();
+        // The dispatchers and bodies are functions of the module (`thin_fn`), written after the
+        // `impl`.
+        let mut functions = String::new();
         for need in &wanted {
+            let at = self.out.len();
+            self.indent -= 1;
             match *need {
-                Need::Base(_) => self.base_fn(t, false),
-                Need::BaseMut(_) => self.base_fn(t, true),
-                Need::Convert(_, to) => self.convert_fn(to),
-                Need::Narrow(_, to) => self.narrow_fn(t, to),
                 Need::Dispatch(_, group) => self.dispatcher(t, group, None),
                 Need::Among(_, group, key) => self.dispatcher(t, group, Some(key)),
                 Need::Body(i) => {
                     self.gap();
                     self.method(i);
                 }
+                _ => {}
+            }
+            self.indent += 1;
+            functions.push_str(&self.out.split_off(at));
+            match *need {
+                Need::Base(_) => self.base_fn(t, false),
+                Need::BaseMut(_) => self.base_fn(t, true),
+                Need::Convert(_, to) => self.convert_fn(to),
+                Need::Narrow(_, to) => self.narrow_fn(t, to),
                 _ => {}
             }
         }
@@ -1866,6 +1934,7 @@ impl<'a> Gen<'a> {
         } else {
             self.line("}");
         }
+        self.out.push_str(&functions);
         if all {
             self.identity_impl(t, &variants);
             self.same_object_impl(t, &variants);
@@ -1947,7 +2016,7 @@ impl<'a> Gen<'a> {
         arm: &dyn Fn(&mut Self, usize) -> (String, bool),
     ) {
         if variants.is_empty() {
-            self.line("match self.view() {}");
+            self.line(&format!("match {}.view() {{}}", self.me()));
             return;
         }
         let arms: Vec<(usize, String, bool)> = variants
@@ -1976,13 +2045,14 @@ impl<'a> Gen<'a> {
             for arm in arms {
                 parts.entry(self.class_tag(arm.0) / PART_CLASSES as u16).or_default().push(arm);
             }
-            self.line(&format!("match self.0.tag() / {PART_CLASSES} {{"));
+            let me = self.me();
+            self.line(&format!("match {me}.0.tag() / {PART_CLASSES} {{"));
             for part in parts.keys() {
-                self.line(&format!("    {part} => self.{}_of_part_{part}({}),", method.name, method.args));
+                self.line(&format!("    {part} => {me}.{}_of_part_{part}({}),", method.name, method.args));
             }
             match &otherwise {
                 Some(text) => self.line(&format!("    _ => {text},")),
-                None => self.line("    _ => java::bad_tag(self.0.tag()),"),
+                None => self.line(&format!("    _ => java::bad_tag({me}.0.tag()),")),
             }
             self.line("}");
             let (out, indent) = (std::mem::take(&mut self.out), self.indent);
@@ -2010,7 +2080,8 @@ impl<'a> Gen<'a> {
     fn tag_match(&mut self, variants: &[usize], arms: Vec<(usize, String, bool)>, otherwise: Option<String>) {
         // A match on the class number, whose arm lends the object where it lies, as `view()`
         // does: one jump to the class's code rather than one to the view and one to the code.
-        self.line("match self.0.tag() {");
+        let me = self.me();
+        self.line(&format!("match {me}.0.tag() {{"));
         self.indent += 1;
         // An arm that does not read the object is written once for every class that runs its
         // text, where the first of them is.
@@ -2024,7 +2095,7 @@ impl<'a> Gen<'a> {
                 let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
                 // The class number is the one its constructor gives.
                 lines.push(Ok(format!(
-                    "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; {text} }}"
+                    "{tag} => {{ let o: &{payload} = unsafe {{ {me}.0.{lend}() }}; {text} }}"
                 )));
             } else if let Some(&i) = index.get(&text) {
                 alike[i].1.push(c);
@@ -2239,20 +2310,38 @@ impl<'a> Gen<'a> {
             self.line("#[inline]");
         }
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
-        self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
+        let ty = struct_name(&self.class.types[t].name);
+        self.line(&format!("{}fn {}(this: {ty}{all}){ret} {{", self.vis(), self.enum_fn(t, &name)));
         self.indent += 1;
+        let outer = std::mem::replace(&mut self.thin_this, true);
+        self.dispatcher_body(t, r, among, &variants, &args, &general);
+        self.thin_this = outer;
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The code of the dispatcher of `dispatcher`, for method `r` and among the `variants` it
+    /// passes on to, whose parameters are `args`; one that dispatches `among` some classes runs
+    /// the whole one, `general`, for any other.
+    fn dispatcher_body(
+        &mut self,
+        t: usize,
+        r: usize,
+        among: Option<u64>,
+        variants: &[usize],
+        args: &str,
+        general: &str,
+    ) {
         // Every object of the enum runs the call that `fields_call` writes, which an object
         // outside the classes of `among` would not.
         if among.is_none()
-            && let Some(call) = self.fields_call(t, r, &variants, &args)
+            && let Some(call) = self.fields_call(t, r, variants, args)
         {
             self.line(&call);
-            self.indent -= 1;
-            self.line("}");
             return;
         }
-        let otherwise = among.map(|_| format!("self.{general}({args})"));
-        self.match_arms_or(&variants, otherwise, &|g: &mut Self, c| match g
+        let otherwise = among.map(|_| self.enum_fn_call(t, general, "this", args));
+        self.match_arms_or(variants, otherwise, &|g: &mut Self, c| match g
             .class
             .hierarchy
             .implementation(r, c)
@@ -2263,7 +2352,7 @@ impl<'a> Gen<'a> {
                 (g.class_answer_arm(r), true)
             }
             Some(i) => {
-                let (text, uses) = g.arm_call(t, c, i, &args);
+                let (text, uses) = g.arm_call(t, c, i, args);
                 (g.covariant_ret(i, r, text), uses)
             }
             // `Object`'s identity, the same text for every class it reads the address of.
@@ -2276,13 +2365,11 @@ impl<'a> Gen<'a> {
             None if g.facts.throwing.contains(&r) => (format!("Ok({})", g.builtin_arm(r, c)), true),
             None => (g.builtin_arm(r, c), true),
         });
-        self.indent -= 1;
-        self.line("}");
     }
 
     /// The call of method `r` on the enum of `t` when every variant runs one body emitted on a
     /// fields struct at or above the one `base()` lends, and `base()` reads that with no `match`
-    /// (`base_fn`): `self.base().base.get_name()`, one call whatever the object's class.
+    /// (`base_fn`): `this.base().base.get_name()`, one call whatever the object's class.
     fn fields_call(&mut self, t: usize, r: usize, variants: &[usize], args: &str) -> Option<String> {
         let h = &self.class.hierarchy;
         let i = h.implementation(r, *variants.first()?)?;
@@ -2296,7 +2383,7 @@ impl<'a> Gen<'a> {
         }
         self.need(Need::Base(t));
         let path = hierarchy::base_path(self.facts, self.class, root, d);
-        let call = format!("self.base().{path}{}({args})", self.fn_names[i]);
+        let call = format!("this.base().{path}{}({args})", self.fn_names[i]);
         Some(self.covariant_ret(i, r, call))
     }
 
@@ -2749,15 +2836,16 @@ impl<'a> Gen<'a> {
         }
         let m = &self.class.methods[r];
         if m.name == "hashCode" {
-            return Some(format!("{}(self.0.address())", self.runtime("address_hash")));
+            return Some(format!("{}({}.0.address())", self.runtime("address_hash"), self.me()));
         }
         let p = &m.params[0];
         let other = self.local(&p.name);
         let optional = self.optional_var(r, p.ty, &p.name);
         let place = if self.lends(r) { other } else { format!("&{other}") };
+        let me = self.me();
         Some(match optional {
-            true => format!("{}.as_ref().is_some_and(|b| b.0 == self.0)", operand(&place)),
-            false => format!("{}.0 == self.0", operand(&place)),
+            true => format!("{}.as_ref().is_some_and(|b| b.0 == {me}.0)", operand(&place)),
+            false => format!("{}.0 == {me}.0", operand(&place)),
         })
     }
 
@@ -2971,13 +3059,15 @@ impl<'a> Gen<'a> {
             Home::Enum(d) => {
                 self.need(Need::Body(i));
                 if d == t {
-                    (format!("self.{name}({args})"), false)
+                    (self.enum_fn_call(d, &name, self.this_value(), args), false)
                 } else if !self.class.hierarchy.is_subtype(t, d) {
                     // A body inherited from a type below `t`: the object as a value of that type.
-                    (format!("{}({}).{name}({args})", self.variant(d, c), self.held(c)), true)
+                    let obj = format!("{}({})", self.variant(d, c), self.held(c));
+                    (self.enum_fn_call(d, &name, &obj, args), true)
                 } else {
                     self.need(Need::Convert(t, d));
-                    (format!("self.{}().{name}({args})", self.to_name(d)), false)
+                    let obj = format!("{}.{}()", self.me(), self.to_name(d));
+                    (self.enum_fn_call(d, &name, &obj, args), false)
                 }
             }
             Home::Free | Home::Nowhere => {

@@ -22,7 +22,7 @@ possible classes are known and dispatch can be a `match`.
    "the enum" of the type. A type with one such class is that class's object, with no enum.
    Enums are flat: every variant is a concrete class, never another enum, so a call through an
    interface over several class trees is one `match`.
-3. **Dispatch is a `match` in a method of the enum** (a *dispatcher*). A body that a class
+3. **Dispatch is a `match` in a function of the enum** (a *dispatcher*). A body that a class
    inherits is emitted once: on the fields struct when it uses `this` only for fields (a
    *field-level* method), otherwise on the enum of the declaring type or in the one concrete
    class's `impl` (an *object-level* method).
@@ -113,8 +113,9 @@ Terms:
   emitted as `impl DFields { fn m(&self | &mut self, ..) }`.
 - **object-level method**: every other instance method of a type that is not a leaf class:
   interface default methods, methods that make virtual calls or use `this` as a value. Emitted
-  on the enum (`self: &D`, `ThisForm::Enum`) or, when the type has one concrete class, beside
-  that class's struct (`fn C__m(this: &Arc<..>, ..)`, see Naming).
+  on the enum, as a function that takes the enum's value (`fn D__m(this: D, ..)`,
+  `ThisForm::Enum`), or, when the type has one concrete class, beside that class's struct (`fn
+  C__m(this: &Arc<..>, ..)`, see Naming).
 
 When in doubt a method is object-level: that is always correct, field-level is an
 optimization.
@@ -142,8 +143,11 @@ Naming:
   the class methods above gets a suffix (`base_2`, `clone_2`).
 - A constructor, and an instance method that takes its object as a parameter (`this:
   &Arc<RefCell<C>>`) rather than as `self`, is a function of the module named after the struct
-  it belongs to and its own name: `Circle__new`, `Circle__describe`, `BaseFields__new`. Methods
-  that take `self` stay in the struct's `impl`, as do all of a generic class's. A function of an
+  it belongs to and its own name: `Circle__new`, `Circle__describe`, `BaseFields__new`. So are
+  the dispatchers and the bodies of a type's enum, which take the enum's value, `Copy` and eight
+  bytes, as `this`: `Base__area(this: Base)`, called `Base__area(b)`. Methods that take `self`
+  stay in the struct's `impl`, as do all of a generic class's and the enum's own conversions
+  and views. A function of an
   `impl` cannot be declared without its code, so a split's header crate would need a function
   of its own for each one that moves, where a function of the module is declared alone
   (docs/several-crates.md).
@@ -225,16 +229,16 @@ impl Base {
             tag => java::bad_tag(tag),
         }
     }
-    fn area(&self) -> f64 {
-        match self.0.tag() {
-            2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
-            3 => { let o: &Arc<RefCell<Rect>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
-            tag => java::bad_tag(tag),
-        }
+}
+fn Base__area(this: Base) -> f64 {
+    match this.0.tag() {
+        2 => { let o: &Arc<RefCell<Circle>> = unsafe { this.0.as_pointer() }; o.borrow().area() }
+        3 => { let o: &Arc<RefCell<Rect>> = unsafe { this.0.as_pointer() }; o.borrow().area() }
+        tag => java::bad_tag(tag),
     }
-    fn to_string_in_base(&self) -> java::JString {
-        java::concat!(self.base().name.clone(), format_args!(":{}", java::Double(self.area())))
-    }
+}
+fn Base__to_string_in_base(this: Base) -> java::JString {
+    java::concat!(this.base().name.clone(), format_args!(":{}", java::Double(Base__area(this))))
 }
 impl PartialEq for Base { /* the same bits: the same class and address */ }
 impl fmt::Display for Base { /* each variant as its class shows it */ }
@@ -242,14 +246,16 @@ impl fmt::Display for Base { /* each variant as its class shows it */ }
 
 Rules:
 
-- A dispatcher exists on an enum for each method the program calls on a receiver of that type.
+- A dispatcher exists on an enum for each method the program calls on a receiver of that type,
+  a function named after the enum and the method that takes the value (`Base__area(b)`; a
+  receiver that is a reference to the value is read as `Base(r.0)`).
   It matches on the class number, and each arm lends the class's object where it lies, as
   `view()` would, so a call is one jump to the class's code. An arm calls what the variant's
   class runs, in the form that class uses (`o.borrow().m()`,
   `o.borrow_mut().m()`, `C::m(o, ..)`, `o.m()` for an immutable class). When every variant runs
   the same body emitted on the enum, the call names that body and no dispatcher is written. A
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
-  wraps the object in that type's enum (`Binary::Add(o.clone()).eval()`) rather than
+  wraps the object in that type's enum (`Binary__eval(Binary::Add(o.clone()))`) rather than
   converting the whole value.
 - An object is held by a `java::Arc`, a handle with no count (docs/collector.md). A value of an
   enum is that handle's address with the class's number in the top 16 bits (`java::Thin`,
@@ -284,7 +290,7 @@ Rules:
   that asserts each variant's offset is 0. The checks are in that constant rather than in
   `base()`, which stays small enough for a program split into crates to keep in the header,
   inlined where it is called (`docs/several-crates.md`). A dispatcher whose every variant runs one field-level body at or above
-  that fields struct calls it there, `self.base().get_name()`. A family behind `RefCell`s or
+  that fields struct calls it there, `this.base().get_name()`. A family behind `RefCell`s or
   `java::Locked`s keeps the `match` above, whose `Ref::map` takes the borrow of the class's
   cell (std's `RefCell` gives no fixed place to its borrow flag), as does an enum with a Java
   enum's constant among its variants, held as a value rather than a handle.
