@@ -421,9 +421,13 @@ one), that call is like any other: what the program's `toString` throws goes on.
 `toString` throws, the dispatching enum of its type gets `try_text`, which returns the exception. The `hashCode` that `Object.toString` shows, for a class without a
 `toString` of its own, is treated the same way.
 
+A Java enum translated as a plain Rust enum does the same: where the generator makes the text of
+a constant whose `toString` may throw what a `catch` sees, it calls the enum's `to_string`, which
+returns the exception.
+
 Elsewhere the text goes through the enum's `Display`, which cannot return an exception, so what the
-`toString` throws ends the program: the text of an enum constant, the message of an exception,
-`printf` (which makes all its text before printing), and the objects other library calls show.
+`toString` throws ends the program: the message of an exception, `printf` (which makes all its
+text before printing), and the objects other library calls show (the elements of a collection).
 Where a `toString` the program wrote may throw what a `catch` around such a text, or around a
 call on the way to it, would catch, the program is rejected ("catching an exception that this
 toString may throw not supported yet").

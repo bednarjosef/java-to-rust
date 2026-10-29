@@ -207,7 +207,13 @@ impl<'a> Gen<'a> {
             _ if matches!(e.ty, Type::Class(..)) => out.push(Part::Text(self.object_text(e))),
             // An enum is a `java::Piece` of the string its `toString` returns; a charset prints
             // through its `Display`, which is its name.
-            _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Text(self.expr(e))),
+            _ if matches!(e.ty, Type::Enum(_)) => {
+                let text = match self.checked_enum_text(e) {
+                    Some(text) => text,
+                    None => self.expr(e),
+                };
+                out.push(Part::Text(text))
+            }
             _ if e.ty == Type::Charset => out.push(Part::Arg(self.expr(e))),
             // A builder shows its text as it is when it is converted, before later operands run.
             _ if e.ty == Type::StringBuilder => {

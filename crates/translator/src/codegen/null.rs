@@ -339,6 +339,10 @@ impl<'a> Gen<'a> {
                 ExprKind::Var(name) if assigned.contains(name) => format!("{}.clone()", self.local(name)),
                 _ => self.option_ref(e),
             };
+            // A `toString` that throws is called, and its exception goes on from here.
+            if let Some(text) = self.checked_nullable_enum_text(e.ty, &option) {
+                return Some(Part::Text(text));
+            }
             return Some(Part::Text(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
         if matches!(e.ty, Type::Boxed(_)) {
