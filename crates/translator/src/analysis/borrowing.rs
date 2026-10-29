@@ -21,27 +21,27 @@
 use super::Facts;
 use super::closure::{Bits, reached_union};
 use super::hierarchy::{Home, home, to_string_impl};
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Borrowing {
     /// Instance methods (indexes into `Class::methods`) that take `&self` or `&mut self`.
-    pub methods: HashSet<usize>,
+    pub methods: FastSet<usize>,
     /// Instance methods that change their object: they take `&mut self` when they borrow it.
-    pub mutating: HashSet<usize>,
+    pub mutating: FastSet<usize>,
     /// Classes, by qualified name, whose constructors build a plain value.
-    pub plain_constructors: HashSet<String>,
+    pub plain_constructors: FastSet<String>,
     /// For each of the other classes, by index, the positions of the constructors and then of
     /// the field initializers that keep it from building a plain value.
-    pub not_plain: HashMap<usize, Vec<Pos>>,
+    pub not_plain: FastMap<usize, Vec<Pos>>,
     /// Methods and constructors that touch no shared object but their own `this`, directly or
     /// through what they call.
-    pub isolated: HashSet<usize>,
+    pub isolated: FastSet<usize>,
     /// Methods and constructors that may write a field of a shared object, directly or through
     /// what they call, so may borrow one mutably. A constructor's writes to its own `this` do not
     /// count: no other code can reach that object yet.
-    pub writers: HashSet<usize>,
+    pub writers: FastSet<usize>,
 }
 
 /// What each method does with objects, and the classes (by index in `Class::types`) whose
@@ -87,7 +87,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             || class.types[t].enum_constants.is_some()
     };
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| home(class, facts, m)).collect();
-    let mut methods: HashSet<usize> = (0..scans.len())
+    let mut methods: FastSet<usize> = (0..scans.len())
         .filter(|&m| match homes[m] {
             _ if class.methods[m].is_ctor => false,
             Home::Class(c) => {
@@ -100,7 +100,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
         .collect();
     // A method that calls a method on `this` that cannot borrow cannot borrow either: each
     // method that loses its place is checked again in the methods that call it.
-    let targets: HashMap<usize, Vec<usize>> = methods
+    let targets: FastMap<usize, Vec<usize>> = methods
         .iter()
         .filter_map(|&m| {
             let Home::Class(c) = homes[m] else { return None };
@@ -116,7 +116,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             })
         })
         .collect();
-    let mut callers: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut callers: FastMap<usize, Vec<usize>> = FastMap::default();
     for (&m, ts) in &targets {
         for &t in ts {
             callers.entry(t).or_default().push(m);
@@ -157,8 +157,8 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     };
     debug_assert_eq!(h.overriders.len(), class.methods.len(), "the hierarchy is out of date");
     let mut memo = Memo::default();
-    let mut plain_constructors = HashSet::new();
-    let mut not_plain = HashMap::new();
+    let mut plain_constructors = FastSet::default();
+    let mut not_plain = FastMap::default();
     for t in 0..class.types.len() {
         let ctors = h.methods_of(t).iter().copied().filter(|&m| class.methods[m].is_ctor);
         let failing_ctors = ctors
@@ -199,7 +199,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     // mutably, whatever the other methods of its group do.
     let mutating =
         mutating.into_iter().filter(|&m| !facts.immutable.contains(name(class.methods[m].class))).collect();
-    let isolated: HashSet<usize> = isolated;
+    let isolated: FastSet<usize> = isolated;
     let isolated =
         isolated.iter().copied().filter(|&m| h.group(m).iter().all(|g| isolated.contains(g))).collect();
     Borrowing { methods, mutating, plain_constructors, not_plain, isolated, writers }
@@ -207,10 +207,10 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
 
 /// The least set holding `seeds` with every method of the override group of each member, since a
 /// call may run any of them, and every method that `callers` lists for a member.
-fn closed(h: &Hierarchy, callers: &[Vec<usize>], seeds: impl Iterator<Item = usize>) -> HashSet<usize> {
+fn closed(h: &Hierarchy, callers: &[Vec<usize>], seeds: impl Iterator<Item = usize>) -> FastSet<usize> {
     // A flag for each method while the walk runs: it looks at every caller of each method.
     let mut seen = vec![false; callers.len()];
-    let mut set = HashSet::new();
+    let mut set = FastSet::default();
     let mut queue: Vec<usize> = seeds.collect();
     while let Some(m) = queue.pop() {
         if !std::mem::replace(&mut seen[m], true) {
@@ -244,7 +244,7 @@ struct Scan<'c> {
     /// Whether it writes a field of `this`.
     writes_this: bool,
     /// Classes whose objects' fields it writes through a handle other than `this`.
-    writes: HashSet<&'c str>,
+    writes: FastSet<&'c str>,
 }
 
 fn scan<'c>(class: &'c Class, m: &Method, memo: &mut Memo) -> Scan<'c> {
@@ -262,8 +262,8 @@ fn scan<'c>(class: &'c Class, m: &Method, memo: &mut Memo) -> Scan<'c> {
 /// `toString`s that turning one into text may run.
 #[derive(Default)]
 struct Memo {
-    touches: HashMap<usize, Bits>,
-    texts: HashMap<usize, Vec<usize>>,
+    touches: FastMap<usize, Bits>,
+    texts: FastMap<usize, Vec<usize>>,
 }
 
 /// The classes an object of type `ty` may be of: the type itself and the concrete classes
@@ -283,7 +283,7 @@ fn class_indexes(class: &Class, ty: Type) -> Vec<usize> {
 impl<'c> Scan<'c> {
     fn expr(&mut self, class: &'c Class, e: &Expr, memo: &mut Memo) {
         // `this` nodes in an allowed position, so that the remaining ones are values.
-        let mut allowed = HashSet::new();
+        let mut allowed = FastSet::default();
         let mut selves = Vec::new();
         visit_expr(e, &mut |x| {
             let is_this = |o: &Expr| matches!(o.kind, ExprKind::This);
@@ -347,7 +347,7 @@ impl<'c> Scan<'c> {
     }
 
     /// An operand turned into text: an object's `toString` runs on it.
-    fn text(&mut self, class: &'c Class, e: &Expr, allowed: &mut HashSet<ExprId>, memo: &mut Memo) {
+    fn text(&mut self, class: &'c Class, e: &Expr, allowed: &mut FastSet<ExprId>, memo: &mut Memo) {
         let Some(t) = class.class_index(e.ty) else { return };
         let on_this = matches!(e.kind, ExprKind::This);
         if on_this {

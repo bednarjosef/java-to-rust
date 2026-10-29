@@ -747,7 +747,11 @@ fn let_else_source(source: String) -> String {
 
 /// The operands of the `&&`s of a chain that unbox a box, of those `&&`s in `catching`, each
 /// mapped to its `&&`.
-fn unboxing_ands(e: &Expr, catching: &HashMap<ExprId, Pos>, out: &mut HashMap<ExprId, ExprId>) {
+fn unboxing_ands(
+    e: &Expr,
+    catching: &crate::analysis::FastMap<ExprId, Pos>,
+    out: &mut HashMap<ExprId, ExprId>,
+) {
     let ExprKind::Binary(BinOp::And, l, r) = &e.kind else { return };
     for operand in [l, r] {
         if catching.contains_key(&e.id) && matches!(operand.ty, Type::Boxed(_)) {

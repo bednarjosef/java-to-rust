@@ -24,6 +24,7 @@
 //! square, and to the field of each `RecursiveOp`, so `forkOrInvoke` never forks, and `join`
 //! never helps another worker of a pool: the program starts no thread.
 
+use super::super::{FastMap, FastSet};
 use super::*;
 
 /// What a place is known to hold: one value, or values that differ. A place that no code has
@@ -57,35 +58,35 @@ impl Known {
 }
 
 /// The parameters and locals of the method being walked, by name.
-pub(super) type Env = HashMap<String, Known>;
+pub(super) type Env = FastMap<String, Known>;
 
 /// What the walk has learned, and who relied on it.
 #[derive(Clone, Default)]
 pub(super) struct Knowledge {
     /// The parameters of each method, by method and position.
-    params: HashMap<(usize, usize), Known>,
+    params: FastMap<(usize, usize), Known>,
     /// The instance fields, by declaring class and name. A field not here holds its default.
-    fields: HashMap<(usize, String), Known>,
+    fields: FastMap<(usize, String), Known>,
     /// The fields whose class a write did not tell: none of them is known.
-    unplaced: HashSet<String>,
+    unplaced: FastSet<String>,
     /// The methods whose code read each field.
-    field_readers: HashMap<(usize, String), HashSet<usize>>,
+    field_readers: FastMap<(usize, String), FastSet<usize>>,
     /// The methods whose code relied on there being no object of a class below each type: once
     /// there is one, nothing makes their values known again, so they are walked again once.
-    absence_readers: HashMap<usize, HashSet<usize>>,
+    absence_readers: FastMap<usize, FastSet<usize>>,
     /// The methods whose code relied on what `same_literal` gives for a method on the objects
     /// of the classes below a type, by method and type: they are walked again when an object of
     /// another class below the type changes that, not whenever one is created.
-    literal_readers: HashMap<(usize, usize), HashSet<usize>>,
+    literal_readers: FastMap<(usize, usize), FastSet<usize>>,
     /// What `same_literal` gives for each method and type that it has been asked for, kept up as
     /// objects of the classes below the type are created (`Walk::created`).
-    literals: HashMap<(usize, usize), Literals>,
+    literals: FastMap<(usize, usize), Literals>,
     /// The methods of `literals`, by type.
-    literal_methods: HashMap<usize, Vec<usize>>,
+    literal_methods: FastMap<usize, Vec<usize>>,
     /// The types that no value of the runtime can be and that only classes are below, by type.
-    program_only: HashMap<usize, bool>,
+    program_only: FastMap<usize, bool>,
     /// Whether some implementation of each method only returns a literal, by method.
-    literal_groups: HashMap<usize, bool>,
+    literal_groups: FastMap<usize, bool>,
     /// The parameters and locals of the method being walked (`STATIC`: none).
     pub(super) env: Rc<Env>,
     /// Where what code relies on goes instead of the readers, while the walk looks at arguments
@@ -277,7 +278,7 @@ impl Walk<'_> {
     /// above it are walked again, and those that relied on what `same_literal` gives for a type
     /// above it, where that changes.
     pub(super) fn created(&self, c: usize) {
-        let mut readers = HashSet::default();
+        let mut readers = FastSet::default();
         let mut state = self.state.borrow_mut();
         for &t in &self.supers[c] {
             readers.extend(state.known.absence_readers.remove(&t).into_iter().flatten());
@@ -374,8 +375,8 @@ impl Walk<'_> {
     /// The expressions of method `m` that cannot run, by id: the side of each branch on a known
     /// condition that it does not take, and the right operand of an `&&` or `||` that the left
     /// one decides.
-    pub(super) fn dead(&self, m: usize) -> HashSet<ExprId> {
-        let dead = RefCell::new(HashSet::default());
+    pub(super) fn dead(&self, m: usize) -> FastSet<ExprId> {
+        let dead = RefCell::new(FastSet::default());
         let mark_expr = |e: &Expr| {
             visit_expr(e, &mut |x| {
                 dead.borrow_mut().insert(x.id);

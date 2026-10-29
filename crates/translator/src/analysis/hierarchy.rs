@@ -3,9 +3,9 @@
 //! of each class type is represented (one concrete class's object, or an enum over several),
 //! and where each method's body is emitted.
 
+use super::FastMap;
 use super::{Facts, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// How values of a class type are represented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,8 +43,8 @@ pub fn has_subclasses(class: &Class, t: usize) -> bool {
 /// instance fields: its type is an enum without variants, whose values are always null, and its
 /// fields are read and written through `base()` all the same (as the reflection table's cases
 /// do), which never returns.
-pub fn fields_structs(class: &Class) -> HashSet<usize> {
-    let mut out = HashSet::new();
+pub fn fields_structs(class: &Class) -> FastSet<usize> {
+    let mut out = FastSet::default();
     // Superclasses first, so that a constructor's `super(...)` is known to do something or not.
     let mut order: Vec<usize> = (0..class.types.len()).collect();
     order.sort_by_key(|&t| class.hierarchy.ancestors(t).len());
@@ -77,8 +77,8 @@ pub fn fields_structs(class: &Class) -> HashSet<usize> {
 }
 
 /// The class that declares each field visible in each class, by (class name, field name).
-pub fn field_owners(class: &Class) -> HashMap<(String, String), String> {
-    let mut out = HashMap::new();
+pub fn field_owners(class: &Class) -> FastMap<(String, String), String> {
+    let mut out = FastMap::default();
     for (t, decl) in class.types.iter().enumerate() {
         let mut chain = vec![t];
         chain.extend(class.hierarchy.ancestors(t));
@@ -141,7 +141,7 @@ pub fn variants(class: &Class, facts: &Facts, t: usize) -> Vec<usize> {
 /// The classes in `raised` are those whose objects the runtime creates when an operation fails.
 pub fn flows(
     class: &Class,
-    field_level: &HashSet<usize>,
+    field_level: &FastSet<usize>,
     raised: &std::collections::BTreeSet<usize>,
 ) -> Vec<FastSet<usize>> {
     let h = &class.hierarchy;
@@ -438,12 +438,12 @@ fn declared_impl(class: &Class, c: usize, name: &str) -> Option<usize> {
 pub fn field_level(
     class: &Class,
     reach: &[super::closure::Bits],
-    immutable: &HashSet<String>,
-    structs: &HashSet<usize>,
-    long: &HashSet<usize>,
-) -> HashSet<usize> {
+    immutable: &FastSet<String>,
+    structs: &FastSet<usize>,
+    long: &FastSet<usize>,
+) -> FastSet<usize> {
     let h = &class.hierarchy;
-    let mut level: HashSet<usize> = (0..class.methods.len())
+    let mut level: FastSet<usize> = (0..class.methods.len())
         .filter(|&m| {
             let method = &class.methods[m];
             let t = method.class;
@@ -497,7 +497,7 @@ pub fn field_level(
 /// Whether `e` uses `this` only as the object of a field access or the receiver of a call that
 /// `allowed` accepts (given the callee and whether it is a `super` call).
 fn uses_this_for_fields(e: &Expr, allowed: &dyn Fn(usize, bool) -> bool) -> bool {
-    let mut ok_ids = HashSet::new();
+    let mut ok_ids = FastSet::default();
     let mut selves = Vec::new();
     visit_expr(e, &mut |x| match &x.kind {
         ExprKind::This => selves.push(x.id),

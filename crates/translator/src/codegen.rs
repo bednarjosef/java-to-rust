@@ -157,7 +157,7 @@ pub fn generate_all_stubbing(
     if !changed.is_empty() {
         let start = std::time::Instant::now();
         // The messages of the dereferences may change where the stubs take away an error of them.
-        let present = |messages: &HashMap<ExprId, Option<String>>| {
+        let present = |messages: &crate::analysis::FastMap<ExprId, Option<String>>| {
             let present = messages.iter().filter(|(id, _)| facts.null_checked.contains_key(id));
             present.map(|(&id, message)| (id, message.clone())).collect::<HashMap<_, _>>()
         };

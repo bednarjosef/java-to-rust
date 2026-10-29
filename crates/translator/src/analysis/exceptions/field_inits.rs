@@ -2,6 +2,7 @@
 //! outside every `try` of the constructor, so what they raise escapes it. The class's `field_inits`
 //! then returns a `Result`, and the constructors that run it pass the failure on.
 
+use super::super::FastSet;
 use super::*;
 
 /// What a point raises, given the escapes of every method (see `analyze`).
@@ -14,8 +15,8 @@ pub(super) fn throwing(
     facts: &Facts,
     raised: &Raised<'_>,
     escapes: &[BTreeSet<Kind>],
-) -> HashSet<usize> {
-    let mut out = HashSet::new();
+) -> FastSet<usize> {
+    let mut out = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {
         let raises = decl.fields.iter().filter_map(|f| f.init.as_ref()).any(|init| {
             let mut points = Vec::new();

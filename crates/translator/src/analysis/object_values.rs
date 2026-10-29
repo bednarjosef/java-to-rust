@@ -37,9 +37,10 @@
 //!   program has none.
 
 use super::Facts;
+use super::{FastMap, FastSet};
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// The context of code that has no `this`: a static method, or a method that no class runs.
@@ -263,12 +264,12 @@ impl Eq for ClassSet {}
 /// their objects.
 pub struct ObjectValues {
     /// The variables of each method in each of its contexts, by their slots in `followed`.
-    vars: super::FastMap<(usize, usize), Vec<Flow>>,
-    returns: super::FastMap<(usize, usize), Flow>,
+    vars: FastMap<(usize, usize), Vec<Flow>>,
+    returns: FastMap<(usize, usize), Flow>,
     /// Instance fields, by the class that declares them.
-    fields: super::FastMap<(usize, String), Flow>,
-    statics: super::FastMap<(usize, String), Flow>,
-    elements: super::FastMap<Type, Flow>,
+    fields: FastMap<(usize, String), Flow>,
+    statics: FastMap<(usize, String), Flow>,
+    elements: FastMap<Type, Flow>,
     /// What the elements of every array hold together, for dispatch (`elements_of`), joined as
     /// they grow: a read of an array element would otherwise join every place of `elements`,
     /// thousands on the Minecraft server, and a great many visits read one.
@@ -276,7 +277,7 @@ pub struct ObjectValues {
     /// The variables of each method that the analysis follows, each with its slot in `vars`: its
     /// parameters (unless the runtime may call it) and the variables it declares, loops over or
     /// binds with a pattern.
-    followed: Vec<super::FastMap<String, usize>>,
+    followed: Vec<FastMap<String, usize>>,
     /// The slot in `vars` of each parameter of each method, where the analysis follows it.
     param_slots: Vec<Vec<Option<usize>>>,
     /// For dispatch, the parameters of each method that the runtime may call itself
@@ -291,10 +292,10 @@ pub struct ObjectValues {
     /// The analysis for the calls that can run (see the module's comment).
     dispatch: bool,
     /// While the analysis runs, the places that the current visit has read.
-    reads: RefCell<Option<super::FastSet<Read>>>,
+    reads: RefCell<Option<FastSet<Read>>>,
     /// While the analysis runs, what each call on a receiver of several classes in each context
     /// was last found to run, and what it passed them (`Passed`).
-    calls: RefCell<Option<super::FastMap<(ExprId, usize), Passed>>>,
+    calls: RefCell<Option<FastMap<(ExprId, usize), Passed>>>,
     /// While the analysis runs, the returns of the targets of calls that run many methods.
     joined: RefCell<Joined>,
 }
@@ -328,10 +329,10 @@ const KEPT_TARGETS: usize = 4;
 #[derive(Default)]
 struct Joined {
     /// The number of each list of targets that has a join, by the list's content.
-    lists: super::FastMap<Targets, u32>,
+    lists: FastMap<Targets, u32>,
     flows: Vec<Flow>,
     /// The joins that each target's return is in.
-    of: super::FastMap<(usize, usize), Vec<u32>>,
+    of: FastMap<(usize, usize), Vec<u32>>,
 }
 
 /// The fewest targets whose returns are joined (`Joined`).
@@ -356,7 +357,7 @@ enum Read {
 
 /// What the analysis needs to know of the program's types.
 struct Types {
-    index: super::FastMap<String, usize>,
+    index: FastMap<String, usize>,
     /// Types no string or box is a value of.
     excluded: Vec<bool>,
     /// Types that objects of every class may be values of: `Object` and its kin, and type
@@ -373,12 +374,12 @@ struct Types {
     /// are not open, so that it does not spread past them (the analysis for dispatch).
     bounded: bool,
     /// The method with a body that each type declares for an override group.
-    declared: super::FastMap<(usize, usize), usize>,
-    implementations: RefCell<super::FastMap<(usize, usize), Option<usize>>>,
+    declared: FastMap<(usize, usize), usize>,
+    implementations: RefCell<FastMap<(usize, usize), Option<usize>>>,
     /// The targets of a call of each override group on every class of a list of `concretes_of`,
     /// by group and the list's address: a call on a value that may be of any class its type
     /// allows is visited many times, and the list may be every class of the program.
-    any_targets: RefCell<super::FastMap<(usize, usize), Targets>>,
+    any_targets: RefCell<FastMap<(usize, usize), Targets>>,
 }
 
 /// The implementations that a call runs, each with the class of its object.
@@ -401,7 +402,7 @@ impl Types {
                 !open[t] && matches!(d.kind, TypeKind::Class | TypeKind::Interface | TypeKind::Enum)
             })
             .collect();
-        let mut supers = vec![HashSet::new(); n];
+        let mut supers = vec![FastSet::default(); n];
         for (t, set) in supers.iter_mut().enumerate() {
             let mut work = vec![t];
             while let Some(s) = work.pop() {
@@ -418,7 +419,7 @@ impl Types {
                 concretes[s].push(c);
             }
         }
-        let mut declared = super::FastMap::default();
+        let mut declared = FastMap::default();
         for (m, method) in class.methods.iter().enumerate() {
             if !method.is_abstract && !method.is_static && !method.is_ctor {
                 declared.insert((method.class, class.hierarchy.group_id(m)), m);
@@ -458,7 +459,7 @@ impl Types {
         let mut found = chain.iter().find_map(|&t| self.declared.get(&(t, group)).copied());
         let mut work: Vec<usize> =
             chain.iter().flat_map(|&t| class.types[t].implements.iter().copied()).collect();
-        let mut seen = HashSet::new();
+        let mut seen = FastSet::default();
         while found.is_none() && !work.is_empty() {
             let mut next = Vec::new();
             for i in work {
@@ -539,7 +540,7 @@ impl ObjectValues {
     /// How many words the class sets of the places hold, and in how many distinct buffers they
     /// are, for the timings.
     fn class_set_words(&self) -> (usize, usize) {
-        let mut seen = super::FastSet::default();
+        let mut seen = FastSet::default();
         let (mut words, mut held) = (0, 0);
         let flows = self.vars.values().flatten().chain(self.returns.values()).chain(self.fields.values());
         for flow in flows.chain(self.statics.values()).chain(self.elements.values()) {
@@ -801,7 +802,7 @@ enum Update {
 /// The override groups of the methods that the runtime may call itself on an object it holds,
 /// such as `equals` from a library's map or `toString` to print it: those of `Object` and of the
 /// JDK interfaces and classes that strings and boxes implement.
-pub(super) fn runtime_called(class: &Class) -> HashSet<usize> {
+pub(super) fn runtime_called(class: &Class) -> FastSet<usize> {
     class
         .methods
         .iter()
@@ -814,7 +815,7 @@ pub(super) fn runtime_called(class: &Class) -> HashSet<usize> {
 /// `runtime_called` for dispatch: with the groups of every `toString()`, `hashCode()`,
 /// `equals(Object)` and `compareTo(T)`, which override methods of `Object` and `Comparable` that
 /// the program may not declare (the translation's `Object` has none).
-pub(super) fn runtime_called_for_dispatch(class: &Class) -> HashSet<usize> {
+pub(super) fn runtime_called_for_dispatch(class: &Class) -> FastSet<usize> {
     let mut groups = runtime_called(class);
     for (m, method) in class.methods.iter().enumerate() {
         let shape = (method.name.as_str(), method.params.len());
@@ -895,7 +896,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     // parameters may be anything. For dispatch, they may be anything that the runtime holds.
     let runtime_called = if dispatch { runtime_called_for_dispatch(class) } else { runtime_called(class) };
     let by_runtime = |m: usize| runtime_called.contains(&class.hierarchy.group_id(m));
-    let followed: Vec<super::FastMap<String, usize>> = class
+    let followed: Vec<FastMap<String, usize>> = class
         .methods
         .iter()
         .enumerate()
@@ -937,11 +938,11 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         })
         .collect();
     let mut values = ObjectValues {
-        vars: super::FastMap::default(),
-        returns: super::FastMap::default(),
-        fields: super::FastMap::default(),
-        statics: super::FastMap::default(),
-        elements: super::FastMap::default(),
+        vars: FastMap::default(),
+        returns: FastMap::default(),
+        fields: FastMap::default(),
+        statics: FastMap::default(),
+        elements: FastMap::default(),
         all_elements: Flow::default(),
         param_slots,
         followed,
@@ -950,8 +951,8 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         contexts,
         types,
         dispatch,
-        reads: RefCell::new(Some(super::FastSet::default())),
-        calls: RefCell::new(Some(super::FastMap::default())),
+        reads: RefCell::new(Some(FastSet::default())),
+        calls: RefCell::new(Some(FastMap::default())),
         joined: RefCell::default(),
     };
     // The visits, each of a method in one of its contexts or (`usize::MAX`) of the code outside
@@ -983,12 +984,12 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     // The visits that read each place, by the place's number (`read_ids`), and the places that
     // each visit is noted as reading: a run notes only what it reads anew, in its own small set,
     // rather than every place it reads in the set of that place's readers.
-    let mut read_ids: super::FastMap<Read, u32> = super::FastMap::default();
+    let mut read_ids: FastMap<Read, u32> = FastMap::default();
     let mut readers: Vec<Vec<u32>> = Vec::new();
-    let mut registered: Vec<super::FastSet<u32>> = vec![super::FastSet::default(); visits.len()];
+    let mut registered: Vec<FastSet<u32>> = vec![FastSet::default(); visits.len()];
     // Only the visit of a method in a context reads its variables there (`var`), so a change to
     // them runs that visit again, with no readers kept for them.
-    let visit_of: super::FastMap<(usize, usize), usize> =
+    let visit_of: FastMap<(usize, usize), usize> =
         visits.iter().enumerate().map(|(v, &mc)| (mc, v)).collect();
     while let Some(v) = queue.pop_front().or_else(|| later.pop_front()) {
         queued[v] = false;
@@ -1247,7 +1248,7 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
                 kept.args = Some(flows.clone());
             }
             // The targets passed the arguments before, where those are not all of them.
-            let before: Option<super::FastSet<(usize, usize)>> = match &passed_before {
+            let before: Option<FastSet<(usize, usize)>> = match &passed_before {
                 Some((Some(targets), _)) => Some(targets.iter().copied().collect()),
                 _ => None,
             };
@@ -1257,7 +1258,7 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
             };
             // What each parameter of a target method gets, by its slot: the same for each class
             // that the method runs on.
-            let mut passed: super::FastMap<usize, Vec<(usize, usize, Flow)>> = super::FastMap::default();
+            let mut passed: FastMap<usize, Vec<(usize, usize, Flow)>> = FastMap::default();
             for target @ &(t, c) in targets.iter() {
                 let params = passed.entry(t).or_insert_with(|| {
                     let slots = values.param_slots[t].iter().zip(&class.methods[t].params).zip(&flows);
@@ -1332,9 +1333,9 @@ pub(super) fn handed(
 
 /// The variables of `method` that the analysis follows, its parameters among them when `params`.
 /// A name that a catch clause binds anywhere in the method is left to be anything.
-fn followed(method: &Method, params: bool) -> super::FastMap<String, usize> {
-    let mut names: HashSet<String> =
-        if params { method.params.iter().map(|p| p.name.clone()).collect() } else { HashSet::new() };
+fn followed(method: &Method, params: bool) -> FastMap<String, usize> {
+    let mut names: FastSet<String> =
+        if params { method.params.iter().map(|p| p.name.clone()).collect() } else { FastSet::default() };
     let mut bindings = Vec::new();
     let mut caught = Vec::new();
     for s in &method.body {

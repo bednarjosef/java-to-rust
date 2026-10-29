@@ -420,7 +420,7 @@ fn same_object(a: &Expr, b: &Expr) -> bool {
 }
 
 /// Whether an expression writes a field of `object` or calls a method that changes it.
-pub(super) fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
+pub(super) fn changes_object(e: &Expr, object: &Expr, mutating: &crate::analysis::FastSet<usize>) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| {
         found |= match &x.kind {

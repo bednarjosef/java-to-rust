@@ -3,8 +3,8 @@
 //! Nothing else may hold one: it is never a field, parameter or return value, and `this` only
 //! receives a method call or a field access, so no alias can outlive the call that uses it.
 
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// Finds the owned classes among those that are not immutable (immutable objects are shared), by
 /// qualified name. A class whose objects are never `created` is not owned: it has no objects to
@@ -12,10 +12,10 @@ use std::collections::{HashMap, HashSet};
 /// `objects::celled_classes`).
 pub fn owned_classes(
     class: &Class,
-    immutable: &HashSet<String>,
-    field_level: &HashSet<usize>,
+    immutable: &FastSet<String>,
+    field_level: &FastSet<usize>,
     created: &[bool],
-) -> HashSet<String> {
+) -> FastSet<String> {
     let uses = Uses::scan(class);
     (0..class.types.len())
         .filter(|&t| {
@@ -45,7 +45,7 @@ fn is_owned(class: &Class, uses: &Uses, t: usize) -> bool {
 /// Whether an object of class `t` runs a method of a superclass that needs the whole object
 /// (one that does not live on the superclass's fields struct, see `hierarchy::field_level`): such
 /// a method takes the object as a value of the superclass's type, which a plain value cannot be.
-fn runs_inherited_object_code(class: &Class, uses: &Uses, t: usize, field_level: &HashSet<usize>) -> bool {
+fn runs_inherited_object_code(class: &Class, uses: &Uses, t: usize, field_level: &FastSet<usize>) -> bool {
     let h = &class.hierarchy;
     let inherited =
         |m: usize| class.methods[m].class != t && !class.methods[m].is_static && !field_level.contains(&m);
@@ -60,7 +60,7 @@ fn runs_inherited_object_code(class: &Class, uses: &Uses, t: usize, field_level:
 }
 
 /// The classes that are type arguments in `ty`, or in one of its type arguments, by name.
-fn type_args(ty: Type, out: &mut HashSet<&'static str>) {
+fn type_args(ty: Type, out: &mut FastSet<&'static str>) {
     match ty {
         Type::Class(_, args) => {
             for &a in args {
@@ -93,32 +93,32 @@ fn has_this_call(body: &[Stmt]) -> bool {
 #[derive(Default)]
 struct Uses {
     /// The classes that are the type of a field, a parameter or a return value, by name.
-    declared: HashSet<&'static str>,
+    declared: FastSet<&'static str>,
     /// The classes that are a type argument of such a type, of a local or of an expression.
-    in_args: HashSet<&'static str>,
+    in_args: FastSet<&'static str>,
     /// The classes with a constructor that calls `this(...)`, which is never allowed.
-    delegating: HashSet<usize>,
+    delegating: FastSet<usize>,
     /// Receivers of calls and field accesses that are a variable or `this`.
-    receivers: HashSet<ExprId>,
+    receivers: FastSet<ExprId>,
     /// The names that an assignment writes.
-    assigned: HashSet<String>,
+    assigned: FastSet<String>,
     /// The classes whose objects are printed or concatenated, by name.
-    shown: HashSet<&'static str>,
+    shown: FastSet<&'static str>,
     /// For each class, the methods called with `super.` in its code.
     super_calls: Vec<Vec<usize>>,
     /// The uses of each class's objects, by its name.
-    by_name: HashMap<&'static str, Of>,
+    by_name: FastMap<&'static str, Of>,
 }
 
 /// The uses of the objects of one class.
 #[derive(Default)]
 struct Of {
     /// `new C(...)` expressions that initialize a local of type C.
-    news: HashSet<ExprId>,
+    news: FastSet<ExprId>,
     /// Every expression of type C.
     typed: Vec<ExprId>,
     /// The names of the locals of type C.
-    locals: HashSet<String>,
+    locals: FastSet<String>,
     /// A local of type C that is not initialized by `new`.
     bad: bool,
     /// The methods called (other than with `super.`) on a receiver of type C.

@@ -11,9 +11,9 @@
 //! and the methods that use the monitor of `this` take their object's handle.
 
 use super::Facts;
+use super::FastSet;
 use super::hierarchy;
 use crate::ast::*;
-use std::collections::HashSet;
 
 /// Whether the program waits, notifies or asks whether a thread holds a monitor.
 pub(super) fn observed(class: &Class) -> bool {
@@ -89,9 +89,9 @@ fn monitor_uses(class: &Class) -> Vec<(usize, Type, bool)> {
 /// The classes, by qualified name, whose objects' monitors are kept, and the methods that use
 /// the monitor of `this` where it is kept, which must take their object's handle. Called once
 /// `threaded`, `thread_shared` and `monitors` are known.
-pub(super) fn kept(class: &Class, facts: &Facts) -> (HashSet<String>, HashSet<usize>) {
-    let mut types: HashSet<usize> = HashSet::new();
-    let mut methods = HashSet::new();
+pub(super) fn kept(class: &Class, facts: &Facts) -> (FastSet<String>, FastSet<usize>) {
+    let mut types: FastSet<usize> = FastSet::default();
+    let mut methods = FastSet::default();
     let synchronized = class.methods.iter().enumerate().filter(|(_, m)| m.is_synchronized && !m.is_static);
     for (m, method) in synchronized {
         if facts.kept_monitor_of(method.class) {
@@ -111,10 +111,10 @@ pub(super) fn kept(class: &Class, facts: &Facts) -> (HashSet<String>, HashSet<us
         }
     }
     if types.is_empty() {
-        return (HashSet::new(), methods);
+        return (FastSet::default(), methods);
     }
     // The objects that may be values of the locks' types.
-    let flows = hierarchy::flows(class, &HashSet::new(), &Default::default());
+    let flows = hierarchy::flows(class, &FastSet::default(), &Default::default());
     let classes = types
         .iter()
         .flat_map(|&t| std::iter::once(t).chain(flows[t].iter().copied()))
@@ -125,11 +125,11 @@ pub(super) fn kept(class: &Class, facts: &Facts) -> (HashSet<String>, HashSet<us
 
 /// The classes, by type index, whose class monitors are kept: those with a static synchronized
 /// method or named by the class literal of a `synchronized` block.
-pub(super) fn class_monitors(class: &Class, facts: &Facts) -> HashSet<usize> {
+pub(super) fn class_monitors(class: &Class, facts: &Facts) -> FastSet<usize> {
     if !facts.kept_class_monitors() {
-        return HashSet::new();
+        return FastSet::default();
     }
-    let mut out: HashSet<usize> =
+    let mut out: FastSet<usize> =
         (class.methods.iter()).filter(|m| m.is_synchronized && m.is_static).map(|m| m.class).collect();
     for method in &class.methods {
         for s in &method.body {

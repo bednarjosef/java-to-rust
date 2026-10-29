@@ -27,8 +27,8 @@
 //! `join` never holds a lock that the thread it waits for needs.
 
 use super::Facts;
+use super::FastSet;
 use crate::ast::*;
-use std::collections::HashSet;
 
 /// Whether the program starts a thread: some method calls the native that starts one, which
 /// only `Thread.start()` does.
@@ -71,7 +71,7 @@ impl Facts {
 }
 
 /// The classes, by type index, whose objects two threads may reach in a threaded program.
-pub(super) fn thread_shared(class: &Class, facts: &Facts) -> HashSet<usize> {
+pub(super) fn thread_shared(class: &Class, facts: &Facts) -> FastSet<usize> {
     let h = &class.hierarchy;
     let mut work = Vec::new();
     if let Some(thread) = class.type_index("java.lang.Thread") {
@@ -86,8 +86,8 @@ pub(super) fn thread_shared(class: &Class, facts: &Facts) -> HashSet<usize> {
     }
     // The objects that become values of each type, as the representation's `flows` finds them
     // but with every method that a class inherits run on its whole object: as many or more.
-    let flows = super::hierarchy::flows(class, &HashSet::new(), &Default::default());
-    let mut shared = HashSet::new();
+    let flows = super::hierarchy::flows(class, &FastSet::default(), &Default::default());
+    let mut shared = FastSet::default();
     while let Some(t) = work.pop() {
         if !shared.insert(t) {
             continue;
@@ -145,9 +145,9 @@ pub(super) fn shares_builders(class: &Class, facts: &Facts) -> bool {
 /// of `Object` that is shared (the runtime class of its type is shared). The arrays of those
 /// families are `java::SharedArray`s; every other array stays a `java::Array`, even in a program
 /// with threads. An array's rows are of its family, so a `SharedArray` never holds an `Array`.
-pub(super) fn shared_arrays(class: &Class, facts: &Facts) -> HashSet<Type> {
+pub(super) fn shared_arrays(class: &Class, facts: &Facts) -> FastSet<Type> {
     let shared = &facts.thread_shared;
-    fn holds(ty: Type, out: &mut HashSet<Type>) {
+    fn holds(ty: Type, out: &mut FastSet<Type>) {
         match ty {
             Type::Array(element) => {
                 out.insert(array_family(ty));
@@ -157,7 +157,7 @@ pub(super) fn shared_arrays(class: &Class, facts: &Facts) -> HashSet<Type> {
             _ => {}
         }
     }
-    let mut out = HashSet::new();
+    let mut out = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {
         if facts.process_statics(t) {
             decl.statics.iter().for_each(|f| holds(f.ty, &mut out));
@@ -200,7 +200,7 @@ fn types_of(class: &Class, ty: Type, out: &mut Vec<usize>) {
 /// The methods of shared classes that must not hold their object's lock for the whole call:
 /// those with a loop, a call of a method or constructor, an access to an object or array other
 /// than `this`'s fields, or a native that blocks.
-pub(super) fn long_methods(class: &Class, shared: &HashSet<usize>) -> HashSet<usize> {
+pub(super) fn long_methods(class: &Class, shared: &FastSet<usize>) -> FastSet<usize> {
     (0..class.methods.len())
         .filter(|&m| {
             let method = &class.methods[m];

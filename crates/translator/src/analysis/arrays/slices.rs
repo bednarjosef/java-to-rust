@@ -12,8 +12,8 @@
 //! mention it. A loop is taken when one of its accesses is not already known to be in bounds.
 
 use super::super::Facts;
+use super::super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// An index of a row on the way from an array variable to the slice: a constant or a variable.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,7 +44,7 @@ pub struct SlicedLoop {
 /// The sliced loops of `method`, keyed by the id of the loop's condition.
 pub(super) fn sliced_loops(
     method: &Method,
-    plain: &HashSet<String>,
+    plain: &FastSet<String>,
     facts: &Facts,
 ) -> Vec<(ExprId, SlicedLoop)> {
     let mut out = Vec::new();
@@ -66,13 +66,13 @@ struct Access {
     write: bool,
 }
 
-fn sliced(s: &Stmt, plain: &HashSet<String>, facts: &Facts) -> Option<(ExprId, SlicedLoop)> {
+fn sliced(s: &Stmt, plain: &FastSet<String>, facts: &Facts) -> Option<(ExprId, SlicedLoop)> {
     let Stmt::For { init, cond: Some(cond), update, body } = s else { return None };
     let (var, from, to) = counting_loop(init, Some(cond), update, body)?;
     if from.ty != Type::Int || has_effects(from) || has_effects(to) || has_loop(body) {
         return None;
     }
-    let mut mentions_of: HashMap<String, usize> = HashMap::new();
+    let mut mentions_of: FastMap<String, usize> = FastMap::default();
     let mut accesses = Vec::new();
     visit_stmt(
         body,

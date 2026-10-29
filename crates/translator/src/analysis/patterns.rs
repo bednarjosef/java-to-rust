@@ -16,9 +16,9 @@
 //! that each read is in the variable's scope, which lets this check be simple: a read of `name`
 //! in code that does not declare a `name` of its own is a read of the pattern's variable.
 
+use super::FastSet;
 use crate::ast::*;
 use crate::program::FieldUpdate;
-use std::collections::HashSet;
 
 /// Every read of a pattern variable that the translation cannot make, the first of each
 /// statement of a method and of its blocks: a census stubs them together.
@@ -65,7 +65,7 @@ pub(super) fn check(class: &Class) -> Result<(), Vec<Error>> {
             );
             errors.extend(found.err());
         }
-        errors.extend(block(&m.body, &mut HashSet::new()).err());
+        errors.extend(block(&m.body, &mut FastSet::default()).err());
     }
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
@@ -78,10 +78,10 @@ pub(super) fn check(class: &Class) -> Result<(), Vec<Error>> {
 pub(super) fn check_object_values(
     class: &Class,
     facts: &super::Facts,
-) -> (HashSet<ExprId>, Result<(), Vec<Error>>) {
+) -> (FastSet<ExprId>, Result<(), Vec<Error>>) {
     let Some(object) = class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
     else {
-        return (HashSet::new(), Ok(()));
+        return (FastSet::default(), Ok(()));
     };
     // An array in an `Object` keeps its identity: it is shared.
     let holds_values = super::hierarchy::variants(class, facts, object)
@@ -95,7 +95,7 @@ pub(super) fn check_object_values(
         matches!(&e.kind, ExprKind::Cast(Type::Class(name, _), inner)
             if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder | Type::JavaClass))
     };
-    let mut sentinels: HashSet<(usize, &str)> = HashSet::new();
+    let mut sentinels: FastSet<(usize, &str)> = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {
         for f in &decl.statics {
             if matches!(f.ty, Type::Class(name, _) if name == OBJECT)
@@ -131,7 +131,7 @@ pub(super) fn check_object_values(
         ),
         _ => matches!(e.ty, Type::Class(name, _) if name == OBJECT),
     };
-    let mut shortcuts = HashSet::new();
+    let mut shortcuts = FastSet::default();
     for method in &class.methods {
         for s in &method.body {
             visit_stmt(s, &mut |e| visit_expr(e, &mut |x| shortcuts.extend(shortcut(x))), &mut |_| {});
@@ -145,7 +145,7 @@ pub(super) fn check_object_values(
         values.get_or_init(|| super::object_values::analyze(class, facts)).may_both_be_values(class, m, l, r)
     };
     let mut found = Vec::new();
-    let mut checks = HashSet::new();
+    let mut checks = FastSet::default();
     for (m, method) in class.methods.iter().enumerate() {
         let in_sorted_map = in_sorted_map(class, method.class);
         let value_shortcut =
@@ -247,7 +247,7 @@ fn in_sorted_map(class: &Class, t: usize) -> bool {
 /// The `Object` fields of `TreeMap`'s classes that only ever hold the key of an entry, `null` or
 /// a sentinel, as the iterators of a sub-map hold its end in `fenceKey = fence == null ?
 /// UNBOUNDED : fence.key`, by the class's name and the field's.
-fn fence_keys<'c>(class: &'c Class, sentinel: &dyn Fn(&Expr) -> bool) -> HashSet<(&'c str, &'c str)> {
+fn fence_keys<'c>(class: &'c Class, sentinel: &dyn Fn(&Expr) -> bool) -> FastSet<(&'c str, &'c str)> {
     fn key_or_end(e: &Expr, sentinel: &dyn Fn(&Expr) -> bool) -> bool {
         match &peel(e).kind {
             ExprKind::Null => true,
@@ -255,7 +255,7 @@ fn fence_keys<'c>(class: &'c Class, sentinel: &dyn Fn(&Expr) -> bool) -> HashSet
             _ => sentinel(peel(e)) || entry_key(e),
         }
     }
-    let mut fences: HashSet<(&str, &str)> = HashSet::new();
+    let mut fences: FastSet<(&str, &str)> = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {
         if !in_sorted_map(class, t) {
             continue;
@@ -302,7 +302,7 @@ fn entry_key(e: &Expr) -> bool {
 /// comparator, which, in the translation, sees strings and boxes only by value, so two keys that
 /// are equal values compare as equal and cannot both be in the map. (`TreeMap`'s code compares
 /// only keys of one map with each other.)
-fn sorted_key(e: &Expr, fences: &HashSet<(&str, &str)>) -> bool {
+fn sorted_key(e: &Expr, fences: &FastSet<(&str, &str)>) -> bool {
     entry_key(e)
         || matches!(&peel(e).kind, ExprKind::Field { object, name }
             if matches!(object.ty, Type::Class(owner, _) if fences.contains(&(owner, name.as_str()))))
@@ -392,7 +392,7 @@ struct Pattern {
 
 /// The patterns in `e`, but those in the statements of a switch expression in it.
 fn patterns(e: &Expr) -> Vec<Pattern> {
-    let mut inner = HashSet::new();
+    let mut inner = FastSet::default();
     switch_bodies(e, &mut |body| {
         for s in body {
             visit_stmt(s, &mut |x| visit_expr(x, &mut |y| _ = inner.insert(y.id)), &mut |_| {});
@@ -497,7 +497,7 @@ fn exits(stmt: &Stmt) -> bool {
 
 /// The statements `stmts` of a block (see `statement`). `done` holds the switch expressions whose
 /// statements have been checked so far, which `statement` checks once each.
-fn block(stmts: &[Stmt], done: &mut HashSet<*const Expr>) -> Result<(), Error> {
+fn block(stmts: &[Stmt], done: &mut FastSet<*const Expr>) -> Result<(), Error> {
     let all: Vec<&Stmt> = stmts.iter().collect();
     for (i, s) in stmts.iter().enumerate() {
         statement(s, &all[i + 1..], done)?;
@@ -507,9 +507,9 @@ fn block(stmts: &[Stmt], done: &mut HashSet<*const Expr>) -> Result<(), Error> {
 
 /// The statement `s`, followed by `rest` in its block: a pattern variable of its own expressions
 /// may be read only where the translation binds it.
-fn statement(s: &Stmt, rest: &[&Stmt], done: &mut HashSet<*const Expr>) -> Result<(), Error> {
+fn statement(s: &Stmt, rest: &[&Stmt], done: &mut FastSet<*const Expr>) -> Result<(), Error> {
     let rest = rest.to_vec();
-    let nested = |s: &Stmt, done: &mut HashSet<*const Expr>| match s {
+    let nested = |s: &Stmt, done: &mut FastSet<*const Expr>| match s {
         Stmt::Block(stmts) => block(stmts, done),
         _ => statement(s, &[], done),
     };
