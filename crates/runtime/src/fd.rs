@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(fd_write_bytes(read, &[104i8][..], 0, 1), Err(bad_descriptor()));
         fd_close(read);
         let write = fd_open_write(crate::Wtf8::new(&name), true).unwrap();
-        let mut buf = vec![0i8; 1];
+        let mut buf = [0i8; 1];
         assert_eq!(fd_read_bytes(write, &mut buf[..], 0, 1), Err(bad_descriptor()));
         fd_close(write);
         std::fs::remove_file(&name).unwrap();
