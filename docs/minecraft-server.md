@@ -590,7 +590,8 @@ These are plans. Work on several of them is under way but not merged yet.
    steps, then the census. Then compare its rejections with the last census's and with javac's,
    and list the new kinds.
 2. The census's speed. A failed try with Rust generics (a rejection that can run, in code that
-   uses them) starts lowering over (about 70 s an attempt); the walk for the methods that can run (about 10 s) stops at the first rejection
+   uses them, and not one that no type changes: a missing class, or asking for the caller with
+   `getCallerClass`) starts lowering over (about 70 s an attempt); the walk for the methods that can run (about 10 s) stops at the first rejection
    that can run, which is all a retry needs to know. A `String[]` written as an `Object[]` that
    can run starts the whole census over (javac, reach and lowering, several minutes before its
    walk); that walk stops at the first such write. Planned: cheaper retries, and knowing which
