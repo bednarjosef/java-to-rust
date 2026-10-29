@@ -126,6 +126,14 @@ made on the stack (`java::count_allocation`).
   `view()` and a `match` over every class, the kernel took 1132 ms in release (fat LTO,
   `opt-level = 3`) and 14751 ms at `opt-level = 1`, against 781 ms and 4183 ms now (medians of
   five, at a load of 6; Java's kernel is about 120 ms).
+- **Classes known only at run time (ClassCast).** `Class.cast` and `Class.isInstance` of values
+  of 258 classes behind `Comparable` with their own class and another, as the Minecraft server's
+  `StateHolder.getValue` casts each property's value. Each asks the value for the names above
+  its class, which is one read of a table by class number (`TYPE_NAMES_BY_CLASS_NUMBER`), and
+  compares each name by its length and last eight bytes before it compares it whole. Through a
+  `match` over the 258 classes and a `memcmp` of each name, the kernel took 184 ms in release,
+  446 ms at `opt-level = 1` and 1450 ms at `opt-level = 0` (the runtime at 2), against 89, 242
+  and 1030 ms now (medians of five, three at 0, at a load of 7; Java's kernel is about 48 ms).
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.

@@ -80,7 +80,12 @@ holds one function whole while it compiles it, and the server's `Display` alone 
 past 20 GB to compile; LLVM's time grows faster than a function's size, so the parts are small;
 they are items of their own, which the split into crates spreads over the body crates
 (docs/several-crates.md). A `match` over 2048 classes or fewer stays whole, so that its call is
-one jump, not two.
+one jump, not two. `runtime_type_names()`, which `isInstance`, `cast` and array stores ask on
+every call, has no `match`: it reads a static at the crate root that holds each class's names by
+class number (`TYPE_NAMES_BY_CLASS_NUMBER`, `class_values::type_names_table`), one load at any
+optimization level, where a `match` over the thousand classes that implement `Comparable` is a
+thousand compares without optimizations; only an `Object[]` that carries its own class answers
+from its value first.
 
 Terms:
 

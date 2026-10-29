@@ -571,8 +571,11 @@ impl<'a> Gen<'a> {
                 .collect();
             tree.modules.push(Module { package, path, uses, items });
         }
-        // The classes as values, which every module may name, once each at the crate root.
-        let (text, names) = self.class_value_constants();
+        // The classes as values, which every module may name, once each at the crate root, and
+        // the names above each class by its number.
+        let table = self.type_names_table();
+        let (mut text, names) = self.class_value_constants();
+        text.push_str(&table);
         if !text.is_empty() {
             let root = &mut tree.modules[0];
             if !root.uses.iter().any(|group| group.contains("use java_runtime as java;")) {

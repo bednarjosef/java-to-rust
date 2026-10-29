@@ -340,7 +340,9 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   Dog.class`) is a `matches!` of the variant. Any other class is a `java::Class` value, `Copy` and
   equal by binary name (`equals` of an object that is not a class is false), with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
   `isArray`, `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value
-  carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests.
+  carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests;
+  `isInstance` and `cast` test the names above the value's class, each name compared by its
+  length and last eight bytes before it is compared whole (`java::Class::is_instance`).
   `getModifiers`, `isMemberClass`, `isLocalClass`, `isAnonymousClass`, `getEnclosingClass` and
   `getDeclaringClass` answer from what the class value carries in a program that asks for them:
   the modifiers javac gives the class, implicit ones included, and where it is declared

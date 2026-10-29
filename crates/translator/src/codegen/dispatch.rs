@@ -3443,6 +3443,23 @@ impl<'a> Gen<'a> {
         for (need, method, ret) in methods {
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
+            if let Need::RuntimeTypeNames(_) = need {
+                // Read from the table by class number (`type_names_table`), but for the arrays that
+                // carry their class.
+                let carried: Vec<usize> =
+                    variants.iter().copied().filter(|&c| self.names_carried(c)).collect();
+                let table = format!("crate::{}[self.0.tag() as usize]", super::class_values::TYPE_NAMES);
+                if carried.is_empty() {
+                    self.line(&table);
+                } else {
+                    self.match_arms_or(&carried, Some(table), &|g: &mut Self, c| {
+                        (format!("{}(o, {})", g.runtime("array_type_names"), g.names_list(c)), true)
+                    });
+                }
+                self.indent -= 1;
+                self.line("}");
+                continue;
+            }
             let ret = format!(" -> {ret}");
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
                 // An `Object[]` that may be a covariant array, which carries its class.
@@ -3451,11 +3468,6 @@ impl<'a> Gen<'a> {
                 }
                 Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
-                // So does its names, which a store of it into an array of arrays tests.
-                Need::RuntimeTypeNames(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
-                    (format!("{}(o, {})", g.runtime("array_type_names"), g.names_list(c)), true)
-                }
-                Need::RuntimeTypeNames(_) => (g.names_list(c), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
                 // Read from the value's bits, the same text for every such class, whose arms
                 // are one (`match_arms_or`): the Minecraft server's were 6 MB of the same code.

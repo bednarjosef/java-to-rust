@@ -17,6 +17,25 @@ const NUMBER: &str = "java.lang.Number";
 /// The binary names of a class and of every class and interface above it, its own first.
 type Names = &'static [&'static str];
 
+/// Whether the binary name `name` is among `names`, as the instance tests ask. Names of one
+/// package differ near their ends (`net.minecraft.world.level.block.state.properties.Half`), and
+/// many are of one length, so each is compared from its last eight bytes first, and then whole:
+/// a name that is not there costs a compare or two, not a `memcmp` of its whole length.
+pub(crate) fn names_contain(names: &[&str], name: &str) -> bool {
+    let (len, end) = (name.len(), tail(name));
+    names.iter().any(|n| n.len() == len && tail(n) == end && (n.as_ptr() == name.as_ptr() || *n == name))
+}
+
+/// The last eight bytes of `name` as a number, or its bytes where it is shorter.
+#[inline(always)]
+fn tail(name: &str) -> u64 {
+    let bytes = name.as_bytes();
+    match bytes.len().checked_sub(8) {
+        Some(start) => u64::from_le_bytes(bytes[start..].try_into().unwrap_or_default()),
+        None => bytes.iter().fold(0, |t, &b| t << 8 | u64::from(b)),
+    }
+}
+
 /// What a class is, which its `toString` shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -474,7 +493,7 @@ impl Class {
     /// `isInstance(x)`, given the binary names of the class of `x` and of every class and
     /// interface above it (`None` for a null `x`), which the translation knows.
     pub fn is_instance(&self, names: Option<&[&str]>) -> bool {
-        names.is_some_and(|names| names.contains(&self.name))
+        names.is_some_and(|names| names_contain(names, self.name))
     }
 
     /// `isAssignableFrom(other)`: whether `other` is this class or a class or interface below it,
@@ -494,7 +513,7 @@ impl Class {
             }
             (None, Some(_)) => matches!(self.name, OBJECT | "java.lang.Cloneable" | SERIAL),
             (Some(_), None) => false,
-            (None, None) => self.name == OBJECT || other.names.contains(&self.name),
+            (None, None) => self.name == OBJECT || names_contain(other.names, self.name),
         }
     }
 
@@ -502,7 +521,7 @@ impl Class {
     /// `ClassCastException` unless `x` is null or an instance.
     pub fn check_cast(&self, names: Option<&[&str]>) {
         if let Some(names) = names
-            && !names.contains(&self.name)
+            && !names_contain(names, self.name)
         {
             let from = names.first().copied().unwrap_or("java.lang.Object");
             crate::throw("java.lang.ClassCastException", &format!("Cannot cast {from} to {}", self.shown()));
@@ -623,5 +642,18 @@ mod tests {
         assert_eq!(Class::INT.descriptor_string(), "I");
         assert_eq!(Class::BOOLEAN_PRIMITIVE.descriptor_string(), "Z");
         assert_eq!(Class::LONG_PRIMITIVE.descriptor_string(), "J");
+    }
+
+    #[test]
+    fn a_name_is_found_among_names_of_its_length_and_end() {
+        // Built at run time, so that no name is the same text as the one looked for.
+        let half = format!("a.b.c.Half{}", "");
+        let names = ["a.b.c.Hal", "a.b.c.Halt", "x.y.z.Half", "a.b.c.Half", "Half"];
+        assert!(names_contain(&names, &half));
+        assert!(!names_contain(&names[..3], &half));
+        assert!(names_contain(&["Ab", "Abc"], &format!("Ab{}", "")));
+        assert!(!names_contain(&["Ac", "aB"], "Ab"));
+        assert!(!names_contain(&[], "Ab"));
+        assert!(names_contain(&[""], ""));
     }
 }
