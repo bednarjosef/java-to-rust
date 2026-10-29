@@ -45,6 +45,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
         return Ok(());
     }
     let h = &class.hierarchy;
+    debug_assert_eq!(h.overriders.len(), class.methods.len(), "the hierarchy is out of date");
     let fields_structs = super::hierarchy::fields_structs(class);
     // The classes with subclasses above and below those, whose constructors call each other.
     let mut whole: BTreeSet<usize> = BTreeSet::new();
@@ -117,7 +118,11 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     for &t in &order {
         let zero = class.methods.len();
         rewrite.zero.insert(t, zero);
-        let pos = class.methods.iter().find(|m| m.is_ctor && m.class == t).map_or(Pos::default(), |m| m.pos);
+        // The hierarchy has the methods as they were before the zero constructors, in index order.
+        let pos = (class.hierarchy.methods_of(t).iter())
+            .map(|&i| &class.methods[i])
+            .find(|m| m.is_ctor)
+            .map_or(Pos::default(), |m| m.pos);
         let fields = &synthetic[&t];
         let mut body = match class.types[t].extends.and_then(|e| rewrite.zero.get(&e).map(|&z| (e, z))) {
             Some((e, above)) => {
@@ -159,11 +164,10 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     // The constructors of the classes with subclasses become `construct<Name>` methods, and those
     // of their subclasses without subclasses start with the zero `super()` and call them.
     for &t in whole.iter().chain(&leaves) {
-        let ctors: Vec<usize> = (0..class.methods.len())
-            .filter(|&m| {
-                class.methods[m].is_ctor && class.methods[m].class == t && rewrite.zero.get(&t) != Some(&m)
-            })
-            .collect();
+        // Its constructors before the zero one, which the hierarchy does not have: none of them
+        // is rewritten yet.
+        let ctors: Vec<usize> =
+            class.hierarchy.methods_of(t).iter().copied().filter(|&m| class.methods[m].is_ctor).collect();
         let starting: Vec<usize> = ctors.iter().copied().filter(|&m| !delegates(&class.methods[m])).collect();
         let inits = rewrite.field_inits(class, t);
         // When several constructors run the initializers, they call a method that does.
