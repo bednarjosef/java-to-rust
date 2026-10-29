@@ -329,6 +329,18 @@ about 6 minutes each. `a_census_finds_the_same_with_the_errors_of_every_check_in
 (`tests/translation.rs`) finds the same census and translation in one round as round by round
 (`program::round_by_round`), where each round ends at the first check that rejects code.
 
+**Every missed cast and operation in one round.** After writing, the generator checks that
+each cast whose `ClassCastException` a `catch` sees, and each operation whose failure one sees
+(`Facts::raising`, `Facts::catching`), was written in its checked form (`Gen::check_casts`,
+`Gen::check_catching`). Each check rejects every one it misses, first to last by line and
+column, as the check of dereferences does, so that a census stubs them all in one round
+rather than one per round: on the Minecraft server, two casts in the arguments of natives that
+the runtime lacks (`XInputMethod.java:89`, `BufImgSurfaceData.java:125`), where a round after
+the first takes about 690 s (analyses 430 s, generator 256 s). The census stubs the same code
+in the same order as a round per cast would, so its report and translation are the same.
+`a_census_stubs_every_cast_the_generator_misses_in_one_round`
+(`tests/translation.rs`) has two such casts, stubbed in one round.
+
 **Steps of the analyses alongside each other.** Every check reads facts that the steps before
 it find, so none can move ahead of another; what a round can do is find its facts sooner. The
 steps that read none of each other's
@@ -427,25 +439,25 @@ Further speed-ups, not done:
 - Lowering of `ScannerGrades` and `TextAdventure` now takes 1 to 2.5 s, twice (two attempts
   of the Rust generics, `lower::real_generics`); keeping what the first attempt learned
   instead of lowering everything again would halve it.
-- The later rounds of a census. On the Minecraft server, pass 3 took three rounds: the first
-  stubbed 315 pieces, 236 of them the generator's conversions (most of them strings as
-  `ConstantDesc`s, which the translator now converts) and 72 the analysis of exceptions'; the
-  second found one more, a cast whose `ClassCastException` is caught, which the facts changed
-  by the first round's stubs show; the third passed and wrote the translation. Each round
-  runs the analyses again (about 305 s after the first), the messages, and the generator
-  (178 s, then 421 s for the last with its rounds of enum items). The analyses that take long, and that the round waits for, are
-  the object values (122 s), then exceptions (105 s), after the structs and the representation
-  (34 s); the ranges, nullness, early static reads, ASCII strings and the objects on the stack
-  run alongside them. Each is a fixpoint over the whole program, and a stub, by taking code
-  away, can change the facts of any code its method's values or exceptions reach, so a
-  second round needs more than the stubbed methods' facts again. Ways to make it cheaper,
-  each to be checked by a census that stays byte for byte the same:
-  - Predicting the generator's rejections before the first round, where they read no facts,
-    saves a round only when every rejection of the first round is predicted: the analysis of
-    exceptions' own rejections, which read the facts, would still be stubbed after the first
-    round, and the round after them is needed all the same, as it was for the cast above. It
-    is worth it only for a program whose first round rejects nothing but such code, and exact
-    only if the stubs are the same, in the same order, with the same messages and anchors.
+- The later rounds of a census. On the Minecraft server, pass 3 takes two rounds: the first
+  stubs 5 pieces, 3 of them the analysis of exceptions' (a `toString` whose exception is
+  caught, two messages of `NullPointerException`s) and 2 the generator's (casts whose
+  `ClassCastException` is caught, in the arguments of natives that the runtime lacks); the
+  second passes and writes the translation. Each round runs the analyses (about 490 s in the
+  first and 430 s after), the messages, and the generator (about 260 s for its first round
+  of writing, which finds its rejections). The analyses that take long, and that the round
+  waits for, are the object values (186 s), then exceptions (147 s), after the structs and
+  the representation (34 s); the ranges, nullness, early static reads, ASCII strings and the
+  objects on the stack run alongside them. Each is a fixpoint over the whole program, and a
+  stub, by taking code away, can change the facts of any code its method's values or
+  exceptions reach, so a second round needs more than the stubbed methods' facts again.
+  Ways to make it cheaper, each to be checked by a census that stays byte for byte the same:
+  - Predicting the first round's rejections before it runs does not apply: every one of them
+    reads the facts (the exceptions that a `catch` sees, `Facts::raising`).
+  - Writing a stub in place without a round after it is exact only where the stub changes no
+    fact that other code is written with, and the stub's own `UnsupportedOperationException`,
+    which its callers may see, changes the facts of exceptions; finding out which facts
+    change is the incremental analysis below.
   - Incremental analyses: rerun the object values and the exceptions only over the stubbed
     methods and what their values and exceptions reach (a worklist seeded with them) rather
     than over everything. As the stubs only take facts away and the analyses grow their facts

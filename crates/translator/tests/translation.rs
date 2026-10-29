@@ -4189,6 +4189,87 @@ public class Main {
 }
 
 #[test]
+fn a_census_stubs_every_cast_the_generator_misses_in_one_round() {
+    // A cast whose `ClassCastException` a `catch` sees, in the argument of a native that the
+    // runtime lacks, is not written (the call is code that never runs), so the generator rejects
+    // it (`Gen::check_casts`). Each such cast is rejected, not only the first, so that one round
+    // stubs both methods and the next passes.
+    let peers = r#"package jdk.peers;
+
+public class Peers {
+    public interface Peer {
+        int f();
+    }
+
+    public static class XPeer implements Peer {
+        public int f() { return 1; }
+        long window() { return 2; }
+    }
+
+    public static class YPeer implements Peer {
+        public int f() { return 9; }
+    }
+
+    static native void focusNative(long window);
+
+    static native boolean gray(XPeer peer);
+
+    public static void setFocus(Peer peer) {
+        focusNative(((XPeer) peer).window());
+    }
+
+    public static int create(Peer peer) {
+        if (gray((XPeer) peer)) {
+            return 1;
+        }
+        return 2;
+    }
+}
+"#;
+    let main = r#"import jdk.peers.Peers;
+
+public class Main {
+    public static void main(String[] args) {
+        Peers.Peer p = args.length > 7 ? null : new Peers.YPeer();
+        try {
+            Peers.setFocus(p);
+        } catch (ClassCastException e) {
+            System.out.println("cce 1");
+        }
+        try {
+            System.out.println(Peers.create(p));
+        } catch (ClassCastException e) {
+            System.out.println("cce 2");
+        }
+    }
+}
+"#;
+    let dir = write_sources(
+        "census_missed_casts",
+        &[
+            ("src/Main.java", main),
+            // A module of the JDK's, whose natives the runtime may lack (`Native::Missing`).
+            ("lib/module-info.java", "module jdk.peers {\n    exports jdk.peers;\n}\n"),
+            ("lib/jdk/peers/Peers.java", peers),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("src")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    assert_contains(
+        &census.report,
+        &[
+            "       2  catching the `ClassCastException` of this cast not supported yet\n          at jdk/peers/Peers.java:22:22, jdk/peers/Peers.java:26:18\n",
+        ],
+    );
+    assert_eq!(rounds, 2, "{}", census.report);
+}
+
+#[test]
 fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
     // A census takes the errors of every check of the analyses, and of the messages and the
     // generator after them, in one round (`analysis::analyze_collecting`); here the generator
