@@ -913,7 +913,7 @@ struct Gen<'a> {
     guarded: bool,
     /// What the statement being emitted does to the plain objects it names, where it is known
     /// (`strings::Steady`); `None` outside a statement, where no field is borrowed in place.
-    steady: Option<strings::Steady>,
+    steady: Option<strings::SteadyOf<'a>>,
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
     /// annotation).
     annotations: Vec<(String, Type, String)>,
