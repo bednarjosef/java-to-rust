@@ -63,8 +63,13 @@ made on the stack (`java::count_allocation`).
   handle is copied without a count. BinaryTrees keeps a tree of about 89 MB alive while it builds
   and drops millions of short-lived ones; the collector marks that long-lived tree again at each
   of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads), which is
-  most of the remaining gap. A young generation, planned in docs/native-speed.md, would collect
-  the short-lived trees without marking the old one. NodeList walks and rebuilds a linked list of
+  most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million nodes again
+  at each of its 22 collections, which no helper can share. Idle markers now sleep instead of
+  spinning (docs/collector.md, "Marking and sweeping in parallel"), which at a load average of
+  about 6 took BinaryTrees from 4.27 s to 2.16 s (Java 0.91 s at that load; the table above is
+  from before) and `SmallObjects` from 0.64 s to 0.36 s (Java 0.17 s). A young generation,
+  planned in docs/native-speed.md, would collect the short-lived objects without marking the old
+  ones. NodeList walks and rebuilds a linked list of
   about 667,000 nodes; its nodes are taken from blocks in address order, so the walk follows
   memory.
 - **Strings read from a field (TokenScanner 0.8x).** A parser that reads its input one character
@@ -170,9 +175,8 @@ objects become `Object`s but no monitor site can lock), `SmallObjects` (3 millio
 and 40 bytes alive together, then 30 million that die young) and `ManyThreadsAllocating` (32
 threads that allocate arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak
 memory in MB, before and after the change that each measures (the median of three runs; of eight
-for `ManyThreadsAllocating`, 0.101 s before and 0.105 s after; of ten for `SmallObjects`, 1.05 s
-before and 0.92 s after, against Java's 0.25 s, with 7.7 and 5.7 s of processor time across the
-collector's threads):
+for `ManyThreadsAllocating`, 0.101 s before and 0.105 s after; of ten for `SmallObjects`, whose
+time is under "Allocation" below):
 
 | program               | before | after | Java |
 |-----------------------|-------:|------:|-----:|

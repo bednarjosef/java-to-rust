@@ -349,7 +349,12 @@ fn futex_wait(word: &AtomicU32, value: u32) {
 }
 
 fn futex_wake(word: &AtomicU32) {
-    unsafe { syscall(SYS_FUTEX, word as *const AtomicU32, FUTEX_WAKE_PRIVATE, i32::MAX) };
+    futex_wake_some(word, i32::MAX);
+}
+
+/// Wakes at most `n` of the threads waiting on `word`.
+fn futex_wake_some(word: &AtomicU32, n: i32) {
+    unsafe { syscall(SYS_FUTEX, word as *const AtomicU32, FUTEX_WAKE_PRIVATE, n) };
 }
 
 /// Maps `len` bytes of zeroed memory that is only committed when touched.
@@ -1108,13 +1113,20 @@ impl MarkStack {
         Some(unsafe { self.items.add(self.len).read() })
     }
 
-    /// Takes the oldest item.
-    fn pop_oldest(&mut self) -> Option<(usize, usize)> {
-        if self.len == self.low {
-            return None;
+    /// Moves the `n` oldest items, at most, onto `to`, in one copy; how many it moved.
+    fn move_oldest(&mut self, n: usize, to: &mut MarkStack) -> usize {
+        let n = n.min(self.count());
+        if to.len + n > to.capacity {
+            out_of_memory();
         }
-        self.low += 1;
-        Some(unsafe { self.items.add(self.low - 1).read() })
+        unsafe { ptr::copy_nonoverlapping(self.items.add(self.low), to.items.add(to.len), n) };
+        self.low += n;
+        to.len += n;
+        if self.low == self.len {
+            self.low = 0;
+            self.len = 0;
+        }
+        n
     }
 }
 
@@ -1158,6 +1170,14 @@ static POOL: Pool = Pool {
 /// all of them are idle, as none can then make more work.
 static MARKERS: AtomicUsize = AtomicUsize::new(1);
 static IDLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts up whenever a marker puts work in the pool and when marking ends: an idle marker that
+/// has spun `IDLE_SPINS` times and yielded `IDLE_YIELDS` times sleeps on it until it changes.
+/// Spinning on, idle helpers took 6 s of processor time in a run of 0.64 s that marked a long
+/// linked list, which hands out no work, 22 times (`SmallObjects`).
+static WORK: AtomicU32 = AtomicU32::new(0);
+const IDLE_SPINS: u32 = 256;
+const IDLE_YIELDS: u32 = 16;
 
 /// The helper threads started; they wait for `MARK_ROUND` to change, mark, and count up
 /// `MARK_DONE`. `META` is the block table they read.
@@ -1382,12 +1402,12 @@ impl Marker {
         let n = (self.stack.count() / 2).min(4096);
         lock_pool();
         let pool = unsafe { &mut *POOL.stack.get() };
-        for _ in 0..n {
-            let Some(item) = self.stack.pop_oldest() else { break };
-            pool.push(item);
-        }
+        self.stack.move_oldest(n, pool);
         POOL.len.store(pool.count(), Ordering::Release);
         unlock_pool();
+        // As many sleepers as the work feeds: each takes up to 256 items.
+        WORK.fetch_add(1, Ordering::SeqCst);
+        futex_wake_some(&WORK, n.div_ceil(256) as i32);
     }
 
     /// Takes work from the pool; whether there was any.
@@ -1397,15 +1417,7 @@ impl Marker {
         }
         lock_pool();
         let pool = unsafe { &mut *POOL.stack.get() };
-        let n = pool.count().min(256);
-        for _ in 0..n {
-            let Some(item) = pool.pop_oldest() else { break };
-            self.stack.push(item);
-        }
-        if pool.count() == 0 {
-            pool.low = 0;
-            pool.len = 0;
-        }
+        let n = pool.move_oldest(256, &mut self.stack);
         POOL.len.store(pool.count(), Ordering::Release);
         unlock_pool();
         n > 0
@@ -1431,13 +1443,25 @@ impl Marker {
                     IDLE.fetch_add(1, Ordering::SeqCst);
                 }
                 if IDLE.load(Ordering::SeqCst) == markers {
+                    // The markers asleep see the end as they wake.
+                    if self.shares {
+                        WORK.fetch_add(1, Ordering::SeqCst);
+                        futex_wake(&WORK);
+                    }
                     return;
                 }
                 spins += 1;
-                if spins < 256 {
+                if spins < IDLE_SPINS {
                     std::hint::spin_loop();
-                } else {
+                } else if spins < IDLE_SPINS + IDLE_YIELDS {
                     unsafe { sched_yield() };
+                } else {
+                    // The count is read before the pool and the idle markers, so that work
+                    // offered or the end reached after them changes it, and the wait returns.
+                    let seen = WORK.load(Ordering::SeqCst);
+                    if POOL.len.load(Ordering::SeqCst) == 0 && IDLE.load(Ordering::SeqCst) != markers {
+                        futex_wait(&WORK, seen);
+                    }
                 }
             }
         }
@@ -1453,9 +1477,13 @@ impl Marker {
     }
 }
 
+/// Takes the pool's lock, waiting on a plain read of it, so that the waiters do not take the
+/// lock's cache line from its holder over and over.
 fn lock_pool() {
     while POOL.lock.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        std::hint::spin_loop();
+        while POOL.lock.load(Ordering::Relaxed) {
+            std::hint::spin_loop();
+        }
     }
 }
 

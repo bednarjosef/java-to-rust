@@ -169,14 +169,23 @@ on a futex.
 
 - A mark bit is set with an atomic `or`, so two markers that reach one object scan it once.
 - Each marker has its own stack. When another marker is idle, a marker moves half of its stack,
-  the oldest items first (they tend to lead to the most work), to a shared pool, from which an
-  idle marker takes up to 256 items.
+  the oldest items first (they tend to lead to the most work), up to 4,096 items, to a shared
+  pool, from which an idle marker takes up to 256 items. Both are one copy under the pool's spin
+  lock, whose waiters read it until it is free before they try to take it.
 - A range longer than 64 KB (a large array) is split into 64 KB pieces as it is taken, all of
   which go on the stack at once, so other markers can take them.
 - A slot taken off a marker's stack waits in a ring of 8 while its memory is prefetched, and is
   scanned as it leaves the ring, so the cache misses of reading eight slots overlap instead of
   coming one after another. On the Minecraft benchmark this took the translated javac's marking
   from 3.9 s to 2.7 s in all (median of runs; 16 slots did no better).
+- An idle marker spins a little, yields a little, and then sleeps on a futex. A marker putting
+  work in the pool wakes one sleeper for each 256 items, and the end of marking wakes them all.
+  A heap that hands out no work (one long linked list) is marked by one thread while the others
+  sleep. Idle helpers that kept spinning and yielding, and woke all at once to queue on the
+  pool's lock, took `SmallObjects` (a linked list of 2 million nodes and an array of 1 million
+  objects, collected 22 times) from 0.36 s to 0.64 s and from 1.1 s to 6.0 s of processor time,
+  and `BinaryTrees` from 2.16 s to 4.27 s and from 5.7 s to 32.8 s (medians at a load average of
+  about 6 on 16 cores).
 - Marking ends when every marker is idle and the pool is empty: no marker can then make work.
 
 Sweeping is shared in chunks of 256 blocks: each thread sweeps the blocks of a chunk and records
