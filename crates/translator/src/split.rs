@@ -26,7 +26,8 @@
 //! Each body crate builds by itself, in parallel with the others; the header holds no code but
 //! what cannot move: generic functions and impls (Rust needs their code where they are used),
 //! `const` functions (statics call them), functions with an `impl Trait` in their signature, and
-//! the initializers of statics. The items' moved code goes to the body crates in the order of the
+//! the initializers of statics; and the small functions (`small`), which an optimized build
+//! inlines where they are called, as it does the header's calls of the moved ones. The items' moved code goes to the body crates in the order of the
 //! modules and their items, in runs of about the same size of code whose ends the items' names
 //! choose (`chunks`), so the same program is split the same way every time, a change moves only
 //! the cuts around it, and a module with more code than a crate's share is spread over several.
@@ -383,6 +384,49 @@ fn movable(sig: &syn::Signature, text: &str) -> bool {
         && !has_word(at(text, sig.span()), "impl")
 }
 
+/// The most tokens that the code of a function kept in the header has (`small`).
+const SMALL_TOKENS: usize = 48;
+
+/// Whether `code`, a function's block, is small enough to stay in the header, `#[inline]`, where
+/// every crate that calls it can inline it: a getter, a buffer's `get`, a class's initialization
+/// check, `Math.lerp`. A call into a body crate cannot be inlined without link-time optimization,
+/// and the call of such a function costs more than its code.
+fn small(code: &str) -> bool {
+    fn count(stream: proc_macro2::TokenStream, limit: usize) -> usize {
+        let mut n = 0;
+        for token in stream {
+            n += 1;
+            if let proc_macro2::TokenTree::Group(g) = token {
+                n += count(g.stream(), limit);
+            }
+            if n > limit {
+                break;
+            }
+        }
+        n
+    }
+    // A token is at least a byte, and most are several: a longer text is not small.
+    code.len() <= SMALL_TOKENS * 12
+        && code.parse::<proc_macro2::TokenStream>().is_ok_and(|s| count(s, SMALL_TOKENS) <= SMALL_TOKENS)
+}
+
+/// Whether a function with attributes `attrs` may be marked `#[inline]`: it has no inline
+/// attribute of its own and is not `#[cold]`.
+fn inlinable(attrs: &[syn::Attribute]) -> bool {
+    !attrs.iter().any(|a| a.path().is_ident("inline") || a.path().is_ident("cold"))
+}
+
+/// An edit that marks a function `#[inline]` in a build that optimizes (without debug
+/// assertions), before its visibility or its signature. A build at `opt-level = 0` inlines
+/// nothing, and there each crate that calls an `#[inline]` function compiles a copy of it.
+fn mark_inline(vis: &syn::Visibility, sig: &syn::Signature) -> Edit {
+    let start = match vis {
+        syn::Visibility::Inherited => sig_start(sig),
+        _ => vis.span().byte_range().start,
+    };
+    Edit { start, end: start, text: "#[cfg_attr(not(debug_assertions), inline)] ".into() }
+}
+
 /// Whether `text` has `word` as a whole word.
 fn has_word(text: &str, word: &str) -> bool {
     replace_word(text, word, "\u{0}") != text
@@ -517,14 +561,23 @@ fn split_module(
                 edits.push(Edit { start: range.start, end: range.end, text: published });
             }
             syn::Item::Fn(f) => {
+                let block = f.block.span().byte_range();
+                let can_move = movable(&f.sig, text);
+                // A `#[cold]` function is not inlined, so it moves whatever its size.
+                let moves = can_move && !(inlinable(&f.attrs) && small(&text[block.clone()]));
+                // A function kept in the header for its size, and the header's call of a moved
+                // one, is inlined where it is called. The mark goes before the edit that makes
+                // the function public, at the same place.
+                if can_move && inlinable(&f.attrs) {
+                    edits.push(mark_inline(&f.vis, &f.sig));
+                }
                 publish(&f.vis, sig_start(&f.sig), &mut edits);
-                if movable(&f.sig, text) {
+                if moves {
                     let name = f.sig.ident.to_string();
                     let symbol = symbol(path, "", &name, used);
                     key.get_or_insert_with(|| symbol.clone());
                     let (params, args) = rename_params(&f.sig, text, &mut edits, None);
                     let ret = at_or_empty(text, &f.sig.output);
-                    let block = f.block.span().byte_range();
                     edits.push(Edit {
                         start: block.start,
                         end: block.end,
@@ -572,14 +625,19 @@ fn split_module(
                         }
                         continue;
                     };
+                    let sig_text = at(text, f.sig.span());
+                    let can_move = plain
+                        && movable(&f.sig, text)
+                        && !(trait_name.is_some() && sig_text.contains("Self::"));
+                    // As for a function: a small method stays, and both it and the header's
+                    // call of a moved one are inlined where they are called.
+                    if can_move && inlinable(&f.attrs) {
+                        edits.push(mark_inline(&f.vis, &f.sig));
+                    }
                     if trait_name.is_none() {
                         publish(&f.vis, sig_start(&f.sig), &mut edits);
                     }
-                    let sig_text = at(text, f.sig.span());
-                    if !plain
-                        || !movable(&f.sig, text)
-                        || (trait_name.is_some() && sig_text.contains("Self::"))
-                    {
+                    if !can_move || (inlinable(&f.attrs) && small(at(text, f.block.span()))) {
                         continue;
                     }
                     let name = f.sig.ident.to_string();
@@ -819,6 +877,35 @@ mod tests {
             let kept = before.iter().filter(|(name, keys)| after.get(*name) == Some(keys)).count();
             assert!(kept + 3 >= before.len(), "{kept} of {} crates kept", before.len());
         }
+    }
+
+    /// A small function or method keeps its code in the header, inlined where an optimized build
+    /// calls it; a larger one moves, and the header's call of it is inlined so.
+    #[test]
+    fn small_functions_stay_in_the_header() {
+        let large = (0..40).map(|i| format!("    let v{i} = x + {i};\n")).collect::<String>();
+        let text = format!(
+            "fn get(x: i32) -> i32 {{ x + 1 }}\n\nfn sum(x: i32) -> i32 {{\n{large}    x\n}}\n\n\
+             #[cold]\n#[inline(never)]\nfn slow() {{}}\n\n\
+             pub struct S;\n\nimpl S {{\n    fn size(&self) -> i32 {{ 3 }}\n    fn total(&self, x: i32) -> i32 {{\n{large}        x\n    }}\n}}\n"
+        );
+        let split = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
+            .unwrap()
+            .split;
+        let inline = "#[cfg_attr(not(debug_assertions), inline)] ";
+        let header = &split.header;
+        assert!(header.contains(&format!("{inline}pub fn get(x: i32) -> i32 {{ x + 1 }}")), "{header}");
+        assert!(
+            header.contains(&format!("{inline}pub fn sum(p0: i32) -> i32 {{ j2r__p__sum(p0) }}")),
+            "{header}"
+        );
+        assert!(header.contains(&format!("{inline}pub fn size(&self) -> i32 {{ 3 }}")), "{header}");
+        assert!(header.contains(&format!("{inline}pub fn total(&self, p0: i32)")), "{header}");
+        assert!(header.contains("#[inline(never)]\npub fn slow() { j2r__p__slow() }"), "{header}");
+        let moved: String = split.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert!(!moved.contains("fn get") && !moved.contains("body_size"), "{moved}");
+        assert!(moved.contains("fn j2r__p__sum") && moved.contains("fn body_total"), "{moved}");
+        assert!(moved.contains("fn j2r__p__slow"), "{moved}");
     }
 
     #[test]

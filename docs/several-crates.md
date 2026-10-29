@@ -154,7 +154,15 @@ along classes. It splits declarations from code, as C splits headers from source
 What cannot move stays in the header with its code: generic functions and the methods of generic
 `impl`s (Rust needs their code in the crate that instantiates them), `const` functions (statics
 call them), functions with an `impl Trait` in their signature, methods of a trait `impl` whose
-signature names `Self::..`, and the initializers of statics. The header calls into the body
+signature names `Self::..`, and the initializers of statics. Small functions stay too: one whose
+code is at most 48 tokens (`split.rs`, `small`) and that is not `#[cold]`, such as a getter, a buffer's `get`, the check
+that a class is initialized or `Mth.lerp`, keeps its code in the header, and both it and the
+header's wrapper of each moved function are `#[cfg_attr(not(debug_assertions), inline)]`, so
+that an optimized build inlines them into the crates that call them: a wrapper becomes a direct
+call of the body crate's function, and a small function no call at all. A build at
+`opt-level = 0` inlines nothing, and there each crate would compile a copy of every `#[inline]`
+function it calls, so a debug build leaves them called. In the Minecraft server about 60% of the
+functions are small, about a tenth of the code. The header calls into the body
 crates, which depend on it; rustc's linker (lld, the default on x86-64 Linux) resolves symbols
 whatever the order of the libraries.
 
@@ -198,10 +206,15 @@ The split parses each item of a module (a class with its `impl`s) by itself with
 its text once split: a syntax tree is many times its text, and the Minecraft server's crate root
 alone is 2.3 million lines (its `Object` enum 650,000).
 
-What it costs: a call of a moved function from another crate goes through the header's wrapper and
-cannot be inlined without link-time optimization. The release profile's fat LTO inlines across
-crates again, at the memory of a whole-program build; debug builds and `cargo check` gain the
-most from the split.
+What it costs: a call of a moved function from another crate cannot be inlined without
+link-time optimization. The release profile's fat LTO inlines across crates again, at the memory
+of a whole-program build; debug builds and `cargo check` gain the most from the split. Without
+LTO, the functions kept in the header for their size are what keeps the cost small: before they
+were, `benchmarks/NoiseTree.java` split into three body crates at `opt-level = 1` ran its kernel
+in about 1240 ms against 470 ms in one crate with fat LTO; with them it runs in about 430 ms.
+The Minecraft server's world generation, whose density functions call buffer accessors, static
+helpers and field getters for every cell, spent about a quarter of its time inside functions of
+at most 64 bytes of machine code, nearly all of them calls into body crates.
 
 ## Not done yet
 

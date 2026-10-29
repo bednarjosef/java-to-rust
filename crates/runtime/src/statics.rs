@@ -141,10 +141,12 @@ trait Bits<B> {
 macro_rules! same_bits {
     ($($t:ty),*) => {$(
         impl Bits<$t> for $t {
+            #[inline]
             fn bits_of(self) -> $t {
                 self
             }
 
+            #[inline]
             fn from_bits_of(bits: $t) -> $t {
                 bits
             }
@@ -155,20 +157,24 @@ macro_rules! same_bits {
 same_bits!(i32, i64, i8, i16, u16, bool);
 
 impl Bits<u32> for f32 {
+    #[inline]
     fn bits_of(self) -> u32 {
         self.to_bits()
     }
 
+    #[inline]
     fn from_bits_of(bits: u32) -> f32 {
         f32::from_bits(bits)
     }
 }
 
 impl Bits<u64> for f64 {
+    #[inline]
     fn bits_of(self) -> u64 {
         self.to_bits()
     }
 
+    #[inline]
     fn from_bits_of(bits: u64) -> f64 {
         f64::from_bits(bits)
     }

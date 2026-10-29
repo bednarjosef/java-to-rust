@@ -404,6 +404,7 @@ pub fn cast_message(from: CastClass, to: CastClass) -> String {
 
 /// Java's checked cast `(T) x` on a non-null object `from`: the object as a `T` if it is one,
 /// which the translation finds (`|o| o.as_t()`), else a `ClassCastException`.
+#[inline]
 pub fn cast<S: CastSource + ?Sized, T>(from: &S, as_t: impl FnOnce(&S) -> Option<T>, to: CastClass) -> T {
     match as_t(from) {
         Some(value) => value,
@@ -413,6 +414,7 @@ pub fn cast<S: CastSource + ?Sized, T>(from: &S, as_t: impl FnOnce(&S) -> Option
 
 /// `cast`, where a `catch` or a `finally` sees its `ClassCastException`: the failure is
 /// returned, to go on as a thrown exception does.
+#[inline]
 pub fn try_cast<S: CastSource + ?Sized, T>(
     from: &S,
     as_t: impl FnOnce(&S) -> Option<T>,
@@ -422,11 +424,13 @@ pub fn try_cast<S: CastSource + ?Sized, T>(
 }
 
 /// The `ClassCastException` of a cast of an object of class `from` to class `to`.
+#[cold]
 pub fn cast_exception(from: CastClass, to: CastClass) -> Exception {
     Exception::new("java.lang.ClassCastException", cast_message(from, to))
 }
 
 /// Throws the `ClassCastException` of a cast of an object of class `from` to class `to`.
+#[cold]
 pub fn cast_failed(from: CastClass, to: CastClass) -> ! {
     throw("java.lang.ClassCastException", &cast_message(from, to))
 }
