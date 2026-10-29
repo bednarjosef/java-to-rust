@@ -568,6 +568,10 @@ impl<'t> Lowering<'t> {
                 })
             })
             .collect();
+        // The methods that lowering added, among them the parts of the reflection table, which
+        // read enums' fields as any method does: they too must be there for the tables to
+        // rewrite their reads. No enum's form adds a method.
+        self.added_methods(methods);
         for (index, bodies) in enum_indices.into_iter().zip(made) {
             let bodies_rejected =
                 bodies.as_ref().err().map(|e| Error { pos: e.pos, message: e.message.clone() });
@@ -593,7 +597,6 @@ impl<'t> Lowering<'t> {
             }
         }
         self.field_update_methods(methods);
-        self.added_methods(methods);
         Ok(())
     }
 
