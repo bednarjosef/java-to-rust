@@ -730,9 +730,14 @@ impl<'a> Gen<'a> {
             self.variant_types.borrow_mut().insert(s);
             return found.clone();
         }
+        // Both lists are in index order: the variants are concrete classes.
         let variants = self.shared_enum_variants(s);
-        let found: std::rc::Rc<[usize]> =
-            variants.iter().copied().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect();
+        let under = self.class.hierarchy.concretes_of(t);
+        let found: std::rc::Rc<[usize]> = if under.len() < variants.len() {
+            under.iter().copied().filter(|&c| self.is_enum_variant(s, c)).collect()
+        } else {
+            variants.iter().copied().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect()
+        };
         self.passing_lists.borrow_mut().insert((s, t), found.clone());
         found
     }
@@ -1261,9 +1266,15 @@ impl<'a> Gen<'a> {
     /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
     /// module, `("Main$Dog", java::APP)`.
     pub(super) fn cast_class(&mut self, c: usize) -> String {
+        if let Some(found) = self.cast_classes.get(&c) {
+            self.uses_runtime |= found.contains("java::");
+            return found.clone();
+        }
         let name = rust_string(&self.binary_name(c));
         let module = self.cast_module(c);
-        format!("({name}, {module})")
+        let found = format!("({name}, {module})");
+        self.cast_classes.insert(c, found.clone());
+        found
     }
 
     /// The module and class loader of class `c` as HotSpot names them with the class: the JDK's

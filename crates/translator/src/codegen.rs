@@ -670,6 +670,7 @@ impl<'a> Gen<'a> {
             variant_lists: Default::default(),
             enum_variant_lists: Default::default(),
             passing_lists: Default::default(),
+            cast_classes: Default::default(),
             enum_variant_sets: Default::default(),
             variant_types: Default::default(),
             checked_value_ofs: &setup.checked_value_ofs,
@@ -854,6 +855,9 @@ struct Gen<'a> {
     /// The variants of the enum of each type whose objects are of another type
     /// (`dispatch::passing`), by the two, once found.
     passing_lists: std::cell::RefCell<HashMap<(usize, usize), Classes>>,
+    /// The text of each class as a `ClassCastException` names it (`dispatch::cast_class`), once
+    /// made.
+    cast_classes: HashMap<usize, String>,
     /// `enum_variant_lists` as sets, for `dispatch::is_enum_variant`.
     enum_variant_sets: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashSet<usize>>>>,
     /// The types whose `enum_variants` the code written asked for, which depend on which classes
