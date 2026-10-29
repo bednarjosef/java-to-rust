@@ -779,6 +779,16 @@ pub(super) fn runtime_failures(
                     out.push((NPE, "this call", true, arg.id));
                 }
             }
+            // `toLowerCase(locale)` or `toUpperCase(locale)`: the receiver is dereferenced with the
+            // checked form (`Gen::text_ref`). The locale's language, which lowering reads
+            // (`case_in_locale`), is only compared with those of their own case mapping, as the
+            // JDK compares it: a null one (which `Locale` never gives, though the analysis may not
+            // see that in a large program) maps as the root locale does.
+            Builtin::String(StringOp::ToUpperCase | StringOp::ToLowerCase) if args.len() == 2 => {
+                if null(&args[0]) {
+                    out.push((NPE, "this call", true, args[0].id));
+                }
+            }
             Builtin::StringCharAt => {
                 if args.first().is_some_and(null) {
                     out.push((NPE, "this call", true, args[0].id));

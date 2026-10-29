@@ -482,7 +482,9 @@ written in checked form exactly when it is in the analysis's set.
   stored value) are computed. Where one may have an effect, lowering computes it first into a
   local, and the receiver (the array) before it unless it is a local that nothing there assigns
   (`lower/argument_order.rs`); the message names the receiver itself, and an argument that the
-  call unboxes from its local is the value that javac unboxes as it computes it.
+  call unboxes from its local is the value that javac unboxes as it computes it. The locale's
+  language that lowering passes to `toLowerCase(locale)` and `toUpperCase(locale)` is read after
+  the check of the string, as the JDK's code reads it.
 - **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
   `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`, and the
   `NullPointerException` message facts below.

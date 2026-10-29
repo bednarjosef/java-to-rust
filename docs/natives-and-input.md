@@ -460,7 +460,10 @@ A translated program is closed: it knows all its classes. So:
   come from ([object-model.md](object-model.md), section 1.6).
 - `toUpperCase(locale)` and `toLowerCase(locale)` are the root locale's mapping, which is every
   language's but Turkish, Azeri and Lithuanian; for those three the program ends with a message
-  (`java_runtime::string::uppercase_in`).
+  (`java_runtime::string::uppercase_in`). Lowering passes the locale's language as the argument
+  (`lower/strings.rs`), read after the check of the string as the JDK's code reads it; a null
+  language, which no `Locale` has but the analyses may not rule out in a large program, maps as
+  the root locale's, since the JDK only compares it with those three.
 - `Character` is translated from the JDK, with its nested classes and `CharacterData` tables,
   except the box, its instance methods and the `char` and code point methods that the runtime
   answers (`lower::runtime_character_method`).
