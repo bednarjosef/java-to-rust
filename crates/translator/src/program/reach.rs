@@ -2799,8 +2799,9 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
 /// been there from the start. A walk that reached what it would not have with the new units from
 /// the start walks again from `main` (`Walk::stale`); with `asking`, what depends on a class
 /// that javac has not answered for yet waits for its answer (`Walk::asked`), which leaves that
-/// to a unit that declares a class javac said it had none of. The units walked must not change:
-/// when they do, a new `Rounds` walks them all again.
+/// to a unit that declares a class javac said it had none of. The units walked must not change,
+/// except for members written into their records that the later units call for (`replace`):
+/// when they change otherwise, a new `Rounds` walks them all again.
 pub struct Rounds<'t> {
     main: String,
     units: Vec<&'t Value>,
@@ -2828,6 +2829,9 @@ pub struct Rounds<'t> {
     /// (`asking`), and those asked for since the last units were added (`Walk::asked`).
     asked: Option<HashSet<String>>,
     newly_asked: Vec<String>,
+    /// The units walked before that come again with more members in their records, since the
+    /// last units were added (`replace`).
+    replaced: Vec<&'t Value>,
 }
 
 impl<'t> Rounds<'t> {
@@ -2847,6 +2851,7 @@ impl<'t> Rounds<'t> {
             string_array_writes: false,
             asked: None,
             newly_asked: Vec::new(),
+            replaced: Vec::new(),
         }
     }
 
@@ -2906,16 +2911,26 @@ impl<'t> Rounds<'t> {
         self.restarts
     }
 
+    /// Replaces the unit added `index`th with a copy of it that has more members written into
+    /// its records (`javac::Completion::only_adds_to`), which the next units added take up: the
+    /// walks then go on as they would had the copy been there from the start
+    /// (`Walk::redeclare_units`).
+    pub fn replace(&mut self, index: usize, unit: &'t Value) {
+        self.units[index] = unit;
+        self.replaced.push(unit);
+    }
+
     /// Adds units to the program, and reaches what they add.
     pub fn add(&mut self, units: &[&'t Value]) -> Result<(), String> {
         self.units.extend(units);
+        let replaced = std::mem::take(&mut self.replaced);
         let asked = std::mem::take(&mut self.newly_asked);
         if let Some(all) = &mut self.asked {
             all.extend(asked.iter().cloned());
         }
         let sequential = match &mut self.sequential {
             Some(walk) => {
-                walk.add(units, &asked);
+                walk.add(units, &replaced, &asked);
                 if walk.stale {
                     self.restarts += 1;
                     self.check = sequential::Index::default();
@@ -2939,7 +2954,7 @@ impl<'t> Rounds<'t> {
         self.stays_sequential = self.check.streams_stay_sequential(sequential);
         match &mut self.parallel {
             Some(walk) => {
-                walk.add(units, &asked);
+                walk.add(units, &replaced, &asked);
                 if walk.stale {
                     self.restarts += 1;
                     walk.restart(&self.main);
@@ -3357,10 +3372,12 @@ impl<'t> Walk<'t> {
 
     /// Adds units, and walks on to what they add: the items that waited for a class they
     /// declare, the supertypes of their classes that are live, and their methods that override
-    /// a method whose overriders may run. Of the classes `asked` for since the last units, those
-    /// that no unit declares are not among the sources: the methods that waited for them are
-    /// external.
-    fn add(&mut self, units: &[&'t Value], asked: &[String]) {
+    /// a method whose overriders may run. Units walked before that come again with more members
+    /// written into their records are declared again (`redeclare_units`). Of the classes `asked`
+    /// for since the last units, those that no unit declares are not among the sources: the
+    /// methods that waited for them are external.
+    fn add(&mut self, units: &[&'t Value], replaced: &[&'t Value], asked: &[String]) {
+        self.redeclare_units(replaced);
         self.declare_units(units);
         for class in std::mem::take(&mut self.declared) {
             self.reach.missing.remove(&class);
@@ -3408,6 +3425,45 @@ impl<'t> Walk<'t> {
         }
     }
 
+    /// Declares again units walked before, which come again as copies with more members written
+    /// into their records (`javac::Completion::only_adds_to`): the accessors, `hashCode` and
+    /// `equals` that the units added since call for, and accessors that override more interface
+    /// methods. The walk then goes on as it would had they been there from the start. A new
+    /// method's overrides are found as a new unit's are (`add`); a method of these classes that
+    /// the walk took for an external one, as no unit declared it, is visited again, which makes
+    /// it an ordinary one (`method`). A record is final, so no class overrides the method that
+    /// was external, and nothing was reached through it that a walk from the start would not
+    /// reach. Reflection's lookups in these classes, and the reflection metadata that names
+    /// their members, are made again, as they may now find more. The rest of each unit is the
+    /// same as before: completing a record does nothing else that depends on the other units, and
+    /// the `implicit` marks it changes in `hashCode` and `equals` are not read here.
+    fn redeclare_units(&mut self, units: &[&'t Value]) {
+        if units.is_empty() {
+            return;
+        }
+        let before = self.declared.len();
+        self.declare_units(units);
+        let classes: HashSet<String> = self.declared.drain(before..).collect();
+        let external: Vec<MethodKey> = self
+            .reach
+            .external
+            .iter()
+            .filter(|key| classes.contains(&key.0) && self.methods.contains_key(*key))
+            .cloned()
+            .collect();
+        self.work.extend(external.into_iter().map(Item::Method));
+        self.reflected_keys.retain(|(class, _)| !classes.contains(class));
+        let pending: HashSet<usize> = self.config_pending.iter().copied().collect();
+        for index in 0..self.reflect_config.len() {
+            let entry = &self.reflect_config[index];
+            if !pending.contains(&index)
+                && self.declared_class(&entry.class).is_some_and(|class| classes.contains(&class))
+            {
+                self.config_pending.push(index);
+            }
+        }
+    }
+
     fn declare(&mut self, decl: &'t Value, outer: Option<&str>) {
         if !CLASS_KINDS.contains(&text(decl, "kind")) {
             return;
@@ -3437,13 +3493,19 @@ impl<'t> Walk<'t> {
             match text(member, "kind") {
                 "METHOD" => {
                     let key = (class.clone(), name, symbol_type(member).to_string());
+                    // A method declared again (`redeclare_units`) keeps the overrides found before.
+                    let known = self.methods.contains_key(&key);
                     for overridden in member["symbol"]["overrides"].as_array().into_iter().flatten() {
                         let overridden = (
                             text(overridden, "owner").to_string(),
                             key.1.clone(),
                             text(overridden, "type").to_string(),
                         );
-                        self.overriders.entry(overridden.clone()).or_default().push(key.clone());
+                        let overriders = self.overriders.entry(overridden.clone()).or_default();
+                        if known && overriders.contains(&key) {
+                            continue;
+                        }
+                        overriders.push(key.clone());
                         self.found_overriders.push((overridden, key.clone()));
                     }
                     if self.methods.insert(key.clone(), member).is_none() {
@@ -4680,6 +4742,42 @@ mod tests {
         rounds.asked(asked);
         rounds.add(units).unwrap();
         rounds.dump()
+    }
+
+    #[test]
+    fn rounds_take_up_the_members_that_a_later_unit_writes_into_a_record_walked_before() {
+        // `main` makes a `Point` and calls `Other.run()`, whose unit comes in the next round and
+        // calls `hashCode` on a point, so that `javac::Records` writes `Point.hashCode`, which
+        // calls `Hasher.mix`, into the record's unit, walked in the first round without it.
+        let new_point = json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "Point", "name": "<init>", "type": "()void"}}});
+        let constructor = json!({"kind": "METHOD", "name": "<init>", "symbol": {"type": "()void", "static": false},
+            "body": {"kind": "BLOCK", "statements": []}});
+        let hash_code = json!({"kind": "METHOD", "name": "hashCode", "symbol": {"type": "()int", "static": false},
+            "body": {"kind": "BLOCK", "statements": [call("Hasher", "mix")]}, "synthetic": true});
+        let point = |members: Vec<Value>| json!({"typeDecls": [{"kind": "RECORD", "symbol": {"type": "Point"}, "members": members}]});
+        let first = json!({"typeDecls": [
+            class("Main", &[("main", vec![new_point, call("Other", "run")])]),
+            class("Hasher", &[("mix", vec![])]),
+        ]});
+        let (before, after) = (point(vec![constructor.clone()]), point(vec![constructor, hash_code]));
+        let other = json!({"typeDecls": [class("Other", &[("run", vec![])])]});
+        let hash = ("Point".to_string(), "hashCode".to_string(), "()int".to_string());
+        let mix = ("Hasher".to_string(), "mix".to_string(), "()void".to_string());
+
+        let mut rounds = Rounds::new("Main").asking();
+        rounds.add(&[&first, &before]).unwrap();
+        // Without the method, `Object`'s `hashCode` runs on a point.
+        assert_eq!(rounds.missing(), ["Other"]);
+        let asked = rounds.missing();
+        rounds.asked(&asked);
+        rounds.replace(1, &after);
+        rounds.add(&[&other]).unwrap();
+        assert_eq!(rounds.restarts(), 0);
+        assert_eq!(rounds.dump(), from_scratch(&[&first, &after, &other], &asked));
+        let reach = rounds.finish();
+        assert!(reach.methods.contains(&hash) && !reach.external.contains(&hash), "{reach:?}");
+        assert!(reach.methods.contains(&mix), "{reach:?}");
     }
 
     #[test]

@@ -202,12 +202,21 @@ dormant, its overriders had been reached for nothing (`Walk::stale`) and the wal
 from `main`: four times in javac's 10 rounds, two or three times in those of `ScannerGrades` and
 `TextAdventure`; and an `instanceof` or exception decided without a supertype stayed decided, so
 the result depended on the order the units came in (javac's translation reached
-`UnixDomainSocketAddress.getPath`, which a walk over all its units does not). A walk still starts
-again from `main` in two cases: when the members written into a record walked before differ with
-the new units, `load` walks every unit again (once in javac's rounds and in some of the corpus
-programs); and a stale walk can still happen when a unit declares a class that javac had none of
-when asked, such as a second top-level class of a file that a later unit came from, which none
-of these programs does. The `timing: reach` line counts the two apart. With the wait, classes
+`UnixDomainSocketAddress.getPath`, which a walk over all its units does not). A stale walk can
+still happen when a unit declares a class that javac had none of when asked, such as a second
+top-level class of a file that a later unit came from, which none of these programs does; the
+walk then starts again from `main`. The members written into a record walked before
+(`javac::Records`) can grow with the new units: an accessor, `hashCode` or `equals` that a new
+unit calls for, or an accessor that overrides an interface method of a new unit. The round then
+declares the record's unit again with them (`Rounds::replace`, `Walk::redeclare_units`): a new
+method's overrides are found as a new unit's are, a method of the record that the walk took for
+an external one as no unit declared it (`Object`'s `hashCode` on a live record) is visited
+again, and reflection's lookups in the record and the reflection metadata that names it are
+made again. A record is final, so nothing was reached through that external method that a walk
+from scratch would not reach. What decides the members only grows with the units, so members are
+only ever added (`javac::Completion::only_adds_to`); were one to go, `load` would walk every unit
+again. The `timing: reach` line counts the walks from the start, for records and stale, and the
+rounds that added members to records walked before. With the wait, classes
 are asked for in other rounds, so the units come in another order, which can change the names
 of overloads, the tags of the classes, and which unsupported construct is reported first.
 Reachability, release translator, on a machine with other builds running, before (a method of
@@ -223,6 +232,13 @@ a missing class taken for an external one at once) and after; walks from the sta
 | the small programs (0.1 to 0.6 s) | 0 to 3 | 0 or 1 |
 
 On the small programs the time is about the same: their walks from the start were short.
+
+Before records took their new members in place, each round that added members to a record walked
+before walked every unit again from `main`, as long as all the walks of the rounds before it:
+once in javac's census (round 6, 2.1 s of a reachability of 6.7 to 6.9 s), and 9 times in the
+Minecraft server's 18 rounds, 304 s of reachability in all. In place, javac's round 6 takes 0.3
+s and its reachability 5.0 to 5.4 s, reaching the same classes and methods; javac's census output
+is the same byte for byte.
 
 Release translator on a loaded machine (load 16 to 23), the before and after runs alternated,
 twice each:
