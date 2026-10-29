@@ -391,12 +391,22 @@ const SMALL_TOKENS: usize = 48;
 /// every crate that calls it can inline it: a getter, a buffer's `get`, a class's initialization
 /// check, `Math.lerp`. A call into a body crate cannot be inlined without link-time optimization,
 /// and the call of such a function costs more than its code.
+///
+/// The arms of a `match` that passes a failure on (`match x { Ok(v) => v, Err(e) => return
+/// Err(..) }`, `Some(v) => v, None => ..`, which `codegen::exceptions` writes for rustc's sake
+/// where Java code calls a method that throws) count as one token, as the `?` they stand for did.
 fn small(code: &str) -> bool {
+    fn passes_on(stream: &proc_macro2::TokenStream) -> bool {
+        let first: String = stream.clone().into_iter().take(6).map(|t| t.to_string()).collect();
+        first == "Ok(v)=>v," || first == "Some(v)=>v,"
+    }
     fn count(stream: proc_macro2::TokenStream, limit: usize) -> usize {
         let mut n = 0;
         for token in stream {
             n += 1;
-            if let proc_macro2::TokenTree::Group(g) = token {
+            if let proc_macro2::TokenTree::Group(g) = token
+                && !(g.delimiter() == proc_macro2::Delimiter::Brace && passes_on(&g.stream()))
+            {
                 n += count(g.stream(), limit);
             }
             if n > limit {
@@ -610,9 +620,8 @@ fn split_module(
                     && !self_ty.contains('<')
                     && matches!(*imp.self_ty, syn::Type::Path(_));
                 let trait_name = imp.trait_.as_ref().map(|(_, p, _)| at(text, p.span()).to_string());
-                // Each moved method: its exported name, its declaration and code in the trait, and
-                // its exported function before and after the trait's name.
-                let mut moved: Vec<(String, String, String, String, String)> = Vec::new();
+                // Each moved method: its exported name, and its declaration and code in the trait.
+                let mut moved: Vec<(String, String, String)> = Vec::new();
                 let clean = |s: &str| {
                     s.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect::<String>()
                 };
@@ -695,13 +704,12 @@ fn split_module(
                     let inputs =
                         if f.sig.inputs.is_empty() { "" } else { &text[f.sig.inputs.span().byte_range()] };
                     let code = &text[block];
-                    let code = format!("{attrs}    fn body_{name}({inputs}){ret} {code}\n");
-                    let this_arg = if this_ty.is_some() { "this, " } else { "" };
-                    let before = format!(
-                        "#[unsafe(no_mangle)]\npub fn {symbol}({this_param}{params}){ret_here} {{\n    <{self_ty} as "
+                    // The method itself is the function that the header declares: a method's
+                    // `self` is passed as a first parameter of its type is.
+                    let code = format!(
+                        "{attrs}    #[unsafe(export_name = \"{symbol}\")]\n    fn body_{name}({inputs}){ret} {code}\n"
                     );
-                    let after = format!(">::body_{name}({this_arg}{args})\n}}\n\n");
-                    moved.push((symbol, decl, code, before, after));
+                    moved.push((symbol, decl, code));
                 }
                 // An `impl` with much code (`Object`'s methods over every class) is cut into
                 // traits of about `CODEGEN_UNIT` of code each, each a piece of its own, which the
@@ -723,10 +731,8 @@ fn split_module(
                     let methods = &moved[start..end];
                     let decls: String = methods.iter().map(|m| m.1.as_str()).collect();
                     let impls: String = methods.iter().map(|m| m.2.as_str()).collect();
-                    let functions: String =
-                        methods.iter().map(|m| format!("{}{bodies}{}", m.3, m.4)).collect();
                     let text = format!(
-                        "trait {bodies}: Sized {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n{functions}"
+                        "trait {bodies}: Sized {{\n{decls}}}\n\nimpl {bodies} for {self_ty} {{\n{impls}}}\n\n"
                     );
                     pieces.push(Piece { size: text.len(), text, key: methods[0].0.clone() });
                     traits.insert(bodies);

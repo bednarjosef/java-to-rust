@@ -293,7 +293,7 @@ impl<'a> Gen<'a> {
     pub(super) fn init_run(&mut self, init: usize) -> String {
         let call = format!("{}()", init_name(&self.class.types[init].name));
         if crate::lower::rewritten_clinit(&self.class.types[init]) {
-            self.passed_on(Code::atom(call))
+            self.passed_on_thrown(Code::atom(call))
         } else {
             call
         }

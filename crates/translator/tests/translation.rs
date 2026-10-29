@@ -2237,7 +2237,7 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_catches_it(
         &rust,
         &[
             "fn to_string(&self) -> Result<java::JString, Throwable> {",
-            "java::println!(\"item {}\", java::or_break!(Arc::new(AItem::new()).to_string(), 'attempt));",
+            "java::println!(\"item {}\", match Arc::new(AItem::new()).to_string() { Ok(v) => v, Err(e) => break 'attempt Err(e) });",
         ],
     );
 }
@@ -2266,7 +2266,9 @@ fn a_catch_around_the_text_of_an_enum_constant_whose_to_string_throws_sees_it() 
     let rust = java_to_rust::translate(&program("System.out.println(\"color \" + Color.RED);")).unwrap();
     assert_contains(
         &rust,
-        &["java::println!(\"color {}\", java::or_break!(AColor::to_string(AColor::Red), 'attempt));"],
+        &[
+            "java::println!(\"color {}\", match AColor::to_string(AColor::Red) { Ok(v) => v, Err(e) => break 'attempt Err(e) });",
+        ],
     );
     let error = java_to_rust::translate(&program("System.out.printf(\"color %s%n\", Color.RED);"))
         .expect_err("an enum's toString whose exception a catch around a printf sees");
@@ -2320,7 +2322,9 @@ fn a_hash_code_that_the_default_text_of_an_object_shows_passes_its_exception_on(
     );
     assert_contains(
         &rust,
-        &["java::default_text(\"A$Item\", java::or_break!(Arc::new(AItem::new()).hash_code(), 'attempt))"],
+        &[
+            "java::default_text(\"A$Item\", match Arc::new(AItem::new()).hash_code() { Ok(v) => v, Err(e) => break 'attempt Err(e) })",
+        ],
     );
 }
 
@@ -2371,8 +2375,8 @@ fn a_catch_on_the_way_to_the_text_of_an_object_whose_to_string_throws_catches_it
         &rust,
         &[
             "fn show(item: &Arc<AItem>) -> Result<(), Throwable> {",
-            "java::println!(\"item {}\", item.to_string()?);",
-            "java::or_break!(show(&Arc::new(AItem::new())), 'attempt);",
+            "java::println!(\"item {}\", match item.to_string() { Ok(v) => v, Err(e) => return Err(e) });",
+            "match show(&Arc::new(AItem::new())) { Ok(v) => v, Err(e) => break 'attempt Err(e) };",
         ],
     );
 }
@@ -3738,7 +3742,7 @@ fn a_census_approximates_the_null_pointer_message_that_is_not_certain() {
     assert_contains(
         &rust,
         &[
-            "try_non_null_message(s.as_deref(), \"Cannot invoke \\\"String.length()\\\"\")",
+            "match s.as_deref() { Some(v) => v, None => return Err(Throwable::j2r_null_pointer(\"Cannot invoke \\\"String.length()\\\"\")) }",
             "Cannot invoke \\\"String.length()\\\" because \\\"<local1>\\\" is null",
         ],
     );
@@ -5466,11 +5470,11 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
             "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "Err(Throwable::Missing(Arc::new(",
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
-            "find(xs, x)?",
+            "match find(xs, x) { Ok(v) => v, Err(e) => return Err(e) }",
             "Err(caught) => {",
             "let e = match caught.view() { ThrowableView::Missing(o) => o.clone(), _ => unreachable!(\"the arm matches its class\") };",
             "let attempt: Result<(), Throwable> = 'attempt: {",
-            "java::or_break!(twice(&xs, 5), 'attempt)",
+            "match twice(&xs, 5) { Ok(v) => v, Err(e) => break 'attempt Err(e) }",
         ],
     );
 }
@@ -5576,7 +5580,7 @@ fn a_finally_runs_after_the_block_and_then_the_exception_goes_on() {
             "fn withdraw(amount: i32) -> Result<(), Throwable> {",
             "let attempt: Result<(), Throwable> = 'attempt: {",
             "break 'attempt Err(Throwable::IllegalStateException(",
-            "attempt?;",
+            "match attempt { Ok(v) => v, Err(e) => return Err(e) };",
         ],
     );
     // A `try` that nothing leaves early is its block, then the `finally`.
@@ -5646,8 +5650,8 @@ fn a_runtime_failure_that_a_catch_sees_is_a_checked_call_that_throws() {
         &rust,
         &[
             "fn ratio(a: i32, b: i32) -> Result<i32, Throwable> {",
-            "java::try_div(a, b)?",
-            "java::or_break!(java::try_put(&mut v, ",
+            "match java::try_div(a, b) { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) }",
+            "match java::try_put(&mut v, argument_0, argument_1) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }",
             "impl From<java::Exception> for Throwable {",
             "\"java.lang.ArithmeticException\" => ",
             "_ => java::uncaught(e),",
@@ -5679,7 +5683,7 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
     assert_contains(
         &rust,
         &[
-            "java::or_break!(java::try_non_null(a.next.as_ref()), 'attempt).get()",
+            "(match java::try_non_null(a.next.as_ref()) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }).get()",
             "\"java.lang.NullPointerException\" => ",
         ],
     );
@@ -5768,7 +5772,12 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
             catch (NegativeArraySizeException e) { System.out.println(\"negative\"); }
         } }",
     );
-    assert_contains(&rust, &["java::or_break!(java::catching(|| "]);
+    assert_contains(
+        &rust,
+        &[
+            "match java::catching(|| java::new_vec(a.len() as i32 - 1, 0)) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }",
+        ],
+    );
     // So does a replacement's, of the classes the runtime raises for it.
     let rust = translate(
         "class A { public static void main(String[] a) {
@@ -5823,7 +5832,9 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     );
     assert_contains(
         &rust,
-        &["java::or_break!(java::try_non_null(s(a.len() as i32).as_deref()), 'attempt).len()"],
+        &[
+            "(match java::try_non_null(s(a.len() as i32).as_deref()) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }).len()",
+        ],
     );
     // A program's own exception constructor that throws passes its failure on from the `new`
     // (only the JDK's are taken to throw for bugs alone, `URISyntaxException`'s tests of its
@@ -5922,7 +5933,7 @@ fn a_constructor_that_throws_returns_a_result_that_new_passes_on() {
             "return Err(Throwable::IllegalArgumentException(",
             // A constructor that only delegates returns the other's `Result`.
             "fn new_i32(high: i32) -> Result<ARange, Throwable> {\n        ARange::new_i32_i32(0, high)\n    }",
-            "java::or_break!(ARange::new_i32(",
+            "match ARange::new_i32(args.len() as i32 - 1) { Ok(v) => v, Err(e) => break 'attempt Err(e) }",
         ],
     );
 }
@@ -6781,7 +6792,7 @@ fn clone_in_a_class_tree_copies_each_runtime_class() {
     assert_contains(
         &rust,
         &[
-            "AShapeView::Shape(_) => java::try_clone_refused(\"A$Shape\")?",
+            "AShapeView::Shape(_) => match java::try_clone_refused(\"A$Shape\") { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) },",
             "AShapeView::Circle(o) => { AShape::Circle(Arc::new(ACircle { base: AShapeFields { x: java::Field::new(o.base.x.get()) }, r: java::Field::new(o.r.get()) })) }",
         ],
     );

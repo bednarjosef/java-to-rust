@@ -105,7 +105,7 @@ impl<'a> Gen<'a> {
         let (_, m) = self.throwing_enum_text(e.ty)?;
         let value = self.expr(e).at(ATOM);
         let call = format!("{}({value})", self.qualified_fn(m));
-        let text = self.passed_on(Code::atom(call));
+        let text = self.passed_on_thrown(Code::atom(call));
         if self.facts.nullable_returns.contains(&m) {
             return Some(Code::atom(format!("{}({text})", self.runtime("or_null"))));
         }
@@ -118,7 +118,7 @@ impl<'a> Gen<'a> {
         let (t, m) = self.throwing_enum_text(ty)?;
         let name = struct_name(&self.class.types[t].name);
         let call = format!("{}(*std::borrow::Borrow::<{name}>::borrow(&o))", self.qualified_fn(m));
-        let texts = self.passed_on(Code::atom(format!("{option}.map(|o| {call}).transpose()")));
+        let texts = self.passed_on_thrown(Code::atom(format!("{option}.map(|o| {call}).transpose()")));
         // A `toString` that returns null shows "null" as a null value does.
         let texts =
             if self.facts.nullable_returns.contains(&m) { format!("{texts}.flatten()") } else { texts };

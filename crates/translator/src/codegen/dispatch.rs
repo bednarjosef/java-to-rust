@@ -1770,7 +1770,7 @@ impl<'a> Gen<'a> {
         self.need(Need::Display(t));
         if self.enum_text_throws(t) {
             // A `toString` that throws is called, through `try_text`.
-            return self.passed_on(Code::atom(format!("{obj}.try_text()")));
+            return self.passed_on_thrown(Code::atom(format!("{obj}.try_text()")));
         }
         self.need(Need::JavaString(t));
         if self.lazy_text && !self.printing { obj } else { format!("{obj}.java_string()") }
@@ -2864,7 +2864,7 @@ impl<'a> Gen<'a> {
         self.need(Need::Display(t));
         let obj = self.object(receiver);
         if self.enum_text_throws(t) {
-            return Code::atom(self.passed_on(Code::atom(format!("{obj}.try_text()"))));
+            return Code::atom(self.passed_on_thrown(Code::atom(format!("{obj}.try_text()"))));
         }
         self.need(Need::JavaString(t));
         Code::atom(format!("{obj}.java_string()"))

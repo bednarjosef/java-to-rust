@@ -674,6 +674,55 @@ Object parameters that may be null are borrowed (`&Option<java::Arc<..>>`,
 docs/supported-java.md) rather than copied. `charAt` and `String.hashCode` read a string's
 leading ASCII bytes as they are.
 
+## Compile time
+
+What rustc spends its time on in a translated program is the amount of code, not one costly
+construct: on javac's translation, split into a header and 30 body crates, a debug build is
+close to half type checking and borrow checking, a third LLVM and the rest metadata, code
+generation and monomorphization, spread over tens of thousands of functions; a release build is
+mostly LLVM. So the generated code is written in the forms that are cheapest for rustc per
+function, where the optimized code is the same:
+
+- A failure that leaves a method or a `try` block is a written-out `match` with its conversion to
+  `Throwable` named (`Throwable::j2r_raised(e)`, `Throwable::j2r_null_pointer(message)`), not a
+  `?` or `java::or_break!` (docs/exceptions.md). For 2,000 such statements, rustc's instructions
+  went from 2.04 G to 1.48 G for null checks with Java's message, 1.39 G to 1.20 G for a `?` and
+  1.59 G to 1.21 G for an `or_break!`.
+- A moved method is the function that the header declares (`#[unsafe(export_name = ..)]` on the
+  trait method), not a second function that calls it (docs/several-crates.md).
+- The runtime chooses by a type's size or layout with `match const { .. }` and `if const { .. }`,
+  so a debug build does not carry the arms for other sizes into every instance, and turns a
+  `Thin` into the pointer it holds with a `transmute` of the reference, which has no debug
+  assertions to compile.
+- A small function keeps its code in the header (docs/several-crates.md), one item there instead
+  of a declaration and a function that calls it.
+
+On javac's translation (rustc's instructions summed over the crates, which unlike wall time do
+not depend on the machine's load), against the same translation written without these forms
+(the match forms and one function per moved method):
+
+| build | without | with |
+|---|---:|---:|
+| debug, all crates | 822 G | 720 G |
+| release without LTO, all crates | 1,736 G | 1,514 G |
+| release header crate alone | 75 G, 2.29 GB | 73 G, 2.22 GB |
+
+The release build's code runs javac's check cases with about 3% fewer instructions (its text
+is 31.1 MB instead of 33.4 MB without LTO).
+
+rustc's memory for a crate grows with its items more than with their size: on javac's header, a
+function that moves costs about 19 KB (its stub and its declaration), an empty function about
+13 KB and a declaration alone about 6 KB. The header is compiled before every body crate and
+holds an item for every function of the program, so it sets a build's peak: the Minecraft
+server's, 219 MB, needs 16 to 20 GB in release. Half of its text is the 274,000 functions that
+moved, a stub and a declaration each; then come the 178,000 small functions that keep their code
+there, and the 43,000 class constants (`CLASS__..`), whose superclass and interfaces are closures,
+93,000 of them, each a function body for rustc.
+
+Cranelift (`-Zcodegen-backend=cranelift`, nightly) builds javac's translation in debug in 55 s
+instead of 82 s with LLVM (two jobs), but the binary it builds ends with status 101 at once on
+the first program, so it is not used.
+
 ## Measuring
 
 - MatrixMultiply (Java about 0.12 s) and StringBuild (Java about 0.03 s) run for less than a

@@ -35,7 +35,9 @@ unsafe impl<T: Sync + Send> Sync for Arc<T> {}
 impl<T> Arc<T> {
     #[inline]
     pub fn new(value: T) -> Arc<T> {
-        if std::mem::size_of::<T>() == 0 {
+        // In a constant, so that a build without optimizations has no call of `new_zero_sized` for
+        // a type with a size.
+        if const { std::mem::size_of::<T>() == 0 } {
             return Arc::new_zero_sized(value);
         }
         Arc { ptr: NonNull::from(Box::leak(Box::new(value))), owns: PhantomData }

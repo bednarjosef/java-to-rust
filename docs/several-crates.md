@@ -137,7 +137,7 @@ along classes. It splits declarations from code, as C splits headers from source
   in an `unsafe extern "Rust"` block of its module (`safe fn j2r__<module>__<type>__<name>(..)`),
   with its parameters renamed `p0`, `p1`, .. so that every pattern is a plain name.
 - **Each body crate** depends on the header alone and defines those functions for the items
-  given to it, each with `#[unsafe(no_mangle)]`. A module of a body crate starts with
+  given to it: a function with `#[unsafe(no_mangle)]`, a method as below. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names
   everything as it did, `crate::..` paths included: the body crate has the modules with code of
   its own and the modules around them, and any other module is the header's, which the glob
@@ -146,8 +146,11 @@ along classes. It splits declarations from code, as C splits headers from source
   a private trait that the body crate implements for the header's type, named after it (`impl
   Bodies_Circle for Circle { fn body_area(&self) .. }`), so that `self`, `Self` and calls of the type's other methods mean
   what they did; the trait is `Sized`, as the type is, for a signature that names `Option<Self>`.
-  The exported function calls the trait's method. The trait's methods are named `body_<name>`, so
-  that a call of the original name finds the header's method, never the trait's.
+  The method itself is the function the header declares, `#[unsafe(export_name =
+  "j2r__..")]`: its `self` is passed as the declaration's first parameter is. (A function of
+  its own that called the method cost every method a second function to check and compile, about
+  3% of a body crate's work on javac.) The trait's methods are named `body_<name>`, so that a
+  call of the original name finds the header's method, never the trait's.
 - **The binary** depends on the header and every body crate (`use body_0 as _;` makes rustc
   link each) and its `main` calls the header's.
 
@@ -155,7 +158,8 @@ What cannot move stays in the header with its code: generic functions and the me
 `impl`s (Rust needs their code in the crate that instantiates them), `const` functions (statics
 call them), functions with an `impl Trait` in their signature, methods of a trait `impl` whose
 signature names `Self::..`, and the initializers of statics. Small functions stay too: one whose
-code is at most 48 tokens (`split.rs`, `small`) and that is not `#[cold]`, such as a getter, a buffer's `get`, the check
+code is at most 48 tokens (`split.rs`, `small`; a `match` that passes a failure on counts as the
+`?` it stands for) and that is not `#[cold]`, such as a getter, a buffer's `get`, the check
 that a class is initialized or `Mth.lerp`, keeps its code in the header, and both it and the
 header's wrapper of each moved function are `#[cfg_attr(not(debug_assertions), inline)]`, so
 that an optimized build inlines them into the crates that call them: a wrapper becomes a direct
