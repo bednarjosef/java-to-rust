@@ -477,6 +477,62 @@ fn covariant_arrays_found_step_by_step_take_one_more_lowering() {
     assert_eq!(attempts, 2, "{stderr}");
 }
 
+/// `Box<String>[]` becomes an `Object[]` (`asList`'s `T[]`), whose elements are `Object`s, which
+/// the objects of the Rust generic class `Box` cannot be: `Box` is erased in the lowering that
+/// notes the array, and its array, `Box[]` once erased, is noted with it. The program is lowered
+/// twice, not once more for `Box` and again for `Box[]`.
+const ARRAY_OF_A_GENERIC_CLASS: &str = r#"
+import java.util.Arrays;
+import java.util.List;
+
+public class Main {
+    static class Box<U> {
+        U value;
+        Box(U value) { this.value = value; }
+    }
+
+    @SafeVarargs
+    static int count(Box<String>... boxes) {
+        List<Box<String>> list = Arrays.asList(boxes);
+        return list.size();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(count(new Box<>("a"), new Box<>("b")));
+    }
+}
+"#;
+
+#[test]
+fn a_covariant_array_of_a_rust_generic_class_erases_it_in_the_same_lowering() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-generic-class-array");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), ARRAY_OF_A_GENERIC_CLASS).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--timings", "--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&translated.stderr);
+    assert!(translated.status.success(), "the translation failed:\n{stderr}");
+    let attempts = stderr
+        .lines()
+        .filter(|l| l.strip_prefix("timing: lowering attempt ").is_some_and(|l| l.contains(": ")))
+        .count();
+    assert_eq!(attempts, 2, "{stderr}");
+    assert!(stderr.contains("(Main.Box<String>[], Main.Box[])"), "{stderr}");
+}
+
 /// A Rust generic whose values go to `System.arraycopy` (`copy`) is failed where lowering meets
 /// it, so the lowering that notes `Block[]` drops it too: the program is lowered twice. Were the
 /// call rejected instead, the next lowering would erase every Rust generic, `requireNonNull`'s

@@ -162,8 +162,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
         lowering.object_types(&mut types);
         lowering.param_decls(&mut types);
-        let failed = lowering.verify(&types, &methods);
-        lowering.noted_later();
+        let mut failed = lowering.verify(&types, &methods);
+        lowering.noted_later(&mut failed);
         let hierarchy = Hierarchy::new(&types, &methods);
         let raised = lowering.raised_objects(&types, &methods);
         let name = first.str("simpleName").to_string();

@@ -361,16 +361,45 @@ impl<'t> Lowering<'t> {
 
     /// The real generic whose type variable `ty` is, if it is one.
     pub(super) fn param_owner(&self, ty: Type) -> Option<Owner> {
-        let Type::Class(name, _) = ty else { return None };
-        let (owner, _) = name.rsplit_once('#')?;
-        let owner = match owner.strip_prefix('@') {
-            Some(m) => m.parse().ok().map(Owner::Method),
-            None => self.type_index(owner).map(Owner::Class),
-        };
+        let owner = self.variable_owner(ty);
         if let Some(owner) = owner {
             self.uses_real.borrow_mut().insert(owner);
         }
         owner
+    }
+
+    /// `param_owner`, without noting that the code being lowered uses the generic.
+    fn variable_owner(&self, ty: Type) -> Option<Owner> {
+        let Type::Class(name, _) = ty else { return None };
+        let (owner, _) = name.rsplit_once('#')?;
+        match owner.strip_prefix('@') {
+            Some(m) => m.parse().ok().map(Owner::Method),
+            None => self.type_index(owner).map(Owner::Class),
+        }
+    }
+
+    /// Type `ty` as the next lowering has it, once the Rust generics `failed` are erased: their
+    /// type variables (which have no bounds) are `Object`, and their classes have no type
+    /// arguments (`MemoryModuleType<GlobalPos>[]` is `MemoryModuleType[]`).
+    pub(super) fn without_failed(&self, ty: Type, failed: &Real) -> Type {
+        let fails = |owner: Owner| match owner {
+            Owner::Class(t) => failed.classes.contains(&t),
+            Owner::Method(m) => failed.methods.contains(&m),
+        };
+        match ty {
+            Type::Array(element) => Type::array(self.without_failed(*element, failed)),
+            Type::Class(name, args) => match self.variable_owner(ty) {
+                Some(owner) if fails(owner) => Type::class(OBJECT),
+                Some(_) => ty,
+                None if args.is_empty() => ty,
+                None if self.type_index(name).is_some_and(|t| fails(Owner::Class(t))) => Type::class(name),
+                None => {
+                    let args: Vec<Type> = args.iter().map(|&a| self.without_failed(a, failed)).collect();
+                    Type::generic(name, &args)
+                }
+            },
+            _ => ty,
+        }
     }
 
     /// The real generics that a type mentions: its own class and the type variables in it.

@@ -756,7 +756,10 @@ everywhere in the program: lowering notes each such type and the program is lowe
 `Object[][]` once `String[]` is one; an array held as an `Object` meets an `Object[]` once a type
 an `Object` is cast to is one) are noted by the same lowering, which meets again the types that
 met as they would be translated then (`covariant::noted_later`), so one lowering more takes
-them all. Element reads get the checked cast back, a for-each casts each element,
+them all. That includes the Rust generics the lowering failed, which the next one erases: an
+array of a generic class with type arguments (`Box<String>[]`) is `Box[]` once the class is
+erased, and noting such an array fails the class itself, whose objects would be `Object`s as its
+elements. Element reads get the checked cast back, a for-each casts each element,
 and a store converts to `Object`. Every other array keeps its exact type.
 
 Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle
