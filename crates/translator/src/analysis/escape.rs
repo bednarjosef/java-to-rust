@@ -136,9 +136,11 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     }
     // Callees are solved before their callers, so that a caller is mostly solved once, with its
     // callees' summaries final: the order of the strongly connected components of the calls, each
-    // after those it calls, and in a component the smaller methods first, so that a large one
-    // that calls many of the others (the reflection's `Method.invoke`, which calls every method
-    // that reflection may run) is solved again only once they settle, not after each of them
+    // after those it calls, and in a component the smaller methods first, a method's size being
+    // its steps and the methods its calls may run. So a method that calls many of the others, by
+    // many calls (the reflection's `Method.invoke`, which calls every method that reflection may
+    // run) or by one call that may run thousands of them (`f.apply(this)`, a call of every
+    // lambda's `Function.apply`), is solved again only once they settle, not after each of them
     // changes. The least fixpoint is the same in any order.
     let callees: Vec<Vec<usize>> = {
         let mut callees = vec![Vec::new(); n];
@@ -152,7 +154,12 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let (rank, _) = super::closure::components(&callees);
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     let mut queued = vec![true; n];
-    let size: Vec<usize> = analysis.code.iter().map(|c| c.assigns.len() + c.calls.len()).collect();
+    let size: Vec<usize> = analysis
+        .code
+        .iter()
+        .zip(&callees)
+        .map(|(c, cs)| c.assigns.len() + c.calls.len() + cs.len())
+        .collect();
     let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize, usize)>> =
         (0..n).map(|m| std::cmp::Reverse((rank[m], size[m], m))).collect();
     let mut solves = 0;

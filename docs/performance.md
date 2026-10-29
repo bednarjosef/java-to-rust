@@ -341,6 +341,19 @@ in the same order as a round per cast would, so its report and translation are t
 `a_census_stubs_every_cast_the_generator_misses_in_one_round`
 (`tests/translation.rs`) has two such casts, stubbed in one round.
 
+**Order of the methods solved for the objects on the stack.** The analysis of the objects
+that may live on the stack (`analysis/escape.rs`) solves each method's summary again whenever
+the summary of a method it may call changes, taking first the components of calls that others
+call and, in a component, the smaller methods. A method's size counts the methods its calls may
+run as well as its steps: `Dynamic.into` of Mojang's serialization library is one call,
+`f.apply(this)`, that may run thousands of lambdas, and as a method of one step it was solved
+again after each of them changed, 8,253 times and 45 s in each round of the Minecraft server's
+census (alongside the other analyses). Taken after them, it waits until they settle. The
+summaries are the least fixpoint in any order, so the facts are the same: javac's census is
+byte for byte the same, with 61,500 solves instead of 70,800 (1.3 s instead of 1.6 s), and a
+program of 2,000 lambdas called through one such method takes 12,000 solves instead of 2
+million (0.17 s instead of 3.9 s).
+
 **Steps of the analyses alongside each other.** Every check reads facts that the steps before
 it find, so none can move ahead of another; what a round can do is find its facts sooner. The
 steps that read none of each other's
