@@ -468,7 +468,8 @@ written in checked form exactly when it is in the analysis's set.
   `NullPointerException` there. `o instanceof T` proves `o` non-null and a cast of it to `T` or a
   class above safe; `!` is followed; `if (c) return;` (or `throw`, `break`, `continue`) narrows
   the statements after it, in a block or a `switch` case; a local initialized from a value so
-  known is non-null. A cast cannot fail either when every object its value may be is under the
+  known is non-null, and so is an assignment of it, to a variable, a field or an element
+  (`(h[k] = c).next`). A cast cannot fail either when every object its value may be is under the
   target type (`Facts::flows`).
 - **Casts that lowering inserts** (javac's conversion of an erased type variable's value) are not
   counted as `ClassCastException`.
