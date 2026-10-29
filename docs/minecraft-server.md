@@ -607,7 +607,7 @@ These are plans. Work on several of them is under way but not merged yet.
    - JDK APIs: datagram channels, `java.lang.management`, and service providers
      that live in JDK modules the code does not name;
    - small ones, one to four pieces each: `Runtime` held as a value, the whole `System.getenv()`
-     map, `Integer.getInteger` with a key that is not a constant, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some
+     map, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some
      `String` constructors, switches and patterns on some types, a few lambda forms,
      `JavaLangAccess`'s thread and module calls, `isAnnotationPresent(Deprecated.class)`, and
      DataFixerUpper's generic method types as values.
