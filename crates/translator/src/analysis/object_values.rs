@@ -266,6 +266,10 @@ pub struct ObjectValues {
     fields: HashMap<(usize, String), Flow>,
     statics: HashMap<(usize, String), Flow>,
     elements: HashMap<Type, Flow>,
+    /// What the elements of every array hold together, for dispatch (`elements_of`), joined as
+    /// they grow: a read of an array element would otherwise join every place of `elements`,
+    /// thousands on the Minecraft server, and a great many visits read one.
+    all_elements: Flow,
     /// The variables of each method that the analysis follows, each with its slot in `vars`: its
     /// parameters (unless the runtime may call it) and the variables it declares, loops over or
     /// binds with a pattern.
@@ -535,11 +539,7 @@ impl ObjectValues {
             return self.elements.get(&element).cloned().unwrap_or_default();
         }
         self.read(|| Read::Elements);
-        let mut flow = Flow::default();
-        for stored in self.elements.values() {
-            flow.join(stored);
-        }
-        self.types.filter(flow, element)
+        self.types.filter(self.all_elements.clone(), element)
     }
 
     /// The concrete classes whose objects a value of type `ty` may be, whatever it holds.
@@ -810,6 +810,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         fields: HashMap::new(),
         statics: HashMap::new(),
         elements: HashMap::new(),
+        all_elements: Flow::default(),
         followed,
         runtime_params,
         handed: Flow::default(),
@@ -994,6 +995,7 @@ fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> Vec<Read> {
             }
             Update::Element(ty, flow) => {
                 if values.elements.entry(ty).or_default().join(&flow) {
+                    values.all_elements.join(&flow);
                     changed.extend([Read::Element(ty), Read::Elements]);
                 }
             }
