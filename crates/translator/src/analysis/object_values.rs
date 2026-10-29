@@ -293,6 +293,8 @@ pub struct ObjectValues {
     /// While the analysis runs, what each call on a receiver of several classes in each context
     /// was last found to run, and what it passed them (`Passed`).
     calls: RefCell<Option<super::FastMap<(ExprId, usize), Passed>>>,
+    /// While the analysis runs, the returns of the targets of calls that run many methods.
+    joined: RefCell<Joined>,
 }
 
 /// What a call on a receiver of several classes, in a context, was last found to run: the
@@ -305,11 +307,30 @@ struct Passed {
     receiver: Flow,
     targets: Targets,
     args: Option<Vec<Flow>>,
+    /// The number of the join of the targets' returns (`Joined`), once a visit evaluated the call.
+    joined: Option<u32>,
 }
 
 /// The fewest targets for which a call's are kept (`Passed`): for fewer, finding them again
 /// costs about as much as comparing the flows.
 const KEPT_TARGETS: usize = 4;
+
+/// The returns of the targets of calls that run many methods, each list of targets joined into
+/// a place of its own, kept up as the returns grow (`apply`). A call that runs thousands of
+/// methods is evaluated in a great many visits, each of which would read and join the return of
+/// every target, and run again whenever any of them grew; it reads the join instead, and runs
+/// again only when the join grows.
+#[derive(Default)]
+struct Joined {
+    /// The number of each list of targets that has a join, by the list's content.
+    lists: super::FastMap<Targets, u32>,
+    flows: Vec<Flow>,
+    /// The joins that each target's return is in.
+    of: super::FastMap<(usize, usize), Vec<u32>>,
+}
+
+/// The fewest targets whose returns are joined (`Joined`).
+const JOINED_TARGETS: usize = 16;
 
 /// A place whose flow a visit reads, so that the visit runs again when the place changes.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -324,6 +345,8 @@ enum Read {
     /// The elements of every array (for dispatch, see `elements_of`).
     Elements,
     Handed,
+    /// The returns of a list of targets, by the number of their join (`Joined`).
+    Joined(u32),
 }
 
 /// What the analysis needs to know of the program's types.
@@ -604,10 +627,15 @@ impl ObjectValues {
             }
             ExprKind::Index(array, _) => self.elements_of(array.ty.element()),
             ExprKind::Call { resolved: Some(_), .. } | ExprKind::MethodCall { resolved: Some(_), .. } => {
+                let targets = self.call_targets(class, m, ctx, e);
+                if let Some(id) = self.joined_returns(ctx, e, &targets) {
+                    self.read(|| Read::Joined(id));
+                    return self.types.filter(self.joined.borrow().flows[id as usize].clone(), e.ty);
+                }
                 let mut flow = Flow::default();
-                for &target in self.call_targets(class, m, ctx, e).iter() {
+                for target in targets.iter() {
                     self.read(|| Read::Return(target.0, target.1));
-                    flow.join(&self.returns.get(&target).cloned().unwrap_or_default());
+                    flow.join(self.returns.get(target).unwrap_or(&Flow::default()));
                 }
                 flow
             }
@@ -664,9 +692,40 @@ impl ObjectValues {
         if targets.len() >= KEPT_TARGETS
             && let Some(calls) = self.calls.borrow_mut().as_mut()
         {
-            calls.insert((e.id, ctx), Passed { receiver: flow, targets: targets.clone(), args: None });
+            let kept = Passed { receiver: flow, targets: targets.clone(), args: None, joined: None };
+            calls.insert((e.id, ctx), kept);
         }
         targets
+    }
+
+    /// While the analysis runs, the number of the join of the returns of `targets`, those of the
+    /// call `e` on an object of class `ctx`, where it has one (`Joined`).
+    fn joined_returns(&self, ctx: usize, e: &Expr, targets: &Targets) -> Option<u32> {
+        if targets.len() < JOINED_TARGETS {
+            return None;
+        }
+        let mut calls = self.calls.borrow_mut();
+        let kept = calls.as_mut()?.get_mut(&(e.id, ctx)).filter(|kept| Rc::ptr_eq(&kept.targets, targets))?;
+        if let Some(id) = kept.joined {
+            return Some(id);
+        }
+        let mut joined = self.joined.borrow_mut();
+        let id = match joined.lists.get(targets) {
+            Some(&id) => id,
+            None => {
+                let id = joined.flows.len() as u32;
+                let mut flow = Flow::default();
+                for target in targets.iter() {
+                    flow.join(self.returns.get(target).unwrap_or(&Flow::default()));
+                    joined.of.entry(*target).or_default().push(id);
+                }
+                joined.flows.push(flow);
+                joined.lists.insert(targets.clone(), id);
+                id
+            }
+        };
+        kept.joined = Some(id);
+        Some(id)
     }
 
     /// What the receiver of the call `e` in method `m` on an object of class `ctx` may be, where
@@ -877,6 +936,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         dispatch,
         reads: RefCell::new(Some(super::FastSet::default())),
         calls: RefCell::new(Some(super::FastMap::default())),
+        joined: RefCell::default(),
     };
     // The visits, each of a method in one of its contexts or (`usize::MAX`) of the code outside
     // methods, run again whenever a place that they read changes, until none does. As every
@@ -977,6 +1037,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     }
     *values.reads.borrow_mut() = None;
     *values.calls.get_mut() = None;
+    *values.joined.get_mut() = Joined::default();
     values
 }
 
@@ -1041,6 +1102,12 @@ fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> Vec<Read> {
             Update::Return(m, ctx, flow) => {
                 if values.returns.entry((m, ctx)).or_default().join(&flow) {
                     changed.push(Read::Return(m, ctx));
+                    let joined = values.joined.get_mut();
+                    for &id in joined.of.get(&(m, ctx)).into_iter().flatten() {
+                        if joined.flows[id as usize].join(&flow) {
+                            changed.push(Read::Joined(id));
+                        }
+                    }
                 }
             }
             Update::Field(t, name, flow) => {

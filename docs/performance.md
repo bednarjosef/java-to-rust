@@ -283,6 +283,24 @@ unresolved calls are the same (`JAVA_TO_RUST_LIVE_CHECK`), and so is javac's cen
 census the main walk goes from about 90,000 walks (36,800 of them for an object) to 50,000 (223),
 and the phase from 2.3 to 1.6 s, 0.8 s of which is the walk of the started threads.
 
+**A points-to analysis that works per call, not per target.** The points-to analysis for dispatch
+(`object_values::analyze_for_dispatch`) runs before each walk of the methods that can run, and
+on the Minecraft server it took about 290 s each time (3.3 million runs of 1.1 million visits).
+A visit runs again whenever a place it read grows, and on each run its calls used to find their
+targets again (an implementation looked up for each class of the receiver), pass every target
+its arguments again, and read and join the return of every target, though a call on a receiver
+of a wide type runs thousands of methods and most calls have the receiver and arguments they had
+before. While the analysis runs, a call of four targets or more now keeps, in each context, the
+receiver's flow with the targets found for it and the argument flows it last passed them: the
+targets are taken again while the receiver holds the same, and arguments that hold the same are
+not passed again, as places only grow. The returns of each list of sixteen targets or more are
+joined into a place of their own, grown with the returns (`Joined`), which a visit reads instead
+of every target's return, so that it runs again only when the join grows. A read of an array
+element joins every element place, one per element type; that join is kept too, grown with the
+places. The analysis reaches the same facts, as the smallest set closed under its rules does not
+depend on the order, and javac's census is byte for byte the same. On javac its readers go from
+442,000 to 199,000, and each run of it from about 6.7 s to 5.5 s.
+
 **Early static reads by groups.** `analysis/early_reads.rs` walks, for each class with an eager
 static initializer, what each statement of the initializer runs. It used to walk method by method
 and list every method that each virtual call can run, once per call, thousands for a call on a
