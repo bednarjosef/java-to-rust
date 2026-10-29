@@ -543,7 +543,7 @@ impl<'t> Lowering<'t> {
             return Ok(match args.get_mut(1) {
                 Some(default) => {
                     let default = std::mem::replace(default, self.synth(ExprKind::Null, pos, boxed));
-                    self.convert(default, boxed).kind
+                    self.boxed_number(default, boxed).kind
                 }
                 None => ExprKind::Null,
             });
@@ -562,7 +562,17 @@ impl<'t> Lowering<'t> {
         } else {
             self.synth(ExprKind::Int(value as i32), pos, Type::Int)
         };
-        Ok(self.convert(number, boxed).kind)
+        Ok(self.boxed_number(number, boxed).kind)
+    }
+
+    /// `e`, a number or its box, as the box `boxed` (`Integer` or `Long`) that `getInteger` and
+    /// `getLong` give: a primitive is boxed, as `Integer.valueOf` boxes it.
+    fn boxed_number(&self, e: Expr, boxed: Type) -> Expr {
+        if e.ty == boxed.unboxed() {
+            let pos = e.pos;
+            return self.synth(ExprKind::Builtin(Builtin::Boxed(BoxedOp::Box, e.ty), vec![e]), pos, boxed);
+        }
+        self.convert(e, boxed)
     }
 
     /// `Integer.getInteger` or `Long.getLong` of a key that code computes (`KeepAliveCache` reads
@@ -591,7 +601,7 @@ impl<'t> Lowering<'t> {
         let default = match args.get_mut(1) {
             Some(default) => {
                 let default = std::mem::replace(default, self.synth(ExprKind::Null, pos, boxed));
-                let default = self.convert(default, boxed);
+                let default = self.boxed_number(default, boxed);
                 let name = self.fresh_name("default");
                 body.push(Stmt::Local { ty: boxed, name: name.clone(), init: Some(default), pos });
                 self.synth(ExprKind::Var(name), pos, boxed)
@@ -612,7 +622,7 @@ impl<'t> Lowering<'t> {
             let label = self.synth(ExprKind::Str(name.clone()), pos, Type::String);
             cases.push(Case {
                 labels: vec![CaseLabel::Value(label)],
-                body: vec![Stmt::Yield(self.convert(number, boxed))],
+                body: vec![Stmt::Yield(self.boxed_number(number, boxed))],
             });
         }
         cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(default)] });
