@@ -195,10 +195,13 @@ fn lower_with<'t>(
     let rejected = lowering.census.take().unwrap_or_default().into_inner();
     // Whether each rejection may go away with the Rust generics erased: it is in code that uses
     // them (`Lowering::uses_real`), and not of a missing class (`names_missing_class`), which
-    // stays missing. Code that uses none of them is lowered the same without them.
+    // stays missing, nor a question about the caller (`asks_caller`), which no type changes. Code
+    // that uses none of them is lowered the same without them.
     let generic: Vec<bool> = rejected
         .iter()
-        .map(|(.., error, uses_real)| !uses_real.is_empty() && !names_missing_class(error))
+        .map(|(.., error, uses_real)| {
+            !uses_real.is_empty() && !names_missing_class(error) && !asks_caller(error)
+        })
         .collect();
     let (rejected, uses): (Vec<Rejected>, Vec<super::real_generics::Real>) = rejected
         .into_iter()
@@ -271,6 +274,13 @@ fn lower_with<'t>(
         }
         _ => lowered,
     }
+}
+
+/// Whether `error` rejects asking for the caller (`Reflection.getCallerClass` or
+/// `StackWalker.getCallerClass`, `callers`): where the method is and what it is, which the Rust
+/// generics do not change.
+fn asks_caller(error: &Error) -> bool {
+    error.message.contains("getCallerClass")
 }
 
 /// Whether `error` is that of a class the program does not have (`type `a.b.C` not supported

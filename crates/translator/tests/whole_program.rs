@@ -591,6 +591,23 @@ public class Main {
 }
 "#;
 
+/// A rejection that can run in code that uses the Rust generic `id`, but that no type changes:
+/// asking for the caller in a method that is not static. The program is lowered once.
+const CALLER_WITH_A_RUST_GENERIC: &str = r#"
+public class Main {
+    static <T> T id(T x) { return x; }
+
+    String odd() {
+        String s = id("a");
+        return s + StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getName();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new Main().odd());
+    }
+}
+"#;
+
 #[test]
 fn a_rust_generic_that_fails_erases_only_itself() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
@@ -634,6 +651,9 @@ fn a_rust_generic_that_fails_erases_only_itself() {
         stderr.contains("is lowered again without 0 of 0 Rust generic classes and 1 of 2 methods (Main.id)"),
         "{stderr}"
     );
+    let (_, stderr, _) = translate("whole-program-caller-generic", CALLER_WITH_A_RUST_GENERIC);
+    assert!(stderr.contains("getCallerClass"), "{stderr}");
+    assert!(!stderr.contains("is lowered again"), "{stderr}");
 }
 
 /// A resource of a class of the JDK is not in the translation: `Character.getName` reads
