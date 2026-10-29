@@ -6,13 +6,16 @@
 //! `AccessibleObject`, `Executable` and `Member`, are the translator's own classes
 //! (`java/Reflection.java`), standard classes like the exceptions (`exceptions.rs`), and the
 //! lookups of `Class` are calls of their static methods (`Method.find`, `Field.list`, ...), which
-//! search the table. The table is made here, for each program, by its natives: `tablePart` gives
-//! the members of a part of the slots, each with its slot, and `invokePart`, `getPart`, `setPart`
-//! and `newInstancePart` are a `switch` over the slots of a part that calls the method, reads or
-//! writes the field or creates the object of each, with its arguments unboxed and its result boxed.
-//! The slots are in 32 parts (`PARTS`), each with a method of its own in `java/Reflection.java`, so
-//! that a big program's table of 100,000 methods makes functions of a few thousand cases each,
-//! which rustc and the analyses take one by one, not one function with all of them. The members are
+//! search the table. The table is made here, for each program, by its natives: `tableClasses`,
+//! `tableInts` and `tableNames` give the members of a part of the slots as data, constant arrays
+//! of their classes, numbers and names that `java/Reflection.java` makes the objects from
+//! (`table_data`), and `invokePart`, `getPart`, `setPart` and `newInstancePart` are a `switch`
+//! over the slots of a part that calls the method, reads or writes the field or creates the object
+//! of each, with its arguments unboxed and its result boxed. The slots are in 32 parts (`PARTS`),
+//! each with a method of its own in `java/Reflection.java`, and a part's `switch` of more than a
+//! few hundred cases is cut into methods of that many (`added_methods::chunked_switch`), so that a
+//! big program's table of 100,000 methods makes many functions of a few hundred cases each, which
+//! rustc and the analyses take one by one, not one function with all of them. The members are
 //! those of the program's classes that reflection can reach: in a whole program, those that
 //! reachability found (`program::reach::reflection`, `Reach::reflected`); in a file, those whose
 //! names the file's lookups spell out, or any string literal of it for a lookup by a computed name,
@@ -80,7 +83,7 @@ const CLASS_METHODS: [(&str, &str, &str); 2] = [
 /// translator's patch of it leaves that out (`java/patches/sun/misc/Unsafe.java`).
 const FILTERED_METHODS: &[(&str, &str)] = &[("sun.misc.Unsafe", "getUnsafe")];
 
-/// The constructors of the three classes, which `tablePart` calls.
+/// The constructors of the three classes, which `java/Reflection.java`'s `part` calls.
 const MEMBER_CONSTRUCTORS: [(&str, &str); 3] = [
     (
         METHOD,
@@ -320,7 +323,8 @@ impl<'t> Lowering<'t> {
         let entries = self.table(node, kind)?;
         let pos = node.pos();
         Ok(Some(match symbol.name {
-            "tablePart" | "invokePart" | "newInstancePart" | "getPart" | "setPart" | "genericTypePart" => {
+            "tableClasses" | "tableInts" | "tableNames" | "invokePart" | "newInstancePart" | "getPart"
+            | "setPart" | "genericTypePart" => {
                 // The part, which `java/Reflection.java` spells out.
                 let mut args = args.into_iter();
                 let part = match args.next().map(|a| a.kind) {
@@ -332,8 +336,8 @@ impl<'t> Lowering<'t> {
                         );
                     }
                 };
-                if symbol.name == "tablePart" {
-                    return Ok(Some(self.table_array(node, symbol.owner, &entries, part)?));
+                if symbol.name.starts_with("table") {
+                    return Ok(Some(self.table_data(node, symbol, &entries, part)?));
                 }
                 // The slot and the other arguments in locals, then a `switch` over the slots of
                 // the part.
@@ -345,19 +349,27 @@ impl<'t> Lowering<'t> {
                 let mut cases = Vec::new();
                 for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
                     let Some(body) = self.slot_case(node, symbol.name, entry, &var)? else { continue };
-                    let label = self.synth(ExprKind::Int(slot as i32), pos, Type::Int);
-                    cases.push(Case { labels: vec![CaseLabel::Value(label)], body });
+                    cases.push((slot as i32, body));
                 }
-                let null = self.synth(ExprKind::Null, pos, Type::Null);
-                cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(null)] });
-                let object = Type::class(OBJECT);
-                let switch = ExprKind::Switch { selector: Box::new(var(0)), cases };
+                // A part of a big table is thousands of cases: they go to methods of a few
+                // hundred each (`chunked_switch`).
+                let null = || vec![Stmt::Yield(self.synth(ExprKind::Null, pos, Type::Null))];
+                let params: Vec<(String, Type)> = names.iter().cloned().zip(types.iter().copied()).collect();
+                let at = super::added_methods::Chunked {
+                    class: self.type_index(symbol.owner).expect("the class of a native is declared"),
+                    base: &format!("{}{part}", symbol.name),
+                    params: &params,
+                    ty: Type::class(OBJECT),
+                    pos,
+                };
+                let step = PARTS * super::added_methods::CASES as i32;
+                let switch = self.chunked_int_switch(&at, cases, step, &null);
                 let mut body: Vec<Stmt> = args
                     .into_iter()
                     .zip(&names)
                     .map(|(a, name)| Stmt::Local { ty: a.ty, name: name.clone(), init: Some(a), pos })
                     .collect();
-                body.push(Stmt::Yield(self.synth(switch, pos, object)));
+                body.push(Stmt::Yield(switch));
                 block(self, pos, body)
             }
             _ => return unsupported(node, &format!("`{}.{}`", symbol.owner, symbol.name)),
@@ -565,7 +577,8 @@ impl<'t> Lowering<'t> {
                 let m = *m;
                 let info = &self.methods[m];
                 let creates = native == "newInstancePart";
-                // A constructor of an abstract class has a negative slot (`tablePart`): nothing creates one.
+                // A constructor of an abstract class has a negative slot (`table_data`): nothing
+                // creates one.
                 if creates && self.types[info.owner].node.has_flag("ABSTRACT") {
                     return Ok(None);
                 }
@@ -776,154 +789,140 @@ impl<'t> Lowering<'t> {
         Ok(self.synth(ExprKind::Cast(ty, Box::new(value)), pos, ty))
     }
 
-    /// `tablePart(part)`: a new array of the members of the table's part `part`, each made with
-    /// its slot.
-    fn table_array(
+    /// `tableClasses(part)`, `tableInts(part)` or `tableNames(part)` (the native `symbol`): an
+    /// array of the classes, of the numbers or of the names of the members of the table's part
+    /// `part`, which `java/Reflection.java`'s `part` makes the objects from. The table is data,
+    /// not code that makes each object, so that a big program's part of thousands of members is
+    /// a few constant arrays, not a function too big to compile.
+    fn table_data(
         &self,
         node: Node<'t>,
-        class: &str,
+        symbol: &Symbol,
         entries: &[Entry<'t>],
         part: usize,
     ) -> Result<ExprKind, Error> {
         let pos = node.pos();
-        let t = self.type_index(class).expect("the class of a native is declared");
-        let (_, init) = MEMBER_CONSTRUCTORS.iter().find(|(c, _)| *c == class).expect("each class has one");
-        let Some(ctor) = self.template_method(class, "<init>", init) else {
-            return unsupported(node, &format!("`{class}` without its constructor"));
+        let (class, which) = (symbol.owner, symbol.name);
+        let ret = self.ty(node, symbol.ty.rsplit(')').next().unwrap_or_default())?;
+        let mut classes: Vec<Type> = Vec::new();
+        let mut class_at: std::collections::HashMap<Type, i32> = Default::default();
+        let mut names: Vec<String> = Vec::new();
+        let mut name_at: std::collections::HashMap<String, i32> = Default::default();
+        let mut index = |ty: Type| {
+            *class_at.entry(ty).or_insert_with(|| {
+                classes.push(ty);
+                classes.len() as i32 - 1
+            })
         };
-        let params = self.param_types(ctor)?;
-        let literal = |ty: Type| {
-            self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass)
+        let mut name = |name: &str| {
+            if let Some(&at) = name_at.get(name) {
+                return at;
+            }
+            names.push(name.to_string());
+            name_at.insert(name.to_string(), names.len() as i32 - 1);
+            names.len() as i32 - 1
         };
-        let int = |i: i32| self.synth(ExprKind::Int(i), pos, Type::Int);
-        let classes = |types: Vec<Type>, at: usize| {
-            let kind = if types.is_empty() {
-                ExprKind::NewArray(vec![int(0)])
-            } else {
-                let element = params[at].element();
-                ExprKind::ArrayLit(types.into_iter().map(|t| self.convert(literal(t), element)).collect())
-            };
-            self.synth(kind, pos, params[at])
+        let mut ints = vec![0];
+        let list = |ints: &mut Vec<i32>, index: &mut dyn FnMut(Type) -> i32, types: Vec<Type>| {
+            ints.push(types.len() as i32);
+            ints.extend(types.into_iter().map(index));
         };
-        // The table's array may be an `Object[]` (`covariant`), as when the program passes the
-        // members to `AccessibleObject.setAccessible(array, flag)`.
-        let element = self.covariant_array(Type::array(self.self_type(t))).element();
-        let mut made = Vec::new();
         for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
+            ints[0] += 1;
             let found_on = match entry.member {
-                Member::Class(_) => literal(Type::JavaClass),
-                Member::BoxParse(primitive) => literal(Type::boxed(primitive)),
-                _ => literal(entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t))),
+                Member::Class(_) => Type::JavaClass,
+                Member::BoxParse(primitive) => Type::boxed(primitive),
+                _ => entry.found_on.map_or(Type::class(OBJECT), |t| self.self_type(t)),
             };
-            let args = match &entry.member {
+            // What `part` reads: for a method the classes that find it and declare it and its
+            // result, its name, modifiers and slot, and the lists of its parameters' and
+            // exceptions' classes; for a field the same with its type and no lists; for a
+            // constructor its class, modifiers, slot and the two lists.
+            match &entry.member {
                 Member::Method(m) if class == CONSTRUCTOR => {
                     let owner = self.methods[*m].owner;
                     let slot = constructor_slot(self.types[owner].node.has_flag("ABSTRACT"), slot);
-                    let types = classes(self.declared_param_classes(*m)?, 1);
-                    vec![
-                        found_on,
-                        types,
-                        classes(self.thrown_types(*m)?, 2),
-                        int(self.modifiers(*m)),
-                        int(slot),
-                    ]
+                    ints.extend([index(found_on), self.modifiers(*m), slot]);
+                    list(&mut ints, &mut index, self.declared_param_classes(*m)?);
+                    list(&mut ints, &mut index, self.thrown_types(*m)?);
                 }
                 Member::Method(m) => {
-                    let declaring = literal(self.self_type(self.methods[*m].owner));
-                    let name =
-                        self.synth(ExprKind::Str(self.methods[*m].name.to_string()), pos, Type::String);
                     let info = &self.methods[*m];
                     let ret = info.sig.rsplit(')').next().unwrap_or_default();
-                    let ret = literal(self.declared_class(node, ret, info.owner, Some(*m))?);
-                    let types = classes(self.declared_param_classes(*m)?, 3);
-                    let thrown = classes(self.thrown_types(*m)?, 5);
-                    vec![
-                        found_on,
-                        declaring,
-                        name,
-                        types,
-                        ret,
-                        thrown,
-                        int(self.modifiers(*m)),
-                        int(slot as i32),
-                    ]
+                    let ret = self.declared_class(node, ret, info.owner, Some(*m))?;
+                    let declaring = self.self_type(info.owner);
+                    ints.extend([index(found_on), index(declaring), index(ret), name(info.name)]);
+                    ints.extend([self.modifiers(*m), slot as i32]);
+                    list(&mut ints, &mut index, self.declared_param_classes(*m)?);
+                    list(&mut ints, &mut index, self.thrown_types(*m)?);
                 }
                 Member::Field(declaring, decl) => {
                     let decl = *decl;
-                    let name = self.synth(ExprKind::Str(decl.str("name").to_string()), pos, Type::String);
                     let ty = decl.symbol().map_or("", |s| s.ty);
-                    let ty = literal(self.declared_class(decl, ty, *declaring, None)?);
+                    let ty = self.declared_class(decl, ty, *declaring, None)?;
                     let mut modifiers = flags(decl, self.types[*declaring].node.kind() == "INTERFACE", false);
                     // An enum's constant is public, static and final, and `ENUM`, which
                     // `isEnumConstant` reads.
                     if super::enums::is_enum_constant(decl) {
                         modifiers |= 1 | 8 | 0x10 | 0x4000;
                     }
-                    let declaring = literal(self.self_type(*declaring));
-                    vec![found_on, declaring, name, ty, int(modifiers), int(slot as i32)]
+                    let declaring = self.self_type(*declaring);
+                    ints.extend([index(found_on), index(declaring), index(ty), name(decl.str("name"))]);
+                    ints.extend([modifiers, slot as i32]);
                 }
-                Member::Object(name) => {
+                Member::Object(method) => {
                     let (_, params, ret, modifiers) =
-                        OBJECT_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Object`'s methods");
+                        OBJECT_METHODS.iter().find(|(n, ..)| n == method).expect("one of `Object`'s methods");
                     let ty = |name: &str| self.ty(node, name);
                     let types = params.iter().map(|p| ty(p)).collect::<Result<Vec<_>, _>>()?;
-                    let declaring = literal(Type::class(OBJECT));
-                    let name = self.synth(ExprKind::Str(name.to_string()), pos, Type::String);
-                    let (types, ret) = (classes(types, 3), literal(ty(ret)?));
-                    vec![
-                        found_on,
-                        declaring,
-                        name,
-                        types,
-                        ret,
-                        classes(Vec::new(), 5),
-                        int(*modifiers),
-                        int(slot as i32),
-                    ]
+                    let ret = ty(ret)?;
+                    ints.extend([index(found_on), index(Type::class(OBJECT)), index(ret), name(method)]);
+                    ints.extend([*modifiers, slot as i32]);
+                    list(&mut ints, &mut index, types);
+                    list(&mut ints, &mut index, Vec::new());
                 }
                 Member::BoxParse(primitive) => {
-                    let boxed = || literal(Type::boxed(*primitive));
-                    let name = self.synth(ExprKind::Str("valueOf".to_string()), pos, Type::String);
+                    let boxed = index(Type::boxed(*primitive));
                     // Public and static.
-                    vec![
-                        boxed(),
-                        boxed(),
-                        name,
-                        classes(vec![Type::String], 3),
-                        boxed(),
-                        classes(Vec::new(), 5),
-                        int(1 | 8),
-                        int(slot as i32),
-                    ]
+                    ints.extend([boxed, boxed, boxed, name("valueOf"), 1 | 8, slot as i32]);
+                    list(&mut ints, &mut index, vec![Type::String]);
+                    list(&mut ints, &mut index, Vec::new());
                 }
-                Member::Class(name) => {
+                Member::Class(method) => {
                     let (_, ret, _) =
-                        CLASS_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Class`'s");
+                        CLASS_METHODS.iter().find(|(n, ..)| n == method).expect("one of `Class`'s");
                     // The class of the result as declared, not as the program holds it.
                     let ret = match ret.strip_suffix("[]") {
                         Some(element) => Type::array(Type::class(element)),
                         None => self.ty(node, ret)?,
                     };
-                    let name = self.synth(ExprKind::Str(name.to_string()), pos, Type::String);
-                    vec![
-                        literal(Type::JavaClass),
-                        literal(Type::JavaClass),
-                        name,
-                        classes(Vec::new(), 3),
-                        literal(ret),
-                        classes(Vec::new(), 5),
-                        int(1),
-                        int(slot as i32),
-                    ]
+                    let class = index(Type::JavaClass);
+                    ints.extend([class, class, index(ret), name(method), 1, slot as i32]);
+                    list(&mut ints, &mut index, Vec::new());
+                    list(&mut ints, &mut index, Vec::new());
                 }
-            };
-            let new = ExprKind::New { class: t, args, ctor: Some(ctor) };
-            made.push(self.convert(self.synth(new, pos, self.self_type(t)), element));
+            }
         }
-        if made.is_empty() {
-            return Ok(ExprKind::NewArray(vec![int(0)]));
+        // A `String[]` or `Class[]` may be held as an `Object[]` (`covariant_array`).
+        let ret = self.covariant_array(ret);
+        let items: Vec<Expr> = match which {
+            "tableClasses" => classes
+                .into_iter()
+                .map(|ty| {
+                    let literal = ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new());
+                    self.convert(self.synth(literal, pos, Type::JavaClass), ret.element())
+                })
+                .collect(),
+            "tableInts" => ints.into_iter().map(|i| self.synth(ExprKind::Int(i), pos, Type::Int)).collect(),
+            _ => names
+                .into_iter()
+                .map(|n| self.convert(self.synth(ExprKind::Str(n), pos, Type::String), ret.element()))
+                .collect(),
+        };
+        if items.is_empty() {
+            return Ok(ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]));
         }
-        Ok(ExprKind::ArrayLit(made))
+        Ok(ExprKind::ArrayLit(items))
     }
 
     /// The members of the table of one kind (see the module's comment), each with the slot that
