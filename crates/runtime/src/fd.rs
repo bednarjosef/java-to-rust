@@ -3,14 +3,16 @@
 //! the JVM's is: 0, 1 and 2 are standard input, output and error. Standard output
 //! goes through `out` so that it stays in order with `println!`. Standard input is descriptor 0
 //! itself, read without a buffer in between, so that each read returns what the JVM's would; what
-//! standard output has written goes out before it is read, so that a prompt shows. A failure is a
+//! standard output has written goes out before it is read, so that a prompt shows. A read or a
+//! write goes to its file with the table unlocked (`Handle`): a read of standard input or of a
+//! pipe may wait for ever, and every other descriptor would wait with it. A failure is a
 //! Java exception (`Failure`), which the generated code raises with `or_throw`, or passes on as a
 //! thrown exception where the program may catch it.
 
 use crate::{out, throw};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 pub const STDIN_FD: i32 = 0;
 pub const STDOUT_FD: i32 = 1;
@@ -28,10 +30,10 @@ enum Entry {
     Stdin,
     Stdout,
     Stderr,
-    Read(File),
-    Write(File),
+    Read(Arc<File>),
+    Write(Arc<File>),
     /// A `RandomAccessFile` opened with `"rw"`, which reads and writes.
-    ReadWrite(File),
+    ReadWrite(Arc<File>),
     /// A socket, a pipe, an `epoll` instance or an event counter of `sun.nio.ch` (`socket.rs`),
     /// which its natives use by the system's descriptor.
     #[cfg(unix)]
@@ -181,7 +183,7 @@ impl FdTable {
             });
         }
         let file = File::open(name).map_err(|e| not_found(name, &e))?;
-        Ok(self.insert(Entry::Read(file)))
+        Ok(self.insert(Entry::Read(Arc::new(file))))
     }
 
     /// `FileOutputStream.open0`: the descriptor of a file to write, created or truncated, or
@@ -194,7 +196,7 @@ impl FdTable {
             .truncate(!append)
             .open(name)
             .map_err(|e| not_found(name, &e))?;
-        Ok(self.insert(Entry::Write(file)))
+        Ok(self.insert(Entry::Write(Arc::new(file))))
     }
 
     /// `RandomAccessFile.open0(name, mode)`: the descriptor of a file to read, or with `O_RDWR`
@@ -217,6 +219,7 @@ impl FdTable {
                 message: format!("{name} (Is a directory)"),
             });
         }
+        let file = Arc::new(file);
         Ok(self.insert(if write { Entry::ReadWrite(file) } else { Entry::Read(file) }))
     }
 
@@ -231,7 +234,7 @@ impl FdTable {
                     None => process_stdin().read(bytes),
                 }
             }
-            Some(Entry::Read(file) | Entry::ReadWrite(file)) => file.read(bytes),
+            Some(Entry::Read(file) | Entry::ReadWrite(file)) => (&**file).read(bytes),
             Some(_) => return Err(bad_descriptor()),
             None => return Err(closed()),
         };
@@ -240,11 +243,7 @@ impl FdTable {
 
     /// `read0()`: the next byte as `0..=255`, or `-1` at the end.
     pub fn read(&mut self, fd: i32) -> Result<i32, Failure> {
-        let mut byte = [0u8];
-        match self.read_into(fd, &mut byte)? {
-            0 => Ok(-1),
-            _ => Ok(byte[0] as i32),
-        }
+        read_byte(|bytes| self.read_into(fd, bytes))
     }
 
     /// `readBytes(b, off, len)`: fills `buf[off..off + len]` and returns the count, or `-1` at the
@@ -256,18 +255,18 @@ impl FdTable {
         off: i32,
         len: i32,
     ) -> Result<i32, Failure> {
-        if len == 0 {
-            return Ok(0);
+        read_bytes_with(|bytes| self.read_into(fd, bytes), buf, off, len)
+    }
+
+    /// What a read or a write of descriptor `fd` goes to, taken out of the table (`Handle`).
+    fn handle(&self, fd: i32) -> Option<Handle> {
+        match self.entries.get(fd as usize).and_then(Option::as_ref)? {
+            Entry::Stdin if self.stdin.is_none() => Some(Handle::Stdin),
+            Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file) => {
+                Some(Handle::File(file.clone()))
+            }
+            _ => None,
         }
-        let (off, len) = (off as usize, len as usize);
-        let mut bytes = vec![0u8; len];
-        let count = self.read_into(fd, &mut bytes)?;
-        if count == 0 {
-            return Ok(-1);
-        }
-        let read: Vec<i8> = bytes[..count].iter().map(|&b| b as i8).collect();
-        buf.store(off, &read);
-        Ok(count as i32)
     }
 
     /// `available0()`: the bytes that can be read without waiting (`file_available`). For the
@@ -363,7 +362,9 @@ impl FdTable {
                 out::raw_write(STDERR_FD, bytes);
                 Ok(())
             }
-            Some(Entry::Write(file) | Entry::ReadWrite(file)) => file.write_all(bytes).map_err(io_failure),
+            Some(Entry::Write(file) | Entry::ReadWrite(file)) => {
+                (&**file).write_all(bytes).map_err(io_failure)
+            }
             Some(_) => Err(bad_descriptor()),
             None => Err(closed()),
         }
@@ -423,9 +424,71 @@ fn with<T>(f: impl FnOnce(&mut FdTable) -> T) -> T {
     f(&mut FDS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// What a read or a write of a descriptor goes to with the table unlocked: the process's standard
+/// input, or an open file, which stays open while it is used even if another thread closes its
+/// descriptor. Everything else (the standard output streams, the input a test supplies, a closed
+/// descriptor) is read or written with the table locked.
+enum Handle {
+    Stdin,
+    File(Arc<File>),
+}
+
+/// `read0()` of a reader that fills a buffer once: the next byte as `0..=255`, or `-1` at the end.
+fn read_byte(read_into: impl FnOnce(&mut [u8]) -> Result<usize, Failure>) -> Result<i32, Failure> {
+    let mut byte = [0u8];
+    match read_into(&mut byte)? {
+        0 => Ok(-1),
+        _ => Ok(byte[0] as i32),
+    }
+}
+
+/// `readBytes(b, off, len)` of a reader that fills a buffer once: fills `buf[off..off + len]` and
+/// returns the count, or `-1` at the end (when `len` is not 0).
+fn read_bytes_with(
+    read_into: impl FnOnce(&mut [u8]) -> Result<usize, Failure>,
+    buf: &mut (impl crate::Target<i8> + ?Sized),
+    off: i32,
+    len: i32,
+) -> Result<i32, Failure> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let (off, len) = (off as usize, len as usize);
+    let mut bytes = vec![0u8; len];
+    let count = read_into(&mut bytes)?;
+    if count == 0 {
+        return Ok(-1);
+    }
+    let read: Vec<i8> = bytes[..count].iter().map(|&b| b as i8).collect();
+    buf.store(off, &read);
+    Ok(count as i32)
+}
+
+/// Reads once from descriptor `fd` into `bytes`, with the table unlocked where it can be.
+fn read_into(fd: i32, bytes: &mut [u8]) -> Result<usize, Failure> {
+    let count = match with(|t| t.handle(fd)) {
+        Some(Handle::Stdin) => {
+            out::drain_stdout();
+            process_stdin().read(bytes)
+        }
+        Some(Handle::File(file)) => (&*file).read(bytes),
+        None => return with(|t| t.read_into(fd, bytes)),
+    };
+    count.map_err(io_failure)
+}
+
+/// Writes `bytes` to descriptor `fd`, with the table unlocked where it can be.
+fn write(fd: i32, bytes: &[u8]) -> Result<(), Failure> {
+    match with(|t| t.handle(fd)) {
+        Some(Handle::File(file)) => (&*file).write_all(bytes).map_err(io_failure),
+        _ => with(|t| t.write(fd, bytes)),
+    }
+}
+
 /// A descriptor for `file`, which `sun.nio.fs`'s natives opened (`unix.rs`), to read, to write,
 /// or both.
 pub(crate) fn insert_file(file: File, read: bool, write: bool) -> i32 {
+    let file = Arc::new(file);
     let entry = match (read, write) {
         (true, true) => Entry::ReadWrite(file),
         (false, true) => Entry::Write(file),
@@ -437,19 +500,22 @@ pub(crate) fn insert_file(file: File, read: bool, write: bool) -> i32 {
 /// `f` of the file that descriptor `fd` holds; `EBADF` where it holds none (closed, or a
 /// standard stream).
 pub(crate) fn with_file<T>(fd: i32, f: impl FnOnce(&File) -> io::Result<T>) -> io::Result<T> {
-    with(|t| match t.entries.get(fd as usize).and_then(Option::as_ref) {
-        Some(Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file)) if fd >= 0 => f(file),
-        _ => Err(io::Error::from_raw_os_error(EBADF)),
-    })
+    let file = with(|t| match t.entries.get(fd as usize).and_then(Option::as_ref) {
+        Some(Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file)) if fd >= 0 => {
+            Some(file.clone())
+        }
+        _ => None,
+    });
+    file.map_or_else(|| Err(io::Error::from_raw_os_error(EBADF)), |file| f(&file))
 }
 
 /// `dup(fd)`: a new descriptor of the same open file.
 pub(crate) fn duplicate(fd: i32) -> io::Result<i32> {
     with(|t| {
         let entry = match t.entries.get(fd as usize).and_then(Option::as_ref) {
-            Some(Entry::Read(file)) if fd >= 0 => Entry::Read(file.try_clone()?),
-            Some(Entry::Write(file)) if fd >= 0 => Entry::Write(file.try_clone()?),
-            Some(Entry::ReadWrite(file)) if fd >= 0 => Entry::ReadWrite(file.try_clone()?),
+            Some(Entry::Read(file)) if fd >= 0 => Entry::Read(Arc::new(file.try_clone()?)),
+            Some(Entry::Write(file)) if fd >= 0 => Entry::Write(Arc::new(file.try_clone()?)),
+            Some(Entry::ReadWrite(file)) if fd >= 0 => Entry::ReadWrite(Arc::new(file.try_clone()?)),
             _ => return Err(io::Error::from_raw_os_error(EBADF)),
         };
         Ok(t.insert(entry))
@@ -530,7 +596,7 @@ pub fn fd_set_length(fd: i32, length: i64) -> Result<(), Failure> {
 }
 
 pub fn fd_read(fd: i32) -> Result<i32, Failure> {
-    with(|t| t.read(fd))
+    read_byte(|bytes| read_into(fd, bytes))
 }
 
 pub fn fd_read_bytes(
@@ -539,7 +605,7 @@ pub fn fd_read_bytes(
     off: i32,
     len: i32,
 ) -> Result<i32, Failure> {
-    with(|t| t.read_bytes(fd, buf, off, len))
+    read_bytes_with(|bytes| read_into(fd, bytes), buf, off, len)
 }
 
 pub fn fd_available(fd: i32) -> Result<i32, Failure> {
@@ -551,7 +617,7 @@ pub fn fd_skip(fd: i32, n: i64) -> Result<i64, Failure> {
 }
 
 pub fn fd_write(fd: i32, b: i32) -> Result<(), Failure> {
-    with(|t| t.write(fd, &[b as u8]))
+    write(fd, &[b as u8])
 }
 
 pub fn fd_write_bytes(
@@ -561,7 +627,7 @@ pub fn fd_write_bytes(
     len: i32,
 ) -> Result<(), Failure> {
     let bytes: Vec<u8> = buf.range(off as usize..(off + len) as usize).iter().map(|&b| b as u8).collect();
-    with(|t| t.write(fd, &bytes))
+    write(fd, &bytes)
 }
 
 pub fn fd_is_regular_file(fd: i32) -> bool {
@@ -737,6 +803,35 @@ mod tests {
         t.close(r);
         let dir = std::path::Path::new(&name).parent().unwrap().to_string_lossy().into_owned();
         assert_eq!(t.open_random(&dir, 1).unwrap_err().message, format!("{dir} (Is a directory)"));
+    }
+
+    #[test]
+    fn a_read_that_waits_leaves_the_other_descriptors_free() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let pipe = insert_file(File::from(std::os::fd::OwnedFd::from(reader)), true, false);
+        let waiting = std::thread::spawn(move || {
+            let mut buf = vec![0i8; 4];
+            (fd_read_bytes(pipe, &mut buf[..], 0, 4), buf)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // The read above waits for the pipe; a file opens, takes a write and closes meanwhile.
+        let name = std::env::temp_dir().join(format!("fd-unlocked-{}", std::process::id()));
+        let name = name.to_string_lossy().into_owned();
+        let (done, finished) = std::sync::mpsc::channel();
+        let path = name.clone();
+        std::thread::spawn(move || {
+            let file = fd_open_write(crate::Wtf8::new(&path), false).unwrap();
+            fd_write_bytes(file, &[104i8, 105][..], 0, 2).unwrap();
+            fd_close(file);
+            done.send(()).unwrap();
+        });
+        finished.recv_timeout(std::time::Duration::from_secs(10)).expect("the write waited for the read");
+        assert_eq!(std::fs::read(&name).unwrap(), b"hi");
+        std::fs::remove_file(&name).unwrap();
+        writer.write_all(b"ok").unwrap();
+        let (read, buf) = waiting.join().unwrap();
+        assert_eq!((read, &buf[..2]), (Ok(2), &[111i8, 107][..]));
+        fd_close(pipe);
     }
 
     #[test]
