@@ -273,8 +273,10 @@ Rules:
   the root of a class tree is at offset 0 of every object of the tree, and a
   `java::Monitored` keeps the object first too. For an immutable or celled family, `base()` is
   then one read with no `match`: `unsafe { self.0.as_prefix() }` (`java::Thin::as_prefix`)
-  lends the start of the object as the `&XFields`, after a `const` block that asserts each
-  variant's offset is 0. A dispatcher whose every variant runs one field-level body at or above
+  lends the start of the object as the `&XFields`, after it uses a constant, `BASE_AT_START`,
+  that asserts each variant's offset is 0. The checks are in that constant rather than in
+  `base()`, which stays small enough for a program split into crates to keep in the header,
+  inlined where it is called (`docs/several-crates.md`). A dispatcher whose every variant runs one field-level body at or above
   that fields struct calls it there, `self.base().get_name()`. A family behind `RefCell`s or
   `java::Locked`s keeps the `match` above, whose `Ref::map` takes the borrow of the class's
   cell (std's `RefCell` gives no fixed place to its borrow flag), as does an enum with a Java

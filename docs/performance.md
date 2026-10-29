@@ -142,6 +142,16 @@ made on the stack (`java::count_allocation`).
   70 ms in release against 192 ms, and 870 ms at `opt-level = 0` (the runtime at 2) against
   1800 ms; at `opt-level = 1` both take about 140 ms (medians of five to nine, at a load of 7 to
   9; Java's kernel is about 94 ms).
+- **Fields read through a type of several classes, split into crates (BaseFields).** Two final
+  fields of an abstract class read from an array of four subclasses, in a translation split into
+  three body crates (`--crates 3`), as the Minecraft server's noise chunk reads its density
+  buffers. `base()` is one read, and its layout checks are in a constant of their own, so it is
+  small enough to stay in the header, inlined where it is called (`docs/several-crates.md`).
+  When every function moved to a body crate behind a header wrapper, the kernel took about
+  730 ms at `opt-level = 1` (with the release profile's fat LTO), against 87 ms now; release
+  takes about 70 ms either way. Without LTO, at `opt-level = 3`, it took 93 ms while `base()`,
+  its checks inside it, was too long to stay, against 70 ms (medians of five, at a load of 7;
+  Java's kernel is about 160 to 220 ms there).
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.

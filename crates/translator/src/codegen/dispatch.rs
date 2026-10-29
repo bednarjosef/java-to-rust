@@ -2074,17 +2074,14 @@ impl<'a> Gen<'a> {
         let vis = self.vis();
         // The borrows of a `java::Locked` are the runtime's.
         let java = if self.facts.thread_shared.contains(&root) { "java::" } else { "" };
-        self.line(&match (mutable, immutable) {
-            (false, true) => format!("{vis}fn base(&self) -> &{structure} {{"),
-            (false, false) => format!("{vis}fn base(&self) -> {java}Ref<'_, {structure}> {{"),
-            _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
-        });
-        self.indent += 1;
-        if immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c)) {
-            // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the
-            // root's fields struct is at the start of every object, which is a `java::Monitored`
-            // only around it, fields first: one read, whatever the class. rustc checks the offsets.
-            let checks: Vec<String> = variants
+        let prefix = immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c));
+        // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the root's
+        // fields struct is at the start of every object, which is a `java::Monitored` only around
+        // it, fields first: one read, whatever the class. rustc checks the offsets in a constant
+        // of their own, which keeps `base()` small enough for a program split into crates to keep
+        // it in the header, inlined where it is called (`split.rs`, `small`).
+        let checks: Vec<String> = if prefix {
+            variants
                 .iter()
                 .filter_map(|&c| {
                     let path = hierarchy::base_path(self.facts, self.class, c, root);
@@ -2093,13 +2090,27 @@ impl<'a> Gen<'a> {
                     (!path.is_empty())
                         .then(|| format!("assert!(std::mem::offset_of!({object}, {path}) == 0);"))
                 })
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !checks.is_empty() {
+            self.line("const BASE_AT_START: () = {");
+            for check in &checks {
+                self.line(&format!("    {check}"));
+            }
+            self.line("};");
+            self.gap();
+        }
+        self.line(&match (mutable, immutable) {
+            (false, true) => format!("{vis}fn base(&self) -> &{structure} {{"),
+            (false, false) => format!("{vis}fn base(&self) -> {java}Ref<'_, {structure}> {{"),
+            _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
+        });
+        self.indent += 1;
+        if prefix {
             if !checks.is_empty() {
-                self.line("const {");
-                for check in checks {
-                    self.line(&format!("    {check}"));
-                }
-                self.line("}");
+                self.line("let () = Self::BASE_AT_START;");
             }
             self.line("// Every variant is an object that starts with the fields struct (above).");
             self.line("unsafe { self.0.as_prefix() }");
