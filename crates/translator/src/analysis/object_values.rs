@@ -979,10 +979,18 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         runs += 1;
         if timings && runs.is_multiple_of(100_000) {
             let entries: usize = readers.iter().map(|r| r.len()).sum();
-            let (words, held) = values.class_set_words();
+            // The class sets are counted on every tenth line only: that goes over every place, as
+            // long as a few hundred thousand runs on the Minecraft server.
+            let sets = match runs.is_multiple_of(1_000_000) {
+                true => {
+                    let (words, held) = values.class_set_words();
+                    format!("class sets of {words} words in {held}, ")
+                }
+                false => String::new(),
+            };
             eprintln!(
                 "timing: points-to: {runs} runs, {} queued, {} read places with {entries} readers, \
-                 class sets of {words} words in {held}, {} variable lists, {} implementations known{}",
+                 {sets}{} variable lists, {} implementations known{}",
                 queue.len(),
                 readers.len(),
                 values.vars.len(),
