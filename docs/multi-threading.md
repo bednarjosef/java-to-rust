@@ -614,7 +614,8 @@ name:
   holds its method's class as its token, and the call tests it. An access through a value that holds one handle, or null,
   is that handle's access after a null check that throws Java's `NullPointerException`, message
   included; Java checks after evaluating the arguments, so such an access takes only arguments
-  whose evaluation does nothing. A call of a lookup or a `MethodHandle` that is not followed, or
+  whose evaluation does nothing. `lookupClass()` of a lookup that is followed is its class. A
+  call of a lookup or a `MethodHandle` that is not followed, or
   that may fail, throws an `UnsupportedOperationException` that says so, which netty's `catch`
   turns into going without that handle (no virtual-thread check through a handle, no cleaner
   linked to `malloc`); a census lists each such call

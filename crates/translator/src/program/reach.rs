@@ -3652,6 +3652,19 @@ impl<'t> Walk<'t> {
                 if key.0 == "java.lang.CharSequence" && key.1 == "isEmpty" {
                     self.work.push(Item::Method((key.0.clone(), "length".into(), "()int".into())));
                 }
+                // A builder reads a `CharSequence` that it appends, or that it is made from, with
+                // its `length()` and `charAt` (`lower::sequence_texts`, `codegen::char_sequence`).
+                if matches!(
+                    key.0.as_str(),
+                    "java.lang.StringBuilder" | "java.lang.StringBuffer" | "java.lang.AbstractStringBuilder"
+                ) && matches!(key.1.as_str(), "append" | "<init>")
+                    && key.2.starts_with("(java.lang.CharSequence")
+                {
+                    for (name, signature) in [("length", "()int"), ("charAt", "(int)char")] {
+                        let method = ("java.lang.CharSequence".to_string(), name.into(), signature.into());
+                        self.work.push(Item::Method(method));
+                    }
+                }
                 // A field updater's `getAndUpdate` and its kin apply their function, in the loop
                 // that lowering adds to the field's class (`lower::handles`).
                 if let Some((interface, declarer, name, signature)) = updater_function(&key.0, &key.1) {

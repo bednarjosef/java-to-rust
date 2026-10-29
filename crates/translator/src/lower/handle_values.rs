@@ -30,9 +30,9 @@
 //! lookups (`MethodHandles.lookup()`, `publicLookup()`, `privateLookupIn`), the `VarHandle`s of a
 //! field, a static field, the elements of an array and the views of a `byte[]` or a `ByteBuffer`,
 //! `MethodType.methodType` of class literals (or `Void.TYPE` and its kin), `findVirtual` and
-//! `findStatic` of these methods themselves, and `invokeExact` or `invoke` of such a
-//! `MethodHandle`, with the call's own types exactly the handle's (as `invokeExact` requires, and
-//! `invoke` without a conversion). `findStatic` also finds a static method of the program that
+//! `findStatic` of these methods themselves, `lookupClass()` of a lookup (its class), and
+//! `invokeExact` or `invoke` of such a `MethodHandle`, with the call's own types exactly the
+//! handle's (as `invokeExact` requires, and `invoke` without a conversion). `findStatic` also finds a static method of the program that
 //! reachability keeps, by its name and exact type, and `VarHandle`'s fences; `invokeExact` of
 //! such a handle is a call of the method (`static_handle_call`). A static method's handle has
 //! its class as its token, so that a value that may be one of several methods, each of its own
@@ -1034,6 +1034,9 @@ impl<'t> Lowering<'t> {
         node: Node<'t>,
         symbol: &Symbol<'t>,
     ) -> Result<Option<ExprKind>, Error> {
+        if symbol.owner == LOOKUP && symbol.name == "lookupClass" {
+            return self.lookup_class(node, symbol).map(Some);
+        }
         let followed = match symbol.owner {
             METHOD_HANDLES => {
                 matches!(symbol.name, "lookup" | "publicLookup")
@@ -1360,6 +1363,31 @@ impl<'t> Lowering<'t> {
             }
             _ => unsupported(node, "`Lookup.findStatic` that may find one of several handles"),
         }
+    }
+
+    /// `lookup.lookupClass()`: the class of a lookup that lowering follows (`Known::Lookup`), after
+    /// the receiver is evaluated; for any other lookup, a call that lowering does not follow
+    /// (`unfollowed`), as the token of a lookup tells nothing of its class.
+    fn lookup_class(&self, node: Node<'t>, symbol: &Symbol<'t>) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let receiver = node.get("methodSelect").and_then(|s| s.get("expression"));
+        let class = receiver.and_then(|r| self.held(r)).and_then(|held| match held[..] {
+            [Known::Lookup(class)] => self.ty(node, class).ok(),
+            _ => None,
+        });
+        let (Some(receiver), Some(class)) = (receiver, class) else {
+            return self.unfollowed(node, symbol, "`Lookup.lookupClass`", false);
+        };
+        let literal =
+            self.synth(ExprKind::Builtin(Builtin::ClassLiteral(class), Vec::new()), pos, Type::JavaClass);
+        if quiet(receiver) {
+            return Ok(literal.kind);
+        }
+        let body = vec![Stmt::Expr(self.expr(receiver)?), Stmt::Yield(literal)];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
     }
 
     /// A call of the method `what` of a lookup or a `MethodHandle` that lowering does not follow

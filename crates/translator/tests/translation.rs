@@ -4016,6 +4016,109 @@ fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
 }
 
 #[test]
+fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
+    // A pattern variable read after the loop that tests it and `synchronized` on a string, in a
+    // program that starts a thread, are rejected by checks that read the code alone: the census
+    // stubs them before the analyses first run, which then run once.
+    let main = r#"public class Main {
+    static final String LOCK = "lock";
+    static int n;
+
+    static String first(Object[] items) {
+        int i = 0;
+        while (!(items[i] instanceof String s)) {
+            i++;
+        }
+        return s;
+    }
+
+    static void count() {
+        synchronized (LOCK) {
+            n++;
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        System.out.println(first(new Object[] {1, "two"}));
+        Thread t = new Thread(Main::count);
+        t.start();
+        t.join();
+        System.out.println(n);
+    }
+}
+"#;
+    let dir = write_sources("census_code_checks", &[("Main.java", main)]);
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    assert_contains(
+        &census.report,
+        &[
+            "`synchronized` on a string not supported yet\n          at Main.java:14:9\n",
+            "a pattern variable used here not supported yet\n          at Main.java:7:18\n",
+        ],
+    );
+    assert_eq!(rounds, 1, "{}", census.report);
+}
+
+#[test]
+fn a_census_stubs_a_class_converted_to_an_interface_the_runtime_lacks_before_the_analyses_run() {
+    // A class as an `AnnotatedElement` or a `TypeDescriptor.OfField`, which `java.lang.Class`
+    // implements but the runtime's classes do not, is rejected by the generator; the census finds
+    // it in the code before the analyses first run, which then run once.
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(std::path::PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this test");
+        return;
+    };
+    let main = r#"import java.lang.invoke.TypeDescriptor;
+import java.lang.reflect.AnnotatedElement;
+
+public class Main {
+    static String shown(AnnotatedElement e) {
+        return String.valueOf(e);
+    }
+
+    static String descriptor(TypeDescriptor.OfField<?> d) {
+        return d.descriptorString();
+    }
+
+    static void annotated() {
+        System.out.println(shown(Main.class));
+    }
+
+    static void primitive() {
+        System.out.println(descriptor(int.class));
+    }
+
+    public static void main(String[] args) {
+        if (args.length > 0) {
+            annotated();
+            primitive();
+        }
+        System.out.println("done");
+    }
+}
+"#;
+    let dir = write_sources("census_class_interfaces", &[("app/Main.java", main)]);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![java_base],
+        ..Default::default()
+    };
+    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 5 pieces; 3 (60.0%) translate, 2 rejected.",
+            "1  a `java.lang.Class` as a `java.lang.invoke.TypeDescriptor.OfField` not supported yet\n",
+            "1  a `java.lang.Class` as a `java.lang.reflect.AnnotatedElement` not supported yet\n",
+            "          at Main.java:14:34, Main.java:18:39\n",
+        ],
+    );
+    assert_eq!(rounds, 1, "{}", census.report);
+}
+
+#[test]
 fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
     // A census takes the errors of every check of the analyses, and of the messages and the
     // generator after them, in one round (`analysis::analyze_collecting`); here the generator
@@ -6605,7 +6708,7 @@ fn seeds_come_from_the_operating_system() {
 }
 
 #[test]
-fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_classes() {
+fn a_builder_made_from_a_char_sequence_copies_its_text_or_reads_a_program_class_unit_by_unit() {
     let rust = translate(
         "public class Main {
             public static void main(String[] a) {
@@ -6625,12 +6728,9 @@ fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_class
     let program = "package app;\npublic class Main implements CharSequence {\n    public int length() { return 0; }\n    public char charAt(int i) { return 'x'; }\n    public CharSequence subSequence(int s, int e) { return this; }\n    public String toString() { return \"\"; }\n    public static void main(String[] a) {\n        CharSequence s = new Main();\n        System.out.println(new StringBuilder(s));\n    }\n}\n";
     let dir = write_sources("builder-from-program-class", &[("app/Main.java", program)]);
     let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
-    let error =
-        java_to_rust::translate_program(&program).expect_err("a program class as a CharSequence").to_string();
-    assert!(
-        error.contains("creating a builder from a `CharSequence` that a program class implements"),
-        "{error}"
-    );
+    let rust = java_to_rust::translate_program(&program).expect("a program class as a CharSequence");
+    // Its `length()` sizes the builder, which appends it with its `length()` and `charAt`.
+    assert_contains(&rust, &["java::StringBuilder::with_capacity(", "append_seq_range::<"]);
 }
 
 #[test]

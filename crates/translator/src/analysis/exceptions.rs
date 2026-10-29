@@ -1140,10 +1140,11 @@ fn is_tested(e: &Expr, safe: &[String]) -> bool {
         ExprKind::Cast(to, value) if to.is_reference() || matches!(to, Type::Enum(_)) => {
             is_tested(value, safe)
         }
-        // So does an assignment, whose value is the assigned one (`(current = e).next`).
+        // So does an assignment, whose value is the assigned one (`(current = e).next`,
+        // `(h[k] = e).next`), as the generator takes it (`Gen::nullable`).
         ExprKind::Assign {
             op: None,
-            target: Place::Field { .. } | Place::Static { .. } | Place::Var(_),
+            target: Place::Field { .. } | Place::Static { .. } | Place::Var(_) | Place::Index(..),
             value,
         } if !matches!(e.ty, Type::Boxed(_)) => is_tested(value, safe),
         _ => false,
