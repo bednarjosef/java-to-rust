@@ -39,7 +39,7 @@
 use super::Facts;
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 
 /// The context of code that has no `this`: a static method, or a method that no class runs.
@@ -266,9 +266,9 @@ pub struct ObjectValues {
     vars: super::FastMap<(usize, usize), Vec<Flow>>,
     returns: super::FastMap<(usize, usize), Flow>,
     /// Instance fields, by the class that declares them.
-    fields: HashMap<(usize, String), Flow>,
-    statics: HashMap<(usize, String), Flow>,
-    elements: HashMap<Type, Flow>,
+    fields: super::FastMap<(usize, String), Flow>,
+    statics: super::FastMap<(usize, String), Flow>,
+    elements: super::FastMap<Type, Flow>,
     /// What the elements of every array hold together, for dispatch (`elements_of`), joined as
     /// they grow: a read of an array element would otherwise join every place of `elements`,
     /// thousands on the Minecraft server, and a great many visits read one.
@@ -277,6 +277,8 @@ pub struct ObjectValues {
     /// parameters (unless the runtime may call it) and the variables it declares, loops over or
     /// binds with a pattern.
     followed: Vec<super::FastMap<String, usize>>,
+    /// The slot in `vars` of each parameter of each method, where the analysis follows it.
+    param_slots: Vec<Vec<Option<usize>>>,
     /// For dispatch, the parameters of each method that the runtime may call itself
     /// (`runtime_called`), which hold what the runtime holds besides what calls pass them.
     runtime_params: Vec<Vec<String>>,
@@ -307,6 +309,9 @@ struct Passed {
     receiver: Flow,
     targets: Targets,
     args: Option<Vec<Flow>>,
+    /// Once the receiver grew, the targets that a visit last passed arguments, and those
+    /// arguments: they need only what changed since.
+    before: Option<(Targets, Vec<Flow>)>,
     /// The number of the join of the targets' returns (`Joined`), once a visit evaluated the call.
     joined: Option<u32>,
 }
@@ -692,7 +697,11 @@ impl ObjectValues {
         if targets.len() >= KEPT_TARGETS
             && let Some(calls) = self.calls.borrow_mut().as_mut()
         {
-            let kept = Passed { receiver: flow, targets: targets.clone(), args: None, joined: None };
+            let before = calls.remove(&(e.id, ctx)).and_then(|old| match old.args {
+                Some(args) => Some((old.targets, args)),
+                None => old.before,
+            });
+            let kept = Passed { receiver: flow, targets: targets.clone(), args: None, before, joined: None };
             calls.insert((e.id, ctx), kept);
         }
         targets
@@ -886,11 +895,17 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     // parameters may be anything. For dispatch, they may be anything that the runtime holds.
     let runtime_called = if dispatch { runtime_called_for_dispatch(class) } else { runtime_called(class) };
     let by_runtime = |m: usize| runtime_called.contains(&class.hierarchy.group_id(m));
-    let followed = class
+    let followed: Vec<super::FastMap<String, usize>> = class
         .methods
         .iter()
         .enumerate()
         .map(|(m, method)| followed(method, dispatch || !by_runtime(m)))
+        .collect();
+    let param_slots = class
+        .methods
+        .iter()
+        .zip(&followed)
+        .map(|(method, followed)| method.params.iter().map(|p| followed.get(&p.name).copied()).collect())
         .collect();
     let runtime_params = class
         .methods
@@ -924,10 +939,11 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
     let mut values = ObjectValues {
         vars: super::FastMap::default(),
         returns: super::FastMap::default(),
-        fields: HashMap::new(),
-        statics: HashMap::new(),
-        elements: HashMap::new(),
+        fields: super::FastMap::default(),
+        statics: super::FastMap::default(),
+        elements: super::FastMap::default(),
         all_elements: Flow::default(),
+        param_slots,
         followed,
         runtime_params,
         handed: Flow::default(),
@@ -1212,7 +1228,9 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
         | ExprKind::MethodCall { args, .. } => {
             let flows: Vec<Flow> = args.iter().map(eval).collect();
             let targets = values.call_targets(class, m, ctx, x);
-            // Passing the targets what they were passed before changes nothing (`Passed`).
+            // Passing the targets what they were passed before changes nothing (`Passed`): a
+            // target that was passed the arguments before gets only those that changed since.
+            let mut passed_before: Option<(Option<Targets>, Vec<bool>)> = None;
             if let Some(kept) =
                 values.calls.borrow_mut().as_mut().and_then(|calls| calls.get_mut(&(x.id, ctx)))
                 && Rc::ptr_eq(&kept.targets, &targets)
@@ -1220,22 +1238,38 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
                 if kept.args.as_ref() == Some(&flows) {
                     return;
                 }
+                let same = |before: &[Flow]| before.iter().zip(&flows).map(|(b, f)| b == f).collect();
+                passed_before = match (&kept.args, kept.before.take()) {
+                    (Some(args), _) => Some((None, same(args))),
+                    (None, Some((targets, args))) => Some((Some(targets), same(&args))),
+                    (None, None) => None,
+                };
                 kept.args = Some(flows.clone());
             }
+            // The targets passed the arguments before, where those are not all of them.
+            let before: Option<super::FastSet<(usize, usize)>> = match &passed_before {
+                Some((Some(targets), _)) => Some(targets.iter().copied().collect()),
+                _ => None,
+            };
+            let unchanged = |i: usize, target: &(usize, usize)| match &passed_before {
+                Some((_, same)) => same[i] && before.as_ref().is_none_or(|b| b.contains(target)),
+                None => false,
+            };
             // What each parameter of a target method gets, by its slot: the same for each class
             // that the method runs on.
-            let mut passed: super::FastMap<usize, Vec<(usize, Flow)>> = super::FastMap::default();
-            for &(t, c) in targets.iter() {
+            let mut passed: super::FastMap<usize, Vec<(usize, usize, Flow)>> = super::FastMap::default();
+            for target @ &(t, c) in targets.iter() {
                 let params = passed.entry(t).or_insert_with(|| {
-                    let followed = &values.followed[t];
-                    let params = class.methods[t].params.iter().zip(&flows);
-                    params
-                        .filter_map(|(p, flow)| {
-                            Some((*followed.get(&p.name)?, values.types.filter(flow.clone(), p.ty)))
+                    let slots = values.param_slots[t].iter().zip(&class.methods[t].params).zip(&flows);
+                    slots
+                        .enumerate()
+                        .filter_map(|(i, ((slot, p), flow))| {
+                            Some((i, (*slot)?, values.types.filter(flow.clone(), p.ty)))
                         })
                         .collect()
                 });
-                out.extend(params.iter().map(|(slot, flow)| Update::Var(t, c, *slot, flow.clone())));
+                let changed = params.iter().filter(|(i, ..)| !unchanged(*i, target));
+                out.extend(changed.map(|(_, slot, flow)| Update::Var(t, c, *slot, flow.clone())));
             }
         }
         // A library function may store its arguments, or the elements of an array it is given,
