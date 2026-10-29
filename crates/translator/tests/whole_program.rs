@@ -788,9 +788,10 @@ public class Main {
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "3 false\n");
 }
 
-/// A `match` on the class number over more classes than one method of it takes (`PART_CLASSES` in
-/// `codegen/dispatch.rs`, 2048) is cut into methods by number: a program with 2100 classes that
-/// shows each object and its class's name runs as Java does, through methods of two parts.
+/// A `match` on the class number over more classes than are written whole (`CUT_ABOVE` in
+/// `codegen/dispatch.rs`, 2048) is cut into methods by number (`PART_CLASSES`, 256 each): a
+/// program with 2100 classes that shows each object and its class's name runs as Java does,
+/// through methods of nine parts.
 #[test]
 fn a_match_over_thousands_of_classes_is_cut_into_parts() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {

@@ -66,9 +66,12 @@ const OPTIONAL: &str = "java.util.Optional";
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
 
+/// The most classes that a `match` on the class number is written whole for (`match_arms_or`).
+const CUT_ABOVE: usize = 2048;
+
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
-const PART_CLASSES: usize = 2048;
+const PART_CLASSES: usize = 256;
 
 /// A method that `match_arms_or` writes the `match` of: its name, its parameters after `&self`
 /// (`, f: &mut fmt::Formatter`), their names (`f`) and its return type (` -> fmt::Result`).
@@ -1956,10 +1959,12 @@ impl<'a> Gen<'a> {
         }
         // A `match` over the classes of a whole program (`Object`'s enum has a variant for every
         // class it makes, the Minecraft server's some 20 000) is one function that rustc holds
-        // whole, past 20 GB: it is cut by class number into methods of `PART_CLASSES` numbers
-        // each, which the method's `match` on the number's high bits calls, and which the split
-        // of a program into crates (`split.rs`) spreads over the body crates.
-        if variants.len() > PART_CLASSES
+        // whole, past 20 GB: one over more than `CUT_ABOVE` classes is cut by class number into
+        // methods of `PART_CLASSES` numbers each, which the method's `match` on the number's high
+        // bits calls, and which the split of a program into crates (`split.rs`) spreads over the
+        // body crates. The parts are small, as LLVM's time grows faster than a function's size;
+        // a `match` of fewer classes is not cut, so that its call costs one jump, not two.
+        if variants.len() > CUT_ABOVE
             && let Some(method) = self.arms_method.clone()
         {
             let mut parts: BTreeMap<u16, Vec<(usize, String, bool)>> = BTreeMap::new();
@@ -2685,17 +2690,23 @@ impl<'a> Gen<'a> {
         self.equals_test(c, &place, optional, same)
     }
 
+    /// Whether the identity of an object of class `c` is the address of its handle (`address`),
+    /// which the bits of a value that holds it hold too (`java::Thin::address`).
+    fn identity_by_address(&self, c: usize) -> bool {
+        let name = &self.class.types[c].name;
+        self.runtime_of(c).is_none()
+            && self.thin_pointer(c)
+            && self.class.shared_of(c).is_none()
+            && !self.facts.owned.contains(name)
+            && (self.facts.immutable.contains(name) || self.celled(name))
+    }
+
     /// `Object`'s `equals` or `hashCode` (method `r`) for an object of class `c` that overrides
     /// neither and whose identity is the address of its handle (`address`), which its value's
     /// bits hold (`java::Thin::address`): read from those bits, so the text is the same for every
     /// such class and their arms are one (`match_arms_or`). `Object`'s own values are `Thin`s.
     fn identity_arm(&mut self, r: usize, c: usize) -> Option<String> {
-        let name = &self.class.types[c].name;
-        let by_address = self.runtime_of(c).is_none()
-            && self.thin_pointer(c)
-            && self.class.shared_of(c).is_none()
-            && !self.facts.owned.contains(name)
-            && (self.facts.immutable.contains(name) || self.celled(name));
+        let by_address = self.identity_by_address(c);
         let object = self.object_index()?;
         if !by_address
             || self.enum_for(object).is_none()
@@ -3419,6 +3430,11 @@ impl<'a> Gen<'a> {
                 }
                 Need::RuntimeTypeNames(_) => (g.names_list(c), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
+                // Read from the value's bits, the same text for every such class, whose arms
+                // are one (`match_arms_or`): the Minecraft server's were 6 MB of the same code.
+                Need::IdentityHash(_) if g.identity_by_address(c) => {
+                    (format!("{}(self.0.address())", g.runtime("address_hash")), false)
+                }
                 _ => (g.value_hash(c, "o"), true),
             });
             self.indent -= 1;
