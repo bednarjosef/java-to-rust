@@ -232,6 +232,12 @@ bytecode the class file already has:
   round: declared `static`. Procyon writes a static interface method as `default` (`unbox` of
   DataFixerUpper's `CartesianLike`), which javac then rejects at every call from a static
   method.
+- **A loop that would spin for ever**, before the first round and in every file, as javac
+  accepts it: a `while (true)` whose body is only `if (c) ; else { .. }`, where `c` reads local
+  variables alone, so that once it holds nothing changes it. Vineflower writes a for-each loop in
+  a `finally` so, without its `break` (`IntervalSelectFunction.Sampler.sampleVolume`, which closes
+  its buffers), where the class file leaves the loop at the end of the array. The empty branch
+  becomes `break`.
 - **A decompiler's cast to exactly the type javac expects** that javac does not allow, as the
   two parameterizations are provably distinct: a cast through its class's wildcard type before
   it (`(PointFree<Function<A, C>>) (PointFree<?>) f`). The original's cast is still made, with its
