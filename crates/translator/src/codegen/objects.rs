@@ -900,6 +900,10 @@ impl<'a> Gen<'a> {
     /// does not write the checked form, where its `NullPointerException` would end the program
     /// instead of reaching the `catch` or the `finally`.
     pub(super) fn check_dereferences(&mut self) {
+        // Mostly every one is written in it, and then no code needs a look.
+        if self.facts.null_checked.keys().all(|id| self.dereferenced.contains(id)) {
+            return;
+        }
         // The objects in the bodies that were not written, which nothing calls or which never run.
         let mut unwritten = HashSet::new();
         let methods = self.class.methods.iter().enumerate().filter(|(i, _)| !self.written.contains(i));

@@ -813,6 +813,10 @@ impl<'a> Gen<'a> {
     /// inside `java::catching`: each such operation, first to last, as the generator reports
     /// what it rejects (`generate_all`), so that a census stubs them all in one round.
     pub(super) fn check_catching(&mut self) {
+        // Mostly every one is written in it, and then no code needs a look.
+        if self.facts.catching.keys().all(|id| self.dereferenced.contains(id)) {
+            return;
+        }
         let mut missed: Vec<Pos> = Vec::new();
         for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
             for stmt in &method.body {
@@ -841,6 +845,9 @@ impl<'a> Gen<'a> {
     /// form, where its `ClassCastException` would end the program instead of reaching the `catch`
     /// or the `finally`: each such cast, first to last, as `check_catching` does.
     pub(super) fn check_casts(&mut self) {
+        if self.facts.raising.iter().all(|id| self.dereferenced.contains(id)) {
+            return;
+        }
         let mut missed: Vec<Pos> = Vec::new();
         for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
             for stmt in &method.body {
