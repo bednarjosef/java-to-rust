@@ -181,11 +181,25 @@ impl<'t> Lowering<'t> {
         })
     }
 
+    /// Whether `owner` is a Rust generic; noted in `uses_real` when it is.
     pub(super) fn is_real(&self, owner: Owner) -> bool {
-        match owner {
+        let real = match owner {
             Owner::Class(t) => self.real.classes.contains(&t),
             Owner::Method(m) => self.real.methods.contains(&m),
+        };
+        if real {
+            self.uses_real.set(true);
         }
+        real
+    }
+
+    /// `lower` with `uses_real` saying whether the code it lowers uses Rust generics, as a
+    /// rejection in it is recorded with; it says so of the code around it too afterwards.
+    pub(super) fn noting_real_uses<T>(&self, lower: impl FnOnce() -> T) -> T {
+        let outer = self.uses_real.replace(false);
+        let lowered = lower();
+        self.uses_real.set(outer | self.uses_real.get());
+        lowered
     }
 
     /// The type of the type variable `var` of a real generic.
@@ -279,10 +293,14 @@ impl<'t> Lowering<'t> {
     pub(super) fn param_owner(&self, ty: Type) -> Option<Owner> {
         let Type::Class(name, _) = ty else { return None };
         let (owner, _) = name.rsplit_once('#')?;
-        match owner.strip_prefix('@') {
+        let owner = match owner.strip_prefix('@') {
             Some(m) => m.parse().ok().map(Owner::Method),
             None => self.type_index(owner).map(Owner::Class),
+        };
+        if owner.is_some() {
+            self.uses_real.set(true);
         }
+        owner
     }
 
     /// The real generics that a type mentions: its own class and the type variables in it.

@@ -852,7 +852,12 @@ variables' values are used for anything but a store, a return, an argument to a 
 type variable or a comparison with `null`; whose types meet a cast or an `instanceof`; that is
 used raw, as an array element, or becomes an `Object`. Lowering runs again with the failed ones
 erased until nothing fails, and an error with candidates left is retried with all of them erased,
-so a real generic never turns a translated program into a rejected one.
+so a real generic never turns a translated program into a rejected one. A census, and a whole
+program, which go on past a rejection, retry only for one in code that can run and that uses a
+real generic (a class or method of them, or one of their type variables, while the method,
+field initializers or initializer block was lowered): code that uses none is lowered the same
+without them, and so is a class the program does not have (`type`, `new`, `extending` or
+`implementing` a missing class).
 
 A type variable of a real generic is a synthetic type of kind `TypeKind::Param`, named
 `Owner#T`, with no members and no implementors, so every analysis sees an opaque value that is

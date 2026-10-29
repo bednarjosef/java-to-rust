@@ -34,7 +34,7 @@ impl<'t> Lowering<'t> {
     ) -> Result<(), Error> {
         match &self.census {
             Some(rejected) => {
-                rejected.borrow_mut().push((t, anchor, method, error));
+                rejected.borrow_mut().push((t, anchor, method, error, self.uses_real.get()));
                 Ok(())
             }
             None => Err(error),
@@ -88,11 +88,16 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// Method `index`, or in a census, when lowering rejects it, its stub.
+    /// Method `index`, or in a census, when lowering rejects it, its stub; each rejection
+    /// recorded with whether the method's code uses Rust generics (`uses_real`).
     pub(super) fn method_or_stub(&self, index: usize) -> Result<Method, Error> {
         if self.census.is_none() {
             return self.method(index);
         }
+        self.noting_real_uses(|| self.method_or_stub_noted(index))
+    }
+
+    fn method_or_stub_noted(&self, index: usize) -> Result<Method, Error> {
         // The code of a class whose declaration is rejected is rejected with it.
         let owner = self.methods[index].owner;
         if let Some(error) = self.class_rejection(owner) {
@@ -280,6 +285,10 @@ impl<'t> Lowering<'t> {
     /// its fields and captured locals of a type that is not supported as `int`s: the code that
     /// uses them lowers the same types, and is rejected too.
     pub(super) fn type_decl_or_stub(&self, t: usize) -> Result<TypeDecl, Error> {
+        self.noting_real_uses(|| self.type_decl_or_stub_noted(t))
+    }
+
+    fn type_decl_or_stub_noted(&self, t: usize) -> Result<TypeDecl, Error> {
         // The field initializers and initializer blocks of a class whose declaration is rejected
         // are rejected with it, and left out (`type_decl`).
         if let Some(error) = self.class_rejection(t) {
