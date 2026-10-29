@@ -31,6 +31,12 @@ impl<'a> Gen<'a> {
                 ExprKind::Field { object, name } if self.field_in_place(object, name) => {
                     format!("{}.as_wtf8()", self.object_place(e))
                 }
+                ExprKind::Static { .. }
+                    if !self.nullable(e)
+                        && let Some(place) = self.final_place(e) =>
+                {
+                    format!("{place}.as_wtf8()")
+                }
                 _ => format!("{}.as_wtf8()", self.expr(e).at(ATOM)),
             };
         }
@@ -41,6 +47,12 @@ impl<'a> Gen<'a> {
             ExprKind::Var(name) => format!("&{}", self.local(name)),
             ExprKind::Field { object, name } if self.field_in_place(object, name) => {
                 format!("&{}", self.object_place(e))
+            }
+            ExprKind::Static { .. }
+                if !self.nullable(e)
+                    && let Some(place) = self.final_place(e) =>
+            {
+                format!("&{place}")
             }
             _ => format!("&{}", self.expr(e).at(UNARY)),
         }

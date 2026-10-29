@@ -195,6 +195,8 @@ impl<'a> Gen<'a> {
             ExprKind::Field { .. } | ExprKind::Index(..) if !self.formatting || self.lazy_text => {
                 format!("{}.as_deref()", self.object_place(e))
             }
+            // A `java::Final` static never changes once its class is initialized.
+            ExprKind::Static { .. } if let Some(place) = self.final_place(e) => format!("{place}.as_deref()"),
             _ => format!("{}.as_deref()", self.expr(e).at(ATOM)),
         }
     }
@@ -240,6 +242,9 @@ impl<'a> Gen<'a> {
                 // A variable or field is tested where it is, without a copy.
                 ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..) => {
                     format!("{}.{test}()", self.object_place(other))
+                }
+                ExprKind::Static { .. } if let Some(place) = self.final_place(other) => {
+                    format!("{place}.{test}()")
                 }
                 ExprKind::Static { class, name } if self.init_call(*class).is_none() => {
                     let cell = self.cell_name(*class, name);

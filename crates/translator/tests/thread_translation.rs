@@ -89,6 +89,42 @@ fn statics_that_a_started_thread_touches_are_process_wide() {
 }
 
 #[test]
+fn a_static_final_that_threads_read_is_read_without_a_lock() {
+    // `TABLE` and `NAME` are assigned once, by `A`'s static initialization: `java::Final`s, which a
+    // thread lends in place. `log` is assigned again, so it keeps its lock.
+    let rust = translate(
+        "class A {
+            static final int[] TABLE;
+            static final String NAME = \"table\";
+            static final String DESCRIBED = NAME + A.TABLE;
+            static String log;
+            static {
+                TABLE = new int[] {1, 2, 3};
+            }
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> log = DESCRIBED + TABLE[1] + TABLE.length);
+                t.start();
+                t.join();
+                System.out.println(log);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // `DESCRIBED`'s initializer reads it before it is set, so it may be null.
+            "static A_TABLE: java::Final<Option<java::SharedArray<i32>>> = java::Final::new(None);",
+            "static A_DESCRIBED: java::Final<java::JString> = java::Final::new(java::JString::new());",
+            "static A_LOG: java::Locked<Option<java::JString>>",
+            "java::len(java::non_null((*{ init_a(); A_TABLE.get() }).as_ref()))",
+            "{ init_a(); A_DESCRIBED.get().clone() }",
+            "A_TABLE.set(Some(java::shared_from_vec(vec![1, 2, 3])));",
+        ],
+    );
+    assert_lacks(&rust, &["A_TABLE.with_borrow", "A_DESCRIBED.with_borrow"]);
+}
+
+#[test]
 fn the_started_thread_runs_the_thread_object_it_was_given() {
     let rust = translate(WORKER);
     // The handle is cloned into the new thread, which makes it its current thread and runs it;

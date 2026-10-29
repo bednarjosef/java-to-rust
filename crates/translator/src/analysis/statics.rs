@@ -8,11 +8,24 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-/// The classes, by index, that need an `init` function: they have a `<clinit>` that is not lazy.
-pub fn eager_classes(class: &Class) -> HashSet<usize> {
+/// The classes, by index, that need an `init` function: they have a `<clinit>` that is not lazy;
+/// and the statics, as (class index, name), that are assigned once, by their class's static
+/// initialization: declared `final`, not constants, and assigned by no other code (see
+/// `Facts::final_statics`).
+pub fn eager_and_final(class: &Class) -> (HashSet<usize>, HashSet<(usize, String)>) {
     let changed = changed_later(class);
     let none = HashSet::new();
-    (0..class.types.len()).filter(|&t| eager(class, t, changed.get(&t).unwrap_or(&none))).collect()
+    let eager =
+        (0..class.types.len()).filter(|&t| eager(class, t, changed.get(&t).unwrap_or(&none))).collect();
+    let finals = class
+        .types
+        .iter()
+        .enumerate()
+        .flat_map(|(t, decl)| decl.statics.iter().map(move |f| (t, f)))
+        .filter(|(t, f)| f.is_final && !f.constant && !changed.get(t).is_some_and(|c| c.contains(&f.name)))
+        .map(|(t, f)| (t, f.name.clone()))
+        .collect();
+    (eager, finals)
 }
 
 /// Whether class `index` needs an `init` function, given the statics of it that `changed_later`

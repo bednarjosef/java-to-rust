@@ -311,12 +311,21 @@ impl<'t> Lowering<'t> {
                 init: None,
                 constant: false,
                 volatile: false,
+                is_final: true,
                 pos,
             });
         }
         for c in nested.captures.iter().filter(|c| !c.inherited) {
             let ty = self.capture_type(c)?;
-            out.push(Field { name: c.field.clone(), ty, init: None, constant: false, volatile: false, pos });
+            out.push(Field {
+                name: c.field.clone(),
+                ty,
+                init: None,
+                constant: false,
+                volatile: false,
+                is_final: true,
+                pos,
+            });
         }
         Ok(out)
     }

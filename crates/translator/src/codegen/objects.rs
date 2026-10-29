@@ -30,6 +30,8 @@ enum Slot {
     },
     /// A static field: a `Cell` when `plain`, else a `RefCell`.
     Static { cell: String, plain: bool },
+    /// A static field that is a `java::Final`, read with no lock.
+    Final { cell: String },
 }
 
 impl Slot {
@@ -51,6 +53,8 @@ impl Slot {
             Slot::Static { cell, plain: false } => {
                 format!("{cell}.with_borrow({})", if copy { "|v| *v" } else { "|v| v.clone()" })
             }
+            Slot::Final { cell } if copy => format!("(*{cell}.get())"),
+            Slot::Final { cell } => format!("{cell}.get().clone()"),
         }
     }
 
@@ -67,6 +71,7 @@ impl Slot {
             }
             Slot::Static { cell, plain: true } => format!("{cell}.set({value});"),
             Slot::Static { cell, plain: false } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
+            Slot::Final { cell } => format!("{cell}.set({value});"),
         }
     }
 }
@@ -992,6 +997,8 @@ impl<'a> Gen<'a> {
                     (format!("{obj}.borrow().{field}"), true)
                 }
             }
+            // A static that is a `java::Final` is borrowed where it is.
+            ExprKind::Static { .. } if let Some(place) = self.final_place(e) => (place, true),
             // An element of a plain array is a place too.
             ExprKind::Index(..) => {
                 let text = self.expr(e).receiver();
@@ -1204,8 +1211,9 @@ impl<'a> Gen<'a> {
             ExprKind::Var(name) if matches!(e.ty, Type::Class(..)) && self.borrowed.contains(name) => {
                 self.local(name)
             }
-            // So is a place that may be null, once checked: a variable, a field or an element.
-            ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..)
+            // So is a place that may be null, once checked: a variable, a field, an element or a
+            // `java::Final` static.
+            ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..) | ExprKind::Static { .. }
                 if matches!(e.ty, Type::Class(..)) && self.nullable(e) =>
             {
                 let (_, place) = self.object_parts(e);
@@ -1506,8 +1514,7 @@ impl<'a> Gen<'a> {
     /// A read of the cell of a static, which initializes its class first. A static that starts
     /// empty holds its value once its class is initialized: it is that value, unless `optional`.
     fn static_cell_read(&mut self, class: usize, name: &str, ty: Type, optional: bool) -> Code {
-        let cell = self.cell_name(class, name);
-        let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
+        let read = self.static_slot(class, name, ty).read(self.clones(ty));
         let read = if !optional && self.facts.placeholder_statics.contains(&(class, name.to_string())) {
             format!("{}({read})", self.runtime("non_null"))
         } else {
@@ -1516,6 +1523,16 @@ impl<'a> Gen<'a> {
         match self.init_call(class) {
             Some(init) => Code::atom(format!("{{ {init} {read} }}")),
             None => Code::atom(read),
+        }
+    }
+
+    /// The cell of static `name` of class `class`, of type `ty`.
+    fn static_slot(&mut self, class: usize, name: &str, ty: Type) -> Slot {
+        let cell = self.cell_name(class, name);
+        if self.final_static(class, name) {
+            Slot::Final { cell }
+        } else {
+            Slot::Static { cell, plain: is_cell(ty) }
         }
     }
 
@@ -2084,9 +2101,7 @@ impl<'a> Gen<'a> {
                 let field = self.field_path(object, name);
                 Slot::Field { obj, field, plain: false, on_enum, cell, volatile }
             }
-            Place::Static { class, name } => {
-                Slot::Static { cell: self.cell_name(*class, name), plain: is_cell(ty) }
-            }
+            Place::Static { class, name } => self.static_slot(*class, name, ty),
             Place::Var(_) => unreachable!("variables are assigned by `assignment`"),
             Place::Index(..) => unreachable!("array elements are assigned by `index_set`"),
         };

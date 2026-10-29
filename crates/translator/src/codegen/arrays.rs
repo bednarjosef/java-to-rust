@@ -106,8 +106,10 @@ impl<'a> Gen<'a> {
         }
         match &e.kind {
             ExprKind::Var(name) => format!("&{}", self.local(name)),
-            // A field is borrowed where it is, without a copy of the handle.
+            // A field is borrowed where it is, without a copy of the handle, and so is a static
+            // that is a `java::Final`.
             ExprKind::Field { .. } => format!("&{}", self.object_place(e)),
+            ExprKind::Static { .. } if let Some(place) = self.final_place(e) => format!("&{place}"),
             _ => format!("&{}", self.expr(e).at(UNARY)),
         }
     }
