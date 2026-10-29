@@ -102,11 +102,13 @@ pub(super) fn write_modules(
     };
     let mut modules: Vec<Option<(modules::Written, Found)>> = indexes.iter().map(|_| None).collect();
     let mut panics = Vec::new();
+    let mut times = Vec::new();
     for result in results {
         match result {
             Ok(written) => {
-                for (at, module, found) in written.modules {
+                for (at, module, found, time) in written.modules {
                     modules[at] = Some((module, found));
+                    times.push((time, indexes[at]));
                 }
             }
             Err(panicked) => panics.push(panicked),
@@ -117,13 +119,40 @@ pub(super) fn write_modules(
         crate::lower::panic_carried(place);
         std::panic::resume_unwind(payload);
     }
+    slowest_timing(setup, times);
     modules.into_iter().map(|module| module.expect("every module is written")).collect()
+}
+
+/// The `--timings` line of the modules of a round that took longest to write, by package, which
+/// shows how much writing them on more threads could gain: a round takes at least as long as
+/// its slowest module.
+fn slowest_timing(setup: &Setup, mut times: Vec<(std::time::Duration, usize)>) {
+    if !crate::timings::enabled() || times.is_empty() {
+        return;
+    }
+    let all: std::time::Duration = times.iter().map(|(time, _)| *time).sum();
+    times.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let slowest: Vec<String> = times
+        .iter()
+        .take(3)
+        .map(|&(time, index)| {
+            let package = setup.plans[index].package();
+            let name = if package.is_empty() { "the crate root" } else { package };
+            format!("{name} {:.3} s", time.as_secs_f64())
+        })
+        .collect();
+    eprintln!(
+        "timing: codegen: {} modules written in {:.3} s, the slowest {}",
+        times.len(),
+        all.as_secs_f64(),
+        slowest.join(", ")
+    );
 }
 
 /// What one generator wrote: modules by their place among those written, each with what writing
 /// it found.
 struct Written {
-    modules: Vec<(usize, modules::Written, Found)>,
+    modules: Vec<(usize, modules::Written, Found, std::time::Duration)>,
 }
 
 /// The modules that the generators of a round write, by index (`indexes`): the place among them of
@@ -154,11 +183,12 @@ fn write_some(
         }
         let index = indexes[at];
         let kept = first.map(|first| &first[index]);
+        let start = std::time::Instant::now();
         match std::panic::catch_unwind(AssertUnwindSafe(|| g.module(&setup.plans[index], &setup.live, kept)))
         {
             // What writing a module found is the module's own: nothing that the generator found
             // before is read while it writes (`Found`).
-            Ok(module) => written.push((at, module, g.take_found())),
+            Ok(module) => written.push((at, module, g.take_found(), start.elapsed())),
             Err(payload) => {
                 stop.fetch_min(at, Ordering::Relaxed);
                 let place = crate::lower::panic_place();

@@ -510,13 +510,17 @@ fn split_module(
     used: &mut std::collections::HashSet<String>,
     traits: &mut std::collections::HashSet<String>,
 ) -> Result<Part, String> {
-    let file = syn::parse_file(text).map_err(|e| {
-        // The code around the error, which a translator's fault in the generated text names.
-        let at = e.span().start();
-        let line = text.lines().nth(at.line.saturating_sub(1)).unwrap_or_default();
-        let around: String = line.chars().skip(at.column.saturating_sub(120)).take(240).collect();
-        format!("{e} at line {}, column {}: {around}", at.line, at.column)
-    })?;
+    let file = text
+        .parse::<proc_macro2::TokenStream>()
+        .map_err(syn::Error::from)
+        .and_then(|tokens| syn::parse2::<syn::File>(hollow(tokens, true)))
+        .map_err(|e| {
+            // The code around the error, which a translator's fault in the generated text names.
+            let at = e.span().start();
+            let line = text.lines().nth(at.line.saturating_sub(1)).unwrap_or_default();
+            let around: String = line.chars().skip(at.column.saturating_sub(120)).take(240).collect();
+            format!("{e} at line {}, column {}: {around}", at.line, at.column)
+        })?;
     let mut edits = Vec::new();
     let mut externs = String::new();
     let mut uses = String::new();
@@ -755,6 +759,43 @@ fn split_module(
     Ok(Part { split: Split { header, uses, pieces }, externs })
 }
 
+/// `tokens` with the code of every function of the module, or of an `impl`, a trait or any other
+/// item's braces at its top (`top`), taken out: the braces after `fn` hold nothing, with the
+/// place of the code (its span) kept. The split reads a function's signature and where its code
+/// is, and takes the code's text from the module's text: syn parsing every body into a syntax tree,
+/// printing it again to find its place (`Spanned::span`) and dropping it took most of the time of
+/// the write, and that of a large program's crate root most of all.
+fn hollow(tokens: proc_macro2::TokenStream, top: bool) -> proc_macro2::TokenStream {
+    use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
+    let mut after_fn = false;
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Ident(ident) => {
+                after_fn |= ident == "fn";
+                TokenTree::Ident(ident)
+            }
+            // A `fn` type of a static or a type alias ends with its item.
+            TokenTree::Punct(punct) => {
+                after_fn &= punct.as_char() != ';';
+                TokenTree::Punct(punct)
+            }
+            TokenTree::Group(group) if group.delimiter() == Delimiter::Brace && after_fn => {
+                after_fn = false;
+                let mut empty = Group::new(Delimiter::Brace, TokenStream::new());
+                empty.set_span(group.span());
+                TokenTree::Group(empty)
+            }
+            TokenTree::Group(group) if group.delimiter() == Delimiter::Brace && top => {
+                let mut inner = Group::new(Delimiter::Brace, hollow(group.stream(), false));
+                inner.set_span(group.span());
+                TokenTree::Group(inner)
+            }
+            other => other,
+        })
+        .collect()
+}
+
 /// The text of a function's return type (` -> T`), or nothing.
 fn at_or_empty(text: &str, output: &syn::ReturnType) -> String {
     match output {
@@ -832,7 +873,7 @@ mod tests {
         let tree = ModuleTree {
             header: String::new(),
             modules: vec![
-                module("a", "fn f() { g_()_2(); }\n"),
+                module("a", "struct S { x: }\n"),
                 module("b", "fn ok() {}\n"),
                 module("c", "fn h( {}\n"),
             ],
