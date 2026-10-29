@@ -254,12 +254,14 @@ fn lower_with<'t>(
 }
 
 /// Whether `error` is that of a class the program does not have (`type `a.b.C` not supported
-/// yet`, `new a.b.C`, as of a field of an untranslated class's type and its initializer):
-/// erasing the Rust generics leaves the class missing, so it is no reason to lower the program
-/// again without them. A type variable's error (`type `B``) may be one.
+/// yet`, `new a.b.C`, as of a field of an untranslated class's type and its initializer, and
+/// `extending `a.b.C`` or `implementing `a.b.C`` of a class whose superclass or interface is
+/// not translated, named by its erasure): erasing the Rust generics leaves the class missing, so
+/// it is no reason to lower the program again without them. A type variable's error (`type `B``)
+/// may be one.
 fn names_missing_class(error: &Error) -> bool {
     let message = &error.message;
-    ["type `", "`new "]
+    ["type `", "`new ", "extending `", "implementing `"]
         .iter()
         .find_map(|prefix| message.strip_prefix(prefix))
         .and_then(|rest| rest.strip_suffix("` not supported yet"))
@@ -463,6 +465,8 @@ mod tests {
     fn a_missing_class_is_no_reason_to_erase_the_rust_generics() {
         assert!(names_missing_class(&error("type `jdk.internal.loader.ClassLoaderValue` not supported yet")));
         assert!(names_missing_class(&error("`new jdk.internal.loader.ClassLoaderValue` not supported yet")));
+        assert!(names_missing_class(&error("extending `java.security.SecureClassLoader` not supported yet")));
+        assert!(names_missing_class(&error("implementing `java.nio.file.WatchService` not supported yet")));
         assert!(!names_missing_class(&error("type `B` not supported yet")));
         assert!(!names_missing_class(&error("type `java.util.List<B>` not supported yet")));
         assert!(!names_missing_class(&error(
