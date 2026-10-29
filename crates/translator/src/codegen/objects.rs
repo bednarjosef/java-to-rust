@@ -2454,10 +2454,15 @@ impl<'a> Gen<'a> {
 
     /// A blank line before an item, unless the output is empty or a line of an item is last.
     pub(super) fn gap(&mut self) {
-        if self.out.ends_with("}\n") || self.out.ends_with(";\n") {
+        if ends_statement(&self.out) {
             self.out.push('\n');
         }
     }
+}
+
+/// Whether `text` ends a statement or a block, after which `gap` leaves a blank line.
+pub(super) fn ends_statement(text: &str) -> bool {
+    text.ends_with("}\n") || text.ends_with(";\n")
 }
 
 /// Whether evaluating `e` may see the static state of a class: it reads or writes a static

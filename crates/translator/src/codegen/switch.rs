@@ -241,9 +241,25 @@ impl<'a> Gen<'a> {
         let name = match &self.frames[index].java {
             Some(java) => snake_case(java),
             None => {
-                self.labels += 1;
+                // The number goes on past a name that a Java label of the method has, or of a
+                // statement around (an inlined lambda's), which would shadow it or which it would.
                 let prefix = if matches!(self.frames[index].kind, Kind::Loop(_)) { "loop" } else { "sw" };
-                format!("{prefix}{}", self.labels)
+                let mut java = HashSet::new();
+                for stmt in &self.class.methods[self.method].body {
+                    visit_stmt(stmt, &mut |_| {}, &mut |s| {
+                        if let Stmt::Labeled { label, .. } = s {
+                            java.insert(snake_case(label));
+                        }
+                    });
+                }
+                java.extend(self.frames.iter().filter_map(|f| f.java.as_deref().map(snake_case)));
+                loop {
+                    self.labels += 1;
+                    let name = format!("{prefix}{}", self.labels);
+                    if !java.contains(&name) {
+                        break name;
+                    }
+                }
             }
         };
         self.frames[index].name = Some(name.clone());

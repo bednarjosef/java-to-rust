@@ -1277,7 +1277,7 @@ fn annotations_of_a_library_are_read() {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
         return;
     };
-    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-library-annotations");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-library-annotations-read");
     let _ = std::fs::remove_dir_all(&work);
     let files = [
         (
