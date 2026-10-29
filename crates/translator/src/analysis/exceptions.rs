@@ -99,6 +99,16 @@ struct Point {
     known: Vec<Vec<Option<guards::Value>>>,
 }
 
+/// What escapes each method (`escapes_of`): the kinds, and the same as sets of their numbers,
+/// with what of them the program's code throws, and how many kinds are numbered.
+#[derive(Default)]
+struct Escaped {
+    kinds: Vec<BTreeSet<Kind>>,
+    bits: Vec<Bits>,
+    program: Vec<Bits>,
+    numbered: usize,
+}
+
 /// What the callers of a method observe: the exceptions under these types, or all of them.
 #[derive(Clone, Default, PartialEq)]
 struct Seen {
@@ -229,8 +239,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // Methods are looked at callees first, and again whenever what escapes a method they call
     // grows (in calls that go round), until nothing does; what escapes only grows, so the order
     // does not change the outcome. The kinds are numbered, and each point's own kinds and those
-    // its `try`s catch are sets of those numbers, worked out once.
-    let escapes_of = |points: &[Vec<Point>]| {
+    // its `try`s catch are sets of those numbers, worked out once. Worked out again after some
+    // methods lost calls (`previous`, with those methods), only what escapes them and their
+    // callers, near and far, is: what escapes every other method calls none of them, and is as
+    // before.
+    let escapes_of = |points: &[Vec<Point>], previous: Option<(Escaped, &[usize])>| {
         let n = class.methods.len();
         let mut kinds: Vec<Kind> = Vec::new();
         let mut numbers: FastMap<Kind, usize> = FastMap::default();
@@ -275,8 +288,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     .collect()
             })
             .collect();
-        let mut escapes: Vec<Bits> = vec![Bits::default(); n];
-        let mut from_program: Vec<Bits> = vec![Bits::default(); n];
         let mut callers: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
         // The calls that may run several methods (the implementations of a virtual call), by
@@ -310,8 +321,40 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     .collect()
             })
             .collect();
+        let affected: Vec<bool> = match &previous {
+            None => vec![true; n],
+            Some((_, changed)) => {
+                let mut affected = vec![false; n];
+                let mut work = changed.to_vec();
+                while let Some(m) = work.pop() {
+                    if !affected[m] {
+                        affected[m] = true;
+                        work.extend(&callers[m]);
+                        work.extend(sets_with[m].iter().flat_map(|&set| &set_callers[set]));
+                    }
+                }
+                affected
+            }
+        };
+        let (mut escapes, mut from_program, mut before_kinds) = match previous {
+            None => (vec![Bits::default(); n], vec![Bits::default(); n], Vec::new()),
+            Some((mut before, _)) => {
+                debug_assert_eq!(before.numbered, kinds.len(), "the kinds are numbered as before");
+                for m in (0..n).filter(|&m| affected[m]) {
+                    before.bits[m] = Bits::default();
+                    before.program[m] = Bits::default();
+                }
+                (before.bits, before.program, before.kinds)
+            }
+        };
         let mut set_escapes: Vec<Bits> = vec![Bits::default(); set_callers.len()];
         let mut set_from_program: Vec<Bits> = vec![Bits::default(); set_callers.len()];
+        for (m, sets) in sets_with.iter().enumerate().filter(|&(m, _)| !affected[m]) {
+            for &set in sets {
+                set_escapes[set].union(&escapes[m]);
+                set_from_program[set].union(&from_program[m]);
+            }
+        }
         let mut called_by = vec![usize::MAX; n];
         for (m, ps) in points.iter().enumerate() {
             for (i, p) in ps.iter().enumerate() {
@@ -328,8 +371,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
             }
         }
-        let mut queued = vec![true; n];
-        let mut queue: VecDeque<usize> = closure::components(&callees).1.into_iter().flatten().collect();
+        let mut queued = affected.clone();
+        let mut queue: VecDeque<usize> =
+            closure::components(&callees).1.into_iter().flatten().filter(|&m| affected[m]).collect();
         while let Some(m) = queue.pop_front() {
             queued[m] = false;
             let mut out = Bits::default();
@@ -396,12 +440,16 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
             }
         }
-        escapes
-            .iter()
-            .map(|set| set.iter().map(|k| kinds[k].clone()).collect())
-            .collect::<Vec<BTreeSet<Kind>>>()
+        let kinds_of = (0..n)
+            .map(|m| match affected[m] {
+                true => escapes[m].iter().map(|k| kinds[k].clone()).collect(),
+                false => std::mem::take(&mut before_kinds[m]),
+            })
+            .collect();
+        Escaped { kinds: kinds_of, bits: escapes, program: from_program, numbered: kinds.len() }
     };
-    let mut escapes = phase("exceptions: escapes", || escapes_of(&points));
+    let mut escaped = phase("exceptions: escapes", || escapes_of(&points, None));
+    let mut escapes = std::mem::take(&mut escaped.kinds);
     // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
     // one out only shrinks what escapes, so the calls are looked at again until none is left.
     phase("exceptions: quiet calls", || {
@@ -434,7 +482,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             for &(m, i) in dropped.iter().rev() {
                 points[m].remove(i);
             }
-            escapes = phase("exceptions: escapes", || escapes_of(&points));
+            let mut changed: Vec<usize> = dropped.iter().map(|&(m, _)| m).collect();
+            changed.dedup();
+            escaped.kinds = std::mem::take(&mut escapes);
+            let before = std::mem::take(&mut escaped);
+            escaped = phase("exceptions: escapes", || escapes_of(&points, Some((before, &changed))));
+            escapes = std::mem::take(&mut escaped.kinds);
         }
     });
 
@@ -478,29 +531,65 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         seen.all |= more.all;
         grew || before != seen.all
     };
+    // What the callers of each method observed when it was last looked at, which it passed on
+    // then: looked at again, it passes on only what they observe since (with the `try`s around
+    // its calls passed on already), as what they observe only grows.
+    let mut passed: Vec<Option<Seen>> = vec![None; class.methods.len()];
+    let calls: Vec<bool> =
+        points.iter().map(|ps| ps.iter().any(|p| matches!(p.raise, Raise::Call(_)))).collect();
     while let Some(m) = queue.pop_front() {
         queued[m] = false;
+        if !calls[m] {
+            continue;
+        }
+        let now = if bugs_only[m] { Seen::default() } else { seen[at[m]].clone() };
+        let added: Option<(Vec<usize>, bool)> =
+            passed[m].as_ref().map(|before| (now.types.without(&before.types), now.all && !before.all));
+        if added.as_ref().is_some_and(|(types, all)| types.is_empty() && !all) {
+            continue;
+        }
         let mut grown = Vec::new();
         for p in &points[m] {
             let Raise::Call(callees) = &p.raise else { continue };
             visit += 1;
-            let mut here = if bugs_only[m] { Seen::default() } else { seen[at[m]].clone() };
-            for f in &p.frames {
-                for &t in &f.catches {
-                    here.types.insert(t);
+            let with_tries;
+            let here = match (&added, p.frames.is_empty()) {
+                (Some(_), _) | (None, true) => &now,
+                (None, false) => {
+                    let mut here = now.clone();
+                    for f in &p.frames {
+                        for &t in &f.catches {
+                            here.types.insert(t);
+                        }
+                        here.all |= f.finally;
+                    }
+                    with_tries = here;
+                    &with_tries
                 }
-                here.all |= f.finally;
-            }
+            };
             for &c in callees {
                 if grown_at[at[c]] == visit {
                     continue;
                 }
                 grown_at[at[c]] = visit;
-                if grow(&mut seen[at[c]], &here) {
+                let grew = match &added {
+                    None => grow(&mut seen[at[c]], here),
+                    Some((types, all)) => {
+                        let seen = &mut seen[at[c]];
+                        let mut grew = *all && !seen.all;
+                        seen.all |= *all;
+                        for &t in types {
+                            grew |= seen.types.insert(t);
+                        }
+                        grew
+                    }
+                };
+                if grew {
                     grown.push(c);
                 }
             }
         }
+        passed[m] = Some(now);
         for c in grown {
             let members = h.group_members(c);
             for &g in if members.is_empty() { std::slice::from_ref(&c) } else { members } {
