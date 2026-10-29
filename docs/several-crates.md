@@ -170,6 +170,14 @@ one item, or an item added or removed, moves only the cuts around it: the crates
 their names and their code. A module with more code than a share is spread over several crates,
 each with the module's `use` lines: the Minecraft server's crate root, whose `Object` enum's
 methods and reflection table are 290 MB of code, would otherwise be one crate of its own.
+Within a body crate, a module's code past about 512 KB (`CODEGEN_UNIT`) is cut into modules of
+its own of about that size (`mod j2r_code_0 { use super::*; .. }`, with the module's `use` lines
+again), and an `impl` with more moved code than that into several traits (`Bodies_Object`,
+`Bodies_Object_2`, ..), each an item of its own: rustc compiles each module's code in one
+codegen unit, on one thread. The Minecraft server's crate root, one module with 30 MB of code in
+one body crate, 18 MB of it one `impl` of `Object`, kept one thread busy for an hour of a release
+build (`opt-level = 1`) while the others had finished; its body crate of the reflection table's
+reads and writes (11 MB) built in 57 s alone, and in 29 s cut into modules so.
 
 Writing the workspace leaves alone each file whose text is already there and removes the body
 crates of an earlier split that this one does not have, so Cargo, which goes by the files' times
