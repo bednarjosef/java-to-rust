@@ -273,8 +273,9 @@ handler really sees (`Facts::raised_classes`), and only those get a variant and 
 
 Specific cases:
 
-- **Regular expressions**: a constant pattern (and literal replacement) that compiles, or one
-  from `Pattern.quote`, never throws (`java_runtime::regex::never_fails`), so a handler around
+- **Regular expressions**: a constant pattern (and literal replacement) that compiles, a literal
+  or a constant variable (a `final` local initialized with one, which lowering replaces with its
+  value, as javac does), or one from `Pattern.quote`, never throws (`java_runtime::regex::never_fails`), so a handler around
   `split`, `matches`, `replaceAll` or `replaceFirst` does not block the program. A replacement
   that is not such a literal may throw `IllegalArgumentException` or `IndexOutOfBoundsException`,
   which a `catch` sees with Java's message. A non-constant pattern may throw

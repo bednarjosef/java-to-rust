@@ -286,6 +286,16 @@ impl<'t> Lowering<'t> {
                 if let Some(Err(why)) = checked {
                     return error(node.pos(), format!("{why} not supported yet"));
                 }
+                // A constant variable named by its simple name (a `final` local initialized with a
+                // literal) is its value, as javac compiles it, so that the analysis of exceptions
+                // sees the constant pattern (and replacement) and that the call never throws.
+                for (arg, at) in args.iter_mut().zip(&arg_nodes).take(2) {
+                    if at.kind() == "IDENTIFIER"
+                        && let Some(text) = self.constant_text(Some(*at))
+                    {
+                        arg.kind = ExprKind::Str(text);
+                    }
+                }
             }
             StringOp::IndexOf | StringOp::LastIndexOf if args.len() > 2 => {
                 return unsupported(node, &format!("`String.{name}` with an end index"));
