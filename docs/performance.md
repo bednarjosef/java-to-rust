@@ -355,19 +355,25 @@ steps run alongside each other and one after another.
 **Generator rounds that write only what is new.** The enums of class types get the items the
 code asks for (conversions, dispatch, bodies of methods), which only writing the code finds, so
 the generator (`codegen::generate_all`) writes the whole program, then writes the enum items
-alone until they ask for nothing new, and then the whole program once more with the final set.
+alone until they ask for nothing new, and then all of them once more with the final set.
 Only the enum items read which items are wanted, and what an item asks for depends on the item
 alone, so a round of enum items now writes only the enums of the types asked for anew, and in
 each only the items asked for anew (`Gen::only_enums`); the rest would ask for what it asked
 for before. What does not depend on the wanted items (the live types, the names of methods, their
 receivers, the homes of methods, the classes' numbers) is worked out once for all the rounds
-(`Setup`), not once per round. The last round still writes everything again: labels are
-numbered across the program, and enum items written among the methods move the numbers of the
-labels after them, so the first round's text cannot be kept. The items asked for in each round
-are the same as before, and javac's census report and whole translation and the 28 targets'
-translations are byte for byte the same. On javac's census from its checkpoint, the generator
-goes from 26.6 s (4.9 s for the first round, ten rounds of enum items at 1.1 to 1.6 s each,
-6.1 s for the last) to 10.4 s (3.8 s, 1.4 s for all ten together, 4.6 s).
+(`Setup`), not once per round. The last round writes only the enum items too, all of them,
+and puts them among the other items of the first round, whose text it keeps (`Kept`,
+`modules::merge`). Labels are numbered per item of a module, so an item's text depends on the
+items before it only through the blank line that may start it (`gap`): of the first round's
+items, only the one right after a module's enum items, where those end otherwise than what was
+before them, is written again. What the checks after the writing read (the bodies written, the
+dereferences and casts written in their checked forms) and the classes named as values are
+carried over from the first round. A name made once for the whole program records nothing in
+the item that first asks for it (`modules::name_in_package`), as which item that is depends on
+what a round writes. javac's census from its checkpoint saves the same tree (`--save-tree`)
+byte for byte, and its generator takes 7.4 s: 3.4 s for the first round, 2.0 s for its ten
+rounds of enum items together, and 1.9 s for the last, which wrote the whole program again in
+5.3 s.
 
 **Messages kept from round to round.** Pass 3 of a census runs the analyses, the messages of
 `NullPointerException`s and the generator once per round, and the stubs between the rounds change

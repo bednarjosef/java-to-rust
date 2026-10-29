@@ -101,28 +101,30 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
     SHARED_STRINGS.set(class.shared_strings);
     // The enums of class types get the items that the code uses, which writing the code finds:
     // the program is written again until it asks for no item that was not written. Only the
-    // enum items read which items are wanted, so what the rest asks for is the same in every
-    // round: after the first, the rounds write only the enum items until those ask for nothing
-    // new, and then the whole program once more. What an enum item asks for depends on the item
-    // alone, so a round of enum items writes those asked for anew (`Gen::only_enums`): the others
-    // ask for what they asked for before. What does not depend on the wanted items is worked out
-    // once (`Setup`). The last round writes the whole program again rather than reusing the
-    // first one's text: labels are numbered across the program, and enum items written among the
-    // methods move the numbers of those after them.
+    // enum items read which items are wanted, so what the rest asks for, and its text, are the
+    // same in every round: after the first, the rounds write only the enum items until those
+    // ask for nothing new, and then all of them once more among the first round's other items
+    // (`Kept`). What an enum item asks for depends on the item alone, so a round of enum items
+    // writes those asked for anew (`Gen::only_enums`): the others ask for what they asked for
+    // before. What does not depend on the wanted items is worked out once (`Setup`).
     let mut setup = Setup::new(class, facts);
     let mut wanted = Needs::new();
     let mut only_enums: Option<OnlyEnums> = None;
+    let mut kept: Option<Kept> = None;
     for round in 1.. {
         let start = std::time::Instant::now();
+        let last = only_enums.is_none() && kept.is_some();
         let (tree, needs, rejected, closures) =
-            generate_with(class, facts, &mut setup, &wanted, only_enums.as_ref());
+            generate_with(class, facts, &mut setup, &wanted, only_enums.as_ref(), &mut kept);
         if crate::timings::enabled() {
             let new = needs.iter().filter(|n| !wanted.contains(n)).count();
-            let written =
-                only_enums.as_ref().map(|only| format!(" (enum items of {} types)", only.types.len()));
+            let written = match &only_enums {
+                Some(only) => format!(" (enum items of {} types)", only.types.len()),
+                None if last => " (all enum items, the first round's other items kept)".to_string(),
+                None => String::new(),
+            };
             eprintln!(
-                "timing: codegen: round {round}{}: {:.3} s, {new} items asked for anew",
-                written.unwrap_or_default(),
+                "timing: codegen: round {round}{written}: {:.3} s, {new} items asked for anew",
                 start.elapsed().as_secs_f64()
             );
         }
@@ -134,7 +136,7 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
         };
         if only_enums.is_some() {
             // What the enum items reject, or the program once they ask for nothing new, is
-            // found by writing the whole program with the same items.
+            // found by writing all of them with the same items.
             if !rejected.is_empty() || needs.is_subset(&wanted) {
                 only_enums = None;
                 continue;
@@ -146,7 +148,7 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
         if !rejected.is_empty() {
             return Err(rejected);
         }
-        if needs.is_subset(&wanted) {
+        if let Some(tree) = tree {
             // The methods with a call that throws inside a closure, and then any other code.
             if !closures.is_empty() {
                 return Err(closures);
@@ -200,6 +202,21 @@ pub fn panicked_in() -> Option<Pos> {
 struct OnlyEnums {
     needs: Needs,
     types: HashSet<usize>,
+}
+
+/// What the first round wrote apart from the enum items of class types, which no later round
+/// writes otherwise: the last round writes the enum items among it (`generate_all`). Labels are
+/// numbered per item, so an item's text depends on what is before it only through the blank
+/// line that may start it (`Gen::module`).
+struct Kept {
+    modules: Vec<modules::Written>,
+    /// What writing it found that the checks and the classes' constants read: `Gen::written`,
+    /// `Gen::dereferenced`, `Gen::class_values`, `Gen::class_details`, `Gen::class_interfaces`.
+    written: HashSet<usize>,
+    dereferenced: HashSet<ExprId>,
+    class_values: std::collections::BTreeSet<usize>,
+    class_details: bool,
+    class_interfaces: bool,
 }
 
 /// What the generator finds of the program before it writes it, the same in every round
@@ -263,16 +280,19 @@ impl Setup {
     }
 }
 
-/// The program, with the enum items `wanted`, and the enum items that it uses; and what in it
-/// cannot be translated, and the methods with a call that throws inside a closure (see
-/// `exceptions::check_closures`).
+/// The program, with the enum items `wanted`, once it rejects nothing and asks for no other;
+/// the enum items that it uses; and what in it cannot be translated, and the methods with a call
+/// that throws inside a closure (see `exceptions::check_closures`). A round of enum items alone
+/// (`only_enums`) writes no program. The first round keeps what it wrote in `kept` when it is
+/// not the last, and a round after the rounds of enum items writes those among it.
 fn generate_with(
     class: &Class,
     facts: &Facts,
     setup: &mut Setup,
     wanted: &Needs,
     only_enums: Option<&OnlyEnums>,
-) -> (ModuleTree, Needs, Vec<Error>, Vec<Error>) {
+    kept: &mut Option<Kept>,
+) -> (Option<ModuleTree>, Needs, Vec<Error>, Vec<Error>) {
     let live = setup.live.clone();
     let _modules = modules::enter(class);
     let mut g = Gen {
@@ -357,7 +377,21 @@ fn generate_with(
         slot_param: String::new(),
         on_stack: false,
         stack_forms: HashSet::new(),
-        only_enums: only_enums.cloned(),
+        only_enums: match (only_enums, &kept) {
+            (Some(only), _) => Some(only.clone()),
+            // The last round writes every enum item, which are all asked for anew.
+            (None, Some(_)) => Some(OnlyEnums {
+                needs: wanted.clone(),
+                types: wanted
+                    .iter()
+                    .filter_map(|need| match *need {
+                        Need::Enum(t) => Some(t),
+                        _ => None,
+                    })
+                    .collect(),
+            }),
+            (None, None) => None,
+        },
         class_values: Default::default(),
         class_value_names: Vec::new(),
         class_details: false,
@@ -379,14 +413,46 @@ fn generate_with(
     } else {
         header
     };
-    let tree = g.program(&live, header);
+    if only_enums.is_none()
+        && let Some(kept) = kept
+    {
+        g.written = kept.written.clone();
+        g.dereferenced = kept.dereferenced.clone();
+        g.class_values = kept.class_values.clone();
+        g.class_details = kept.class_details;
+        g.class_interfaces = kept.class_interfaces;
+    }
+    let first = kept.as_ref().filter(|_| only_enums.is_none()).map(|kept| &kept.modules[..]);
+    let written = g.program(&live, first);
+    let needs = g.needs.take();
     if only_enums.is_some() {
-        return (tree, g.needs.take(), g.rejected, Vec::new());
+        return (None, needs, g.rejected, Vec::new());
     }
     g.check_dereferences();
     g.check_casts();
     g.check_catching();
-    (tree, g.needs.take(), g.rejected, g.closures)
+    let done = g.rejected.is_empty() && needs.is_subset(wanted);
+    let written = match kept.take() {
+        Some(first) if done => modules::merge(first.modules, written),
+        Some(first) => {
+            *kept = Some(first);
+            return (None, needs, g.rejected, Vec::new());
+        }
+        None if done => written,
+        None => {
+            *kept = Some(Kept {
+                modules: written,
+                written: std::mem::take(&mut g.written),
+                dereferenced: std::mem::take(&mut g.dereferenced),
+                class_values: std::mem::take(&mut g.class_values),
+                class_details: g.class_details,
+                class_interfaces: g.class_interfaces,
+            });
+            return (None, needs, g.rejected, Vec::new());
+        }
+    };
+    let (tree, closures) = g.finish(header, written);
+    (Some(tree), needs, g.rejected, closures)
 }
 
 /// How deep rustc follows a trait such as `Send` through the fields of nested types.
@@ -623,8 +689,8 @@ struct Gen<'a> {
     on_stack: bool,
     /// The constructors and factories that get a form on the stack (see `stack_objects`).
     stack_forms: HashSet<usize>,
-    /// The enum items written in a round of them alone, to find what they ask for
-    /// (`generate_all`).
+    /// The enum items written in a round of them alone, to find what they ask for, or all of
+    /// them in the last round, which takes the other items from the first (`generate_all`).
     only_enums: Option<OnlyEnums>,
     /// The classes of the program whose `java::Class` values the code names, each declared once
     /// as a constant at the crate root (`class_value_constants`).
