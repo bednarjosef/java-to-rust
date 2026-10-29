@@ -5997,7 +5997,7 @@ fn a_pattern_binds_the_object_with_if_let() {
     assert_contains(
         &rust,
         &[
-            "    fn as_rect(&self) -> Option<Arc<Rect>> {\n        match self.view() {\n            ShapeView::Rect(o) => Some(o.clone()),\n            _ => None,\n        }\n    }",
+            "    fn as_rect(&self) -> Option<Arc<Rect>> {\n        match self.0.tag() {\n            2 => { let o: &Arc<Rect> = unsafe { self.0.as_pointer() }; Some(o.clone()) }\n            _ => None,\n        }\n    }",
             "    if let Some(c) = s.as_circle() {\n",
             "    } else if let Some(r) = s.as_rect() && r.w == r.h {\n",
             "    s.as_rect().is_some_and(|r| r.w > r.h)",
@@ -6025,7 +6025,7 @@ fn downcasts_are_checked() {
         &[
             "let r = java::cast(&all[1], |o| o.as_rect(), (\"Rect\", java::APP));",
             "java::cast(&s, |o| o.as_unit(), (\"Unit\", java::APP)) as i32",
-            "    fn as_unit(&self) -> Option<Unit> {\n        match self.view() {\n            ShapeView::Unit(o) => Some(*o),",
+            "    fn as_unit(&self) -> Option<Unit> {\n        match self.0.tag() {\n            3 => { let o: &Unit = unsafe { self.0.as_value() }; Some(*o) }",
         ],
     );
 }

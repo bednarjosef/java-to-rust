@@ -378,13 +378,21 @@ impl<'a> Gen<'a> {
             .into_iter()
             .filter(|&c| self.class.types[c].kind == TypeKind::Enum)
             .collect();
+        let all = enums.len() == self.enum_variants(t).len();
         let ordinal = |g: &mut Self, e: &'a Expr| {
             let obj = g.object(e);
-            let mut arms: Vec<String> =
-                enums.iter().map(|&c| format!("{}(e) => *e as i32", g.view_pattern(t, c))).collect();
+            // A constant is held in the value's bits, which are its ordinal (`java::Thin::ordinal`):
+            // no `match` over the enums, of which an `Enum` of a large program has hundreds.
+            if all && !enums.is_empty() {
+                return format!("{{ let value = {obj}; value.0.ordinal() }}");
+            }
+            let tags = g.tags(&enums, &g.enum_variants(t));
+            let mut arms = Vec::new();
+            if !enums.is_empty() {
+                arms.push(format!("{tags} => value.0.ordinal()"));
+            }
             arms.push(g.not_enum_arm(t));
-            // The view lends the constant, however the `Enum` is held.
-            format!("{{ let value = {obj}; match value.view() {{ {} }} }}", arms.join(", "))
+            format!("{{ let value = {obj}; match value.0.tag() {{ {} }} }}", arms.join(", "))
         };
         match builtin {
             Builtin::EnumOrdinal => Code::atom(ordinal(self, &args[0])),

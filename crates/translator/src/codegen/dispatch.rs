@@ -2146,14 +2146,21 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
         } else {
-            self.line("match self.view() {");
+            // A test of the class number, which lends the object where it lies: `view()` would
+            // be a call and a `match` over every class of the type (an `Object`'s, thousands)
+            // for the one or few that pass.
+            self.line("match self.0.tag() {");
             self.indent += 1;
             for &c in &passing {
-                self.line(&format!("{}(o) => Some({}),", self.view_pattern(t, c), self.held(c)));
+                let payload = self.payload(c);
+                let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
+                let (tag, held) = (self.class_tag(c), self.held(c));
+                // The class number is the one its constructor gives.
+                self.line(&format!(
+                    "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; Some({held}) }}"
+                ));
             }
-            if passing.len() < variants.len() {
-                self.line("_ => None,");
-            }
+            self.line("_ => None,");
             self.indent -= 1;
             self.line("}");
         }
@@ -3019,6 +3026,22 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether two values of class `c`'s variant are the same object exactly when their bits are
+    /// (`same_object_impl`): a handle compared by identity, or an enum's constant, a `Boolean` or
+    /// a `Byte` held in the low bytes, as `same_variant` compares them with `==`.
+    fn same_by_bits(&mut self, c: usize) -> bool {
+        let same = self.same_variant(c);
+        if self.thin_pointer(c) {
+            return same == IDENTITY;
+        }
+        let value = match self.runtime_of(c) {
+            Some(Type::Boxed(b)) => matches!(*b, Type::Boolean | Type::Byte),
+            Some(_) => false,
+            None => self.class.types[c].kind == TypeKind::Enum,
+        };
+        value && same == "a == b"
+    }
+
     /// `java::SameObject` for the enum of `Object` (type `t`), where the program compares values
     /// that may both be strings or boxes (`Facts::identity_checks`): Java's identity, which a
     /// string or a box that is not kept as an object (`faithful_box`) has only as far as unequal
@@ -3034,24 +3057,27 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
         self.indent += 1;
-        // The objects whose identity is their handle's: the same object exactly when the two
-        // values have the same bits (`java::Thin`), one test for all of them.
-        let by_bits: Vec<usize> = variants
-            .iter()
-            .copied()
-            .filter(|&c| {
-                self.runtime_of(c).is_none() && self.thin_pointer(c) && self.same_variant(c) == IDENTITY
-            })
-            .collect();
+        // The objects whose identity is their handle's, and the values that are equal exactly
+        // when their bits are (an enum's constant, a `Boolean` or a `Byte`, which `java::Thin`
+        // holds in the low bytes of zeroed bits): the same object exactly when the two values
+        // have the same bits, one test for all of them.
+        let by_bits: Vec<usize> = variants.iter().copied().filter(|&c| self.same_by_bits(c)).collect();
         let others: Vec<usize> = variants.iter().copied().filter(|c| !by_bits.contains(c)).collect();
         if by_bits.len() == variants.len() && !variants.is_empty() {
             self.line("self.0 == other.0");
         } else if variants.is_empty() {
             self.line("match self.view() {}");
         } else {
+            // Values of two classes are never the same object. The few classes of the others
+            // (strings, boxes, builders) are the test, not the many of the rest, which a `match`
+            // on the number would test one range after another.
+            self.line("let tag = self.0.tag();");
+            self.line("if tag != other.0.tag() {");
+            self.line("    return false;");
+            self.line("}");
             if !by_bits.is_empty() {
-                let tags = self.tags(&by_bits, variants);
-                self.line(&format!("if matches!(self.0.tag(), {tags}) {{"));
+                let tags = self.tags(&others, variants);
+                self.line(&format!("if !matches!(tag, {tags}) {{"));
                 self.line("    return self.0 == other.0;");
                 self.line("}");
             }

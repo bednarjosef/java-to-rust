@@ -131,7 +131,9 @@ Naming:
   another type has the same name either way (`CSS.Value` beside `CSSValue`), with its package
   where that is shared too. The names are unique in the program, as every enum's conversions
   meet on `Object`: where two types still come to one name (`WinDef.LONG` and `Long`), all but
-  the one with fewest dots take the first free number (`as_long`, `as_long_2`). A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
+  the one with fewest dots take the first free number (`as_long`, `as_long_2`). `as_<type>()`
+  tests the class number and lends the object where it lies, as `view()` does, without the
+  `match` over all of the type's classes that `view()` is. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
   the class methods above gets a suffix (`base_2`, `clone_2`).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
@@ -420,7 +422,10 @@ A string or a box inside `Object` is a plain value whose identity the translatio
 keep, so `==` between two `Object`s where both sides may be strings or boxes is
 `java::same_object` (`Facts::identity_checks`): different values are different objects, and two
 equal ones end the program (`java::unkept_identity`), as Java may or may not see one object in
-them. Never compare by value where Java compares references. Whether a side may be one is a points-to
+them. `same_object` is false for two class numbers, and the bits otherwise, but for the few
+classes that are such values, which it tests by number and compares through the view: a Java
+enum's constant, a `Boolean` and a `Byte` are equal exactly when their bits are, as are handles.
+Never compare by value where Java compares references. Whether a side may be one is a points-to
 analysis (`analysis/object_values.rs`): it follows, until nothing changes, whether each
 variable, parameter, return value, field, static and array element type may hold a string or a
 box, and which classes its objects may be of; each instance method is followed once per class
@@ -642,6 +647,10 @@ Other rules:
 - An interface method that a Java enum implements with a method every enum has (`name()`,
   `ordinal()`, `toString()`) dispatches to the enum's own; any other method of `java.lang.Enum`
   doing so is rejected.
+- `ordinal()` and `compareTo` of a constant held as an `Enum` or an `Object` read the value's
+  bits (`java::Thin::ordinal`): a Java enum is a Rust enum without fields, whose discriminant is
+  the ordinal, held in the low bytes. Where the type has classes that are not enums, the class
+  number is tested first and the others fail the cast to `Enum`.
 - A class may implement an interface's method with a method it inherits from a superclass that
   does not implement the interface (`Spliterators.EmptySpliterator.OfInt`). javac's `overrides`
   cannot list it, so `JavaTree` gives the class an `inherits` list of such pairs, and
