@@ -406,7 +406,9 @@ Design: [natives-and-input.md](natives-and-input.md).
   and the `jrt:` file system over the JDK's `lib/modules` image.
 - `System.getProperty` gives what a plain `java Main` run gives (`lower/system.rs`): machine
   values at run time, other keys fixed from the JDK the translator ran with, and
-  `java.awt.headless` `"true"`, as with `-Djava.awt.headless=true`.
+  `java.awt.headless` `"true"`, as with `-Djava.awt.headless=true`. A key that code computes is
+  a `switch` over the keys of such a run; `Integer.getInteger` and `Long.getLong` of one give
+  the number of a key whose value is one, and the default for any other key.
   `sun.java.command` and `user.timezone` as constants are rejected. `System.setProperty` and
   `clearProperty` keep their changes, which every `getProperty` of a program that calls them
   reads (`java/overlay/java/lang/TranslatedProperties.java`). `System.getenv(name)` reads the
