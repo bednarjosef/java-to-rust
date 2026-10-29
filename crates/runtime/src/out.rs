@@ -12,7 +12,8 @@
 //! streams through `standard_write`, `standard_write_bytes`, `standard_flush` and
 //! `standard_close`, so the two ways of printing stay in order.
 //!
-//! What standard output has written is held in memory rather than written at once. Rust's
+//! What standard output has written is held in memory rather than written at once, in a program
+//! without threads. Rust's
 //! `println!` locks standard output and, because standard output is line buffered even when it is
 //! a file or a pipe, makes one `write` system call per line. Java's `System.out` also writes on
 //! every `println`, but a translated program has no reason to: what it prints is the same bytes in
@@ -28,10 +29,12 @@
 //!
 //! Standard output lives in a thread-local whose destructor writes it out when the main thread
 //! ends; glibc runs those destructors on `exit`, and the corpus test checks every program's
-//! output. Once the program starts a thread, the stream is the process's (`SHARED`) instead: each
-//! `print` or `println` collects its text in its `Out` and appends it whole when the `Out` is
-//! dropped, at the end of the statement, so that two threads' lines never interleave inside a
-//! line, as `PrintStream`'s synchronized methods guarantee. A `toString` that prints while its
+//! output. Once the program starts a thread, the stream is the process's (`SHARED`) instead,
+//! which writes what it passes on at once, as Java does: a program with threads, such as a
+//! server, may go on for as long as it likes after it prints, or be killed, and what it printed
+//! is out by then. Each `print` or `println` collects its text in its `Out` and appends it whole
+//! when the `Out` is dropped, at the end of the statement, so that two threads' lines never
+//! interleave inside a line, as `PrintStream`'s synchronized methods guarantee. A `toString` that prints while its
 //! object is being printed comes out first, as in Java, which converts the object before it
 //! locks the stream.
 
@@ -56,11 +59,17 @@ struct Stream {
     /// Whether the program has closed the stream (`System.out.close()`): what it prints after
     /// that goes nowhere, as Java's closed `PrintStream` drops it.
     closed: bool,
+    /// Whether what the stream passes on is written at once, rather than once it has 8 KiB.
+    at_once: bool,
 }
 
 impl Stream {
     const fn new(fd: i32) -> Stream {
-        Stream { fd, written: Vec::new(), buffered: Vec::new(), closed: false }
+        Stream { fd, written: Vec::new(), buffered: Vec::new(), closed: false, at_once: false }
+    }
+
+    const fn at_once(fd: i32) -> Stream {
+        Stream { fd, written: Vec::new(), buffered: Vec::new(), closed: false, at_once: true }
     }
 
     /// Writes out what the stream has written.
@@ -78,12 +87,13 @@ impl Stream {
         self.written.clear();
     }
 
-    /// Standard error writes at once, after what standard output has written.
+    /// Standard error writes at once, after what standard output has written; so does the
+    /// standard output of a program with threads.
     fn settle(&mut self) {
         if self.fd == 2 {
             drain_stdout();
             self.drain();
-        } else if self.written.len() >= CAPACITY {
+        } else if self.at_once || self.written.len() >= CAPACITY {
             self.drain();
         }
     }
@@ -159,12 +169,14 @@ impl Drop for Stream {
 thread_local! {
     static OUT: RefCell<Stream> = {
         install_panic_flush();
-        RefCell::new(Stream { fd: 1, written: Vec::with_capacity(CAPACITY), buffered: Vec::new(), closed: false })
+        let mut s = Stream::new(1);
+        s.written.reserve(CAPACITY);
+        RefCell::new(s)
     };
 }
 
 /// Standard output of a program that has started a thread, which every thread prints to.
-static SHARED: Mutex<Stream> = Mutex::new(Stream::new(1));
+static SHARED: Mutex<Stream> = Mutex::new(Stream::at_once(1));
 
 /// Standard error.
 static ERR: Mutex<Stream> = Mutex::new(Stream::new(2));
@@ -452,6 +464,18 @@ mod tests {
         s.buffer_bytes(&[b'e'; BUFFER]);
         assert_eq!(s.written.len(), 2 * BUFFER + 1);
         assert!(s.buffered.is_empty());
+        s.written.clear();
+    }
+
+    #[test]
+    fn the_output_of_a_program_with_threads_goes_out_at_once() {
+        // A newline, which is all this writes to the test's standard output.
+        let mut s = Stream::at_once(1);
+        s.text(b"\n");
+        assert!(s.written.is_empty());
+        let mut s = stream();
+        s.text(b"\n");
+        assert_eq!(s.written, b"\n");
         s.written.clear();
     }
 
