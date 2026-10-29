@@ -164,6 +164,7 @@ impl<'t> Lowering<'t> {
                 type_params: Vec::new(),
                 jdk_code: false,
                 field_update: None,
+                added: false,
             });
             methods.len() - 1
         });
@@ -286,6 +287,7 @@ impl<'t> Lowering<'t> {
                     type_params: Vec::new(),
                     jdk_code: false,
                     field_update: None,
+                    added: false,
                 };
                 self.guard_clinit(index, &mut clinit, &mut types[index], clinit_ctors);
                 methods.push(clinit);

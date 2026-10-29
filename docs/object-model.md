@@ -373,7 +373,10 @@ in the order of its `implements` clauses, each interface after its own superinte
 interface's initialization initializes none (`codegen::default_superinterfaces`, and
 reachability keeps those initializers, `Walk::default_interfaces`). Code in a class or its
 subclass does not initialize the class again (`codegen/statics.rs::init_call`), nor does a
-default method its interface, which the class's initialization has initialized.
+default method its interface, which the class's initialization has initialized. A method that
+lowering adds for an expression (`Method::added`, `lower/added_methods.rs`), such as the one
+every `Class.forName` with a computed name calls, is put in the class whose code it first meets
+but stands for the code at its call sites, so calling it does not initialize that class.
 
 ### 1.5 `instanceof`, patterns and casts
 

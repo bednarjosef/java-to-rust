@@ -459,6 +459,7 @@ impl<'t> Lowering<'t> {
             type_params: Vec::new(),
             jdk_code: false,
             field_update: None,
+            added: false,
         };
         for m in methods.iter_mut().filter(|m| !m.is_static && !m.is_ctor) {
             match (m.name.as_str(), &m.params[..], m.ret) {
@@ -694,6 +695,7 @@ impl<'t> Lowering<'t> {
             type_params: Vec::new(),
             jdk_code: true,
             field_update: None,
+            added: false,
         }
     }
 
@@ -1158,6 +1160,7 @@ impl<'t> Lowering<'t> {
             type_params: Vec::new(),
             jdk_code: false,
             field_update: None,
+            added: false,
         }
     }
 

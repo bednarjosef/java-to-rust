@@ -2595,6 +2595,7 @@ impl<'t> Lowering<'t> {
             jdk_code: false,
             // A loop is code like any other, which calls the update that it loops on.
             field_update: u.looped.is_none().then(|| (u.update, u.field.clone())),
+            added: false,
         }
     }
 

@@ -839,6 +839,11 @@ pub struct Method {
     /// a method that lowering adds (`lower::handles`): its body reads, compares and writes the
     /// field, which the generator writes as one atomic action where the field is shared.
     pub field_update: Option<(crate::program::FieldUpdate, String)>,
+    /// A method that lowering adds for an expression (`lower/added_methods.rs`), such as the one
+    /// `Class.forName` calls: it stands for code at its call sites, whatever class it is put in, so
+    /// calling it does not initialize that class (`analysis::statics::entry_inits`).
+    #[serde(default)]
+    pub added: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

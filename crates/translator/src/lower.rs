@@ -756,6 +756,7 @@ impl<'t> Lowering<'t> {
             type_params: self.method_type_params(index),
             jdk_code: self.is_proxy_class(info.owner),
             field_update: None,
+            added: false,
         })
     }
 

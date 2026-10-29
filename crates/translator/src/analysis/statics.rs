@@ -114,7 +114,8 @@ fn pure(e: &Expr, index: usize, assigned: &HashSet<&str>, decl: &TypeDecl) -> bo
 /// The static methods and constructors of eagerly initialized classes that start by running
 /// their class's `init`. Java initializes a class when one of them is first called; a method that
 /// only methods of its own class call, or any method of the class of `main` but `main` itself,
-/// cannot run before that has started, so it skips the check.
+/// cannot run before that has started, so it skips the check. A method that lowering adds for an
+/// expression (`Method::added`) never runs it: it is the code of its call sites.
 pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
     let mains: Vec<&Method> = class.methods.iter().filter(|m| m.is_main).collect();
     let main_class = match mains[..] {
@@ -163,6 +164,7 @@ pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
             std::iter::once(m.class).chain(class.hierarchy.ancestors(m.class)).any(|c| eager.contains(&c))
                 && (m.is_static || m.is_ctor)
                 && m.name != "<clinit>"
+                && !m.added
                 && (m.is_main
                     || (Some(m.class) != main_class
                         && callers.get(&i).is_some_and(|from| from.iter().any(|&c| c != m.class))))
