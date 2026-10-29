@@ -29,6 +29,14 @@ pub const fn wtf8_bytes(bytes: &[u8]) -> &Wtf8 {
     unsafe { Wtf8::from_bytes_unchecked(bytes) }
 }
 
+/// The case of a `switch` on a string with many labels whose label is `text`, given the labels'
+/// WTF-8 bytes, sorted, each with its case: `usize::MAX` when no label is. The generator writes
+/// such a switch as a `match` on the case rather than on the bytes, whose thousands of
+/// comparisons in one function are slow for LLVM to compile.
+pub fn string_case(text: &[u8], cases: &[(&[u8], usize)]) -> usize {
+    cases.binary_search_by(|(label, _)| (*label).cmp(text)).map_or(usize::MAX, |i| cases[i].1)
+}
+
 /// Whether `bytes` are WTF-8 in which no high surrogate's 3-byte form comes directly before a low
 /// one's.
 const fn well_formed(bytes: &[u8]) -> bool {

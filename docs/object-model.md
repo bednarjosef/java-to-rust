@@ -1030,7 +1030,10 @@ normal text stays plain UTF-8 at no cost:
   lone surrogate as `?`. A printed line with two or more strings or `char`s, which could be the
   halves of a pair, is made first and then printed.
 - **`switch` and `valueOf`.** A string `switch` and an enum's `valueOf` match the string's bytes
-  against byte string literals (`b"..."`), a string constant in a `case` by its text.
+  against byte string literals (`b"..."`), a string constant in a `case` by its text. A `switch`
+  with more than 64 labels, such as the list of a program's resources, instead looks the bytes
+  up in a sorted table of its labels (`java::string_case`) and matches the number of the case:
+  a match of thousands of byte strings keeps LLVM's register coalescing busy for most of an hour.
 
 What does not hold a lone surrogate exactly: the message of an exception the runtime raises
 (a Rust `String`), a thread's name (Rust's), and the text of a charset or a `Class`.

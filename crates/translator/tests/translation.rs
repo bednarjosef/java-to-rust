@@ -2432,6 +2432,34 @@ fn switch_without_fall_through_is_a_match_on_int_char_and_string() {
 }
 
 #[test]
+fn a_string_switch_with_many_labels_matches_the_number_of_its_case() {
+    // A match on bytes with thousands of string labels makes LLVM's register coalescing run for
+    // most of an hour, so above a few dozen labels the label is looked up in a sorted table.
+    let cases: String = (0..70).map(|i| format!("case \"k{i}\" -> {i};\n")).collect();
+    let rust = translate(&format!(
+        "class A {{
+            static int code(String s) {{
+                return switch (s) {{
+                    {cases}
+                    default -> -1;
+                }};
+            }}
+            public static void main(String[] a) {{
+                System.out.println(code(a.length == 0 ? \"k7\" : a[0]));
+            }}
+        }}"
+    ));
+    assert_contains(
+        &rust,
+        &[
+            "java::string_case(",
+            "const CASES: &[(&[u8], usize)] = &[(b\"k0\", 0), (b\"k1\", 1), (b\"k10\", 10),",
+        ],
+    );
+    assert_lacks(&rust, &["b\"k7\" =>"]);
+}
+
+#[test]
 fn arrow_switch_expression_is_a_match_that_yields_a_value() {
     let rust = translate(
         "class A {

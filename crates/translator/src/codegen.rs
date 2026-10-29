@@ -698,6 +698,7 @@ impl<'a> Gen<'a> {
             lazy_text: false,
             formatting: false,
             chars: false,
+            indexed: false,
             exhaustive: false,
             chain: false,
             field_locals: HashMap::new(),
@@ -919,6 +920,9 @@ struct Gen<'a> {
     formatting: bool,
     /// Whether the switch being written matches its `char` selector as a Rust `char`.
     chars: bool,
+    /// Whether the switch being written on a string matches the number of the case of its label
+    /// (`java::string_case`), as it has many labels.
+    indexed: bool,
     /// Whether the cases of the switch being written cover every value of its enum selector.
     exhaustive: bool,
     /// Whether the `?:` being written is the else branch of another, so that the chain is written
