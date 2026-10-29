@@ -479,6 +479,7 @@ fn analyse(
         ends_rejected,
         owner: None,
         changed: Vec::new(),
+        reshaped: false,
     };
     // `whole_objects` changes the program only when it passes: an error of it that no stub takes
     // away is recorded, and the census goes on without it. An error of a check of the analyses
@@ -490,6 +491,14 @@ fn analyse(
     // The facts that depend on the program alone, kept while no stub changes the program: a pass
     // that only tolerates more errors finds them again the same.
     let represented: std::cell::RefCell<Option<analysis::Represented>> = Default::default();
+    // A stub ends the program where its code would run, so it only takes behaviour away: the
+    // facts of the analyses still hold for the program after it, which may do less than they
+    // say but nothing more. A round whose errors the stubs took away by giving methods such a
+    // body (`Stubs::reshaped` not set) keeps its facts, and the next round runs the messages and
+    // the generator alone on them; any other change, or an error that no stub took away, runs
+    // the analyses again.
+    let kept: std::cell::RefCell<Option<analysis::Facts>> = Default::default();
+    let keep = std::cell::Cell::new(false);
     let passes: [Pass; 4] = [
         &|class| crate::timings::phase("census: string identity", || analysis::string_identity(class)),
         &|class| crate::timings::phase("census: whole objects", || analysis::whole_objects_all(class)),
@@ -498,6 +507,12 @@ fn analyse(
             crate::timings::phase("census: checks of the code", || known_before_analyses(class))
         },
         &|class| {
+            let reused = if keep.take() { kept.take() } else { None };
+            kept.take();
+            if let Some(mut facts) = reused {
+                let errors = names.messages(class, &mut facts).err().unwrap_or_default();
+                return generate(class, facts, errors, &generated, &kept);
+            }
             ANALYSIS_ROUNDS.set(ANALYSIS_ROUNDS.get() + 1);
             let tolerated = tolerated.borrow();
             // The errors of every check, and those of the messages after them, are found in one
@@ -546,30 +561,7 @@ fn analyse(
                 Err(found) => errors.extend(found),
                 Ok(()) => {}
             }
-            let facts = analysed.with_stack_objects();
-            codegen::catch_panics(true);
-            let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::timings::phase("census: generator", || codegen::generate_all(class, &facts))
-            }));
-            codegen::catch_panics(false);
-            // A panic outside the methods, after errors, may come of the code they reject: the
-            // round ends with those errors.
-            let tree = match tree {
-                Ok(tree) => tree,
-                Err(_) if !errors.is_empty() => return Err(errors),
-                Err(panic) => std::panic::resume_unwind(panic),
-            };
-            match tree {
-                Ok(tree) if errors.is_empty() => {
-                    *generated.borrow_mut() = Some(tree);
-                    Ok(())
-                }
-                Ok(_) => Err(errors),
-                Err(found) => {
-                    errors.extend(found);
-                    Err(errors)
-                }
-            }
+            generate(class, analysed.with_stack_objects(), errors, &generated, &kept)
         },
     ];
     for (index, pass) in passes.into_iter().enumerate() {
@@ -595,6 +587,7 @@ fn analyse(
             }
             let mut stuck = Vec::new();
             let mut stubbed = false;
+            stubs.reshaped = false;
             for error in errors {
                 let rejection = stubs.stub(class, units, error);
                 if crate::timings::enabled() {
@@ -622,6 +615,7 @@ fn analyse(
             // An error that no stub took away comes back, unless the stubs took away its cause.
             if stubbed {
                 represented.take();
+                keep.set(stuck.is_empty() && !stubs.reshaped);
                 continue;
             }
             if index < passes.len() - 1 {
@@ -655,6 +649,42 @@ fn analyse(
     None
 }
 
+/// The generator on the facts of a round of the analyses (`analyse`), after the `errors` of the
+/// analyses and the messages: the tree when there are none, or else the errors of all three, with
+/// the facts kept for the next round.
+fn generate(
+    class: &mut Class,
+    facts: analysis::Facts,
+    mut errors: Vec<Error>,
+    generated: &std::cell::RefCell<Option<ModuleTree>>,
+    kept: &std::cell::RefCell<Option<analysis::Facts>>,
+) -> Result<(), Vec<Error>> {
+    codegen::catch_panics(true);
+    let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::timings::phase("census: generator", || codegen::generate_all(class, &facts))
+    }));
+    codegen::catch_panics(false);
+    // A panic outside the methods, after errors, may come of the code they reject: the round ends
+    // with those errors.
+    let tree = match tree {
+        Ok(tree) => tree,
+        Err(_) if !errors.is_empty() => return Err(errors),
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    match tree {
+        Ok(tree) if errors.is_empty() => {
+            *generated.borrow_mut() = Some(tree);
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(found) => errors.extend(found),
+    }
+    if !ROUND_BY_ROUND.get() {
+        *kept.borrow_mut() = Some(facts);
+    }
+    Err(errors)
+}
+
 /// The name of a class as the stubs' messages name the code by it: none unless the translation
 /// is written (`Program::ends_rejected`).
 fn named(name: &str, ends_rejected: bool) -> &str {
@@ -685,6 +715,9 @@ struct Stubs {
     /// the abstract ones made concrete, and those of a class whose field initializers a stub
     /// dropped, which its first constructor runs.
     changed: Vec<usize>,
+    /// Whether a stub changed more than the body of a method since this was last cleared: it
+    /// made an abstract method concrete, or changed a field's initializer.
+    reshaped: bool,
 }
 
 impl Stubs {
@@ -764,6 +797,7 @@ impl Stubs {
                 // A constant's value is a literal that nothing rejects, though its position may
                 // be that of an error in another file.
                 if !field.constant && field.init.as_ref().is_some_and(|i| at(i) && !is_stub(i)) {
+                    self.reshaped = true;
                     field.init = self.ends_rejected.then(|| {
                         let message = stub_message(named(&decl.name, ends_rejected), &rejection.error);
                         self.expr(Builtin::NoObject { class: t }, Some(message), field.pos, field.ty)
@@ -794,6 +828,7 @@ impl Stubs {
                     &rejection.error,
                 );
                 method.is_abstract = false;
+                self.reshaped = true;
                 self.never(method, message);
                 self.changed.push(index);
                 class.hierarchy.make_concrete(index);
