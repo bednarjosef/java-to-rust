@@ -4016,6 +4016,51 @@ fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
 }
 
 #[test]
+fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
+    // A pattern variable read after the loop that tests it and `synchronized` on a string, in a
+    // program that starts a thread, are rejected by checks that read the code alone: the census
+    // stubs them before the analyses first run, which then run once.
+    let main = r#"public class Main {
+    static final String LOCK = "lock";
+    static int n;
+
+    static String first(Object[] items) {
+        int i = 0;
+        while (!(items[i] instanceof String s)) {
+            i++;
+        }
+        return s;
+    }
+
+    static void count() {
+        synchronized (LOCK) {
+            n++;
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        System.out.println(first(new Object[] {1, "two"}));
+        Thread t = new Thread(Main::count);
+        t.start();
+        t.join();
+        System.out.println(n);
+    }
+}
+"#;
+    let dir = write_sources("census_code_checks", &[("Main.java", main)]);
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    assert_contains(
+        &census.report,
+        &[
+            "`synchronized` on a string not supported yet\n          at Main.java:14:9\n",
+            "a pattern variable used here not supported yet\n          at Main.java:7:18\n",
+        ],
+    );
+    assert_eq!(rounds, 1, "{}", census.report);
+}
+
+#[test]
 fn a_census_finds_the_same_with_the_errors_of_every_check_in_one_round() {
     // A census takes the errors of every check of the analyses, and of the messages and the
     // generator after them, in one round (`analysis::analyze_collecting`); here the generator

@@ -413,6 +413,19 @@ pub fn analyze_from(
     analyze_with(class, tolerated, found, None)
 }
 
+/// The errors of the checks of the analyses that read the code alone: the pattern variables, and
+/// the monitors, whose facts (whether the program starts threads, whether it observes monitors)
+/// are scans of the code. A census runs them before the analyses (`program::census`), so that
+/// the code they reject is stubbed before the analyses first run; the analyses run them again
+/// where they always do, and find nothing more.
+pub fn code_checks(class: &Class) -> Vec<Error> {
+    let mut errors = patterns::check(class).err().unwrap_or_default();
+    let facts =
+        Facts { threaded: threads::threaded(class), monitors: monitors::observed(class), ..Facts::default() };
+    errors.extend(monitors::check(class, &facts).err().unwrap_or_default());
+    errors
+}
+
 /// `analyze_from` for a census, which stubs the code of every error it is given at once: an
 /// error of a check, or of the analysis of exceptions, does not end the analyses but is added to
 /// `errors`, and the checks and analyses after it run as if it had passed, to find their errors
