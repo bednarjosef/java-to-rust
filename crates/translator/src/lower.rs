@@ -25,6 +25,7 @@ mod local_names;
 mod object;
 mod object_clone;
 mod objects;
+mod predict;
 mod real_generics;
 mod references;
 mod scans;
@@ -149,8 +150,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
         lowering.plan_captures().map_err(|(_, e)| e)?;
-        lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
         let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
+        lowering.start_real(real, &planned);
         lowering.plan_object(&planned);
         let mut types: Vec<TypeDecl> =
             (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;

@@ -377,8 +377,8 @@ fn lower_into<'t>(
             false => translated_nested(d, reach),
         })
         .collect();
-    lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
     let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
+    lowering.start_real(real, &planned);
     lowering.plan_object(&planned);
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {

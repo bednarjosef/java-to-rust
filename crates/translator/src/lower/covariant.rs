@@ -52,13 +52,15 @@ fn lowered_as(ty: Type, known: &std::collections::HashSet<Type>) -> Type {
 }
 
 /// The array types that are `Object[]`s in this lowering (`known`), and those that it found
-/// covariant (`noted`), shared with `real_generics::retry`, which lowers again with them; and
-/// the array types that met in this lowering (`meets_object_array`), which `noted_later` meets
-/// again as the next lowering would.
+/// covariant (`noted`), shared with `real_generics::retry`, which lowers again with them; the
+/// array types that met in this lowering (`meets_object_array`), which `noted_later` meets
+/// again as the next lowering would; and the prediction made before the first lowering, shared
+/// by all of them (`predict`).
 #[derive(Clone, Default)]
 pub(super) struct Covariant {
     pub(super) known: std::collections::HashSet<Type>,
     pub(super) noted: Rc<RefCell<Vec<Type>>>,
+    pub(super) predicted: Rc<RefCell<Option<super::predict::Prediction>>>,
     met: RefCell<std::collections::HashSet<(Type, Type)>>,
 }
 

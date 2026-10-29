@@ -944,9 +944,10 @@ translation. A type predicted covariant that no two arrays meet is an `Object[]`
   table's members (`invokePart`, `getPart`: about 15% of Minecraft's types), proxies' interface
   methods, an enum's `values` as a method reference (`Supplier<E[]>`), field initializers and
   bridges. The closure that `noted_later` makes then runs on the predicted pairs.
-- **Checking it**: with `--timings`, lowering prints how many of the types it noted and of the
-  generics that failed the scan predicted, and the ones it missed or added, so each census shows
-  what the scan still lacks.
+- **Checking it** (built, `lower/predict.rs`): with `JAVA_TO_RUST_PREDICTION_CHECK` set, the
+  prediction is made but not used, and `--timings` prints how many of the array types the
+  lowerings noted and of the Rust generics that failed it predicted, then each one it missed or
+  added (`timing: prediction missed array String[]`). The prediction itself is still empty.
 
 Expected: the generics at 98% or better (most fail by the inference and lambda rules, which the
 trees show exactly); the arrays at 90 to 95% at first, since lowering makes some of the code
