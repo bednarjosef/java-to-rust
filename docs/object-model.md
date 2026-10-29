@@ -733,7 +733,8 @@ supertype (a `Version[]` is an `Object[]`), and erasure makes `T[]` an array of 
 `list.toArray(new Version[0])` passes a `Version[]` where `T[]` is an `Object[]`, and `toArray(a)`
 fills `a` and returns it. Copying at the boundary would lose that identity. Instead, two different
 array types of references that meet (an argument, an assignment, a return, a cast, a substitution
-for an array of a type variable, an array passed for `Object...`) are each an `Object[]`
+for an array of a type variable, an array passed for `Object...` or, where javac does not pack the
+call's arguments, for any varargs) are each an `Object[]`
 everywhere in the program: lowering notes each such type and the program is lowered again
 (`real_generics::retry`). Types that meet only once others are `Object[]`s (a `String[][]` is an
 `Object[][]` once `String[]` is one; an array held as an `Object` meets an `Object[]` once a type
@@ -861,13 +862,21 @@ erased program has lost what the decision needs. Candidates:
   (a Rust struct must use its type parameters), that extends and implements nothing, has no
   subclasses and is not abstract;
 - a method whose type parameters have no bounds and each occur in a parameter's type (so Rust
-  can infer them).
+  can infer them);
+- and neither has an array of one of its type variables anywhere in it, in its signature, a
+  field, a variable or an expression's type (`T[]`, `T...`): `verify` would fail it every time,
+  and while it is tried its arrays meet no others and code that makes one (`Arrays.copyOf` into
+  a `T[]`) is rejected, which would erase every candidate.
 
 Lowering translates them as real, then `real_generics::verify` fails every candidate whose type
 variables' values are used for anything but a store, a return, an argument to a parameter of a
 type variable or a comparison with `null`; whose types meet a cast or an `instanceof`; that is
-used raw, as an array element, or becomes an `Object`. Lowering runs again with the failed ones
-erased until nothing fails, and an error with candidates left is retried with all of them erased,
+used raw, as an array element, or becomes an `Object`. Since the failed ones' type variables
+become `Object` the next time, a value of another candidate's type variable that goes to or comes
+from one of them (an argument, a return, a field) would be converted then, so `verify` checks
+again with them erased until no more fail. Lowering runs again with the failed ones erased until
+nothing fails (together with the covariant arrays a lowering found, when it found any), and an
+error with candidates left is retried with all of them erased,
 so a real generic never turns a translated program into a rejected one. A census, and a whole
 program, which go on past a rejection, retry only for one in code that can run and that uses a
 real generic (a class or method of them, or one of their type variables, while the method,
