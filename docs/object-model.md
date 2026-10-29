@@ -260,7 +260,11 @@ Rules:
   string, a box, a Java enum constant, an array, a builder) is held in the low six bytes when it
   fits there and in a box otherwise; an array, a builder, a box with identity and a string with
   identity (`java::JStr`) are their own handles. A number that no class of the type has is a bug
-  the view reports (`java::bad_tag`).
+  the view reports (`java::bad_tag`). In a `match` of a method on the number, though, the arm
+  whose classes are in the most runs (more than four) is the last arm, `_`, in place of that
+  report: rustc tests a pattern's runs one by one before it switches on the other numbers, and
+  the Minecraft server's `Object::hash_code` spent its time walking the 3 750 runs of the classes
+  whose hash is their address.
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.

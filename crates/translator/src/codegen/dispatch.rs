@@ -69,6 +69,10 @@ const AMONG_MOST: usize = 4;
 /// The most classes that a `match` on the class number is written whole for (`match_arms_or`).
 const CUT_ABOVE: usize = 2048;
 
+/// The most runs of class numbers that an arm of a `match` on the class number is written with,
+/// where it could be the match's last arm, `_`, instead (`tag_match`).
+const LAST_ARM_RUNS: usize = 4;
+
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
 const PART_CLASSES: usize = 256;
@@ -2030,18 +2034,28 @@ impl<'a> Gen<'a> {
                 alike.push((text, vec![c]));
             }
         }
+        let patterns: Vec<String> = alike.iter().map(|(_, classes)| self.tags(classes, variants)).collect();
+        // The arm of the most runs of class numbers, where the match has no other: rustc tests a
+        // pattern's runs one by one before the `match` on the numbers of the other arms, and the
+        // Minecraft server's `Object::hash_code` spent its time in the 3 750 runs of the classes
+        // whose hash is their address. As the match's last arm, `_`, it costs nothing: no value has
+        // a number that no variant has.
+        let runs = |pattern: &String| pattern.matches(" | ").count() + 1;
+        let last = (0..alike.len())
+            .filter(|_| otherwise.is_none())
+            .max_by_key(|&i| (runs(&patterns[i]), std::cmp::Reverse(i)))
+            .filter(|&i| runs(&patterns[i]) > LAST_ARM_RUNS);
         for line in lines {
             match line {
                 Ok(line) => self.line(&line),
-                Err(i) => {
-                    let tags = self.tags(&alike[i].1, variants);
-                    self.line(&format!("{tags} => {},", alike[i].0));
-                }
+                Err(i) if Some(i) == last => {}
+                Err(i) => self.line(&format!("{} => {},", patterns[i], alike[i].0)),
             }
         }
-        match otherwise {
-            Some(text) => self.line(&format!("_ => {text},")),
-            None => self.line("tag => java::bad_tag(tag),"),
+        match (otherwise, last) {
+            (Some(text), _) => self.line(&format!("_ => {text},")),
+            (None, Some(i)) => self.line(&format!("_ => {},", alike[i].0)),
+            (None, None) => self.line("tag => java::bad_tag(tag),"),
         }
         self.indent -= 1;
         self.line("}");

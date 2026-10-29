@@ -134,6 +134,14 @@ made on the stack (`java::count_allocation`).
   `match` over the 258 classes and a `memcmp` of each name, the kernel took 184 ms in release,
   446 ms at `opt-level = 1` and 1450 ms at `opt-level = 0` (the runtime at 2), against 89, 242
   and 1030 ms now (medians of five, three at 0, at a load of 7; Java's kernel is about 48 ms).
+- **Objects of many classes hashed as `Object`s (ObjectHash).** An open-addressing set of 300
+  objects probed for each, as `ImmutableCollections.SetN.probe` is in the Minecraft server: two
+  classes in three hash by their address and the others override `hashCode`, numbered in turn,
+  so the classes that hash by address are 100 runs of class numbers. With them as the last arm
+  of `Object::hash_code`'s `match` (`_`) rather than 100 range tests before it, the kernel takes
+  70 ms in release against 192 ms, and 870 ms at `opt-level = 0` (the runtime at 2) against
+  1800 ms; at `opt-level = 1` both take about 140 ms (medians of five to nine, at a load of 7 to
+  9; Java's kernel is about 94 ms).
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
