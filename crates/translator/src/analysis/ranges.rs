@@ -19,7 +19,7 @@ use super::constants::static_value;
 use super::{FastMap, FastSet};
 use crate::ast::*;
 use crate::types::binary_type;
-use std::collections::HashSet;
+
 use std::rc::Rc;
 
 pub fn analyze(class: &Class, facts: &mut Facts) {
@@ -444,7 +444,7 @@ impl<'a> Analysis<'a> {
         // Methods that nothing calls, and callees of field initializers (not analyzed here), take
         // any arguments. Methods reachable only through a cycle of calls from them do too, since
         // no caller's arguments can be seen. The others get their arguments from their callers.
-        let initializers: HashSet<usize> = initializer_callees(self.class).into_iter().collect();
+        let initializers: FastSet<usize> = initializer_callees(self.class).into_iter().collect();
         let is_root: Vec<bool> = (0..n).map(|m| callers[m].is_empty() || initializers.contains(&m)).collect();
         let mut live = is_root.clone();
         let mut todo: Vec<usize> = (0..n).filter(|&m| is_root[m]).collect();

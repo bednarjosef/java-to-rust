@@ -174,10 +174,14 @@ fn yield_count(cases: &[Case]) -> usize {
 
 impl<'a> Gen<'a> {
     /// The Rust pattern of a case's labels; a case with a `default` label matches everything
-    /// else. With `chars`, the selector is an `Option<char>` and the labels are char literals.
-    fn pattern(&self, case: &Case, chars: bool) -> String {
+    /// else. With `chars`, the selector is an `Option<char>` and the labels are char literals;
+    /// with `index`, the selector is the number of the case (`indexed_selector`), this one's.
+    fn pattern(&self, case: &Case, chars: bool, index: Option<usize>) -> String {
         if is_default(case) {
             return "_".to_string();
+        }
+        if let Some(index) = index {
+            return index.to_string();
         }
         let values: Vec<String> = case
             .labels
@@ -437,6 +441,10 @@ impl<'a> Gen<'a> {
             format!("{}.as_bytes()", self.expr(selector).at(ATOM))
         };
         self.guarded = outer;
+        let text = match selector.ty == Type::String {
+            true => self.indexed_selector(text, cases),
+            false => text,
+        };
         let yields_last = cases.iter().all(|c| matches!(c.body.last(), Some(Stmt::Yield(_))));
         if falls {
             self.machine(&text, cases, value);
@@ -518,6 +526,7 @@ impl<'a> Gen<'a> {
     /// No case falls through and none leaves early: `match`, with `_ => {}` when there is no default.
     fn matched(&mut self, text: &str, cases: &'a [Case], tail: bool) {
         let chars = std::mem::take(&mut self.chars);
+        let number = case_numbers(cases, std::mem::take(&mut self.indexed));
         let exhaustive = std::mem::take(&mut self.exhaustive);
         // One label, and nothing for any other value: `if let`, as clippy's `single_match` asks.
         let nothing_else = match cases.iter().find(|c| is_default(c)) {
@@ -528,7 +537,7 @@ impl<'a> Gen<'a> {
         if let [case] = labeled.as_slice()
             && nothing_else
         {
-            self.line(&format!("if let {} = {text} {{", self.pattern(case, chars)));
+            self.line(&format!("if let {} = {text} {{", self.pattern(case, chars, number(case))));
             self.indent += 1;
             self.stmts(strip(&case.body), tail);
             self.indent -= 1;
@@ -538,7 +547,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
-            self.line(&format!("{} => {{", self.pattern(case, chars)));
+            self.line(&format!("{} => {{", self.pattern(case, chars, number(case))));
             self.indent += 1;
             self.stmts(strip(&case.body), tail);
             self.indent -= 1;
@@ -554,6 +563,7 @@ impl<'a> Gen<'a> {
     /// Some case leaves early: a labeled block around the `match`, which the `break`s name.
     fn block(&mut self, text: &str, cases: &'a [Case], value: Option<Type>) {
         let chars = std::mem::take(&mut self.chars);
+        let number = case_numbers(cases, std::mem::take(&mut self.indexed));
         let exhaustive = std::mem::take(&mut self.exhaustive);
         self.line("{");
         let kind = match value {
@@ -565,7 +575,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
-            self.line(&format!("{} => {{", self.pattern(case, chars)));
+            self.line(&format!("{} => {{", self.pattern(case, chars, number(case))));
             self.indent += 1;
             let body = if value.is_some() { &case.body[..] } else { strip(&case.body) };
             self.stmts(body, false);
@@ -586,11 +596,12 @@ impl<'a> Gen<'a> {
     /// values.
     fn value_match(&mut self, text: &str, cases: &'a [Case], ty: Type) {
         let chars = std::mem::take(&mut self.chars);
+        let number = case_numbers(cases, std::mem::take(&mut self.indexed));
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
             let Some((Stmt::Yield(value), init)) = case.body.split_last() else { unreachable!() };
-            self.line(&format!("{} => {{", self.pattern(case, chars)));
+            self.line(&format!("{} => {{", self.pattern(case, chars, number(case))));
             self.indent += 1;
             self.yielded(init, value, ty);
             self.indent -= 1;
@@ -604,6 +615,7 @@ impl<'a> Gen<'a> {
     /// case that does not leave sets it to the next one, and the loop runs the cases in order.
     fn machine(&mut self, text: &str, cases: &'a [Case], value: Option<Type>) {
         let chars = std::mem::take(&mut self.chars);
+        let number = case_numbers(cases, std::mem::take(&mut self.indexed));
         let exhaustive = std::mem::take(&mut self.exhaustive);
         self.line("{");
         self.indent += 1;
@@ -614,7 +626,7 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         for case in arms(cases) {
             let index = cases.iter().position(|c| std::ptr::eq(c, case)).unwrap_or(0);
-            self.line(&format!("{} => {index},", self.pattern(case, chars)));
+            self.line(&format!("{} => {index},", self.pattern(case, chars, number(case))));
         }
         let matches_all = cases.iter().any(is_default) || exhaustive;
         if !matches_all {
@@ -661,6 +673,52 @@ impl<'a> Gen<'a> {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+    }
+}
+
+/// The most labels of a `switch` on a string that is a `match` on its bytes. One with more matches
+/// the number of its case (`Gen::indexed_selector`): a `match` with thousands of byte string
+/// labels is thousands of comparisons in one function, on which LLVM's register coalescing takes
+/// time that grows with their square (a lookup of a Java module's resources has ten thousand).
+const BYTE_LABELS: usize = 64;
+
+/// For a switch whose selector is the number of its case (`indexed`), the number of each case
+/// of `cases`, by the case.
+fn case_numbers(cases: &[Case], indexed: bool) -> impl Fn(&Case) -> Option<usize> + '_ {
+    move |case| indexed.then(|| cases.iter().position(|c| std::ptr::eq(c, case)).unwrap_or(0))
+}
+
+impl Gen<'_> {
+    /// The selector `text`, the bytes of a string, of a switch with `cases`: where they have more
+    /// than `BYTE_LABELS` labels, all strings, the number of the case whose label it is
+    /// (`java::string_case`, `usize::MAX` for none), which the arms then match (`indexed`).
+    fn indexed_selector(&mut self, text: String, cases: &[Case]) -> String {
+        let mut labels: Vec<(Vec<u8>, usize)> = Vec::new();
+        for (i, case) in cases.iter().enumerate() {
+            for label in &case.labels {
+                match label {
+                    CaseLabel::Value(Expr { kind: ExprKind::Str(s), .. }) => {
+                        labels.push((s.as_bytes().to_vec(), i))
+                    }
+                    CaseLabel::Value(Expr { kind: ExprKind::Units(units), .. }) => {
+                        labels.push((super::strings::wtf8_of(units), i))
+                    }
+                    CaseLabel::Value(_) => return text,
+                    CaseLabel::Default => {}
+                }
+            }
+        }
+        if labels.len() <= BYTE_LABELS {
+            return text;
+        }
+        // A label written twice (the resources of several jars) matches its first case.
+        labels.sort();
+        labels.dedup_by(|later, first| later.0 == first.0);
+        let entries: Vec<String> =
+            labels.iter().map(|(bytes, i)| format!("({}, {i})", byte_string(bytes))).collect();
+        self.indexed = true;
+        let lookup = self.runtime("string_case");
+        format!("{lookup}({text}, {{ const CASES: &[(&[u8], usize)] = &[{}]; CASES }})", entries.join(", "))
     }
 }
 

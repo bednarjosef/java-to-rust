@@ -16,14 +16,14 @@
 //! Everything else keeps the object model's form, an enum with a
 //! variant per lambda class.
 
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// The interfaces (indexes into `Class::types`) whose values are closures.
-pub fn closure_types(class: &Class) -> HashSet<usize> {
+pub fn closure_types(class: &Class) -> FastSet<usize> {
     let h = &class.hierarchy;
     let object = class.type_index(OBJECT);
-    let mut candidates: HashSet<usize> = HashSet::new();
+    let mut candidates: FastSet<usize> = FastSet::default();
     let supers = |t: usize| -> Vec<usize> {
         class.types[t].implements.iter().copied().filter(|&i| Some(i) != object).collect()
     };
@@ -84,8 +84,8 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     let lambda_of = |c: usize| candidates.iter().copied().find(|&t| h.is_subtype(c, t));
     // The interfaces some use rules out, and how many `new`s of each lambda class are converted
     // to its interface directly, of how many in all.
-    let mut ruled_out: HashSet<usize> = HashSet::new();
-    let mut news: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut ruled_out: FastSet<usize> = FastSet::default();
+    let mut news: FastMap<usize, (usize, usize)> = FastMap::default();
     let mut on_expr = |x: &Expr| match &x.kind {
         ExprKind::Cast(to, value) => {
             if let ExprKind::New { class: c, .. } = value.kind
@@ -178,7 +178,7 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
         }
     }
     // What rules out an interface rules out those above and below it.
-    let ruled_out: HashSet<usize> = (candidates.iter().copied())
+    let ruled_out: FastSet<usize> = (candidates.iter().copied())
         .filter(|&t| ruled_out.iter().any(|&r| h.is_subtype(t, r) || h.is_subtype(r, t)))
         .collect();
     candidates.retain(|t| !ruled_out.contains(t));
@@ -189,11 +189,11 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
 /// the name in the method has a lambda converted to its type as its initializer, and every other
 /// use of it is a call of its type's method on it. Nothing else holds such a closure, so it is a
 /// plain Rust closure that the method owns, with no `Rc`.
-pub fn closure_locals(class: &Class, closure_types: &HashSet<usize>) -> HashSet<(usize, String)> {
-    let mut out = HashSet::new();
+pub fn closure_locals(class: &Class, closure_types: &FastSet<usize>) -> FastSet<(usize, String)> {
+    let mut out = FastSet::default();
     for (index, m) in class.methods.iter().enumerate() {
         // Per name: whether every declaration qualifies, and the uses that are calls.
-        let mut declared: HashMap<String, bool> = HashMap::new();
+        let mut declared: FastMap<String, bool> = FastMap::default();
         for s in &m.body {
             visit_stmt(s, &mut |_| {}, &mut |s| {
                 if let Stmt::Local { ty, name, init, .. } = s {
@@ -208,9 +208,9 @@ pub fn closure_locals(class: &Class, closure_types: &HashSet<usize>) -> HashSet<
         if declared.is_empty() {
             continue;
         }
-        let mut uses: HashMap<String, usize> = HashMap::new();
-        let mut calls: HashMap<String, usize> = HashMap::new();
-        let mut assigned: HashSet<String> = HashSet::new();
+        let mut uses: FastMap<String, usize> = FastMap::default();
+        let mut calls: FastMap<String, usize> = FastMap::default();
+        let mut assigned: FastSet<String> = FastSet::default();
         for s in &m.body {
             visit_stmt(
                 s,

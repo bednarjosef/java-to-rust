@@ -9,23 +9,23 @@
 //! other assignment stores a value that may be null. A static field needs a non-null initializer
 //! that runs on first use (see `statics`).
 
+use super::FastSet;
 use super::{Facts, leading_assignments};
 use crate::ast::*;
-use std::collections::HashSet;
 
 /// Records the variables, parameters, return values and fields that can hold null, until nothing
 /// changes. A parameter is recorded under its name, as the names of a method's variables and
 /// parameters are distinct.
 pub fn analyze(class: &Class, facts: &mut Facts) {
-    let read: Vec<HashSet<String>> = class.methods.iter().map(read_locals).collect();
+    let read: Vec<FastSet<String>> = class.methods.iter().map(read_locals).collect();
     let mut ctors: Vec<Vec<usize>> = vec![Vec::new(); class.types.len()];
     for (m, method) in class.methods.iter().enumerate().filter(|(_, m)| m.is_ctor) {
         ctors[method.class].push(m);
     }
     // The override groups, by id, whose parameters (with the parameter's index) or return values
     // are recorded as nullable for every method of the group.
-    let mut nullable_groups: HashSet<(usize, usize)> = HashSet::new();
-    let mut nullable_group_returns: HashSet<usize> = HashSet::new();
+    let mut nullable_groups: FastSet<(usize, usize)> = FastSet::default();
+    let mut nullable_group_returns: FastSet<usize> = FastSet::default();
     loop {
         let before = (
             facts.nullable_vars.len(),
@@ -258,8 +258,8 @@ fn reflect_elements(class: &Class) -> Vec<Type> {
 }
 
 /// The locals and parameters that the code of `method` reads.
-fn read_locals(method: &Method) -> HashSet<String> {
-    let mut read = HashSet::new();
+fn read_locals(method: &Method) -> FastSet<String> {
+    let mut read = FastSet::default();
     for stmt in &method.body {
         visit_stmt(
             stmt,

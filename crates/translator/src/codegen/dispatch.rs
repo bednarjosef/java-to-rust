@@ -284,14 +284,34 @@ impl<'a> Gen<'a> {
 
     /// The concrete classes whose objects the enum of type `t` holds, in `Class::types` order.
     pub(super) fn enum_variants(&self, t: usize) -> Vec<usize> {
+        self.shared_enum_variants(t).to_vec()
+    }
+
+    /// Whether class `c` is one of `enum_variants(t)`.
+    pub(super) fn is_enum_variant(&self, t: usize, c: usize) -> bool {
+        let variants = self.shared_enum_variants(t);
+        if variants.len() < 16 {
+            return variants.contains(&c);
+        }
+        let set = self.enum_variant_sets.borrow().get(&t).cloned();
+        let set = set.unwrap_or_else(|| {
+            let set = std::rc::Rc::new(variants.iter().copied().collect::<HashSet<usize>>());
+            self.enum_variant_sets.borrow_mut().insert(t, set.clone());
+            set
+        });
+        set.contains(&c)
+    }
+
+    /// `enum_variants`, shared with the list kept.
+    pub(super) fn shared_enum_variants(&self, t: usize) -> std::rc::Rc<[usize]> {
         self.variant_types.borrow_mut().insert(t);
         if let Some(found) = self.enum_variant_lists.borrow().get(&t) {
-            return found.to_vec();
+            return found.clone();
         }
         // An enum's constants exist without `new`.
-        let found: Vec<usize> =
+        let found: std::rc::Rc<[usize]> =
             self.variants(t).iter().copied().filter(|&c| self.live[c] || self.holds_value(c)).collect();
-        self.enum_variant_lists.borrow_mut().insert(t, found.clone().into());
+        self.enum_variant_lists.borrow_mut().insert(t, found.clone());
         found
     }
 
@@ -538,7 +558,7 @@ impl<'a> Gen<'a> {
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
     /// `c` is ever created, where code that has one never runs.
     pub(super) fn variant_of(&self, t: usize, c: usize) -> Option<String> {
-        self.enum_variants(t).contains(&c).then(|| self.variant(t, c))
+        self.is_enum_variant(t, c).then(|| self.variant(t, c))
     }
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
@@ -703,9 +723,23 @@ impl<'a> Gen<'a> {
         holds_class
     }
 
-    /// The variants of the enum of `s` whose objects are of type `t`.
-    fn passing(&self, s: usize, t: usize) -> Vec<usize> {
-        self.enum_variants(s).into_iter().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect()
+    /// The variants of the enum of `s` whose objects are of type `t`, found once for each pair: a
+    /// cast from `Object` to each class goes over every class.
+    fn passing(&self, s: usize, t: usize) -> std::rc::Rc<[usize]> {
+        if let Some(found) = self.passing_lists.borrow().get(&(s, t)) {
+            self.variant_types.borrow_mut().insert(s);
+            return found.clone();
+        }
+        // Both lists are in index order: the variants are concrete classes.
+        let variants = self.shared_enum_variants(s);
+        let under = self.class.hierarchy.concretes_of(t);
+        let found: std::rc::Rc<[usize]> = if under.len() < variants.len() {
+            under.iter().copied().filter(|&c| self.is_enum_variant(s, c)).collect()
+        } else {
+            variants.iter().copied().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect()
+        };
+        self.passing_lists.borrow_mut().insert((s, t), found.clone());
+        found
     }
 
     /// The text of the value of `value` for a method to be called on it in a condition: a local
@@ -1142,7 +1176,7 @@ impl<'a> Gen<'a> {
                 for &source in widening_sources(element) {
                     let boxed = Type::boxed(source);
                     let Some(c) = self.class.type_of(boxed) else { continue };
-                    let Some(o) = object.filter(|&o| self.enum_variants(o).contains(&c)) else { continue };
+                    let Some(o) = object.filter(|&o| self.is_enum_variant(o, c)) else { continue };
                     let source_variant = self.view_pattern(o, c);
                     let read = if self.faithful_box(boxed) { "**b" } else { "*b" };
                     let read = if source == element {
@@ -1232,9 +1266,15 @@ impl<'a> Gen<'a> {
     /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
     /// module, `("Main$Dog", java::APP)`.
     pub(super) fn cast_class(&mut self, c: usize) -> String {
+        if let Some(found) = self.cast_classes.get(&c) {
+            self.uses_runtime |= found.contains("java::");
+            return found.clone();
+        }
         let name = rust_string(&self.binary_name(c));
         let module = self.cast_module(c);
-        format!("({name}, {module})")
+        let found = format!("({name}, {module})");
+        self.cast_classes.insert(c, found.clone());
+        found
     }
 
     /// The module and class loader of class `c` as HotSpot names them with the class: the JDK's
@@ -1632,9 +1672,9 @@ impl<'a> Gen<'a> {
     /// call the compiler can inline.
     fn among(&self, t: usize, receiver: &Expr) -> Option<u64> {
         let set = self.class.receivers.get(&receiver.id)?;
-        let variants = self.enum_variants(t);
-        let among = set.iter().filter(|c| variants.contains(c)).count();
-        (among > 0 && among <= AMONG_MOST && among < variants.len()).then(|| receiver_key(set))
+        let among = set.iter().filter(|&&c| self.is_enum_variant(t, c)).count();
+        (among > 0 && among <= AMONG_MOST && among < self.shared_enum_variants(t).len())
+            .then(|| receiver_key(set))
     }
 
     /// The implementations that the variants of the enum of `t` run for a call of `resolved`.
@@ -2176,7 +2216,7 @@ impl<'a> Gen<'a> {
             // for the one or few that pass.
             self.line("match self.0.tag() {");
             self.indent += 1;
-            for &c in &passing {
+            for &c in passing.iter() {
                 let payload = self.payload(c);
                 let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
                 let (tag, held) = (self.class_tag(c), self.held(c));
@@ -2367,7 +2407,7 @@ impl<'a> Gen<'a> {
             let name = runtime_name(runtime).unwrap_or("value");
             return reject(self, &format!("a `{name}` held as a `{owner}`"));
         }
-        let object = self.object_index().filter(|&t| self.enum_variants(t).contains(&c));
+        let object = self.object_index().filter(|&t| self.is_enum_variant(t, c));
         let Some(object) = object else {
             return reject(self, "a string or a box where no `Object` is one");
         };
@@ -2500,8 +2540,7 @@ impl<'a> Gen<'a> {
             (false, _) => text,
         };
         let char_sequence = method.class;
-        let string =
-            self.class.type_of(Type::String).filter(|&s| self.enum_variants(char_sequence).contains(&s));
+        let string = self.class.type_of(Type::String).filter(|&s| self.is_enum_variant(char_sequence, s));
         let Some(string) = string else {
             let message = "`subSequence` of a builder held as a `CharSequence` where no string is one not supported yet";
             self.rejected.push(Error { pos: method.pos, message: message.to_string() });
@@ -2662,7 +2701,7 @@ impl<'a> Gen<'a> {
             format!("{}.view()", operand(&place))
         };
         let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
-        if !optional && self.enum_variants(e).len() == 1 {
+        if !optional && self.shared_enum_variants(e).len() == 1 {
             return format!("{{ let {pattern} = {viewed}; {compare} }}");
         }
         // Any other object fails the cast to `c` that `compareTo` makes; null fails first.
@@ -2776,7 +2815,7 @@ impl<'a> Gen<'a> {
                 format!("{{ let b = {place}; {same} }}")
             };
         };
-        if !self.enum_variants(e).contains(&c) {
+        if !self.is_enum_variant(e, c) {
             return "false".to_string();
         }
         let variant = self.view_pattern(e, c);

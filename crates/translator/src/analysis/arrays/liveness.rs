@@ -8,29 +8,29 @@
 //! mention counts as live throughout them, and so does everything live where a jump inside them
 //! could lead. Anything this module cannot follow is live, which only keeps an array shared.
 
+use super::super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
-type Live = HashSet<String>;
+type Live = FastSet<String>;
 
 /// The arrays among `arrays` that are live after each simple statement of `method`, keyed by
 /// the statement's expression (the initializer, the expression, or the returned value).
-pub(super) fn live_after(method: &Method, arrays: &HashSet<String>) -> HashMap<ExprId, Live> {
+pub(super) fn live_after(method: &Method, arrays: &FastSet<String>) -> FastMap<ExprId, Live> {
     let mut walk = Walk {
         arrays,
-        after: HashMap::new(),
+        after: FastMap::default(),
         breaks: Vec::new(),
         continues: Vec::new(),
         labels: Vec::new(),
         pending: None,
     };
-    walk.block(&method.body, Live::new());
+    walk.block(&method.body, Live::default());
     walk.after
 }
 
 struct Walk<'s> {
-    arrays: &'s HashSet<String>,
-    after: HashMap<ExprId, Live>,
+    arrays: &'s FastSet<String>,
+    after: FastMap<ExprId, Live>,
     /// Where an unlabeled `break` and `continue` lead, innermost loop last.
     breaks: Vec<Live>,
     continues: Vec<Live>,
@@ -44,7 +44,7 @@ struct Walk<'s> {
 impl Walk<'_> {
     /// The arrays that `e` mentions anywhere, including in the statements of a switch expression.
     fn uses(&self, e: &Expr) -> Live {
-        let mut live = Live::new();
+        let mut live = Live::default();
         visit_expr(e, &mut |x| {
             if let ExprKind::Var(v) | ExprKind::Assign { target: Place::Var(v), .. } = &x.kind
                 && self.arrays.contains(v)
@@ -83,10 +83,10 @@ impl Walk<'_> {
                 }
             }
             Stmt::Return(Some(e), _) => {
-                self.after.insert(e.id, Live::new());
+                self.after.insert(e.id, Live::default());
                 self.uses(e)
             }
-            Stmt::Return(None, _) => Live::new(),
+            Stmt::Return(None, _) => Live::default(),
             Stmt::If { cond, then, otherwise } => {
                 let mut live = self.stmt(then, out.clone());
                 live.extend(match otherwise {
@@ -115,7 +115,7 @@ impl Walk<'_> {
             }
             Stmt::For { init, cond, update, body } => {
                 let cond_uses = cond.as_ref().map(|c| self.uses(c)).unwrap_or_default();
-                let exit = if cond.is_some() { out.clone() } else { Live::new() };
+                let exit = if cond.is_some() { out.clone() } else { Live::default() };
                 let update_uses: Live = update.iter().flat_map(|u| self.uses(u)).collect();
                 let next = |head: &Live| union(&[&update_uses, head]);
                 let head = self.fixed_point(&out, next, |w, head| {
@@ -148,7 +148,7 @@ impl Walk<'_> {
             // not walked.
             Stmt::Throw(e) => self.uses(e),
             Stmt::Labeled { label, body } => {
-                self.labels.push((label.clone(), out.clone(), Live::new()));
+                self.labels.push((label.clone(), out.clone(), Live::default()));
                 let is_loop = matches!(
                     **body,
                     Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. }
@@ -197,7 +197,7 @@ impl Walk<'_> {
         mut step: impl FnMut(&mut Self, &Live) -> (Live, Live),
     ) -> Live {
         let label = self.pending.take();
-        let mut head = Live::new();
+        let mut head = Live::default();
         loop {
             let continue_to = next(&head);
             if let Some(label) = &label

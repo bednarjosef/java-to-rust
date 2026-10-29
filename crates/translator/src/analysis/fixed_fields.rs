@@ -9,13 +9,13 @@
 //! constructors, may start a thread are not fixed. (Java promises nothing for a `final` field
 //! that another thread reads while the constructor runs either; here the read must not race.)
 
+use super::FastSet;
 use crate::ast::*;
-use std::collections::HashSet;
 
 /// The fixed fields, by the type that declares them and their name.
-pub fn fixed_fields(class: &Class, threaded: bool) -> HashSet<(usize, String)> {
-    let mut written = HashSet::new();
-    let mut written_names = HashSet::new();
+pub fn fixed_fields(class: &Class, threaded: bool) -> FastSet<(usize, String)> {
+    let mut written = FastSet::default();
+    let mut written_names = FastSet::default();
     let mut note = |x: &Expr, in_ctor: bool| {
         let (ExprKind::Assign { target: Place::Field { object, name }, .. }
         | ExprKind::IncDec { target: Place::Field { object, name }, .. }) = &x.kind
@@ -40,8 +40,8 @@ pub fn fixed_fields(class: &Class, threaded: bool) -> HashSet<(usize, String)> {
     for init in class.types.iter().flat_map(|t| &t.fields).filter_map(|f| f.init.as_ref()) {
         visit_expr(init, &mut |x| note(x, true));
     }
-    let unsafe_classes = if threaded { constructors_starting_threads(class) } else { HashSet::new() };
-    let mut fixed = HashSet::new();
+    let unsafe_classes = if threaded { constructors_starting_threads(class) } else { FastSet::default() };
+    let mut fixed = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {
         if unsafe_classes.contains(&t) {
             continue;
@@ -57,7 +57,7 @@ pub fn fixed_fields(class: &Class, threaded: bool) -> HashSet<(usize, String)> {
 
 /// The classes that a constructor which may start a thread builds objects of: the class of the
 /// constructor, and its superclasses, whose fields the object has too.
-fn constructors_starting_threads(class: &Class) -> HashSet<usize> {
+fn constructors_starting_threads(class: &Class) -> FastSet<usize> {
     // Who calls each method, then every method from which a call chain reaches `Thread.start`.
     let mut callers: Vec<Vec<usize>> = vec![Vec::new(); class.methods.len()];
     let mut starting = vec![false; class.methods.len()];
@@ -93,7 +93,7 @@ fn constructors_starting_threads(class: &Class) -> HashSet<usize> {
     }
     // A subclass's constructor calls its superclass's, so it starts a thread too when that one
     // does, and so does a field initializer that calls such a method.
-    let mut builders: HashSet<usize> = class
+    let mut builders: FastSet<usize> = class
         .methods
         .iter()
         .enumerate()
@@ -111,7 +111,7 @@ fn constructors_starting_threads(class: &Class) -> HashSet<usize> {
             });
         }
     }
-    let mut out = HashSet::new();
+    let mut out = FastSet::default();
     for t in builders {
         out.insert(t);
         out.extend(class.hierarchy.ancestors(t));

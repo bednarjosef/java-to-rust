@@ -7,8 +7,8 @@
 //! string or the same handle. A wrong answer here could only make the Rust fail to compile.
 
 use super::Facts;
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
     for method in &class.methods {
@@ -20,11 +20,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
         // A variable mentioned twice in one statement is not moved there: Rust keeps temporaries
         // such as a `Ref` from a field read, or the references `format_args!` takes, alive to the
         // end of the statement, so a move next to another mention would not compile.
-        let mut per_statement: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut per_statement: FastMap<(usize, usize), usize> = FastMap::default();
         for use_ in &walk.uses {
             *per_statement.entry((use_.var, use_.statement)).or_default() += 1;
         }
-        let mut later = HashSet::new();
+        let mut later = FastSet::default();
         for use_ in walk.uses.iter().rev() {
             if later.insert(use_.var)
                 && per_statement[&(use_.var, use_.statement)] == 1
@@ -52,7 +52,7 @@ struct Use {
 #[derive(Default)]
 struct Walk<'c> {
     /// The arrays read for their class beside the copies made into it (`Class::array_likes`).
-    likes: Option<&'c HashMap<ExprId, Expr>>,
+    likes: Option<&'c std::collections::HashMap<ExprId, Expr>>,
     /// The variables in scope, innermost last: (Java name, variable).
     scope: Vec<(String, usize)>,
     /// How many loops enclose each variable's declaration.

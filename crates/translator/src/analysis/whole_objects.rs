@@ -30,8 +30,9 @@
 //! structs is translated as before.
 
 use super::whole_object_classes;
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
 pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
     whole_objects_all(class).map_err(|mut errors| errors.remove(0))
@@ -45,6 +46,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
         return Ok(());
     }
     let h = &class.hierarchy;
+    debug_assert_eq!(h.overriders.len(), class.methods.len(), "the hierarchy is out of date");
     let fields_structs = super::hierarchy::fields_structs(class);
     // The classes with subclasses above and below those, whose constructors call each other.
     let mut whole: BTreeSet<usize> = BTreeSet::new();
@@ -64,7 +66,8 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     let leaves: BTreeSet<usize> = (0..class.types.len())
         .filter(|t| !whole.contains(t) && class.types[*t].extends.is_some_and(|e| whole.contains(&e)))
         .collect();
-    let mut rewrite = Rewrite { next_id: next_id(class), zero: HashMap::new(), construct: HashMap::new() };
+    let mut rewrite =
+        Rewrite { next_id: next_id(class), zero: FastMap::default(), construct: FastMap::default() };
     let original: Vec<usize> = (0..class.methods.len())
         .filter(|&m| class.methods[m].is_ctor && whole.contains(&class.methods[m].class))
         .collect();
@@ -72,7 +75,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     // object is built with them, so an override that the superclass's part calls finds them set.
     let mut order: Vec<usize> = whole.iter().copied().collect();
     order.sort_by_key(|&t| class.hierarchy.ancestors(t).len());
-    let mut synthetic: HashMap<usize, Vec<(String, Type)>> = HashMap::new();
+    let mut synthetic: FastMap<usize, Vec<(String, Type)>> = FastMap::default();
     for &t in &order {
         let mut fields = class.types[t].extends.and_then(|e| synthetic.get(&e)).cloned().unwrap_or_default();
         fields.extend(own_synthetic(class, t));
@@ -81,7 +84,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     // For each constructor of these classes and of their subclasses without subclasses, the
     // parameters that pass the synthetic fields of its zero object (of its superclass's, for one
     // of a class without subclasses).
-    let mut sources: HashMap<usize, Vec<Source>> = HashMap::new();
+    let mut sources: FastMap<usize, Vec<Source>> = FastMap::default();
     let mut errors = Vec::new();
     for m in (0..class.methods.len()).filter(|&m| {
         let method = &class.methods[m];
@@ -117,7 +120,11 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     for &t in &order {
         let zero = class.methods.len();
         rewrite.zero.insert(t, zero);
-        let pos = class.methods.iter().find(|m| m.is_ctor && m.class == t).map_or(Pos::default(), |m| m.pos);
+        // The hierarchy has the methods as they were before the zero constructors, in index order.
+        let pos = (class.hierarchy.methods_of(t).iter())
+            .map(|&i| &class.methods[i])
+            .find(|m| m.is_ctor)
+            .map_or(Pos::default(), |m| m.pos);
         let fields = &synthetic[&t];
         let mut body = match class.types[t].extends.and_then(|e| rewrite.zero.get(&e).map(|&z| (e, z))) {
             Some((e, above)) => {
@@ -160,11 +167,10 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
     // The constructors of the classes with subclasses become `construct<Name>` methods, and those
     // of their subclasses without subclasses start with the zero `super()` and call them.
     for &t in whole.iter().chain(&leaves) {
-        let ctors: Vec<usize> = (0..class.methods.len())
-            .filter(|&m| {
-                class.methods[m].is_ctor && class.methods[m].class == t && rewrite.zero.get(&t) != Some(&m)
-            })
-            .collect();
+        // Its constructors before the zero one, which the hierarchy does not have: none of them
+        // is rewritten yet.
+        let ctors: Vec<usize> =
+            class.hierarchy.methods_of(t).iter().copied().filter(|&m| class.methods[m].is_ctor).collect();
         let starting: Vec<usize> = ctors.iter().copied().filter(|&m| !delegates(&class.methods[m])).collect();
         let inits = rewrite.field_inits(class, t);
         // When several constructors run the initializers, they call a method that does.
@@ -224,7 +230,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
         }
     }
     // `new C(..)` of a class with subclasses calls `new<Name>`.
-    let mut factories = HashMap::new();
+    let mut factories = FastMap::default();
     for &m in &original {
         let t = class.methods[m].class;
         if !class.hierarchy.is_concrete(t) {
@@ -384,7 +390,7 @@ enum Source {
 fn synthetic_sources(
     class: &Class,
     whole: &BTreeSet<usize>,
-    synthetic: &HashMap<usize, Vec<(String, Type)>>,
+    synthetic: &FastMap<usize, Vec<(String, Type)>>,
     m: usize,
 ) -> Option<Vec<Source>> {
     let method = &class.methods[m];
@@ -424,7 +430,7 @@ fn synthetic_sources(
 fn leaf_sources(
     class: &Class,
     whole: &BTreeSet<usize>,
-    synthetic: &HashMap<usize, Vec<(String, Type)>>,
+    synthetic: &FastMap<usize, Vec<(String, Type)>>,
     m: usize,
 ) -> Option<Vec<Source>> {
     let method = &class.methods[m];
@@ -478,9 +484,9 @@ fn source(class: &Class, method: &Method, value: &Expr) -> Option<Source> {
 struct Rewrite {
     next_id: ExprId,
     /// The constructor with no parameters of each class with subclasses that is rewritten.
-    zero: HashMap<usize, usize>,
+    zero: FastMap<usize, usize>,
     /// The name of the `construct<Name>` method each constructor becomes.
-    construct: HashMap<usize, String>,
+    construct: FastMap<usize, String>,
 }
 
 impl Rewrite {
@@ -591,7 +597,7 @@ impl Rewrite {
             class.methods[m].body.splice(at..at, inits);
             return;
         };
-        let synthetic: HashSet<String> = own_synthetic(class, t).into_iter().map(|(f, _)| f).collect();
+        let synthetic: FastSet<String> = own_synthetic(class, t).into_iter().map(|(f, _)| f).collect();
         let mut body = std::mem::take(&mut class.methods[m].body);
         // The statements before `super(..)` (see `construct`) run on the zero object.
         let prologue: Vec<Stmt> = body.drain(..at.unwrap_or(0)).collect();

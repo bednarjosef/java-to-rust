@@ -137,7 +137,6 @@ pub fn generate_all_stubbing(
 ) -> Result<ModuleTree, Vec<Error>> {
     SHARED_STRINGS.set(class.shared_strings);
     let setup = Setup::new(class, facts);
-    let checked = enums::checked_value_ofs(class, facts);
     let start = std::time::Instant::now();
     let mut kept = None;
     let wanted = Needs::new();
@@ -158,7 +157,7 @@ pub fn generate_all_stubbing(
     if !changed.is_empty() {
         let start = std::time::Instant::now();
         // The messages of the dereferences may change where the stubs take away an error of them.
-        let present = |messages: &HashMap<ExprId, Option<String>>| {
+        let present = |messages: &crate::analysis::FastMap<ExprId, Option<String>>| {
             let present = messages.iter().filter(|(id, _)| facts.null_checked.contains_key(id));
             present.map(|(&id, message)| (id, message.clone())).collect::<HashMap<_, _>>()
         };
@@ -172,7 +171,7 @@ pub fn generate_all_stubbing(
         // nothing else of the setup does where the stubs replace bodies alone.
         let mut stubbed = Setup::new(class, facts);
         let live = std::mem::replace(&mut stubbed.live, setup.live.clone());
-        if stubbed != setup || enums::checked_value_ofs(class, facts) != checked {
+        if stubbed != setup {
             if crate::timings::enabled() {
                 eprintln!("timing: codegen: the stubs change what the whole program is written with");
             }
@@ -473,6 +472,9 @@ impl Found {
     }
 }
 
+/// A list of classes shared between the users of a generator's caches.
+type Classes = std::rc::Rc<[usize]>;
+
 /// What the generator finds of the program before it writes it, the same in every round
 /// (`generate_all`).
 #[derive(PartialEq)]
@@ -483,6 +485,8 @@ struct Setup {
     group_names: HashMap<usize, String>,
     struct_methods: HashMap<usize, Vec<usize>>,
     static_fn_names: HashSet<String>,
+    /// `fn_names` as a set, for the temporaries that must not take one.
+    fn_name_set: HashSet<String>,
     receiver_sets: HashMap<u64, std::sync::Arc<[usize]>>,
     class_tags: Vec<u16>,
     runs: Vec<bool>,
@@ -492,6 +496,11 @@ struct Setup {
     /// `Gen::conversion_names` and `Gen::stack_forms`, which a generator finds from the rest.
     conversion_names: std::sync::Arc<[String]>,
     stack_forms: HashSet<usize>,
+    /// `Gen::stack_sites` of each method that has any.
+    stack_sites: HashMap<usize, Vec<(ExprId, usize)>>,
+    /// The enums whose `valueOf` a `catch` or `finally` sees fail (`enums::checked_value_ofs`),
+    /// found once rather than by each round's generators.
+    checked_value_ofs: HashSet<&'static str>,
 }
 
 impl Setup {
@@ -520,10 +529,12 @@ impl Setup {
             .filter(|&i| class.methods[i].is_static)
             .map(|i| fn_names[i].clone())
             .collect();
+        let fn_name_set = fn_names.iter().cloned().collect();
         let mut setup = Setup {
             live: live_types(class, facts),
             homes,
             fn_names,
+            fn_name_set,
             group_names,
             struct_methods,
             static_fn_names,
@@ -534,13 +545,20 @@ impl Setup {
             plans: modules::plans(class),
             conversion_names: std::sync::Arc::from([]),
             stack_forms: HashSet::new(),
+            stack_sites: HashMap::new(),
+            checked_value_ofs: enums::checked_value_ofs(class, facts),
         };
         let wanted = Needs::new();
         let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
         let g = Gen::new(class, facts, &setup, &round);
-        let (conversion_names, stack_forms) = (g.conversion_names().into(), g.stack_forms());
+        let sites: HashMap<usize, Vec<(ExprId, usize)>> = (0..class.methods.len())
+            .map(|m| (m, g.find_stack_sites(m)))
+            .filter(|(_, sites)| !sites.is_empty())
+            .collect();
+        let (conversion_names, stack_forms) = (g.conversion_names().into(), g.stack_forms(&sites));
         setup.conversion_names = conversion_names;
         setup.stack_forms = stack_forms;
+        setup.stack_sites = sites;
         setup
     }
 }
@@ -642,6 +660,7 @@ impl<'a> Gen<'a> {
             class,
             facts,
             fn_names: &setup.fn_names,
+            fn_name_set: &setup.fn_name_set,
             static_fn_names: &setup.static_fn_names,
             variant_names: Default::default(),
             cell_names: Default::default(),
@@ -650,8 +669,11 @@ impl<'a> Gen<'a> {
             reps: Default::default(),
             variant_lists: Default::default(),
             enum_variant_lists: Default::default(),
+            passing_lists: Default::default(),
+            cast_classes: Default::default(),
+            enum_variant_sets: Default::default(),
             variant_types: Default::default(),
-            checked_value_ofs: Default::default(),
+            checked_value_ofs: &setup.checked_value_ofs,
             group_names: &setup.group_names,
             receiver_sets: &setup.receiver_sets,
             conversion_names: setup.conversion_names.clone(),
@@ -677,6 +699,7 @@ impl<'a> Gen<'a> {
             lazy_text: false,
             formatting: false,
             chars: false,
+            indexed: false,
             exhaustive: false,
             chain: false,
             field_locals: HashMap::new(),
@@ -720,6 +743,7 @@ impl<'a> Gen<'a> {
             slot_param: String::new(),
             on_stack: false,
             stack_forms: &setup.stack_forms,
+            stack_sites: &setup.stack_sites,
             only_enums: round.only_enums.as_ref(),
             class_values: Default::default(),
             class_value_names: Vec::new(),
@@ -830,12 +854,20 @@ struct Gen<'a> {
     /// The variants of the enum of each type that have objects (`dispatch::enum_variants`), once
     /// found.
     enum_variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<[usize]>>>,
+    /// The variants of the enum of each type whose objects are of another type
+    /// (`dispatch::passing`), by the two, once found.
+    passing_lists: std::cell::RefCell<HashMap<(usize, usize), Classes>>,
+    /// The text of each class as a `ClassCastException` names it (`dispatch::cast_class`), once
+    /// made.
+    cast_classes: HashMap<usize, String>,
+    /// `enum_variant_lists` as sets, for `dispatch::is_enum_variant`.
+    enum_variant_sets: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashSet<usize>>>>,
     /// The types whose `enum_variants` the code written asked for, which depend on which classes
     /// are live: a census that stubs code writes the modules that asked again where a stub
     /// changes that (`generate_all_stubbing`).
     variant_types: std::cell::RefCell<HashSet<usize>>,
     /// The enums whose `valueOf` a `catch` or `finally` sees fail (see `enums::checked_value_of`).
-    checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
+    checked_value_ofs: &'a HashSet<&'static str>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: &'a HashMap<usize, String>,
     /// The sets of classes in `Class::receivers`, by their key (`receiver_key`).
@@ -892,6 +924,9 @@ struct Gen<'a> {
     formatting: bool,
     /// Whether the switch being written matches its `char` selector as a Rust `char`.
     chars: bool,
+    /// Whether the switch being written on a string matches the number of the case of its label
+    /// (`java::string_case`), as it has many labels.
+    indexed: bool,
     /// Whether the cases of the switch being written cover every value of its enum selector.
     exhaustive: bool,
     /// Whether the `?:` being written is the else branch of another, so that the chain is written
@@ -922,6 +957,8 @@ struct Gen<'a> {
     /// annotation).
     annotations: Vec<(String, Type, String)>,
     fn_names: &'a [String],
+    /// `fn_names` as a set.
+    fn_name_set: &'a HashSet<String>,
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
     /// The boxed types of the current method's parameters and locals, by Java name.
@@ -997,6 +1034,8 @@ struct Gen<'a> {
     on_stack: bool,
     /// The constructors and factories that get a form on the stack (see `stack_objects`).
     stack_forms: &'a HashSet<usize>,
+    /// `Setup::stack_sites`.
+    stack_sites: &'a HashMap<usize, Vec<(ExprId, usize)>>,
     /// The enum items written in a round of them alone, to find what they ask for, or all of
     /// them in the last round, which takes the other items from the first (`generate_all`).
     only_enums: Option<&'a OnlyEnums>,

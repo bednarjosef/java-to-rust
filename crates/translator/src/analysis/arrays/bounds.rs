@@ -15,24 +15,24 @@
 //! analysis's bounds: `a[2]` of `new int[3]`.
 
 use super::super::Facts;
+use super::super::{FastMap, FastSet};
 use super::declarations;
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// The accesses of plain arrays in `method` whose index is always in bounds: element reads and
 /// writes and row reads, by expression id.
 pub(super) fn in_bounds(
     method: &Method,
-    plain: &HashSet<String>,
-    reshaped: &HashSet<String>,
+    plain: &FastSet<String>,
+    reshaped: &FastSet<String>,
     facts: &Facts,
 ) -> Vec<ExprId> {
-    let mut declared: HashMap<&str, usize> = HashMap::new();
-    let mut inits: HashMap<&str, &Expr> = HashMap::new();
+    let mut declared: FastMap<&str, usize> = FastMap::default();
+    let mut inits: FastMap<&str, &Expr> = FastMap::default();
     // Variables declared by for-each loops only: each lives in its own loop and is not assigned
     // there, so a name reused by several loops is as good as one declared once.
-    let mut loops_only: HashSet<&str> = HashSet::new();
-    let mut others: HashSet<&str> = HashSet::new();
+    let mut loops_only: FastSet<&str> = FastSet::default();
+    let mut others: FastSet<&str> = FastSet::default();
     for p in &method.params {
         *declared.entry(&p.name).or_default() += 1;
         others.insert(&p.name);
@@ -48,8 +48,8 @@ pub(super) fn in_bounds(
             inits.insert(d.name, init);
         }
     }
-    let mut assigned: HashSet<String> = HashSet::new();
-    let mut lent: HashSet<String> = HashSet::new();
+    let mut assigned: FastSet<String> = FastSet::default();
+    let mut lent: FastSet<String> = FastSet::default();
     for stmt in &method.body {
         visit_stmt(
             stmt,
@@ -151,17 +151,17 @@ struct Guard {
     /// Whether `var` is known not to be negative: a counter that counts up from zero.
     counts_up: bool,
     /// Every variable the guard depends on; assigning one ends it.
-    vars: HashSet<String>,
+    vars: FastSet<String>,
 }
 
 struct Walk<'a> {
     facts: &'a Facts,
-    plain: &'a HashSet<String>,
+    plain: &'a FastSet<String>,
     /// Variables declared once and never assigned after their declaration.
-    stable: HashSet<&'a str>,
-    inits: HashMap<&'a str, &'a Expr>,
+    stable: FastSet<&'a str>,
+    inits: FastMap<&'a str, &'a Expr>,
     /// Plain arrays whose rows are never replaced, so the length of each row stays the same.
-    fixed_rows: HashSet<String>,
+    fixed_rows: FastSet<String>,
     guards: Vec<Guard>,
     proven: Vec<ExprId>,
 }
@@ -172,12 +172,12 @@ impl Walk<'_> {
     }
 
     /// The bound that `e` evaluates to where a guard is tested, if it has a symbolic form.
-    fn bound_of(&self, e: &Expr) -> Option<(Bound, HashSet<String>)> {
+    fn bound_of(&self, e: &Expr) -> Option<(Bound, FastSet<String>)> {
         match &e.kind {
-            ExprKind::Int(c) => Some((Bound::constant(*c as i64), HashSet::new())),
+            ExprKind::Int(c) => Some((Bound::constant(*c as i64), FastSet::default())),
             ExprKind::Var(v) => {
                 let bound = self.named(v).unwrap_or(Bound { base: Some(Base::Var(v.clone())), offset: 0 });
-                let mut vars = HashSet::from([v.clone()]);
+                let mut vars = FastSet::from_iter([v.clone()]);
                 vars.extend(bound.vars());
                 Some((bound, vars))
             }
@@ -195,7 +195,7 @@ impl Walk<'_> {
 
     /// `path.length` as a bound, where the path is an array variable or a row of one reached
     /// through index variables.
-    fn length_of(&self, e: &Expr) -> Option<(Bound, HashSet<String>)> {
+    fn length_of(&self, e: &Expr) -> Option<(Bound, FastSet<String>)> {
         let ExprKind::Length(path) = &e.kind else { return None };
         let (root, rows) = self.index_vars(path)?;
         let vars = std::iter::once(root.clone()).chain(rows.iter().cloned()).collect();
@@ -275,7 +275,7 @@ impl Walk<'_> {
                 ExprKind::ArrayLit(items) => {
                     sizes.push(Some(Bound::constant(items.len() as i64)));
                     // The next level is known when every row is a literal of the same length.
-                    let lengths: HashSet<usize> = items
+                    let lengths: FastSet<usize> = items
                         .iter()
                         .map(|item| match &item.kind {
                             ExprKind::ArrayLit(row) => Some(row.len()),

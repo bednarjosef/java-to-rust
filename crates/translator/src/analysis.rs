@@ -48,7 +48,6 @@ mod whole_objects;
 
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 pub use exceptions::{generator_text, text_objects};
 pub(crate) use npe_messages::{
@@ -67,7 +66,7 @@ pub use whole_objects::{whole_objects, whole_objects_all};
 /// The types whose statics a thread that the program starts may touch (`Class::thread_statics`),
 /// for a translation that does not keep only the methods that can run (a whole program's does,
 /// and finds these on the way): `None` when the program starts no thread, or that is not known.
-pub fn thread_statics(class: &Class) -> Option<HashSet<usize>> {
+pub fn thread_statics(class: &Class) -> Option<std::collections::HashSet<usize>> {
     if !threads::threaded(class) {
         return None;
     }
@@ -83,206 +82,206 @@ pub struct Facts {
     pub interrupts: bool,
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
-    pub thread_shared: HashSet<usize>,
+    pub thread_shared: FastSet<usize>,
     /// The types whose statics the started threads' code may touch (`Class::thread_statics`),
     /// `None` when not known; see `Facts::process_statics`.
-    pub thread_statics: Option<HashSet<usize>>,
+    pub thread_statics: Option<std::collections::HashSet<usize>>,
     /// Whether two threads may reach a `StringBuilder`, whose builders are then all
     /// `java::SharedStringBuilder`s (see `threads::shares_builders`).
     pub shared_builders: bool,
     /// The families of the arrays that two threads may reach (`threads::array_family`), whose
     /// arrays are `java::SharedArray`s; every other array is a `java::Array`.
-    pub shared_arrays: HashSet<Type>,
+    pub shared_arrays: FastSet<Type>,
     /// The methods of those classes that must not borrow their object for the whole call, and
     /// the methods that use the kept monitor of `this` (see `monitors`).
-    pub long_methods: HashSet<usize>,
+    pub long_methods: FastSet<usize>,
     /// Whether the program waits, notifies or asks `Thread.holdsLock`, so that every monitor it
     /// uses is kept (see `monitors`).
     pub monitors: bool,
     /// The classes, by type index, whose class monitors are kept (see `monitors`).
-    pub class_monitors: HashSet<usize>,
+    pub class_monitors: FastSet<usize>,
     /// Integer `+`, `-`, `*`, negation, `++`, `--`, compound assignments and `Math.abs` that
     /// never overflow.
-    pub no_overflow: HashSet<ExprId>,
+    pub no_overflow: FastSet<ExprId>,
     /// The values that the index of each array indexing or element assignment takes, from the
     /// range analysis: (lowest, highest), empty when `lowest > highest`. Each size of a
     /// `new T[n]` has its values here too, keyed by the size expression.
-    pub index_ranges: HashMap<ExprId, (i64, i64)>,
+    pub index_ranges: FastMap<ExprId, (i64, i64)>,
     /// Reads of string, array and object variables that are last uses: the value is moved, not
     /// cloned (see `moves`).
-    pub moves: HashSet<ExprId>,
+    pub moves: FastSet<ExprId>,
     /// Integer `/`, `%` and their compound assignments whose divisor is never zero and that never
     /// compute `MIN / -1`.
-    pub safe_division: HashSet<ExprId>,
+    pub safe_division: FastSet<ExprId>,
     /// `String.length()`, `String.charAt` and `String.substring` calls on strings that are always
     /// ASCII.
-    pub ascii_length: HashSet<ExprId>,
+    pub ascii_length: FastSet<ExprId>,
     /// `(char)` casts whose integer value the range analysis keeps within ASCII.
-    pub ascii_chars: HashSet<ExprId>,
+    pub ascii_chars: FastSet<ExprId>,
     /// `s.charAt(i)` calls whose index is always within the string.
-    pub index_in_bounds: HashSet<ExprId>,
+    pub index_in_bounds: FastSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
-    pub borrowed_params: HashSet<(usize, usize)>,
+    pub borrowed_params: FastSet<(usize, usize)>,
     /// String parameters that are never assigned but can be null: `Option<&str>`.
-    pub borrowed_optional_params: HashSet<(usize, usize)>,
+    pub borrowed_optional_params: FastSet<(usize, usize)>,
     /// Object parameters, as (method, parameter) indexes, that the method never assigns and only
     /// uses through: it reads and writes their fields, calls their methods, compares or prints
     /// them, passes them on to such parameters, and copies them into locals. They are `&Rc<..>`,
     /// which the caller lends.
-    pub borrowed_objects: HashSet<(usize, usize)>,
+    pub borrowed_objects: FastSet<(usize, usize)>,
     /// Object parameters that can be null and that the method uses the same way: they are
     /// `&Option<Rc<..>>`, which the caller lends.
-    pub borrowed_optional_objects: HashSet<(usize, usize)>,
+    pub borrowed_optional_objects: FastSet<(usize, usize)>,
     /// String variables and parameters, as (method, name), that can hold null.
     pub nullable_vars: MethodLocals,
     /// Methods whose string or object return value can be null.
-    pub nullable_returns: HashSet<usize>,
+    pub nullable_returns: FastSet<usize>,
     /// String and object fields, as (class, field), that can hold null: `Option`s.
-    pub nullable_fields: HashSet<(String, String)>,
+    pub nullable_fields: FastSet<(String, String)>,
     /// String and object static fields, as (class index, field), that can hold null.
-    pub nullable_statics: HashSet<(usize, String)>,
+    pub nullable_statics: FastSet<(usize, String)>,
     /// Statics of object type, of a class initialized eagerly, that are never null once the class
     /// is initialized: their cell starts empty, as there is no object to start it with, so it is
     /// an `Option` that is written with `Some` and read with `java::non_null`.
-    pub placeholder_statics: HashSet<(usize, String)>,
+    pub placeholder_statics: FastSet<(usize, String)>,
     /// The reads of a static that may run during its class's initialization, before the
     /// initializer sets it (see `early_reads`): a read of a static of `placeholder_statics` there
     /// may be null, and is its cell's `Option`.
-    pub early_static_reads: HashSet<ExprId>,
+    pub early_static_reads: FastSet<ExprId>,
     /// Statics that are never null where code reads them, though the nullness analysis lets
     /// them be: a static set nowhere else, which the first statements of its class's static
     /// initializer set to a value that is not null, as `ForkJoinPool`'s `U = Unsafe.getUnsafe()`.
     /// Reading it cannot throw (see `exceptions`); its cell is still an `Option`.
-    pub initialized_statics: HashSet<(usize, String)>,
+    pub initialized_statics: FastSet<(usize, String)>,
     /// The element types (strings, objects and arrays) whose arrays can hold null: their
     /// elements are `Option`s, in every array of that element type.
-    pub nullable_elements: HashSet<Type>,
+    pub nullable_elements: FastSet<Type>,
     /// Array locals and borrowed array parameters, as (method, name), that no other name can
     /// see: plain `Vec`s (of `Vec`s, for arrays of arrays). The flag says whether an element of
     /// the array, at any depth, is ever assigned.
-    pub plain_arrays: HashMap<(usize, String), bool>,
+    pub plain_arrays: FastMap<(usize, String), bool>,
     /// Accesses of plain arrays (`a[i]` reads, element assignments and rows `m[i]` of `m[i][j]`)
     /// whose index is always in bounds.
-    pub in_bounds: HashSet<ExprId>,
+    pub in_bounds: FastSet<ExprId>,
     /// Array parameters, as (method, parameter) indexes, that are plain at every call: `&[T]`, or
     /// `&mut [T]` when the flag says the elements are written.
-    pub borrowed_arrays: HashMap<(usize, usize), bool>,
+    pub borrowed_arrays: FastMap<(usize, usize), bool>,
     /// The variables of for-each loops over plain arrays of arrays, as (method, name): each
     /// borrows the rows in turn (`for row in m.iter()`), as `&Vec<T>` or `&mut Vec<T>`.
-    pub row_loops: HashSet<(usize, String)>,
+    pub row_loops: FastSet<(usize, String)>,
     /// Innermost counting loops over plain arrays whose accesses are all in bounds when a check
     /// made before the loop passes: the loop then runs over slices, keyed by its condition.
-    pub sliced_loops: HashMap<ExprId, SlicedLoop>,
+    pub sliced_loops: FastMap<ExprId, SlicedLoop>,
     /// Methods that return arrays nobody else holds: they return the plain `Vec`.
-    pub owned_returns: HashSet<usize>,
+    pub owned_returns: FastSet<usize>,
     /// Counting loops over a plain array whose body only reads `a[i]`, keyed by the loop
     /// condition: the reads that can become elements of `for x in a.iter()`.
-    pub element_loops: HashMap<ExprId, Vec<ExprId>>,
+    pub element_loops: FastMap<ExprId, Vec<ExprId>>,
     /// The classes whose objects never change after construction, by qualified name.
-    pub immutable: HashSet<String>,
+    pub immutable: FastSet<String>,
     /// The classes whose objects are never shared, so they are plain values, by qualified name.
-    pub owned: HashSet<String>,
+    pub owned: FastSet<String>,
     /// The classes whose objects change and are shared, by qualified name: an object is an
     /// `Arc<C>` whose fields are cells, read and written by value, with no `RefCell` (see
     /// `objects::celled_classes`).
-    pub celled: HashSet<String>,
+    pub celled: FastSet<String>,
     /// The celled classes whose objects keep a monitor, because threads share them or the
     /// program waits on them: an `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s.
-    pub monitored: HashSet<String>,
+    pub monitored: FastSet<String>,
     /// For each type (index into `Class::types`), the concrete classes and enums whose values
     /// become values of that type (see `hierarchy::flows`).
     pub flows: Vec<FastSet<usize>>,
     /// The instance methods (indexes into `Class::methods`) that change their object.
-    pub mutating: HashSet<usize>,
+    pub mutating: FastSet<usize>,
     /// The instance methods that borrow their object for the call: `&self` or `&mut self`.
-    pub self_methods: HashSet<usize>,
+    pub self_methods: FastSet<usize>,
     /// The classes whose constructors build a plain value, which `new` then shares.
-    pub plain_constructors: HashSet<String>,
+    pub plain_constructors: FastSet<String>,
     /// For each other class, by index, the positions of the constructors and field initializers
     /// that keep it from building a plain value.
-    pub not_plain: HashMap<usize, Vec<Pos>>,
+    pub not_plain: FastMap<usize, Vec<Pos>>,
     /// Methods and constructors that touch no object but their own, so they borrow no other.
-    pub isolated: HashSet<usize>,
+    pub isolated: FastSet<usize>,
     /// Methods and constructors that may borrow a shared object mutably, through what they call.
-    pub writers: HashSet<usize>,
+    pub writers: FastSet<usize>,
     /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
     /// an `init` function; the other classes initialize each static lazily on first access.
-    pub eager_init: HashSet<usize>,
+    pub eager_init: FastSet<usize>,
     /// The statics, as (class index, name), that Java assigns once and only in their class's
     /// static initialization: declared `final`, not constants, and assigned by no other method.
     /// Where they are the process's, those of object, array or string type are `java::Final`
     /// cells, which a thread reads without a lock (see `codegen/statics.rs`).
-    pub final_statics: HashSet<(usize, String)>,
+    pub final_statics: FastSet<(usize, String)>,
     /// The static methods and constructors that run their class's `init` when they start.
-    pub entry_init: HashSet<usize>,
+    pub entry_init: FastSet<usize>,
     /// The class of `main`, when the program has exactly one, which `main` initializes first.
     pub main_class: Option<usize>,
     /// The assignments of each static (see `exceptions::guards`).
     static_writes: exceptions::guards::StaticWrites,
     /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
     /// are shared objects. Every other boxed kind is its primitive value.
-    pub faithful_boxes: HashSet<Type>,
+    pub faithful_boxes: FastSet<Type>,
     /// The `==` and `!=` (by expression id) on two `Object` values that may both be strings or
     /// boxes, whose identity the translation does not keep: compared at run time, where values
     /// that are not equal are different objects and equal ones end the program
     /// (`java::unkept_identity`), as Java may or may not see one object in them.
-    pub identity_checks: HashSet<ExprId>,
+    pub identity_checks: FastSet<ExprId>,
     /// The classes with subclasses (indexes into `Class::types`) whose fields are a struct of
     /// their own, `<Name>Fields`, that the structs of their subclasses embed as `base`.
-    pub fields_structs: HashSet<usize>,
+    pub fields_structs: FastSet<usize>,
     /// The methods of classes with subclasses that live on the class's fields struct.
-    pub field_level: HashSet<usize>,
+    pub field_level: FastSet<usize>,
     /// The class that declares each field visible in each class: (class, field) to class, by
     /// qualified name.
-    pub field_owners: HashMap<(String, String), String>,
+    pub field_owners: FastMap<(String, String), String>,
     /// The instance fields that only constructors write, through `this`, by declaring type and
     /// name: their reads borrow the field alone (see `fixed_fields`).
-    pub fixed_fields: HashSet<(usize, String)>,
+    pub fixed_fields: FastSet<(usize, String)>,
     /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
     /// exception that may escape them (see `exceptions`).
-    pub throwing: HashSet<usize>,
+    pub throwing: FastSet<usize>,
     /// The classes whose instance field initializers raise, so that their `field_inits` returns a
     /// `Result` (see `exceptions::field_inits`).
-    pub init_throwing: HashSet<usize>,
+    pub init_throwing: FastSet<usize>,
     /// The `try` statements, by address, whose `catch` clauses catch an exception that their body
     /// may throw. The others run their body as a plain block.
-    pub live_tries: HashSet<usize>,
+    pub live_tries: FastSet<usize>,
     /// The `try` statements, by address, whose body or `catch` clauses an exception of the
     /// program may leave or reach (which their `finally` must see).
-    pub raising_tries: HashSet<usize>,
+    pub raising_tries: FastSet<usize>,
     /// The operations whose failure a `catch` or a `finally` may see, which are written with the
     /// runtime's checked form (see `analysis::exceptions`).
-    pub raising: HashSet<ExprId>,
+    pub raising: FastSet<ExprId>,
     /// The objects, by expression, whose dereference by a call or a field access may throw a
     /// `NullPointerException` that a `catch` or a `finally` may see: they are written with the
     /// runtime's checked `non_null`. With the position of the call or the field access.
-    pub null_checked: HashMap<ExprId, Pos>,
+    pub null_checked: FastMap<ExprId, Pos>,
     /// Where a `catch` first reads the message of a `NullPointerException` that the runtime
     /// raises (`getMessage`), which the translation then writes as Java's (see `npe_messages`).
     pub npe_message_read: Option<Pos>,
     /// The objects of `null_checked` whose message such a `catch` may read: those that its `try`
     /// catches itself, and those whose exception leaves their method. Each must have Java's
     /// message in `npe_messages`, or the program is not translated.
-    pub npe_message_needed: HashSet<ExprId>,
+    pub npe_message_needed: FastSet<ExprId>,
     /// The message of the `NullPointerException` of the dereference of each object of
     /// `null_checked` whose message is known: Java's text, or `None` for an exception without
     /// one (such as `Objects.requireNonNull`'s). Filled in only when `npe_message_read` is set.
-    pub npe_messages: HashMap<ExprId, Option<String>>,
+    pub npe_messages: FastMap<ExprId, Option<String>>,
     /// The dereferences of `npe_message_needed` whose message is approximated
     /// (`Program::approximate_messages`), with the position of the method each is in (`None` for a
     /// field's initializer).
     pub npe_approximated: Vec<(Pos, Option<Pos>)>,
     /// The operations whose failure, which has no checked form of its own, a `catch` or a
     /// `finally` may see: they run inside `java::catching`. With their positions.
-    pub catching: HashMap<ExprId, Pos>,
+    pub catching: FastMap<ExprId, Pos>,
     /// The standard classes whose objects the runtime raises where the program may see them.
     pub raised_classes: std::collections::BTreeSet<usize>,
     /// The functional interfaces whose values are closures, `Rc<dyn Fn(A) -> R>` (see
     /// `closures`).
-    pub closure_types: HashSet<usize>,
+    pub closure_types: FastSet<usize>,
     /// The locals, by method and name, that hold a closure only to call it: a plain Rust
     /// closure, `let f = |x| ..;` (see `closures::closure_locals`).
-    pub closure_locals: HashSet<(usize, String)>,
+    pub closure_locals: FastSet<(usize, String)>,
     /// The `new`s and calls of factories whose objects never leave the method that creates
     /// them and, in a loop, can no longer be reached when the next iteration makes the next one:
     /// their objects may live in a slot on the method's stack (see `escape`). Empty when the
@@ -373,13 +372,13 @@ impl Analysed {
 /// What the analyses find from the code alone, after the checks (`analyze_from`).
 struct FromCode {
     ranges: Facts,
-    fixed_fields: HashSet<(usize, String)>,
-    eager_init: HashSet<usize>,
-    final_statics: HashSet<(usize, String)>,
-    entry_init: HashSet<usize>,
-    early_static_reads: HashSet<ExprId>,
+    fixed_fields: FastSet<(usize, String)>,
+    eager_init: FastSet<usize>,
+    final_statics: FastSet<(usize, String)>,
+    entry_init: FastSet<usize>,
+    early_static_reads: FastSet<ExprId>,
     /// `Facts::ascii_length`, from the ranges' `ascii_chars`.
-    ascii_length: alongside::Done<HashSet<ExprId>>,
+    ascii_length: alongside::Done<FastSet<ExprId>>,
 }
 
 /// `analyze_tolerating`, from the facts that `represented` found for `class` (which it finds
@@ -661,7 +660,7 @@ fn representation(class: &Class, facts: &mut Facts) {
 /// The classes with subclasses whose constructors cannot build their fields struct as a plain
 /// value: they use `this` as a value or call an overridable method. `whole_objects` gives them
 /// the second constructor form.
-fn whole_object_classes(class: &Class) -> HashSet<usize> {
+fn whole_object_classes(class: &Class) -> FastSet<usize> {
     let mut facts = Facts { fields_structs: hierarchy::fields_structs(class), ..Facts::default() };
     representation(class, &mut facts);
     facts
@@ -744,7 +743,7 @@ pub fn inline_initializers(class: &Class, t: usize, facts: &Facts) -> bool {
 /// that have initializers: those have their initial values then, which a constructor computes
 /// into locals first.
 pub fn reads_earlier_fields(decl: &TypeDecl, i: usize, e: &Expr) -> bool {
-    let mut allowed = HashSet::new();
+    let mut allowed = FastSet::default();
     let mut selves = Vec::new();
     visit_expr(e, &mut |x| match &x.kind {
         ExprKind::This => selves.push(x.id),
@@ -797,7 +796,7 @@ pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -
 
 /// Whether `value` uses `this` only to read fields of `decl` that the assignments `earlier` set.
 fn reads_only(value: &Expr, decl: &TypeDecl, earlier: &[(usize, &Expr)]) -> bool {
-    let mut allowed = HashSet::new();
+    let mut allowed = FastSet::default();
     let mut selves = Vec::new();
     visit_expr(value, &mut |x| match &x.kind {
         ExprKind::This => selves.push(x.id),
@@ -850,7 +849,7 @@ fn borrowed_params(class: &Class, facts: &mut Facts) {
 /// Keeps a (method, parameter) pair only when every method of the method's override group has
 /// it: a call may run any of them, so they take their parameters alike. Says whether it removed
 /// any.
-fn align_groups(class: &Class, set: &mut HashSet<(usize, usize)>) -> bool {
+fn align_groups(class: &Class, set: &mut FastSet<(usize, usize)>) -> bool {
     let unaligned: Vec<(usize, usize)> = set
         .iter()
         .copied()
@@ -863,12 +862,12 @@ fn align_groups(class: &Class, set: &mut HashSet<(usize, usize)>) -> bool {
 }
 
 /// Parameters, as (method, parameter) indexes.
-type Params = HashSet<(usize, usize)>;
+type Params = FastSet<(usize, usize)>;
 
 /// The object parameters that methods borrow: those that can never be null (`&Rc<..>`) and
 /// those that can (`&Option<Rc<..>>`).
 fn borrowed_objects(class: &Class, facts: &Facts) -> (Params, Params) {
-    let mut borrowed = Params::new();
+    let mut borrowed = Params::default();
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
             if matches!(p.ty, Type::Class(..)) && !assigns_any(&method.body, &p.name) {
@@ -915,8 +914,8 @@ fn var_read(e: &Expr, name: &str) -> Option<ExprId> {
 /// of a parameter that is not borrowed, a returned or thrown value, or an operand of anything but
 /// a field access, a call on it, `instanceof`, `==`, `!=` or a concatenation. A read that the
 /// method needs as a value (a local's, a cast's) clones the borrowed handle there.
-fn used_as_value(stmts: &[Stmt], name: &str, borrowed: &HashSet<(usize, usize)>) -> bool {
-    let mut allowed = HashSet::new();
+fn used_as_value(stmts: &[Stmt], name: &str, borrowed: &FastSet<(usize, usize)>) -> bool {
+    let mut allowed = FastSet::default();
     let mut uses = Vec::new();
     let mut on_expr = |e: &Expr| {
         visit_expr(e, &mut |x| match &x.kind {
@@ -972,19 +971,19 @@ fn used_as_value(stmts: &[Stmt], name: &str, borrowed: &HashSet<(usize, usize)>)
 /// "all ASCII" and marks what a non-ASCII value can reach, until nothing changes.
 #[derive(Default)]
 struct NonAscii {
-    vars: HashSet<(usize, String)>,
-    params: HashSet<(usize, usize)>,
+    vars: FastSet<(usize, String)>,
+    params: FastSet<(usize, usize)>,
     /// Override groups (`Hierarchy::group_id`) of which a method may return non-ASCII text, and
     /// those with a method that does not return a `String` (a type variable), not followed.
-    returns: HashSet<usize>,
-    untyped: HashSet<usize>,
+    returns: FastSet<usize>,
+    untyped: FastSet<usize>,
     /// Instance and static fields, by name in any class: a name is followed only when every
     /// field of that name is a `String` (`string_fields`), and then it is non-ASCII when any of
     /// them may be.
-    fields: HashSet<String>,
-    string_fields: HashSet<String>,
+    fields: FastSet<String>,
+    string_fields: FastSet<String>,
     /// The `(char)` casts that the range analysis proves ASCII.
-    chars: HashSet<ExprId>,
+    chars: FastSet<ExprId>,
 }
 
 /// The method index that `NonAscii::ascii` takes for an expression outside any method (a field
@@ -1069,7 +1068,7 @@ impl NonAscii {
 fn ascii_strings(class: &Class, facts: &mut Facts) {
     let mut non_ascii = NonAscii { chars: facts.ascii_chars.clone(), ..NonAscii::default() };
     let all_fields = || class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics));
-    let other_fields: HashSet<&str> =
+    let other_fields: FastSet<&str> =
         all_fields().filter(|f| f.ty != Type::String).map(|f| f.name.as_str()).collect();
     non_ascii.string_fields = all_fields()
         .filter(|f| f.ty == Type::String && !other_fields.contains(f.name.as_str()))
@@ -1249,14 +1248,14 @@ impl std::hash::Hasher for IndexHasher {
     }
 }
 
-pub(crate) type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IndexHasher>>;
+pub(crate) type FastMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<IndexHasher>>;
 pub type FastSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<IndexHasher>>;
 
 /// A set of locals and parameters, as (method, name), that is asked about without making a
 /// `String` for the name.
 #[derive(Clone, Default)]
 pub struct MethodLocals {
-    by_method: FastMap<usize, HashSet<String>>,
+    by_method: FastMap<usize, FastSet<String>>,
     len: usize,
 }
 

@@ -15,10 +15,10 @@
 //! only if everything it ever holds is an array that nobody else holds.
 
 use super::super::Facts;
+use super::super::{FastMap, FastSet};
 use super::declarations;
 use crate::analysis::nullable_var;
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// What makes an array value one that nobody else holds.
 #[derive(Clone, Debug)]
@@ -39,15 +39,15 @@ pub(super) enum Owned {
 #[derive(Default)]
 pub(super) struct Scan {
     /// Array locals and parameters that qualify unless a condition below makes them shared.
-    pub candidates: HashSet<String>,
+    pub candidates: FastSet<String>,
     /// Array parameters that may be borrowed, as (index, name).
     pub params: Vec<(usize, String)>,
     /// Every array local and parameter, plain or not.
-    pub arrays: HashSet<String>,
+    pub arrays: FastSet<String>,
     /// Arrays with an element assigned in this method, at any depth.
-    pub written: HashSet<String>,
+    pub written: FastSet<String>,
     /// Arrays whose rows are replaced in this method (`m[i] = new int[3]`).
-    pub reshaped: HashSet<String>,
+    pub reshaped: FastSet<String>,
     /// The calls made in this method.
     pub calls: Vec<Call>,
     /// The values assigned to array locals, the initializer included.
@@ -83,7 +83,7 @@ pub(super) struct Arg {
     pub moved: bool,
     pub array: bool,
     /// The variables the argument mentions.
-    pub mentions: HashSet<String>,
+    pub mentions: FastSet<String>,
     /// Whether evaluating the argument may run code that reaches an array: a call, an assignment
     /// or a `java.util.Arrays` method.
     pub effects: bool,
@@ -120,21 +120,21 @@ pub(super) fn scan(
     m: usize,
     method: &Method,
     facts: &Facts,
-    live_after: &HashMap<ExprId, HashSet<String>>,
+    live_after: &FastMap<ExprId, FastSet<String>>,
 ) -> Scan {
-    let mut types = HashMap::new();
-    let mut declared: HashMap<String, usize> = HashMap::new();
+    let mut types = FastMap::default();
+    let mut declared: FastMap<String, usize> = FastMap::default();
     for p in &method.params {
         *declared.entry(p.name.clone()).or_default() += 1;
         if matches!(p.ty, Type::Array(_)) {
             types.insert(p.name.clone(), p.ty);
         }
     }
-    let mut references: HashSet<&str> = method.params.iter().map(|p| p.name.as_str()).collect();
+    let mut references: FastSet<&str> = method.params.iter().map(|p| p.name.as_str()).collect();
     // The variables declared only by for-each loops, all of one type: the loops may share a
     // name, as each variable lives in its own loop and is never assigned.
-    let mut loop_vars: HashMap<&str, Option<Type>> = HashMap::new();
-    let mut other_vars: HashSet<&str> = references.clone();
+    let mut loop_vars: FastMap<&str, Option<Type>> = FastMap::default();
+    let mut other_vars: FastSet<&str> = references.clone();
     for d in declarations(method) {
         *declared.entry(d.name.to_string()).or_default() += 1;
         if matches!(d.ty, Type::Array(_)) {
@@ -157,7 +157,7 @@ pub(super) fn scan(
         live_after,
         types: &types,
         references: &references,
-        bad: HashSet::new(),
+        bad: FastSet::default(),
         top: None,
         switches: 0,
         scan: Scan::default(),
@@ -188,14 +188,14 @@ fn eligible(ty: Type, facts: &Facts) -> bool {
 
 struct Walk<'m> {
     facts: &'m Facts,
-    live_after: &'m HashMap<ExprId, HashSet<String>>,
+    live_after: &'m FastMap<ExprId, FastSet<String>>,
     /// The type of every array local and parameter.
-    types: &'m HashMap<String, Type>,
+    types: &'m FastMap<String, Type>,
     /// The parameters and for-each variables: they refer to arrays held elsewhere, so they are
     /// never moved and never take another array.
-    references: &'m HashSet<&'m str>,
+    references: &'m FastSet<&'m str>,
     /// The array variables that a use makes shared.
-    bad: HashSet<String>,
+    bad: FastSet<String>,
     /// The expression of the simple statement being walked, where a variable may be moved.
     top: Option<&'m Expr>,
     /// How many switches and `try` statements enclose the code being walked; the liveness
@@ -669,7 +669,7 @@ fn calls_with(e: &Expr, name: &str) -> bool {
 
 impl Arg {
     fn of(e: &Expr, name: Option<String>, row: bool, fresh: Owned, moved: bool) -> Arg {
-        let mut mentions = HashSet::new();
+        let mut mentions = FastSet::default();
         let mut effects = false;
         visit_expr(e, &mut |x| match &x.kind {
             ExprKind::Var(v) => {

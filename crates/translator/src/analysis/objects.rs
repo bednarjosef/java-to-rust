@@ -6,11 +6,11 @@
 
 use super::Facts;
 use super::hierarchy::{Home, home};
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// The qualified names of the classes whose objects never change once constructed.
-pub fn immutable_classes(class: &Class) -> HashSet<String> {
+pub fn immutable_classes(class: &Class) -> FastSet<String> {
     let scans = Scans::new(class);
     let alone: Vec<bool> = (0..class.types.len()).map(|t| scans.is_immutable(class, t)).collect();
     (0..class.types.len())
@@ -24,7 +24,7 @@ pub fn immutable_classes(class: &Class) -> HashSet<String> {
 
 /// Removes from `immutable` the families of the classes named in `classes`: a class tree is
 /// immutable together or not at all, so one class with a kept monitor makes its whole tree mutable.
-pub fn remove_families(class: &Class, immutable: &mut HashSet<String>, classes: &HashSet<String>) {
+pub fn remove_families(class: &Class, immutable: &mut FastSet<String>, classes: &FastSet<String>) {
     for name in classes {
         let Some(t) = class.type_index(name) else { continue };
         for f in class.hierarchy.family(t) {
@@ -45,9 +45,9 @@ pub fn remove_families(class: &Class, immutable: &mut HashSet<String>, classes: 
 pub fn celled_classes(
     class: &Class,
     facts: &Facts,
-    monitor_classes: &HashSet<String>,
+    monitor_classes: &FastSet<String>,
     created: &[bool],
-) -> (HashSet<String>, HashSet<String>) {
+) -> (FastSet<String>, FastSet<String>) {
     let celled = |t: usize| {
         let name = &class.types[t].name;
         class.types[t].enum_constants.is_none()
@@ -59,7 +59,7 @@ pub fn celled_classes(
     // Every class of a tree decides, its abstract ones too, whose fields structs the concrete
     // ones embed.
     let classes = || (0..class.types.len()).filter(|&t| class.types[t].kind == TypeKind::Class);
-    let mut trees: HashMap<usize, (bool, bool)> = HashMap::new();
+    let mut trees: FastMap<usize, (bool, bool)> = FastMap::default();
     for t in classes() {
         let tree = trees.entry(class.hierarchy.root(t)).or_insert((true, false));
         tree.0 &= celled(t);
@@ -97,9 +97,9 @@ pub fn instantiated(class: &Class) -> Vec<bool> {
 /// The immutable concrete classes with a method that calls on `this` a body living on the enum of
 /// a type: that call needs the object's handle to make the enum's value, which a method that
 /// borrows the object as `&self` does not have. Their class trees cannot be immutable.
-pub fn calls_needing_handles(class: &Class, facts: &Facts) -> HashSet<usize> {
+pub fn calls_needing_handles(class: &Class, facts: &Facts) -> FastSet<usize> {
     let h = &class.hierarchy;
-    let mut out = HashSet::new();
+    let mut out = FastSet::default();
     for m in 0..class.methods.len() {
         let Home::Class(c) = home(class, facts, m) else { continue };
         if !facts.immutable.contains(&class.types[c].name) || out.contains(&c) {
@@ -140,12 +140,12 @@ struct Scans {
     /// What each method does with `this`.
     methods: Vec<MethodScan>,
     /// The types of the objects whose fields the methods write through a handle other than `this`.
-    written: HashSet<usize>,
+    written: FastSet<usize>,
     /// The same, of the field initializers of each type.
-    init_written: Vec<HashSet<usize>>,
+    init_written: Vec<FastSet<usize>>,
     /// The `this` nodes that are a field object or a receiver in the field initializers of each
     /// type.
-    init_allowed: Vec<HashSet<ExprId>>,
+    init_allowed: Vec<FastSet<ExprId>>,
     /// The methods of each type.
     by_class: Vec<Vec<usize>>,
 }
@@ -156,13 +156,13 @@ struct MethodScan {
     /// Its `this` nodes that are neither a field object nor a receiver in any method.
     selves: Vec<ExprId>,
     /// The `this` nodes whose fields it writes.
-    this_writes: HashSet<ExprId>,
+    this_writes: FastSet<ExprId>,
 }
 
 impl Scans {
     fn new(class: &Class) -> Scans {
-        let mut allowed = HashSet::new();
-        let mut written = HashSet::new();
+        let mut allowed = FastSet::default();
+        let mut written = FastSet::default();
         let mut methods = Vec::with_capacity(class.methods.len());
         let mut by_class = vec![Vec::new(); class.types.len()];
         for (index, m) in class.methods.iter().enumerate() {
@@ -187,13 +187,13 @@ impl Scans {
         for scan in &mut methods {
             scan.selves.retain(|id| !allowed.contains(id));
         }
-        let mut init_written = vec![HashSet::new(); class.types.len()];
-        let mut init_allowed = vec![HashSet::new(); class.types.len()];
+        let mut init_written = vec![FastSet::default(); class.types.len()];
+        let mut init_allowed = vec![FastSet::default(); class.types.len()];
         for (t, decl) in class.types.iter().enumerate() {
             for init in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
                 // The writes to fields of `this` in an initializer change nothing: no code runs on
                 // the object there (see `is_immutable`).
-                let mut ignored = HashSet::new();
+                let mut ignored = FastSet::default();
                 visit_expr(init, &mut |x| {
                     note(class, x, &mut init_allowed[t], &mut init_written[t], &mut ignored)
                 });
@@ -208,7 +208,7 @@ impl Scans {
         chain.extend(h.ancestors(t));
         // A write through another handle to an object that may be of the class.
         let supertypes = h.supertypes(t);
-        let may_be = |written: &HashSet<usize>| supertypes.iter().any(|s| written.contains(s));
+        let may_be = |written: &FastSet<usize>| supertypes.iter().any(|s| written.contains(s));
         if may_be(&self.written) || chain.iter().any(|&c| may_be(&self.init_written[c])) {
             return false;
         }
@@ -231,7 +231,7 @@ impl Scans {
         if runs_on().any(|&m| !self.methods[m].this_writes.is_empty() && !class.methods[m].is_ctor) {
             return false;
         }
-        let built: Vec<&HashSet<ExprId>> =
+        let built: Vec<&FastSet<ExprId>> =
             runs_on().filter(|&&m| class.methods[m].is_ctor).map(|&m| &self.methods[m].this_writes).collect();
         runs_on().flat_map(|&m| &self.methods[m].selves).all(|id| {
             built.iter().any(|w| w.contains(id)) || chain.iter().any(|&c| self.init_allowed[c].contains(id))
@@ -245,9 +245,9 @@ impl Scans {
 fn note(
     class: &Class,
     x: &Expr,
-    allowed: &mut HashSet<ExprId>,
-    written: &mut HashSet<usize>,
-    this_writes: &mut HashSet<ExprId>,
+    allowed: &mut FastSet<ExprId>,
+    written: &mut FastSet<usize>,
+    this_writes: &mut FastSet<ExprId>,
 ) {
     match &x.kind {
         ExprKind::Field { object, .. } if matches!(object.kind, ExprKind::This) => {

@@ -5,9 +5,10 @@
 //! (`Facts::placeholder_statics`) is then null wherever such a read flows (see `nullness`).
 
 use super::closure::Bits;
+use super::{FastMap, FastSet};
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+
 use std::rc::Rc;
 
 /// What a method does that matters here: the statics it reads, by expression, and what running it
@@ -24,15 +25,15 @@ struct Summary {
 /// run, within that initializer or code it runs, before the initializer's own assignment of the
 /// static: the statements of the `<clinit>` run in order, and a static counts as set after the
 /// statement that assigns it, not during it.
-pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
-    let clinits: HashMap<usize, usize> = (class.methods.iter().enumerate())
+pub fn early_reads(class: &Class, eager: &FastSet<usize>) -> FastSet<ExprId> {
+    let clinits: FastMap<usize, usize> = (class.methods.iter().enumerate())
         .filter(|(_, m)| m.name == "<clinit>")
         .map(|(i, m)| (m.class, i))
         .collect();
     // The classes whose initializers are walked, each with its statics that start unset.
     let walked: Vec<Walked> = (eager.iter())
         .filter_map(|&t| {
-            let unset: HashSet<&str> = (class.types[t].statics.iter())
+            let unset: FastSet<&str> = (class.types[t].statics.iter())
                 .filter(|f| matches!(f.ty, Type::Class(..)) && f.init.is_some())
                 .map(|f| f.name.as_str())
                 .collect();
@@ -54,7 +55,7 @@ pub fn early_reads(class: &Class, eager: &HashSet<usize>) -> HashSet<ExprId> {
 }
 
 /// A class whose initializer is walked, its `<clinit>`, and its statics that start unset.
-type Walked<'c> = (usize, usize, HashSet<&'c str>);
+type Walked<'c> = (usize, usize, FastSet<&'c str>);
 
 /// Walks the initializer of each class of `walked`, statement by statement, through what it runs
 /// (see `early_reads`). A group of methods that run each other (`Groups`) is entered whole: what
@@ -65,8 +66,8 @@ fn walk(
     walked: &[Walked],
     groups: &Groups,
     reaching: &Reaching,
-) -> HashSet<ExprId> {
-    let mut early = HashSet::new();
+) -> FastSet<ExprId> {
+    let mut early = FastSet::default();
     // The groups seen for the initializer of each class, as the number of that class's turn: a
     // set for each class without clearing one.
     let mut seen_in: Vec<u32> = vec![0; groups.next.len()];
@@ -133,14 +134,14 @@ fn walk_methods(
     walked: &[Walked],
     summaries: &[Summary],
     lists: &[Rc<[usize]>],
-) -> HashSet<ExprId> {
+) -> FastSet<ExprId> {
     let runs = |s: &Summary| -> Vec<usize> {
         let mut runs = s.runs.clone();
         runs.extend(s.calls.iter().flat_map(|&l| lists[l].iter().copied()));
         runs
     };
     let runs_of: Vec<Vec<usize>> = summaries.iter().map(runs).collect();
-    let mut early = HashSet::new();
+    let mut early = FastSet::default();
     let mut seen_in: Vec<u32> = vec![0; class.methods.len()];
     let mut turn = 0;
     for (t, clinit, unset) in walked {
@@ -207,7 +208,7 @@ impl<'c> Groups<'c> {
     fn new(
         summaries: &'c [Summary],
         lists: &[Rc<[usize]>],
-        clinits: &HashMap<usize, usize>,
+        clinits: &FastMap<usize, usize>,
         walked: &[Walked],
     ) -> Groups<'c> {
         let methods = summaries.len();
@@ -226,7 +227,7 @@ impl<'c> Groups<'c> {
             .collect();
         let (group, components) = super::closure::components(&into);
         drop(into);
-        let by_class: HashMap<usize, usize> = walked.iter().enumerate().map(|(w, &(t, ..))| (t, w)).collect();
+        let by_class: FastMap<usize, usize> = walked.iter().enumerate().map(|(w, &(t, ..))| (t, w)).collect();
         let mut listed = vec![usize::MAX; components.len()];
         let mut next = Vec::with_capacity(components.len());
         let mut reads = Vec::with_capacity(components.len());
@@ -309,9 +310,9 @@ fn flatten<'s>(stmts: &'s [Stmt], out: &mut Vec<&'s Stmt>) {
 /// wide type runs thousands of methods, and finding them takes a look at every class below it.
 struct Uses<'c> {
     class: &'c Class,
-    clinits: &'c HashMap<usize, usize>,
+    clinits: &'c FastMap<usize, usize>,
     /// The list of each method and receiver type, by index into `lists`.
-    callees: RefCell<HashMap<(usize, usize), usize>>,
+    callees: RefCell<FastMap<(usize, usize), usize>>,
     lists: RefCell<Vec<Rc<[usize]>>>,
 }
 

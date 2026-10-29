@@ -57,6 +57,7 @@ struct Saved<'a> {
     printing: bool,
     lazy_text: bool,
     chars: bool,
+    indexed: bool,
     exhaustive: bool,
 }
 
@@ -527,6 +528,7 @@ impl<'a> Gen<'a> {
             printing: std::mem::replace(&mut self.printing, false),
             lazy_text: std::mem::replace(&mut self.lazy_text, false),
             chars: std::mem::replace(&mut self.chars, false),
+            indexed: std::mem::replace(&mut self.indexed, false),
             exhaustive: std::mem::replace(&mut self.exhaustive, false),
         }
     }
@@ -565,6 +567,7 @@ impl<'a> Gen<'a> {
         self.printing = s.printing;
         self.lazy_text = s.lazy_text;
         self.chars = s.chars;
+        self.indexed = s.indexed;
         self.exhaustive = s.exhaustive;
     }
 }

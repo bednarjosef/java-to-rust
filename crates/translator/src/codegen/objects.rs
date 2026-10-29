@@ -420,7 +420,7 @@ fn same_object(a: &Expr, b: &Expr) -> bool {
 }
 
 /// Whether an expression writes a field of `object` or calls a method that changes it.
-pub(super) fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
+pub(super) fn changes_object(e: &Expr, object: &Expr, mutating: &crate::analysis::FastSet<usize>) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| {
         found |= match &x.kind {
@@ -921,6 +921,10 @@ impl<'a> Gen<'a> {
     /// does not write the checked form, where its `NullPointerException` would end the program
     /// instead of reaching the `catch` or the `finally`.
     pub(super) fn check_dereferences(&mut self) {
+        // Mostly every one is written in it, and then no code needs a look.
+        if self.facts.null_checked.keys().all(|id| self.dereferenced.contains(id)) {
+            return;
+        }
         // The objects in the bodies that were not written, which nothing calls or which never run.
         let mut unwritten = HashSet::new();
         let methods = self.class.methods.iter().enumerate().filter(|(i, _)| !self.written.contains(i));
@@ -1853,7 +1857,7 @@ impl<'a> Gen<'a> {
 
     /// A name for a temporary that no Java local or function of this method uses.
     pub(super) fn temp(&self, base: &str) -> String {
-        let taken = |n: &str| self.locals.values().any(|v| v == n) || self.fn_names.iter().any(|f| f == n);
+        let taken = |n: &str| self.locals.values().any(|v| v == n) || self.fn_name_set.contains(n);
         let mut name = base.to_string();
         let mut i = 1;
         while taken(&name) {
