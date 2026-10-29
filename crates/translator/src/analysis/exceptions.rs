@@ -22,9 +22,9 @@
 //!
 //! The `toString` that making an object's text runs is such a call where the generator makes the
 //! text (`"" + o`, `println(o)`, `String.valueOf(o)`, `append(o)`, `String.format`): it calls the
-//! `toString` of the program, or the `hashCode` of the program that `Object`'s `toString` shows,
-//! and what that throws goes on from there. Elsewhere (the text of an enum's constant, the message
-//! of an exception, `printf`, the objects that other library calls show) the text is made through
+//! `toString` of the program (an enum's constant's too), or the `hashCode` of the program that
+//! `Object`'s `toString` shows, and what that throws goes on from there. Elsewhere (the message of
+//! an exception, `printf`, the objects that other library calls show) the text is made through
 //! `Display`, which has no way to return an exception, so what it throws ends the program there, as an
 //! exception that nothing catches does; where a `toString` that the program wrote may throw what
 //! a `catch` around such a text, or around a call on the way to it, would catch, the program is
@@ -528,8 +528,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut throwing: HashSet<usize> = (0..class.methods.len())
         .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[at[m]]))))
         .collect();
-    // The methods that throw themselves, not only through an override.
-    let own = throwing.clone();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
 
@@ -644,17 +642,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 method.pos,
                 "a constructor that throws, of an exception the runtime raises, not supported yet",
             );
-        }
-        // The text of an enum's constant is its `Display`, which cannot throw; that of an object is
-        // a call of its `toString` where the generator makes it (`generator_text`).
-        let of_enum = std::iter::once(method.class)
-            .chain(h.ancestors(method.class))
-            .any(|t| class.types[t].kind == TypeKind::Enum);
-        if method.name == "toString" && method.params.is_empty() && of_enum {
-            // At the override that throws, which may not be the first of its group.
-            let thrower = h.group(m).into_iter().find(|g| own.contains(g)).unwrap_or(m);
-            let pos = class.methods[thrower].pos;
-            reject(pos, "a toString that throws an exception that is caught not supported yet");
         }
     }
 

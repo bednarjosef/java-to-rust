@@ -421,9 +421,13 @@ one), that call is like any other: what the program's `toString` throws goes on.
 `toString` throws, the dispatching enum of its type gets `try_text`, which returns the exception. The `hashCode` that `Object.toString` shows, for a class without a
 `toString` of its own, is treated the same way.
 
+A Java enum translated as a plain Rust enum does the same: where the generator makes the text of
+a constant whose `toString` may throw what a `catch` sees, it calls the enum's `to_string`, which
+returns the exception.
+
 Elsewhere the text goes through the enum's `Display`, which cannot return an exception, so what the
-`toString` throws ends the program: the text of an enum constant, the message of an exception,
-`printf` (which makes all its text before printing), and the objects other library calls show.
+`toString` throws ends the program: the message of an exception, `printf` (which makes all its
+text before printing), and the objects other library calls show (the elements of a collection).
 Where a `toString` the program wrote may throw what a `catch` around such a text, or around a
 call on the way to it, would catch, the program is rejected ("catching an exception that this
 toString may throw not supported yet").
@@ -478,7 +482,9 @@ written in checked form exactly when it is in the analysis's set.
   stored value) are computed. Where one may have an effect, lowering computes it first into a
   local, and the receiver (the array) before it unless it is a local that nothing there assigns
   (`lower/argument_order.rs`); the message names the receiver itself, and an argument that the
-  call unboxes from its local is the value that javac unboxes as it computes it.
+  call unboxes from its local is the value that javac unboxes as it computes it. The locale's
+  language that lowering passes to `toLowerCase(locale)` and `toUpperCase(locale)` is read after
+  the check of the string, as the JDK's code reads it.
 - **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
   `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`, and the
   `NullPointerException` message facts below.

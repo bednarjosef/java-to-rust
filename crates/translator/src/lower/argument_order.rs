@@ -8,7 +8,8 @@
 //! block without the `yield`. The arguments before the last that may have an effect are computed
 //! first too, as one of those may change what an earlier one reads. The message of the exception
 //! names the receiver as Java's does: `npe_messages` follows a `receiver$` local back to its
-//! value.
+//! value. The language of `s.toLowerCase(locale)`, which lowering reads as the argument
+//! (`case_in_locale`), is read after the check of the receiver, as the JDK's code reads it.
 //!
 //! The calls are those of the program's and the library's methods, and the methods of strings and
 //! builders that the runtime has (but `equals`, which code generation orders itself). A receiver
@@ -87,6 +88,7 @@ impl<'t> Lowering<'t> {
             }
             return;
         }
+        let case_in_locale = case_in_locale(e);
         let (receiver, args) = match &mut e.kind {
             ExprKind::MethodCall { receiver, args, is_super: false, .. } => (&mut **receiver, &mut args[..]),
             ExprKind::Builtin(builtin, args) if receives(builtin, args) => {
@@ -109,7 +111,20 @@ impl<'t> Lowering<'t> {
             body.push(self.hold(receiver, name, pos));
         }
         for arg in &mut args[..=last] {
-            if !self.literal(arg) {
+            if let Some(method) = case_in_locale
+                && let ExprKind::MethodCall { receiver: locale, .. } = &mut arg.kind
+            {
+                if !self.literal(locale) {
+                    body.push(self.hold(locale, fresh(ARGUMENT), pos));
+                }
+                let ExprKind::Var(name) = &receiver.kind else { unreachable!("a held receiver") };
+                let read = self.synth(ExprKind::Var(name.clone()), pos, receiver.ty);
+                let check = ExprKind::Builtin(
+                    Builtin::String(StringOp::Receiver(method, "java.util.Locale")),
+                    vec![read],
+                );
+                body.push(Stmt::Expr(self.synth(check, pos, Type::Void)));
+            } else if !self.literal(arg) {
                 let name = fresh(ARGUMENT);
                 body.push(self.hold(arg, name, pos));
             }
@@ -221,6 +236,24 @@ fn non_null_locals(method: &Method) -> HashSet<String> {
             found.remove(&v);
         }
     }
+}
+
+/// For `s.toLowerCase(locale)` or `s.toUpperCase(locale)`, whose argument is the locale's language
+/// (`case_in_locale`), the method's name: the JDK's code reads the language once the call has
+/// checked its receiver, so the locale is held, then the receiver checked.
+fn case_in_locale(e: &Expr) -> Option<&'static str> {
+    let ExprKind::Builtin(Builtin::String(op @ (StringOp::ToLowerCase | StringOp::ToUpperCase)), args) =
+        &e.kind
+    else {
+        return None;
+    };
+    let [_, language] = &args[..] else { return None };
+    let ExprKind::MethodCall { name, .. } = &language.kind else { return None };
+    (name == crate::program::LOCALE_LANGUAGE.1).then_some(if *op == StringOp::ToLowerCase {
+        "toLowerCase"
+    } else {
+        "toUpperCase"
+    })
 }
 
 /// Whether the builtin is a method of the string or builder `args[0]` that the runtime has.
