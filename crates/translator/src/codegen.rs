@@ -491,6 +491,8 @@ struct Setup {
     /// `Gen::conversion_names` and `Gen::stack_forms`, which a generator finds from the rest.
     conversion_names: std::sync::Arc<[String]>,
     stack_forms: HashSet<usize>,
+    /// `Gen::stack_sites` of each method that has any.
+    stack_sites: HashMap<usize, Vec<(ExprId, usize)>>,
     /// The enums whose `valueOf` a `catch` or `finally` sees fail (`enums::checked_value_ofs`),
     /// found once rather than by each round's generators.
     checked_value_ofs: HashSet<&'static str>,
@@ -536,14 +538,20 @@ impl Setup {
             plans: modules::plans(class),
             conversion_names: std::sync::Arc::from([]),
             stack_forms: HashSet::new(),
+            stack_sites: HashMap::new(),
             checked_value_ofs: enums::checked_value_ofs(class, facts),
         };
         let wanted = Needs::new();
         let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
         let g = Gen::new(class, facts, &setup, &round);
-        let (conversion_names, stack_forms) = (g.conversion_names().into(), g.stack_forms());
+        let sites: HashMap<usize, Vec<(ExprId, usize)>> = (0..class.methods.len())
+            .map(|m| (m, g.find_stack_sites(m)))
+            .filter(|(_, sites)| !sites.is_empty())
+            .collect();
+        let (conversion_names, stack_forms) = (g.conversion_names().into(), g.stack_forms(&sites));
         setup.conversion_names = conversion_names;
         setup.stack_forms = stack_forms;
+        setup.stack_sites = sites;
         setup
     }
 }
@@ -722,6 +730,7 @@ impl<'a> Gen<'a> {
             slot_param: String::new(),
             on_stack: false,
             stack_forms: &setup.stack_forms,
+            stack_sites: &setup.stack_sites,
             only_enums: round.only_enums.as_ref(),
             class_values: Default::default(),
             class_value_names: Vec::new(),
@@ -996,6 +1005,8 @@ struct Gen<'a> {
     on_stack: bool,
     /// The constructors and factories that get a form on the stack (see `stack_objects`).
     stack_forms: &'a HashSet<usize>,
+    /// `Setup::stack_sites`.
+    stack_sites: &'a HashMap<usize, Vec<(ExprId, usize)>>,
     /// The enum items written in a round of them alone, to find what they ask for, or all of
     /// them in the last round, which takes the other items from the first (`generate_all`).
     only_enums: Option<&'a OnlyEnums>,
