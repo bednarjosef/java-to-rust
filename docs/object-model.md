@@ -642,6 +642,10 @@ Other rules:
 - An interface method that a Java enum implements with a method every enum has (`name()`,
   `ordinal()`, `toString()`) dispatches to the enum's own; any other method of `java.lang.Enum`
   doing so is rejected.
+- `ordinal()` and `compareTo` of a constant held as an `Enum` or an `Object` read the value's
+  bits (`java::Thin::ordinal`): a Java enum is a Rust enum without fields, whose discriminant is
+  the ordinal, held in the low bytes. Where the type has classes that are not enums, the class
+  number is tested first and the others fail the cast to `Enum`.
 - A class may implement an interface's method with a method it inherits from a superclass that
   does not implement the interface (`Spliterators.EmptySpliterator.OfInt`). javac's `overrides`
   cannot list it, so `JavaTree` gives the class an `inherits` list of such pairs, and
