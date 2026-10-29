@@ -150,6 +150,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     printf_of_streams(class, &mut reject);
     let h = &class.hierarchy;
+    // What showing each type runs is the same for every point while the program does not change.
+    TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = Some(HashMap::new()));
     let mut points: Vec<Vec<Point>> = phase("exceptions: points", || {
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect()
     });
@@ -816,6 +818,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
 
     // The facts are kept with errors too: a census goes on past them as if they had passed
     // (`analysis::analyze_collecting`), and the messages of the dereferences read them.
+    TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = None);
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -1746,16 +1749,37 @@ pub fn generator_text(x: &Expr) -> bool {
     }
 }
 
+thread_local! {
+    /// `to_string_impls` of each type, while `analyze` runs (`Some`): a value of `Object` shows
+    /// the text of every class, which many points ask for.
+    static TO_STRING_IMPLS: std::cell::RefCell<Option<HashMap<Type, std::rc::Rc<[usize]>>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that
-/// `Object`'s `toString` shows.
+/// `Object`'s `toString` shows; found once for each type while `analyze` runs.
 fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
+    if let Some(found) = TO_STRING_IMPLS.with_borrow(|cache| cache.as_ref().and_then(|c| c.get(&ty).cloned()))
+    {
+        return found.to_vec();
+    }
+    let found = find_to_string_impls(class, ty);
+    TO_STRING_IMPLS.with_borrow_mut(|cache| {
+        if let Some(cache) = cache {
+            cache.insert(ty, found.as_slice().into());
+        }
+    });
+    found
+}
+
+fn find_to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
     // A plain enum's value shows the `toString` of its constant, or `Enum`'s, which shows its name.
     if let Type::Enum(name) = ty {
         let Some(t) = class.type_index(name) else { return Vec::new() };
-        let mut out = Vec::new();
-        for c in std::iter::once(t).chain(class.hierarchy.concretes(t)) {
+        for c in std::iter::once(t).chain(class.hierarchy.concretes_of(t).iter().copied()) {
             if let Some(i) = hierarchy::to_string_impl(class, c)
-                && !out.contains(&i)
+                && seen.insert(i)
             {
                 out.push(i);
             }
@@ -1763,10 +1787,9 @@ fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
         return out;
     }
     let Some(t) = class.class_index(ty) else { return Vec::new() };
-    let mut out = Vec::new();
-    for c in class.hierarchy.concretes(t) {
+    for &c in class.hierarchy.concretes_of(t).iter() {
         if let Some(i) = hierarchy::text_impl(class, c)
-            && !out.contains(&i)
+            && seen.insert(i)
         {
             out.push(i);
         }

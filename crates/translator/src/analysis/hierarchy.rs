@@ -419,9 +419,8 @@ pub fn text_impl(class: &Class, c: usize) -> Option<usize> {
 /// The method without parameters named `name` that an object of concrete class `c` runs, if the
 /// program declares one.
 fn declared_impl(class: &Class, c: usize, name: &str) -> Option<usize> {
-    let mut chain = vec![c];
-    chain.extend(class.hierarchy.ancestors(c));
     debug_assert_eq!(class.hierarchy.overriders.len(), class.methods.len(), "the hierarchy is out of date");
+    let chain = std::iter::successors(Some(c), |&t| class.hierarchy.superclass(t));
     chain.into_iter().find_map(|t| {
         class.hierarchy.methods_of(t).iter().copied().find(|&i| {
             let m = &class.methods[i];
