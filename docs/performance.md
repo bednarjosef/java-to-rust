@@ -270,6 +270,19 @@ javac's census and every test with it set, and the javac census report and the 2
 translations are byte for byte the same. On javac, whose visits rarely repeat a call's targets,
 the walk itself goes from 1.47 to 1.29 s (the rest of the phase is the points-to analysis).
 
+**Walking a method again only when the literal it relied on changes.** A call such as
+`buffer.isDirect()` is known when every class with objects below the receiver's type returns the
+same literal from it (`same_literal` in `live_methods/known.rs`). A method whose code relied on
+that used to be walked again whenever an object of any class below the type was created, so a
+call on an `Object` or a wide interface walked its method again for nearly every class of the
+program: on the Minecraft server, 3.5 million of the main walk's 4.2 million walks. What the
+classes return is now kept for each method and type that was asked for, and brought up to date as
+each class gets its first object; the methods that relied on it are walked again only when the
+literal changes (none, then one, then none for good). The methods, classes, receivers and
+unresolved calls are the same (`JAVA_TO_RUST_LIVE_CHECK`), and so is javac's census. On javac's
+census the main walk goes from about 90,000 walks (36,800 of them for an object) to 50,000 (223),
+and the phase from 2.3 to 1.6 s, 0.8 s of which is the walk of the started threads.
+
 **Early static reads by groups.** `analysis/early_reads.rs` walks, for each class with an eager
 static initializer, what each statement of the initializer runs. It used to walk method by method
 and list every method that each virtual call can run, once per call, thousands for a call on a

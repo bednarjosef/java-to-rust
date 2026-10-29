@@ -553,7 +553,7 @@ struct Walk<'a> {
     /// (`Memos::handed`, `State::glued_classes`), initializing a type again
     /// (`State::initialized_above`), finding the values and dead code of a method again while
     /// nothing they relied on changed (`State::prepared`), and asking whether the classes with
-    /// objects return the same literal while no other has objects (`same_literal`).
+    /// objects return the same literal again (`same_literal`).
     /// `JAVA_TO_RUST_LIVE_CHECK` checks that the walk finds the same without.
     fast: bool,
     glue: Vec<usize>,
@@ -625,8 +625,6 @@ struct Memos {
     /// handing them again hands the runtime nothing new.
     handed: HashSet<(usize, ExprId, usize)>,
     thrown: HashSet<(usize, ExprId, usize)>,
-    /// What `same_literal` found, by method and type, with how many classes had objects then.
-    literals: HashMap<(usize, usize), (usize, Option<i128>)>,
 }
 
 /// What a call passed the methods it runs (`Walk::call`): what was known of the argument at
