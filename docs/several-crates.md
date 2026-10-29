@@ -204,7 +204,10 @@ compiles a program.
 
 The split parses each item of a module (a class with its `impl`s) by itself with `syn` and drops
 its text once split: a syntax tree is many times its text, and the Minecraft server's crate root
-alone is 2.3 million lines (its `Object` enum 650,000).
+alone is 2.3 million lines (its `Object` enum 650,000). It parses the items and the signatures of their
+functions, not the functions' code: before `syn` parses an item, each function's braces are
+emptied with their place kept (`hollow`), and the split takes the code's text from the module's
+text. A function's code that is not Rust is then rustc's to report, not the split's.
 
 What it costs: a call of a moved function from another crate cannot be inlined without
 link-time optimization. The release profile's fat LTO inlines across crates again, at the memory
