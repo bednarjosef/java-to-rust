@@ -413,7 +413,7 @@ Design: [natives-and-input.md](natives-and-input.md).
   environment, and in a whole program `System.getenv()` is the JDK's map of it.
 - `Runtime` is no value: its methods are translated on `Runtime.getRuntime()` or a local that
   holds it, and any other use of one is rejected. Its shutdown hooks run on the first exit, as
-  Java's do, but not on a signal ([multi-threading.md](multi-threading.md), 6).
+  Java's do, a `SIGTERM`, `SIGINT` or `SIGHUP` too ([multi-threading.md](multi-threading.md), 6).
 - A translation is headless, unlike a JVM on a machine with a display: AWT's natives are not
   translated, so `GraphicsEnvironment.isHeadless()` is always true, and a program that would
   open a window there (the Minecraft server without `nogui`) runs as it does on a server

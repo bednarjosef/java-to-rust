@@ -66,6 +66,7 @@ pub mod regex;
 mod scalb;
 mod shared;
 mod shared_string;
+mod signals;
 #[cfg(unix)]
 mod socket;
 mod statics;
