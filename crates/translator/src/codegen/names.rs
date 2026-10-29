@@ -145,10 +145,24 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     let mut constructors: Vec<HashSet<String>> = vec![HashSet::new(); class.types.len()];
     let mut group_names: HashMap<usize, String> = HashMap::new();
     let mut names: Vec<String> = Vec::with_capacity(class.methods.len());
-    // The methods of each name, in index order: the overloads of a method are among them.
-    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    // The methods of each name in each class, in index order: the overloads of a method are
+    // among them, and among the instance methods of its name in its class tree.
+    let mut by_class: HashMap<(&str, usize), Vec<usize>> = HashMap::new();
     for (o, other) in class.methods.iter().enumerate() {
-        by_name.entry(other.name.as_str()).or_default().push(o);
+        by_class.entry((other.name.as_str(), other.class)).or_default().push(o);
+    }
+    // The override groups of the instance methods of each name in each class tree, sorted, each
+    // once: found once per name and tree rather than once per method of the name, which made
+    // the names of the Minecraft server's methods, a few hundred thousand, take most of a minute.
+    let mut tree_groups: HashMap<(&str, usize), Vec<usize>> = HashMap::new();
+    for (o, other) in class.methods.iter().enumerate() {
+        if !other.is_static {
+            tree_groups.entry((other.name.as_str(), h.root(other.class))).or_default().push(h.group_id(o));
+        }
+    }
+    for groups in tree_groups.values_mut() {
+        groups.sort_unstable();
+        groups.dedup();
     }
     for (i, m) in class.methods.iter().enumerate() {
         let instance = !m.is_ctor && !m.is_static;
@@ -161,21 +175,15 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             continue;
         }
         let root = h.root(m.class);
+        let in_class = &by_class[&(m.name.as_str(), m.class)];
         let overloads = if instance {
-            let mut groups: Vec<usize> = by_name[m.name.as_str()]
-                .iter()
-                .copied()
-                .filter(|&o| {
-                    let other = &class.methods[o];
-                    other.class == m.class || (!other.is_static && h.root(other.class) == root)
-                })
-                .map(|o| h.group_id(o))
-                .collect();
-            groups.sort_unstable();
-            groups.dedup();
-            groups.len()
+            // The groups of the tree, and those of the class's static methods of the name.
+            let tree = &tree_groups[&(m.name.as_str(), root)];
+            let statics = in_class.iter().filter(|&&o| class.methods[o].is_static).map(|&o| h.group_id(o));
+            let more: BTreeSet<usize> = statics.filter(|g| tree.binary_search(g).is_err()).collect();
+            tree.len() + more.len()
         } else {
-            by_name[m.name.as_str()].iter().filter(|&&o| class.methods[o].class == m.class).count()
+            in_class.len()
         };
         let mut base = if m.is_ctor { "new".to_string() } else { snake_case(&m.name) };
         if overloads > 1 {
@@ -188,13 +196,9 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
                 o.params.len() == m.params.len() && o.params.iter().zip(&m.params).all(|(a, b)| a.ty == b.ty)
             };
             if instance
-                && by_name[m.name.as_str()].iter().any(|&o| {
+                && in_class.iter().any(|&o| {
                     let other = &class.methods[o];
-                    o != i
-                        && other.class == m.class
-                        && h.group_id(o) != h.group_id(i)
-                        && !other.is_static
-                        && same_params(other)
+                    o != i && h.group_id(o) != h.group_id(i) && !other.is_static && same_params(other)
                 })
             {
                 base = format!("{base}_{}", name_part(m.ret));
@@ -303,12 +307,16 @@ fn separate_met_groups(
             return;
         }
         let mut renamed = false;
+        // Whether each method is an instance method of a shared name, kept as names change.
+        let mut of_shared: Vec<bool> = (0..names.len())
+            .map(|m| m < class.methods.len() && instance(m) && shared.contains(&names[m]))
+            .collect();
         for t in 0..class.types.len() {
             // The groups of each shared name among the methods that `t` has.
             let mut met: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
             for s in h.supertypes(t) {
                 for &m in h.methods_of(s) {
-                    if m < class.methods.len() && instance(m) && shared.contains(&names[m]) {
+                    if of_shared.get(m) == Some(&true) {
                         met.entry(names[m].clone()).or_default().insert(h.group_id(m));
                     }
                 }
@@ -335,6 +343,9 @@ fn separate_met_groups(
                     }
                     for &o in &members {
                         names[o] = fresh.clone();
+                        if let Some(flag) = of_shared.get_mut(o) {
+                            *flag = o < class.methods.len() && instance(o) && shared.contains(&fresh);
+                        }
                     }
                     group_names.insert(group, fresh);
                     renamed = true;
