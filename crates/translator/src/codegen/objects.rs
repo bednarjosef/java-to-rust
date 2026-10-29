@@ -1434,8 +1434,9 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The Rust path of a method or constructor, such as `Point::new` or `Point::norm`: a function
-    /// of the struct whose `impl` has it.
+    /// The Rust path of a method or constructor, such as `Point__new` or `Point::norm`: a function
+    /// of the module named after its struct (`module_fn`), or a function of the struct whose
+    /// `impl` has it.
     pub(super) fn qualified_fn(&self, index: usize) -> String {
         let owner = match self.homes[index] {
             Home::Enum(t) => {
@@ -1444,7 +1445,24 @@ impl<'a> Gen<'a> {
             Home::Class(c) | Home::Fields(c) => c,
             Home::Free | Home::Nowhere => self.class.methods[index].class,
         };
-        format!("{}::{}", self.struct_of(owner), self.fn_names[index])
+        let between = if self.module_fn(index) { "__" } else { "::" };
+        format!("{}{between}{}", self.struct_of(owner), self.fn_names[index])
+    }
+
+    /// Whether method `index`, emitted on a struct, is a function of the struct's module rather
+    /// than of its `impl`: a constructor, or an instance method that takes its object as a
+    /// parameter (`this: &Arc<..>`) rather than as `self`, of a class that is not generic. It is
+    /// named after the struct and the method, `Point__new`, `Shape__area`. A split's header crate
+    /// declares such a function alone, where a function of an `impl` whose code moves keeps a
+    /// function that calls the declaration, which costs rustc about three times the declaration's
+    /// memory (`split.rs`).
+    pub(super) fn module_fn(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        let (Home::Class(t) | Home::Fields(t)) = self.homes[index] else { return false };
+        !m.is_static
+            && self.class.types[t].type_params.is_empty()
+            && self.class.types[t].enum_constants.is_none()
+            && (m.is_ctor || !self.facts.self_methods.contains(&index))
     }
 
     /// A value read from a field of an object.
@@ -2231,22 +2249,41 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("}");
+        let mark = self.out.len();
         self.gap();
         self.line(&format!("impl{params} {name}{args} {{"));
         self.indent += 1;
+        let start = self.out.len();
         self.this_struct = index;
         self.field_inits(index);
-        // Its own constructors and methods first, then those it inherits.
+        // Its own constructors and methods first, then those it inherits. Those without a
+        // receiver are functions of the module (`module_fn`), written after the `impl`.
         let mut order: Vec<usize> = self.struct_methods.get(&index).cloned().unwrap_or_default();
         order.sort_by_key(|&i| class.methods[i].class != index);
+        let mut functions = String::new();
         for i in order {
-            if self.emitted_in(i, index) {
+            if !self.emitted_in(i, index) {
+                continue;
+            }
+            if self.module_fn(i) {
+                let at = self.out.len();
+                self.indent -= 1;
+                self.gap();
+                self.method(i);
+                self.indent += 1;
+                functions.push_str(&self.out.split_off(at));
+            } else {
                 self.gap();
                 self.method(i);
             }
         }
         self.indent -= 1;
-        self.line("}");
+        if self.out.len() == start {
+            self.out.truncate(mark);
+        } else {
+            self.line("}");
+        }
+        self.out.push_str(&functions);
     }
 
     /// Whether method `i` is emitted in the `impl` of the struct of class `t`: it lives there, and

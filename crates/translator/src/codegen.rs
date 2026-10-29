@@ -583,6 +583,8 @@ fn generate_with(
         true => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         false => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
     };
+    // The functions of a module named after a struct (`objects::module_fn`), `Point__new`.
+    let header = format!("{header}#![allow(non_snake_case)]\n\n");
     // With threads a static holds objects that must be `Send`, which Rust proves through every
     // field of every class the object reaches: javac's `Arc<Locked<..>>` chains go deeper than
     // the default limit of 128.
@@ -1303,6 +1305,8 @@ impl<'a> Gen<'a> {
             let init = statics::init_name(name);
             self.init_fast_path(m.class, &init, &ret);
             format!("{init}_slow")
+        } else if self.module_fn(index) {
+            format!("{}__{}", self.struct_of(self.this_struct), self.fn_names[index])
         } else {
             self.fn_names[index].clone()
         };

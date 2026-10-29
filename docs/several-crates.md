@@ -136,9 +136,10 @@ along classes. It splits declarations from code, as C splits headers from source
   whose code can move is only declared there, in an `unsafe extern "Rust"` block of its module,
   by its own name and with the name of its code: `#[link_name = "j2r__<module>__<name>"] pub safe
   fn <name>(..)`. Callers name it as they did, and the header has no function of its own for it.
-  A method whose code can move keeps only its signature, as Rust has no declaration of a method
-  without its code. Its body calls a function declared in that block
-  (`safe fn j2r__<module>__<type>__<name>(..)`). Both have their parameters renamed `p0`, `p1`,
+  Constructors and the methods that take their object as a parameter are such functions too,
+  named after their struct (`Circle__new`, docs/object-model.md). A method that takes `self`
+  keeps only its signature, as Rust has no declaration of a method without its code. Its body
+  calls a function declared in that block (`safe fn j2r__<module>__<type>__<name>(..)`). Both have their parameters renamed `p0`, `p1`,
   .. so that every pattern is a plain name. A function of the header that only calls a
   declaration costs rustc about three times what the declaration does: about 21 KB of memory
   against 8 KB, measured on synthetic header crates of 40,000 moved functions in a release

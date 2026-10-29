@@ -113,8 +113,8 @@ Terms:
   emitted as `impl DFields { fn m(&self | &mut self, ..) }`.
 - **object-level method**: every other instance method of a type that is not a leaf class:
   interface default methods, methods that make virtual calls or use `this` as a value. Emitted
-  on the enum (`self: &D`, `ThisForm::Enum`) or, when the type has one concrete class, in that
-  class's `impl`.
+  on the enum (`self: &D`, `ThisForm::Enum`) or, when the type has one concrete class, beside
+  that class's struct (`fn C__m(this: &Arc<..>, ..)`, see Naming).
 
 When in doubt a method is object-level: that is always correct, field-level is an
 optimization.
@@ -140,6 +140,13 @@ Naming:
   tests the class number and lends the object where it lies, as `view()` does, without the
   `match` over all of the type's classes that `view()` is. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
   the class methods above gets a suffix (`base_2`, `clone_2`).
+- A constructor, and an instance method that takes its object as a parameter (`this:
+  &Arc<RefCell<C>>`) rather than as `self`, is a function of the module named after the struct
+  it belongs to and its own name: `Circle__new`, `Circle__describe`, `BaseFields__new`. Methods
+  that take `self` stay in the struct's `impl`, as do all of a generic class's. A function of an
+  `impl` cannot be declared without its code, so a split's header crate would need a function
+  of its own for each one that moves, where a function of the module is declared alone
+  (docs/several-crates.md).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.
@@ -183,16 +190,16 @@ The shape of the Rust (simplified):
 ```rust
 struct BaseFields { name: java::JString, uses: i32 }
 impl BaseFields {
-    fn new(name: &java::Wtf8) -> BaseFields { BaseFields { name: name.to_owned(), uses: 0 } }
     fn get_name(&mut self) -> java::JString { self.uses = self.uses.wrapping_add(1); self.name.clone() }
 }
+fn BaseFields__new(name: &java::Wtf8) -> BaseFields { BaseFields { name: name.to_owned(), uses: 0 } }
 
 #[repr(C)]
 struct Circle { base: BaseFields, r: f64 }
 impl Circle {
-    fn new(r: f64) -> Circle { Circle { base: BaseFields::new(java::wtf8("circle")), r } }
     fn area(&self) -> f64 { 3.0 * self.r * self.r }
 }
+fn Circle__new(r: f64) -> Circle { Circle { base: BaseFields__new(java::wtf8("circle")), r } }
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
@@ -302,7 +309,7 @@ any object type. A caller converts at the call: `total(&Base::Circle(c.clone()))
 There are two constructor forms.
 
 **The plain form** (the default). A constructor builds a plain value, a struct literal whose
-first entry is the superclass's part: `Circle { base: BaseFields::new("circle"), r }`. The
+first entry is the superclass's part: `Circle { base: BaseFields__new("circle"), r }`. The
 `base:` value is the superclass constructor that javac resolved (or the fields struct's
 `new()` for an implicit `super()`). Since `base` is the first thing Java runs and the first
 entry, `codegen/owned.rs::struct_literal` keeps Java's order by binding values with effects to
@@ -930,10 +937,10 @@ list of a million nodes needs nothing special (`corpus/features/LongChainsDrop.j
 
 An object that never leaves the method that makes it lives in a `java::Slot` in that method's
 frame instead, with the same handle type (docs/collector.md, "Objects on the stack";
-`analysis/escape.rs`, `codegen/stack_objects.rs`): `let p = slot_1.put(P::new(3));` for a plain
-constructor, `P::new_on_stack(&slot_1, 3)` for one that allocates its object itself (1.4). A
+`analysis/escape.rs`, `codegen/stack_objects.rs`): `let p = slot_1.put(P__new(3));` for a plain
+constructor, `P__new_on_stack(&slot_1, 3)` for one that allocates its object itself (1.4). A
 method that returns a new object of its own (a factory, such as an `iterator()`) gets a form
-that takes a slot after its receiver, `List::iterator_on_stack(this, &slot_2)`, which a caller
+that takes a slot after its receiver, `List__iterator_on_stack(this, &slot_2)`, which a caller
 that keeps the object uses (`corpus/features/StackObjects.java`, `StackFactories.java`,
 `StackObjectsInLists.java`).
 

@@ -713,12 +713,15 @@ is 31.1 MB instead of 33.4 MB without LTO).
 rustc's memory for a crate grows with its items more than with their size: on javac's header, a
 method that moves costs about 19 KB (its stub and its declaration), an empty function about
 13 KB and a declaration alone about 6 KB. So a function that moves is a declaration alone, by
-its own name (`docs/several-crates.md`), and only a method keeps a stub. The header is compiled
+its own name (`docs/several-crates.md`), and so are constructors and the methods that take
+their object as a parameter, which are functions of their module (`Circle__new`,
+`docs/object-model.md`); only a method that takes `self` keeps a stub. The header is compiled
 before every body crate and holds an item for every function of the program, so it sets a
 build's peak: the Minecraft server's, 226 MB, needs 16 to 20 GB in release. Half of its text is
-the 285,000 functions and methods that moved: 253,000 methods with a stub and a declaration
-each, and 32,000 functions declared alone. Then come the 178,000 small functions that keep their
-code there, and the 43,000 classes as values (`CLASS__..`). Those are statics that name their
+the 285,000 functions and methods that move, of which about 68,000 take `self` (counted by kind
+on a translation written before the others became functions of their module). Then come the
+178,000 small functions that keep their code there, and the 43,000 classes as values
+(`CLASS__..`). Those are statics that name their
 superclass, interfaces and declaring class by references: as constants that named them by
 closures, 93,000 function bodies for rustc, they alone took rustc 2.8 GB and 15.9 s in release,
 and as statics 1.8 GB and 13.0 s.
