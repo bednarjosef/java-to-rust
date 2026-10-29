@@ -90,6 +90,7 @@ abstract class Executable extends AccessibleObject implements Member {
 final class Method extends Executable {
     // The table, made once.
     private static Method[] table;
+    private static MemberIndex owners;
 
     // The class that `getMethod` and `getDeclaredMethod` find the method on: the declaring class,
     // or for a public method a class that inherits it.
@@ -204,10 +205,11 @@ final class Method extends Executable {
     static Method find(Class<?> c, String name, Class<?>[] types, boolean declared) throws NoSuchMethodException {
         annotationMembers(c);
         Method[] all = table();
-        for (int i = 0; i < all.length; i++) {
-            Method m = all[i];
-            if (m.owner == c && m.name.equals(name) && m.found(c, declared)
-                    && Constructor.same(m.parameterTypes, types)) {
+        MemberIndex owners = owners();
+        int s = owners.slot(c);
+        for (int k = owners.start(s); k < owners.end(s); k++) {
+            Method m = all[owners.member(k)];
+            if (m.name.equals(name) && m.found(c, declared) && Constructor.same(m.parameterTypes, types)) {
                 return m;
             }
         }
@@ -219,17 +221,20 @@ final class Method extends Executable {
     static Method[] list(Class<?> c, boolean declared) {
         annotationMembers(c);
         Method[] all = table();
+        MemberIndex owners = owners();
+        int s = owners.slot(c);
         int n = 0;
-        for (int i = 0; i < all.length; i++) {
-            if (all[i].owner == c && all[i].found(c, declared)) {
+        for (int k = owners.start(s); k < owners.end(s); k++) {
+            if (all[owners.member(k)].found(c, declared)) {
                 n++;
             }
         }
         Method[] out = new Method[n];
         n = 0;
-        for (int i = 0; i < all.length; i++) {
-            if (all[i].owner == c && all[i].found(c, declared)) {
-                out[n] = all[i];
+        for (int k = owners.start(s); k < owners.end(s); k++) {
+            Method m = all[owners.member(k)];
+            if (m.found(c, declared)) {
+                out[n] = m;
                 n++;
             }
         }
@@ -255,6 +260,19 @@ final class Method extends Executable {
             table = table0();
         }
         return table;
+    }
+
+    // The table's methods by the class that finds them, made once.
+    private static MemberIndex owners() {
+        if (owners == null) {
+            Method[] all = table();
+            Class<?>[] of = new Class<?>[all.length];
+            for (int i = 0; i < all.length; i++) {
+                of[i] = all[i].owner;
+            }
+            owners = new MemberIndex(of);
+        }
+        return owners;
     }
 
     // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
@@ -418,6 +436,7 @@ final class Method extends Executable {
 
 final class Field extends AccessibleObject implements Member {
     private static Field[] table;
+    private static MemberIndex owners;
 
     private final Class<?> owner;
     private final Class<?> clazz;
@@ -821,9 +840,11 @@ final class Field extends AccessibleObject implements Member {
     // `c.getField(name)`, or with `declared` `c.getDeclaredField(name)`.
     static Field find(Class<?> c, String name, boolean declared) throws NoSuchFieldException {
         Field[] all = table();
-        for (int i = 0; i < all.length; i++) {
-            Field f = all[i];
-            if (f.owner == c && f.name.equals(name) && f.found(c, declared)) {
+        MemberIndex owners = owners();
+        int s = owners.slot(c);
+        for (int k = owners.start(s); k < owners.end(s); k++) {
+            Field f = all[owners.member(k)];
+            if (f.name.equals(name) && f.found(c, declared)) {
                 return f;
             }
         }
@@ -832,17 +853,20 @@ final class Field extends AccessibleObject implements Member {
 
     static Field[] list(Class<?> c, boolean declared) {
         Field[] all = table();
+        MemberIndex owners = owners();
+        int s = owners.slot(c);
         int n = 0;
-        for (int i = 0; i < all.length; i++) {
-            if (all[i].owner == c && all[i].found(c, declared)) {
+        for (int k = owners.start(s); k < owners.end(s); k++) {
+            if (all[owners.member(k)].found(c, declared)) {
                 n++;
             }
         }
         Field[] out = new Field[n];
         n = 0;
-        for (int i = 0; i < all.length; i++) {
-            if (all[i].owner == c && all[i].found(c, declared)) {
-                out[n] = all[i];
+        for (int k = owners.start(s); k < owners.end(s); k++) {
+            Field f = all[owners.member(k)];
+            if (f.found(c, declared)) {
+                out[n] = f;
                 n++;
             }
         }
@@ -858,6 +882,19 @@ final class Field extends AccessibleObject implements Member {
             table = table0();
         }
         return table;
+    }
+
+    // The table's fields by the class that finds them, made once.
+    private static MemberIndex owners() {
+        if (owners == null) {
+            Field[] all = table();
+            Class<?>[] of = new Class<?>[all.length];
+            for (int i = 0; i < all.length; i++) {
+                of[i] = all[i].owner;
+            }
+            owners = new MemberIndex(of);
+        }
+        return owners;
     }
 
     // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
@@ -1091,6 +1128,7 @@ final class Constructor<T> extends Executable {
     static final String MISSING = ", which is not in the translation";
 
     private static Constructor<?>[] table;
+    private static MemberIndex owners;
 
     private final Class<T> clazz;
     private final Class<?>[] parameterTypes;
@@ -1188,9 +1226,11 @@ final class Constructor<T> extends Executable {
     // `c.getConstructor(types)`, or with `declared` `c.getDeclaredConstructor(types)`.
     static Constructor<?> find(Class<?> c, Class<?>[] types, boolean declared) throws NoSuchMethodException {
         Constructor<?>[] all = table();
-        for (int i = 0; i < all.length; i++) {
-            Constructor<?> k = all[i];
-            if (k.clazz == c && (declared || (k.modifiers & 1) != 0) && same(k.parameterTypes, types)) {
+        MemberIndex owners = owners();
+        int s = owners.slot(c);
+        for (int i = owners.start(s); i < owners.end(s); i++) {
+            Constructor<?> k = all[owners.member(i)];
+            if ((declared || (k.modifiers & 1) != 0) && same(k.parameterTypes, types)) {
                 return k;
             }
         }
@@ -1199,17 +1239,20 @@ final class Constructor<T> extends Executable {
 
     static Constructor<?>[] list(Class<?> c, boolean declared) {
         Constructor<?>[] all = table();
+        MemberIndex owners = owners();
+        int s = owners.slot(c);
         int n = 0;
-        for (int i = 0; i < all.length; i++) {
-            if (all[i].clazz == c && (declared || (all[i].modifiers & 1) != 0)) {
+        for (int i = owners.start(s); i < owners.end(s); i++) {
+            if (declared || (all[owners.member(i)].modifiers & 1) != 0) {
                 n++;
             }
         }
         Constructor<?>[] out = new Constructor<?>[n];
         n = 0;
-        for (int i = 0; i < all.length; i++) {
-            if (all[i].clazz == c && (declared || (all[i].modifiers & 1) != 0)) {
-                out[n] = all[i];
+        for (int i = owners.start(s); i < owners.end(s); i++) {
+            Constructor<?> k = all[owners.member(i)];
+            if (declared || (k.modifiers & 1) != 0) {
+                out[n] = k;
                 n++;
             }
         }
@@ -1238,6 +1281,19 @@ final class Constructor<T> extends Executable {
             table = table0();
         }
         return table;
+    }
+
+    // The table's constructors by their class, made once.
+    private static MemberIndex owners() {
+        if (owners == null) {
+            Constructor<?>[] all = table();
+            Class<?>[] of = new Class<?>[all.length];
+            for (int i = 0; i < all.length; i++) {
+                of[i] = all[i].clazz;
+            }
+            owners = new MemberIndex(of);
+        }
+        return owners;
     }
 
     // The table in the parts of its slots: part `p` holds slots `p`, `p + 32`, `p + 64` and so
@@ -1557,6 +1613,81 @@ final class Constructor<T> extends Executable {
             return (double) l;
         }
         throw new IllegalArgumentException("argument type mismatch");
+    }
+}
+
+// The members of a reflection table grouped by the class that finds them, so that a lookup on a
+// class reads that class's members rather than the whole table (the Minecraft server's has
+// 160,000 methods, and log4j and gson look up members class by class): a hash table, open
+// addressing, from each class to the run of its members' indices in `order`, in the table's order.
+final class MemberIndex {
+    private final Class<?>[] keys;
+    private final int[] starts;
+    private final int[] ends;
+    private final int[] order;
+
+    // `owners[i]` is the class that finds member `i`.
+    MemberIndex(Class<?>[] owners) {
+        // There are at most as many classes as runs of members of one class.
+        int runs = 0;
+        for (int i = 0; i < owners.length; i++) {
+            if (i == 0 || owners[i] != owners[i - 1]) {
+                runs++;
+            }
+        }
+        int size = 16;
+        while (size < 2 * runs) {
+            size <<= 1;
+        }
+        keys = new Class<?>[size];
+        starts = new int[size];
+        ends = new int[size];
+        int[] slots = new int[owners.length];
+        for (int i = 0; i < owners.length; i++) {
+            int s = slot(owners[i]);
+            keys[s] = owners[i];
+            ends[s]++;
+            slots[i] = s;
+        }
+        int at = 0;
+        for (int s = 0; s < size; s++) {
+            starts[s] = at;
+            at += ends[s];
+            ends[s] = starts[s];
+        }
+        order = new int[owners.length];
+        for (int i = 0; i < owners.length; i++) {
+            order[ends[slots[i]]] = i;
+            ends[slots[i]]++;
+        }
+    }
+
+    // The slot of class `c`: its own, or the empty one where it would go. Null has no members.
+    int slot(Class<?> c) {
+        if (c == null) {
+            return -1;
+        }
+        int mask = keys.length - 1;
+        int h = c.hashCode();
+        int s = (h ^ (h >>> 16)) & mask;
+        while (keys[s] != null && keys[s] != c) {
+            s = (s + 1) & mask;
+        }
+        return s;
+    }
+
+    // The run of the members of the class in slot `s`, as positions in `order`.
+    int start(int s) {
+        return s < 0 ? 0 : starts[s];
+    }
+
+    int end(int s) {
+        return s < 0 ? 0 : ends[s];
+    }
+
+    // The index in the table of the member at position `k`.
+    int member(int k) {
+        return order[k];
     }
 }
 

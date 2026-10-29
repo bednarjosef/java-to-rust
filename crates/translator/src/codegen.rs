@@ -666,6 +666,7 @@ impl<'a> Gen<'a> {
             super_targets: &setup.super_targets,
             this_struct: 0,
             method: 0,
+            in_field_inits: false,
             borrowed: HashSet::new(),
             borrowed_optional: HashSet::new(),
             after_body: &[],
@@ -861,6 +862,9 @@ struct Gen<'a> {
     this_struct: usize,
     /// The index of the current method.
     method: usize,
+    /// Whether the code being written is a class's field initializers, which run in its
+    /// constructors (`field_inits`).
+    in_field_inits: bool,
     /// The current method's string variables that are `&str`: borrowed parameters, and
     /// possibly-null strings inside a null check that narrowed them.
     borrowed: HashSet<String>,

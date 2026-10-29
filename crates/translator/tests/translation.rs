@@ -899,7 +899,7 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
         &[
             "impl Base {",
             "fn to_string_in_base(&self) -> java::JString {",
-            "java::concat!(self.base().name.get(), format_args!(\":{}\", java::Double(self.area())))",
+            "java::concat!((*self.base().name.fixed()).clone(), format_args!(\":{}\", java::Double(self.area())))",
             // `super.toString()` wraps the subclass's object in the enum to call the body there.
             "Base::Circle(this.clone()).to_string_in_base()",
             "impl fmt::Display for Base {",
@@ -1569,7 +1569,7 @@ fn unreachable_code_is_not_translated() {
 #[test]
 fn anonymous_classes_are_reached_through_their_creation_and_calls() {
     let rust = translate_project("anonymous", "app.Main");
-    assert_contains(&rust, &["fn run(", "fn area(", "java::concat!(\"task \", self.name.get())"]);
+    assert_contains(&rust, &["fn run(", "fn area(", "java::concat!(\"task \", (*self.name.fixed()))"]);
     // `audit` and `describe` are never called, nor is `never`, whose anonymous class uses `extra`.
     assert_lacks(&rust, &["extra", "Audit", "audit", "describe", "fn never", "\"never\""]);
 }

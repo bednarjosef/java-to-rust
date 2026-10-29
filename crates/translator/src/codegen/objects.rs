@@ -739,6 +739,21 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// Whether the field `name` of `object`, of type `ty`, is the cell of a fixed field (`fixed`)
+    /// that is read where it is, without copying its value out through the cell's `get`: the
+    /// object is celled, the field is not `volatile`, and the code is not a constructor's or a
+    /// field initializer's, which write the fixed fields. Once its object is built nothing writes
+    /// the field, so a reference into the cell aliases no write (the runtime's `Field::fixed`).
+    /// A primitive or a Java enum's value is a word that `get` copies as cheaply.
+    pub(super) fn fixed_cell(&self, object: &Expr, name: &str, ty: Type) -> bool {
+        !(ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_)))
+            && self.celled_object(object)
+            && self.fixed(object, name)
+            && !self.volatile_cell(object, name)
+            && !self.in_field_inits
+            && !self.class.methods[self.method].is_ctor
+    }
+
     /// The method that a call of `resolved` on `receiver` runs: the one it names for `super.m()`,
     /// else the implementation of the class whose objects the receiver is.
     pub(super) fn dispatch(&self, receiver: &Expr, resolved: usize, is_super: bool) -> usize {
@@ -970,11 +985,14 @@ impl<'a> Gen<'a> {
                 let field = self.field_path(object, name);
                 let obj = self.object(object);
                 if self.celled_object(object) {
-                    // A cell is read by value.
+                    // A cell is read by value, unless it is a fixed field's, which is a place.
                     let borrow = match self.enum_of(object) {
                         Some(t) => self.enum_borrow(t, false),
                         None => "",
                     };
+                    if self.fixed_cell(object, name, e.ty) {
+                        return (format!("(*{obj}{borrow}.{field}.fixed())"), true);
+                    }
                     let (get, _) = self.cell_accessors(object, name);
                     (format!("{obj}{borrow}.{field}.{get}()"), false)
                 } else if let Some(t) = self.enum_of(object) {
@@ -1472,6 +1490,10 @@ impl<'a> Gen<'a> {
                 Some(t) => self.enum_borrow(t, false),
                 None => "",
             };
+            if self.fixed_cell(object, name, ty) {
+                let path = self.field_path(object, name);
+                return Code::atom(format!("(*{obj}{borrow}.{path}.fixed()){clone}"));
+            }
             let (get, _) = self.cell_accessors(object, name);
             return Code::atom(format!("{obj}{borrow}.{}.{get}()", self.field_path(object, name)));
         }
@@ -2297,6 +2319,7 @@ impl<'a> Gen<'a> {
             ));
         }
         self.indent += 1;
+        let outer_inits = std::mem::replace(&mut self.in_field_inits, true);
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
             let outer = std::mem::replace(&mut self.guarded, true);
@@ -2313,6 +2336,7 @@ impl<'a> Gen<'a> {
                 self.line(&format!("this.borrow_mut().{field} = {value};"));
             }
         }
+        self.in_field_inits = outer_inits;
         if throws {
             let ok = self.ok("()".to_string());
             self.line(&ok);

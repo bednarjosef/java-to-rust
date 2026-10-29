@@ -134,7 +134,13 @@ program where such a lookup can happen, so they can be checked before the progra
   few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
   size. The table itself is data: each part is three constant arrays, of the classes its members
   name, of their names, and of numbers (indices into those two, modifiers and slots), which a
-  loop of `java/Reflection.java` makes the objects from, not code that makes each. Arguments are checked and unboxed as Java does: a wrong
+  loop of `java/Reflection.java` makes the objects from, not code that makes each. A lookup
+  reads only the members of its class: the first lookup of methods, fields or constructors
+  groups the table by the class that finds each member (`MemberIndex`, a hash table from the
+  class to the run of its members, in the table's order), where reading the whole table for
+  each lookup took over 2 s of the Minecraft server's start, on the thread that starts it
+  (`benchmarks/ReflectionLookups.java`, 120 classes looked up one at a time: 7.3 s before,
+  0.15 s after, Java 0.16 s). Arguments are checked and unboxed as Java does: a wrong
   type is an `IllegalArgumentException` and a null receiver a `NullPointerException`, and an
   exception of the called code is wrapped in an `InvocationTargetException` (by
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final
