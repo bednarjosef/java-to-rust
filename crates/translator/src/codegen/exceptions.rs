@@ -22,6 +22,15 @@
 
 use super::*;
 
+/// The places of `missed`, each once, ordered by line and column; those at the same line and
+/// column keep the order they were found in, so the first is the one that a translation, which
+/// stops at the first, reports.
+fn first_to_last(mut missed: Vec<Pos>) -> Vec<Pos> {
+    missed.sort_by_key(|p| (p.line, p.column));
+    missed.dedup();
+    missed
+}
+
 /// Whether a statement can complete normally, so that code after it runs: Java's rules,
 /// conservatively (a statement not known to end abruptly completes), which is also when the Rust
 /// it becomes can.
@@ -801,7 +810,8 @@ impl<'a> Gen<'a> {
     }
 
     /// Rejects the program when an operation of `Facts::catching` that is written does not run
-    /// inside `java::catching`.
+    /// inside `java::catching`: each such operation, first to last, as the generator reports
+    /// what it rejects (`generate_all`), so that a census stubs them all in one round.
     pub(super) fn check_catching(&mut self) {
         let mut missed: Vec<Pos> = Vec::new();
         for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
@@ -821,7 +831,7 @@ impl<'a> Gen<'a> {
                 );
             }
         }
-        if let Some(pos) = missed.into_iter().min_by_key(|p| (p.line, p.column)) {
+        for pos in first_to_last(missed) {
             let message = "catching the exception of this operation not supported yet";
             self.rejected.push(Error { pos, message: message.to_string() });
         }
@@ -829,7 +839,7 @@ impl<'a> Gen<'a> {
 
     /// Rejects the program when a cast of `Facts::raising` that is written is not in the checked
     /// form, where its `ClassCastException` would end the program instead of reaching the `catch`
-    /// or the `finally`.
+    /// or the `finally`: each such cast, first to last, as `check_catching` does.
     pub(super) fn check_casts(&mut self) {
         let mut missed: Vec<Pos> = Vec::new();
         for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
@@ -850,7 +860,7 @@ impl<'a> Gen<'a> {
                 );
             }
         }
-        if let Some(pos) = missed.into_iter().min_by_key(|p| (p.line, p.column)) {
+        for pos in first_to_last(missed) {
             let message = "catching the `ClassCastException` of this cast not supported yet";
             self.rejected.push(Error { pos, message: message.to_string() });
         }
