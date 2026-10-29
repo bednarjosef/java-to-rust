@@ -2146,14 +2146,21 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
         } else {
-            self.line("match self.view() {");
+            // A test of the class number, which lends the object where it lies: `view()` would
+            // be a call and a `match` over every class of the type (an `Object`'s, thousands)
+            // for the one or few that pass.
+            self.line("match self.0.tag() {");
             self.indent += 1;
             for &c in &passing {
-                self.line(&format!("{}(o) => Some({}),", self.view_pattern(t, c), self.held(c)));
+                let payload = self.payload(c);
+                let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
+                let (tag, held) = (self.class_tag(c), self.held(c));
+                // The class number is the one its constructor gives.
+                self.line(&format!(
+                    "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; Some({held}) }}"
+                ));
             }
-            if passing.len() < variants.len() {
-                self.line("_ => None,");
-            }
+            self.line("_ => None,");
             self.indent -= 1;
             self.line("}");
         }

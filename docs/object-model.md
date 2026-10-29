@@ -131,7 +131,9 @@ Naming:
   another type has the same name either way (`CSS.Value` beside `CSSValue`), with its package
   where that is shared too. The names are unique in the program, as every enum's conversions
   meet on `Object`: where two types still come to one name (`WinDef.LONG` and `Long`), all but
-  the one with fewest dots take the first free number (`as_long`, `as_long_2`). A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
+  the one with fewest dots take the first free number (`as_long`, `as_long_2`). `as_<type>()`
+  tests the class number and lends the object where it lies, as `view()` does, without the
+  `match` over all of the type's classes that `view()` is. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
   the class methods above gets a suffix (`base_2`, `clone_2`).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
