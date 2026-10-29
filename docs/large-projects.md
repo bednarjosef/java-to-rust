@@ -115,8 +115,8 @@ the order that unblocks the most.
 - **Every blocker at once.** `--census` already runs past every rejection and counts what each
   blocks. It must become fast enough for a large project: it runs the analyses again after a
   round of stubs only when a stub changed more than a method's body or an error stayed (see
-  docs/performance.md, "Facts kept across rounds of stubs"), and runs the generator again after
-  every round of stubs.
+  docs/performance.md, "Facts kept across rounds of stubs"), and writes such stubs in the same
+  run of the generator.
 - **A ranked list**: blockers by how many reached pieces each one blocks, which is the to-do list.
 - **An opt-in preview build** for exploring: rejected methods become stubs that end the program
   with "not translated: <method>" if they are ever reached, so the rest of the project can be

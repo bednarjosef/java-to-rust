@@ -340,11 +340,24 @@ pub(super) fn split(name: &str) -> (String, &str) {
 
 /// A module of the program as every round writes it (`Gen::module`): its package, its path from
 /// the crate root, and the types and the methods of the package, in index order.
+#[derive(PartialEq)]
 pub(super) struct Plan {
     package: String,
     path: Vec<String>,
     types: Vec<usize>,
     methods: Vec<usize>,
+}
+
+impl Plan {
+    /// The module's types, in index order.
+    pub(super) fn types(&self) -> &[usize] {
+        &self.types
+    }
+
+    /// The module's methods, in index order.
+    pub(super) fn methods(&self) -> &[usize] {
+        &self.methods
+    }
 }
 
 /// The program's modules in the order they are written, one per package: the crate root first,
