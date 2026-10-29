@@ -277,6 +277,7 @@ impl<'a> Gen<'a> {
 
     /// The concrete classes whose objects the enum of type `t` holds, in `Class::types` order.
     pub(super) fn enum_variants(&self, t: usize) -> Vec<usize> {
+        self.variant_types.borrow_mut().insert(t);
         if let Some(found) = self.enum_variant_lists.borrow().get(&t) {
             return found.to_vec();
         }

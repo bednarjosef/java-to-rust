@@ -41,8 +41,8 @@ fn threads() -> usize {
     })
 }
 
-/// A panic while a module was written, with the module's index, where in the translator it
-/// happened, and the method being written then (`WRITING`).
+/// A panic while a module was written, with the module's place among those written, where in
+/// the translator it happened, and the method being written then (`WRITING`).
 struct Panicked {
     index: usize,
     payload: Box<dyn std::any::Any + Send>,
@@ -50,19 +50,28 @@ struct Panicked {
     writing: Option<Pos>,
 }
 
-/// The modules of `setup.plans`, written in `round` (with the first round's modules `first` in
-/// the last), and what writing them found.
+/// The modules of `setup.plans`, or those of them at the indexes `only`, written in `round` (with
+/// the first round's modules `first` in the last), each with what writing it found, in their
+/// order.
 pub(super) fn write_modules(
     class: &Class,
     facts: &Facts,
     setup: &Setup,
     round: &Round,
     first: Option<&[modules::Written]>,
-) -> (Vec<modules::Written>, Found) {
-    let threads = threads().clamp(1, setup.plans.len().max(1));
-    let next = AtomicUsize::new(0);
-    let stop = AtomicUsize::new(usize::MAX);
-    let write = || write_some(class, facts, setup, round, first, &next, &stop);
+    only: Option<&[usize]>,
+) -> Vec<(modules::Written, Found)> {
+    let all: Vec<usize>;
+    let indexes = match only {
+        Some(only) => only,
+        None => {
+            all = (0..setup.plans.len()).collect();
+            &all
+        }
+    };
+    let threads = threads().clamp(1, indexes.len().max(1));
+    let queue = Queue { indexes, next: AtomicUsize::new(0), stop: AtomicUsize::new(usize::MAX) };
+    let write = || write_some(class, facts, setup, round, first, &queue);
     let results: Vec<Result<Written, Panicked>> = if threads == 1 {
         vec![write()]
     } else {
@@ -91,16 +100,14 @@ pub(super) fn write_modules(
                 .collect()
         })
     };
-    let mut modules: Vec<Option<modules::Written>> = setup.plans.iter().map(|_| None).collect();
-    let mut found = Found::default();
+    let mut modules: Vec<Option<(modules::Written, Found)>> = indexes.iter().map(|_| None).collect();
     let mut panics = Vec::new();
     for result in results {
         match result {
             Ok(written) => {
-                for (index, module) in written.modules {
-                    modules[index] = Some(module);
+                for (at, module, found) in written.modules {
+                    modules[at] = Some((module, found));
                 }
-                found.add(written.found);
             }
             Err(panicked) => panics.push(panicked),
         }
@@ -110,44 +117,55 @@ pub(super) fn write_modules(
         crate::lower::panic_carried(place);
         std::panic::resume_unwind(payload);
     }
-    (modules.into_iter().map(|module| module.expect("every module is written")).collect(), found)
+    modules.into_iter().map(|module| module.expect("every module is written")).collect()
 }
 
-/// What one generator wrote: modules by their index, and what it found.
+/// What one generator wrote: modules by their place among those written, each with what writing
+/// it found.
 struct Written {
-    modules: Vec<(usize, modules::Written)>,
-    found: Found,
+    modules: Vec<(usize, modules::Written, Found)>,
 }
 
-/// Writes modules not yet taken (`next`) with a generator of this thread, until none is left or
-/// another thread's generator panicked on an earlier module (`stop`).
+/// The modules that the generators of a round write, by index (`indexes`): the place among them of
+/// the next one that no generator took (`next`), and the earliest where one panicked (`stop`).
+struct Queue<'a> {
+    indexes: &'a [usize],
+    next: AtomicUsize,
+    stop: AtomicUsize,
+}
+
+/// Writes modules of `queue` not yet taken with a generator of this thread, until none is left or
+/// another thread's generator panicked on an earlier module.
 fn write_some(
     class: &Class,
     facts: &Facts,
     setup: &Setup,
     round: &Round,
     first: Option<&[modules::Written]>,
-    next: &AtomicUsize,
-    stop: &AtomicUsize,
+    queue: &Queue,
 ) -> Result<Written, Panicked> {
+    let Queue { indexes, next, stop } = queue;
     let mut g = Gen::new(class, facts, setup, round);
     let mut written = Vec::new();
     loop {
-        let index = next.fetch_add(1, Ordering::Relaxed);
-        if index >= setup.plans.len() || index > stop.load(Ordering::Relaxed) {
+        let at = next.fetch_add(1, Ordering::Relaxed);
+        if at >= indexes.len() || at > stop.load(Ordering::Relaxed) {
             break;
         }
+        let index = indexes[at];
         let kept = first.map(|first| &first[index]);
         match std::panic::catch_unwind(AssertUnwindSafe(|| g.module(&setup.plans[index], &setup.live, kept)))
         {
-            Ok(module) => written.push((index, module)),
+            // What writing a module found is the module's own: nothing that the generator found
+            // before is read while it writes (`Found`).
+            Ok(module) => written.push((at, module, g.take_found())),
             Err(payload) => {
-                stop.fetch_min(index, Ordering::Relaxed);
+                stop.fetch_min(at, Ordering::Relaxed);
                 let place = crate::lower::panic_place();
                 let writing = WRITING.with(|w| w.get());
-                return Err(Panicked { index, payload, place, writing });
+                return Err(Panicked { index: at, payload, place, writing });
             }
         }
     }
-    Ok(Written { modules: written, found: g.take_found() })
+    Ok(Written { modules: written })
 }

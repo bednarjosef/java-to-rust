@@ -501,16 +501,55 @@ arguments of natives the runtime lacks. A stub ends the program where its code w
 (`java::not_translated`), so it only takes behaviour away: the facts of the analyses still hold
 for the program after the stubs, which may do less than they say but nothing more, as they held
 for the generator that ran on them in the same round past those errors. So a round whose errors
-the stubs all took away by replacing method bodies keeps its facts, and the next round runs only
-the messages of the changed methods and the generator on them (`program/census.rs`, `analyse`).
-A stub that changes more than a body (an abstract method made concrete, a field initializer
-changed: `Stubs::reshaped`), an error that no stub took away, or a round that stopped before the
-analyses finished runs the analyses again, as does a census round by round. The translation of a
-census that kept its facts may differ from one that ran the analyses again where the facts of
-stubbed code reach, as a stubbed method keeps the form its callers saw (it may still return a
-`Result`); a stub never runs past its first line, so the program behaves the same.
-`a_census_stubs_every_cast_the_generator_misses_in_one_round` (`tests/translation.rs`) runs the
-analyses once for its two rounds.
+the stubs all took away by replacing method bodies keeps its facts, and goes on with the
+messages of the changed methods and the generator (`program/census.rs`, `analyse`; see the next
+paragraph). The facts that name the expressions of the code a stub replaced, which is no longer
+in the program, are taken out of the kept facts (`forget_replaced`): the dereferences that the
+generator checks it wrote (`Facts::null_checked`) and those that need a message
+(`Facts::npe_message_needed`), which would otherwise be rejected as not written or without a
+message. A stub that changes more than a body (an abstract method made concrete, a field
+initializer changed: `Stubs::reshaped`), an error that no stub took away, or a round that
+stopped before the analyses finished runs the analyses again, as does a census round by round.
+The translation of a census that kept its facts may differ from one that ran the analyses again
+where the facts of stubbed code reach, as a stubbed method keeps the form its callers saw (it
+may still return a `Result`); a stub never runs past its first line, so the program behaves the
+same. `a_census_stubs_every_cast_the_generator_misses_in_one_round` (`tests/translation.rs`)
+runs the analyses and the generator once for its two rounds of stubs, one of them in a method
+with a dereference whose `NullPointerException` is caught.
+
+**Stubs written in the same run of the generator.** The round after stubs that only replaced
+method bodies would run the whole generator again (about 260 s on the Minecraft server) only to
+write the stubbed methods. Instead, a census's generator (`codegen::generate_all_stubbing`)
+hands the errors of its first round, with those of the analyses and the messages before it, to
+the census, which stubs them there and then and records them as a round of its own would. Where
+the stubs replaced only method bodies and took every error away, the census keeps the facts (as
+above), finds the messages of the changed methods again, and the generator goes on in the same
+run: a module's text depends on its own code alone, given what the generator works out of the
+whole program before it writes (`Setup`), so it writes again only the modules that the stubs
+reach (`restubbed`). Those are the modules that hold a changed method (its class's, its home
+class's, its free functions'), or code that calls one or creates an object of its class (the
+generator reads the bodies of a lambda's methods where it is created, and those of constructors
+for objects on the stack); those that hold a class that the stubs left with no `new`, or that
+asked for the variants of an enum that may hold one (`Found::variant_types`); and those that
+rejected code in the first round. Every other module keeps its first round's text and what
+writing it found (`Found`); the checks after the writing run again over all of them, and the
+rounds of enum items follow as in any run. Where the stubs change anything else of `Setup`, the
+enums whose `valueOf` is checked, or a message of a dereference left in the program, the
+generator writes the whole program again in the same run, as the next round would have. Where
+the stubs changed more than a body or an error stayed, the generator stops after its first round
+and the census goes on as before, to a round that runs the analyses again. So a census whose
+stubs only replace bodies runs the generator once. The Minecraft server's pass 3 has had only
+such stubs (a `toString` whose exception is caught, messages of `NullPointerException`s, casts
+in the arguments of natives the runtime lacks). javac's census is the same byte for byte,
+report and translation: of its 18 errors in pass 3, 5 are in methods that an earlier error of the
+same round stubbed, which counts as an error no stub took away, so it runs the analyses again as
+before, and its first run of the generator now stops after the first round (2.7 s rather than
+4.4 s). Taking those errors as clean instead, the generator writes 102 of javac's 169 modules
+again in 2.3 s, where a whole run takes 4.3 s, and its translation is the same byte for byte as
+the whole generator's on the same stubbed program.
+`a_census_stubs_every_cast_the_generator_misses_in_one_round` compares a census with one that
+runs the generator again for the stubs (`program::generator_again`): report, JSON and
+translation are the same.
 
 Further speed-ups, not done:
 
@@ -525,17 +564,12 @@ Further speed-ups, not done:
 - Lowering of `ScannerGrades` and `TextAdventure` now takes 1 to 2.5 s, twice (two attempts
   of the Rust generics, `lower::real_generics`); keeping what the first attempt learned
   instead of lowering everything again would halve it.
-- The generator's later rounds in a census. The round after stubs that only replaced method
-  bodies runs the messages of the changed methods and the generator again (about 260 s on the
-  Minecraft server) to write the stubbed methods. Writing a stub's body in the place of a method
-  that the generator rejects would leave one run of the generator.
-  Ways to make it cheaper, each to be checked by a census that stays byte for byte the same:
-  - Predicting the first round's rejections before it runs does not apply: every one of them
-    reads the facts (the exceptions that a `catch` sees, `Facts::raising`).
-  - Writing a stub in place without a round after it is exact only where the stub changes no
-    fact that other code is written with, and the stub's own `UnsupportedOperationException`,
-    which its callers may see, changes the facts of exceptions; finding out which facts
-    change is the incremental analysis below.
+- An error in code that an earlier error of the same round stubbed (javac has 5 of its 18 in
+  pass 3) counts as one that no stub took away, so the census runs the analyses and the
+  generator again. Taking such an error as taken away by that stub would let the census keep its
+  facts and write the stubs in the same run of the generator.
+- The analyses' rounds in a census, where a stub changes more than a body or an error stays.
+  Ways to make them cheaper, each to be checked by a census that stays byte for byte the same:
   - Incremental analyses: rerun the object values and the exceptions only over the stubbed
     methods and what their values and exceptions reach (a worklist seeded with them) rather
     than over everything. As the stubs only take facts away and the analyses grow their facts

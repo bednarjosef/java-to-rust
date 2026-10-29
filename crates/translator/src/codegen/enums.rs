@@ -276,28 +276,7 @@ impl<'a> Gen<'a> {
 
     /// Whether a `valueOf` of the enum `index` is somewhere a `catch` or `finally` sees its failure.
     fn checked_value_of(&self, index: usize) -> bool {
-        let checked = self.checked_value_ofs.get_or_init(|| {
-            let mut found = HashSet::new();
-            for m in &self.class.methods {
-                for s in &m.body {
-                    visit_stmt(
-                        s,
-                        &mut |e| {
-                            visit_expr(e, &mut |x| {
-                                if let (ExprKind::Builtin(Builtin::EnumValueOf, _), Type::Enum(n)) =
-                                    (&x.kind, x.ty)
-                                    && self.facts.raising.contains(&x.id)
-                                {
-                                    found.insert(n);
-                                }
-                            })
-                        },
-                        &mut |_| {},
-                    );
-                }
-            }
-            found
-        });
+        let checked = self.checked_value_ofs.get_or_init(|| checked_value_ofs(self.class, self.facts));
         checked.contains(self.class.types[index].name.as_str())
     }
 
@@ -425,4 +404,28 @@ impl<'a> Gen<'a> {
             _ => unreachable!("not a builtin of an erased enum: {builtin:?}"),
         }
     }
+}
+
+/// The enums, by name, of the `valueOf`s whose failure a `catch` or `finally` sees
+/// (`Gen::checked_value_of`), anywhere in the program.
+pub(super) fn checked_value_ofs(class: &Class, facts: &Facts) -> HashSet<&'static str> {
+    let mut found = HashSet::new();
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let (ExprKind::Builtin(Builtin::EnumValueOf, _), Type::Enum(n)) = (&x.kind, x.ty)
+                            && facts.raising.contains(&x.id)
+                        {
+                            found.insert(n);
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    found
 }

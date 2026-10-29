@@ -4206,8 +4206,9 @@ fn a_census_stubs_every_cast_the_generator_misses_in_one_round() {
     // A cast whose `ClassCastException` a `catch` sees, in the argument of a native that the
     // runtime lacks, is not written (the call is code that never runs), so the generator rejects
     // it (`Gen::check_casts`). Each such cast is rejected, not only the first, so that one round
-    // stubs both methods, and the next runs the generator again on the facts of the analyses,
-    // which run once.
+    // stubs the three methods, and the generator goes on with the stubs in the same run, on the
+    // facts of the analyses, which run once. Those facts no longer hold the dereference of the
+    // code a stub replaced (`name.length()`), which the generator would find not written.
     let peers = r#"package jdk.peers;
 
 public class Peers {
@@ -4238,6 +4239,11 @@ public class Peers {
         }
         return 2;
     }
+
+    public static int named(Peer peer, String name) {
+        focusNative(((XPeer) peer).window());
+        return name.length();
+    }
 }
 "#;
     let main = r#"import jdk.peers.Peers;
@@ -4254,6 +4260,11 @@ public class Main {
             System.out.println(Peers.create(p));
         } catch (ClassCastException e) {
             System.out.println("cce 2");
+        }
+        try {
+            System.out.println(Peers.named(p, null));
+        } catch (ClassCastException | NullPointerException e) {
+            System.out.println("cce 3");
         }
     }
 }
@@ -4273,14 +4284,24 @@ public class Main {
         libraries: vec![dir.join("lib")],
         ..Default::default()
     };
-    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    let ((taken, rounds), runs) = java_to_rust::program::runs_of_generator(|| {
+        java_to_rust::program::rounds_of_analyses(|| census(&program))
+    });
     assert_contains(
-        &census.report,
+        &taken.report,
         &[
-            "       2  catching the `ClassCastException` of this cast not supported yet\n          at jdk/peers/Peers.java:22:22, jdk/peers/Peers.java:26:18\n",
+            "       3  catching the `ClassCastException` of this cast not supported yet\n          at jdk/peers/Peers.java:22:22, jdk/peers/Peers.java:26:18, jdk/peers/Peers.java:33:22\n",
         ],
     );
-    assert_eq!(rounds, 1, "{}", census.report);
+    assert_eq!(rounds, 1, "{}", taken.report);
+    assert_eq!(runs, 1, "{}", taken.report);
+    // The same as with a run of the generator for the stubs, the translation too.
+    let program = java_to_rust::Program { ends_rejected: true, ..program };
+    let (once, again) = (census(&program), java_to_rust::program::generator_again(|| census(&program)));
+    assert_eq!(once.report, again.report);
+    assert_eq!(once.json, again.json);
+    let rust = once.modules.expect("a translation").one_file();
+    assert_eq!(rust, again.modules.expect("a translation").one_file());
 }
 
 #[test]

@@ -110,32 +110,119 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
     // writes those asked for anew (`Gen::only_enums`): the others ask for what they asked for
     // before. What does not depend on the wanted items is worked out once (`Setup`).
     let setup = Setup::new(class, facts);
-    let mut wanted = Needs::new();
-    let mut only_enums: Option<OnlyEnums> = None;
-    let mut kept: Option<Kept> = None;
-    for round in 1.. {
+    rounds(class, facts, &setup, Needs::new(), None, None, 1)
+}
+
+/// A census's hook of `generate_all_stubbing`.
+pub type Stub<'a> = dyn FnMut(&mut Class, &mut Facts, Vec<Error>) -> Option<HashSet<usize>> + 'a;
+
+/// `generate_all` for a census, which stubs what the first round rejects and has the generator
+/// go on with the stubs in the same run. `stub` gets the errors of the first round, after the
+/// first round's text of every module is written and checked, and stubs their code in `class`:
+/// it gives back the methods whose bodies it replaced, or `None` where it changed more than
+/// bodies, or did not take every error away, and the census goes on as with `generate_all`'s
+/// errors (which it then has already). The modules that the stubs reach are written again
+/// (`restubbed`); every other module keeps its first round's text and what writing it found
+/// (`Found`), as a module's text depends on its own code alone, given what the generator works
+/// out of the whole program before it writes (`Setup`) and the messages of the dereferences.
+/// Where the stubs change those, other than which classes are live, the program is written again
+/// from the start.
+/// The errors given back are those of the program with the stubs, or the first round's when
+/// `stub` gave back `None`. `stub` may change `facts` to those of the program with the stubs: take
+/// out what they say of the code it replaced, and find the messages of the dereferences again.
+pub fn generate_all_stubbing(
+    class: &mut Class,
+    facts: &mut Facts,
+    stub: &mut Stub,
+) -> Result<ModuleTree, Vec<Error>> {
+    SHARED_STRINGS.set(class.shared_strings);
+    let setup = Setup::new(class, facts);
+    let checked = enums::checked_value_ofs(class, facts);
+    let start = std::time::Instant::now();
+    let mut kept = None;
+    let wanted = Needs::new();
+    let (tree, needs, rejected, closures) = generate_with(class, facts, &setup, &wanted, None, &mut kept);
+    round_timing(1, start, "", &needs, &wanted);
+    let Some(mut kept) = kept else {
+        // The program asks for no enum item and rejects nothing: it is done in one round.
+        let tree = tree.expect("a round that keeps nothing is the last");
+        return match stub(class, facts, Vec::new()) {
+            None => Err(Vec::new()),
+            Some(changed) if changed.is_empty() => finished(tree, closures),
+            Some(_) => generate_all(class, facts),
+        };
+    };
+    let first = rejected.iter().map(|e| Error { pos: e.pos, message: e.message.clone() }).collect();
+    let messages = facts.npe_messages.clone();
+    let Some(changed) = stub(class, facts, rejected) else { return Err(first) };
+    if !changed.is_empty() {
         let start = std::time::Instant::now();
-        let last = only_enums.is_none() && kept.is_some();
-        let (tree, needs, rejected, closures) =
-            generate_with(class, facts, &setup, &wanted, only_enums.as_ref(), &mut kept);
+        // The messages of the dereferences may change where the stubs take away an error of them.
+        let present = |messages: &HashMap<ExprId, Option<String>>| {
+            let present = messages.iter().filter(|(id, _)| facts.null_checked.contains_key(id));
+            present.map(|(&id, message)| (id, message.clone())).collect::<HashMap<_, _>>()
+        };
+        if present(&messages) != present(&facts.npe_messages) {
+            if crate::timings::enabled() {
+                eprintln!("timing: codegen: the stubs change the messages of dereferences");
+            }
+            return generate_all(class, facts);
+        }
+        // Which classes are live may change (a stub takes away the only `new` of a class), as
+        // nothing else of the setup does where the stubs replace bodies alone.
+        let mut stubbed = Setup::new(class, facts);
+        let live = std::mem::replace(&mut stubbed.live, setup.live.clone());
+        if stubbed != setup || enums::checked_value_ofs(class, facts) != checked {
+            if crate::timings::enabled() {
+                eprintln!("timing: codegen: the stubs change what the whole program is written with");
+            }
+            return generate_all(class, facts);
+        }
+        stubbed.live = live;
+        let unlive: Vec<usize> =
+            (0..class.types.len()).filter(|&t| stubbed.live[t] != setup.live[t]).collect();
+        let setup = stubbed;
+        let (needs, rejected, written) = restubbed(class, facts, &setup, &mut kept, &changed, &unlive);
         if crate::timings::enabled() {
-            let new = needs.iter().filter(|n| !wanted.contains(n)).count();
-            let written = match &only_enums {
-                Some(only) => format!(" (enum items of {} types)", only.types.len()),
-                None if last => " (all enum items, the first round's other items kept)".to_string(),
-                None => String::new(),
-            };
             eprintln!(
-                "timing: codegen: round {round}{written}: {:.3} s, {new} items asked for anew",
+                "timing: codegen: {written} of {} modules written again with stubs: {:.3} s",
+                setup.plans.len(),
                 start.elapsed().as_secs_f64()
             );
         }
-        let anew = |wanted: &Needs, needs: &Needs| {
-            let needs: Needs = needs.difference(wanted).copied().collect();
-            let types =
-                needs.iter().flat_map(|&need| dispatch::need_types(class, &setup.homes, need)).collect();
-            OnlyEnums { needs, types }
+        if !rejected.is_empty() {
+            return Err(rejected);
+        }
+        let only_enums = anew(class, &setup, &wanted, &needs);
+        return rounds(class, facts, &setup, needs, Some(only_enums), Some(kept), 2);
+    }
+    let only_enums = anew(class, &setup, &wanted, &needs);
+    rounds(class, facts, &setup, needs, Some(only_enums), Some(kept), 2)
+}
+
+/// The rounds of `generate_all` from round `first`, with the enum items `wanted`, those of a round
+/// of enum items alone (`only_enums`) and the first round's modules (`kept`), as earlier rounds
+/// left them.
+fn rounds(
+    class: &Class,
+    facts: &Facts,
+    setup: &Setup,
+    mut wanted: Needs,
+    mut only_enums: Option<OnlyEnums>,
+    mut kept: Option<Kept>,
+    first: usize,
+) -> Result<ModuleTree, Vec<Error>> {
+    for round in first.. {
+        let start = std::time::Instant::now();
+        let last = only_enums.is_none() && kept.is_some();
+        let (tree, needs, rejected, closures) =
+            generate_with(class, facts, setup, &wanted, only_enums.as_ref(), &mut kept);
+        let written = match &only_enums {
+            Some(only) => format!(" (enum items of {} types)", only.types.len()),
+            None if last => " (all enum items, the first round's other items kept)".to_string(),
+            None => String::new(),
         };
+        round_timing(round, start, &written, &needs, &wanted);
         if only_enums.is_some() {
             // What the enum items reject, or the program once they ask for nothing new, is
             // found by writing all of them with the same items.
@@ -143,7 +230,7 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
                 only_enums = None;
                 continue;
             }
-            only_enums = Some(anew(&wanted, &needs));
+            only_enums = Some(anew(class, setup, &wanted, &needs));
             wanted.extend(needs);
             continue;
         }
@@ -151,19 +238,148 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
             return Err(rejected);
         }
         if let Some(tree) = tree {
-            // The methods with a call that throws inside a closure, and then any other code.
-            if !closures.is_empty() {
-                return Err(closures);
-            }
-            for module in &tree.modules {
-                exceptions::check_closures(&module.items_text()).map_err(|e| vec![e])?;
-            }
-            return Ok(tree);
+            return finished(tree, closures);
         }
-        only_enums = Some(anew(&wanted, &needs));
+        only_enums = Some(anew(class, setup, &wanted, &needs));
         wanted.extend(needs);
     }
     unreachable!("the rounds end")
+}
+
+/// The `--timings` line of a round of the generator.
+fn round_timing(round: usize, start: std::time::Instant, written: &str, needs: &Needs, wanted: &Needs) {
+    if crate::timings::enabled() {
+        let new = needs.iter().filter(|n| !wanted.contains(n)).count();
+        eprintln!(
+            "timing: codegen: round {round}{written}: {:.3} s, {new} items asked for anew",
+            start.elapsed().as_secs_f64()
+        );
+    }
+}
+
+/// The enum items that `needs` asks for and `wanted` lacks, and the types they are of.
+fn anew(class: &Class, setup: &Setup, wanted: &Needs, needs: &Needs) -> OnlyEnums {
+    let needs: Needs = needs.difference(wanted).copied().collect();
+    let types = needs.iter().flat_map(|&need| dispatch::need_types(class, &setup.homes, need)).collect();
+    OnlyEnums { needs, types }
+}
+
+/// The written program, unless some of its methods have a call that throws inside a closure: those
+/// methods, and then any other code.
+fn finished(tree: ModuleTree, closures: Vec<Error>) -> Result<ModuleTree, Vec<Error>> {
+    if !closures.is_empty() {
+        return Err(closures);
+    }
+    for module in &tree.modules {
+        exceptions::check_closures(&module.items_text()).map_err(|e| vec![e])?;
+    }
+    Ok(tree)
+}
+
+/// The first round's modules (`kept`) after a census's stubs changed the bodies of the methods
+/// `changed` and which of the classes `unlive` are live (`generate_all_stubbing`): those that hold
+/// one of the methods or code that reads one, those that hold one of the classes or depend on the
+/// variants of an enum that may hold one (`Found::variant_types`), and those that rejected code
+/// in the first round, are written again as the first round wrote them; then the checks after the
+/// writing run over all of them. What the program asks for, what it rejects, and how many modules
+/// were written again.
+fn restubbed(
+    class: &Class,
+    facts: &Facts,
+    setup: &Setup,
+    kept: &mut Kept,
+    changed: &HashSet<usize>,
+    unlive: &[usize],
+) -> (Needs, Vec<Error>, usize) {
+    let mut module_of_type = vec![usize::MAX; class.types.len()];
+    let mut module_of_method = HashMap::new();
+    for (index, plan) in setup.plans.iter().enumerate() {
+        for &t in plan.types() {
+            module_of_type[t] = index;
+        }
+        for &m in plan.methods() {
+            module_of_method.insert(m, index);
+        }
+    }
+    let mut again: std::collections::BTreeSet<usize> = kept.rejecting.iter().copied().collect();
+    let add_method = |again: &mut std::collections::BTreeSet<usize>, m: usize| {
+        let mut types = vec![class.methods[m].class];
+        if let Home::Class(c) | Home::Fields(c) = setup.homes[m] {
+            types.push(c);
+        }
+        again.extend(types.into_iter().map(|t| module_of_type[t]).filter(|&i| i != usize::MAX));
+        again.extend(module_of_method.get(&m).copied());
+    };
+    let changed_classes: HashSet<usize> = changed.iter().map(|&m| class.methods[m].class).collect();
+    let reads = |e: &Expr| {
+        let mut found = false;
+        visit_expr(e, &mut |x| {
+            found |= match &x.kind {
+                ExprKind::Call { resolved: Some(m), .. }
+                | ExprKind::MethodCall { resolved: Some(m), .. }
+                | ExprKind::ThisCall { resolved: Some(m), .. }
+                | ExprKind::SuperInit { resolved: Some(m), .. } => changed.contains(m),
+                ExprKind::New { class: c, ctor, .. } => {
+                    changed_classes.contains(c) || ctor.is_some_and(|m| changed.contains(&m))
+                }
+                _ => false,
+            }
+        });
+        found
+    };
+    for (m, method) in class.methods.iter().enumerate() {
+        let mut found = changed.contains(&m);
+        for s in &method.body {
+            if !found {
+                visit_stmt(s, &mut |e| found |= reads(e), &mut |_| {});
+            }
+        }
+        if found {
+            add_method(&mut again, m);
+        }
+    }
+    for (t, decl) in class.types.iter().enumerate() {
+        let initializers = decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref());
+        if initializers.into_iter().any(&reads) && module_of_type[t] != usize::MAX {
+            again.insert(module_of_type[t]);
+        }
+    }
+    if !unlive.is_empty() {
+        again.extend(unlive.iter().map(|&c| module_of_type[c]).filter(|&i| i != usize::MAX));
+        let asked: HashSet<usize> =
+            kept.found.iter().flat_map(|found| found.variant_types.iter().copied()).collect();
+        let moved: HashSet<usize> = asked
+            .into_iter()
+            .filter(|&t| hierarchy::variants(class, facts, t).iter().any(|c| unlive.contains(c)))
+            .collect();
+        for (index, found) in kept.found.iter().enumerate() {
+            if found.variant_types.iter().any(|t| moved.contains(t)) {
+                again.insert(index);
+            }
+        }
+    }
+    let again: Vec<usize> = again.into_iter().collect();
+    let _modules = modules::enter(class);
+    let wanted = Needs::new();
+    let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
+    let written = threads::write_modules(class, facts, setup, &round, None, Some(&again));
+    let mut rejected_at = Vec::new();
+    for (&index, (module, found)) in again.iter().zip(written) {
+        if !module.rejected.is_empty() {
+            rejected_at.push(index);
+        }
+        kept.found[index] = found;
+        kept.modules[index] = module;
+    }
+    kept.rejecting = rejected_at;
+    let mut g = Gen::new(class, facts, setup, &round);
+    g.add_found(Found::all(&kept.found));
+    // What the modules reject, in the order they are written.
+    g.rejected = kept.modules.iter_mut().flat_map(|module| std::mem::take(&mut module.rejected)).collect();
+    g.check_dereferences();
+    g.check_casts();
+    g.check_catching();
+    (g.needs.take(), std::mem::take(&mut g.rejected), again.len())
 }
 
 thread_local! {
@@ -212,13 +428,17 @@ struct OnlyEnums {
 /// line that may start it (`Gen::module`).
 struct Kept {
     modules: Vec<modules::Written>,
-    found: Found,
+    /// What writing each module found.
+    found: Vec<Found>,
+    /// The modules that rejected code, by index.
+    rejecting: Vec<usize>,
 }
 
 /// What writing modules finds besides their text (`threads::write_modules`): the enum items
 /// that the code uses, and what the checks after the writing and the classes' constants read
 /// (`Gen::written`, `Gen::dereferenced`, `Gen::class_values`, `Gen::class_details`,
-/// `Gen::class_interfaces`).
+/// `Gen::class_interfaces`), and the types whose enum's variants the code depends on
+/// (`Gen::variant_types`).
 #[derive(Clone, Default)]
 struct Found {
     needs: Needs,
@@ -227,9 +447,19 @@ struct Found {
     class_values: std::collections::BTreeSet<usize>,
     class_details: bool,
     class_interfaces: bool,
+    variant_types: HashSet<usize>,
 }
 
 impl Found {
+    /// What the generators of `parts` found together.
+    fn all(parts: &[Found]) -> Found {
+        let mut all = Found::default();
+        for part in parts {
+            all.add(part.clone());
+        }
+        all
+    }
+
     /// Adds what another generator found. Each part only grows as the program is written, so
     /// what generators of parts of it found together is what one of all of it finds.
     fn add(&mut self, more: Found) {
@@ -239,11 +469,13 @@ impl Found {
         self.class_values.extend(more.class_values);
         self.class_details |= more.class_details;
         self.class_interfaces |= more.class_interfaces;
+        self.variant_types.extend(more.variant_types);
     }
 }
 
 /// What the generator finds of the program before it writes it, the same in every round
 /// (`generate_all`).
+#[derive(PartialEq)]
 struct Setup {
     live: Vec<bool>,
     homes: Vec<Home>,
@@ -362,11 +594,13 @@ fn generate_with(
     if only_enums.is_none()
         && let Some(kept) = kept
     {
-        g.add_found(kept.found.clone());
+        g.add_found(Found::all(&kept.found));
     }
     let first = kept.as_ref().filter(|_| only_enums.is_none()).map(|kept| &kept.modules[..]);
-    let (mut written, found) = threads::write_modules(class, facts, setup, &round, first);
-    g.add_found(found);
+    let (mut written, found): (Vec<modules::Written>, Vec<Found>) =
+        threads::write_modules(class, facts, setup, &round, first, None).into_iter().unzip();
+    g.add_found(Found::all(&found));
+    let rejecting = (0..written.len()).filter(|&i| !written[i].rejected.is_empty()).collect();
     // What the modules reject, in the order they are written.
     g.rejected = written.iter_mut().flat_map(|module| std::mem::take(&mut module.rejected)).collect();
     let needs = g.needs.take();
@@ -385,7 +619,7 @@ fn generate_with(
         }
         None if done => written,
         None => {
-            *kept = Some(Kept { modules: written, found: g.take_found() });
+            *kept = Some(Kept { modules: written, found, rejecting });
             return (None, needs, g.rejected, Vec::new());
         }
     };
@@ -416,6 +650,7 @@ impl<'a> Gen<'a> {
             reps: Default::default(),
             variant_lists: Default::default(),
             enum_variant_lists: Default::default(),
+            variant_types: Default::default(),
             checked_value_ofs: Default::default(),
             group_names: &setup.group_names,
             receiver_sets: &setup.receiver_sets,
@@ -506,6 +741,7 @@ impl Gen<'_> {
         self.class_values = all.class_values;
         self.class_details = all.class_details;
         self.class_interfaces = all.class_interfaces;
+        *self.variant_types.get_mut() = all.variant_types;
     }
 
     /// What this generator found, taken.
@@ -517,6 +753,7 @@ impl Gen<'_> {
             class_values: std::mem::take(&mut self.class_values),
             class_details: self.class_details,
             class_interfaces: self.class_interfaces,
+            variant_types: self.variant_types.take(),
         }
     }
 }
@@ -592,6 +829,10 @@ struct Gen<'a> {
     /// The variants of the enum of each type that have objects (`dispatch::enum_variants`), once
     /// found.
     enum_variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<[usize]>>>,
+    /// The types whose `enum_variants` the code written asked for, which depend on which classes
+    /// are live: a census that stubs code writes the modules that asked again where a stub
+    /// changes that (`generate_all_stubbing`).
+    variant_types: std::cell::RefCell<HashSet<usize>>,
     /// The enums whose `valueOf` a `catch` or `finally` sees fail (see `enums::checked_value_of`).
     checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
