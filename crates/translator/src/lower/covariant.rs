@@ -101,16 +101,20 @@ impl<'t> Lowering<'t> {
     /// that `Object[]` as well; an array that becomes an `Object` meets every `Object[]` that an
     /// `Object` is cast to once some type it was cast to is one. So the program is lowered again
     /// once for what one lowering finds, not once more for each step of it; a type that only a
-    /// changed lowering meets is noted by the next attempt as before.
-    pub(super) fn noted_later(&self) {
-        if self.object.is_none() || self.covariant.noted.borrow().is_empty() {
+    /// changed lowering meets is noted by the next attempt as before. The types meet as the next
+    /// lowering has them without the Rust generics that `failed` here (`without_failed`): an array
+    /// of a generic class with type arguments is another type once the class is erased, so a
+    /// `MemoryModuleType<GlobalPos>[]` noted here is a `MemoryModuleType[]` there. A Rust generic
+    /// class whose array a type noted here holds fails with it (`real_element_class`).
+    pub(super) fn noted_later(&self, failed: &mut super::real_generics::Real) {
+        if self.object.is_none() || self.covariant.noted.borrow().is_empty() && failed.is_empty() {
             return;
         }
         let mut known = self.covariant.known.clone();
         known.extend(self.covariant.noted.borrow().iter().copied());
         let met: Vec<(Type, Type)> = self.covariant.met.borrow().iter().copied().collect();
         loop {
-            let lowered = |ty: Type| lowered_as(ty, &known);
+            let lowered = |ty: Type| lowered_as(self.without_failed(ty, failed), &known);
             let mut more = Vec::new();
             for &(a, b) in &met {
                 self.meet_again(lowered(a), lowered(b), &known, &mut more);
@@ -127,6 +131,7 @@ impl<'t> Lowering<'t> {
             if more.is_empty() {
                 return;
             }
+            failed.classes.extend(more.iter().filter_map(|&ty| self.real_element_class(ty)));
             known.extend(more.iter().copied());
             self.covariant.noted.borrow_mut().extend(more);
         }
@@ -191,7 +196,22 @@ impl<'t> Lowering<'t> {
         if !noted.contains(&ty) {
             noted.push(ty);
         }
+        if let Some(t) = self.real_element_class(ty) {
+            self.fail(super::real_generics::Owner::Class(t));
+        }
         true
+    }
+
+    /// The Rust generic class whose objects array type `ty` holds (`Box<String>[]`, or arrays of
+    /// them): once `ty` is an `Object[]`, they are `Object`s, which a Rust generic's objects must
+    /// not become, so the class fails with the array (see `real_generics`).
+    fn real_element_class(&self, mut ty: Type) -> Option<usize> {
+        while let Type::Array(element) = ty {
+            ty = *element;
+        }
+        let Type::Class(name, args) = ty else { return None };
+        let t = self.type_index(name)?;
+        (!args.is_empty() && self.real.classes.contains(&t)).then_some(t)
     }
 
     /// Whether `node`, an `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]`,

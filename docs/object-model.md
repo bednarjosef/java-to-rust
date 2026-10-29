@@ -759,7 +759,10 @@ everywhere in the program: lowering notes each such type and the program is lowe
 `Object[][]` once `String[]` is one; an array held as an `Object` meets an `Object[]` once a type
 an `Object` is cast to is one) are noted by the same lowering, which meets again the types that
 met as they would be translated then (`covariant::noted_later`), so one lowering more takes
-them all. Element reads get the checked cast back, a for-each casts each element,
+them all. That includes the Rust generics the lowering failed, which the next one erases: an
+array of a generic class with type arguments (`Box<String>[]`) is `Box[]` once the class is
+erased, and noting such an array fails the class itself, whose objects would be `Object`s as its
+elements. Element reads get the checked cast back, a for-each casts each element,
 and a store converts to `Object`. Every other array keeps its exact type.
 
 Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle
@@ -885,12 +888,13 @@ erased program has lost what the decision needs. Candidates:
 - and neither has an array of one of its type variables anywhere in it, in its signature, a
   field, a variable or an expression's type (`T[]`, `T...`): `verify` would fail it every time,
   and while it is tried its arrays meet no others and code that makes one (`Arrays.copyOf` into
-  a `T[]`) is rejected, which would erase every candidate.
+  a `T[]`) is rejected, which would erase it and the other candidates that code uses.
 
 Lowering translates them as real, then `real_generics::verify` fails every candidate whose type
 variables' values are used for anything but a store, a return, an argument to a parameter of a
 type variable or a comparison with `null`; whose types meet a cast or an `instanceof`; that is
-used raw, as an array element, or becomes an `Object`. Since the failed ones' type variables
+used raw, as an array element, or becomes an `Object` (lowering fails a candidate itself where
+its values go to `System.arraycopy`, whose arrays are `Object`s). Since the failed ones' type variables
 become `Object` the next time, a value of another candidate's type variable that goes to or comes
 from one of them (an argument, a return, a field) would be converted then, so `verify` checks
 again with them erased until no more fail. Lowering runs again with the failed ones erased until
@@ -899,9 +903,10 @@ error with candidates left is retried with all of them erased,
 so a real generic never turns a translated program into a rejected one. A census, and a whole
 program, which go on past a rejection, retry only for one in code that can run and that uses a
 real generic (a class or method of them, or one of their type variables, while the method,
-field initializers or initializer block was lowered): code that uses none is lowered the same
-without them, and so is a class the program does not have (`type`, `new`, `extending` or
-`implementing` a missing class).
+field initializers or initializer block was lowered), and erase only the real generics that
+code used before the rejection: code that uses none is lowered the same without them, and so is
+a class the program does not have (`type`, `new`, `extending` or `implementing` a missing
+class).
 
 A type variable of a real generic is a synthetic type of kind `TypeKind::Param`, named
 `Owner#T`, with no members and no implementors, so every analysis sees an opaque value that is

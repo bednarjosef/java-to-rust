@@ -121,7 +121,7 @@ impl<'t> Lowering<'t> {
             plain_object: None,
             real: Default::default(),
             failed: Default::default(),
-            uses_real: Cell::new(false),
+            uses_real: RefCell::default(),
             aliases: Default::default(),
             functional: Default::default(),
             lambdas: Vec::new(),

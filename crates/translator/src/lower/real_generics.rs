@@ -34,6 +34,18 @@ impl Real {
         self.classes.is_empty() && self.methods.is_empty()
     }
 
+    pub(super) fn insert(&mut self, owner: Owner) {
+        match owner {
+            Owner::Class(t) => self.classes.insert(t),
+            Owner::Method(m) => self.methods.insert(m),
+        };
+    }
+
+    pub(super) fn extend(&mut self, other: &Real) {
+        self.classes.extend(&other.classes);
+        self.methods.extend(&other.methods);
+    }
+
     fn without(&self, failed: &Real) -> Real {
         Real {
             classes: self.classes.difference(&failed.classes).copied().collect(),
@@ -50,7 +62,8 @@ pub(super) enum Owner {
 }
 
 /// Lowers with every candidate, then without those that fail, until none does; an error with
-/// real generics is retried with all of them erased. A lowering that finds arrays that meet an
+/// real generics is retried with all of them erased (a census and a whole program, which go on
+/// past rejections, fail those the rejected code uses instead: `program::lower_with`). A lowering that finds arrays that meet an
 /// `Object[]` is retried with them as `Object[]`s (see `covariant`), and without the Rust
 /// generics that failed in it.
 pub(super) fn retry<E: std::fmt::Debug>(
@@ -149,8 +162,8 @@ fn held(node: Node) -> bool {
 /// in it: in its signature, a field, a variable or the type of an expression. `verify` erases
 /// such a generic on every lowering, as an array of a type variable is not supported, and while
 /// it is tried, its arrays meet no others (`covariant::note_covariant`) and code that makes one
-/// (`Arrays.copyOf` into a `T[]`) is rejected, which erases every Rust generic. So it is no
-/// candidate.
+/// (`Arrays.copyOf` into a `T[]`) is rejected, which erases it and the other Rust generics that
+/// code uses. So it is no candidate.
 fn holds_variable_array(node: Node) -> bool {
     let vars: Vec<&str> = node.list("typeParameters").map(|p| p.str("name")).collect();
     holds_array_of(node, &vars)
@@ -249,17 +262,17 @@ impl<'t> Lowering<'t> {
             Owner::Method(m) => self.real.methods.contains(&m),
         };
         if real {
-            self.uses_real.set(true);
+            self.uses_real.borrow_mut().insert(owner);
         }
         real
     }
 
-    /// `lower` with `uses_real` saying whether the code it lowers uses Rust generics, as a
-    /// rejection in it is recorded with; it says so of the code around it too afterwards.
+    /// `lower` with `uses_real` holding the Rust generics that the code it lowers uses, as a
+    /// rejection in it is recorded with; they are those of the code around it too afterwards.
     pub(super) fn noting_real_uses<T>(&self, lower: impl FnOnce() -> T) -> T {
-        let outer = self.uses_real.replace(false);
+        let outer = self.uses_real.take();
         let lowered = lower();
-        self.uses_real.set(outer | self.uses_real.get());
+        self.uses_real.borrow_mut().extend(&outer);
         lowered
     }
 
@@ -343,25 +356,50 @@ impl<'t> Lowering<'t> {
 
     /// Records that a real generic cannot stay one; lowering goes on, and is run again.
     pub(super) fn fail(&self, owner: Owner) {
-        let mut failed = self.failed.borrow_mut();
-        match owner {
-            Owner::Class(t) => failed.classes.insert(t),
-            Owner::Method(m) => failed.methods.insert(m),
-        };
+        self.failed.borrow_mut().insert(owner);
     }
 
     /// The real generic whose type variable `ty` is, if it is one.
     pub(super) fn param_owner(&self, ty: Type) -> Option<Owner> {
-        let Type::Class(name, _) = ty else { return None };
-        let (owner, _) = name.rsplit_once('#')?;
-        let owner = match owner.strip_prefix('@') {
-            Some(m) => m.parse().ok().map(Owner::Method),
-            None => self.type_index(owner).map(Owner::Class),
-        };
-        if owner.is_some() {
-            self.uses_real.set(true);
+        let owner = self.variable_owner(ty);
+        if let Some(owner) = owner {
+            self.uses_real.borrow_mut().insert(owner);
         }
         owner
+    }
+
+    /// `param_owner`, without noting that the code being lowered uses the generic.
+    fn variable_owner(&self, ty: Type) -> Option<Owner> {
+        let Type::Class(name, _) = ty else { return None };
+        let (owner, _) = name.rsplit_once('#')?;
+        match owner.strip_prefix('@') {
+            Some(m) => m.parse().ok().map(Owner::Method),
+            None => self.type_index(owner).map(Owner::Class),
+        }
+    }
+
+    /// Type `ty` as the next lowering has it, once the Rust generics `failed` are erased: their
+    /// type variables (which have no bounds) are `Object`, and their classes have no type
+    /// arguments (`MemoryModuleType<GlobalPos>[]` is `MemoryModuleType[]`).
+    pub(super) fn without_failed(&self, ty: Type, failed: &Real) -> Type {
+        let fails = |owner: Owner| match owner {
+            Owner::Class(t) => failed.classes.contains(&t),
+            Owner::Method(m) => failed.methods.contains(&m),
+        };
+        match ty {
+            Type::Array(element) => Type::array(self.without_failed(*element, failed)),
+            Type::Class(name, args) => match self.variable_owner(ty) {
+                Some(owner) if fails(owner) => Type::class(OBJECT),
+                Some(_) => ty,
+                None if args.is_empty() => ty,
+                None if self.type_index(name).is_some_and(|t| fails(Owner::Class(t))) => Type::class(name),
+                None => {
+                    let args: Vec<Type> = args.iter().map(|&a| self.without_failed(a, failed)).collect();
+                    Type::generic(name, &args)
+                }
+            },
+            _ => ty,
+        }
     }
 
     /// The real generics that a type mentions: its own class and the type variables in it.
@@ -383,7 +421,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// Records that the real generics `ty` mentions cannot stay ones.
-    fn fail_all_of(&self, ty: Type) {
+    pub(super) fn fail_all_of(&self, ty: Type) {
         let mut owners = Vec::new();
         self.owners_in(ty, &mut owners);
         owners.into_iter().for_each(|o| self.fail(o));

@@ -34,7 +34,7 @@ impl<'t> Lowering<'t> {
     ) -> Result<(), Error> {
         match &self.census {
             Some(rejected) => {
-                rejected.borrow_mut().push((t, anchor, method, error, self.uses_real.get()));
+                rejected.borrow_mut().push((t, anchor, method, error, self.uses_real.borrow().clone()));
                 Ok(())
             }
             None => Err(error),
