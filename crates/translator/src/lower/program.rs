@@ -206,14 +206,17 @@ fn lower_with<'t>(
     // only an error in code that can run (`analysis::live_methods`) and that may go away without
     // them (`generic`): the others leave the program as it is, and the Rust generics may stay. A
     // lowering that noted covariant arrays is lowered again whatever it found
-    // (`real_generics::retry`), so its methods that can run are not looked for. Nor are they once a rejection can run, as that lowering is retried:
-    // the walk stops there (`live_methods_unless`). Those found are handed on with the program,
-    // which a census narrows to them (`program::narrow`).
+    // (`real_generics::retry`), so its methods that can run are not looked for; nor are they for
+    // one with Rust generics that failed (`real_generics::verify`) and no such error, which is
+    // lowered again without those. Nor are they once a rejection can run, as that lowering is
+    // retried: the walk stops there (`live_methods_unless`). Those found are handed on with the
+    // program, which a census narrows to them (`program::narrow`).
     let live = match &lowered {
-        Ok((class, ..))
+        Ok((class, _, failed))
             if !lowering.real.is_empty()
                 && lowering.covariant.noted.borrow().is_empty()
-                && !rejected.is_empty() =>
+                && !rejected.is_empty()
+                && (failed.is_empty() || generic.contains(&true)) =>
         {
             let code: Vec<(usize, Option<usize>)> =
                 rejected.iter().zip(&generic).filter(|(_, g)| **g).map(|(r, _)| (r.ty, r.method)).collect();
