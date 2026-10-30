@@ -1894,8 +1894,18 @@ public class Main {
     // `get` of an erased `Optional` read as the capture's bound `U`, which lowering casts back.
     @SuppressWarnings("unchecked")
     static <U> U orElse(Optional<? extends U> o, U other) { return (U) (o.isPresent() ? o.get() : other); }
+    // Implemented by a method reference, and overridden by enum constants' bodies.
+    interface Terminal { <T> String decode(List<T> ops, T input); }
+    static <T> String decodeAll(List<T> ops, T input) { return ops.size() + ":" + input; }
+    enum Kind {
+        ONE { <T> List<T> create(T value) { return List.of(value); } },
+        TWO { <T> List<T> create(T value) { return List.of(value, value); } };
+        abstract <T> List<T> create(T value);
+    }
 
     public static void main(String[] args) {
+        Terminal terminal = Main::decodeAll;
+        System.out.println(terminal.decode(List.of(1), 2) + Kind.TWO.create("k"));
         Box<String> box = new Box<>(keep(orElse(Optional.of("b"), "c")));
         new Visitor<String>().visit(new Leaf(), "x");
         System.out.println(box.get() + first(one("f")) + text(3) + later("l").get()

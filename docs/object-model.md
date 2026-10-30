@@ -947,7 +947,8 @@ nothing (slower, never wrong), so the scan is to be exact, not generous.
   variables of what failed, which can fail more: a method none of whose parameter types names a
   type variable outside an erased class's arguments, which Rust cannot infer (`List<T>` once
   `List` is erased; about half of Minecraft's), and a class none of whose instance fields does;
-  a method that overrides another or that another overrides; a type variable named in a lambda,
+  a method that overrides another or that another overrides, an enum constant's body, a lambda
+  or a method reference implements; a type variable named in a lambda,
   a local or anonymous class or an inner class (`type_var`); a candidate class used raw, or with
   a wildcard, capture or intersection argument; a cast or `instanceof` of a type that names a
   candidate; a value of a type variable used as an operand or receiver, or stored, passed

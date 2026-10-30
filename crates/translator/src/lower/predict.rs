@@ -120,7 +120,31 @@ impl<'t> Lowering<'t> {
     /// Then a method that overrides or is overridden, and what the code does with the values of
     /// each one (`Flow`, as `verify`'s `Check` and lowering's own failures).
     fn predict_failed(&self, candidates: &Real) -> Real {
-        let mut real = candidates.clone();
+        // A method that another overrides or a lambda implements is called through the dispatch
+        // of its class's objects, which no type parameter of its own fits, whichever class
+        // declares the other: an enum constant's body, a lambda's or a method reference's.
+        // An enum constant's body is no method of its own: its override is an arm of the enum's
+        // method (`constant_bodies`), where the body's type variables meet the method's.
+        let bodies = self.types.iter().filter(|t| t.node.kind() == "ENUM").flat_map(|t| {
+            t.node
+                .list("members")
+                .filter_map(|c| c.get("initializer").and_then(|i| i.get("classBody")))
+                .flat_map(|body| body.list("members").filter(|m| m.kind() == "METHOD"))
+        });
+        let mut dispatched = Real::default();
+        for node in self.methods.iter().map(|info| info.node).chain(bodies) {
+            if node.get("symbol").and_then(|s| s.0["overrides"].as_array()).is_some_and(|o| !o.is_empty()) {
+                for o in self.overrides(node) {
+                    dispatched.insert(Owner::Method(o));
+                }
+            }
+        }
+        for lambda in &self.lambdas {
+            if let Some(o) = self.implemented(lambda.node) {
+                dispatched.insert(Owner::Method(o));
+            }
+        }
+        let mut real = candidates.without(&dispatched);
         let methods_by_node =
             self.methods.iter().enumerate().map(|(m, i)| (i.node.0 as *const Value, m)).collect();
         let types_by_node =
@@ -1060,17 +1084,7 @@ impl<'t> Meets<'_, 't> {
             self.flows(code, ret);
         }
         // The bridge to the method the lambda implements returns the result as that method's.
-        let implemented = l.method_index(&Symbol {
-            kind: "METHOD",
-            name: descriptor.str("name"),
-            owner: descriptor.str("owner"),
-            is_static: false,
-            varargs: false,
-            native: false,
-            ty: descriptor.str("type"),
-            constant: None,
-        });
-        if let (Some(ret), Some(o)) = (ret, implemented)
+        if let (Some(ret), Some(o)) = (ret, l.implemented(node))
             && let Some(declared) = self.declared_ret(o)
         {
             self.convert(ret, declared);
