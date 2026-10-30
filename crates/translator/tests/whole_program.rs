@@ -581,6 +581,67 @@ fn arrays_held_as_objects_in_lowered_code_are_predicted() {
     assert_eq!(predicted, unpredicted);
 }
 
+/// Arrays that a lambda's or a method reference's method returns as the descriptor's return
+/// type: the `Mode[]` of `Mode::values` as the `E[]` of a `Supplier<E[]>`, as Minecraft passes its
+/// enums' constants to `StringRepresentable.fromEnum`, and the `Shade[]` and `Size[]` that a
+/// lambda's expression and `return` give as `Object[]`s. The prediction finds them all, and the
+/// program is lowered once.
+const ARRAYS_FROM_LAMBDAS: &str = r#"
+import java.util.function.Supplier;
+
+public class Main {
+    interface Named { String serialName(); }
+
+    enum Mode implements Named {
+        FAST, SLOW;
+        public String serialName() { return name().toLowerCase(); }
+    }
+
+    enum Shade { LIGHT, DARK }
+
+    enum Size { SMALL, LARGE }
+
+    static <E extends Enum<E> & Named> String names(Supplier<E[]> values) {
+        StringBuilder out = new StringBuilder();
+        for (E e : values.get()) out.append(e.serialName()).append(' ');
+        return out.toString().trim();
+    }
+
+    static int count(Supplier<Object[]> values) { return values.get().length; }
+
+    public static void main(String[] args) {
+        System.out.println(names(Mode::values));
+        System.out.println(count(() -> Shade.values()));
+        System.out.println(count(() -> {
+            Size[] sizes = Size.values();
+            return sizes;
+        }));
+    }
+}
+"#;
+
+#[test]
+fn arrays_that_lambdas_return_are_predicted() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-arrays-from-lambdas");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), ARRAYS_FROM_LAMBDAS).unwrap();
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    let again = stderr.lines().find(|l| l.contains("is lowered again for")).unwrap_or_default();
+    for array in ["Main.Mode[]", "Main.Shade[]", "Main.Size[]"] {
+        assert!(again.contains(array), "{array} not noted:\n{stderr}");
+    }
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
 /// `Box<String>[]` becomes an `Object[]` (`asList`'s `T[]`), whose elements are `Object`s, which
 /// the objects of the Rust generic class `Box` cannot be: `Box` is erased in the lowering that
 /// notes the array, and its array, `Box[]` once erased, is noted with it. The program is lowered

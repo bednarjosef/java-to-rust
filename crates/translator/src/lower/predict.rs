@@ -876,11 +876,6 @@ impl<'t> Meets<'_, 't> {
     fn bridges(&self, m: usize, node: Node<'t>) {
         let l = self.lowering;
         let Ok(params) = l.param_types(m) else { return };
-        let ret = |m: usize| {
-            let info = &l.methods[m];
-            let ret = info.node.get("returnType")?;
-            l.declared_type(ret, l.return_java_type(m, ret), info.owner, Some(m)).ok()
-        };
         for o in l.overrides(node) {
             let Ok(overridden) = l.param_types(o) else { continue };
             for (&p, &q) in params.iter().zip(&overridden) {
@@ -888,7 +883,7 @@ impl<'t> Meets<'_, 't> {
                     l.meets_object_array(p, q);
                 }
             }
-            if let (Some(a), Some(b)) = (ret(m), ret(o)) {
+            if let (Some(a), Some(b)) = (self.declared_ret(m), self.declared_ret(o)) {
                 l.meets_object_array(a, b);
             }
         }
@@ -1003,6 +998,7 @@ impl<'t> Meets<'_, 't> {
                     }
                 }
             }
+            "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node),
             "MEMBER_SELECT" | "IDENTIFIER" => {
                 self.children(node, None);
                 if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD")
@@ -1014,6 +1010,50 @@ impl<'t> Meets<'_, 't> {
             }
             _ => self.children(node, None),
         }
+    }
+
+    /// A lambda or a method reference, whose method returns the value of its body, or of the call
+    /// that the reference makes, as the descriptor's return type (`lambda_body`).
+    fn lambda(&self, node: Node<'t>) {
+        let l = self.lowering;
+        let Some((_, code)) = l.lambda_class(node).and_then(|t| l.lambda_code(t)) else {
+            return self.children(node, None);
+        };
+        let current = l.current.get();
+        l.current.set(l.lambda_class(node).unwrap_or(current));
+        let Some(descriptor) = node.get("descriptor") else { return l.current.set(current) };
+        let ret = self.ty(node, signature(descriptor.str("substituted")).1).filter(|&ty| ty != Type::Void);
+        if node.kind() == "LAMBDA_EXPRESSION" && node.str("bodyKind") == "STATEMENT" {
+            self.stmt(code, ret);
+        } else {
+            self.expr(code);
+            self.flows(code, ret);
+        }
+        // The bridge to the method the lambda implements returns the result as that method's.
+        let implemented = l.method_index(&Symbol {
+            kind: "METHOD",
+            name: descriptor.str("name"),
+            owner: descriptor.str("owner"),
+            is_static: false,
+            varargs: false,
+            native: false,
+            ty: descriptor.str("type"),
+            constant: None,
+        });
+        if let (Some(ret), Some(o)) = (ret, implemented)
+            && let Some(declared) = self.declared_ret(o)
+        {
+            self.convert(ret, declared);
+        }
+        l.current.set(current);
+    }
+
+    /// The declared return type of method `m`.
+    fn declared_ret(&self, m: usize) -> Option<Type> {
+        let l = self.lowering;
+        let info = &l.methods[m];
+        let ret = info.node.get("returnType")?;
+        l.declared_type(ret, l.return_java_type(m, ret), info.owner, Some(m)).ok()
     }
 
     /// A use of a member whose declared type is `declared`, where javac gave the use another:

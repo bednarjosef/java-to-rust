@@ -964,8 +964,10 @@ nothing (slower, never wrong), so the scan is to be exact, not generous.
   `object_array`): an argument and its parameter (packed varargs too), an assignment, a field's
   or local's initializer, a return, a `?:`, an array initializer's element, a cast, an
   `instanceof`, an array in a string concatenation, a member of an erased generic read back as
-  javac's type (`erased_use`), and a method's parameters and result against those of the methods
-  it overrides (the bridges). Code that lowering makes and the trees do not have is read from the
+  javac's type (`erased_use`), a method's parameters and result against those of the methods
+  it overrides (the bridges), and the value of a lambda's body or of a method reference's call
+  as the descriptor's return type, and that as the result of the method it implements (its
+  bridge; `Mode::values` as a `Supplier<E[]>`). Code that lowering makes and the trees do not have is read from the
   same inputs lowering makes it from: a field read or updated through `Unsafe`, a `VarHandle` or
   a field updater, whose value is converted to the call's type (`handle_read`), and the members
   of the reflection tables, whose arguments and fields are cast from `Object` and whose results
