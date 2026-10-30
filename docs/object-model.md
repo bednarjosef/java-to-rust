@@ -408,9 +408,11 @@ but stands for the code at its call sites, so calling it does not initialize tha
   `continue` or `throw`). An `if` whose condition is an `||` chain with a negated pattern is
   turned around into an `&&` chain of the negated operands with its branches swapped, and a
   `?:` whose condition is a negated pattern has its branches swapped (`!(o instanceof C c) ?
-  false : f(c)`, as decompilers write `equals`). An `if` whose condition negates an `&&` chain
-  with a pattern has it negated operand by operand first (`!(a && x instanceof C c)` is `!a ||
-  !(x instanceof C c)`), and an `||` inside the condition's `&&` chain whose negated pattern a
+  false : f(c)`, as decompilers write `equals`). An `if` whose condition, or an operand of its
+  `||` chain, negates an `&&` chain with a pattern has it negated operand by operand first (`!(a
+  && x instanceof C c)` is `!a || !(x instanceof C c)`; `m == null || !(s instanceof C c &&
+  f(c))`, as `SSLAlgorithmConstraints` writes it, is `m == null || !(s instanceof C c) ||
+  !f(c)`), and an `||` inside the condition's `&&` chain whose negated pattern a
   later operand reads becomes a conditional (`!(x instanceof C c) || f(c)` is `x instanceof C c
   ? f(c) : true`; all in `lower/negated_patterns.rs`). A read anywhere else is rejected: "a
   pattern variable used here not supported yet". A pattern variable may be assigned, except one of a record or switch
