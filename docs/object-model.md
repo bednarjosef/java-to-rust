@@ -527,7 +527,8 @@ Runtime variants are types of kind `TypeKind::Runtime` beside it:
 - a class value held as an `Object` is a `Class` variant, equal and hashed as the class value;
 - a charset held as an `Object` is a `java.nio.charset.Charset` variant holding the runtime's
   `java::Charset`, equal, hashed and printed as its name, as Java's charsets are. Its class is
-  that one runtime class, where Java's is the JDK's class of the charset (`sun.nio.cs.UTF_8`);
+  that one runtime class, where Java's is the JDK's class of the charset (`sun.nio.cs.UTF_8`),
+  and `Charset.class` is that class too;
 - `new Object()` makes an object of `PlainObject`, a class without fields, equal only to itself
   and printed as `java.lang.Object@..`, as the JDK's lock objects and placeholders (`HashSet`'s
   `PRESENT`) need.
