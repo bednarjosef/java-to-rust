@@ -1060,11 +1060,13 @@ unsafe fn allocate(layout: Layout, global: bool) -> *mut u8 {
     p
 }
 
-/// Memory for an object of `layout`, taken where it is called rather than through the global
-/// allocator, whose call the compiler does not inline: an object's size is a constant there, and
-/// so are its slot's class and the zeroing of its slot, which the object's own fields then
-/// overwrite. A null pointer when the heap is out of address space for a large one.
-#[inline(always)]
+/// Memory for an object of `layout`, taken by a direct call rather than through the global
+/// allocator, which works out the slot's class from a size it does not know and zeroes the slot
+/// with a call of `memset`. It is not inlined where the object is made: that was faster still
+/// where objects are made in a loop, but other loops of the same program, which allocate
+/// nothing, lost optimizations (docs/collector.md, "Allocation"). A null pointer when the heap is
+/// out of address space for a large one.
+#[inline(never)]
 pub(crate) fn allocate_object(layout: Layout) -> *mut u8 {
     unsafe { allocate(layout, false) }
 }

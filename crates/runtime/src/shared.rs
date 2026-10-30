@@ -40,7 +40,7 @@ impl<T> Arc<T> {
         if const { std::mem::size_of::<T>() == 0 } {
             return Arc::new_zero_sized(value);
         }
-        // Straight from the thread's slots, inlined, rather than through the global allocator.
+        // From the thread's slots by a direct call, rather than through the global allocator.
         let layout = std::alloc::Layout::new::<T>();
         let Some(ptr) = NonNull::new(crate::gc::allocate_object(layout) as *mut T) else {
             std::alloc::handle_alloc_error(layout)

@@ -73,16 +73,17 @@ untaken slot of a block into a list, as the allocator did before, cost 5% of the
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
-An object (`java::Arc::new`) takes its slot right where it is made (`gc::allocate_object`),
-not through the global allocator: the compiler does not inline the global allocator's call, so
-each `new` was a call that worked out the slot's size class from the size it was given and
-zeroed the slot with a call of `memset`. Inlined, the size is a constant, and so are the class
-and the zeroing, two stores for a 16-byte object, which the object's own fields then overwrite.
-BinaryTrees takes about 30% less time (alternating runs on a throttled machine, 8.45 s against
-5.95 s). Where the collector is not the global allocator (the runtime's own tests), memory that
-Rust took elsewhere may hold handles it cannot see, so it never collects there: whether it is
-the global allocator is found out at the first refill of a thread's slots, by an allocation
-through the global allocator (`INSTALLED`).
+An object (`java::Arc::new`) takes its slot by a direct call of `gc::allocate_object`, not
+through the global allocator, whose call works out the slot's size class from the size it is
+given and zeroes the slot with a call of `memset`. BinaryTrees takes 7.0 s against 9.4 s through
+the global allocator (alternating runs on a throttled machine). Inlined at every `new`, the
+size, the class and the zeroing are constants and BinaryTrees takes 5.8 s, but the compiler then
+optimizes other loops worse, ones that allocate nothing: ObjectDispatch's search of a palette
+by identity, which it otherwise specializes for the key's class, took 4.0 s against 1.86 s (the
+cause inside the compiler is not pinned down). Where the collector is not the global allocator
+(the runtime's own tests), memory that Rust took elsewhere may hold handles it cannot see, so it
+never collects there: whether it is the global allocator is found out at the first refill of a
+thread's slots, by an allocation through the global allocator (`INSTALLED`).
 
 The collector keeps every taken slot of each thread's spans, after marking: the slots not handed
 out yet, and the one a thread stopped in `alloc` may be handing out before its address is in a
