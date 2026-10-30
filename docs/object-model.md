@@ -971,7 +971,8 @@ nothing (slower, never wrong), so the scan is to be exact, not generous.
   same inputs lowering makes it from: a field read or updated through `Unsafe`, a `VarHandle` or
   a field updater, whose value is converted to the call's type (`handle_read`), and the members
   of the reflection tables, whose arguments and fields are cast from `Object` and whose results
-  converted to it (`reflected_conversions`). `noted_later` then closes the set, and what the scan
+  converted to it (`reflected_conversions`), and an `Arrays.copyOf` into a class literal's
+  `Object[]`, whose copy is the source's array (`copy_of_with_class`). `noted_later` then closes the set, and what the scan
   recorded is forgotten, as nothing has been lowered yet. On javac it predicts all 73 types and
   no others, in 0.6 s, and the census lowers the program once, to the same translation.
 - **Checking it**: with `JAVA_TO_RUST_PREDICTION_CHECK` set, the predicted arrays are not used,

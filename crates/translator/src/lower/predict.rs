@@ -1048,6 +1048,32 @@ impl<'t> Meets<'_, 't> {
         l.current.set(current);
     }
 
+    /// `Arrays.copyOf(a, n, Object[].class)` (or `copyOfRange`), whose copy is `a`'s array once
+    /// the two meet (`copy_of_with_class`).
+    fn copy_into_objects(&self, node: Node<'t>, symbol: &Symbol<'t>, args: &[Node<'t>]) {
+        let wanted = match symbol.name {
+            "copyOf" => 3,
+            "copyOfRange" => 4,
+            _ => return,
+        };
+        if symbol.owner != "java.util.Arrays" || args.len() != wanted {
+            return;
+        }
+        let mut class = args[wanted - 1];
+        while matches!(class.kind(), "TYPE_CAST" | "PARENTHESIZED") {
+            let Some(inner) = class.get("expression") else { return };
+            class = inner;
+        }
+        let literal = class.kind() == "MEMBER_SELECT" && class.str("identifier") == "class";
+        if let (true, Some(copy @ Type::Array(e)), Some(array @ Type::Array(f))) =
+            (literal, self.ty(node, node.java_type()), self.value(args[0]))
+            && Lowering::is_object(*e)
+            && Lowering::of_objects(*f)
+        {
+            self.lowering.meets_object_array(array, copy);
+        }
+    }
+
     /// The declared return type of method `m`.
     fn declared_ret(&self, m: usize) -> Option<Type> {
         let l = self.lowering;
@@ -1096,9 +1122,10 @@ impl<'t> Meets<'_, 't> {
                 self.convert(ty, Type::class(crate::ast::OBJECT));
             }
         }
+        let args: Vec<Node<'t>> = node.list("arguments").collect();
+        self.copy_into_objects(node, &symbol, &args);
         let Some(m) = l.method_index(&symbol) else { return };
         let Ok(params) = l.param_types(m) else { return };
-        let args: Vec<Node<'t>> = node.list("arguments").collect();
         let last = params.len().saturating_sub(1);
         for (i, &a) in args.iter().enumerate() {
             let Some(&param) = params.get(i.min(last)) else { continue };

@@ -517,13 +517,18 @@ fn assert_predicted_all(stderr: &str) {
 /// the old `Tag[]` that `getAndSet` of a `VarHandle` gives as an `Object`, read from the field
 /// (the call itself passes no array), meets the `(Object[])` cast; and the `Label[]` that `Method.invoke` gets in its `Object[]`
 /// meets the `Named[]` that the table of the program's methods casts it to for the call
-/// (`lower::reflection`). The prediction finds both, and the program is lowered once.
+/// (`lower::reflection`); and the `Step[]` that `Arrays.copyOf(.., Object[].class)` copies, which
+/// lowering copies as it is, meets the copy's `Object[]`, as in the queue of a
+/// `ScheduledThreadPoolExecutor`. The prediction finds them all, and the program is lowered once.
 const ARRAYS_IN_LOWERED_CODE: &str = r#"
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 
 public class Main {
+    static class Step {}
+
     static class Tag {
         final String name;
         Tag(String name) { this.name = name; }
@@ -555,6 +560,8 @@ public class Main {
         System.out.println(back.length + " " + (shelf.tags == null));
         Method count = Main.class.getMethod("count", Named[].class);
         System.out.println(count.invoke(null, new Object[] { new Label[2] }));
+        Step[] steps = { new Step(), new Step() };
+        System.out.println(Arrays.copyOf(steps, 1, Object[].class).length);
     }
 }
 "#;
@@ -572,7 +579,7 @@ fn arrays_held_as_objects_in_lowered_code_are_predicted() {
     std::fs::write(sources.join("Main.java"), ARRAYS_IN_LOWERED_CODE).unwrap();
     let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
     let again = stderr.lines().find(|l| l.contains("is lowered again for")).unwrap_or_default();
-    for array in ["Main.Tag[]", "Main.Label[]", "Main.Named[]"] {
+    for array in ["Main.Tag[]", "Main.Label[]", "Main.Named[]", "Main.Step[]"] {
         assert!(again.contains(array), "{array} not noted:\n{stderr}");
     }
     assert_predicted_all(&stderr);
