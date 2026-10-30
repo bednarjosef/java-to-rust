@@ -95,7 +95,8 @@ program where such a lookup can happen, so they can be checked before the progra
   fields, and for constructors the classes of the class literals among the values of
   annotations, which code that reads them makes objects of (log4j's
   `@PluginVisitorStrategy(PluginValueVisitor.class)`); or only the class of the receiver when
-  it is a class literal. The annotations of a class that reachable code names are reached with
+  it is a class literal; plus the classes that the points-to facts find a lookup of that kind
+  gets (below). The annotations of a class that reachable code names are reached with
   it, values included. The names of the classes
   that security providers register for their services are left out: the providers' own lookup
   makes those (`program/reach/services.rs`). The member names are
@@ -151,7 +152,15 @@ program where such a lookup can happen, so they can be checked before the progra
   registry's keys, of an `EnumSet` or of a logger's name then keep no members, while
   `o.getClass().getDeclaredFields()` keeps those of the classes of the objects `o` can be
   (`corpus/whole-program/LookupsOnClassesThatReachThem.java`); `JAVA_TO_RUST_TABLE_DUMP=file`
-  writes how many members of each class are kept and left out. What the facts still merge: the
+  writes how many members of each class are kept and left out. A class can reach a lookup with
+  no class literal anywhere: `o.getClass()` of an object made with `new`, and its
+  `getSuperclass()`. Where the facts find a lookup gets a class whose members reachability did
+  not put in (`analysis::reflection_table::missing`), the program is translated again, from
+  reachability on, with that class among the candidates of lookups of that kind
+  (`Program::flow_classes`), so that a lookup never silently finds nothing
+  (`corpus/whole-program/LookupsOnClassesWithoutLiterals.java`); each round adds classes, so the
+  rounds end. Where the facts say a lookup of a kind may get any class, its candidates stay
+  reachability's. What the facts still merge: the
   elements of every array are one place for each element type, so a `Class` value stored in
   any array (a member's classes in the table's data among them) reaches every read of a
   `Class[]`, `Type[]` or `Object[]` element, and a field of a class holds what any of its

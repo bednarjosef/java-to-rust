@@ -1040,12 +1040,41 @@ impl<'t> Lowering<'t> {
                 CONSTRUCTOR => TableKind::Constructor,
                 _ => continue,
             };
+            let Some(m) = self.template_method(class, method, sig) else { continue };
             if matches!(method, "find" | "list")
                 && name.starts_with("get")
-                && let Some(m) = self.template_method(class, method, sig)
                 && !layout.lookups.contains(&(kind, m))
             {
                 layout.lookups.push((kind, m));
+            }
+            if matches!(method, "find" | "list" | "newInstanceOf") && !layout.entries.contains(&(kind, m)) {
+                layout.entries.push((kind, m));
+            }
+        }
+        layout.internal = [METHOD, FIELD, CONSTRUCTOR, RECORD_COMPONENT]
+            .iter()
+            .filter_map(|c| self.type_index(c))
+            .collect();
+        // The classes that a lookup on a `Class` value that is not a class literal does not
+        // look in, of those that could have members in the table.
+        if let Some(reach) = self.reach {
+            for (kind, table) in [
+                (LookupKind::Method, TableKind::Method),
+                (LookupKind::Field, TableKind::Field),
+                (LookupKind::Constructor, TableKind::Constructor),
+            ] {
+                let candidates = reach.lookup_candidates.get(&kind);
+                let uncovered = layout.uncovered.entry(table).or_default();
+                for t in (0..self.types.len()).filter(|&t| self.reflectable(t)) {
+                    let javac = &self.types[t].javac;
+                    let creatable = matches!(self.types[t].node.kind(), "CLASS" | "RECORD")
+                        && self.nesting(t).is_none_or(|n| !n.outer && n.captures.is_empty());
+                    if (kind != LookupKind::Constructor || creatable)
+                        && !candidates.is_some_and(|c| c.contains(javac))
+                    {
+                        uncovered.insert(t, javac.clone());
+                    }
+                }
             }
         }
         layout

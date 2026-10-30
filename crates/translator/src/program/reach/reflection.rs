@@ -37,7 +37,7 @@
 //! finds it not, and its code never assigns the parameter. A load of any other `Class` value
 //! loads any service whose class literal reachable code has.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{
     Item, MethodKey, Walk, by_name::class_bound, by_name::class_for_name, has_flag, literal_class,
@@ -69,6 +69,10 @@ pub const RECORD_COMPONENT_METHODS: [&str; 6] =
 
 /// The key in `Walk::reflected_keys` of a record whose components are found.
 const RECORD_KEY: &str = "<record>";
+
+/// The classes that the flow of `Class` values found that the lookups of each kind look in
+/// (`Walk::flow_classes`).
+pub type FlowClasses = BTreeMap<Kind, BTreeSet<String>>;
 
 /// What a lookup looks for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -348,6 +352,7 @@ impl<'t> Walk<'t> {
                         .or_insert_with(|| {
                             let mut all: BTreeSet<&String> = self.named.iter().collect();
                             all.extend(self.reach.found_by_name.iter());
+                            all.extend(self.flow_classes.get(&lookup.kind).into_iter().flatten());
                             match lookup.kind {
                                 Kind::Constructor => all.extend(self.annotation_classes.iter()),
                                 Kind::Record => {
@@ -621,6 +626,24 @@ impl<'t> Walk<'t> {
             self.work.extend(made.into_iter().map(Item::Method));
         }
         new
+    }
+
+    /// The classes that a lookup of each kind on a `Class` value that is not a class literal may
+    /// look in, before the bound of its type (`Reach::lookup_candidates`), as `reflected_members`
+    /// takes them.
+    pub(super) fn lookup_candidates(&self) -> BTreeMap<Kind, BTreeSet<String>> {
+        let mut out = BTreeMap::new();
+        for kind in [Kind::Method, Kind::Field, Kind::Constructor] {
+            let mut all: BTreeSet<String> = self.named.iter().cloned().collect();
+            all.extend(self.reach.found_by_name.iter().cloned());
+            all.extend(self.flow_classes.get(&kind).into_iter().flatten().cloned());
+            match kind {
+                Kind::Constructor => all.extend(self.annotation_classes.iter().cloned()),
+                _ => all.extend(self.class_literals.iter().cloned()),
+            }
+            out.insert(kind, all);
+        }
+        out
     }
 
     /// The class `class` and its supertypes, directly or not.

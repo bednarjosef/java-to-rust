@@ -114,12 +114,28 @@ pub fn live_methods_unless(
 /// `live_methods_unless`, which first leaves out of the reflection table the members that no
 /// lookup can find (`reflection_table::prune`), by the same facts: they hold for the program
 /// without those members, which does less.
+///
+/// With `missing`, the classes that the facts find a lookup gets that the table lacks
+/// (`reflection_table::missing`) are put there first; where there are any, nothing is pruned and
+/// nothing walked, and the result is `None`, as the translation is to be made again.
 pub fn live_methods_of_pruned(
     class: &mut Class,
     code: &[(usize, Option<usize>)],
+    missing: Option<&mut Vec<(TableKind, String)>>,
 ) -> Result<Option<LiveMethods>, String> {
     let values =
         crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
+    if let Some(missing) = missing {
+        *missing = crate::timings::phase("classes missing from the reflection table", || {
+            super::reflection_table::missing(class, &values)
+        });
+        if !missing.is_empty() {
+            if crate::timings::enabled() {
+                eprintln!("timing: reflection table: {} classes missing, translated again", missing.len());
+            }
+            return Ok(None);
+        }
+    }
     let (kept, of) =
         crate::timings::phase("reflection table", || super::reflection_table::prune(class, &values));
     if crate::timings::enabled() {

@@ -502,6 +502,17 @@ pub struct ReflectionTable {
     pub cases: HashMap<ExprId, (TableKind, i32)>,
     /// The arrays of a part's data, by their first item.
     pub data: HashMap<ExprId, TableData>,
+    /// The methods whose calls in the program's code name the class that a lookup of each kind
+    /// looks in by their first argument: `find` and `list`, and `Constructor.newInstanceOf`.
+    pub entries: Vec<(TableKind, usize)>,
+    /// The translator's classes of reflection (`Method`, `Field`, `Constructor`,
+    /// `RecordComponent`), whose own calls of those methods are not the program's lookups.
+    pub internal: Vec<usize>,
+    /// For each kind, the classes of the program, by type index with their names as javac
+    /// gives them, that could have members in the table but that reachability did not take
+    /// for candidates of a lookup on a `Class` value that is not a class literal
+    /// (`Reach::lookup_candidates`).
+    pub uncovered: HashMap<TableKind, HashMap<usize, String>>,
 }
 
 /// An array of a part's data in the reflection table (`tableInts`, `tableClasses`).

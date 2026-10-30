@@ -29,9 +29,76 @@
 //! the translator prints how many members it kept, and `JAVA_TO_RUST_TABLE_DUMP=file` writes how
 //! many of each class's of each kind it kept and left out.
 
-use super::FastSet;
-use super::object_values::ObjectValues;
+use super::object_values::{ObjectValues, STATIC};
+use super::{FastMap, FastSet};
 use crate::ast::*;
+
+/// The classes, by kind and with their names as javac gives them, that the facts `values` find
+/// that a lookup on a `Class` value that is not a class literal gets, but that reachability did
+/// not take for candidates of such a lookup (`ReflectionTable::uncovered`), so that the table
+/// lacks their members: the translation is made again with them (`Program::flow_classes`). A
+/// lookup's `Class` value is the first argument of a call of `find`, `list` or `newInstanceOf`
+/// in the program's code (`ReflectionTable::entries`); the calls that the translator's classes
+/// of reflection make themselves look in what reachability found for them (a record's
+/// accessors), and a class literal is looked in for the names that its lookup spells out. Where
+/// the lookups of a kind may get any class, the facts do not tell, and the kind is left as
+/// reachability found it.
+pub(super) fn missing(class: &Class, values: &ObjectValues) -> Vec<(TableKind, String)> {
+    let table = &class.reflection_table;
+    if table.entries.is_empty() {
+        return Vec::new();
+    }
+    let entries: FastMap<usize, TableKind> = table.entries.iter().map(|&(kind, m)| (m, kind)).collect();
+    let mut gets: FastMap<TableKind, FastSet<usize>> = FastMap::default();
+    let mut any: FastSet<TableKind> = FastSet::default();
+    let mut look = |m: usize, contexts: &[usize], e: &Expr| {
+        visit_expr(e, &mut |x| {
+            let ExprKind::Call { resolved: Some(r), args, .. } = &x.kind else { return };
+            let (Some(&kind), Some(first)) = (entries.get(r), args.first()) else { return };
+            if is_class_literal(first) {
+                return;
+            }
+            for &ctx in contexts {
+                let flow = values.eval(class, m, ctx, first);
+                if flow.any_class {
+                    any.insert(kind);
+                } else {
+                    gets.entry(kind).or_default().extend(flow.class_values.iter());
+                }
+            }
+        })
+    };
+    for (m, method) in class.methods.iter().enumerate() {
+        if table.internal.contains(&method.class) {
+            continue;
+        }
+        for stmt in &method.body {
+            visit_stmt(stmt, &mut |e| look(m, &values.contexts[m], e), &mut |_| {});
+        }
+    }
+    for decl in &class.types {
+        for init in decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()) {
+            look(usize::MAX, &[STATIC], init);
+        }
+    }
+    let mut out = Vec::new();
+    for (kind, classes) in gets.into_iter().filter(|(kind, _)| !any.contains(kind)) {
+        let Some(uncovered) = table.uncovered.get(&kind) else { continue };
+        out.extend(classes.into_iter().filter_map(|t| uncovered.get(&t)).map(|name| (kind, name.clone())));
+    }
+    out.sort_by(|a, b| (format!("{:?}", a.0), &a.1).cmp(&(format!("{:?}", b.0), &b.1)));
+    out.dedup();
+    out
+}
+
+/// Whether `e` is a class literal, as converted or cast.
+fn is_class_literal(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Cast(_, inner) => is_class_literal(inner),
+        ExprKind::Builtin(Builtin::ClassLiteral(_), _) => true,
+        _ => false,
+    }
+}
 
 /// Leaves out of the reflection table the members that no lookup can find, by the facts
 /// `values` (see the module's comment); how many members it kept, of how many that a class
