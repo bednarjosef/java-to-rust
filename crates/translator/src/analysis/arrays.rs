@@ -38,9 +38,9 @@ mod slices;
 pub use slices::{RowIndex, Slice, SlicedLoop};
 
 use super::Facts;
+use super::{FastMap, FastSet};
 use crate::ast::*;
 use scan::{Call, Owned, Scan};
-use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
     let mut scans: Vec<Scan> = class
@@ -48,7 +48,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
         .iter()
         .enumerate()
         .map(|(m, method)| {
-            let arrays: HashSet<String> = declarations(method)
+            let arrays: FastSet<String> = declarations(method)
                 .into_iter()
                 .filter(|d| matches!(d.ty, Type::Array(_)))
                 .map(|d| d.name.to_string())
@@ -79,7 +79,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
     let solution = solve(class, &scans, lend_shared, facts);
     let written = written_names(class, &scans, &solution.borrowed);
     for (m, method) in class.methods.iter().enumerate() {
-        let names: HashMap<String, bool> =
+        let names: FastMap<String, bool> =
             solution.plain[m].iter().map(|name| (name.clone(), written[m].contains(name))).collect();
         for stmt in &method.body {
             visit_stmt(stmt, &mut |_| {}, &mut |s| {
@@ -247,11 +247,11 @@ fn visit_place_switches<'e>(place: &'e Place, out: &mut Vec<&'e [Case]>) {
 /// What the solver decides.
 struct Solution {
     /// The plain array variables of each method.
-    plain: Vec<HashSet<String>>,
+    plain: Vec<FastSet<String>>,
     /// The borrowed (method, parameter) pairs.
-    borrowed: HashSet<(usize, usize)>,
+    borrowed: FastSet<(usize, usize)>,
     /// The methods that return arrays they own, as `Vec`s.
-    owned_returns: HashSet<usize>,
+    owned_returns: FastSet<usize>,
 }
 
 /// Decides which arrays are plain, which parameters are borrowed and which methods return their
@@ -262,9 +262,9 @@ struct Solution {
 /// array (see `lends`), and a parameter that is not borrowed is shared; a method returns its own
 /// arrays only while every value it returns is owned.
 fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Solution {
-    let mut plain: Vec<HashSet<String>> = scans.iter().map(|s| s.candidates.clone()).collect();
-    let called: HashSet<usize> = scans.iter().flat_map(|s| s.calls.iter().map(|c| c.callee)).collect();
-    let mut borrowed: HashSet<(usize, usize)> = scans
+    let mut plain: Vec<FastSet<String>> = scans.iter().map(|s| s.candidates.clone()).collect();
+    let called: FastSet<usize> = scans.iter().flat_map(|s| s.calls.iter().map(|c| c.callee)).collect();
+    let mut borrowed: FastSet<(usize, usize)> = scans
         .iter()
         .enumerate()
         .filter(|(m, _)| called.contains(m))
@@ -287,7 +287,7 @@ fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Sol
             _ => {}
         });
     }
-    let mut owned_returns: HashSet<usize> = class
+    let mut owned_returns: FastSet<usize> = class
         .methods
         .iter()
         .enumerate()
@@ -391,7 +391,7 @@ fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Sol
 
 /// Whether a value is an array that nobody else holds, given the plain locals of its method and
 /// the methods that return their own arrays.
-fn owned(value: &Owned, plain: &HashSet<String>, owned_returns: &HashSet<usize>) -> bool {
+fn owned(value: &Owned, plain: &FastSet<String>, owned_returns: &FastSet<usize>) -> bool {
     match value {
         Owned::Never => false,
         Owned::Fresh => true,
@@ -405,12 +405,12 @@ fn owned(value: &Owned, plain: &HashSet<String>, owned_returns: &HashSet<usize>)
 struct Lending<'s> {
     class: &'s Class,
     scans: &'s [Scan],
-    plain: &'s [HashSet<String>],
-    borrowed: &'s HashSet<(usize, usize)>,
-    owned_returns: &'s HashSet<usize>,
+    plain: &'s [FastSet<String>],
+    borrowed: &'s FastSet<(usize, usize)>,
+    owned_returns: &'s FastSet<usize>,
     lend_shared: bool,
     /// The families of the arrays that threads share, which are never lent.
-    threads_share: &'s HashSet<Type>,
+    threads_share: &'s FastSet<Type>,
 }
 
 impl Lending<'_> {
@@ -469,8 +469,8 @@ impl Lending<'_> {
 /// The arrays whose elements are written: the ones written in their method, any argument (or
 /// array whose row is the argument) passed to a borrowed parameter that is written, which must
 /// then be borrowed mutably, and any array whose rows a written for-each variable borrows.
-fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize)>) -> Vec<HashSet<String>> {
-    let mut written: Vec<HashSet<String>> = scans.iter().map(|s| s.written.clone()).collect();
+fn written_names(class: &Class, scans: &[Scan], borrowed: &FastSet<(usize, usize)>) -> Vec<FastSet<String>> {
+    let mut written: Vec<FastSet<String>> = scans.iter().map(|s| s.written.clone()).collect();
     loop {
         let mut changed = false;
         for (m, scan) in scans.iter().enumerate() {
@@ -506,7 +506,7 @@ struct OverArray<'s> {
 }
 
 /// The counting loop `s`, if `s` is one over an array in `plain`.
-fn counting_over<'s>(s: &'s Stmt, plain: &HashMap<String, bool>) -> Option<OverArray<'s>> {
+fn counting_over<'s>(s: &'s Stmt, plain: &FastMap<String, bool>) -> Option<OverArray<'s>> {
     let Stmt::For { init, cond: Some(cond), update, body } = s else { return None };
     let (index, from, to) = counting_loop(init, Some(cond), update, body)?;
     let ExprKind::Length(array) = &to.kind else { return None };

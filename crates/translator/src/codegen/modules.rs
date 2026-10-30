@@ -115,11 +115,9 @@ impl Resolver {
         }
     }
 
-    /// The `use` lines of the module being written for the modules it names through their
-    /// aliases. A module inside the one being written is in scope already.
-    fn use_lines(&mut self) -> String {
-        let current = self.current.clone().unwrap_or_default();
-        let imports = std::mem::take(&mut self.imports);
+    /// The `use` lines of the module of package `current` for the modules it names through
+    /// their aliases, `imports`. A module inside it is in scope already.
+    fn use_lines(&self, current: &str, imports: &BTreeSet<String>) -> String {
         imports
             .iter()
             .filter(|package| parent(package) != current)
@@ -233,6 +231,78 @@ fn set_current(package: &str) {
 /// The packages of other modules and the classes that an item names.
 type Named = (BTreeSet<String>, BTreeSet<String>);
 
+/// A piece of a module that the generator writes as one item (`Gen::piece`).
+#[derive(Clone, Copy)]
+enum Piece {
+    /// A class's struct, its `impl`s and its methods.
+    Class(usize),
+    /// The enum that stands for a class type, with the items of it that the code uses.
+    ClassEnum(usize),
+    /// A Java `enum`'s Rust enum.
+    Enum(usize),
+    /// The statics of the module's classes.
+    Statics,
+    /// The monitors of the module's classes.
+    Monitors,
+    /// A static method, a function of its class's module.
+    Function(usize),
+    /// The crate's `fn main`, which calls the main method.
+    Main(usize),
+}
+
+/// A module as the generator writes it, before its `use` lines are found (`Gen::finish`). The
+/// first round's modules are kept so, for the last round to put the enum items of class types
+/// among their items (`merge`).
+pub(super) struct Written {
+    package: String,
+    path: Vec<String>,
+    items: Vec<WrittenItem>,
+    /// Where the enum items of class types are among the items: after the classes' own.
+    enums_at: usize,
+    /// Whether the last item, after the enum items, is written again to take the place of the
+    /// first round's item there (`Gen::module`).
+    replaces: bool,
+    /// The packages that the items name through their aliases (`Resolver::imports`).
+    imports: BTreeSet<String>,
+    /// The extension traits whose methods the items call (`Gen::traits`).
+    traits: BTreeSet<String>,
+    /// What writing the module found that cannot be translated (`Gen::rejected`), in order.
+    pub(super) rejected: Vec<Error>,
+}
+
+/// An item of a module as the generator writes it (`Written`).
+struct WrittenItem {
+    piece: Piece,
+    origin: Origin,
+    text: String,
+    named: Named,
+    /// The item's methods with a call that throws inside a closure (`Gen::closures`).
+    closures: Vec<Error>,
+}
+
+/// The first round's modules `kept` with the last round's enum items of class types, `enums`
+/// (`plans`), which are of the same modules in the same order.
+pub(super) fn merge(kept: Vec<Written>, enums: Vec<Written>) -> Vec<Written> {
+    kept.into_iter()
+        .zip(enums)
+        .map(|(mut kept, enums)| {
+            let after = kept.items.split_off(kept.enums_at);
+            let skip = usize::from(enums.replaces);
+            kept.items.extend(enums.items);
+            kept.items.extend(after.into_iter().skip(skip));
+            kept.imports.extend(enums.imports);
+            kept.traits.extend(enums.traits);
+            kept.rejected.extend(enums.rejected);
+            kept
+        })
+        .collect()
+}
+
+/// What an item's text ends with as far as the next item's `gap` sees it.
+fn ending(text: &str) -> &'static str {
+    if ends_statement(text) { ";\n" } else { "\n" }
+}
+
 /// What the item written since the last call names.
 fn take_refers() -> Named {
     with(|r| (std::mem::take(&mut r.refers), std::mem::take(&mut r.names))).unwrap_or_default()
@@ -241,13 +311,7 @@ fn take_refers() -> Named {
 /// The path prefix that names a class from the module being written (empty inside its own
 /// module), and its name inside its package (`Outer.Inner` for a nested class).
 pub(super) fn split(name: &str) -> (String, &str) {
-    // The standard exception classes are items of the crate's root, named by their simple names,
-    // and so are the functional interfaces lowering provides, which have no package (the JDK's
-    // own, translated from its sources, are in theirs).
-    let provided = crate::lower::is_functional(name)
-        && RESOLVER
-            .with_borrow(|r| r.as_ref().is_none_or(|r| r.packages.get(name).is_some_and(String::is_empty)));
-    if crate::lower::is_standard(name) || provided {
+    if at_root(name) {
         let simple = crate::lower::standard_local_name(name);
         let nested = with(|r| match r.current.as_deref() {
             None => false,
@@ -272,6 +336,92 @@ pub(super) fn split(name: &str) -> (String, &str) {
     })
     .flatten()
     .unwrap_or((String::new(), name))
+}
+
+/// A module of the program as every round writes it (`Gen::module`): its package, its path from
+/// the crate root, and the types and the methods of the package, in index order.
+#[derive(PartialEq)]
+pub(super) struct Plan {
+    package: String,
+    path: Vec<String>,
+    types: Vec<usize>,
+    methods: Vec<usize>,
+}
+
+impl Plan {
+    /// The module's package: empty for the crate root.
+    pub(super) fn package(&self) -> &str {
+        &self.package
+    }
+
+    /// The module's types, in index order.
+    pub(super) fn types(&self) -> &[usize] {
+        &self.types
+    }
+
+    /// The module's methods, in index order.
+    pub(super) fn methods(&self) -> &[usize] {
+        &self.methods
+    }
+}
+
+/// The program's modules in the order they are written, one per package: the crate root first,
+/// and each module before the modules inside it, which are in the order of their names.
+pub(super) fn plans(class: &Class) -> Vec<Plan> {
+    let packages = all_packages(class);
+    let mut members: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
+    for (index, decl) in class.types.iter().enumerate() {
+        members.entry(decl.package.as_str()).or_default().0.push(index);
+    }
+    for (index, m) in class.methods.iter().enumerate() {
+        members.entry(class.types[m.class].package.as_str()).or_default().1.push(index);
+    }
+    fn add(
+        package: &str,
+        path: Vec<String>,
+        packages: &BTreeSet<String>,
+        members: &mut HashMap<&str, (Vec<usize>, Vec<usize>)>,
+        plans: &mut Vec<Plan>,
+    ) {
+        let (types, methods) = members.remove(package).unwrap_or_default();
+        plans.push(Plan { package: package.to_string(), path: path.clone(), types, methods });
+        let prefix = if package.is_empty() { String::new() } else { format!("{package}.") };
+        let children = packages
+            .iter()
+            .filter(|p| p.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('.')));
+        for child in children {
+            let mut child_path = path.clone();
+            child_path.push(module_name(&child[prefix.len()..]));
+            add(child, child_path, packages, members, plans);
+        }
+    }
+    let mut plans = Vec::new();
+    add("", Vec::new(), &packages, &mut members, &mut plans);
+    plans
+}
+
+/// Whether class `name` is an item of the crate's root named by its simple name: the standard
+/// exception classes are, and so are the functional interfaces lowering provides, which have no
+/// package (the JDK's own, translated from its sources, are in theirs).
+fn at_root(name: &str) -> bool {
+    let provided = crate::lower::is_functional(name)
+        && RESOLVER
+            .with_borrow(|r| r.as_ref().is_none_or(|r| r.packages.get(name).is_some_and(String::is_empty)));
+    crate::lower::is_standard(name) || provided
+}
+
+/// The name of class `name` inside its package, as `split` gives it, without the item being
+/// written naming the class: for names made once for the whole program, wherever they are first
+/// asked for (`variant_names_of`).
+pub(super) fn name_in_package(name: &str) -> &str {
+    if at_root(name) {
+        return crate::lower::standard_local_name(name);
+    }
+    let package = RESOLVER.with_borrow(|r| r.as_ref().and_then(|r| r.packages.get(name).map(String::len)));
+    match package {
+        Some(len) if len > 0 => &name[len + 1..],
+        _ => name,
+    }
 }
 
 /// Whether a class belongs to the module being written; always, outside a whole program.
@@ -375,26 +525,62 @@ impl<'a> Gen<'a> {
         format!("{}{}", split(owner).0, self.fn_names[index])
     }
 
-    /// The whole program as modules, one per package, with `fn main` at the crate root. `header`
-    /// starts the crate root.
-    pub(super) fn program(&mut self, live: &[bool], header: String) -> ModuleTree {
+    /// The program's modules as a tree, `header` starting the crate root, and the methods written
+    /// with a call that throws inside a closure (`Gen::closures`), in the order of the items.
+    pub(super) fn finish(&mut self, header: String, written: Vec<Written>) -> (ModuleTree, Vec<Error>) {
         let packages = all_packages(self.class);
-        // The types of each package, and the methods of its types, in index order.
-        let mut members: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
-        for (index, decl) in self.class.types.iter().enumerate() {
-            members.entry(decl.package.as_str()).or_default().0.push(index);
-        }
-        for (index, m) in self.class.methods.iter().enumerate() {
-            members.entry(self.class.types[m.class].package.as_str()).or_default().1.push(index);
-        }
-        self.package_types =
-            members.iter().map(|(p, (types, _))| (p.to_string(), std::rc::Rc::new(types.clone()))).collect();
-        self.package_methods =
-            members.into_iter().map(|(p, (_, methods))| (p.to_string(), std::rc::Rc::new(methods))).collect();
         let mut tree = ModuleTree { header, modules: Vec::new(), footer: ALLOCATOR.to_string() };
-        self.module("", Vec::new(), live, &packages, &mut tree.modules);
-        // The classes as values, which every module may name, once each at the crate root.
-        let (text, names) = self.class_value_constants();
+        let mut closures = Vec::new();
+        for module in written {
+            let Written { package, path, items, imports, traits, .. } = module;
+            let text: String = items.iter().map(|item| item.text.as_str()).collect();
+            let mut uses = use_lines(&text);
+            drop(text);
+            // The modules it names through their own names, and the extension traits whose
+            // methods it calls, from the crate root.
+            let mut crate_uses = with(|r| r.use_lines(&package, &imports)).unwrap_or_default();
+            for trait_path in &traits {
+                let absolute = with(|r| r.absolute_path(trait_path)).unwrap_or_else(|| trait_path.clone());
+                crate_uses.push_str(&format!("use {absolute};\n"));
+            }
+            let mut texts = Vec::with_capacity(items.len());
+            let mut rest = Vec::with_capacity(items.len());
+            for item in items {
+                texts.push(item.text);
+                closures.extend(item.closures);
+                rest.push((item.origin, item.named));
+            }
+            // The crate root's items, in a package's module, by their names where nothing else
+            // has them.
+            if !package.is_empty() {
+                let taken: BTreeSet<String> = uses
+                    .iter()
+                    .chain([&crate_uses])
+                    .flat_map(|group| group.lines())
+                    .filter_map(|line| line.trim_end_matches(';').rsplit([':', ' ']).next())
+                    .map(str::to_string)
+                    .collect();
+                let roots = packages.iter().filter(|p| !p.contains('.')).map(|p| module_name(p)).collect();
+                crate_uses.push_str(&imports::import_root_items(&mut texts, &roots, &taken));
+            }
+            if !crate_uses.is_empty() {
+                let mut lines: Vec<&str> = crate_uses.lines().collect();
+                lines.sort_unstable();
+                lines.dedup();
+                uses.push(lines.iter().map(|line| format!("{line}\n")).collect());
+            }
+            let items = rest
+                .into_iter()
+                .zip(texts)
+                .map(|((origin, (refers, names)), text)| Item { origin, text, refers, names })
+                .collect();
+            tree.modules.push(Module { package, path, uses, items });
+        }
+        // The classes as values, which every module may name, once each at the crate root, and
+        // the names above each class by its number.
+        let table = self.type_names_table();
+        let (mut text, names) = self.class_value_constants();
+        text.push_str(&table);
         if !text.is_empty() {
             let root = &mut tree.modules[0];
             if !root.uses.iter().any(|group| group.contains("use java_runtime as java;")) {
@@ -407,80 +593,48 @@ impl<'a> Gen<'a> {
                 names,
             });
         }
-        tree
+        (tree, closures)
     }
 
-    /// The module of a package, then the modules inside it, into `modules`.
-    fn module(
-        &mut self,
-        package: &str,
-        path: Vec<String>,
-        live: &[bool],
-        packages: &BTreeSet<String>,
-        modules: &mut Vec<Module>,
-    ) {
+    /// Starts an item of a module, which numbers its own labels (`Gen::labels`): its text then
+    /// depends on the items written before it only through the blank line that may start it
+    /// (`gap`). Returns where its text starts.
+    fn item_start(&mut self) -> usize {
+        self.labels = 0;
+        self.out.len()
+    }
+
+    /// Writes `piece` as the module's next item, and gives what it was made from.
+    fn piece(&mut self, piece: Piece) -> Origin {
         let class = self.class;
-        set_current(package);
-        let outer = std::mem::take(&mut self.out);
-        let outer_traits = std::mem::take(&mut self.traits);
-        self.indent = 0;
-        // Each piece the generator writes is an item: the text it added, and what it named.
-        let mut items: Vec<(Origin, usize, Named)> = Vec::new();
-        let mut item = |g: &mut Self, origin: Origin, start: usize| {
-            let named = take_refers();
-            if g.out.len() > start {
-                items.push((origin, start, named));
+        let name = |t: usize| class.types[t].name.clone();
+        match piece {
+            Piece::Class(t) => {
+                self.type_items(t);
+                Origin::Class(name(t))
             }
-        };
-        let types = self.package_types.get(package).cloned().unwrap_or_default();
-        for &index in types.iter() {
-            let decl = &class.types[index];
-            if live[index] && self.only_enums.is_none() {
-                let start = self.out.len();
-                self.type_items(index);
-                item(self, Origin::Class(decl.name.clone()), start);
+            Piece::ClassEnum(t) => {
+                self.type_enum_items(t);
+                Origin::ClassEnum(name(t))
             }
-        }
-        for &index in types.iter() {
-            let decl = &class.types[index];
-            if self.wanted.contains(&Need::Enum(index))
-                && self.only_enums.as_ref().is_none_or(|only| only.types.contains(&index))
-            {
-                let start = self.out.len();
-                self.type_enum_items(index);
-                item(self, Origin::ClassEnum(decl.name.clone()), start);
+            Piece::Enum(t) => {
+                self.enum_items(t);
+                Origin::Enum(name(t))
             }
-        }
-        if self.only_enums.is_none() {
-            for &index in types.iter() {
-                let decl = &class.types[index];
-                if decl.enum_constants.is_some() {
-                    let start = self.out.len();
-                    self.enum_items(index);
-                    item(self, Origin::Enum(decl.name.clone()), start);
-                }
+            Piece::Statics => {
+                self.statics();
+                Origin::Statics
             }
-            let start = self.out.len();
-            self.statics();
-            item(self, Origin::Statics, start);
-            let start = self.out.len();
-            self.class_monitors();
-            item(self, Origin::Monitors, start);
-            let methods = self.package_methods.get(package).cloned().unwrap_or_default();
-            for &index in methods.iter() {
-                let m = &class.methods[index];
-                if self.emitted_free(index) {
-                    let start = self.out.len();
-                    self.gap();
-                    self.method(index);
-                    item(self, Origin::Function(class.types[m.class].name.clone()), start);
-                }
+            Piece::Monitors => {
+                self.class_monitors();
+                Origin::Monitors
             }
-            let main = class.methods.iter().position(|m| m.is_main);
-            if let Some(main) = main
-                .filter(|&m| package.is_empty() && !class.types[class.methods[m].class].package.is_empty())
-            {
-                let start = self.out.len();
+            Piece::Function(index) => {
+                self.gap();
+                self.method(index);
+                Origin::Function(name(class.methods[index].class))
+            }
+            Piece::Main(main) => {
                 self.gap();
                 self.line("fn main() {");
                 self.indent += 1;
@@ -488,54 +642,98 @@ impl<'a> Gen<'a> {
                 self.line(&call);
                 self.indent -= 1;
                 self.line("}");
-                item(self, Origin::Main, start);
+                Origin::Main
             }
         }
-        let text = std::mem::replace(&mut self.out, outer);
+    }
+
+    /// The module of `plan`, before its `use` lines are found (`finish`). With `kept_module`,
+    /// the first round's, only the enum items of class types, which go among its items
+    /// (`merge`).
+    pub(super) fn module(&mut self, plan: &Plan, live: &[bool], kept_module: Option<&Written>) -> Written {
+        let class = self.class;
+        let Plan { package, path, types, methods } = plan;
+        set_current(package);
+        let outer = std::mem::take(&mut self.out);
+        let outer_traits = std::mem::take(&mut self.traits);
+        self.indent = 0;
+        let mut items: Vec<WrittenItem> = Vec::new();
+        // Each piece the generator writes is an item: the text it added, and what it named.
+        let write = |g: &mut Self, piece: Piece, items: &mut Vec<WrittenItem>| {
+            let start = g.item_start();
+            let origin = g.piece(piece);
+            let named = take_refers();
+            let closures = std::mem::take(&mut g.closures);
+            if g.out.len() > start {
+                let text = g.out.split_off(start);
+                // What follows sees how this ends (`gap`), and nothing else of it.
+                g.out.push_str(ending(&text));
+                items.push(WrittenItem { piece, origin, text, named, closures });
+            } else {
+                g.closures = closures;
+            }
+        };
+        if self.only_enums.is_none() {
+            for &index in types.iter().filter(|&&index| live[index]) {
+                write(self, Piece::Class(index), &mut items);
+            }
+        }
+        let enums_at = items.len();
+        // The first round's items before the enum items end as they did there.
+        if let Some(before) = kept_module.and_then(|m| m.enums_at.checked_sub(1).map(|i| &m.items[i].text)) {
+            self.out.push_str(ending(before));
+        }
+        for &index in types.iter() {
+            if self.wanted.contains(&Need::Enum(index))
+                && self.only_enums.as_ref().is_none_or(|only| only.types.contains(&index))
+            {
+                write(self, Piece::ClassEnum(index), &mut items);
+            }
+        }
+        if self.only_enums.is_none() {
+            for &index in types.iter().filter(|&&index| class.types[index].enum_constants.is_some()) {
+                write(self, Piece::Enum(index), &mut items);
+            }
+            write(self, Piece::Statics, &mut items);
+            write(self, Piece::Monitors, &mut items);
+            for &index in methods.iter() {
+                if self.emitted_free(index) {
+                    write(self, Piece::Function(index), &mut items);
+                }
+            }
+            let main = class.methods.iter().position(|m| m.is_main);
+            if let Some(main) = main
+                .filter(|&m| package.is_empty() && !class.types[class.methods[m].class].package.is_empty())
+            {
+                write(self, Piece::Main(main), &mut items);
+            }
+        }
+        // The first round's item after the enum items starts with a blank line or not as what
+        // is before it ends (`gap`): where the enum items end otherwise than what was before
+        // them there, it is written again after them and takes its place (`merge`).
+        let mut replaces = false;
+        if let Some(kept_module) = kept_module
+            && !items.is_empty()
+            && let Some(next) = kept_module.items.get(kept_module.enums_at)
+        {
+            let before = kept_module.enums_at.checked_sub(1).map(|i| &kept_module.items[i].text);
+            if before.is_some_and(|before| ends_statement(before)) != ends_statement(&self.out) {
+                write(self, next.piece, &mut items);
+                replaces = true;
+            }
+        }
+        self.out = outer;
         let traits = std::mem::replace(&mut self.traits, outer_traits);
-        let ends = items.iter().skip(1).map(|(_, start, _)| *start).chain([text.len()]);
-        let mut texts: Vec<String> =
-            items.iter().zip(ends).map(|((_, start, _), end)| text[*start..end].to_string()).collect();
-        let mut uses = use_lines(&text);
-        // The modules it names through their own names, and the extension traits whose methods
-        // it calls, from the crate root.
-        let mut crate_uses = with(Resolver::use_lines).unwrap_or_default();
-        for trait_path in &traits {
-            let absolute = with(|r| r.absolute_path(trait_path)).unwrap_or_else(|| trait_path.clone());
-            crate_uses.push_str(&format!("use {absolute};\n"));
-        }
-        // The crate root's items, in a package's module, by their names where nothing else has them.
-        if !package.is_empty() {
-            let taken: BTreeSet<String> = uses
-                .iter()
-                .chain([&crate_uses])
-                .flat_map(|group| group.lines())
-                .filter_map(|line| line.trim_end_matches(';').rsplit([':', ' ']).next())
-                .map(str::to_string)
-                .collect();
-            let roots = packages.iter().filter(|p| !p.contains('.')).map(|p| module_name(p)).collect();
-            crate_uses.push_str(&imports::import_root_items(&mut texts, &roots, &taken));
-        }
-        if !crate_uses.is_empty() {
-            let mut lines: Vec<&str> = crate_uses.lines().collect();
-            lines.sort_unstable();
-            lines.dedup();
-            uses.push(lines.iter().map(|line| format!("{line}\n")).collect());
-        }
-        let items = items
-            .into_iter()
-            .zip(texts)
-            .map(|((origin, _, (refers, names)), text)| Item { origin, text, refers, names })
-            .collect();
-        modules.push(Module { package: package.to_string(), path: path.clone(), uses, items });
-        let prefix = if package.is_empty() { String::new() } else { format!("{package}.") };
-        let children = packages
-            .iter()
-            .filter(|p| p.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('.')));
-        for child in children {
-            let mut child_path = path.clone();
-            child_path.push(module_name(&child[prefix.len()..]));
-            self.module(child, child_path, live, packages, modules);
+        let imports = with(|r| std::mem::take(&mut r.imports)).unwrap_or_default();
+        Written {
+            package: package.to_string(),
+            path: path.clone(),
+            items,
+            enums_at,
+            imports,
+            traits,
+            replaces,
+            rejected: std::mem::take(&mut self.rejected),
         }
     }
 

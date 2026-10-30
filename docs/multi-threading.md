@@ -28,14 +28,15 @@ hand-written itself.
 3. **The fields of a thread-shared object are `java::SharedField` cells**, read and written by
    value, each access one atomic action: acquire loads and release stores of a word, sequentially
    consistent ones for a `volatile` field, a striped lock for a wider value. The object is an
-   `Arc<java::Monitored<C>>`, its fields and its monitor's lock. Every object is held by a
-   `java::Arc` (`shared.rs`, docs/collector.md), thread-shared or not. The generated text is the
-   same as for an object of one thread, whose fields are `java::Field` cells; only the type names
-   differ. An immutable shared class is `Arc<C>`, read without a lock. Which classes are shared
-   is decided per class, by type (section 4).
+   `Arc<C>`, or where a monitor site may lock it an `Arc<java::Monitored<C>>`, its fields and its
+   monitor's lock. Every object is held by a `java::Arc` (`shared.rs`, docs/collector.md),
+   thread-shared or not. The generated text is the same as for an object of one thread, whose
+   fields are `java::Field` cells; only the type names differ. An immutable shared class is
+   `Arc<C>`, read without a lock. Which classes are shared is decided per class, by type (section
+   4).
 4. **An object's monitor is the lock of its `java::Monitored`.** `synchronized` holds it for the
    region; field accesses take no lock. Monitors are kept only where the program can tell them
-   from none (section 3).
+   from none, and only the objects that such a site may lock have one (section 3).
 5. **The statics that a started thread can touch are process-wide `static` items**:
    `java::Atomic<T>` for primitives (acquire/release), `java::Locked<T>` for objects and strings,
    and a `java::ClassInit` per class that runs its static initialization once for the process.
@@ -65,14 +66,14 @@ The translation maps every Java memory action to one of:
 | Java action | Rust |
 | --- | --- |
 | read/write of a field of an object only one thread reaches | plain read/write |
-| read/write of a field of a thread-shared object | its `java::SharedField`: an acquire load or release store of a word, under a striped lock for a wider value |
+| read/write of a field of a thread-shared object | its `java::SharedField`: an acquire load or release store of a word, under a striped lock for a wider value; a fixed field's read borrows the value |
 | read/write of a `volatile` field of a thread-shared object | its `java::SharedField`, sequentially consistent |
 | read/write of an element of an array that threads share | the element's cell (`java::SharedArray`): an acquire load or release store of a word, under a striped lock for a wider value |
 | `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on a field | one atomic action of its `java::SharedField` (5.3) |
 | `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on an element | one atomic action of the element's cell, sequentially consistent in the volatile mode (5.3) |
 | monitor enter/exit, `wait`, `notify` | the object's reentrant lock and its wait set (section 3) |
 | `Thread.start`, `join`, `park`/`unpark` | `std::thread` spawn, the thread record's condition variables |
-| static field access | `java::Atomic` (acquire/release) or `java::Locked` statics |
+| static field access | `java::Atomic` (acquire/release) or `java::Locked` statics; a `java::Final` static's one write is a release, and its reads acquire |
 | `Unsafe.fullFence` and the `VarHandle` fences | `fence(SeqCst)` |
 
 Each is at least as strong as the Java action: a lock makes the access part of a total order,
@@ -146,7 +147,7 @@ Besides shared (`Arc<RefCell<C>>`), immutable (`Arc<C>`) and owned (a plain valu
 
 | | thread-local | thread-shared |
 | --- | --- | --- |
-| mutable | `Arc<C>` of `java::Field`s | `Arc<java::Monitored<C>>` of `java::SharedField`s |
+| mutable | `Arc<C>` of `java::Field`s | `Arc<C>` of `java::SharedField`s; `Arc<java::Monitored<C>>` of them where a monitor site may lock it (3.1) |
 | immutable (no field written after construction) | `Arc<C>` | `Arc<C>` |
 | owned | plain value | plain value, moved into the thread |
 | closure type (`docs/closures-and-nested-classes.md` 4.2) | `Rc<dyn Fn(..) -> R>` | `std::sync::Arc<dyn Fn(..) -> R + Send + Sync>` |
@@ -162,9 +163,12 @@ text for both forms: `o.n.set(o.n.get() + 1)`. A value of 1, 2, 4 or 8 bytes wit
 (a primitive, an object's handle, a string with an identity) is an atomic word, loaded with
 acquire and stored with release, which on x86-64 are plain moves; any other value (a closure, a
 string without an identity) is copied and replaced under one of 64 striped spin locks, picked by
-the field's address and taken only once a second thread runs. The object's `java::Monitored`
-holds the fields first and then the monitor's lock, so the object's address is its fields', as
-`&self` of a method sees it. A class tree is celled and monitored together, so an enum over it
+the field's address and taken only once a second thread runs. A field that only constructors
+write (a fixed field, [object-model.md](object-model.md) 1.8) is read where it is, `fixed()`,
+with no lock and no copy, outside the constructors and field initializers. A
+`java::Monitored` object holds the fields first and then a pointer to the monitor's lock, made
+the first time a thread takes it (`LazyMonitor`), so the object's address is its fields', as
+`&self` of a method sees it. A class tree is celled, shared and monitored together, so an enum over it
 lends every variant's fields struct as `&XFields`. A class tree with a Java enum keeps its
 `java::Locked`, whose `RefCell` API (`borrow`, `borrow_mut`, mapped guards) the generator writes
 as for a `RefCell`. Identity is `Arc::ptr_eq`; `Option` for null is unchanged.
@@ -224,7 +228,24 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | compile-time constant | `const` | `X` |
 | primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
+| object or string that only its class's initialization assigns | `java::Final<T>`, behind a `LazyLock` likewise | `X.get().clone()`, or the place `(*X.get())`; `X.set(v)` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
+
+A `static final` of object, array or string type that no code but its class's static
+initialization assigns (`Facts::final_statics`, from `analysis/statics.rs`) is a `java::Final`:
+a `OnceLock` that the initializer's one assignment sets, next to the value it starts with (Java's
+default, or the initializer's value for a class initialized lazily). Its value never changes once
+the class is initialized, so a read takes no lock: `get()` lends the value set, or the starting
+value before that, which is what a read during the initializer sees (null for a static not yet
+assigned, as in Java). Where the read is only borrowed (the object of a call or a field access,
+an array that is indexed or measured, a string that is lent, a null test), the generator writes
+the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clone; a static that
+starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is
+unchanged: a reader from another class calls the class's `init` first, which waits for a run in
+progress. The Minecraft server's noise functions index a `static final` array millions of times
+from every worker thread; behind a `java::Locked`, most of those threads stood in its lock. A
+small program of eight threads doing the same runs 25 times faster in a debug build, and over
+100 times faster in a release one, with a `java::Final`.
 
 `java::ClassInit` is the JLS 12.4.2 procedure: the thread that finds the class not started runs
 the initializer, another thread finding it in progress waits, and the same thread finding its
@@ -272,22 +293,37 @@ Code: `analysis/monitors.rs` (which monitors are kept), `lower/sync.rs`, `codege
 
 ### 3.1 Which monitors are kept
 
-A monitor is kept where the program can tell it from none:
+A monitor site (a `synchronized` block or method, `wait`, `notify`, `holdsLock`) keeps the
+monitor of its lock where the program can tell it from none:
 
-- in a program that waits, notifies or asks `Thread.holdsLock`, every object's monitor, since
-  those answer as Java's only when the monitor is held;
-- otherwise, the monitors of objects whose class threads may share, and of builders where they
-  are shared;
+- in a program that waits, notifies or asks `Thread.holdsLock`, at every site, since those answer
+  as Java's only when the monitor is held;
+- otherwise, at the sites whose lock is of a class that threads may share, or a builder where
+  builders are shared;
 - class monitors in any program with threads.
 
 Everywhere else `synchronized` is the null check of its lock, so a program without threads or
 `wait` translates as before. `synchronized (this)` in a constructor keeps no monitor: no other
 thread has the object yet.
 
+Only the objects that a site keeping its monitor may lock have one (`analysis/lock_values.rs`):
+the classes of the lock's type, of `this` in a synchronized method, and of the objects the lock
+can be, found from where its value comes from. `new C()` is an object of `C`; a field holds what
+any assignment to it stores (reflection, deserialization and `Unsafe` write fields in code that
+lowering wrote out, so their stores are among them); a local variable what the method gives it;
+a constructor's or static method's parameter what its callers pass; a cast, `?:` and an
+assignment pass their operands' on. What is not followed (another method's parameter, which a
+call through an interface or the runtime may pass, an array's element, a call's result) is any
+object of its type (`hierarchy::flows`), so a lock of type `Object` that a call returns makes
+every class whose objects become `Object`s keep monitors. A class tree keeps them together, so
+the other objects of a locked class's tree have one too. `corpus/threads/WaitThroughInterface`
+and `WaitThroughArraysAndCalls` wait on objects reached each of these ways.
+
 An array's monitor is kept in any program with threads. An array that threads share
-(`java::SharedArray`) makes its lock the first time a thread takes it (`LazyMonitor` in
-`monitor.rs`, a pointer that stays null for the many arrays never locked); one that a single
-thread uses keeps its monitor by address, as a `RefCell` object does.
+(`java::SharedArray`), like a `java::Monitored` object, makes its lock the first time a thread
+takes it (`LazyMonitor` in `monitor.rs`, a pointer that stays null for the many objects and
+arrays never locked, eight bytes where the lock is sixteen); one that a single thread uses keeps
+its monitor by address, as a `RefCell` object does.
 
 Rejected, by name: `synchronized` on a string, a box, a Java enum's constant, or the class of a
 value (`o.getClass()`) where the monitor would be kept (they are values without a lock), and
@@ -300,9 +336,9 @@ held as an Object is not supported by the translation" (`java::unkept_monitor`).
 
 ### 3.2 One form: the monitor is the object's lock
 
-An object whose monitor is kept, of a class that threads share or one whose monitor the program
-waits on, notifies or asks about, is an `Arc<java::Monitored<C>>`, whose reentrant lock is its
-monitor. Its fields take no lock, so the monitor is the only lock its object has. (A builder and
+An object that a site keeping its monitor may lock (3.1) is an `Arc<java::Monitored<C>>`, whose
+reentrant lock is its monitor. Its fields take no lock, so the monitor is the only lock its
+object has. (A builder and
 a `java::Locked` object have their data lock as their monitor, and an array its elements', as 3.1
 says.)
 
@@ -597,7 +633,8 @@ name:
   holds its method's class as its token, and the call tests it. An access through a value that holds one handle, or null,
   is that handle's access after a null check that throws Java's `NullPointerException`, message
   included; Java checks after evaluating the arguments, so such an access takes only arguments
-  whose evaluation does nothing. A call of a lookup or a `MethodHandle` that is not followed, or
+  whose evaluation does nothing. `lookupClass()` of a lookup that is followed is its class. A
+  call of a lookup or a `MethodHandle` that is not followed, or
   that may fail, throws an `UnsupportedOperationException` that says so, which netty's `catch`
   turns into going without that handle (no virtual-thread check through a handle, no cleaner
   linked to `malloc`); a census lists each such call
@@ -654,8 +691,11 @@ field that is not `volatile` asks for more (section 7).
   `DeleteOnExitHook` registers) are the translator's `Thread.registerShutdownHook`'s, kept by
   slot with the JDK's checks: the exit runs them in the order of their slots, the program's hooks
   in slot 1 as the JDK's `ApplicationShutdownHooks` does, so the files go after every hook of the
-  program has ended. `Runtime.halt` runs none, as in Java. A signal (`SIGINT`, `SIGTERM`) ends
-  the process without running them, where Java runs them; and an exit while the hooks run ends
+  program has ended. `Runtime.halt` runs none, as in Java. `SIGTERM`, `SIGINT` and `SIGHUP`
+  (unless it is ignored, as under `nohup`) end a program with hooks as the JDK's `Terminator`
+  does: a thread named `SIGTERM handler` (`SIGINT`, `SIGHUP`) exits with status 128 + the
+  signal, running the hooks; a later signal changes nothing (`runtime/src/signals.rs`). A
+  program without hooks ends as the signal ends any process. An exit while the hooks run ends
   the process at once, where Java's blocks.
 - `InterruptedException`, `IllegalMonitorStateException` and `IllegalThreadStateException` are
   standard classes of `Standard.java`.
@@ -722,7 +762,8 @@ unchanged and that a class no thread reaches has no monitor.
 - **A thread-shared mutable object** costs nothing more than an object of one thread on a field
   access of a word: an acquire load or a release store is a plain move on x86-64. A `volatile`
   store is an exchange. A wider value costs a striped spin lock once a second thread runs. Each
-  object carries its monitor's lock, 16 bytes. An immutable shared object costs nothing on reads,
+  object carries a pointer to its monitor's lock, 8 bytes, and the 16 bytes of the lock once a
+  thread first takes it. An immutable shared object costs nothing on reads,
   and copying a handle is copying a pointer, shared or not.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock. Until the
   program starts its first thread, taking the lock and giving it back are a plain increment and

@@ -286,6 +286,16 @@ impl<'t> Lowering<'t> {
                 if let Some(Err(why)) = checked {
                     return error(node.pos(), format!("{why} not supported yet"));
                 }
+                // A constant variable named by its simple name (a `final` local initialized with a
+                // literal) is its value, as javac compiles it, so that the analysis of exceptions
+                // sees the constant pattern (and replacement) and that the call never throws.
+                for (arg, at) in args.iter_mut().zip(&arg_nodes).take(2) {
+                    if at.kind() == "IDENTIFIER"
+                        && let Some(text) = self.constant_text(Some(*at))
+                    {
+                        arg.kind = ExprKind::Str(text);
+                    }
+                }
             }
             StringOp::IndexOf | StringOp::LastIndexOf if args.len() > 2 => {
                 return unsupported(node, &format!("`String.{name}` with an end index"));
@@ -489,6 +499,19 @@ impl<'t> Lowering<'t> {
             args.insert(0, receiver);
             return self.as_char_sequence(node, Builtin::Builder(op), args);
         }
+        // `append(s)` of a `CharSequence` that may be an object of a class of the program, which
+        // the builder reads with `length` and `charAt`.
+        if op == BuilderOp::Append
+            && args.len() == 1
+            && symbol.ty.starts_with("(java.lang.CharSequence)")
+            && self.sequence_classes()
+        {
+            let sequence = substring_text(args.remove(0));
+            if matches!(sequence.ty, Type::Class(..)) {
+                return Ok(self.append_sequence(node.pos(), receiver, sequence));
+            }
+            args.push(sequence);
+        }
         // A range of a program class that implements `CharSequence` is a range of that interface.
         let range_of = match op {
             BuilderOp::Append if args.len() == 3 => Some(0),
@@ -521,6 +544,8 @@ impl<'t> Lowering<'t> {
             _ => None,
         };
         if let Some(i) = shown {
+            let x = args.remove(i);
+            args.insert(i, substring_text(x));
             let ty = args[i].ty;
             if matches!(ty, Type::Array(_)) && ty != Type::array(Type::Char) {
                 return unsupported(node, "appending an array that is not a `char[]`");
@@ -542,7 +567,18 @@ impl<'t> Lowering<'t> {
         {
             return Ok(None);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> =
+            node.list("arguments").map(|a| self.expr(a).map(substring_text)).collect::<Result<_, _>>()?;
+        // A builder made from a `CharSequence` that may be an object of a class of the program.
+        if symbol.owner != "java.lang.String"
+            && symbol.ty == "(java.lang.CharSequence)void"
+            && matches!(args[..], [Expr { ty: Type::Class(..), .. }])
+            && self.sequence_classes()
+            && let Some(negative) = self.message_ctor("java.lang.NegativeArraySizeException")
+        {
+            let sequence = args.into_iter().next().expect("one argument");
+            return Ok(Some(self.sequence_builder(node.pos(), sequence, negative)));
+        }
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
         let bytes = Type::array(Type::Byte);
@@ -624,5 +660,27 @@ impl<'t> Lowering<'t> {
             _ => return None,
         };
         symbol.is_static.then_some(Builtin::Bits(op, kind))
+    }
+}
+
+/// `e` as the string it is, where it is the `subSequence` of a string or a builder, which gives a
+/// string as a `CharSequence` (`as_char_sequence`): a builder made from it, or appending it,
+/// copies a string, as Java's does, rather than showing an object that may be of a program class
+/// with a `toString` of its own. Such a string is never null.
+fn substring_text(e: Expr) -> Expr {
+    match e.kind {
+        ExprKind::Cast(Type::Class(name, _), inner)
+            if name == CHAR_SEQUENCE
+                && matches!(
+                    inner.kind,
+                    ExprKind::Builtin(
+                        Builtin::String(StringOp::Substring) | Builtin::Builder(BuilderOp::Substring),
+                        _
+                    )
+                ) =>
+        {
+            *inner
+        }
+        kind => Expr { kind, ..e },
     }
 }

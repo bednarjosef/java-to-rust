@@ -39,8 +39,8 @@ fn a_local_class_holds_its_captures_as_fields() {
         &rust,
         &[
             "struct ALabeler {\n    scale: i32,\n    unit: java::JString,\n    calls: i32,\n}",
-            "fn new(scale: i32, unit: &java::Wtf8) -> ALabeler {",
-            "ALabeler::new(scale, &unit)",
+            "fn ALabeler__new(scale: i32, unit: &java::Wtf8) -> ALabeler {",
+            "ALabeler__new(scale, &unit)",
             "self.scale",
         ],
     );
@@ -60,7 +60,7 @@ fn a_captured_array_is_shared() {
     );
     assert_contains(
         &rust,
-        &["seen: java::Array<i32>,", "ACounter::new(seen.clone())", "update(&self.seen, i % 2"],
+        &["seen: java::Array<i32>,", "ACounter__new(seen.clone())", "update(&self.seen, i % 2"],
     );
 }
 
@@ -85,8 +85,8 @@ fn a_method_whose_this_is_captured_keeps_the_handle() {
         &rust,
         &[
             "outer: Arc<A>,",
-            "fn scaled(this: &Arc<A>, v: i32) -> java::JString {",
-            "AScaler::new(this.clone(), v)",
+            "fn A__scaled(this: &Arc<A>, v: i32) -> java::JString {",
+            "AScaler__new(this.clone(), v)",
             "self.outer.factor.get()",
         ],
     );
@@ -116,9 +116,9 @@ fn an_inner_class_holds_the_outer_handle() {
         &rust,
         &[
             "struct ACursor {\n    outer: Arc<A>,\n    next: i32,\n}",
-            "fn new(outer: Arc<A>) -> ACursor {",
-            "ACursor::new(this.clone())",
-            "ACursor::new(list.clone())",
+            "fn ACursor__new(outer: Arc<A>) -> ACursor {",
+            "ACursor__new(this.clone())",
+            "ACursor__new(list.clone())",
             "self.next < self.outer.size.get()",
         ],
     );
@@ -142,7 +142,7 @@ fn outer_this_is_the_outer_field_chain() {
             }
         }",
     );
-    assert_contains(&rust, &["self.outer.width.get().wrapping_add(self.outer.outer.get().width)"]);
+    assert_contains(&rust, &["self.outer.width.get().wrapping_add((*self.outer.outer.fixed()).width)"]);
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn inner_subclasses_share_one_outer_field() {
         &[
             "struct AOpFields {\n    outer: Arc<A>,\n}",
             "struct ATwice {\n    base: AOpFields,\n}",
-            "ATwice { base: AOpFields::new(outer) }",
+            "ATwice { base: AOpFields__new(outer) }",
         ],
     );
 }
@@ -204,7 +204,7 @@ fn an_anonymous_class_is_a_variant_of_its_interface() {
             "struct OrderInMain {\n}",
             "struct OrderInMain2 {\n}",
             "enum AOrderView<'a> {\n    OrderInMain(&'a Arc<OrderInMain>) = 2,\n    OrderInMain2(&'a Arc<OrderInMain2>) = 3,\n}",
-            "AOrder::OrderInMain(slot_1.put(OrderInMain::new()))",
+            "AOrder::OrderInMain(slot_1.put(OrderInMain__new()))",
         ],
     );
 }
@@ -232,9 +232,9 @@ fn an_anonymous_subclass_passes_constructor_arguments_to_super() {
         &rust,
         &[
             "struct ReportInMain {\n    base: AReportFields,\n    sep: java::JString,\n}",
-            "fn new(title: &java::Wtf8, sep: &java::Wtf8) -> ReportInMain {",
-            "ReportInMain { base: AReportFields::new(title), sep: sep.to_owned() }",
-            "ReportInMain::new(java::wtf8(\"squares\"), &sep)",
+            "fn ReportInMain__new(title: &java::Wtf8, sep: &java::Wtf8) -> ReportInMain {",
+            "ReportInMain { base: AReportFields__new(title), sep: sep.to_owned() }",
+            "ReportInMain__new(java::wtf8(\"squares\"), &sep)",
         ],
     );
 }
@@ -269,7 +269,7 @@ fn for_each_over_an_iterable_is_the_iterator_loop() {
     assert_contains(
         &rust,
         &[
-            "let it = A::iterator(&a);",
+            "let it = A__iterator(&a);",
             "'outer: while it.has_next() {",
             "let s = java::cast(&it.next(), |o| o.as_string(), (\"java.lang.String\", java::BASE));",
             "continue 'outer;",
@@ -326,7 +326,7 @@ fn an_inner_subclass_in_a_generic_class_embeds_its_superclass() {
         &rust,
         &[
             "struct ASeqListItr {\n    base: ASeqItrFields,\n}",
-            "ASeqListItr { base: ASeqItrFields::new(outer) }",
+            "ASeqListItr { base: ASeqItrFields__new(outer) }",
         ],
     );
 }
@@ -358,7 +358,7 @@ fn an_inner_subclass_of_another_outers_inner_class_holds_both_outers() {
         &rust,
         &[
             "struct ABatchRepeated {\n    base: AStepFields,\n    outer_: Arc<ABatch>,\n}",
-            "ABatchRepeated { base: AStepFields::new(outer.outer.clone(), by.wrapping_mul(outer.times)), outer_: outer }",
+            "ABatchRepeated { base: AStepFields__new(outer.outer.clone(), by.wrapping_mul(outer.times)), outer_: outer }",
         ],
     );
 }
@@ -382,7 +382,7 @@ fn an_anonymous_subclass_takes_its_superclasses_explicit_enclosing_instance() {
             }
         }",
     );
-    assert_contains(&rust, &["StepInMain { base: AStepFields::new(x0, by) }", "StepInMain::new(m, 2)"]);
+    assert_contains(&rust, &["StepInMain { base: AStepFields__new(x0, by) }", "StepInMain__new(m, 2)"]);
 }
 
 #[test]
@@ -409,8 +409,8 @@ fn an_inner_superclass_whose_constructor_calls_an_override_gets_its_enclosing_in
     assert_contains(
         &rust,
         &[
-            "fn new(outer: Arc<A>) -> ABaseFields {",
-            "ADerived { base: ABaseFields::new(outer.clone()) }",
+            "fn ABaseFields__new(outer: Arc<A>) -> ABaseFields {",
+            "ADerived { base: ABaseFields__new(outer.clone()) }",
             "java::concat!(format_args!(\"derived {}\", self.base.outer.get().total))",
         ],
     );

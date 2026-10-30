@@ -24,6 +24,7 @@
 //! square, and to the field of each `RecursiveOp`, so `forkOrInvoke` never forks, and `join`
 //! never helps another worker of a pool: the program starts no thread.
 
+use super::super::{FastMap, FastSet};
 use super::*;
 
 /// What a place is known to hold: one value, or values that differ. A place that no code has
@@ -57,28 +58,35 @@ impl Known {
 }
 
 /// The parameters and locals of the method being walked, by name.
-pub(super) type Env = HashMap<String, Known>;
+pub(super) type Env = FastMap<String, Known>;
 
 /// What the walk has learned, and who relied on it.
 #[derive(Clone, Default)]
 pub(super) struct Knowledge {
     /// The parameters of each method, by method and position.
-    params: HashMap<(usize, usize), Known>,
+    params: FastMap<(usize, usize), Known>,
     /// The instance fields, by declaring class and name. A field not here holds its default.
-    fields: HashMap<(usize, String), Known>,
+    fields: FastMap<(usize, String), Known>,
     /// The fields whose class a write did not tell: none of them is known.
-    unplaced: HashSet<String>,
+    unplaced: FastSet<String>,
     /// The methods whose code read each field.
-    field_readers: HashMap<(usize, String), HashSet<usize>>,
+    field_readers: FastMap<(usize, String), FastSet<usize>>,
     /// The methods whose code relied on there being no object of a class below each type: once
     /// there is one, nothing makes their values known again, so they are walked again once.
-    absence_readers: HashMap<usize, HashSet<usize>>,
-    /// The methods whose code relied on which classes below each type have objects.
-    instance_readers: HashMap<usize, HashSet<usize>>,
+    absence_readers: FastMap<usize, FastSet<usize>>,
+    /// The methods whose code relied on what `same_literal` gives for a method on the objects
+    /// of the classes below a type, by method and type: they are walked again when an object of
+    /// another class below the type changes that, not whenever one is created.
+    literal_readers: FastMap<(usize, usize), FastSet<usize>>,
+    /// What `same_literal` gives for each method and type that it has been asked for, kept up as
+    /// objects of the classes below the type are created (`Walk::created`).
+    literals: FastMap<(usize, usize), Literals>,
+    /// The methods of `literals`, by type.
+    literal_methods: FastMap<usize, Vec<usize>>,
     /// The types that no value of the runtime can be and that only classes are below, by type.
-    program_only: HashMap<usize, bool>,
+    program_only: FastMap<usize, bool>,
     /// Whether some implementation of each method only returns a literal, by method.
-    literal_groups: HashMap<usize, bool>,
+    literal_groups: FastMap<usize, bool>,
     /// The parameters and locals of the method being walked (`STATIC`: none).
     pub(super) env: Rc<Env>,
     /// Where what code relies on goes instead of the readers, while the walk looks at arguments
@@ -93,8 +101,39 @@ pub(super) enum Reliance {
     Field((usize, String)),
     /// There being no object of a class below a type.
     Absence(usize),
-    /// Which classes below a type have objects.
-    Instance(usize),
+    /// What `same_literal` gives for a method and a type.
+    Literal(usize, usize),
+}
+
+/// The literals that a method returns on the objects created so far of the classes below a type
+/// (`Walk::same_literal`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Literals {
+    /// No class below the type has objects.
+    None,
+    /// Each class with objects returns this literal.
+    One(i128),
+    /// They return different literals, or one of them does not return a literal.
+    Not,
+}
+
+impl Literals {
+    /// What the classes return once objects of a class that returns `literal` are created too.
+    fn and(self, literal: Option<i128>) -> Literals {
+        match (self, literal) {
+            (Literals::None, Some(v)) => Literals::One(v),
+            (Literals::One(a), Some(b)) if a == b => Literals::One(a),
+            _ => Literals::Not,
+        }
+    }
+
+    /// The literal that every class with objects returns, when there is one.
+    fn value(self) -> Option<i128> {
+        match self {
+            Literals::One(v) => Some(v),
+            Literals::None | Literals::Not => None,
+        }
+    }
 }
 
 impl Knowledge {
@@ -111,7 +150,7 @@ impl Knowledge {
         let readers = match on {
             Reliance::Field(key) => self.field_readers.entry(key).or_default(),
             Reliance::Absence(t) => self.absence_readers.entry(t).or_default(),
-            Reliance::Instance(t) => self.instance_readers.entry(t).or_default(),
+            Reliance::Literal(r, t) => self.literal_readers.entry((r, t)).or_default(),
         };
         readers.insert(m);
     }
@@ -236,16 +275,24 @@ impl Walk<'_> {
     }
 
     /// An object of class `c` is created: the methods that relied on there being none of a type
-    /// above it are walked again.
+    /// above it are walked again, and those that relied on what `same_literal` gives for a type
+    /// above it, where that changes.
     pub(super) fn created(&self, c: usize) {
-        let mut readers = HashSet::default();
-        {
-            let mut state = self.state.borrow_mut();
-            for t in &self.supers[c] {
-                readers.extend(state.known.absence_readers.remove(t).into_iter().flatten());
-                readers.extend(state.known.instance_readers.get(t).into_iter().flatten().copied());
+        let mut readers = FastSet::default();
+        let mut state = self.state.borrow_mut();
+        for &t in &self.supers[c] {
+            readers.extend(state.known.absence_readers.remove(&t).into_iter().flatten());
+            let known = &mut state.known;
+            for &r in known.literal_methods.get(&t).into_iter().flatten() {
+                let literals = known.literals.get_mut(&(r, t)).expect("a type's literals are kept");
+                let before = literals.value();
+                *literals = literals.and(self.literal_of(r, c));
+                if literals.value() != before {
+                    readers.extend(known.literal_readers.get(&(r, t)).into_iter().flatten().copied());
+                }
             }
         }
+        drop(state);
         for m in readers {
             self.rescan(m, Rescan::Object);
         }
@@ -328,8 +375,8 @@ impl Walk<'_> {
     /// The expressions of method `m` that cannot run, by id: the side of each branch on a known
     /// condition that it does not take, and the right operand of an `&&` or `||` that the left
     /// one decides.
-    pub(super) fn dead(&self, m: usize) -> HashSet<ExprId> {
-        let dead = RefCell::new(HashSet::default());
+    pub(super) fn dead(&self, m: usize) -> FastSet<ExprId> {
+        let dead = RefCell::new(FastSet::default());
         let mark_expr = |e: &Expr| {
             visit_expr(e, &mut |x| {
                 dead.borrow_mut().insert(x.id);
@@ -445,7 +492,7 @@ impl Walk<'_> {
                     && self.literal_group(*r) =>
             {
                 let t = class.class_index(receiver.ty)?;
-                self.state.borrow_mut().known.rely(Reliance::Instance(t), m);
+                self.state.borrow_mut().known.rely(Reliance::Literal(*r, t), m);
                 self.same_literal(*r, t)?
             }
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return int(value),
@@ -490,34 +537,35 @@ impl Walk<'_> {
     }
 
     /// The literal that every implementation of method `r` returns in the classes below type `t`
-    /// that have objects, when there are some and they all return the same one. Remembered until
-    /// another class has objects.
+    /// that have objects, when there are some and they all return the same one. Found once, and
+    /// then kept up as objects of other classes below `t` are created (`Knowledge::literals`):
+    /// a walk that skips nothing finds it again each time.
     fn same_literal(&self, r: usize, t: usize) -> Option<i128> {
-        let objects = self.state.borrow().live.instantiated.len();
-        if self.fast
-            && let Some(&(seen, value)) = self.memos.borrow().literals.get(&(r, t))
-            && seen == objects
+        let kept = self.state.borrow().known.literals.get(&(r, t)).copied();
+        if let Some(literals) = kept
+            && self.fast
         {
-            return value;
+            return literals.value();
         }
         let concretes = self.concretes(t);
-        let value = (|| {
+        let literals = {
             let state = self.state.borrow();
-            let mut value = None;
-            // `literal_result` of a literal does not look at the state.
-            for &c in concretes.iter().filter(|c| state.live.instantiated.contains(c)) {
-                let v = self.literal_result(self.class.hierarchy.implementation(r, c)?)?;
-                if value.is_some_and(|known| known != v) {
-                    return None;
-                }
-                value = Some(v);
-            }
-            value
-        })();
-        if self.fast {
-            self.memos.borrow_mut().literals.insert((r, t), (objects, value));
+            let created = concretes.iter().filter(|c| state.live.instantiated.contains(c));
+            created.fold(Literals::None, |literals, &c| literals.and(self.literal_of(r, c)))
+        };
+        if kept.is_none() {
+            let known = &mut self.state.borrow_mut().known;
+            known.literals.insert((r, t), literals);
+            known.literal_methods.entry(t).or_default().push(r);
         }
-        value
+        literals.value()
+    }
+
+    /// The literal that the implementation of method `r` that objects of class `c` run returns,
+    /// when it only returns one.
+    fn literal_of(&self, r: usize, c: usize) -> Option<i128> {
+        // `literal_result` of a literal does not look at the state.
+        self.literal_result(self.class.hierarchy.implementation(r, c)?)
     }
 
     /// The literal that method `r` returns, when its body only returns one.

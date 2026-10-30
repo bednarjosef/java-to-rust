@@ -93,6 +93,28 @@ pub(super) fn completion(records: &[&Value], survey: &Survey) -> Completion {
 #[derive(PartialEq)]
 pub struct Completion(Vec<RecordCompletion>);
 
+impl Completion {
+    /// Whether what `complete_record` writes with this completion only adds to what it wrote
+    /// with `before`, of the same records: every member written before is written still, each
+    /// accessor overriding at least what it did, so the new unit has the members of the old one
+    /// and maybe more. Which components are plain values changes only the `implicit` marks of the
+    /// calls of `java.util.Objects` in `hashCode` and `equals`. As the units only add to the
+    /// survey, a later completion always adds to an earlier one.
+    pub fn only_adds_to(&self, before: &Completion) -> bool {
+        self.0.len() == before.0.len()
+            && self.0.iter().zip(&before.0).all(|(now, was)| {
+                now.accessors.len() == was.accessors.len()
+                    && now.accessors.iter().zip(&was.accessors).all(|(now, was)| match (now, was) {
+                        (_, None) => true,
+                        (Some(now), Some(was)) => was.iter().all(|o| now.contains(o)),
+                        (None, Some(_)) => false,
+                    })
+                    && (now.hash_code || !was.hash_code)
+                    && (now.equals || !was.equals)
+            })
+    }
+}
+
 #[derive(PartialEq)]
 struct RecordCompletion {
     /// For each component, the interfaces and types of the methods that its accessor overrides,
@@ -754,5 +776,30 @@ impl Pos {
             test = self.binary("CONDITIONAL_AND", "boolean", test, same);
         }
         test
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completion(accessors: Vec<Option<Vec<&str>>>, hash_code: bool, equals: bool) -> Completion {
+        let accessors = accessors
+            .into_iter()
+            .map(|a| a.map(|o| o.into_iter().map(|i| (i.to_string(), "()int".to_string())).collect()))
+            .collect();
+        Completion(vec![RecordCompletion { accessors, hash_code, equals, plain: Vec::new() }])
+    }
+
+    #[test]
+    fn a_completion_adds_to_another_when_it_keeps_every_member_written() {
+        let before = completion(vec![None, Some(vec!["a.I"])], false, true);
+        assert!(before.only_adds_to(&before));
+        // An accessor and `hashCode` written, an accessor that overrides more.
+        assert!(completion(vec![Some(vec![]), Some(vec!["a.I", "a.J"])], true, true).only_adds_to(&before));
+        // An accessor no longer written, one that overrides less, `equals` no longer written.
+        assert!(!completion(vec![None, None], false, true).only_adds_to(&before));
+        assert!(!completion(vec![None, Some(vec![])], false, true).only_adds_to(&before));
+        assert!(!completion(vec![None, Some(vec!["a.I"])], false, false).only_adds_to(&before));
     }
 }

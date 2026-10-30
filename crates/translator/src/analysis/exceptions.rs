@@ -22,9 +22,9 @@
 //!
 //! The `toString` that making an object's text runs is such a call where the generator makes the
 //! text (`"" + o`, `println(o)`, `String.valueOf(o)`, `append(o)`, `String.format`): it calls the
-//! `toString` of the program, or the `hashCode` of the program that `Object`'s `toString` shows,
-//! and what that throws goes on from there. Elsewhere (the text of an enum's constant, the message
-//! of an exception, `printf`, the objects that other library calls show) the text is made through
+//! `toString` of the program (an enum's constant's too), or the `hashCode` of the program that
+//! `Object`'s `toString` shows, and what that throws goes on from there. Elsewhere (the message of
+//! an exception, `printf`, the objects that other library calls show) the text is made through
 //! `Display`, which has no way to return an exception, so what it throws ends the program there, as an
 //! exception that nothing catches does; where a `toString` that the program wrote may throw what
 //! a `catch` around such a text, or around a call on the way to it, would catch, the program is
@@ -38,6 +38,7 @@ mod comparable;
 mod conditions;
 mod entry;
 mod failures;
+use super::{FastMap, FastSet};
 use conditions::{condition_points, statement_unboxing_points};
 use failures::format_may_fail;
 mod field_inits;
@@ -50,7 +51,7 @@ use super::nullness::{maybe_null, non_null_names};
 use crate::ast::*;
 use crate::lower::standard_subclass;
 use failures::runtime_failures;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 /// What a static initializer that throws raises: Java wraps the exception in this `Error`.
 const INITIALIZER_ERROR: &str = "java.lang.ExceptionInInitializerError";
@@ -96,6 +97,16 @@ struct Point {
     frames: Vec<Frame>,
     /// For a call, the values of its arguments when some are known (see `guards`).
     known: Vec<Vec<Option<guards::Value>>>,
+}
+
+/// What escapes each method (`escapes_of`): the kinds, and the same as sets of their numbers,
+/// with what of them the program's code throws, and how many kinds are numbered.
+#[derive(Default)]
+struct Escaped {
+    kinds: Vec<BTreeSet<Kind>>,
+    bits: Vec<Bits>,
+    program: Vec<Bits>,
+    numbered: usize,
 }
 
 /// What the callers of a method observe: the exceptions under these types, or all of them.
@@ -150,6 +161,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     printf_of_streams(class, &mut reject);
     let h = &class.hierarchy;
+    // What showing each type runs is the same for every point while the program does not change.
+    TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
+    RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
     let mut points: Vec<Vec<Point>> = phase("exceptions: points", || {
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect()
     });
@@ -226,11 +240,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // Methods are looked at callees first, and again whenever what escapes a method they call
     // grows (in calls that go round), until nothing does; what escapes only grows, so the order
     // does not change the outcome. The kinds are numbered, and each point's own kinds and those
-    // its `try`s catch are sets of those numbers, worked out once.
-    let escapes_of = |points: &[Vec<Point>]| {
+    // its `try`s catch are sets of those numbers, worked out once. Worked out again after some
+    // methods lost calls (`previous`, with those methods), only what escapes them and their
+    // callers, near and far, is: what escapes every other method calls none of them, and is as
+    // before.
+    let escapes_of = |points: &[Vec<Point>], previous: Option<(Escaped, &[usize])>| {
         let n = class.methods.len();
         let mut kinds: Vec<Kind> = Vec::new();
-        let mut numbers: HashMap<Kind, usize> = HashMap::new();
+        let mut numbers: FastMap<Kind, usize> = FastMap::default();
         let mut number = |k: Kind| {
             *numbers.entry(k.clone()).or_insert_with(|| {
                 kinds.push(k);
@@ -254,7 +271,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         let mut masks: Vec<Bits> = vec![Bits::default()];
         // Each `try` by its id, what it catches and whether it has a `finally`.
         type Tries<'a> = Vec<(usize, &'a [usize], bool)>;
-        let mut mask_of: HashMap<Tries, usize> = HashMap::new();
+        let mut mask_of: FastMap<Tries, usize> = FastMap::default();
         let caught_by: Vec<Vec<usize>> = points
             .iter()
             .map(|ps| {
@@ -272,15 +289,13 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     .collect()
             })
             .collect();
-        let mut escapes: Vec<Bits> = vec![Bits::default(); n];
-        let mut from_program: Vec<Bits> = vec![Bits::default(); n];
         let mut callers: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
         // The calls that may run several methods (the implementations of a virtual call), by
         // their set of methods: what escapes the methods of a set is kept as one union, grown as
         // theirs grow, so that a call reads one set rather than each of its methods. What escapes
         // a method only grows, so the union of what has escaped each is what escapes them now.
-        let mut set_of: HashMap<&[usize], usize> = HashMap::new();
+        let mut set_of: FastMap<&[usize], usize> = FastMap::default();
         let mut set_callers: Vec<Vec<usize>> = Vec::new();
         let mut sets_with: Vec<Vec<usize>> = vec![Vec::new(); n];
         let call_sets: Vec<Vec<usize>> = points
@@ -307,8 +322,40 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     .collect()
             })
             .collect();
+        let affected: Vec<bool> = match &previous {
+            None => vec![true; n],
+            Some((_, changed)) => {
+                let mut affected = vec![false; n];
+                let mut work = changed.to_vec();
+                while let Some(m) = work.pop() {
+                    if !affected[m] {
+                        affected[m] = true;
+                        work.extend(&callers[m]);
+                        work.extend(sets_with[m].iter().flat_map(|&set| &set_callers[set]));
+                    }
+                }
+                affected
+            }
+        };
+        let (mut escapes, mut from_program, mut before_kinds) = match previous {
+            None => (vec![Bits::default(); n], vec![Bits::default(); n], Vec::new()),
+            Some((mut before, _)) => {
+                debug_assert_eq!(before.numbered, kinds.len(), "the kinds are numbered as before");
+                for m in (0..n).filter(|&m| affected[m]) {
+                    before.bits[m] = Bits::default();
+                    before.program[m] = Bits::default();
+                }
+                (before.bits, before.program, before.kinds)
+            }
+        };
         let mut set_escapes: Vec<Bits> = vec![Bits::default(); set_callers.len()];
         let mut set_from_program: Vec<Bits> = vec![Bits::default(); set_callers.len()];
+        for (m, sets) in sets_with.iter().enumerate().filter(|&(m, _)| !affected[m]) {
+            for &set in sets {
+                set_escapes[set].union(&escapes[m]);
+                set_from_program[set].union(&from_program[m]);
+            }
+        }
         let mut called_by = vec![usize::MAX; n];
         for (m, ps) in points.iter().enumerate() {
             for (i, p) in ps.iter().enumerate() {
@@ -325,8 +372,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
             }
         }
-        let mut queued = vec![true; n];
-        let mut queue: VecDeque<usize> = closure::components(&callees).1.into_iter().flatten().collect();
+        let mut queued = affected.clone();
+        let mut queue: VecDeque<usize> =
+            closure::components(&callees).1.into_iter().flatten().filter(|&m| affected[m]).collect();
         while let Some(m) = queue.pop_front() {
             queued[m] = false;
             let mut out = Bits::default();
@@ -393,12 +441,16 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
             }
         }
-        escapes
-            .iter()
-            .map(|set| set.iter().map(|k| kinds[k].clone()).collect())
-            .collect::<Vec<BTreeSet<Kind>>>()
+        let kinds_of = (0..n)
+            .map(|m| match affected[m] {
+                true => escapes[m].iter().map(|k| kinds[k].clone()).collect(),
+                false => std::mem::take(&mut before_kinds[m]),
+            })
+            .collect();
+        Escaped { kinds: kinds_of, bits: escapes, program: from_program, numbered: kinds.len() }
     };
-    let mut escapes = phase("exceptions: escapes", || escapes_of(&points));
+    let mut escaped = phase("exceptions: escapes", || escapes_of(&points, None));
+    let mut escapes = std::mem::take(&mut escaped.kinds);
     // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
     // one out only shrinks what escapes, so the calls are looked at again until none is left.
     phase("exceptions: quiet calls", || {
@@ -431,7 +483,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             for &(m, i) in dropped.iter().rev() {
                 points[m].remove(i);
             }
-            escapes = phase("exceptions: escapes", || escapes_of(&points));
+            let mut changed: Vec<usize> = dropped.iter().map(|&(m, _)| m).collect();
+            changed.dedup();
+            escaped.kinds = std::mem::take(&mut escapes);
+            let before = std::mem::take(&mut escaped);
+            escaped = phase("exceptions: escapes", || escapes_of(&points, Some((before, &changed))));
+            escapes = std::mem::take(&mut escaped.kinds);
         }
     });
 
@@ -475,29 +532,65 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         seen.all |= more.all;
         grew || before != seen.all
     };
+    // What the callers of each method observed when it was last looked at, which it passed on
+    // then: looked at again, it passes on only what they observe since (with the `try`s around
+    // its calls passed on already), as what they observe only grows.
+    let mut passed: Vec<Option<Seen>> = vec![None; class.methods.len()];
+    let calls: Vec<bool> =
+        points.iter().map(|ps| ps.iter().any(|p| matches!(p.raise, Raise::Call(_)))).collect();
     while let Some(m) = queue.pop_front() {
         queued[m] = false;
+        if !calls[m] {
+            continue;
+        }
+        let now = if bugs_only[m] { Seen::default() } else { seen[at[m]].clone() };
+        let added: Option<(Vec<usize>, bool)> =
+            passed[m].as_ref().map(|before| (now.types.without(&before.types), now.all && !before.all));
+        if added.as_ref().is_some_and(|(types, all)| types.is_empty() && !all) {
+            continue;
+        }
         let mut grown = Vec::new();
         for p in &points[m] {
             let Raise::Call(callees) = &p.raise else { continue };
             visit += 1;
-            let mut here = if bugs_only[m] { Seen::default() } else { seen[at[m]].clone() };
-            for f in &p.frames {
-                for &t in &f.catches {
-                    here.types.insert(t);
+            let with_tries;
+            let here = match (&added, p.frames.is_empty()) {
+                (Some(_), _) | (None, true) => &now,
+                (None, false) => {
+                    let mut here = now.clone();
+                    for f in &p.frames {
+                        for &t in &f.catches {
+                            here.types.insert(t);
+                        }
+                        here.all |= f.finally;
+                    }
+                    with_tries = here;
+                    &with_tries
                 }
-                here.all |= f.finally;
-            }
+            };
             for &c in callees {
                 if grown_at[at[c]] == visit {
                     continue;
                 }
                 grown_at[at[c]] = visit;
-                if grow(&mut seen[at[c]], &here) {
+                let grew = match &added {
+                    None => grow(&mut seen[at[c]], here),
+                    Some((types, all)) => {
+                        let seen = &mut seen[at[c]];
+                        let mut grew = *all && !seen.all;
+                        seen.all |= *all;
+                        for &t in types {
+                            grew |= seen.types.insert(t);
+                        }
+                        grew
+                    }
+                };
+                if grew {
                     grown.push(c);
                 }
             }
         }
+        passed[m] = Some(now);
         for c in grown {
             let members = h.group_members(c);
             for &g in if members.is_empty() { std::slice::from_ref(&c) } else { members } {
@@ -525,32 +618,30 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     }
 
     // A static initializer never returns a `Result`: what it raises ends the program (see `seen`).
-    let mut throwing: HashSet<usize> = (0..class.methods.len())
+    let mut throwing: FastSet<usize> = (0..class.methods.len())
         .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[at[m]]))))
         .collect();
-    // The methods that throw themselves, not only through an override.
-    let own = throwing.clone();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
 
     // The failures of the runtime that something would see, the `try`s that catch something,
     // and those that an exception of the program leaves.
-    let mut live_tries = HashSet::new();
-    let mut raising_tries = HashSet::new();
-    let mut raising = HashSet::new();
-    let mut null_checked = std::collections::HashMap::new();
-    let mut catching = std::collections::HashMap::new();
+    let mut live_tries = FastSet::default();
+    let mut raising_tries = FastSet::default();
+    let mut raising = FastSet::default();
+    let mut null_checked = FastMap::default();
+    let mut catching = FastMap::default();
     // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises, those of
     // them that get one without the checked form (whose message is the runtime's), and the
     // objects of `null_checked` with the `try` that catches their exception in their method, and
     // their method.
-    let mut runtime_npe_tries = HashSet::new();
-    let mut unchecked_npe_tries = HashSet::new();
+    let mut runtime_npe_tries = FastSet::default();
+    let mut unchecked_npe_tries = FastSet::default();
     let mut npe_catchers: Vec<(ExprId, Option<usize>, usize)> = Vec::new();
     let mut raised_classes = BTreeSet::new();
     // What the calls of the same methods raise, gathered once: a call of an override group's
     // method has thousands of them.
-    let mut raised_by_calls: super::FastMap<&[usize], BTreeSet<Kind>> = Default::default();
+    let mut raised_by_calls: FastMap<&[usize], BTreeSet<Kind>> = Default::default();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
             let gathered;
@@ -645,17 +736,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 "a constructor that throws, of an exception the runtime raises, not supported yet",
             );
         }
-        // The text of an enum's constant is its `Display`, which cannot throw; that of an object is
-        // a call of its `toString` where the generator makes it (`generator_text`).
-        let of_enum = std::iter::once(method.class)
-            .chain(h.ancestors(method.class))
-            .any(|t| class.types[t].kind == TypeKind::Enum);
-        if method.name == "toString" && method.params.is_empty() && of_enum {
-            // At the override that throws, which may not be the first of its group.
-            let thrower = h.group(m).into_iter().find(|g| own.contains(g)).unwrap_or(m);
-            let pos = class.methods[thrower].pos;
-            reject(pos, "a toString that throws an exception that is caught not supported yet");
-        }
     }
 
     // Java's message of a `NullPointerException` that the runtime raises describes the
@@ -663,7 +743,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // a `catch` reads it, the translation writes Java's message (`npe_messages`), for the checked
     // form only.
     let npe = Kind::Runtime("java.lang.NullPointerException");
-    let mut reading_tries = HashSet::new();
+    let mut reading_tries = FastSet::default();
     // A suppressed exception is read only through `getSuppressed`, and printed by a
     // `printStackTrace` to a stream or a writer, which may be standard output (standard error, where
     // `printStackTrace()` and uncaught exceptions print, is not compared). So adding one to the
@@ -709,8 +789,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 for catch in catches.iter().filter(|c| c.types.iter().any(|&t| matches(&npe, t))) {
                     // Any use of the exception may read its message (`getMessage`, its text, a
                     // method it is passed to), except throwing it on and suppressing (above).
-                    let mut rethrown = HashSet::new();
-                    let mut suppressing = HashSet::new();
+                    let mut rethrown = FastSet::default();
+                    let mut suppressing = FastSet::default();
                     for b in &catch.body {
                         visit_stmt(
                             b,
@@ -764,7 +844,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     }
     // A `catch` may read the message of a dereference that its `try` catches, or of one whose
     // exception leaves its method, in a method that a call in the `try` may run.
-    let mut reached = HashSet::new();
+    let mut reached = FastSet::default();
     let mut calls: Vec<usize> = points
         .iter()
         .flatten()
@@ -829,6 +909,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
 
     // The facts are kept with errors too: a census goes on past them as if they had passed
     // (`analysis::analyze_collecting`), and the messages of the dereferences read them.
+    TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = None);
+    RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = None);
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -950,7 +1032,7 @@ fn assigned_null_test(e: &Expr) -> Option<(&str, bool)> {
 /// that nothing else assigns. Code of another thread that reads it waits until the class is
 /// initialized; code of the initializing thread runs after that assignment, or else during the
 /// values of it and the assignments before it, which `reads_static` shows never read it.
-fn initialized_statics(class: &Class, facts: &Facts) -> HashSet<(usize, String)> {
+fn initialized_statics(class: &Class, facts: &Facts) -> FastSet<(usize, String)> {
     let mut walk = StaticReads::new(class);
     let mut leading = Vec::new();
     for (m, method) in class.methods.iter().enumerate() {
@@ -991,7 +1073,7 @@ fn initialized_statics(class: &Class, facts: &Facts) -> HashSet<(usize, String)>
             }
         }
     }
-    let mut writes: std::collections::HashMap<(usize, String), usize> = std::collections::HashMap::new();
+    let mut writes: FastMap<(usize, String), usize> = FastMap::default();
     for method in &class.methods {
         for s in &method.body {
             visit_stmt(
@@ -1081,7 +1163,7 @@ struct StaticRead {
 /// the current walk, as the number of its turn.
 struct StaticReads<'c> {
     class: &'c Class,
-    clinits: std::collections::HashMap<usize, usize>,
+    clinits: FastMap<usize, usize>,
     summaries: Vec<Option<std::rc::Rc<StaticRead>>>,
     seen: Vec<u32>,
     turn: u32,
@@ -1140,10 +1222,11 @@ fn is_tested(e: &Expr, safe: &[String]) -> bool {
         ExprKind::Cast(to, value) if to.is_reference() || matches!(to, Type::Enum(_)) => {
             is_tested(value, safe)
         }
-        // So does an assignment, whose value is the assigned one (`(current = e).next`).
+        // So does an assignment, whose value is the assigned one (`(current = e).next`,
+        // `(h[k] = e).next`), as the generator takes it (`Gen::nullable`).
         ExprKind::Assign {
             op: None,
-            target: Place::Field { .. } | Place::Static { .. } | Place::Var(_),
+            target: Place::Field { .. } | Place::Static { .. } | Place::Var(_) | Place::Index(..),
             value,
         } if !matches!(e.ty, Type::Boxed(_)) => is_tested(value, safe),
         _ => false,
@@ -1482,7 +1565,7 @@ fn expr_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
-    let callees = class.callees(x);
+    let callees = callees(class, x);
     if !callees.is_empty() {
         let known = match callees[..] {
             [only] => Some(guards::known_args(class, &facts.static_writes, x))
@@ -1758,16 +1841,79 @@ pub fn generator_text(x: &Expr) -> bool {
     }
 }
 
+/// Lists of methods shared by key while `analyze` runs (`Some`).
+type SharedLists<K> = std::cell::RefCell<Option<FastMap<K, std::rc::Rc<[usize]>>>>;
+
+thread_local! {
+    /// `to_string_impls` of each type, while `analyze` runs (`Some`): a value of `Object` shows
+    /// the text of every class, which many points ask for.
+    static TO_STRING_IMPLS: SharedLists<Type> = const { std::cell::RefCell::new(None) };
+    /// The methods that a call runs on the objects of a list of `Class::receivers`, by the list
+    /// and the called method, while `analyze` runs (`Some`): calls share the lists.
+    static RECEIVER_TARGETS: SharedLists<(usize, usize)> = const { std::cell::RefCell::new(None) };
+}
+
+/// The methods that the call `x` may run (`Class::callees`); for an instance call that the
+/// points-to facts know the receiver of (`Class::receivers`), only those that the classes of its
+/// objects run, as the generated code dispatches it: a `Runnable`'s `run()` in a cleaner does not
+/// run every `run()` of the program.
+fn callees(class: &Class, x: &Expr) -> Vec<usize> {
+    let all = class.callees(x);
+    let ExprKind::MethodCall { receiver, resolved: Some(r), is_super: false, .. } = &x.kind else {
+        return all;
+    };
+    let Some(classes) = class.receivers.get(&receiver.id) else { return all };
+    if all.len() < 2 || classes.is_empty() || class.methods[*r].is_static {
+        return all;
+    }
+    let key = (classes.as_ptr() as usize, *r);
+    if let Some(found) =
+        RECEIVER_TARGETS.with_borrow(|cache| cache.as_ref().and_then(|c| c.get(&key).cloned()))
+    {
+        return found.to_vec();
+    }
+    let mut found: Vec<usize> = Vec::new();
+    for &c in classes.iter() {
+        match class.hierarchy.implementation(*r, c) {
+            Some(m) => found.push(m),
+            None => return all,
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    RECEIVER_TARGETS.with_borrow_mut(|cache| {
+        if let Some(cache) = cache {
+            cache.insert(key, found.as_slice().into());
+        }
+    });
+    found
+}
+
 /// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that
-/// `Object`'s `toString` shows.
+/// `Object`'s `toString` shows; found once for each type while `analyze` runs.
 fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
+    if let Some(found) = TO_STRING_IMPLS.with_borrow(|cache| cache.as_ref().and_then(|c| c.get(&ty).cloned()))
+    {
+        return found.to_vec();
+    }
+    let found = find_to_string_impls(class, ty);
+    TO_STRING_IMPLS.with_borrow_mut(|cache| {
+        if let Some(cache) = cache {
+            cache.insert(ty, found.as_slice().into());
+        }
+    });
+    found
+}
+
+fn find_to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut seen = FastSet::default();
     // A plain enum's value shows the `toString` of its constant, or `Enum`'s, which shows its name.
     if let Type::Enum(name) = ty {
         let Some(t) = class.type_index(name) else { return Vec::new() };
-        let mut out = Vec::new();
-        for c in std::iter::once(t).chain(class.hierarchy.concretes(t)) {
+        for c in std::iter::once(t).chain(class.hierarchy.concretes_of(t).iter().copied()) {
             if let Some(i) = hierarchy::to_string_impl(class, c)
-                && !out.contains(&i)
+                && seen.insert(i)
             {
                 out.push(i);
             }
@@ -1775,10 +1921,9 @@ fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
         return out;
     }
     let Some(t) = class.class_index(ty) else { return Vec::new() };
-    let mut out = Vec::new();
-    for c in class.hierarchy.concretes(t) {
+    for &c in class.hierarchy.concretes_of(t).iter() {
         if let Some(i) = hierarchy::text_impl(class, c)
-            && !out.contains(&i)
+            && seen.insert(i)
         {
             out.push(i);
         }

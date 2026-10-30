@@ -1916,6 +1916,49 @@ impl<'t> Lowering<'t> {
         Ok(self.convert(read, self.ty(node, node.java_type())?).kind)
     }
 
+    /// The field that the call `node` of `symbol` reads, or updates and gives the old value of,
+    /// through `Unsafe` at its offset, a `VarHandle` or a field updater, as `handle_access`,
+    /// `var_handle_access` and `updater_access` find it: its class, its name and whether it is
+    /// static. `None` for a write, an element's access and any other call. Lowering converts the
+    /// field's value to the call's type (`access_of`), which the prediction of covariant arrays
+    /// reads (`predict`).
+    pub(super) fn handle_read(&self, node: Node<'t>, symbol: &Symbol<'t>) -> Option<(usize, &'t str, bool)> {
+        let receiver = node
+            .get("methodSelect")
+            .and_then(|s| s.get("expression").filter(|_| s.kind() == "MEMBER_SELECT"));
+        let args: Vec<Node> = node.list("arguments").collect();
+        let forwarded = crate::program::sun_misc_forwarded(symbol.owner, symbol.name, symbol.ty);
+        let (owner, name) = match &forwarded {
+            Some(internal) => ("jdk.internal.misc.Unsafe", interned_name(internal)),
+            None => (symbol.owner, symbol.name),
+        };
+        let update = crate::program::unsafe_field_update(owner, name, symbol.ty);
+        let put = crate::program::unsafe_field_access(owner, name, symbol.ty);
+        if update.is_some() || put.is_some() {
+            let offset = *args.get(1)?;
+            let field = match (self.handle(offset), self.static_handle(offset, false)) {
+                (Some((class, field)), _) => (class, field, false),
+                (_, Some((class, field))) => (class, field, true),
+                _ => return None,
+            };
+            return (update.is_some() || put == Some(false)).then_some(field);
+        }
+        if symbol.owner == VAR_HANDLE {
+            let (put, _) = var_handle_method(symbol.name)?;
+            let receiver = receiver?;
+            let handle = self.var_handle(receiver).or_else(|| Some(self.held_var_handle(receiver)?.0))?;
+            let field = match handle {
+                VarHandleOf::Field(class, field) => (class, field, false),
+                VarHandleOf::Static(class, field) => (class, field, true),
+                _ => return None,
+            };
+            return (put != Some(true)).then_some(field);
+        }
+        updater_kind(symbol.owner)?;
+        let (class, field) = self.updater(receiver?)?;
+        (!matches!(symbol.name, "set" | "lazySet")).then_some((class, field, false))
+    }
+
     /// `U.get<Kind><Mode>(o, OFFSET)` and `U.put<Kind><Mode>(o, OFFSET, x)` of a field handle:
     /// the read `o.f`, or the assignment `o.f = x`; at an element offset, `a[i]` or `a[i] = x`.
     /// The atomic updates likewise (`field_update`, `element_update`). `None` for any other call.
@@ -2595,6 +2638,7 @@ impl<'t> Lowering<'t> {
             jdk_code: false,
             // A loop is code like any other, which calls the update that it loops on.
             field_update: u.looped.is_none().then(|| (u.update, u.field.clone())),
+            added: false,
         }
     }
 

@@ -421,8 +421,14 @@ impl<'a> Gen<'a> {
         self.catching_now = catching;
         self.throwing = throwing;
         let start = self.runtime("start_thread");
+        // A shared object is borrowed in the thread, as a variable holding one is; a value of a
+        // type's enum is a `Copy` value, which its functions take as it is.
+        let borrow = match self.enum_of(thread) {
+            Some(_) => String::new(),
+            None => format!("let {local} = &{local}; "),
+        };
         Code::atom(format!(
-            "{start}({tid}, {name}, {daemon}, {{ let {local} = {handle}; move || {{ let {local} = &{local}; \
+            "{start}({tid}, {name}, {daemon}, {{ let {local} = {handle}; move || {{ {borrow}\
              {set}({local}.clone()); {body}; }} }})"
         ))
     }

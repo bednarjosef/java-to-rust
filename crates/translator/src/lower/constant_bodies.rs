@@ -281,6 +281,7 @@ impl<'t> Lowering<'t> {
                     init,
                     constant: false,
                     volatile: member.has_flag("VOLATILE"),
+                    is_final: member.has_flag("FINAL"),
                     pos: member.pos(),
                 });
             }
@@ -318,6 +319,7 @@ impl<'t> Lowering<'t> {
                     init: None,
                     constant: false,
                     volatile: field.volatile,
+                    is_final: field.is_final,
                     pos: field.pos,
                 }),
             }

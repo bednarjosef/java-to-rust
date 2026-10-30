@@ -17,6 +17,7 @@
 //! of one of its instance fields, as a Rust struct must use them; its uses must all give it
 //! type arguments, and its objects must not become `Object`s. A method qualifies when its type
 //! parameters have no bounds and each occurs in a parameter's type, so that Rust can infer it.
+//! Neither qualifies with an array of its type variables anywhere in it (`holds_variable_array`).
 
 use super::*;
 use std::collections::BTreeSet;
@@ -33,7 +34,19 @@ impl Real {
         self.classes.is_empty() && self.methods.is_empty()
     }
 
-    fn without(&self, failed: &Real) -> Real {
+    pub(super) fn insert(&mut self, owner: Owner) {
+        match owner {
+            Owner::Class(t) => self.classes.insert(t),
+            Owner::Method(m) => self.methods.insert(m),
+        };
+    }
+
+    pub(super) fn extend(&mut self, other: &Real) {
+        self.classes.extend(&other.classes);
+        self.methods.extend(&other.methods);
+    }
+
+    pub(super) fn without(&self, failed: &Real) -> Real {
         Real {
             classes: self.classes.difference(&failed.classes).copied().collect(),
             methods: self.methods.difference(&failed.methods).copied().collect(),
@@ -49,24 +62,46 @@ pub(super) enum Owner {
 }
 
 /// Lowers with every candidate, then without those that fail, until none does; an error with
-/// real generics is retried with all of them erased. A lowering that finds arrays that meet an
-/// `Object[]` is retried with them as `Object[]`s first (see `covariant`).
+/// real generics is retried with all of them erased (a census and a whole program, which go on
+/// past rejections, fail those the rejected code uses instead: `program::lower_with`). A lowering that finds arrays that meet an
+/// `Object[]` is retried with them as `Object[]`s (see `covariant`), and without the Rust
+/// generics that failed in it.
 pub(super) fn retry<E: std::fmt::Debug>(
     mut run: impl FnMut(Option<&Real>, &super::covariant::Covariant) -> Result<(Class, Real, Real), E>,
 ) -> Result<Class, E> {
     let mut real: Option<Real> = None;
     let mut covariant = super::covariant::Covariant::default();
     let mut attempt = 0;
+    // For the check of the prediction: the Rust generics the first lowering tried.
+    let mut tried: Option<Real> = None;
     loop {
         attempt += 1;
         let result =
             crate::timings::phase(&format!("lowering attempt {attempt}"), || run(real.as_ref(), &covariant));
+        if let Ok((_, used, _)) = &result {
+            tried.get_or_insert_with(|| used.clone());
+        }
+        // The predicted arrays are `Object[]`s in every lowering, as in the first.
+        if !super::predict::checking()
+            && let Some(prediction) = &*covariant.predicted.borrow()
+        {
+            covariant.known.extend(prediction.arrays.iter().copied());
+        }
         let noted: Vec<Type> =
             covariant.noted.take().into_iter().filter(|ty| !covariant.known.contains(ty)).collect();
         if !noted.is_empty() {
+            // The Rust generics that failed are erased at the same time: more `Object[]`s fail
+            // no fewer (`covariant::fail_on_covariant`).
+            let without = match &result {
+                Ok((class, used, failed)) if !failed.is_empty() => {
+                    real = Some(used.without(failed));
+                    format!(" and without {}", failed_generics(class, used, failed))
+                }
+                _ => String::new(),
+            };
             if crate::timings::enabled() {
                 eprintln!(
-                    "timing: lowering attempt {attempt} is lowered again for {}",
+                    "timing: lowering attempt {attempt} is lowered again for {}{without}",
                     covariant_types(&noted)
                 );
             }
@@ -74,7 +109,21 @@ pub(super) fn retry<E: std::fmt::Debug>(
             continue;
         }
         match result {
-            Ok((class, _, failed)) if failed.is_empty() => return Ok(class),
+            Ok((class, used, failed)) if failed.is_empty() => {
+                if super::predict::checking()
+                    && crate::timings::enabled()
+                    && let Some(prediction) = &*covariant.predicted.borrow()
+                {
+                    let mut noted: Vec<Type> = covariant.known.iter().copied().collect();
+                    noted.sort_by_key(Type::to_string);
+                    let mut failed = tried.as_ref().map_or_else(Real::default, |t| t.without(&used));
+                    if !super::predict::unseeded() {
+                        failed.extend(&prediction.failed);
+                    }
+                    super::predict::report(prediction, &noted, &failed, &class);
+                }
+                return Ok(class);
+            }
             Ok((class, used, failed)) => {
                 if crate::timings::enabled() {
                     eprintln!(
@@ -134,6 +183,55 @@ fn held(node: Node) -> bool {
     node.list("typeParameters").all(|v| fields.iter().any(|ty| mentions_var(ty, v.str("name"))))
 }
 
+/// Whether the generic class or method `node` has an array of one of its type variables anywhere
+/// in it: in its signature, a field, a variable or the type of an expression. `verify` erases
+/// such a generic on every lowering, as an array of a type variable is not supported, and while
+/// it is tried, its arrays meet no others (`covariant::note_covariant`) and code that makes one
+/// (`Arrays.copyOf` into a `T[]`) is rejected, which erases it and the other Rust generics that
+/// code uses. So it is no candidate.
+fn holds_variable_array(node: Node) -> bool {
+    let vars: Vec<&str> = node.list("typeParameters").map(|p| p.str("name")).collect();
+    holds_array_of(node, &vars)
+}
+
+/// Whether a type in the tree under `node` names an array of one of the type variables `vars`,
+/// each of which a class or method in it may declare again for itself.
+fn holds_array_of(node: Node, vars: &[&str]) -> bool {
+    let types = [
+        // A method's type, as a name of one has it, is that of its declaration, of other type
+        // variables; its arguments have their own types.
+        Some(node.java_type()).filter(|t| !t.starts_with(['(', '<'])),
+        matches!(node.kind(), "VARIABLE" | "METHOD").then(|| node.symbol().map_or("", |s| s.ty)),
+    ];
+    if types.into_iter().flatten().any(|ty| vars.iter().any(|v| mentions_var_array(ty, v))) {
+        return true;
+    }
+    let Value::Object(map) = node.0 else { return false };
+    map.values().flat_map(nodes_in).any(|child| {
+        let declared: Vec<&str> = child.list("typeParameters").map(|p| p.str("name")).collect();
+        let vars: Vec<&str> = vars.iter().copied().filter(|v| !declared.contains(v)).collect();
+        !vars.is_empty() && holds_array_of(child, &vars)
+    })
+}
+
+/// The nodes that the value `v` of a field of a node is: itself, or the items of a list.
+fn nodes_in(v: &Value) -> Vec<Node<'_>> {
+    match v {
+        Value::Object(_) => vec![Node(v)],
+        Value::Array(items) => items.iter().flat_map(nodes_in).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether javac's type string `ty` names an array of the type variable `name` (`T[]`, `T...`).
+fn mentions_var_array(ty: &str, name: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '.';
+    ty.match_indices(name).any(|(at, _)| {
+        let rest = &ty[at + name.len()..];
+        !ty[..at].ends_with(word) && (rest.starts_with("[]") || rest.starts_with("..."))
+    })
+}
+
 fn has_bounds(node: Node) -> bool {
     node.list("typeParameters").any(|p| p.list("bounds").next().is_some())
 }
@@ -159,12 +257,13 @@ impl<'t> Lowering<'t> {
                     && node.list("implementsClause").next().is_none()
                     && !extended.contains(self.types[t].name.as_str())
                     && held(node)
+                    && !holds_variable_array(node)
             })
             .collect();
         let methods = (0..self.methods.len())
             .filter(|&m| {
                 let node = self.methods[m].node;
-                generic(node) && !has_bounds(node) && self.inferable(m)
+                generic(node) && !has_bounds(node) && self.inferable(m) && !holds_variable_array(node)
             })
             .collect();
         Real { classes, methods }
@@ -181,11 +280,25 @@ impl<'t> Lowering<'t> {
         })
     }
 
+    /// Whether `owner` is a Rust generic; noted in `uses_real` when it is.
     pub(super) fn is_real(&self, owner: Owner) -> bool {
-        match owner {
+        let real = match owner {
             Owner::Class(t) => self.real.classes.contains(&t),
             Owner::Method(m) => self.real.methods.contains(&m),
+        };
+        if real {
+            self.uses_real.borrow_mut().insert(owner);
         }
+        real
+    }
+
+    /// `lower` with `uses_real` holding the Rust generics that the code it lowers uses, as a
+    /// rejection in it is recorded with; they are those of the code around it too afterwards.
+    pub(super) fn noting_real_uses<T>(&self, lower: impl FnOnce() -> T) -> T {
+        let outer = self.uses_real.take();
+        let lowered = lower();
+        self.uses_real.borrow_mut().extend(&outer);
+        lowered
     }
 
     /// The type of the type variable `var` of a real generic.
@@ -268,20 +381,49 @@ impl<'t> Lowering<'t> {
 
     /// Records that a real generic cannot stay one; lowering goes on, and is run again.
     pub(super) fn fail(&self, owner: Owner) {
-        let mut failed = self.failed.borrow_mut();
-        match owner {
-            Owner::Class(t) => failed.classes.insert(t),
-            Owner::Method(m) => failed.methods.insert(m),
-        };
+        self.failed.borrow_mut().insert(owner);
     }
 
     /// The real generic whose type variable `ty` is, if it is one.
     pub(super) fn param_owner(&self, ty: Type) -> Option<Owner> {
+        let owner = self.variable_owner(ty);
+        if let Some(owner) = owner {
+            self.uses_real.borrow_mut().insert(owner);
+        }
+        owner
+    }
+
+    /// `param_owner`, without noting that the code being lowered uses the generic.
+    fn variable_owner(&self, ty: Type) -> Option<Owner> {
         let Type::Class(name, _) = ty else { return None };
         let (owner, _) = name.rsplit_once('#')?;
         match owner.strip_prefix('@') {
             Some(m) => m.parse().ok().map(Owner::Method),
             None => self.type_index(owner).map(Owner::Class),
+        }
+    }
+
+    /// Type `ty` as the next lowering has it, once the Rust generics `failed` are erased: their
+    /// type variables (which have no bounds) are `Object`, and their classes have no type
+    /// arguments (`MemoryModuleType<GlobalPos>[]` is `MemoryModuleType[]`).
+    pub(super) fn without_failed(&self, ty: Type, failed: &Real) -> Type {
+        let fails = |owner: Owner| match owner {
+            Owner::Class(t) => failed.classes.contains(&t),
+            Owner::Method(m) => failed.methods.contains(&m),
+        };
+        match ty {
+            Type::Array(element) => Type::array(self.without_failed(*element, failed)),
+            Type::Class(name, args) => match self.variable_owner(ty) {
+                Some(owner) if fails(owner) => Type::class(OBJECT),
+                Some(_) => ty,
+                None if args.is_empty() => ty,
+                None if self.type_index(name).is_some_and(|t| fails(Owner::Class(t))) => Type::class(name),
+                None => {
+                    let args: Vec<Type> = args.iter().map(|&a| self.without_failed(a, failed)).collect();
+                    Type::generic(name, &args)
+                }
+            },
+            _ => ty,
         }
     }
 
@@ -304,7 +446,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// Records that the real generics `ty` mentions cannot stay ones.
-    fn fail_all_of(&self, ty: Type) {
+    pub(super) fn fail_all_of(&self, ty: Type) {
         let mut owners = Vec::new();
         self.owners_in(ty, &mut owners);
         owners.into_iter().for_each(|o| self.fail(o));
@@ -321,9 +463,23 @@ impl<'t> Lowering<'t> {
     }
 
     /// Checks what the lowered program does with the values of each real generic (see the
-    /// module's comment), and returns those that cannot stay Rust generics.
+    /// module's comment), and returns those that cannot stay Rust generics. The type variables
+    /// of those that fail are erased the next time, to `Object`, and a value of another's that
+    /// goes to or comes from one then is converted, which fails that one too: the check is run
+    /// again with them as erased until no more fail, so that the next lowering finds no more.
     pub(super) fn verify(&self, types: &[TypeDecl], methods: &[Method]) -> Real {
-        let check = Check { lowering: self, methods };
+        loop {
+            let erased = self.failed.borrow().clone();
+            self.check(&Check { lowering: self, methods, types, erased: &erased });
+            if *self.failed.borrow() == erased {
+                return erased;
+            }
+        }
+    }
+
+    /// One run of `verify`'s check.
+    fn check(&self, check: &Check) {
+        let (types, methods) = (check.types, check.methods);
         for decl in types {
             // A Rust struct must use each type parameter in a field other than one of its own
             // type (`next: TableStack<K, V>`): a field whose class was erased uses none.
@@ -353,7 +509,6 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
-        self.failed.borrow().clone()
     }
 }
 
@@ -379,13 +534,16 @@ fn mentions_outside(ty: Type, p: Type, own: &str) -> bool {
 }
 
 /// Whether javac's type string `ty` mentions the type variable `name`.
-fn mentions_var(ty: &str, name: &str) -> bool {
+pub(super) fn mentions_var(ty: &str, name: &str) -> bool {
     ty.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.')).any(|w| w == name)
 }
 
 struct Check<'l, 't> {
     lowering: &'l Lowering<'t>,
     methods: &'l [Method],
+    types: &'l [TypeDecl],
+    /// The real generics that failed before this run, whose type variables are erased.
+    erased: &'l Real,
 }
 
 impl Check<'_, '_> {
@@ -414,9 +572,45 @@ impl Check<'_, '_> {
         }
     }
 
-    /// Whether `ty` is a bare type variable of a real generic.
+    /// Whether `ty` is a bare type variable of a real generic that is not erased.
     fn is_param(&self, ty: Type) -> bool {
-        self.lowering.param_owner(ty).is_some()
+        self.lowering.param_owner(ty).is_some_and(|o| !self.is_erased(o))
+    }
+
+    fn is_erased(&self, owner: Owner) -> bool {
+        match owner {
+            Owner::Class(t) => self.erased.classes.contains(&t),
+            Owner::Method(m) => self.erased.methods.contains(&m),
+        }
+    }
+
+    /// Whether type `ty` mentions an erased type variable.
+    fn mentions_erased(&self, ty: Type) -> bool {
+        match ty {
+            Type::Array(element) => self.mentions_erased(*element),
+            Type::Class(_, args) => {
+                self.lowering.param_owner(ty).is_some_and(|o| self.is_erased(o))
+                    || args.iter().any(|&a| self.mentions_erased(a))
+            }
+            _ => false,
+        }
+    }
+
+    /// A value `e` that javac's substitution gives a type of a real generic's type variable,
+    /// read from where the type is `declared`: where that mentions an erased one, the value is
+    /// cast back from `Object`.
+    fn read(&self, e: &Expr, declared: Type) {
+        if self.mentions_erased(declared) && self.lowering.has_param(e.ty) && !self.mentions_erased(e.ty) {
+            self.fail_all(e.ty);
+        }
+    }
+
+    /// The declared type of field `name` of the class of `object`, if it is one of the program's.
+    fn field_type(&self, object: &Expr, name: &str) -> Option<Type> {
+        let Type::Class(class, _) = object.ty else { return None };
+        let t = self.lowering.type_index(class)?;
+        let decl = self.types.get(t).filter(|d| d.name == class)?;
+        decl.fields.iter().find(|f| f.name == name).map(|f| f.ty)
     }
 
     /// A value stored where a value of type `to` goes.
@@ -471,7 +665,14 @@ impl Check<'_, '_> {
                 self.fail_all(value.ty);
                 self.fail_all(*ty);
             }
-            ExprKind::Assign { op: None, value, .. } => self.store(value, e.ty),
+            ExprKind::Assign { op: None, target, value } => {
+                self.store(value, e.ty);
+                if let Place::Field { object, name } = target
+                    && let Some(declared) = self.field_type(object, name)
+                {
+                    self.store(value, declared);
+                }
+            }
             ExprKind::Assign { value, .. } => self.store(value, Type::Void),
             ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r)
                 if (param(l) && r.ty == Type::Null) || (param(r) && l.ty == Type::Null) => {}
@@ -487,7 +688,12 @@ impl Check<'_, '_> {
             ExprKind::Call { args, resolved, .. }
             | ExprKind::New { args, ctor: resolved, .. }
             | ExprKind::ThisCall { args, resolved }
-            | ExprKind::SuperInit { args, resolved } => self.args(args, *resolved),
+            | ExprKind::SuperInit { args, resolved } => {
+                self.args(args, *resolved);
+                if let Some(m) = resolved.and_then(|r| self.methods.get(r)) {
+                    self.read(e, m.ret);
+                }
+            }
             ExprKind::MethodCall { receiver, args, resolved, .. } => {
                 self.store(receiver, Type::Void);
                 // A method that a real generic class inherits (`Object`'s `equals`, say) sees its
@@ -500,9 +706,17 @@ impl Check<'_, '_> {
                     self.lowering.fail(Owner::Class(t));
                 }
                 self.args(args, *resolved);
+                if let Some(m) = resolved.and_then(|r| self.methods.get(r)) {
+                    self.read(e, m.ret);
+                }
             }
             ExprKind::Unary(_, x) | ExprKind::Length(x) => self.store(x, Type::Void),
-            ExprKind::Field { object, .. } => self.store(object, Type::Void),
+            ExprKind::Field { object, name } => {
+                self.store(object, Type::Void);
+                if let Some(declared) = self.field_type(object, name) {
+                    self.read(e, declared);
+                }
+            }
             ExprKind::Index(a, i) => {
                 self.store(a, Type::Void);
                 self.store(i, Type::Int);

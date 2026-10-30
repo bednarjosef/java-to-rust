@@ -66,9 +66,16 @@ const OPTIONAL: &str = "java.util.Optional";
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
 
+/// The most classes that a `match` on the class number is written whole for (`match_arms_or`).
+const CUT_ABOVE: usize = 2048;
+
+/// The most runs of class numbers that an arm of a `match` on the class number is written with,
+/// where it could be the match's last arm, `_`, instead (`tag_match`).
+const LAST_ARM_RUNS: usize = 4;
+
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
-const PART_CLASSES: usize = 2048;
+const PART_CLASSES: usize = 256;
 
 /// A method that `match_arms_or` writes the `match` of: its name, its parameters after `&self`
 /// (`, f: &mut fmt::Formatter`), their names (`f`) and its return type (` -> fmt::Result`).
@@ -277,13 +284,34 @@ impl<'a> Gen<'a> {
 
     /// The concrete classes whose objects the enum of type `t` holds, in `Class::types` order.
     pub(super) fn enum_variants(&self, t: usize) -> Vec<usize> {
+        self.shared_enum_variants(t).to_vec()
+    }
+
+    /// Whether class `c` is one of `enum_variants(t)`.
+    pub(super) fn is_enum_variant(&self, t: usize, c: usize) -> bool {
+        let variants = self.shared_enum_variants(t);
+        if variants.len() < 16 {
+            return variants.contains(&c);
+        }
+        let set = self.enum_variant_sets.borrow().get(&t).cloned();
+        let set = set.unwrap_or_else(|| {
+            let set = std::rc::Rc::new(variants.iter().copied().collect::<HashSet<usize>>());
+            self.enum_variant_sets.borrow_mut().insert(t, set.clone());
+            set
+        });
+        set.contains(&c)
+    }
+
+    /// `enum_variants`, shared with the list kept.
+    pub(super) fn shared_enum_variants(&self, t: usize) -> std::rc::Rc<[usize]> {
+        self.variant_types.borrow_mut().insert(t);
         if let Some(found) = self.enum_variant_lists.borrow().get(&t) {
-            return found.to_vec();
+            return found.clone();
         }
         // An enum's constants exist without `new`.
-        let found: Vec<usize> =
+        let found: std::rc::Rc<[usize]> =
             self.variants(t).iter().copied().filter(|&c| self.live[c] || self.holds_value(c)).collect();
-        self.enum_variant_lists.borrow_mut().insert(t, found.clone().into());
+        self.enum_variant_lists.borrow_mut().insert(t, found.clone());
         found
     }
 
@@ -508,7 +536,7 @@ impl<'a> Gen<'a> {
 
     fn in_package_name(&self, c: usize) -> String {
         let (element, arrays) = self.element_name(c);
-        modules::split(element).1.replace(['.', '$'], "") + &arrays
+        modules::name_in_package(element).replace(['.', '$'], "") + &arrays
     }
 
     fn full_variant_name(&self, c: usize) -> String {
@@ -530,7 +558,7 @@ impl<'a> Gen<'a> {
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
     /// `c` is ever created, where code that has one never runs.
     pub(super) fn variant_of(&self, t: usize, c: usize) -> Option<String> {
-        self.enum_variants(t).contains(&c).then(|| self.variant(t, c))
+        self.is_enum_variant(t, c).then(|| self.variant(t, c))
     }
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
@@ -695,9 +723,23 @@ impl<'a> Gen<'a> {
         holds_class
     }
 
-    /// The variants of the enum of `s` whose objects are of type `t`.
-    fn passing(&self, s: usize, t: usize) -> Vec<usize> {
-        self.enum_variants(s).into_iter().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect()
+    /// The variants of the enum of `s` whose objects are of type `t`, found once for each pair: a
+    /// cast from `Object` to each class goes over every class.
+    fn passing(&self, s: usize, t: usize) -> std::rc::Rc<[usize]> {
+        if let Some(found) = self.passing_lists.borrow().get(&(s, t)) {
+            self.variant_types.borrow_mut().insert(s);
+            return found.clone();
+        }
+        // Both lists are in index order: the variants are concrete classes.
+        let variants = self.shared_enum_variants(s);
+        let under = self.class.hierarchy.concretes_of(t);
+        let found: std::rc::Rc<[usize]> = if under.len() < variants.len() {
+            under.iter().copied().filter(|&c| self.is_enum_variant(s, c)).collect()
+        } else {
+            variants.iter().copied().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect()
+        };
+        self.passing_lists.borrow_mut().insert((s, t), found.clone());
+        found
     }
 
     /// The text of the value of `value` for a method to be called on it in a condition: a local
@@ -1134,7 +1176,7 @@ impl<'a> Gen<'a> {
                 for &source in widening_sources(element) {
                     let boxed = Type::boxed(source);
                     let Some(c) = self.class.type_of(boxed) else { continue };
-                    let Some(o) = object.filter(|&o| self.enum_variants(o).contains(&c)) else { continue };
+                    let Some(o) = object.filter(|&o| self.is_enum_variant(o, c)) else { continue };
                     let source_variant = self.view_pattern(o, c);
                     let read = if self.faithful_box(boxed) { "**b" } else { "*b" };
                     let read = if source == element {
@@ -1224,9 +1266,15 @@ impl<'a> Gen<'a> {
     /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
     /// module, `("Main$Dog", java::APP)`.
     pub(super) fn cast_class(&mut self, c: usize) -> String {
+        if let Some(found) = self.cast_classes.get(&c) {
+            self.uses_runtime |= found.contains("java::");
+            return found.clone();
+        }
         let name = rust_string(&self.binary_name(c));
         let module = self.cast_module(c);
-        format!("({name}, {module})")
+        let found = format!("({name}, {module})");
+        self.cast_classes.insert(c, found.clone());
+        found
     }
 
     /// The module and class loader of class `c` as HotSpot names them with the class: the JDK's
@@ -1426,6 +1474,14 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `as_enum`, as the value that a function of the enum's module takes (`thin_receiver`).
+    pub(super) fn thin_as_enum(&mut self, t: usize, e: &'a Expr) -> String {
+        match self.enum_of(e) {
+            Some(s) if s == t => self.thin_receiver(t, e),
+            _ => self.as_enum(t, e),
+        }
+    }
+
     /// A conversion of an object to a supertype: the same object as a value of the supertype's
     /// enum. Where both types have the same representation it changes nothing.
     pub(super) fn class_cast(&mut self, to: Type, value: &'a Expr) -> Code {
@@ -1612,9 +1668,9 @@ impl<'a> Gen<'a> {
             }
             _ => self.dispatch_name(t, resolved),
         };
-        let obj = self.object(receiver);
+        let obj = self.thin_receiver(t, receiver);
         let args = self.call_args(resolved, args).join(", ");
-        Code::atom(format!("{obj}.{name}({args})"))
+        Code::atom(self.enum_fn_call(t, &name, &obj, &args))
     }
 
     /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
@@ -1624,9 +1680,9 @@ impl<'a> Gen<'a> {
     /// call the compiler can inline.
     fn among(&self, t: usize, receiver: &Expr) -> Option<u64> {
         let set = self.class.receivers.get(&receiver.id)?;
-        let variants = self.enum_variants(t);
-        let among = set.iter().filter(|c| variants.contains(c)).count();
-        (among > 0 && among <= AMONG_MOST && among < variants.len()).then(|| receiver_key(set))
+        let among = set.iter().filter(|&&c| self.is_enum_variant(t, c)).count();
+        (among > 0 && among <= AMONG_MOST && among < self.shared_enum_variants(t).len())
+            .then(|| receiver_key(set))
     }
 
     /// The implementations that the variants of the enum of `t` run for a call of `resolved`.
@@ -1655,6 +1711,56 @@ impl<'a> Gen<'a> {
         let group = self.class.hierarchy.group_id(resolved);
         self.need(Need::Dispatch(t, group));
         self.group_names[&group].clone()
+    }
+
+    /// Whether method `index` is a function of the module of a type's enum rather than a method
+    /// of its `impl`: a method emitted on the enum of a type that is not a closure type, whose
+    /// methods are those of a trait of the closure (`closure_trait`). It is named after the enum
+    /// and the method, `Shape__area` (`enum_fn`), and takes the enum's value itself, which is
+    /// `Copy`: `this: Shape`. A split's header crate declares such a function alone, where a
+    /// method whose code moves keeps a function that calls the declaration (`split.rs`).
+    pub(super) fn thin_fn(&self, index: usize) -> bool {
+        matches!(self.homes[index], Home::Enum(t) if !self.facts.closure_types.contains(&t))
+            && !self.class.methods[index].is_ctor
+    }
+
+    /// The name of the function `name` of the module of the enum of `t`: `Shape__area`.
+    pub(super) fn enum_fn(&self, t: usize, name: &str) -> String {
+        format!("{}__{name}", struct_name(&self.class.types[t].name))
+    }
+
+    /// `this` as the value that a function of an enum's module takes: `this` in such a function,
+    /// `*self` in a method of the enum's `impl` or one of its traits, which borrows it.
+    pub(super) fn this_value(&self) -> &'static str {
+        if self.thin_this { "this" } else { "*self" }
+    }
+
+    /// The receiver of the code of the enum being written, as a method call's receiver: `this`
+    /// in a function of the enum's module, else `self`.
+    fn me(&self) -> &'static str {
+        if self.thin_this { "this" } else { "self" }
+    }
+
+    /// The receiver `e`, a value of the enum of `t`, as the value that a function of the enum's
+    /// module takes (`thin_fn`): `this`, a variable, or else the enum's struct of the receiver's
+    /// bits, `Shape(r.0)`, which reads the same whether `r` is the value or a reference to it.
+    pub(super) fn thin_receiver(&mut self, t: usize, e: &'a Expr) -> String {
+        let peeled = self.peel(e);
+        match &peeled.kind {
+            ExprKind::This => return self.this_value().to_string(),
+            ExprKind::Var(name) if !self.borrowed.contains(name) && !self.nullable(peeled) => {
+                return self.object(e);
+            }
+            _ => {}
+        }
+        let obj = self.object(e);
+        format!("{}({obj}.0)", struct_name(&self.class.types[t].name))
+    }
+
+    /// A call of function `name` of the module of the enum of `t` on `obj`, the value it takes.
+    pub(super) fn enum_fn_call(&self, t: usize, name: &str, obj: &str, args: &str) -> String {
+        let all = if args.is_empty() { obj.to_string() } else { format!("{obj}, {args}") };
+        format!("{}({all})", self.enum_fn(t, name))
     }
 
     /// The body that a call of `resolved` on the enum of `t` calls directly, when it calls no
@@ -1703,9 +1809,9 @@ impl<'a> Gen<'a> {
         match self.homes[index] {
             Home::Enum(d) => {
                 self.need(Need::Body(index));
-                let obj = self.as_enum(d, receiver);
+                let obj = self.thin_as_enum(d, receiver);
                 let args = self.call_args(index, args).join(", ");
-                Some(Code::atom(format!("{obj}.{}({args})", self.fn_names[index])))
+                Some(Code::atom(self.enum_fn_call(d, &self.fn_names[index], &obj, &args)))
             }
             Home::Fields(d) => {
                 let t = self.enum_of(receiver)?;
@@ -1762,7 +1868,7 @@ impl<'a> Gen<'a> {
         self.need(Need::Display(t));
         if self.enum_text_throws(t) {
             // A `toString` that throws is called, through `try_text`.
-            return self.passed_on(Code::atom(format!("{obj}.try_text()")));
+            return self.passed_on_thrown(Code::atom(format!("{obj}.try_text()")));
         }
         self.need(Need::JavaString(t));
         if self.lazy_text && !self.printing { obj } else { format!("{obj}.java_string()") }
@@ -1837,18 +1943,28 @@ impl<'a> Gen<'a> {
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
         let start = self.out.len();
+        // The dispatchers and bodies are functions of the module (`thin_fn`), written after the
+        // `impl`.
+        let mut functions = String::new();
         for need in &wanted {
+            let at = self.out.len();
+            self.indent -= 1;
             match *need {
-                Need::Base(_) => self.base_fn(t, false),
-                Need::BaseMut(_) => self.base_fn(t, true),
-                Need::Convert(_, to) => self.convert_fn(to),
-                Need::Narrow(_, to) => self.narrow_fn(t, to),
                 Need::Dispatch(_, group) => self.dispatcher(t, group, None),
                 Need::Among(_, group, key) => self.dispatcher(t, group, Some(key)),
                 Need::Body(i) => {
                     self.gap();
                     self.method(i);
                 }
+                _ => {}
+            }
+            self.indent += 1;
+            functions.push_str(&self.out.split_off(at));
+            match *need {
+                Need::Base(_) => self.base_fn(t, false),
+                Need::BaseMut(_) => self.base_fn(t, true),
+                Need::Convert(_, to) => self.convert_fn(to),
+                Need::Narrow(_, to) => self.narrow_fn(t, to),
                 _ => {}
             }
         }
@@ -1858,6 +1974,7 @@ impl<'a> Gen<'a> {
         } else {
             self.line("}");
         }
+        self.out.push_str(&functions);
         if all {
             self.identity_impl(t, &variants);
             self.same_object_impl(t, &variants);
@@ -1939,7 +2056,7 @@ impl<'a> Gen<'a> {
         arm: &dyn Fn(&mut Self, usize) -> (String, bool),
     ) {
         if variants.is_empty() {
-            self.line("match self.view() {}");
+            self.line(&format!("match {}.view() {{}}", self.me()));
             return;
         }
         let arms: Vec<(usize, String, bool)> = variants
@@ -1956,23 +2073,26 @@ impl<'a> Gen<'a> {
         }
         // A `match` over the classes of a whole program (`Object`'s enum has a variant for every
         // class it makes, the Minecraft server's some 20 000) is one function that rustc holds
-        // whole, past 20 GB: it is cut by class number into methods of `PART_CLASSES` numbers
-        // each, which the method's `match` on the number's high bits calls, and which the split
-        // of a program into crates (`split.rs`) spreads over the body crates.
-        if variants.len() > PART_CLASSES
+        // whole, past 20 GB: one over more than `CUT_ABOVE` classes is cut by class number into
+        // methods of `PART_CLASSES` numbers each, which the method's `match` on the number's high
+        // bits calls, and which the split of a program into crates (`split.rs`) spreads over the
+        // body crates. The parts are small, as LLVM's time grows faster than a function's size;
+        // a `match` of fewer classes is not cut, so that its call costs one jump, not two.
+        if variants.len() > CUT_ABOVE
             && let Some(method) = self.arms_method.clone()
         {
             let mut parts: BTreeMap<u16, Vec<(usize, String, bool)>> = BTreeMap::new();
             for arm in arms {
                 parts.entry(self.class_tag(arm.0) / PART_CLASSES as u16).or_default().push(arm);
             }
-            self.line(&format!("match self.0.tag() / {PART_CLASSES} {{"));
+            let me = self.me();
+            self.line(&format!("match {me}.0.tag() / {PART_CLASSES} {{"));
             for part in parts.keys() {
-                self.line(&format!("    {part} => self.{}_of_part_{part}({}),", method.name, method.args));
+                self.line(&format!("    {part} => {me}.{}_of_part_{part}({}),", method.name, method.args));
             }
             match &otherwise {
                 Some(text) => self.line(&format!("    _ => {text},")),
-                None => self.line("    _ => java::bad_tag(self.0.tag()),"),
+                None => self.line(&format!("    _ => java::bad_tag({me}.0.tag()),")),
             }
             self.line("}");
             let (out, indent) = (std::mem::take(&mut self.out), self.indent);
@@ -2000,7 +2120,8 @@ impl<'a> Gen<'a> {
     fn tag_match(&mut self, variants: &[usize], arms: Vec<(usize, String, bool)>, otherwise: Option<String>) {
         // A match on the class number, whose arm lends the object where it lies, as `view()`
         // does: one jump to the class's code rather than one to the view and one to the code.
-        self.line("match self.0.tag() {");
+        let me = self.me();
+        self.line(&format!("match {me}.0.tag() {{"));
         self.indent += 1;
         // An arm that does not read the object is written once for every class that runs its
         // text, where the first of them is.
@@ -2014,7 +2135,7 @@ impl<'a> Gen<'a> {
                 let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
                 // The class number is the one its constructor gives.
                 lines.push(Ok(format!(
-                    "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; {text} }}"
+                    "{tag} => {{ let o: &{payload} = unsafe {{ {me}.0.{lend}() }}; {text} }}"
                 )));
             } else if let Some(&i) = index.get(&text) {
                 alike[i].1.push(c);
@@ -2024,18 +2145,28 @@ impl<'a> Gen<'a> {
                 alike.push((text, vec![c]));
             }
         }
+        let patterns: Vec<String> = alike.iter().map(|(_, classes)| self.tags(classes, variants)).collect();
+        // The arm of the most runs of class numbers, where the match has no other: rustc tests a
+        // pattern's runs one by one before the `match` on the numbers of the other arms, and the
+        // Minecraft server's `Object::hash_code` spent its time in the 3 750 runs of the classes
+        // whose hash is their address. As the match's last arm, `_`, it costs nothing: no value has
+        // a number that no variant has.
+        let runs = |pattern: &String| pattern.matches(" | ").count() + 1;
+        let last = (0..alike.len())
+            .filter(|_| otherwise.is_none())
+            .max_by_key(|&i| (runs(&patterns[i]), std::cmp::Reverse(i)))
+            .filter(|&i| runs(&patterns[i]) > LAST_ARM_RUNS);
         for line in lines {
             match line {
                 Ok(line) => self.line(&line),
-                Err(i) => {
-                    let tags = self.tags(&alike[i].1, variants);
-                    self.line(&format!("{tags} => {},", alike[i].0));
-                }
+                Err(i) if Some(i) == last => {}
+                Err(i) => self.line(&format!("{} => {},", patterns[i], alike[i].0)),
             }
         }
-        match otherwise {
-            Some(text) => self.line(&format!("_ => {text},")),
-            None => self.line("tag => java::bad_tag(tag),"),
+        match (otherwise, last) {
+            (Some(text), _) => self.line(&format!("_ => {text},")),
+            (None, Some(i)) => self.line(&format!("_ => {},", alike[i].0)),
+            (None, None) => self.line("tag => java::bad_tag(tag),"),
         }
         self.indent -= 1;
         self.line("}");
@@ -2054,17 +2185,14 @@ impl<'a> Gen<'a> {
         let vis = self.vis();
         // The borrows of a `java::Locked` are the runtime's.
         let java = if self.facts.thread_shared.contains(&root) { "java::" } else { "" };
-        self.line(&match (mutable, immutable) {
-            (false, true) => format!("{vis}fn base(&self) -> &{structure} {{"),
-            (false, false) => format!("{vis}fn base(&self) -> {java}Ref<'_, {structure}> {{"),
-            _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
-        });
-        self.indent += 1;
-        if immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c)) {
-            // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the
-            // root's fields struct is at the start of every object, which is a `java::Monitored`
-            // only around it, fields first: one read, whatever the class. rustc checks the offsets.
-            let checks: Vec<String> = variants
+        let prefix = immutable && !variants.is_empty() && variants.iter().all(|&c| self.object_variant(c));
+        // Each variant's struct is `#[repr(C)]` with its `base` first (`type_items`), so the root's
+        // fields struct is at the start of every object, which is a `java::Monitored` only around
+        // it, fields first: one read, whatever the class. rustc checks the offsets in a constant
+        // of their own, which keeps `base()` small enough for a program split into crates to keep
+        // it in the header, inlined where it is called (`split.rs`, `small`).
+        let checks: Vec<String> = if prefix {
+            variants
                 .iter()
                 .filter_map(|&c| {
                     let path = hierarchy::base_path(self.facts, self.class, c, root);
@@ -2073,13 +2201,27 @@ impl<'a> Gen<'a> {
                     (!path.is_empty())
                         .then(|| format!("assert!(std::mem::offset_of!({object}, {path}) == 0);"))
                 })
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !checks.is_empty() {
+            self.line("const BASE_AT_START: () = {");
+            for check in &checks {
+                self.line(&format!("    {check}"));
+            }
+            self.line("};");
+            self.gap();
+        }
+        self.line(&match (mutable, immutable) {
+            (false, true) => format!("{vis}fn base(&self) -> &{structure} {{"),
+            (false, false) => format!("{vis}fn base(&self) -> {java}Ref<'_, {structure}> {{"),
+            _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
+        });
+        self.indent += 1;
+        if prefix {
             if !checks.is_empty() {
-                self.line("const {");
-                for check in checks {
-                    self.line(&format!("    {check}"));
-                }
-                self.line("}");
+                self.line("let () = Self::BASE_AT_START;");
             }
             self.line("// Every variant is an object that starts with the fields struct (above).");
             self.line("unsafe { self.0.as_prefix() }");
@@ -2140,14 +2282,21 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
         } else {
-            self.line("match self.view() {");
+            // A test of the class number, which lends the object where it lies: `view()` would
+            // be a call and a `match` over every class of the type (an `Object`'s, thousands)
+            // for the one or few that pass.
+            self.line("match self.0.tag() {");
             self.indent += 1;
-            for &c in &passing {
-                self.line(&format!("{}(o) => Some({}),", self.view_pattern(t, c), self.held(c)));
+            for &c in passing.iter() {
+                let payload = self.payload(c);
+                let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
+                let (tag, held) = (self.class_tag(c), self.held(c));
+                // The class number is the one its constructor gives.
+                self.line(&format!(
+                    "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; Some({held}) }}"
+                ));
             }
-            if passing.len() < variants.len() {
-                self.line("_ => None,");
-            }
+            self.line("_ => None,");
             self.indent -= 1;
             self.line("}");
         }
@@ -2201,20 +2350,38 @@ impl<'a> Gen<'a> {
             self.line("#[inline]");
         }
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
-        self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
+        let ty = struct_name(&self.class.types[t].name);
+        self.line(&format!("{}fn {}(this: {ty}{all}){ret} {{", self.vis(), self.enum_fn(t, &name)));
         self.indent += 1;
+        let outer = std::mem::replace(&mut self.thin_this, true);
+        self.dispatcher_body(t, r, among, &variants, &args, &general);
+        self.thin_this = outer;
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The code of the dispatcher of `dispatcher`, for method `r` and among the `variants` it
+    /// passes on to, whose parameters are `args`; one that dispatches `among` some classes runs
+    /// the whole one, `general`, for any other.
+    fn dispatcher_body(
+        &mut self,
+        t: usize,
+        r: usize,
+        among: Option<u64>,
+        variants: &[usize],
+        args: &str,
+        general: &str,
+    ) {
         // Every object of the enum runs the call that `fields_call` writes, which an object
         // outside the classes of `among` would not.
         if among.is_none()
-            && let Some(call) = self.fields_call(t, r, &variants, &args)
+            && let Some(call) = self.fields_call(t, r, variants, args)
         {
             self.line(&call);
-            self.indent -= 1;
-            self.line("}");
             return;
         }
-        let otherwise = among.map(|_| format!("self.{general}({args})"));
-        self.match_arms_or(&variants, otherwise, &|g: &mut Self, c| match g
+        let otherwise = among.map(|_| self.enum_fn_call(t, general, "this", args));
+        self.match_arms_or(variants, otherwise, &|g: &mut Self, c| match g
             .class
             .hierarchy
             .implementation(r, c)
@@ -2225,7 +2392,7 @@ impl<'a> Gen<'a> {
                 (g.class_answer_arm(r), true)
             }
             Some(i) => {
-                let (text, uses) = g.arm_call(t, c, i, &args);
+                let (text, uses) = g.arm_call(t, c, i, args);
                 (g.covariant_ret(i, r, text), uses)
             }
             // `Object`'s identity, the same text for every class it reads the address of.
@@ -2238,13 +2405,11 @@ impl<'a> Gen<'a> {
             None if g.facts.throwing.contains(&r) => (format!("Ok({})", g.builtin_arm(r, c)), true),
             None => (g.builtin_arm(r, c), true),
         });
-        self.indent -= 1;
-        self.line("}");
     }
 
     /// The call of method `r` on the enum of `t` when every variant runs one body emitted on a
     /// fields struct at or above the one `base()` lends, and `base()` reads that with no `match`
-    /// (`base_fn`): `self.base().base.get_name()`, one call whatever the object's class.
+    /// (`base_fn`): `this.base().base.get_name()`, one call whatever the object's class.
     fn fields_call(&mut self, t: usize, r: usize, variants: &[usize], args: &str) -> Option<String> {
         let h = &self.class.hierarchy;
         let i = h.implementation(r, *variants.first()?)?;
@@ -2258,7 +2423,7 @@ impl<'a> Gen<'a> {
         }
         self.need(Need::Base(t));
         let path = hierarchy::base_path(self.facts, self.class, root, d);
-        let call = format!("self.base().{path}{}({args})", self.fn_names[i]);
+        let call = format!("this.base().{path}{}({args})", self.fn_names[i]);
         Some(self.covariant_ret(i, r, call))
     }
 
@@ -2329,7 +2494,7 @@ impl<'a> Gen<'a> {
             let name = runtime_name(runtime).unwrap_or("value");
             return reject(self, &format!("a `{name}` held as a `{owner}`"));
         }
-        let object = self.object_index().filter(|&t| self.enum_variants(t).contains(&c));
+        let object = self.object_index().filter(|&t| self.is_enum_variant(t, c));
         let Some(object) = object else {
             return reject(self, "a string or a box where no `Object` is one");
         };
@@ -2462,8 +2627,7 @@ impl<'a> Gen<'a> {
             (false, _) => text,
         };
         let char_sequence = method.class;
-        let string =
-            self.class.type_of(Type::String).filter(|&s| self.enum_variants(char_sequence).contains(&s));
+        let string = self.class.type_of(Type::String).filter(|&s| self.is_enum_variant(char_sequence, s));
         let Some(string) = string else {
             let message = "`subSequence` of a builder held as a `CharSequence` where no string is one not supported yet";
             self.rejected.push(Error { pos: method.pos, message: message.to_string() });
@@ -2624,7 +2788,7 @@ impl<'a> Gen<'a> {
             format!("{}.view()", operand(&place))
         };
         let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
-        if !optional && self.enum_variants(e).len() == 1 {
+        if !optional && self.shared_enum_variants(e).len() == 1 {
             return format!("{{ let {pattern} = {viewed}; {compare} }}");
         }
         // Any other object fails the cast to `c` that `compareTo` makes; null fails first.
@@ -2685,17 +2849,23 @@ impl<'a> Gen<'a> {
         self.equals_test(c, &place, optional, same)
     }
 
+    /// Whether the identity of an object of class `c` is the address of its handle (`address`),
+    /// which the bits of a value that holds it hold too (`java::Thin::address`).
+    fn identity_by_address(&self, c: usize) -> bool {
+        let name = &self.class.types[c].name;
+        self.runtime_of(c).is_none()
+            && self.thin_pointer(c)
+            && self.class.shared_of(c).is_none()
+            && !self.facts.owned.contains(name)
+            && (self.facts.immutable.contains(name) || self.celled(name))
+    }
+
     /// `Object`'s `equals` or `hashCode` (method `r`) for an object of class `c` that overrides
     /// neither and whose identity is the address of its handle (`address`), which its value's
     /// bits hold (`java::Thin::address`): read from those bits, so the text is the same for every
     /// such class and their arms are one (`match_arms_or`). `Object`'s own values are `Thin`s.
     fn identity_arm(&mut self, r: usize, c: usize) -> Option<String> {
-        let name = &self.class.types[c].name;
-        let by_address = self.runtime_of(c).is_none()
-            && self.thin_pointer(c)
-            && self.class.shared_of(c).is_none()
-            && !self.facts.owned.contains(name)
-            && (self.facts.immutable.contains(name) || self.celled(name));
+        let by_address = self.identity_by_address(c);
         let object = self.object_index()?;
         if !by_address
             || self.enum_for(object).is_none()
@@ -2705,15 +2875,16 @@ impl<'a> Gen<'a> {
         }
         let m = &self.class.methods[r];
         if m.name == "hashCode" {
-            return Some(format!("{}(self.0.address())", self.runtime("address_hash")));
+            return Some(format!("{}({}.0.address())", self.runtime("address_hash"), self.me()));
         }
         let p = &m.params[0];
         let other = self.local(&p.name);
         let optional = self.optional_var(r, p.ty, &p.name);
         let place = if self.lends(r) { other } else { format!("&{other}") };
+        let me = self.me();
         Some(match optional {
-            true => format!("{}.as_ref().is_some_and(|b| b.0 == self.0)", operand(&place)),
-            false => format!("{}.0 == self.0", operand(&place)),
+            true => format!("{}.as_ref().is_some_and(|b| b.0 == {me}.0)", operand(&place)),
+            false => format!("{}.0 == {me}.0", operand(&place)),
         })
     }
 
@@ -2732,7 +2903,7 @@ impl<'a> Gen<'a> {
                 format!("{{ let b = {place}; {same} }}")
             };
         };
-        if !self.enum_variants(e).contains(&c) {
+        if !self.is_enum_variant(e, c) {
             return "false".to_string();
         }
         let variant = self.view_pattern(e, c);
@@ -2820,7 +2991,7 @@ impl<'a> Gen<'a> {
         self.need(Need::Display(t));
         let obj = self.object(receiver);
         if self.enum_text_throws(t) {
-            return Code::atom(self.passed_on(Code::atom(format!("{obj}.try_text()"))));
+            return Code::atom(self.passed_on_thrown(Code::atom(format!("{obj}.try_text()"))));
         }
         self.need(Need::JavaString(t));
         Code::atom(format!("{obj}.java_string()"))
@@ -2927,13 +3098,15 @@ impl<'a> Gen<'a> {
             Home::Enum(d) => {
                 self.need(Need::Body(i));
                 if d == t {
-                    (format!("self.{name}({args})"), false)
+                    (self.enum_fn_call(d, &name, self.this_value(), args), false)
                 } else if !self.class.hierarchy.is_subtype(t, d) {
                     // A body inherited from a type below `t`: the object as a value of that type.
-                    (format!("{}({}).{name}({args})", self.variant(d, c), self.held(c)), true)
+                    let obj = format!("{}({})", self.variant(d, c), self.held(c));
+                    (self.enum_fn_call(d, &name, &obj, args), true)
                 } else {
                     self.need(Need::Convert(t, d));
-                    (format!("self.{}().{name}({args})", self.to_name(d)), false)
+                    let obj = format!("{}.{}()", self.me(), self.to_name(d));
+                    (self.enum_fn_call(d, &name, &obj, args), false)
                 }
             }
             Home::Free | Home::Nowhere => {
@@ -3007,6 +3180,22 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether two values of class `c`'s variant are the same object exactly when their bits are
+    /// (`same_object_impl`): a handle compared by identity, or an enum's constant, a `Boolean` or
+    /// a `Byte` held in the low bytes, as `same_variant` compares them with `==`.
+    fn same_by_bits(&mut self, c: usize) -> bool {
+        let same = self.same_variant(c);
+        if self.thin_pointer(c) {
+            return same == IDENTITY;
+        }
+        let value = match self.runtime_of(c) {
+            Some(Type::Boxed(b)) => matches!(*b, Type::Boolean | Type::Byte),
+            Some(_) => false,
+            None => self.class.types[c].kind == TypeKind::Enum,
+        };
+        value && same == "a == b"
+    }
+
     /// `java::SameObject` for the enum of `Object` (type `t`), where the program compares values
     /// that may both be strings or boxes (`Facts::identity_checks`): Java's identity, which a
     /// string or a box that is not kept as an object (`faithful_box`) has only as far as unequal
@@ -3022,24 +3211,27 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
         self.indent += 1;
-        // The objects whose identity is their handle's: the same object exactly when the two
-        // values have the same bits (`java::Thin`), one test for all of them.
-        let by_bits: Vec<usize> = variants
-            .iter()
-            .copied()
-            .filter(|&c| {
-                self.runtime_of(c).is_none() && self.thin_pointer(c) && self.same_variant(c) == IDENTITY
-            })
-            .collect();
+        // The objects whose identity is their handle's, and the values that are equal exactly
+        // when their bits are (an enum's constant, a `Boolean` or a `Byte`, which `java::Thin`
+        // holds in the low bytes of zeroed bits): the same object exactly when the two values
+        // have the same bits, one test for all of them.
+        let by_bits: Vec<usize> = variants.iter().copied().filter(|&c| self.same_by_bits(c)).collect();
         let others: Vec<usize> = variants.iter().copied().filter(|c| !by_bits.contains(c)).collect();
         if by_bits.len() == variants.len() && !variants.is_empty() {
             self.line("self.0 == other.0");
         } else if variants.is_empty() {
             self.line("match self.view() {}");
         } else {
+            // Values of two classes are never the same object. The few classes of the others
+            // (strings, boxes, builders) are the test, not the many of the rest, which a `match`
+            // on the number would test one range after another.
+            self.line("let tag = self.0.tag();");
+            self.line("if tag != other.0.tag() {");
+            self.line("    return false;");
+            self.line("}");
             if !by_bits.is_empty() {
-                let tags = self.tags(&by_bits, variants);
-                self.line(&format!("if matches!(self.0.tag(), {tags}) {{"));
+                let tags = self.tags(&others, variants);
+                self.line(&format!("if !matches!(tag, {tags}) {{"));
                 self.line("    return self.0 == other.0;");
                 self.line("}");
             }
@@ -3405,6 +3597,23 @@ impl<'a> Gen<'a> {
         for (need, method, ret) in methods {
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
+            if let Need::RuntimeTypeNames(_) = need {
+                // Read from the table by class number (`type_names_table`), but for the arrays that
+                // carry their class.
+                let carried: Vec<usize> =
+                    variants.iter().copied().filter(|&c| self.names_carried(c)).collect();
+                let table = format!("crate::{}[self.0.tag() as usize]", super::class_values::TYPE_NAMES);
+                if carried.is_empty() {
+                    self.line(&table);
+                } else {
+                    self.match_arms_or(&carried, Some(table), &|g: &mut Self, c| {
+                        (format!("{}(o, {})", g.runtime("array_type_names"), g.names_list(c)), true)
+                    });
+                }
+                self.indent -= 1;
+                self.line("}");
+                continue;
+            }
             let ret = format!(" -> {ret}");
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
                 // An `Object[]` that may be a covariant array, which carries its class.
@@ -3413,12 +3622,12 @@ impl<'a> Gen<'a> {
                 }
                 Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
-                // So does its names, which a store of it into an array of arrays tests.
-                Need::RuntimeTypeNames(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
-                    (format!("{}(o, {})", g.runtime("array_type_names"), g.names_list(c)), true)
-                }
-                Need::RuntimeTypeNames(_) => (g.names_list(c), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
+                // Read from the value's bits, the same text for every such class, whose arms
+                // are one (`match_arms_or`): the Minecraft server's were 6 MB of the same code.
+                Need::IdentityHash(_) if g.identity_by_address(c) => {
+                    (format!("{}(self.0.address())", g.runtime("address_hash")), false)
+                }
                 _ => (g.value_hash(c, "o"), true),
             });
             self.indent -= 1;

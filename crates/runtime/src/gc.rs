@@ -15,10 +15,10 @@
 //! (an object, or a free slot that a thread holds) and a bit per slot for marking.
 //!
 //! **Allocation** takes a slot of its size from the calling thread's own free slots, a few
-//! instructions: from the list of slots it freed, or from its span, the untaken slots of one word
-//! of a block's bitmap that it took under the heap's lock (64 slots at most). A slot
-//! that may hold pointers is zeroed as it is handed out, so that no old word in it keeps an object
-//! alive; a pointer-free one only for `alloc_zeroed`.
+//! instructions: from the list of slots it freed, or from its span, untaken slots of one word of a
+//! block's bitmap that it took under the heap's lock (64 slots at most, and no more than fit in
+//! `SPAN_BYTES`, one at least). A slot that may hold pointers is zeroed as it is handed out, so
+//! that no old word in it keeps an object alive; a pointer-free one only for `alloc_zeroed`.
 //!
 //! **Collection** runs when the program has taken as many bytes as were alive after the last one
 //! (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share). It stops every other thread
@@ -30,10 +30,22 @@
 //!   the registers that the signal saved), and of the collecting thread, with its registers;
 //! - the program's static data, the writable segments of every loaded object;
 //! - each thread's static thread-local storage, where the slots its free lists start from are;
-//! - the free lists of every thread, whose slots are marked without being scanned, and the words
-//!   of their spans, every taken slot of which is marked once marking is done (`keep_spans`).
+//! - the free lists of every thread, whose slots are marked without being scanned, and the slots
+//!   of their spans, every taken one of which is marked once marking is done (`keep_spans`).
 //!
 //! Slots are scanned whole, word by word, except in blocks that cannot hold pointers.
+//!
+//! **Generations**, with `JAVA_GC_GENERATIONS=1`: an object that lives through a collection keeps
+//! its mark and is old. A minor collection marks from the roots and from the old objects on the
+//! pages written since the last collection, stops at marked objects, and frees the young ones
+//! left unmarked; a full one clears the marks first, and runs once a quarter more (plus 1 MB) is
+//! alive than after the last full one, at once after the minor one that finds it. Which pages
+//! were written the kernel says: the heap is registered with a `userfaultfd` in asynchronous
+//! write-protect mode, each collection protects the pages that hold old objects, and
+//! `PAGEMAP_SCAN` reports those written since (`track_writes`, `written`, `protect_old`). Every
+//! write counts, whatever code or thread makes it, so nothing is emitted in the program. Memory
+//! outside the heap that can hold a reference is the roots, scanned whole at every collection.
+//! Where the kernel refuses, every collection is full.
 //!
 //! A thread is registered (its stack and thread pointer found) as the first thing it does, by
 //! this crate's `pthread_create`, which takes the C library's place, and unregistered when it
@@ -57,11 +69,13 @@ const MAX_BLOCKS: usize = HEAP_BYTES >> BLOCK_SHIFT;
 const MAX_SLOTS: usize = BLOCK / 16;
 const BITMAP_WORDS: usize = MAX_SLOTS / 64;
 
-/// The sizes of the slots of small blocks. Larger allocations take whole blocks.
-const SIZES: [u32; 40] = [
-    16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280,
-    1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384, 20480,
-    24576, 28672, 32768,
+/// The sizes of the slots of small blocks. Larger allocations take whole blocks. Up to 128 bytes,
+/// where most objects are, the sizes grow by 8 bytes, a handle or a `long`, so that an object
+/// takes at most 7 bytes more than it needs; above, by a quarter of a power of two.
+const SIZES: [u32; 47] = [
+    16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 160, 192, 224, 256, 320, 384, 448, 512,
+    640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192, 10240,
+    12288, 14336, 16384, 20480, 24576, 28672, 32768,
 ];
 const SIZE_COUNT: usize = SIZES.len();
 const LARGEST_SMALL: usize = 32768;
@@ -78,14 +92,20 @@ const LIST_MAX_BYTES: usize = 1 << 20;
 /// The most bytes of a new span fetched into the cache ahead of the program's writes.
 const PREFETCH_SPAN: usize = 4096;
 
-/// The class of a size up to 1024 bytes, by `(size + 15) / 16`.
-static SMALL_CLASS: [u8; 65] = small_classes();
+/// The most bytes of slots a span takes, one slot at least. A word of a block's bitmap covers the
+/// whole block from slots of 1 KB, and each thread keeps a span in every class it allocates in:
+/// with whole words, the Minecraft server's 41 threads held 28 MB of slots taken and never handed
+/// out, about a 64 KB block per thread and class of the larger sizes.
+const SPAN_BYTES: usize = 8192;
 
-const fn small_classes() -> [u8; 65] {
-    let mut table = [0u8; 65];
+/// The size index of a size up to 1024 bytes, by `(size + 7) / 8`.
+static SMALL_CLASS: [u8; 129] = small_classes();
+
+const fn small_classes() -> [u8; 129] {
+    let mut table = [0u8; 129];
     let mut i = 0;
-    while i <= 64 {
-        let size = i * 16;
+    while i <= 128 {
+        let size = i * 8;
         let mut c = 0;
         while (SIZES[c] as usize) < size {
             c += 1;
@@ -97,8 +117,9 @@ const fn small_classes() -> [u8; 65] {
 }
 
 /// The size index of a slot for `size` bytes aligned to `align`, or `None` for a large
-/// allocation. A slot is aligned to 16 bytes, and to its size when that is a power of two, so an
-/// alignment above 16 takes the smallest power of two that holds the size.
+/// allocation. A slot is aligned to 8 bytes, to 16 when its size is a multiple of 16, and to its
+/// size when that is a power of two, so an alignment of 16 takes a multiple of 16 and one above
+/// 16 the smallest power of two that holds the size.
 #[inline(always)]
 fn size_index(size: usize, align: usize) -> Option<usize> {
     if align > 16 {
@@ -108,8 +129,9 @@ fn size_index(size: usize, align: usize) -> Option<usize> {
         }
         return SIZES.iter().position(|&s| s as usize == wanted);
     }
+    let size = if align > 8 { size.next_multiple_of(16) } else { size };
     if size <= 1024 {
-        return Some(SMALL_CLASS[size.div_ceil(16)] as usize);
+        return Some(SMALL_CLASS[size.div_ceil(8)] as usize);
     }
     if size > LARGEST_SMALL {
         return None;
@@ -208,6 +230,17 @@ struct Heap {
     threads_set: bool,
     /// The large allocations made, which choose where the next one starts.
     larges: usize,
+    /// Whether the system reports the pages of the heap written since the last collection, so
+    /// that collections can be minor (see "Generations" above): `/proc/self/pagemap`, read with
+    /// `PAGEMAP_SCAN` into `regions`, outside the heap, and the userfaultfd that protects pages.
+    /// -1 when it does not.
+    pagemap: i32,
+    uffd: i32,
+    regions: *mut PageRegion,
+    /// The next collection is a full one once this many bytes are alive.
+    next_full: usize,
+    /// Whether the last collection was minor.
+    minor: bool,
 }
 
 struct Shared(UnsafeCell<Heap>);
@@ -229,6 +262,11 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     growth: 100,
     threads_set: false,
     larges: 0,
+    pagemap: -1,
+    uffd: -1,
+    regions: ptr::null_mut(),
+    next_full: 0,
+    minor: false,
 }));
 
 /// The heap's lock: a spin lock that yields, since it is taken rarely and briefly, and must not
@@ -317,6 +355,8 @@ unsafe extern "C" {
     fn getenv(name: *const std::ffi::c_char) -> *const std::ffi::c_char;
     fn dlsym(handle: *mut u8, name: *const std::ffi::c_char) -> *mut u8;
     fn sched_getaffinity(pid: i32, size: usize, mask: *mut u64) -> i32;
+    fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
 }
 
 const PROT_READ_WRITE: i32 = 3;
@@ -333,13 +373,61 @@ const FUTEX_WAKE_PRIVATE: i32 = 129;
 const PT_LOAD: u32 = 1;
 const PT_TLS: u32 = 7;
 const PF_W: u32 = 2;
+const O_RDONLY_CLOEXEC: i32 = 0x80000;
+const O_NONBLOCK: i32 = 0x800;
+const SYS_USERFAULTFD: i64 = 323;
+const UFFD_USER_MODE_ONLY: i64 = 1;
+const UFFD_API: u64 = 0xaa;
+const UFFDIO_API: u64 = 0xc018_aa3f;
+const UFFDIO_REGISTER: u64 = 0xc020_aa00;
+const UFFDIO_REGISTER_MODE_WP: u64 = 2;
+const UFFD_FEATURE_WP_ASYNC: u64 = 0x8000;
+const UFFDIO_WRITEPROTECT: u64 = 0xc018_aa06;
+const UFFDIO_WRITEPROTECT_MODE_WP: u64 = 1;
+const PAGE: usize = 4096;
+const PAGEMAP_SCAN: u64 = 0xc060_6610;
+const PM_SCAN_CHECK_WPASYNC: u64 = 2;
+const PAGE_IS_WRITTEN: u64 = 2;
+
+/// A range of pages that `PAGEMAP_SCAN` reports, and its argument (`linux/fs.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PageRegion {
+    start: u64,
+    end: u64,
+    categories: u64,
+}
+
+#[repr(C)]
+struct PmScanArg {
+    size: u64,
+    flags: u64,
+    start: u64,
+    end: u64,
+    walk_end: u64,
+    vec: u64,
+    vec_len: u64,
+    max_pages: u64,
+    category_inverted: u64,
+    category_mask: u64,
+    category_anyof_mask: u64,
+    return_mask: u64,
+}
+
+/// The ranges one call of `PAGEMAP_SCAN` reports at most.
+const REGIONS: usize = 1 << 14;
 
 fn futex_wait(word: &AtomicU32, value: u32) {
     unsafe { syscall(SYS_FUTEX, word as *const AtomicU32, FUTEX_WAIT_PRIVATE, value, ptr::null::<u8>()) };
 }
 
 fn futex_wake(word: &AtomicU32) {
-    unsafe { syscall(SYS_FUTEX, word as *const AtomicU32, FUTEX_WAKE_PRIVATE, i32::MAX) };
+    futex_wake_some(word, i32::MAX);
+}
+
+/// Wakes at most `n` of the threads waiting on `word`.
+fn futex_wake_some(word: &AtomicU32, n: i32) {
+    unsafe { syscall(SYS_FUTEX, word as *const AtomicU32, FUTEX_WAKE_PRIVATE, n) };
 }
 
 /// Maps `len` bytes of zeroed memory that is only committed when touched.
@@ -385,6 +473,81 @@ fn start(h: &mut Heap) {
     if let Some(n) = number_from(c"JAVA_GC_EVERY") {
         h.every = n.max(1);
         h.next_collection = h.every;
+    }
+    if number_from(c"JAVA_GC_GENERATIONS") == Some(1) {
+        track_writes(h);
+    }
+}
+
+/// Has the system track the writes into the heap's reservation: registers it with a
+/// `userfaultfd` in asynchronous write-protect mode, in which a write to a protected page
+/// unprotects it in the kernel, with no thread woken, and opens `/proc/self/pagemap`, whose
+/// `PAGEMAP_SCAN` reports the unprotected pages. The userfaultfd stays open: closing it would
+/// end the tracking. Where any step is refused, collections stay full.
+#[cold]
+fn track_writes(h: &mut Heap) {
+    let uffd =
+        unsafe { syscall(SYS_USERFAULTFD, (O_RDONLY_CLOEXEC | O_NONBLOCK) as i64 | UFFD_USER_MODE_ONLY) };
+    if uffd < 0 {
+        return;
+    }
+    let uffd = uffd as i32;
+    let mut api = [UFFD_API, UFFD_FEATURE_WP_ASYNC, 0];
+    let mut register = [h.base as u64, HEAP_BYTES as u64, UFFDIO_REGISTER_MODE_WP, 0];
+    if unsafe { ioctl(uffd, UFFDIO_API, api.as_mut_ptr()) } != 0
+        || api[1] & UFFD_FEATURE_WP_ASYNC == 0
+        || unsafe { ioctl(uffd, UFFDIO_REGISTER, register.as_mut_ptr()) } != 0
+    {
+        return;
+    }
+    let pagemap = unsafe { open(c"/proc/self/pagemap".as_ptr(), O_RDONLY_CLOEXEC) };
+    if pagemap < 0 {
+        return;
+    }
+    h.pagemap = pagemap;
+    h.uffd = uffd;
+    h.regions = reserve(REGIONS * std::mem::size_of::<PageRegion>()) as *mut PageRegion;
+    // A first scan, of no pages yet, finds whether the system answers it.
+    if !written(h, |_, _| {}) {
+        h.pagemap = -1;
+    }
+}
+
+/// Calls `each` with every range of the heap's blocks not protected: written since it was
+/// protected, or never protected. False when the system refuses.
+fn written(h: &Heap, mut each: impl FnMut(usize, usize)) -> bool {
+    let end = h.block_address(h.top) as u64;
+    let mut at = h.base as u64;
+    loop {
+        let mut arg = PmScanArg {
+            size: std::mem::size_of::<PmScanArg>() as u64,
+            flags: PM_SCAN_CHECK_WPASYNC,
+            start: at,
+            end: end.max(at + 4096),
+            walk_end: 0,
+            vec: h.regions as u64,
+            vec_len: REGIONS as u64,
+            max_pages: 0,
+            category_inverted: 0,
+            category_mask: PAGE_IS_WRITTEN,
+            category_anyof_mask: 0,
+            return_mask: PAGE_IS_WRITTEN,
+        };
+        let n = unsafe { ioctl(h.pagemap, PAGEMAP_SCAN, &mut arg) };
+        if n < 0 {
+            return false;
+        }
+        for i in 0..n as usize {
+            let r = unsafe { *h.regions.add(i) };
+            each(r.start as usize, r.end as usize);
+        }
+        if arg.walk_end >= end {
+            return true;
+        }
+        if arg.walk_end <= at {
+            return false;
+        }
+        at = arg.walk_end;
     }
 }
 
@@ -483,13 +646,23 @@ impl Heap {
     }
 
     /// Takes the untaken slots of the first word of block `b`'s bitmap, from word `from`, that
-    /// has any: the word's index and the bits of the slots taken.
+    /// has any, as many as `SPAN_BYTES` holds (one at least), lowest first: the word's index and
+    /// the bits of the slots taken.
     fn take_word(&mut self, b: usize, from: usize) -> Option<(usize, u64)> {
         let m = self.meta(b);
         let slots = m.slots as usize;
+        let most = (SPAN_BYTES / m.size as usize).max(1) as u32;
         for w in from..slots.div_ceil(64) {
             let valid = if (w + 1) * 64 <= slots { u64::MAX } else { (1u64 << (slots % 64)) - 1 };
-            let free = valid & !m.taken[w];
+            let mut free = valid & !m.taken[w];
+            if free.count_ones() > most {
+                // The lowest `most` bits: the bits below the (most + 1)th lowest.
+                let mut rest = free;
+                for _ in 0..most {
+                    rest &= rest - 1;
+                }
+                free &= !rest;
+            }
             if free != 0 {
                 m.taken[w] |= free;
                 self.taken += free.count_ones() as usize * m.size as usize;
@@ -526,14 +699,19 @@ fn fail(message: &[u8]) -> ! {
 }
 
 /// A thread's free slots, per class: those Rust freed, in a list linked through the slots' first
-/// words, and a span, the untaken slots of one word of a block's bitmap that the thread took.
+/// words, and a span, untaken slots of one word of a block's bitmap that the thread took.
 struct Lists {
     heads: [Cell<*mut u8>; CLASSES],
     bytes: [Cell<usize>; CLASSES],
     /// The address of the first slot of the span's word, and the bits of the slots not handed out
-    /// yet. The collector keeps every taken slot of that word (see `keep_spans`).
+    /// yet.
     span_base: [Cell<usize>; CLASSES],
     span_bits: [Cell<u64>; CLASSES],
+    /// The bits of all the span's slots, handed out or not, which the collector keeps (see
+    /// `keep_spans`).
+    span_all: [Cell<u64>; CLASSES],
+    /// The span's slots that `keep_spans` marked, whose marks go once the sweep is done.
+    span_kept: [Cell<u64>; CLASSES],
     /// The block the span is in, and the next word of its bitmap to take slots from.
     span_block: [Cell<u32>; CLASSES],
     span_next: [Cell<u32>; CLASSES],
@@ -550,6 +728,8 @@ thread_local! {
             bytes: [const { Cell::new(0) }; CLASSES],
             span_base: [const { Cell::new(0) }; CLASSES],
             span_bits: [const { Cell::new(0) }; CLASSES],
+            span_all: [const { Cell::new(0) }; CLASSES],
+            span_kept: [const { Cell::new(0) }; CLASSES],
             span_block: [const { Cell::new(NONE) }; CLASSES],
             span_next: [const { Cell::new(0) }; CLASSES],
             entry: Cell::new(NO_ENTRY),
@@ -668,6 +848,8 @@ fn unregister(lists: &Lists) {
             bits &= bits - 1;
         }
         lists.span_bits[class].set(0);
+        lists.span_all[class].set(0);
+        lists.span_kept[class].set(0);
         lists.span_block[class].set(NONE);
     }
     THREADS[i].used.store(false, Ordering::Release);
@@ -675,13 +857,15 @@ fn unregister(lists: &Lists) {
     let _ = ENTRY.try_with(|e| e.set(NO_ENTRY));
 }
 
-/// Marks a slot untaken, so that its block's next refill hands it out again.
+/// Marks a slot untaken, so that its block's next refill hands it out again, and young: an old
+/// object that Rust freed leaves its mark behind.
 fn untake(h: &mut Heap, p: usize) {
     let b = (p - h.base) >> BLOCK_SHIFT;
     let m = h.meta(b);
     let start = h.block_address(b) + m.start as usize;
     let slot = (((p - start) as u64 * m.magic) >> 32) as usize;
     m.taken[slot / 64] &= !(1u64 << (slot % 64));
+    m.marks[slot / 64] &= !(1u64 << (slot % 64));
     h.list(b);
 }
 
@@ -879,9 +1063,11 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
         {
             let size = SIZES[class / 2] as usize;
             let base = h.block_address(b as usize) + h.meta(b as usize).start as usize + w * 64 * size;
-            lists.span_next[class].set(w as u32 + 1);
+            // The same word again next: `take_word` may have left slots of it untaken.
+            lists.span_next[class].set(w as u32);
             lists.span_base[class].set(base);
             lists.span_bits[class].set(bits & (bits - 1));
+            lists.span_all[class].set(bits);
             // The span's slots are fetched into the cache now, before the program writes them.
             let from = base + bits.trailing_zeros() as usize * size;
             let to = (base + (64 - bits.leading_zeros() as usize) * size).min(from + PREFETCH_SPAN);
@@ -928,10 +1114,13 @@ fn allocate_large(layout: Layout) -> *mut u8 {
     }
     let g = prepare();
     let h = heap(&g);
-    // Each starts at another of the 64 cache lines of a page (see `color`).
-    let color = if layout.align() <= 64 { (h.larges * 23 % 64) * 64 } else { 0 };
+    // Each starts at another of the 64 cache lines of a page (see `color`), within the room that
+    // the blocks its size needs leave: a size of whole blocks, as a `Vec` that doubled to 128 KB
+    // asks for, starts at its first block rather than taking one more block for its color.
+    let n = layout.size().div_ceil(BLOCK).max(1);
+    let lines = (n * BLOCK - layout.size()) / 64 + 1;
+    let color = if layout.align() <= 64 { (h.larges * 23 % 64 % lines) * 64 } else { 0 };
     h.larges += 1;
-    let n = (color + layout.size()).div_ceil(BLOCK).max(1);
     let b = h.take_blocks(n);
     // A large allocation is handed out zeroed.
     for k in b..b + n {
@@ -1078,13 +1267,20 @@ impl MarkStack {
         Some(unsafe { self.items.add(self.len).read() })
     }
 
-    /// Takes the oldest item.
-    fn pop_oldest(&mut self) -> Option<(usize, usize)> {
-        if self.len == self.low {
-            return None;
+    /// Moves the `n` oldest items, at most, onto `to`, in one copy; how many it moved.
+    fn move_oldest(&mut self, n: usize, to: &mut MarkStack) -> usize {
+        let n = n.min(self.count());
+        if to.len + n > to.capacity {
+            out_of_memory();
         }
-        self.low += 1;
-        Some(unsafe { self.items.add(self.low - 1).read() })
+        unsafe { ptr::copy_nonoverlapping(self.items.add(self.low), to.items.add(to.len), n) };
+        self.low += n;
+        to.len += n;
+        if self.low == self.len {
+            self.low = 0;
+            self.len = 0;
+        }
+        n
     }
 }
 
@@ -1128,6 +1324,14 @@ static POOL: Pool = Pool {
 /// all of them are idle, as none can then make more work.
 static MARKERS: AtomicUsize = AtomicUsize::new(1);
 static IDLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts up whenever a marker puts work in the pool and when marking ends: an idle marker that
+/// has spun `IDLE_SPINS` times and yielded `IDLE_YIELDS` times sleeps on it until it changes.
+/// Spinning on, idle helpers took 6 s of processor time in a run of 0.64 s that marked a long
+/// linked list, which hands out no work, 22 times (`SmallObjects`).
+static WORK: AtomicU32 = AtomicU32::new(0);
+const IDLE_SPINS: u32 = 256;
+const IDLE_YIELDS: u32 = 16;
 
 /// The helper threads started; they wait for `MARK_ROUND` to change, mark, and count up
 /// `MARK_DONE`. `META` is the block table they read.
@@ -1352,12 +1556,12 @@ impl Marker {
         let n = (self.stack.count() / 2).min(4096);
         lock_pool();
         let pool = unsafe { &mut *POOL.stack.get() };
-        for _ in 0..n {
-            let Some(item) = self.stack.pop_oldest() else { break };
-            pool.push(item);
-        }
+        self.stack.move_oldest(n, pool);
         POOL.len.store(pool.count(), Ordering::Release);
         unlock_pool();
+        // As many sleepers as the work feeds: each takes up to 256 items.
+        WORK.fetch_add(1, Ordering::SeqCst);
+        futex_wake_some(&WORK, n.div_ceil(256) as i32);
     }
 
     /// Takes work from the pool; whether there was any.
@@ -1367,15 +1571,7 @@ impl Marker {
         }
         lock_pool();
         let pool = unsafe { &mut *POOL.stack.get() };
-        let n = pool.count().min(256);
-        for _ in 0..n {
-            let Some(item) = pool.pop_oldest() else { break };
-            self.stack.push(item);
-        }
-        if pool.count() == 0 {
-            pool.low = 0;
-            pool.len = 0;
-        }
+        let n = pool.move_oldest(256, &mut self.stack);
         POOL.len.store(pool.count(), Ordering::Release);
         unlock_pool();
         n > 0
@@ -1401,13 +1597,25 @@ impl Marker {
                     IDLE.fetch_add(1, Ordering::SeqCst);
                 }
                 if IDLE.load(Ordering::SeqCst) == markers {
+                    // The markers asleep see the end as they wake.
+                    if self.shares {
+                        WORK.fetch_add(1, Ordering::SeqCst);
+                        futex_wake(&WORK);
+                    }
                     return;
                 }
                 spins += 1;
-                if spins < 256 {
+                if spins < IDLE_SPINS {
                     std::hint::spin_loop();
-                } else {
+                } else if spins < IDLE_SPINS + IDLE_YIELDS {
                     unsafe { sched_yield() };
+                } else {
+                    // The count is read before the pool and the idle markers, so that work
+                    // offered or the end reached after them changes it, and the wait returns.
+                    let seen = WORK.load(Ordering::SeqCst);
+                    if POOL.len.load(Ordering::SeqCst) == 0 && IDLE.load(Ordering::SeqCst) != markers {
+                        futex_wait(&WORK, seen);
+                    }
                 }
             }
         }
@@ -1423,9 +1631,13 @@ impl Marker {
     }
 }
 
+/// Takes the pool's lock, waiting on a plain read of it, so that the waiters do not take the
+/// lock's cache line from its holder over and over.
 fn lock_pool() {
     while POOL.lock.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        std::hint::spin_loop();
+        while POOL.lock.load(Ordering::Relaxed) {
+            std::hint::spin_loop();
+        }
     }
 }
 
@@ -1505,12 +1717,41 @@ fn collect(g: &Guard) {
         start_helpers();
     }
     let stopped = stop_others(me);
-    let h = heap(g);
     if MARK_STACK.load(Ordering::Relaxed).is_null() {
         MARK_STACK.store(MarkStack::reserved(MARK_STACK_ITEMS).items, Ordering::Relaxed);
         unsafe { *POOL.stack.get() = MarkStack::reserved(MARK_STACK_ITEMS) };
     }
-    // The marks are clear: the last sweep cleared them, and blocks never used are zero.
+    // A minor collection keeps the marks, which make the objects that lived through the last
+    // collection old; a full one clears them first. Should a minor one leave as much alive as
+    // starts a full one, the full one follows in the same pause, so that the old objects that
+    // died do not decide when the next collection runs.
+    let h = heap(g);
+    let minor = h.pagemap >= 0 && h.alive < h.next_full;
+    if mark_and_sweep(g, me, shares, minor, taken, started) && heap(g).alive >= heap(g).next_full {
+        mark_and_sweep(g, me, shares, false, taken, started);
+    }
+    for t in &THREADS {
+        t.stopped_sp.set(0);
+        t.thread_pointer.set(0);
+    }
+    resume_others(stopped);
+}
+
+/// Marks and sweeps, with the other threads stopped: a minor collection or a full one. Returns
+/// whether it was minor (a minor one becomes full when the system stops answering).
+fn mark_and_sweep(
+    g: &Guard,
+    me: usize,
+    shares: bool,
+    minor: bool,
+    taken: usize,
+    started: std::time::Instant,
+) -> bool {
+    let h = heap(g);
+    let mut minor = minor;
+    if !minor {
+        clear_marks(h);
+    }
     let (base, end) = (h.base, h.block_address(h.top));
     let helpers = if shares { HELPERS.load(Ordering::Acquire) } else { 0 };
     MARKERS.store(helpers + 1, Ordering::Release);
@@ -1524,6 +1765,22 @@ fn collect(g: &Guard) {
     let stack =
         MarkStack { items: MARK_STACK.load(Ordering::Relaxed), low: 0, len: 0, capacity: MARK_STACK_ITEMS };
     let mut marker = Marker { meta: h.meta, base, end, stack, shares: helpers > 0 };
+    // In a minor collection, the old objects on the pages written since the last collection
+    // are scanned: they are where an old object may point to a young one. Should the system stop
+    // answering, this and every later collection are full.
+    if minor {
+        let complete = {
+            let h = &*h;
+            written(h, |from, to| push_old(h, &mut marker, from, to))
+        };
+        if !complete {
+            h.pagemap = -1;
+            marker.stack.low = 0;
+            marker.stack.len = 0;
+            clear_marks(h);
+            minor = false;
+        }
+    }
     let statics = statics();
     for &(from, to) in &statics.ranges[..statics.count] {
         marker.range(from, to);
@@ -1566,22 +1823,26 @@ fn collect(g: &Guard) {
     keep_spans(h);
     let marked = started.elapsed();
     sweep(h, helpers);
+    release_kept(h);
+    if h.pagemap >= 0 && !protect_old(h) {
+        h.pagemap = -1;
+    }
+    h.minor = minor;
+    if !minor {
+        h.next_full = h.alive / 4 * 5 + (1 << 20);
+    }
     h.collections += 1;
     if h.log {
         report(h, taken, marked, started.elapsed());
     }
-    for t in &THREADS {
-        t.stopped_sp.set(0);
-        t.thread_pointer.set(0);
-    }
-    resume_others(stopped);
+    minor
 }
 
-/// Keeps every taken slot of the word of each thread's spans, once marking is done. Those are the
-/// slots of the span not handed out yet, and the slot a thread stopped in `alloc` was handing out
-/// before its address was anywhere the marking looks; the others are kept one collection longer.
-/// Marking scans each slot that something reaches the first time it marks it, which a mark set
-/// here before would prevent.
+/// Keeps every taken slot of each thread's spans, once marking is done. Those are the slots of
+/// the span not handed out yet, and the slot a thread stopped in `alloc` was handing out before
+/// its address was anywhere the marking looks; the others the span handed out are kept one
+/// collection longer. Marking scans each slot that something reaches the first time it marks it,
+/// which a mark set here before would prevent.
 fn keep_spans(h: &mut Heap) {
     for t in &THREADS {
         if !t.used.load(Ordering::Acquire) {
@@ -1596,7 +1857,147 @@ fn keep_spans(h: &mut Heap) {
             let b = (base - h.base) >> BLOCK_SHIFT;
             let m = h.meta(b);
             let w = (base - h.block_address(b) - m.start as usize) / (64 * m.size as usize);
-            m.marks[w] |= m.taken[w];
+            let kept = m.taken[w] & lists.span_all[class].get() & !m.marks[w];
+            lists.span_kept[class].set(kept);
+            m.marks[w] |= kept;
+        }
+    }
+}
+
+/// Whether the page at `page` holds an old object that may hold pointers.
+fn old_on(h: &Heap, page: usize) -> bool {
+    let b = (page - h.base) >> BLOCK_SHIFT;
+    let m = h.meta(b);
+    match m.kind {
+        SMALL if !m.no_scan => {
+            let start = h.block_address(b) + m.start as usize;
+            if page + PAGE <= start {
+                return false;
+            }
+            let size = m.size as usize;
+            let first = page.saturating_sub(start) / size;
+            let last = ((page + PAGE - 1 - start) / size).min(m.slots as usize - 1);
+            (first..=last).any(|slot| m.taken[slot / 64] & m.marks[slot / 64] & (1u64 << (slot % 64)) != 0)
+        }
+        LARGE | LARGE_REST => {
+            let head = h.meta(if m.kind == LARGE { b } else { m.size as usize });
+            !head.no_scan && head.marks[0] & 1 != 0
+        }
+        _ => false,
+    }
+}
+
+/// Protects the pages not protected that now hold old objects, in runs, so that a write to one
+/// is reported at the next collection. Pages of young objects only stay writable, so that
+/// allocation does not fault. False when the system refuses.
+fn protect_old(h: &Heap) -> bool {
+    let mut run: Option<(usize, usize)> = None;
+    let mut refused = false;
+    let mut protect = |from: usize, to: usize| {
+        let mut range = [from as u64, (to - from) as u64, UFFDIO_WRITEPROTECT_MODE_WP];
+        refused |= unsafe { ioctl(h.uffd, UFFDIO_WRITEPROTECT, range.as_mut_ptr()) } != 0;
+    };
+    let complete = written(h, |from, to| {
+        for page in (from..to).step_by(PAGE) {
+            if old_on(h, page) {
+                run = match run {
+                    Some((start, end)) if end == page => Some((start, page + PAGE)),
+                    Some((start, end)) => {
+                        protect(start, end);
+                        Some((page, page + PAGE))
+                    }
+                    None => Some((page, page + PAGE)),
+                };
+            }
+        }
+    });
+    if let Some((start, end)) = run {
+        protect(start, end);
+    }
+    complete && !refused
+}
+
+/// Takes back the marks that the collection gave the slots threads hold, once the sweep has
+/// kept them: those of the free lists (`Marker::keep`) and those `keep_spans` set. What a thread
+/// makes in them is then young. A mark that marking set stays: its object is old, and what it
+/// pointed to was marked through it.
+fn release_kept(h: &mut Heap) {
+    for t in &THREADS {
+        if !t.used.load(Ordering::Acquire) {
+            continue;
+        }
+        let lists = unsafe { &*t.lists.get() };
+        for class in 0..CLASSES {
+            let mut p = lists.heads[class].get() as usize;
+            while p != 0 {
+                let b = (p - h.base) >> BLOCK_SHIFT;
+                let m = h.meta(b);
+                let slot = (((p - h.block_address(b) - m.start as usize) as u64 * m.magic) >> 32) as usize;
+                m.marks[slot / 64] &= !(1u64 << (slot % 64));
+                p = unsafe { (p as *const usize).read() };
+            }
+            let kept = lists.span_kept[class].replace(0);
+            let base = lists.span_base[class].get();
+            if kept != 0 && base != 0 {
+                let b = (base - h.base) >> BLOCK_SHIFT;
+                let m = h.meta(b);
+                let w = (base - h.block_address(b) - m.start as usize) / (64 * m.size as usize);
+                m.marks[w] &= !kept;
+            }
+        }
+    }
+}
+
+/// Clears every mark, for a full collection.
+fn clear_marks(h: &mut Heap) {
+    for b in 0..h.top {
+        let m = h.meta(b);
+        if m.kind == SMALL || m.kind == LARGE {
+            m.marks = [0; BITMAP_WORDS];
+        }
+    }
+}
+
+/// Puts the old objects of `[from, to)`, a range of written pages, on the marker's stack: the
+/// marked slots of the small blocks that may hold pointers that the range overlaps, and the part
+/// of a marked large allocation within it. Their marks are set, so marking would not scan them.
+fn push_old(h: &Heap, marker: &mut Marker, from: usize, to: usize) {
+    let from = from.max(h.base);
+    let to = to.min(h.block_address(h.top));
+    let mut b = from.saturating_sub(h.base) >> BLOCK_SHIFT;
+    while from < to && h.block_address(b) < to {
+        let m = h.meta(b);
+        match m.kind {
+            SMALL if !m.no_scan => {
+                let start = h.block_address(b) + m.start as usize;
+                let size = m.size as usize;
+                let (low, high) = (from.max(start), to.min(h.block_address(b + 1)));
+                if low < high {
+                    let first = (low - start) / size;
+                    let last = ((high - 1 - start) / size).min(m.slots as usize - 1);
+                    for slot in first..=last {
+                        let (w, bit) = (slot / 64, 1u64 << (slot % 64));
+                        if m.taken[w] & m.marks[w] & bit != 0 {
+                            marker.stack.push((start + slot * size, size));
+                        }
+                    }
+                }
+                b += 1;
+            }
+            LARGE | LARGE_REST => {
+                let head = if m.kind == LARGE { b } else { m.size as usize };
+                let n = h.meta(head).size as usize;
+                let (start, end) = (h.block_address(head), h.block_address(head + n));
+                let hm = h.meta(head);
+                if !hm.no_scan && hm.marks[0] & 1 != 0 {
+                    let (low, high) = (from.max(start), to.min(end));
+                    if low < high {
+                        marker.stack.push((low & !7, high - (low & !7)));
+                    }
+                }
+                b = head + n;
+            }
+            _ => b += 1,
         }
     }
 }
@@ -1608,8 +2009,9 @@ fn report(h: &Heap, taken: usize, marked: std::time::Duration, total: std::time:
     let mut out = &mut buffer[..];
     let _ = writeln!(
         out,
-        "[gc {}: took {} MB, {} MB alive, heap {} MB, mark {} ms, sweep {} ms]",
+        "[gc {} {}: took {} MB, {} MB alive, heap {} MB, mark {} ms, sweep {} ms]",
         h.collections,
+        if h.minor { "minor" } else { "full" },
         taken >> 20,
         h.alive >> 20,
         (h.top << BLOCK_SHIFT) >> 20,
@@ -1704,9 +2106,8 @@ fn sweep_share() {
     SWEEP_ALIVE.fetch_add(alive, Ordering::AcqRel);
 }
 
-/// Sweeps the block described by `m`: frees the dead slots of a small block, records
-/// what lives (`live`, `untaken`), and clears the marks for the next collection. Returns the
-/// bytes alive in a small block.
+/// Sweeps the block described by `m`: frees the dead slots of a small block and records what
+/// lives (`live`, `untaken`). Returns the bytes alive in a small block.
 fn sweep_block(m: *mut Meta) -> usize {
     let m = unsafe { &mut *m };
     let alive = match m.kind {
@@ -1735,7 +2136,7 @@ fn sweep_block(m: *mut Meta) -> usize {
         }
         _ => 0,
     };
-    m.marks = [0; BITMAP_WORDS];
+    // The marks stay: an object that lives on is old (see "Generations" above).
     alive
 }
 
@@ -1790,7 +2191,11 @@ mod tests {
     fn sizes_take_the_smallest_class_that_holds_them() {
         assert_eq!(size_index(1, 1), Some(0));
         assert_eq!(size_index(16, 8), Some(0));
-        assert_eq!(size_index(17, 8), Some(1));
+        assert_eq!(size_index(17, 8).map(|i| SIZES[i]), Some(24));
+        assert_eq!(size_index(17, 16).map(|i| SIZES[i]), Some(32));
+        assert_eq!(size_index(24, 16).map(|i| SIZES[i]), Some(32));
+        assert_eq!(size_index(121, 8).map(|i| SIZES[i]), Some(128));
+        assert_eq!(size_index(129, 8).map(|i| SIZES[i]), Some(160));
         assert_eq!(size_index(1000, 8).map(|i| SIZES[i]), Some(1024));
         assert_eq!(size_index(1025, 8).map(|i| SIZES[i]), Some(1280));
         assert_eq!(size_index(32768, 8).map(|i| SIZES[i]), Some(32768));

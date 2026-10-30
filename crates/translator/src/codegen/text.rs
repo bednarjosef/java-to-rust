@@ -104,7 +104,14 @@ impl<'a> Gen<'a> {
             StringOp::ToUpperCase | StringOp::ToLowerCase if args.len() == 2 => {
                 let f = if op == StringOp::ToUpperCase { "uppercase_in" } else { "lowercase_in" };
                 let s = self.text_ref(&args[0]);
-                let language = self.text_ref(&args[1]);
+                // A null language maps as the root locale's, the empty one, does (see
+                // `analysis::exceptions::failures`).
+                let language = if self.nullable(&args[1]) {
+                    let option = self.option_ref(&args[1]);
+                    format!("{option}.unwrap_or({})", self.wtf8_literal(""))
+                } else {
+                    self.text_ref(&args[1])
+                };
                 call(self, f, vec![s, language])
             }
             StringOp::IsBlank

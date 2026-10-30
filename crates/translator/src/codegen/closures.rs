@@ -23,7 +23,7 @@ use crate::analysis::closures;
 
 /// The method-level state of the generator, set aside while a closure's body is written inside
 /// another method.
-struct Saved {
+struct Saved<'a> {
     method: usize,
     ret: Type,
     throwing: bool,
@@ -51,12 +51,13 @@ struct Saved {
     out: String,
     indent: usize,
     guarded: bool,
-    steady: Option<strings::Steady>,
+    steady: Option<strings::SteadyOf<'a>>,
     chain: bool,
     formatting: bool,
     printing: bool,
     lazy_text: bool,
     chars: bool,
+    indexed: bool,
     exhaustive: bool,
 }
 
@@ -492,7 +493,7 @@ impl<'a> Gen<'a> {
         self.object_type(&self.class.types[t].name)
     }
 
-    fn set_aside(&mut self) -> Saved {
+    fn set_aside(&mut self) -> Saved<'a> {
         Saved {
             method: self.method,
             ret: self.ret,
@@ -527,11 +528,12 @@ impl<'a> Gen<'a> {
             printing: std::mem::replace(&mut self.printing, false),
             lazy_text: std::mem::replace(&mut self.lazy_text, false),
             chars: std::mem::replace(&mut self.chars, false),
+            indexed: std::mem::replace(&mut self.indexed, false),
             exhaustive: std::mem::replace(&mut self.exhaustive, false),
         }
     }
 
-    fn restore(&mut self, s: Saved) {
+    fn restore(&mut self, s: Saved<'a>) {
         self.method = s.method;
         self.ret = s.ret;
         self.throwing = s.throwing;
@@ -565,6 +567,7 @@ impl<'a> Gen<'a> {
         self.printing = s.printing;
         self.lazy_text = s.lazy_text;
         self.chars = s.chars;
+        self.indexed = s.indexed;
         self.exhaustive = s.exhaustive;
     }
 }

@@ -7,7 +7,8 @@ same standard output and exit with the same code as Java's; a program that diffe
 does not translate or compile, is reported and not timed. Times are the median of the runs,
 wall clock: Java with its default flags, JVM start-up included. A program that warms up prints
 a line `kernel-ms N` on standard error after its warm-up runs: N is the time of the timed kernel
-measured inside the program, and it is reported as well.
+measured inside the program, and it is reported as well. So is each side's peak memory, the most
+resident memory the process held (the median over the runs of its `ru_maxrss`).
 
     python3 scripts/benchmark.py [--runs N] [Program ...]
 """
@@ -18,6 +19,7 @@ import re
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +37,7 @@ class Run:
     code: int
     stderr: str
     ms: float
+    peak_mb: float
 
 
 @dataclass
@@ -45,6 +48,8 @@ class Row:
     rust_ms: float = 0.0
     java_kernel: float | None = None
     rust_kernel: float | None = None
+    java_mb: float = 0.0
+    rust_mb: float = 0.0
 
 
 def crate_name(stem):
@@ -59,14 +64,32 @@ def first_error(stderr):
     return stderr.strip().splitlines()[-1] if stderr.strip() else "failed"
 
 
+def measured_run(cmd):
+    """Runs `cmd` to its end: its output, exit code, wall time and peak resident memory, which
+    `wait4` gives for the one process."""
+    start = time.perf_counter()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    output = {}
+
+    def read(name, stream):
+        output[name] = stream.read()
+
+    readers = [threading.Thread(target=read, args=(n, s)) for n, s in (("out", proc.stdout), ("err", proc.stderr))]
+    for r in readers:
+        r.start()
+    timer = threading.Timer(RUN_TIMEOUT, proc.kill)
+    timer.start()
+    _, status, usage = os.wait4(proc.pid, 0)
+    timer.cancel()
+    ms = (time.perf_counter() - start) * 1000
+    proc.returncode = os.waitstatus_to_exitcode(status)
+    for r in readers:
+        r.join()
+    return Run(output["out"], proc.returncode, output["err"], ms, usage.ru_maxrss / 1024)
+
+
 def timed_runs(cmd, runs):
-    results = []
-    for _ in range(runs):
-        start = time.perf_counter()
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=RUN_TIMEOUT)
-        ms = (time.perf_counter() - start) * 1000
-        results.append(Run(proc.stdout, proc.returncode, proc.stderr, ms))
-    return results
+    return [measured_run(cmd) for _ in range(runs)]
 
 
 def kernel_median(runs):
@@ -112,6 +135,8 @@ def benchmark(java_file, translator, runs):
     row.rust_ms = statistics.median(r.ms for r in rust)
     row.java_kernel = kernel_median(java)
     row.rust_kernel = kernel_median(rust)
+    row.java_mb = statistics.median(r.peak_mb for r in java)
+    row.rust_mb = statistics.median(r.peak_mb for r in rust)
     return row
 
 
@@ -122,7 +147,7 @@ def ratio(rust, java):
 def print_table(rows):
     print(
         f"{'program':<16}{'Java ms':>10}{'Rust ms':>10}{'Rust/Java':>11}"
-        f"{'Java kernel':>13}{'Rust kernel':>13}{'kernel ratio':>14}"
+        f"{'Java kernel':>13}{'Rust kernel':>13}{'kernel ratio':>14}{'Java MB':>9}{'Rust MB':>9}"
     )
     for r in rows:
         if r.status != "ok":
@@ -135,6 +160,7 @@ def print_table(rows):
         )
         print(
             f"{r.name:<16}{r.java_ms:>10.0f}{r.rust_ms:>10.0f}{ratio(r.rust_ms, r.java_ms):>11}{kernel}"
+            f"{r.java_mb:>9.1f}{r.rust_mb:>9.1f}"
         )
 
 
@@ -169,7 +195,7 @@ def main():
     translator = ROOT / "target" / "release" / "java-to-rust"
 
     print(environment())
-    print(f"median of {args.runs} runs, wall clock, milliseconds\n")
+    print(f"median of {args.runs} runs, wall clock, milliseconds; peak resident memory, MB\n")
     rows = []
     for f in files:
         print(f"running {f.stem}", file=sys.stderr)

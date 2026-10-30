@@ -88,6 +88,43 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// The enum's own `toString` that the text of a value of type `ty` runs, when it may throw
+    /// what a `catch` sees (`Facts::throwing`), and the enum's index.
+    fn throwing_enum_text(&self, ty: Type) -> Option<(usize, usize)> {
+        let Type::Enum(name) = ty else { return None };
+        let t = self.class.type_index(name)?;
+        let m = self.enum_to_string(t).filter(|m| self.facts.throwing.contains(m))?;
+        Some((t, m))
+    }
+
+    /// The text of the enum value `e` where the generator makes it (`analysis::generator_text`:
+    /// a concatenation, a print, `String.valueOf`, a format), when its `toString` may throw what
+    /// a `catch` sees: a call of the `toString`, whose exception goes on from here as a call's
+    /// does. `None` for any other value. A `toString` that may return null shows "null".
+    pub(super) fn checked_enum_text(&mut self, e: &'a Expr) -> Option<Code> {
+        let (_, m) = self.throwing_enum_text(e.ty)?;
+        let value = self.expr(e).at(ATOM);
+        let call = format!("{}({value})", self.qualified_fn(m));
+        let text = self.passed_on_thrown(Code::atom(call));
+        if self.facts.nullable_returns.contains(&m) {
+            return Some(Code::atom(format!("{}({text})", self.runtime("or_null"))));
+        }
+        Some(Code::atom(text))
+    }
+
+    /// `checked_enum_text` of a value that may be null, given as an `Option` of the enum or of
+    /// a reference to it (`option`): the text of the value, or "null".
+    pub(super) fn checked_nullable_enum_text(&mut self, ty: Type, option: &str) -> Option<Code> {
+        let (t, m) = self.throwing_enum_text(ty)?;
+        let name = struct_name(&self.class.types[t].name);
+        let call = format!("{}(*std::borrow::Borrow::<{name}>::borrow(&o))", self.qualified_fn(m));
+        let texts = self.passed_on_thrown(Code::atom(format!("{option}.map(|o| {call}).transpose()")));
+        // A `toString` that returns null shows "null" as a null value does.
+        let texts =
+            if self.facts.nullable_returns.contains(&m) { format!("{texts}.flatten()") } else { texts };
+        Some(Code::atom(format!("{}({texts})", self.runtime("or_null"))))
+    }
+
     /// The `enum` and its `impl` for an enum class: the variants, an accessor for each field,
     /// `enum_name` and `enum_value_of`, the instance methods, and `Display`.
     pub(super) fn enum_items(&mut self, index: usize) {
@@ -181,15 +218,32 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         self.indent += 1;
-        match self.enum_to_string(index) {
+        // The text that the runtime makes, such as a collection's, through which no `catch` sees
+        // what a `toString` throws (`analysis::exceptions`): it ends the program. Where the
+        // generator makes the text, it calls the `toString` (`enum_text`).
+        let to_string = self.enum_to_string(index);
+        let unchecked = |g: &mut Self, m: usize| {
+            let call = format!("Self::{}(*self)", g.fn_names[m]);
+            if !g.facts.throwing.contains(&m) {
+                return call;
+            }
+            if let Some(t) = g.class.type_index("java.lang.Throwable").and_then(|t| g.enum_for(t)) {
+                g.need(Need::Display(t));
+            }
+            format!("{call}.unwrap_or_else({})", g.runtime("uncaught"))
+        };
+        match to_string {
             // The path names the enum's own method: on `&self`, `ToString::to_string` would be
             // found first, which is this `Display`.
             // A `toString` that may return null shows "null", as Java's string conversion does.
-            Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
-                "fmt::Display::fmt(Self::{}(*self).as_deref().unwrap_or(java::wtf8(\"null\")), f)",
-                self.fn_names[m]
-            )),
-            Some(m) => self.line(&format!("fmt::Display::fmt(&Self::{}(*self), f)", self.fn_names[m])),
+            Some(m) if self.facts.nullable_returns.contains(&m) => {
+                let call = unchecked(self, m);
+                self.line(&format!("fmt::Display::fmt({call}.as_deref().unwrap_or(java::wtf8(\"null\")), f)"))
+            }
+            Some(m) => {
+                let call = unchecked(self, m);
+                self.line(&format!("fmt::Display::fmt(&{call}, f)"))
+            }
             None => self.line("write!(f, \"{}\", self.enum_name())"),
         }
         self.indent -= 1;
@@ -203,12 +257,15 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn push_to(&self, out: &mut {jstring}) {{"));
         self.indent += 1;
-        match self.enum_to_string(index) {
-            Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
-                "out.push_wtf8(Self::{}(*self).as_deref().unwrap_or(java::wtf8(\"null\")));",
-                self.fn_names[m]
-            )),
-            Some(m) => self.line(&format!("out.push_wtf8(&Self::{}(*self));", self.fn_names[m])),
+        match to_string {
+            Some(m) if self.facts.nullable_returns.contains(&m) => {
+                let call = unchecked(self, m);
+                self.line(&format!("out.push_wtf8({call}.as_deref().unwrap_or(java::wtf8(\"null\")));"))
+            }
+            Some(m) => {
+                let call = unchecked(self, m);
+                self.line(&format!("out.push_wtf8(&{call});"))
+            }
             None => self.line("let _ = fmt::Write::write_fmt(out, format_args!(\"{self}\"));"),
         }
         self.indent -= 1;
@@ -219,29 +276,7 @@ impl<'a> Gen<'a> {
 
     /// Whether a `valueOf` of the enum `index` is somewhere a `catch` or `finally` sees its failure.
     fn checked_value_of(&self, index: usize) -> bool {
-        let checked = self.checked_value_ofs.get_or_init(|| {
-            let mut found = HashSet::new();
-            for m in &self.class.methods {
-                for s in &m.body {
-                    visit_stmt(
-                        s,
-                        &mut |e| {
-                            visit_expr(e, &mut |x| {
-                                if let (ExprKind::Builtin(Builtin::EnumValueOf, _), Type::Enum(n)) =
-                                    (&x.kind, x.ty)
-                                    && self.facts.raising.contains(&x.id)
-                                {
-                                    found.insert(n);
-                                }
-                            })
-                        },
-                        &mut |_| {},
-                    );
-                }
-            }
-            found
-        });
-        checked.contains(self.class.types[index].name.as_str())
+        self.checked_value_ofs.contains(self.class.types[index].name.as_str())
     }
 
     /// `try_enum_value_of`, the checked form of `enum_value_of`, whose failure is an exception the
@@ -342,13 +377,21 @@ impl<'a> Gen<'a> {
             .into_iter()
             .filter(|&c| self.class.types[c].kind == TypeKind::Enum)
             .collect();
+        let all = enums.len() == self.shared_enum_variants(t).len();
         let ordinal = |g: &mut Self, e: &'a Expr| {
             let obj = g.object(e);
-            let mut arms: Vec<String> =
-                enums.iter().map(|&c| format!("{}(e) => *e as i32", g.view_pattern(t, c))).collect();
+            // A constant is held in the value's bits, which are its ordinal (`java::Thin::ordinal`):
+            // no `match` over the enums, of which an `Enum` of a large program has hundreds.
+            if all && !enums.is_empty() {
+                return format!("{{ let value = {obj}; value.0.ordinal() }}");
+            }
+            let tags = g.tags(&enums, &g.enum_variants(t));
+            let mut arms = Vec::new();
+            if !enums.is_empty() {
+                arms.push(format!("{tags} => value.0.ordinal()"));
+            }
             arms.push(g.not_enum_arm(t));
-            // The view lends the constant, however the `Enum` is held.
-            format!("{{ let value = {obj}; match value.view() {{ {} }} }}", arms.join(", "))
+            format!("{{ let value = {obj}; match value.0.tag() {{ {} }} }}", arms.join(", "))
         };
         match builtin {
             Builtin::EnumOrdinal => Code::atom(ordinal(self, &args[0])),
@@ -368,4 +411,28 @@ impl<'a> Gen<'a> {
             _ => unreachable!("not a builtin of an erased enum: {builtin:?}"),
         }
     }
+}
+
+/// The enums, by name, of the `valueOf`s whose failure a `catch` or `finally` sees
+/// (`Gen::checked_value_of`), anywhere in the program.
+pub(super) fn checked_value_ofs(class: &Class, facts: &Facts) -> HashSet<&'static str> {
+    let mut found = HashSet::new();
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let (ExprKind::Builtin(Builtin::EnumValueOf, _), Type::Enum(n)) = (&x.kind, x.ty)
+                            && facts.raising.contains(&x.id)
+                        {
+                            found.insert(n);
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    found
 }

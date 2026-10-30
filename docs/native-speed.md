@@ -79,15 +79,17 @@ is read and written by value, through the object's address, the way Java does it
   object is an `Arc<C>` whose fields are `java::Field` cells, read with `get()` and written with
   `set()`.
 - Built for the classes that threads share, which are nearly all of javac's: an object is an
-  `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s, acquire loads and release
+  `Arc<C>` whose fields are `java::SharedField`s (an `Arc<java::Monitored<C>>` where a monitor
+  site may lock it), acquire loads and release
   stores of a word (the same instructions as plain ones on x86-64), sequentially consistent for a
   `volatile` field, a striped lock for a wider value (docs/multi-threading.md, 2.1).
 - Built for the arrays that threads share, which are nearly all of javac's: a
   `java::SharedArray` keeps each element in a `java::SharedField` cell, so `a[i]` is a bounds
   check and one load, with no lock taken (docs/multi-threading.md, 2.2). Arrays of one thread
   keep their `RefCell`.
-- Planned: `synchronized` and `wait`/`notify` use monitors kept in a side table, only for the
-  objects that are locked, so that no object carries a lock word.
+- Built for the classes whose objects no monitor site can lock: they carry no lock word
+  (docs/multi-threading.md, 3.1). Planned: `synchronized` and `wait`/`notify` use monitors kept
+  in a side table, only for the objects that are locked, so that no object carries one.
 - Planned: identity hash codes are also kept in a side table, only for classes whose identity
   hash is used.
 
@@ -117,10 +119,77 @@ at each collection, and marking in parallel. Planned beyond it:
   and stack bounds and waits. Each thread allocates from its own blocks.
 - **Values that own Rust memory** (a buffer of a runtime type) are dropped when their object is
   swept. Such classes are marked for it. Strings and arrays live in the heap, so there are few.
-- **Generations**: most objects die young. Once the basic collector is measured, a young
-  generation (sticky mark bits: young objects are collected often without tracing the old ones)
-  is added, with card marking on reference stores into old objects. Analysis removes the barrier
-  where the stored-into object is known to be young (constructors).
+- **Generations** (built, opt-in with `JAVA_GC_GENERATIONS=1`; docs/collector.md,
+  "Generations"). Most objects die young, and a full collection marks everything alive again:
+  `BinaryTrees` marks its 89 MB tree at each of 72 collections, `SmallObjects` its list of 2
+  million nodes at each of 22 (docs/performance.md, "Allocation"). The young generation uses
+  sticky mark bits, in the runtime alone:
+  - **Old and young.** An object that survives a collection keeps its mark bit, and is old. A
+    minor collection marks from the roots and from the old objects on the pages written since
+    the last collection, stops at any marked object, and frees the taken slots left unmarked:
+    the young objects that died. A full collection clears every mark first. It runs once a
+    quarter more (plus 1 MB) is alive than after the last full one, in the same pause as the
+    minor collection that finds it, so that old objects that died do not decide when the next
+    collection runs. Slots that threads hold free (spans, free lists), which a collection keeps
+    marked, lose their marks after the sweep, so that what is made in them is young, and a slot
+    freed by Rust (`untake`) loses its mark too. Sweeping still visits every block.
+  - **Which old objects were written: the kernel's write protection, not a barrier in the
+    code.** The heap is registered with `userfaultfd` in asynchronous write-protect mode
+    (`UFFD_FEATURE_WP_ASYNC`, Linux 6.7, unprivileged with `UFFD_USER_MODE_ONLY`). A write to a
+    protected page faults once, and the kernel unprotects the page and notes it, without waking
+    any thread. Each minor collection, with the world stopped, asks `PAGEMAP_SCAN` for the pages
+    not protected and scans the old objects on them; after the sweep, the pages among them that
+    now hold old objects that may hold pointers are protected again (`UFFDIO_WRITEPROTECT`, in
+    runs). Pages of young objects only stay writable, so allocation does not fault. No barrier is
+    emitted, and every write counts: the generated code's, the runtime's, the standard
+    library's (a `Vec` or a `RefCell` written in place), atomics, the kernel's (a `read` into a
+    buffer), and every thread's, since the protection is the process's. Where the kernel
+    refuses (an older kernel, a seccomp filter), or stops answering, every collection is a full
+    one; this was tested with `systemd-run -p SystemCallFilter=~userfaultfd`.
+  - **Memory outside the heap that can hold a reference.** A reference held where neither
+    the roots nor the protected heap are would be missed by a minor collection. What exists:
+    - Rust's own allocations: every `Vec` buffer (an array's elements), `RefCell` contents,
+      `Box`, and the runtime's collections (the interned strings of `shared_string.rs`, the
+      thread table of `thread.rs`) are taken from the collector, which is the global allocator,
+      so they are in the protected heap.
+    - Statics (the writable segments of every loaded object), thread-local storage, the
+      threads' stacks and registers, and objects on the stack: roots, scanned whole at every
+      collection, minor or full.
+    - The C library's `malloc`: the runtime takes it only for a starting thread's closure
+      (`Start`), and no collection runs until the thread has registered and taken it.
+    - `native_memory.rs` blocks and mapped files: bytes, never references.
+    - The collector's own memory (block metadata, mark stacks, `PAGEMAP_SCAN`'s buffer):
+      reserved outside the heap, holding no references.
+  - **Why not card marking.** A card barrier (`card[address >> 9] = 1` after a reference store)
+    would have to see every reference written into the heap. `java::Field::set`,
+    `java::SharedField::set` and an array's element store are the runtime's and could mark, but
+    the translation also writes references through `RefCell` borrows (a `RefCell` object's fields,
+    the bulk operations on an array's `Vec`: copies, fills, sorts), into local `Vec` arrays,
+    through `&mut` methods of owned values held in objects, and the runtime keeps references in
+    Rust collections (`shared_string.rs`, `thread.rs`). One store missed frees an object that is
+    still reached. Measured on a loop of four reference stores per iteration (two fields of old
+    objects, two elements of an old array), the barrier in the runtime's store paths cost 44% with
+    a range check, 38% as HotSpot's unconditional byte store over a table for the whole address
+    space, and 18% as a conditional store (read the card, write it if clean): the loop waits on
+    cache misses, and the card stores queue behind them. On the benchmarks it was within noise
+    (NodeList 3%), except that a barrier on every 8-byte store slowed `ParticleArray`'s `double`
+    stores by 53%, by stopping their vectorization: a real barrier would have to know a reference
+    type from a `long`.
+  - **What it costs and gains.** The first write to a protected page in a cycle costs 0.26 to
+    0.4 µs, and scanning and protecting 256 MB of heap 0.2 to 0.6 ms. A protected huge page is
+    split into 4 KB pages (the protection is per page). Measured (median of alternating runs,
+    off against on): `SmallObjects` 0.43 s and 1.2 s of processor time against 0.34 s and 0.49
+    s, but 170 MB against 200 MB at its peak, since the dead old nodes wait for a full
+    collection; `BinaryTrees` the same wall time with a third less processor time (4.9 s against
+    3.2 s); `ManyThreadsAllocating` 0.10 s against 0.13 s and 196 MB against 201 MB, from the
+    full collections that follow minor ones; `SortMillion` 47 MB against 56 MB at the same
+    speed. The others are unchanged. That mix is why it is opt-in: it is to be tried on the
+    Minecraft server before it becomes the default.
+  - **Threads and forms.** Nothing changes in the generated code or the object forms
+    (`java::Monitored`, `java::SharedField`, `RefCell`): the protection sees writes, not
+    types. A `LazyMonitor` that makes its lock writes the lock's pointer into the object, a
+    write like any other. The collector already stops every thread, so the pages are read and
+    protected again while nothing writes.
 
 ### 1.4 Types, dispatch and values
 
@@ -155,7 +224,8 @@ Each part lands on its own and passes the gate (all checks and the 28 targets):
    on the class number.
 4. Fields as cells, monitors and identity hashes in side tables, removing `RefCell` and
    `Locked`. Built: fields as cells, for one thread and for threads, and the elements of the
-   arrays that threads share; the monitors still live in each object's `java::Monitored`, and
+   arrays that threads share; the monitors still live in the `java::Monitored` of each object a
+   monitor site may lock, and
    identity hashes are addresses.
 5. Strings and arrays in the heap; boxed values in references.
 6. Young generation, huge pages, field order.

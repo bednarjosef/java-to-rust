@@ -25,6 +25,12 @@
 //! (`locale_data_classes`), which are then candidates as if a literal named them. A name that
 //! `Class.forName(name)` computes is one of the classes named so far, or of those named later,
 //! and each of them is initialized, as the call would.
+//!
+//! A name that code makes of a package, a computed part and the rest of a class name, as `URL`
+//! finds the handler of a protocol, `"sun.net.www.protocol." + protocol + ".Handler"`, names
+//! every class of the source roots that fits it, with an identifier for the computed part
+//! (`name_pattern`, `pattern_classes`): `sun.net.www.protocol.https.Handler` and the other
+//! protocols' handlers, as if a literal named each.
 
 use std::path::PathBuf;
 
@@ -162,6 +168,62 @@ pub fn locale_data_classes(roots: &[PathBuf]) -> Vec<String> {
     out
 }
 
+/// The prefix and suffix of the class name that the string concatenation `node` makes of a
+/// constant package (`"sun.net.www.protocol."`), one computed part and a constant rest of a name
+/// that starts with a dot (`".Handler"`). `None` for any other node.
+pub fn name_pattern(node: &Value) -> Option<(String, String)> {
+    fn operands<'v>(node: &'v Value, out: &mut Vec<&'v Value>) {
+        let node = unparenthesized(node);
+        if text(node, "kind") == "PLUS" && text(node, "javaType") == "java.lang.String" {
+            operands(&node["leftOperand"], out);
+            operands(&node["rightOperand"], out);
+        } else {
+            out.push(node);
+        }
+    }
+    fn constant(node: &Value) -> Option<&str> {
+        match text(node, "kind") {
+            "STRING_LITERAL" => node["value"].as_str(),
+            "IDENTIFIER" | "MEMBER_SELECT" => node["symbol"]["constant"].as_str(),
+            _ => None,
+        }
+    }
+    if text(node, "kind") != "PLUS" || text(node, "javaType") != "java.lang.String" {
+        return None;
+    }
+    let mut parts = Vec::new();
+    operands(node, &mut parts);
+    let [prefix, computed, suffix] = parts[..] else { return None };
+    let (prefix, suffix) = (constant(prefix)?, constant(suffix)?);
+    let package = prefix.strip_suffix('.')?;
+    let rest = suffix.strip_prefix('.')?;
+    let fits = constant(computed).is_none()
+        && package.split('.').all(is_identifier)
+        && rest.split('.').all(|part| is_identifier(part) && !part.contains('$'));
+    fits.then(|| (prefix.to_string(), suffix.to_string()))
+}
+
+/// The top-level classes of these source roots whose names are `prefix`, an identifier and
+/// `suffix` (`name_pattern`): for each directory of the package `prefix` names, the class that
+/// the rest of the name names in it, if its file is there.
+pub fn pattern_classes(roots: &[PathBuf], (prefix, suffix): (&str, &str)) -> Vec<String> {
+    let mut out = Vec::new();
+    for root in roots {
+        let dir = prefix.split('.').filter(|p| !p.is_empty()).fold(root.clone(), |dir, part| dir.join(part));
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let part = entry.file_name().to_string_lossy().to_string();
+            let file = suffix[1..].split('.').fold(dir.join(&part), |dir, part| dir.join(part));
+            if is_identifier(&part) && file.with_extension("java").is_file() {
+                out.push(format!("{prefix}{part}{suffix}"));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The call `node` is `Class.forName(module, name)`: `Some` of the name when the code spells it
 /// out, `Some(None)` when it computes it, `None` for any other node.
 pub fn module_for_name(node: &Value) -> Option<Option<String>> {
@@ -254,6 +316,17 @@ impl Walk<'_> {
             // A bound that is no class, a type variable `T`, is `Object`'s.
             let class = target.contains('.') || self.classes.contains_key(&target);
             self.created_by_target(if class { target } else { "java.lang.Object".to_string() });
+        }
+    }
+
+    /// A class name that code makes of a prefix, a computed part and a suffix: the classes of the
+    /// source roots that fit it are named, as if literals named them.
+    pub(super) fn named_by_pattern(&mut self, pattern: (String, String)) {
+        if !self.patterns.insert(pattern.clone()) {
+            return;
+        }
+        for class in pattern_classes(&self.class_roots, (&pattern.0, &pattern.1)) {
+            self.named(&class);
         }
     }
 
@@ -412,6 +485,35 @@ mod tests {
         assert_eq!(class_bound("java.lang.Class<Shape>"), "Shape");
         assert_eq!(class_bound("java.lang.Class<capture#1 of ?>"), "java.lang.Object");
         assert_eq!(class_bound("java.lang.Class"), "java.lang.Object");
+    }
+
+    #[test]
+    fn a_pattern_names_the_classes_that_fit_it() {
+        let root = std::env::temp_dir().join(format!("name-pattern-{}", std::process::id()));
+        for dir in ["https", "jar", "notes"] {
+            std::fs::create_dir_all(root.join("sun/net/www/protocol").join(dir)).unwrap();
+        }
+        for file in ["https/Handler.java", "jar/Handler.java", "notes/Other.java"] {
+            std::fs::write(root.join("sun/net/www/protocol").join(file), "").unwrap();
+        }
+        let classes = pattern_classes(std::slice::from_ref(&root), ("sun.net.www.protocol.", ".Handler"));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(classes, ["sun.net.www.protocol.https.Handler", "sun.net.www.protocol.jar.Handler"]);
+    }
+
+    #[test]
+    fn a_pattern_is_a_package_a_computed_part_and_a_name() {
+        use crate::value::json;
+        let prefix = json!({"kind": "IDENTIFIER", "javaType": "java.lang.String",
+            "symbol": {"constant": "sun.net.www.protocol."}});
+        let computed = json!({"kind": "IDENTIFIER", "javaType": "java.lang.String", "symbol": {}});
+        let suffix = json!({"kind": "STRING_LITERAL", "javaType": "java.lang.String", "value": ".Handler"});
+        let inner = json!({"kind": "PLUS", "javaType": "java.lang.String",
+            "leftOperand": prefix, "rightOperand": computed});
+        let node = json!({"kind": "PLUS", "javaType": "java.lang.String",
+            "leftOperand": inner.clone(), "rightOperand": suffix});
+        assert_eq!(name_pattern(&node), Some(("sun.net.www.protocol.".to_string(), ".Handler".to_string())));
+        assert_eq!(name_pattern(&inner), None);
     }
 
     #[test]

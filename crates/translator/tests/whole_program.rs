@@ -420,6 +420,347 @@ fn a_program_using_collections_has_only_reachable_units_attributed() {
     assert!(elapsed.as_secs() < 120, "the translation took {elapsed:?}:\n{stderr}");
 }
 
+/// Array types that become `Object[]`s one after another: `Block[]` meets the `Object[]` it is
+/// stored in; then `(Block[]) other` casts an `Object` to an `Object[]`, which the `Item[]` held
+/// as an `Object` may be; and `String[][]` with `String[]` noted is an `Object[][]`, which meets
+/// the `Object[]` it is stored in. The first lowering notes them all, the later steps by meeting
+/// again the types that met (`lower::covariant`), so the program is lowered twice, not four times;
+/// once, with the arrays predicted before it (`lower::predict`).
+const COVARIANT_STEPS: &str = r#"
+public class Main {
+    static class Item { String name; Item(String n) { name = n; } }
+    static class Block { int id; Block(int i) { id = i; } }
+
+    static Object hold(Object o) { return o; }
+
+    public static void main(String[] args) {
+        Item[] items = { new Item("a"), new Item("b") };
+        Block[] blocks = { new Block(1) };
+        Object[] objects = blocks;
+        Object held = hold(items);
+        Object other = hold(blocks);
+        Block[] back = (Block[]) other;
+        System.out.println(objects.length + " " + back[0].id + " " + (held instanceof Block[]));
+        String[][] grid = { { "x" }, { "y", "z" } };
+        Object[] rows = grid;
+        System.out.println(rows.length + " " + ((String[]) rows[1])[1]);
+    }
+}
+"#;
+
+#[test]
+fn covariant_arrays_found_step_by_step_take_one_more_lowering() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-covariant-steps");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), COVARIANT_STEPS).unwrap();
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    assert_eq!(attempts(&stderr), 2, "{stderr}");
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
+/// The translation of the program in `sources` with `--timings`, with
+/// `JAVA_TO_RUST_PREDICTION_CHECK` set to `check`: its timings and its Rust.
+fn translate_counted(sources: &Path, library: &Path, work: &Path, check: Option<&str>) -> (String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
+    if let Some(check) = check {
+        command.env("JAVA_TO_RUST_PREDICTION_CHECK", check);
+    }
+    let translated = command
+        .args(["--timings", "--main", "Main", "--source"])
+        .arg(sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&translated.stderr).into_owned();
+    assert!(translated.status.success(), "the translation failed:\n{stderr}");
+    (stderr, std::fs::read_to_string(work.join("main.rs")).unwrap())
+}
+
+/// How many times the timings `stderr` say the program was lowered: `timing: lowering attempt 2:
+/// 0.001 s, ...`.
+fn attempts(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|l| l.strip_prefix("timing: lowering attempt ").is_some_and(|l| l.contains(": ")))
+        .count()
+}
+
+/// The checked prediction's line of the timings `stderr`, whose array types and Rust generics it
+/// predicted all (`N of N`) and no more: `timing: prediction: 3 of 3 covariant array types, 0
+/// more; 2 of 2 failed Rust generics, 0 more`.
+fn assert_predicted_all(stderr: &str) {
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with("timing: prediction: ") && l.contains(" of "))
+        .unwrap_or_else(|| panic!("no prediction checked:\n{stderr}"));
+    for half in line.trim_start_matches("timing: prediction: ").split("; ") {
+        let numbers: Vec<&str> = half.split(' ').collect();
+        assert_eq!(numbers[0], numbers[2], "{line}\n{stderr}");
+        assert!(half.ends_with(", 0 more"), "{line}\n{stderr}");
+    }
+    assert!(!stderr.contains("prediction missed"), "{stderr}");
+}
+
+/// Arrays that meet where lowering makes code of its own, not where the program converts them:
+/// the old `Tag[]` that `getAndSet` of a `VarHandle` gives as an `Object`, read from the field
+/// (the call itself passes no array), meets the `(Object[])` cast; and the `Label[]` that `Method.invoke` gets in its `Object[]`
+/// meets the `Named[]` that the table of the program's methods casts it to for the call
+/// (`lower::reflection`). The prediction finds both, and the program is lowered once.
+const ARRAYS_IN_LOWERED_CODE: &str = r#"
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.lang.reflect.Method;
+
+public class Main {
+    static class Tag {
+        final String name;
+        Tag(String name) { this.name = name; }
+    }
+
+    interface Named {}
+
+    static class Label implements Named {}
+
+    static class Shelf {
+        Tag[] tags = { new Tag("a") };
+    }
+
+    static final VarHandle TAGS;
+    static {
+        try {
+            TAGS = MethodHandles.lookup().findVarHandle(Shelf.class, "tags", Tag[].class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
+    public static int count(Named[] names) { return names.length; }
+
+    public static void main(String[] args) throws Exception {
+        Shelf shelf = new Shelf();
+        Object old = TAGS.getAndSet(shelf, null);
+        Object[] back = (Object[]) old;
+        System.out.println(back.length + " " + (shelf.tags == null));
+        Method count = Main.class.getMethod("count", Named[].class);
+        System.out.println(count.invoke(null, new Object[] { new Label[2] }));
+    }
+}
+"#;
+
+#[test]
+fn arrays_held_as_objects_in_lowered_code_are_predicted() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-arrays-in-lowered-code");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), ARRAYS_IN_LOWERED_CODE).unwrap();
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    let again = stderr.lines().find(|l| l.contains("is lowered again for")).unwrap_or_default();
+    for array in ["Main.Tag[]", "Main.Label[]", "Main.Named[]"] {
+        assert!(again.contains(array), "{array} not noted:\n{stderr}");
+    }
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
+/// `Box<String>[]` becomes an `Object[]` (`asList`'s `T[]`), whose elements are `Object`s, which
+/// the objects of the Rust generic class `Box` cannot be: `Box` is erased in the lowering that
+/// notes the array, and its array, `Box[]` once erased, is noted with it. The program is lowered
+/// twice, not once more for `Box` and again for `Box[]`.
+const ARRAY_OF_A_GENERIC_CLASS: &str = r#"
+import java.util.Arrays;
+import java.util.List;
+
+public class Main {
+    static class Box<U> {
+        U value;
+        Box(U value) { this.value = value; }
+    }
+
+    @SafeVarargs
+    static int count(Box<String>... boxes) {
+        List<Box<String>> list = Arrays.asList(boxes);
+        return list.size();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(count(new Box<>("a"), new Box<>("b")));
+    }
+}
+"#;
+
+#[test]
+fn a_covariant_array_of_a_rust_generic_class_erases_it_in_the_same_lowering() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-generic-class-array");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), ARRAY_OF_A_GENERIC_CLASS).unwrap();
+    // Without the prediction, which fails `Box` and notes `Box[]` before the first lowering.
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("unseeded"));
+    assert_eq!(attempts(&stderr), 2, "{stderr}");
+    assert!(stderr.contains("(Main.Box<String>[], Main.Box[])"), "{stderr}");
+    // The arrays are predicted with `Box` failed, as the lowerings find them with it.
+    let (stderr, _) = translate_counted(&sources, &library, &work, Some("1"));
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
+/// A Rust generic whose values go to `System.arraycopy` (`copy`) is failed where lowering meets
+/// it, so the lowering that notes `Block[]` drops it too: the program is lowered twice. Were the
+/// call rejected instead, the next lowering would erase every Rust generic, `requireNonNull`'s
+/// among them, whose `Query[]` would then become an `Object` that meets the `(Object[])` cast,
+/// and be lowered twice more. With the prediction, which fails `copy` and notes `Block[]` before,
+/// it is lowered once.
+const ARRAYCOPY_OF_A_TYPE_VARIABLE: &str = r#"
+import java.util.Objects;
+
+public class Main {
+    static class Block { int id; Block(int i) { id = i; } }
+    static class Query { String name; Query(String n) { name = n; } }
+
+    static <T> T copy(T source, T dest, int length) {
+        System.arraycopy(source, 0, dest, 0, length);
+        return dest;
+    }
+
+    static <T> T pick(T a, T b, boolean first) { return first ? a : b; }
+
+    static int count(Query... queries) {
+        Objects.requireNonNull(queries, "queries");
+        return queries.length;
+    }
+
+    static Object hold(Object o) { return o; }
+
+    public static void main(String[] args) {
+        Block[] blocks = { new Block(1) };
+        Object[] objects = blocks;
+        int[] copied = copy(new int[] { 1, 2, 3 }, new int[3], 3);
+        Object held = hold(new Object[] { "x" });
+        Object[] back = (Object[]) held;
+        System.out.println(objects.length + " " + copied[2] + " " + back[0] + " " + count(new Query("q"))
+            + " " + pick("a", "b", false));
+    }
+}
+"#;
+
+/// A rejection that can run, in code that uses the Rust generic `id`, erases `id` alone: `pick`
+/// stays a Rust generic.
+const REJECTED_WITH_A_RUST_GENERIC: &str = r#"
+public class Main {
+    static <T> T id(T x) { return x; }
+
+    static <T> T pick(T a, T b, boolean first) { return first ? a : b; }
+
+    static void odd() {
+        String s = id("a");
+        System.out.println(s + System.identityHashCode(5));
+    }
+
+    public static void main(String[] args) {
+        System.out.println(pick("a", "b", false));
+        odd();
+    }
+}
+"#;
+
+/// A rejection that can run in code that uses the Rust generic `id`, but that no type changes:
+/// asking for the caller in a method that is not static. The program is lowered once.
+const CALLER_WITH_A_RUST_GENERIC: &str = r#"
+public class Main {
+    static <T> T id(T x) { return x; }
+
+    String odd() {
+        String s = id("a");
+        return s + StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getName();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new Main().odd());
+    }
+}
+"#;
+
+#[test]
+fn a_rust_generic_that_fails_erases_only_itself() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    // Without the prediction, unless `predicted`.
+    let translate_as = |name: &str, java: &str, predicted: bool| {
+        let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+        let sources = work.join("src");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("Main.java"), java).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
+        if !predicted {
+            command.env("JAVA_TO_RUST_PREDICTION_CHECK", "unseeded");
+        }
+        let translated = command
+            .args(["--timings", "--main", "Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join("main.rs"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr).into_owned();
+        (
+            translated.status.success(),
+            stderr,
+            std::fs::read_to_string(work.join("main.rs")).unwrap_or_default(),
+        )
+    };
+    let translate = |name: &str, java: &str| translate_as(name, java, false);
+    let (ok, stderr, rust) = translate("whole-program-arraycopy-generic", ARRAYCOPY_OF_A_TYPE_VARIABLE);
+    assert!(ok, "the translation failed:\n{stderr}");
+    assert_eq!(attempts(&stderr), 2, "{stderr}");
+    for generic in ["fn pick<T", "fn require_non_null<T"] {
+        assert!(rust.contains(generic), "no {generic} in the translation:\n{stderr}");
+    }
+    let (ok, stderr, predicted) =
+        translate_as("whole-program-arraycopy-generic-predicted", ARRAYCOPY_OF_A_TYPE_VARIABLE, true);
+    assert!(ok, "the translation failed:\n{stderr}");
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, rust);
+    let (_, stderr, _) = translate("whole-program-rejected-generic", REJECTED_WITH_A_RUST_GENERIC);
+    assert!(
+        stderr.contains("is lowered again without 0 of 0 Rust generic classes and 1 of 2 methods (Main.id)"),
+        "{stderr}"
+    );
+    let (_, stderr, _) = translate("whole-program-caller-generic", CALLER_WITH_A_RUST_GENERIC);
+    assert!(stderr.contains("getCallerClass"), "{stderr}");
+    assert!(!stderr.contains("is lowered again"), "{stderr}");
+}
+
 /// A resource of a class of the JDK is not in the translation: `Character.getName` reads
 /// `uniName.dat`, a data file of the JDK that is generated when the JDK is built and is not in
 /// its sources, and the program ends there, naming it (`TranslatedModules.classResource`). The
@@ -788,9 +1129,10 @@ public class Main {
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "3 false\n");
 }
 
-/// A `match` on the class number over more classes than one method of it takes (`PART_CLASSES` in
-/// `codegen/dispatch.rs`, 2048) is cut into methods by number: a program with 2100 classes that
-/// shows each object and its class's name runs as Java does, through methods of two parts.
+/// A `match` on the class number over more classes than are written whole (`CUT_ABOVE` in
+/// `codegen/dispatch.rs`, 2048) is cut into methods by number (`PART_CLASSES`, 256 each): a
+/// program with 2100 classes that shows each object and its class's name runs as Java does,
+/// through methods of nine parts.
 #[test]
 fn a_match_over_thousands_of_classes_is_cut_into_parts() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
@@ -1277,7 +1619,7 @@ fn annotations_of_a_library_are_read() {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
         return;
     };
-    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-library-annotations");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-library-annotations-read");
     let _ = std::fs::remove_dir_all(&work);
     let files = [
         (
@@ -1414,4 +1756,85 @@ public class Main {
     for wanted in ["a proxy class of ", "the module of a proxy class, a dynamic module"] {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
+}
+
+/// Rust generics that fail for each of the reasons lowering finds, and two that stay: the
+/// prediction made before the first lowering names exactly those that fail
+/// (`lower::predict`, checked with `JAVA_TO_RUST_PREDICTION_CHECK`).
+const GENERICS_THAT_FAIL: &str = r#"
+import java.util.*;
+import java.util.function.Supplier;
+
+public class Main {
+    static class Box<T> { T value; Box(T v) { value = v; } T get() { return value; } }
+    static class Pair<A, B> {
+        A a; B b;
+        Pair(A a, B b) { this.a = a; this.b = b; }
+        public boolean equals(Object o) { return o instanceof Pair<?, ?> p && Objects.equals(a, p.a); }
+    }
+    interface Node { <A> void accept(A arg); }
+    static class Leaf implements Node { public <A> void accept(A arg) { System.out.println("leaf"); } }
+    static class Visitor<A> { void visit(Node n, A arg) { n.accept(arg); } }
+
+    static <T> T keep(T v) { return v; }
+    static <T> T first(List<T> list) { return list.get(0); }
+    static <T> String text(T v) { return "v" + v; }
+    static <T> T cast(Object o) { return keep((T) o); }
+    static <T> Supplier<T> later(T v) { return () -> v; }
+    static <T> List<T> one(T v) { return List.of(v); }
+
+    public static void main(String[] args) {
+        Box<String> box = new Box<>(keep("b"));
+        new Visitor<String>().visit(new Leaf(), "x");
+        System.out.println(box.get() + first(one("f")) + text(3) + later("l").get()
+            + new Pair<>("a", 1).equals(new Pair<>("a", 2)) + Main.<String>cast("c"));
+    }
+}
+"#;
+
+#[test]
+fn the_rust_generics_that_fail_are_predicted() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-predicted-generics");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), GENERICS_THAT_FAIL).unwrap();
+    let translate = |check: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
+        if check {
+            command.env("JAVA_TO_RUST_PREDICTION_CHECK", "unseeded");
+        }
+        let translated = command
+            .args(["--timings", "--main", "Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join("main.rs"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr).into_owned();
+        assert!(translated.status.success(), "the translation failed:\n{stderr}");
+        (stderr, std::fs::read_to_string(work.join("main.rs")).unwrap())
+    };
+    let (checked, unseeded) = translate(true);
+    let line = checked
+        .lines()
+        .find(|l| l.starts_with("timing: prediction: ") && l.contains(" of "))
+        .unwrap_or_else(|| panic!("no prediction checked:\n{checked}"));
+    let generics = line.split("; ").nth(1).unwrap();
+    let numbers: Vec<&str> = generics.split(' ').collect();
+    assert_eq!(numbers[0], numbers[2], "{line}\n{checked}");
+    assert!(generics.ends_with(", 0 more"), "{line}\n{checked}");
+    assert!(!checked.contains("prediction missed generic"), "{checked}");
+    // The Rust generics that stay are the same with the prediction used.
+    let (_, seeded) = translate(false);
+    for generic in ["struct MainBox<T", "fn keep<T"] {
+        assert!(seeded.contains(generic) && unseeded.contains(generic), "no {generic} in the translation");
+    }
+    assert_eq!(seeded, unseeded);
 }

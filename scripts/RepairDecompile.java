@@ -44,7 +44,9 @@
 //   again in the same scope renamed, with its uses after it;
 // - before the first round, a method that the source does not declare static but its class file
 //   does declared static (`static` for the `default` Procyon writes for a static interface
-//   method);
+//   method), and in every file, the empty branch of `while (true) { if (c) ; else { .. } }`, with
+//   `c` reading locals alone, made a `break` (Vineflower's for-each in a `finally`, which would
+//   spin for ever);
 // - CFR's `SwitchBootstraps.typeSwitch(..)` call replaced with the index its call site returns
 //   (`x == null ? -1 : n <= 0 && x instanceof A ? 0 : ..`), the one edit that is not the class
 //   file's bytecode but computes the same;
@@ -156,7 +158,7 @@ public class RepairDecompile {
         }
         Map<Path, List<Error>> errors = new TreeMap<>();
         boolean[] declared = {false};
-        compile(all, (task, units) -> declared[0] = staticMethods(task, units), errors);
+        compile(all, (task, units) -> declared[0] = staticMethods(task, units) | spinningLoops(units), errors);
         report("before", errors);
         // Methods made static as their class files have them change other files' errors.
         if (declared[0]) {
@@ -2485,6 +2487,82 @@ public class RepairDecompile {
             any = true;
         }
         return any;
+    }
+
+    // Each `while (true)` (or `for (;;)`) loop whose body is only `if (c) ; else { .. }`, with `c`
+    // reading local variables alone: once `c` holds the loop spins for ever, as no bytecode does.
+    // Vineflower writes a for-each loop in a `finally` so, without its `break`; the empty branch
+    // becomes the `break`. javac accepts the loop, so this runs on every file, before the rounds.
+    // Edits the files; returns whether it edited any.
+    static boolean spinningLoops(List<CompilationUnitTree> units) throws IOException {
+        boolean any = false;
+        for (CompilationUnitTree unit : units) {
+            JCTree.JCCompilationUnit cu = (JCTree.JCCompilationUnit) unit;
+            List<Edit> edits = new ArrayList<>();
+            new TreeScanner<Void, Void>() {
+                public Void visitWhileLoop(WhileLoopTree node, Void v) {
+                    if (TreeInfo.skipParens((JCTree.JCExpression) node.getCondition()) instanceof JCTree.JCLiteral l
+                            && Boolean.TRUE.equals(l.getValue())) {
+                        spinning(node.getStatement());
+                    }
+                    return super.visitWhileLoop(node, v);
+                }
+
+                public Void visitForLoop(ForLoopTree node, Void v) {
+                    if (node.getCondition() == null && node.getUpdate().isEmpty()) spinning(node.getStatement());
+                    return super.visitForLoop(node, v);
+                }
+
+                void spinning(StatementTree body) {
+                    while (body instanceof BlockTree block && block.getStatements().size() == 1)
+                        body = block.getStatements().get(0);
+                    if (!(body instanceof JCTree.JCIf branch) || branch.elsepart == null || !empty(branch.thenpart)
+                            || !localsOnly(branch.cond)) {
+                        return;
+                    }
+                    JCTree then = branch.thenpart;
+                    int start = TreeInfo.getStartPos(then), end = TreeInfo.getEndPos(then, cu.endPositions);
+                    String text = then instanceof JCTree.JCBlock ? "{ break; }" : "break;";
+                    edits.add(new Edit(start, end, text, "break for the empty branch of a loop that would spin: if ("
+                        + branch.cond.toString().replaceAll("^\\((.*)\\)$", "$1") + ")"));
+                }
+            }.scan(cu, null);
+            if (edits.isEmpty()) continue;
+            Path file = Path.of(unit.getSourceFile().toUri());
+            String text = Files.readString(file);
+            for (Edit edit : edits)
+                log.printf("round 0 %s:%d %s%n", root.relativize(file), line(text, edit.start()), edit.what());
+            Files.writeString(file, apply(text, edits));
+            any = true;
+        }
+        return any;
+    }
+
+    // Whether a statement does nothing: `;`, or a block of nothing.
+    static boolean empty(JCTree statement) {
+        return statement instanceof JCTree.JCSkip
+            || statement instanceof JCTree.JCBlock block && block.stats.stream().allMatch(RepairDecompile::empty);
+    }
+
+    // Whether an expression only reads local variables and constants, with no effects.
+    static boolean localsOnly(JCTree.JCExpression e) {
+        boolean[] ok = {true};
+        new TreeScanner<Void, Void>() {
+            public Void scan(Tree tree, Void v) {
+                if (tree == null || !ok[0]) return null;
+                switch (tree) {
+                    case JCTree.JCIdent id -> ok[0] = id.sym instanceof Symbol.VarSymbol var
+                        && var.owner != null && var.owner.kind == Kinds.Kind.MTH;
+                    case JCTree.JCLiteral l -> {}
+                    case JCTree.JCParens p -> super.scan(tree, v);
+                    case JCTree.JCBinary b -> super.scan(tree, v);
+                    case JCTree.JCUnary u when !u.getTag().isIncOrDecUnaryOp() -> super.scan(tree, v);
+                    default -> ok[0] = false;
+                }
+                return null;
+            }
+        }.scan(e, null);
+        return ok[0];
     }
 
     // The JVM descriptor of a type's erasure, or null where it has none.

@@ -323,8 +323,9 @@ pub fn jdk_temps(trees: &[&Value]) -> JdkTemps {
 /// below the nearest block or lambda, before that construct runs, and freed after it; the value
 /// tested is kept in a variable of its own while it is tested, unless it is a local variable or a
 /// parameter. A binding that stays in scope after its statement (`if (!(o instanceof T t))
-/// return;`) is declared in the enclosing block instead, which this does not follow, so a method
-/// that may have one is left out (`untracked_patterns`).
+/// return;`) is declared in the enclosing block instead, before the statement, and freed at the
+/// end of the block (`kept_bindings`); a method where that is not certain, or where such a
+/// statement is not one of a block's own, is left out (`untracked_patterns`).
 fn unit_temps(unit: &Value) -> JdkTemps {
     let mut out = Vec::new();
     for class in unit["typeDecls"].as_array().into_iter().flatten() {
@@ -347,7 +348,8 @@ fn classes(class: &Value, outermost: &str, plain: bool, out: &mut JdkTemps) {
                 {
                     continue;
                 }
-                let mut slots = SwitchSlots { outermost, out: &mut *out, next: 0, claimed: false };
+                let mark = out.len();
+                let mut slots = SwitchSlots::new(outermost, &mut *out, 0);
                 if symbol["static"].as_bool() != Some(true) {
                     slots.next = 1;
                 }
@@ -355,6 +357,9 @@ fn classes(class: &Value, outermost: &str, plain: bool, out: &mut JdkTemps) {
                     slots.next += size(param);
                 }
                 slots.statement(&member["body"]);
+                if slots.failed {
+                    out.truncate(mark);
+                }
             }
             Some(kind @ ("CLASS" | "INTERFACE" | "ENUM" | "RECORD")) => {
                 let plain = kind != "ENUM" && member["symbol"]["static"].as_bool() == Some(true);
@@ -395,22 +400,33 @@ fn nested_classes(v: &Value, outermost: &str, out: &mut JdkTemps, top: bool) {
 /// Whether the code under `v` has patterns whose variables the walk of slots does not follow:
 /// a `switch` with patterns (or `case null`), a record pattern, `_` as a pattern, a pattern or
 /// `instanceof` of a primitive type, or a binding that may stay in scope after its statement
-/// (`preserved`).
+/// (`preserved`) where that statement is not one of a block's own (the walk follows those, see
+/// `kept_bindings`).
 fn untracked_patterns(v: &Value) -> bool {
-    match v {
-        Value::Object(fields) => {
-            let kind = v["kind"].as_str().unwrap_or_default();
-            matches!(kind, "DECONSTRUCTION_PATTERN" | "RECORD_PATTERN" | "PATTERN_CASE_LABEL" | "ANY_PATTERN")
-                || kind == "CONSTANT_CASE_LABEL"
+    fn untracked(v: &Value, in_block: bool) -> bool {
+        match v {
+            Value::Object(fields) => {
+                let kind = v["kind"].as_str().unwrap_or_default();
+                matches!(
+                    kind,
+                    "DECONSTRUCTION_PATTERN" | "RECORD_PATTERN" | "PATTERN_CASE_LABEL" | "ANY_PATTERN"
+                ) || kind == "CONSTANT_CASE_LABEL"
                     && v["constantExpression"]["kind"].as_str() == Some("NULL_LITERAL")
-                || kind == "INSTANCE_OF" && primitive(&v["type"])
-                || kind == "BINDING_PATTERN" && primitive(&v["variable"])
-                || preserved(v)
-                || fields.iter().any(|(key, value)| key != "symbol" && untracked_patterns(value))
+                    || kind == "INSTANCE_OF" && primitive(&v["type"])
+                    || kind == "BINDING_PATTERN" && primitive(&v["variable"])
+                    || !in_block && preserved(v)
+                    || fields.iter().any(|(key, value)| match value {
+                        Value::Array(items) if kind == "BLOCK" && key == "statements" => {
+                            items.iter().any(|s| untracked(s, true))
+                        }
+                        _ => key != "symbol" && untracked(value, false),
+                    })
+            }
+            Value::Array(items) => items.iter().any(|i| untracked(i, false)),
+            _ => false,
         }
-        Value::Array(items) => items.iter().any(untracked_patterns),
-        _ => false,
     }
+    untracked(v, false)
 }
 
 /// Whether the type of the tree `v` is a primitive type.
@@ -432,6 +448,208 @@ fn preserved(s: &Value) -> bool {
                 || when_false && may_not_complete(&s["thenStatement"])
         }
         "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP" => when_false,
+        _ => false,
+    }
+}
+
+/// The number of binding variables of statement `s`, one of a block's own, that stay in scope
+/// after it (JLS 6.3.2), which javac declares in the block before the statement
+/// (`TransPatterns.visitBlock`'s `tryPrepend`) rather than around it: an `if`'s bindings when
+/// false where only its `else` (or the lack of one) completes normally, when true where only its
+/// `then` does (`Attr.visitIf`), and a loop's bindings when false where nothing breaks out of
+/// it. `None` where that is not certain: where whether a branch completes is not known
+/// (`completes`), and for a labeled statement that may keep bindings.
+fn kept_bindings(s: &Value) -> Option<usize> {
+    match s["kind"].as_str().unwrap_or_default() {
+        "IF" => {
+            let (when_true, when_false) = condition_counts(&s["condition"]);
+            if when_true + when_false == 0 {
+                return Some(0);
+            }
+            let then = completes(&s["thenStatement"])?;
+            let otherwise = if s["elseStatement"].is_null() { true } else { completes(&s["elseStatement"])? };
+            Some(match (then, otherwise) {
+                (true, false) => when_true,
+                (false, true) => when_false,
+                _ => 0,
+            })
+        }
+        "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP" => {
+            let when_false = condition_counts(&s["condition"]).1;
+            Some(if jumps_out(&s["statement"], "BREAK") { 0 } else { when_false })
+        }
+        "LABELED_STATEMENT" => {
+            let mut inner = &s["statement"];
+            while inner["kind"].as_str() == Some("LABELED_STATEMENT") {
+                inner = &inner["statement"];
+            }
+            if preserved(inner) { None } else { Some(0) }
+        }
+        _ => Some(0),
+    }
+}
+
+/// The numbers of the named bindings that the condition `e` introduces when true, and when
+/// false (JLS 6.3.1).
+fn condition_counts(e: &Value) -> (usize, usize) {
+    match e["kind"].as_str().unwrap_or_default() {
+        "PARENTHESIZED" => condition_counts(&e["expression"]),
+        "LOGICAL_COMPLEMENT" => {
+            let (t, f) = condition_counts(&e["expression"]);
+            (f, t)
+        }
+        "CONDITIONAL_AND" => {
+            (condition_counts(&e["leftOperand"]).0 + condition_counts(&e["rightOperand"]).0, 0)
+        }
+        "CONDITIONAL_OR" => {
+            (0, condition_counts(&e["leftOperand"]).1 + condition_counts(&e["rightOperand"]).1)
+        }
+        "INSTANCE_OF" => {
+            let pattern = &e["pattern"];
+            let named = pattern["kind"].as_str() == Some("BINDING_PATTERN")
+                && !matches!(pattern["variable"]["name"].as_str(), None | Some("" | "_"));
+            (usize::from(named), 0)
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Whether statement `s` can complete normally (JLS 14.22), as javac's `Flow.aliveAfter`
+/// decides; `None` where this does not follow the rules (a `switch`, a condition that may be a
+/// constant expression other than a literal or a constant variable).
+fn completes(s: &Value) -> Option<bool> {
+    let either = |a: Option<bool>, b: Option<bool>| match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    };
+    match s["kind"].as_str().unwrap_or_default() {
+        "BLOCK" => {
+            // A statement after one that cannot complete is unreachable, which javac rejects.
+            let mut known = true;
+            for statement in s["statements"].as_array().into_iter().flatten() {
+                match completes(statement) {
+                    Some(false) => return Some(false),
+                    Some(true) => {}
+                    None => known = false,
+                }
+            }
+            known.then_some(true)
+        }
+        "RETURN" | "THROW" | "BREAK" | "CONTINUE" | "YIELD" => Some(false),
+        "IF" if s["elseStatement"].is_null() => Some(true),
+        "IF" => either(completes(&s["thenStatement"]), completes(&s["elseStatement"])),
+        "WHILE_LOOP" | "FOR_LOOP" => match constant_true(&s["condition"])? {
+            true => Some(jumps_out(&s["statement"], "BREAK")),
+            false => Some(true),
+        },
+        "DO_WHILE_LOOP" => {
+            if jumps_out(&s["statement"], "BREAK") {
+                return Some(true);
+            }
+            if constant_true(&s["condition"])? {
+                return Some(false);
+            }
+            // The condition runs when the body completes or continues the loop.
+            if jumps_out(&s["statement"], "CONTINUE") { Some(true) } else { completes(&s["statement"]) }
+        }
+        "LABELED_STATEMENT" => {
+            let label = s["label"].as_str().unwrap_or_default();
+            match completes(&s["statement"]) {
+                Some(true) => Some(true),
+                _ if breaks_to(&s["statement"], label) => Some(true),
+                other => other,
+            }
+        }
+        "SYNCHRONIZED" => completes(&s["block"]),
+        "TRY" => {
+            let finally = &s["finallyBlock"];
+            if !finally.is_null() && !completes(finally)? {
+                return Some(false);
+            }
+            let mut alive = completes(&s["block"]);
+            for catch in s["catches"].as_array().into_iter().flatten() {
+                alive = either(alive, completes(&catch["block"]));
+            }
+            alive
+        }
+        "EXPRESSION_STATEMENT"
+        | "VARIABLE"
+        | "EMPTY_STATEMENT"
+        | "ENHANCED_FOR_LOOP"
+        | "ASSERT"
+        | "CLASS"
+        | "INTERFACE"
+        | "ENUM"
+        | "RECORD" => Some(true),
+        _ => None,
+    }
+}
+
+/// Whether the loop condition `c` is the constant `true` (no condition is); `None` where it may
+/// be a constant expression that this does not evaluate.
+fn constant_true(c: &Value) -> Option<bool> {
+    fn variable(v: &Value) -> bool {
+        match v {
+            Value::Object(fields) => {
+                let kind = v["kind"].as_str().unwrap_or_default();
+                matches!(kind, "IDENTIFIER" | "MEMBER_SELECT") && v["symbol"]["constant"].is_null()
+                    || matches!(
+                        kind,
+                        "METHOD_INVOCATION" | "NEW_CLASS" | "INSTANCE_OF" | "ARRAY_ACCESS" | "ASSIGNMENT"
+                    )
+                    || fields.iter().any(|(key, value)| key != "symbol" && variable(value))
+            }
+            Value::Array(items) => items.iter().any(variable),
+            _ => false,
+        }
+    }
+    if c.is_null() {
+        return Some(true);
+    }
+    match c["kind"].as_str().unwrap_or_default() {
+        "PARENTHESIZED" => constant_true(&c["expression"]),
+        "BOOLEAN_LITERAL" => c["value"].as_bool(),
+        "IDENTIFIER" | "MEMBER_SELECT" if !c["symbol"]["constant"].is_null() => {
+            Some(c["symbol"]["constant"].as_str() == Some("true"))
+        }
+        _ if variable(c) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the body `v` of a loop has an unlabeled `jump` (`BREAK` or `CONTINUE`) of the loop:
+/// one that is not in a loop of its own, or for a `break`, a `switch`; not in a class or a
+/// lambda.
+fn jumps_out(v: &Value, jump: &str) -> bool {
+    match v {
+        Value::Object(fields) => {
+            let kind = v["kind"].as_str().unwrap_or_default();
+            if kind == jump {
+                return v["label"].is_null();
+            }
+            let own = matches!(kind, "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP" | "ENHANCED_FOR_LOOP")
+                || jump == "BREAK" && matches!(kind, "SWITCH" | "SWITCH_EXPRESSION")
+                || matches!(kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD" | "LAMBDA_EXPRESSION");
+            !own && fields.iter().any(|(key, value)| key != "symbol" && jumps_out(value, jump))
+        }
+        Value::Array(items) => items.iter().any(|i| jumps_out(i, jump)),
+        _ => false,
+    }
+}
+
+/// Whether the code `v` has a `break label;` (not in a class or a lambda).
+fn breaks_to(v: &Value, label: &str) -> bool {
+    match v {
+        Value::Object(fields) => {
+            let kind = v["kind"].as_str().unwrap_or_default();
+            if kind == "BREAK" {
+                return v["label"].as_str() == Some(label);
+            }
+            !matches!(kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD" | "LAMBDA_EXPRESSION")
+                && fields.iter().any(|(key, value)| key != "symbol" && breaks_to(value, label))
+        }
+        Value::Array(items) => items.iter().any(|i| breaks_to(i, label)),
         _ => false,
     }
 }
@@ -645,9 +863,18 @@ struct SwitchSlots<'a> {
     /// The walk is inside a construct that declares the binding variables under it (see
     /// `unit_temps`), and not in a block below it.
     claimed: bool,
+    /// The number of the binding variables of the statement walked next that its block has
+    /// declared before it (`kept_bindings`).
+    kept: usize,
+    /// The walk met code whose slots it does not know: its method's temps are left out.
+    failed: bool,
 }
 
-impl SwitchSlots<'_> {
+impl<'a> SwitchSlots<'a> {
+    fn new(outermost: &'a str, out: &'a mut JdkTemps, next: usize) -> Self {
+        SwitchSlots { outermost, out, next, claimed: false, kept: 0, failed: false }
+    }
+
     fn statement(&mut self, s: &Value) {
         let start = self.next;
         let claimed = self.claimed;
@@ -661,7 +888,16 @@ impl SwitchSlots<'_> {
             "BLOCK" => {
                 self.claimed = false;
                 for statement in list(&s["statements"]) {
+                    // The bindings that stay in scope after the statement, the block's from here.
+                    match kept_bindings(&statement) {
+                        Some(kept) => {
+                            self.next += kept;
+                            self.kept = kept;
+                        }
+                        None => self.failed = true,
+                    }
                     self.statement(&statement);
+                    self.kept = 0;
                 }
             }
             "VARIABLE" => {
@@ -729,7 +965,7 @@ impl SwitchSlots<'_> {
     /// Declares the binding variables under the construct `v`, unless one around it does.
     fn claim(&mut self, v: &Value) {
         if !self.claimed {
-            self.next += bindings(v);
+            self.next += bindings(v).saturating_sub(std::mem::take(&mut self.kept));
             self.claimed = true;
         }
     }
@@ -757,18 +993,17 @@ impl SwitchSlots<'_> {
             // `this`: javac makes it static, with the variables it uses, then its parameters.
             "LAMBDA_EXPRESSION" => {
                 if let Some(captured) = lambda_captures(e) {
-                    let mut slots = SwitchSlots {
-                        outermost: self.outermost,
-                        out: &mut *self.out,
-                        next: captured,
-                        claimed: false,
-                    };
+                    let mark = self.out.len();
+                    let mut slots = SwitchSlots::new(self.outermost, &mut *self.out, captured);
                     for param in e["parameters"].as_array().into_iter().flatten() {
                         slots.next += size(param);
                     }
                     match e["body"]["kind"].as_str() {
                         Some("BLOCK") => slots.statement(&e["body"]),
                         _ => slots.expression(&e["body"]),
+                    }
+                    if slots.failed {
+                        self.out.truncate(mark);
                     }
                 }
                 return;
@@ -844,7 +1079,7 @@ mod tests {
     use super::*;
 
     /// Methods with `instanceof` patterns and a for-each loop each; the slots of the iterators are
-    /// javac's (`javap -c` of the class compiled by javac 26): 4, 4 and 5.
+    /// javac's (`javap -c` of the class compiled by javac 26): 4, 4, 5, 5, 4 and 5.
     const PATTERNS: &str = "import java.util.List;
 
 class Patterns {
@@ -889,6 +1124,28 @@ class Patterns {
         return n;
     }
 
+    int notKept(Object o, List<String> l) {
+        if (!(o instanceof String s)) {
+            o = get();
+        }
+        int n = 0;
+        for (String x : l) {
+            n++;
+        }
+        return n;
+    }
+
+    int loop(Object o, List<String> l) {
+        while (!(o instanceof String s)) {
+            o = get();
+        }
+        int n = s.length();
+        for (String x : l) {
+            n++;
+        }
+        return n;
+    }
+
     Object get() {
         return null;
     }
@@ -903,8 +1160,16 @@ class Patterns {
             .filter(|t| t.2 == "i$")
             .map(|(_, pos, _, text)| (pos.line, text))
             .collect();
-        // `kept`'s binding outlives its `if`, in a slot of the method's block: it is left out.
-        let expected = [(9, "<local4>"), (17, "<local4>"), (26, "<local5>")];
+        // `kept`'s and `loop`'s bindings outlive their statements, in slots of the method's block
+        // before `n`'s; `notKept`'s `if` completes either way, its binding is its own.
+        let expected = [
+            (9, "<local4>"),
+            (17, "<local4>"),
+            (26, "<local5>"),
+            (39, "<local5>"),
+            (50, "<local4>"),
+            (61, "<local5>"),
+        ];
         assert_eq!(iterators, expected.map(|(line, text)| (line, text.to_string())));
     }
 }

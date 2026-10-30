@@ -74,9 +74,9 @@
 //! summaries known, a few rounds per method, and is then cut down until every method in it is
 //! still a factory with the factories that remain.
 
-use super::FastMap;
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
+
 use std::rc::Rc;
 
 /// What the analysis found (see the module's comment).
@@ -85,11 +85,11 @@ pub struct StackObjects {
     /// The `new`s and the calls of factories (by expression id) whose objects never leave the
     /// method whose body holds them and, in a loop, are no longer reachable when the next
     /// iteration makes the next one.
-    pub objects: HashSet<ExprId>,
+    pub objects: FastSet<ExprId>,
     /// The method that each call of `objects` runs, a factory.
-    pub calls: HashMap<ExprId, usize>,
+    pub calls: FastMap<ExprId, usize>,
     /// The factories: the methods that return a new object that does not otherwise leave them.
-    pub factories: HashMap<usize, Product>,
+    pub factories: FastMap<usize, Product>,
 }
 
 /// The object that a factory returns.
@@ -136,9 +136,11 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     }
     // Callees are solved before their callers, so that a caller is mostly solved once, with its
     // callees' summaries final: the order of the strongly connected components of the calls, each
-    // after those it calls, and in a component the smaller methods first, so that a large one
-    // that calls many of the others (the reflection's `Method.invoke`, which calls every method
-    // that reflection may run) is solved again only once they settle, not after each of them
+    // after those it calls, and in a component the smaller methods first, a method's size being
+    // its steps and the methods its calls may run. So a method that calls many of the others, by
+    // many calls (the reflection's `Method.invoke`, which calls every method that reflection may
+    // run) or by one call that may run thousands of them (`f.apply(this)`, a call of every
+    // lambda's `Function.apply`), is solved again only once they settle, not after each of them
     // changes. The least fixpoint is the same in any order.
     let callees: Vec<Vec<usize>> = {
         let mut callees = vec![Vec::new(); n];
@@ -150,9 +152,14 @@ pub fn stack_objects(class: &Class) -> StackObjects {
         callees
     };
     let (rank, _) = super::closure::components(&callees);
-    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+    let mut edges: FastSet<(usize, usize)> = FastSet::default();
     let mut queued = vec![true; n];
-    let size: Vec<usize> = analysis.code.iter().map(|c| c.assigns.len() + c.calls.len()).collect();
+    let size: Vec<usize> = analysis
+        .code
+        .iter()
+        .zip(&callees)
+        .map(|(c, cs)| c.assigns.len() + c.calls.len() + cs.len())
+        .collect();
     let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize, usize)>> =
         (0..n).map(|m| std::cmp::Reverse((rank[m], size[m], m))).collect();
     let mut solves = 0;
@@ -617,8 +624,8 @@ fn field_of(class: &Class, t: usize, name: &str) -> Option<FieldKey> {
 /// The instance fields that the program reads only on `this` (`this.f`, or `f` alone): what an
 /// object holds in them is read only by its own methods (see `Contents`). A read on another
 /// object whose class is not known counts for every field of its name.
-fn own_fields(class: &Class) -> HashSet<FieldKey> {
-    let mut fields: HashSet<FieldKey> = class
+fn own_fields(class: &Class) -> FastSet<FieldKey> {
+    let mut fields: FastSet<FieldKey> = class
         .types
         .iter()
         .enumerate()
@@ -660,7 +667,7 @@ struct Compiling<'a, 'l> {
     order: Vec<&'a str>,
     site_of: FastMap<ExprId, u32>,
     call_of: FastMap<ExprId, u32>,
-    own_fields: &'a HashSet<FieldKey>,
+    own_fields: &'a FastSet<FieldKey>,
     /// The method being compiled.
     method: usize,
 }
@@ -670,7 +677,7 @@ fn compile<'a>(
     class: &'a Class,
     m: usize,
     field_inits: &[Vec<(usize, &'a Expr)>],
-    own_fields: &'a HashSet<FieldKey>,
+    own_fields: &'a FastSet<FieldKey>,
     lists: &mut Lists,
 ) -> Compiled {
     let method = &class.methods[m];
@@ -1540,10 +1547,10 @@ impl Analysis<'_> {
                         let names: Vec<String> = path.iter().map(|&t| method_name(class, t)).collect();
                         out.push_str(&format!("  as the receiver of {}:\n", names.join(" -> ")));
                         let last = *path.last().expect("a path has a method");
-                        let mut seen = HashSet::new();
+                        let mut seen = FastSet::default();
                         self.explain(class, last, 0, Some(c), 2, &mut seen, &mut out);
                     }
-                    let mut seen = HashSet::new();
+                    let mut seen = FastSet::default();
                     self.explain(class, m, s, Some(c), 1, &mut seen, &mut out);
                 } else if !flows.returned.contains(s) {
                     if dead_by_next_iteration(&self.code[m], &flows.vars, &flows.contents, s, &mut Vec::new())
@@ -1596,7 +1603,7 @@ impl Analysis<'_> {
         s: usize,
         c: Option<usize>,
         depth: usize,
-        seen: &mut HashSet<(usize, usize)>,
+        seen: &mut FastSet<(usize, usize)>,
         out: &mut String,
     ) {
         let indent = "  ".repeat(depth);
@@ -1793,14 +1800,15 @@ struct Scopes<'m> {
     made: &'m FastMap<ExprId, u32>,
     /// The loops around each `new` and call of a factory, outermost first, as numbers of the
     /// loops.
-    sites: HashMap<ExprId, Vec<usize>>,
+    sites: FastMap<ExprId, Vec<usize>>,
     /// For each variable, the loops around each of its declarations.
-    declarations: HashMap<&'m str, Vec<Vec<usize>>>,
+    declarations: FastMap<&'m str, Vec<Vec<usize>>>,
 }
 
 impl<'m> Scopes<'m> {
     fn of(method: &'m Method, made: &'m FastMap<ExprId, u32>) -> Scopes<'m> {
-        let mut scopes = Scopes { count: 0, made, sites: HashMap::new(), declarations: HashMap::new() };
+        let mut scopes =
+            Scopes { count: 0, made, sites: FastMap::default(), declarations: FastMap::default() };
         for p in &method.params {
             scopes.declarations.entry(p.name.as_str()).or_default().push(Vec::new());
         }
@@ -1897,7 +1905,7 @@ impl<'m> Scopes<'m> {
     /// each (the decompiled Minecraft server nests them deep enough for gigabytes).
     fn expr(&mut self, e: &'m Expr, loops: &mut Vec<usize>, bindings: Option<usize>) {
         // The expressions in the statements of `e`'s switch expressions, at any depth.
-        let mut inner: HashSet<*const Expr> = HashSet::new();
+        let mut inner: FastSet<*const Expr> = FastSet::default();
         visit_expr(e, &mut |x| {
             // An outer switch comes first, and holds the ones nested in its statements.
             if let ExprKind::Switch { cases, .. } = &x.kind

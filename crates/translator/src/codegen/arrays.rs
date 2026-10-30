@@ -106,8 +106,10 @@ impl<'a> Gen<'a> {
         }
         match &e.kind {
             ExprKind::Var(name) => format!("&{}", self.local(name)),
-            // A field is borrowed where it is, without a copy of the handle.
+            // A field is borrowed where it is, without a copy of the handle, and so is a static
+            // that is a `java::Final`.
             ExprKind::Field { .. } => format!("&{}", self.object_place(e)),
+            ExprKind::Static { .. } if let Some(place) = self.final_place(e) => format!("&{place}"),
             _ => format!("&{}", self.expr(e).at(UNARY)),
         }
     }
@@ -492,9 +494,8 @@ impl<'a> Gen<'a> {
     /// A name for a temporary, the first of `candidates` that no local or method of the program
     /// already uses, since the code the temporary is bound around may use those.
     pub(super) fn fresh_name(&self, candidates: &[&'static str]) -> &'static str {
-        let taken = |name: &str| {
-            self.locals.values().any(|local| local == name) || self.fn_names.iter().any(|f| f == name)
-        };
+        let taken =
+            |name: &str| self.locals.values().any(|local| local == name) || self.fn_name_set.contains(name);
         candidates.iter().copied().find(|name| !taken(name)).unwrap_or(candidates[0])
     }
 

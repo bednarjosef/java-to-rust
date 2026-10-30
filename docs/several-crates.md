@@ -132,12 +132,21 @@ Crates cannot name each other in a loop, and translated classes do, so `split.rs
 along classes. It splits declarations from code, as C splits headers from sources:
 
 - **The header crate** has every module and item of the program, made `pub`: the structs, the
-  enums of the hierarchies, the statics, the traits, and every function and method. A function or
-  method whose code can move keeps only its signature there. Its body calls a function declared
-  in an `unsafe extern "Rust"` block of its module (`safe fn j2r__<module>__<type>__<name>(..)`),
-  with its parameters renamed `p0`, `p1`, .. so that every pattern is a plain name.
+  enums of the hierarchies, the statics, the traits, and every function and method. A function
+  whose code can move is only declared there, in an `unsafe extern "Rust"` block of its module,
+  by its own name and with the name of its code: `#[link_name = "j2r__<module>__<name>"] pub safe
+  fn <name>(..)`. Callers name it as they did, and the header has no function of its own for it.
+  Constructors and the methods that take their object as a parameter are such functions too,
+  named after their struct (`Circle__new`, docs/object-model.md), and so are the dispatchers
+  and bodies of a type's enum, which take its value (`Shape__area`). A method that takes `self`
+  keeps only its signature, as Rust has no declaration of a method without its code. Its body
+  calls a function declared in that block (`safe fn j2r__<module>__<type>__<name>(..)`). Both have their parameters renamed `p0`, `p1`,
+  .. so that every pattern is a plain name. A function of the header that only calls a
+  declaration costs rustc about three times what the declaration does: about 21 KB of memory
+  against 8 KB, measured on synthetic header crates of 40,000 moved functions in a release
+  build.
 - **Each body crate** depends on the header alone and defines those functions for the items
-  given to it, each with `#[unsafe(no_mangle)]`. A module of a body crate starts with
+  given to it: a function with `#[unsafe(no_mangle)]`, a method as below. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names
   everything as it did, `crate::..` paths included: the body crate has the modules with code of
   its own and the modules around them, and any other module is the header's, which the glob
@@ -146,15 +155,29 @@ along classes. It splits declarations from code, as C splits headers from source
   a private trait that the body crate implements for the header's type, named after it (`impl
   Bodies_Circle for Circle { fn body_area(&self) .. }`), so that `self`, `Self` and calls of the type's other methods mean
   what they did; the trait is `Sized`, as the type is, for a signature that names `Option<Self>`.
-  The exported function calls the trait's method. The trait's methods are named `body_<name>`, so
-  that a call of the original name finds the header's method, never the trait's.
+  The method itself is the function the header declares, `#[unsafe(export_name =
+  "j2r__..")]`: its `self` is passed as the declaration's first parameter is. (A function of
+  its own that called the method cost every method a second function to check and compile, about
+  3% of a body crate's work on javac.) The trait's methods are named `body_<name>`, so that a
+  call of the original name finds the header's method, never the trait's.
 - **The binary** depends on the header and every body crate (`use body_0 as _;` makes rustc
   link each) and its `main` calls the header's.
 
 What cannot move stays in the header with its code: generic functions and the methods of generic
 `impl`s (Rust needs their code in the crate that instantiates them), `const` functions (statics
 call them), functions with an `impl Trait` in their signature, methods of a trait `impl` whose
-signature names `Self::..`, and the initializers of statics. The header calls into the body
+signature names `Self::..`, and the initializers of statics. Small functions stay too: one whose
+code is at most 48 tokens (`split.rs`, `small`; a `match` that passes a failure on counts as the
+`?` it stands for) and that is neither `#[cold]` nor `#[inline(never)]`, such as a getter, a
+buffer's `get` or `Mth.lerp`, keeps its code in the header, and so does one that the generator
+marked `#[inline]` itself: the check that a class is initialized (`init_x`, whose `init_x_slow`
+moves), a variant's constructor, the view of a type's enum. Both those the generator did not mark
+and the header's wrapper of each moved method are `#[cfg_attr(not(debug_assertions), inline)]`, so
+that an optimized build inlines them into the crates that call them: a wrapper becomes a direct
+call of the body crate's function, and a small function no call at all. A build at
+`opt-level = 0` inlines nothing, and there each crate would compile a copy of every `#[inline]`
+function it calls, so a debug build leaves them called. In the Minecraft server about 60% of the
+functions are small, about a tenth of the code. The header calls into the body
 crates, which depend on it; rustc's linker (lld, the default on x86-64 Linux) resolves symbols
 whatever the order of the libraries.
 
@@ -170,6 +193,14 @@ one item, or an item added or removed, moves only the cuts around it: the crates
 their names and their code. A module with more code than a share is spread over several crates,
 each with the module's `use` lines: the Minecraft server's crate root, whose `Object` enum's
 methods and reflection table are 290 MB of code, would otherwise be one crate of its own.
+Within a body crate, a module's code past about 512 KB (`CODEGEN_UNIT`) is cut into modules of
+its own of about that size (`mod j2r_code_0 { use super::*; .. }`, with the module's `use` lines
+again), and an `impl` with more moved code than that into several traits (`Bodies_Object`,
+`Bodies_Object_2`, ..), each an item of its own: rustc compiles each module's code in one
+codegen unit, on one thread. The Minecraft server's crate root, one module with 30 MB of code in
+one body crate, 18 MB of it one `impl` of `Object`, kept one thread busy for an hour of a release
+build (`opt-level = 1`) while the others had finished; its body crate of the reflection table's
+reads and writes (11 MB) built in 57 s alone, and in 29 s cut into modules so.
 
 Writing the workspace leaves alone each file whose text is already there and removes the body
 crates of an earlier split that this one does not have, so Cargo, which goes by the files' times
@@ -188,12 +219,20 @@ compiles a program.
 
 The split parses each item of a module (a class with its `impl`s) by itself with `syn` and drops
 its text once split: a syntax tree is many times its text, and the Minecraft server's crate root
-alone is 2.3 million lines (its `Object` enum 650,000).
+alone is 2.3 million lines (its `Object` enum 650,000). It parses the items and the signatures of their
+functions, not the functions' code: before `syn` parses an item, each function's braces are
+emptied with their place kept (`hollow`), and the split takes the code's text from the module's
+text. A function's code that is not Rust is then rustc's to report, not the split's.
 
-What it costs: a call of a moved function from another crate goes through the header's wrapper and
-cannot be inlined without link-time optimization. The release profile's fat LTO inlines across
-crates again, at the memory of a whole-program build; debug builds and `cargo check` gain the
-most from the split.
+What it costs: a call of a moved function from another crate cannot be inlined without
+link-time optimization. The release profile's fat LTO inlines across crates again, at the memory
+of a whole-program build; debug builds and `cargo check` gain the most from the split. Without
+LTO, the functions kept in the header for their size are what keeps the cost small: before they
+were, `benchmarks/NoiseTree.java` split into three body crates at `opt-level = 1` ran its kernel
+in about 1240 ms against 470 ms in one crate with fat LTO; with them it runs in about 430 ms.
+The Minecraft server's world generation, whose density functions call buffer accessors, static
+helpers and field getters for every cell, spent about a quarter of its time inside functions of
+at most 64 bytes of machine code, nearly all of them calls into body crates.
 
 ## Not done yet
 

@@ -4,6 +4,7 @@
 //! outside it is reported as an error naming the construct.
 
 mod abstract_sequence;
+mod added_methods;
 mod code_point;
 mod covariant;
 mod element_reads;
@@ -24,9 +25,11 @@ mod local_names;
 mod object;
 mod object_clone;
 mod objects;
+mod predict;
 mod real_generics;
 mod references;
 mod scans;
+mod sequence_texts;
 mod statics;
 mod strings;
 mod stubs;
@@ -99,6 +102,7 @@ pub(crate) use inner::OUTER;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
+pub(crate) use sequence_texts::SEQUENCE;
 
 /// The UTF-16 code units of a string that `JavaTree` wrote: a JSON string, or the array of its code
 /// units where it has a lone surrogate, which JSON cannot hold (`JavaTree.string`).
@@ -146,9 +150,10 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
         lowering.plan_captures().map_err(|(_, e)| e)?;
-        lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
         let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
+        lowering.start_real(real);
         lowering.plan_object(&planned);
+        lowering.predict_arrays();
         let mut types: Vec<TypeDecl> =
             (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
         let mut methods: Vec<Method> =
@@ -159,7 +164,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
         lowering.object_types(&mut types);
         lowering.param_decls(&mut types);
-        let failed = lowering.verify(&types, &methods);
+        let mut failed = lowering.verify(&types, &methods);
+        lowering.noted_later(&mut failed);
         let hierarchy = Hierarchy::new(&types, &methods);
         let raised = lowering.raised_objects(&types, &methods);
         let name = first.str("simpleName").to_string();
@@ -396,6 +402,10 @@ struct Lowering<'t> {
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
+    /// The methods that lowering adds for the code it writes (see `added_methods`).
+    added_methods: RefCell<Vec<added_methods::AddedMethod>>,
+    /// The added methods that many places share, by what they are for (`shared_method`).
+    shared_methods: RefCell<std::collections::HashMap<String, String>>,
     /// The calls of the program's methods, found the first time the value of a handle's
     /// parameter is asked for (see `handle_values`).
     handle_calls: RefCell<Option<handle_values::Calls<'t>>>,
@@ -415,6 +425,12 @@ struct Lowering<'t> {
     real: real_generics::Real,
     /// Those of `real` that lowering found cannot be: the program is lowered again without them.
     failed: RefCell<real_generics::Real>,
+    /// The Rust generics that the code being lowered uses, classes and methods of `real` or their
+    /// type variables (`real_generics::Lowering::is_real`), since the method, field initializers
+    /// or initializer block being lowered began (`census::method_or_stub`): a census records them
+    /// with each rejection, as only an error in such code may go away without them, and the
+    /// program is then lowered again without those.
+    uses_real: RefCell<real_generics::Real>,
     /// The pattern variables in scope that name a value without testing it (see `patterns`).
     aliases: RefCell<Vec<patterns::Alias>>,
     /// The JDK's functional interfaces that the program uses and lowering provides (see `functional`).
@@ -517,8 +533,9 @@ struct Lowering<'t> {
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
 /// position of the method being lowered, the index of that method when the code rejected is part
-/// of its body alone, and the error.
-type CensusError = (usize, Option<Pos>, Option<usize>, Error);
+/// of its body alone, the error, and the Rust generics that the code lowered so far uses
+/// (`Lowering::uses_real`).
+type CensusError = (usize, Option<Pos>, Option<usize>, Error, real_generics::Real);
 
 /// What `finish_types` keeps from one enum to the next.
 struct EnumsKept {
@@ -554,6 +571,10 @@ impl<'t> Lowering<'t> {
                 })
             })
             .collect();
+        // The methods that lowering added, among them the parts of the reflection table, which
+        // read enums' fields as any method does: they too must be there for the tables to
+        // rewrite their reads. No enum's form adds a method.
+        self.added_methods(methods);
         for (index, bodies) in enum_indices.into_iter().zip(made) {
             let bodies_rejected =
                 bodies.as_ref().err().map(|e| Error { pos: e.pos, message: e.message.clone() });
@@ -738,6 +759,7 @@ impl<'t> Lowering<'t> {
             type_params: self.method_type_params(index),
             jdk_code: self.is_proxy_class(info.owner),
             field_update: None,
+            added: false,
         })
     }
 

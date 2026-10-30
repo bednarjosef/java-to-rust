@@ -108,21 +108,21 @@ pub(super) fn import_root_items(
     taken: &BTreeSet<String>,
 ) -> String {
     let all: Vec<Vec<Word>> = texts.iter().map(|text| words(text)).collect();
-    let mut wanted = BTreeSet::new();
-    let mut in_scope = BTreeSet::new();
-    for (text, words) in texts.iter().zip(&all) {
-        for word in words {
-            let name = &text[word.start..word.end];
-            if word.through_crate.is_some() {
-                wanted.insert(name.to_string());
-            } else if word.in_scope {
-                in_scope.insert(name.to_string());
-            }
+    let named =
+        || texts.iter().zip(&all).flat_map(|(text, words)| words.iter().map(|w| (&text[w.start..w.end], w)));
+    // The names wanted through `crate::`, a few, and of those, the ones in scope: the module's
+    // other names, every word of its text, are only looked up.
+    let mut wanted: BTreeSet<&str> =
+        named().filter(|(_, w)| w.through_crate.is_some()).map(|(name, _)| name).collect();
+    for (name, w) in named() {
+        if w.through_crate.is_none() && w.in_scope {
+            wanted.remove(name);
         }
     }
     let imported: BTreeSet<String> = wanted
         .into_iter()
-        .filter(|name| !in_scope.contains(name) && !modules.contains(name) && !taken.contains(name))
+        .filter(|name| !modules.contains(*name) && !taken.contains(*name))
+        .map(str::to_string)
         .collect();
     if imported.is_empty() {
         return String::new();

@@ -66,6 +66,7 @@ pub mod regex;
 mod scalb;
 mod shared;
 mod shared_string;
+mod signals;
 #[cfg(unix)]
 mod socket;
 mod statics;
@@ -164,7 +165,7 @@ pub use unsigned::{
     try_parse_unsigned,
 };
 pub use vm::*;
-pub use wtf8::{JString, Piece, Wtf8, wtf8, wtf8_bytes};
+pub use wtf8::{JString, Piece, Wtf8, string_case, wtf8, wtf8_bytes};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
@@ -403,6 +404,7 @@ pub fn cast_message(from: CastClass, to: CastClass) -> String {
 
 /// Java's checked cast `(T) x` on a non-null object `from`: the object as a `T` if it is one,
 /// which the translation finds (`|o| o.as_t()`), else a `ClassCastException`.
+#[inline]
 pub fn cast<S: CastSource + ?Sized, T>(from: &S, as_t: impl FnOnce(&S) -> Option<T>, to: CastClass) -> T {
     match as_t(from) {
         Some(value) => value,
@@ -412,6 +414,7 @@ pub fn cast<S: CastSource + ?Sized, T>(from: &S, as_t: impl FnOnce(&S) -> Option
 
 /// `cast`, where a `catch` or a `finally` sees its `ClassCastException`: the failure is
 /// returned, to go on as a thrown exception does.
+#[inline]
 pub fn try_cast<S: CastSource + ?Sized, T>(
     from: &S,
     as_t: impl FnOnce(&S) -> Option<T>,
@@ -421,11 +424,13 @@ pub fn try_cast<S: CastSource + ?Sized, T>(
 }
 
 /// The `ClassCastException` of a cast of an object of class `from` to class `to`.
+#[cold]
 pub fn cast_exception(from: CastClass, to: CastClass) -> Exception {
     Exception::new("java.lang.ClassCastException", cast_message(from, to))
 }
 
 /// Throws the `ClassCastException` of a cast of an object of class `from` to class `to`.
+#[cold]
 pub fn cast_failed(from: CastClass, to: CastClass) -> ! {
     throw("java.lang.ClassCastException", &cast_message(from, to))
 }

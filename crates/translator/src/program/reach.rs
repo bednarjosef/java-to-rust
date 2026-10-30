@@ -15,6 +15,7 @@
 
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 
 mod by_name;
 mod initialize;
@@ -28,7 +29,7 @@ mod stubs;
 
 pub use by_name::{
     array_for_name, class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes,
-    module_for_name,
+    module_for_name, name_pattern,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
 pub use native_image::{ReflectEntry, reflect_config};
@@ -380,6 +381,10 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
     // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
     "sun.security.util.Debug",
+    // The check of a server certificate's host name that the HTTPS client makes, which only
+    // hands out its two checkers: checking a name is patched to fail, as certificates and TLS
+    // are not translated (`java/patches/sun/security/util/HostnameChecker.java`).
+    "sun.security.util.HostnameChecker",
     // The signers of a jar's entry, which `JarEntry` and `JarFile` keep in fields: abstract and
     // final classes, of which only signature verification, not translated, makes objects.
     "java.security.cert.Certificate",
@@ -391,7 +396,8 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.util.SignatureFileVerifier",
     // Message digests, as javac's `-XDshowClass` computes a class file's checksum: the JDK's
     // own code of `MessageDigest` and of the `SUN` provider's digests, which
-    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below).
+    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below), and `MD4`,
+    // which NTLM authentication in the HTTP client gets from a provider of its own.
     "java.security.DigestException",
     "java.security.DigestInputStream",
     "java.security.DigestOutputStream",
@@ -407,6 +413,7 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.provider.ByteArrayAccess.LE",
     "sun.security.provider.DigestBase",
     "sun.security.provider.MD2",
+    "sun.security.provider.MD4",
     "sun.security.provider.MD5",
     "sun.security.provider.SHA",
     "sun.security.provider.SHA2",
@@ -2798,8 +2805,9 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
 /// been there from the start. A walk that reached what it would not have with the new units from
 /// the start walks again from `main` (`Walk::stale`); with `asking`, what depends on a class
 /// that javac has not answered for yet waits for its answer (`Walk::asked`), which leaves that
-/// to a unit that declares a class javac said it had none of. The units walked must not change:
-/// when they do, a new `Rounds` walks them all again.
+/// to a unit that declares a class javac said it had none of. The units walked must not change,
+/// except for members written into their records that the later units call for (`replace`):
+/// when they change otherwise, a new `Rounds` walks them all again.
 pub struct Rounds<'t> {
     main: String,
     units: Vec<&'t Value>,
@@ -2811,6 +2819,8 @@ pub struct Rounds<'t> {
     stays_sequential: bool,
     /// The locale data classes of the libraries (`Walk::locale_data`).
     locale_data: Vec<String>,
+    /// The source roots (`Walk::class_roots`).
+    class_roots: Vec<PathBuf>,
     /// The service providers of the sources (`Walk::providers`).
     providers: Vec<super::modules::ServiceProvider>,
     /// The entries of the roots' reflection metadata (`Walk::reflect_config`).
@@ -2825,6 +2835,9 @@ pub struct Rounds<'t> {
     /// (`asking`), and those asked for since the last units were added (`Walk::asked`).
     asked: Option<HashSet<String>>,
     newly_asked: Vec<String>,
+    /// The units walked before that come again with more members in their records, since the
+    /// last units were added (`replace`).
+    replaced: Vec<&'t Value>,
 }
 
 impl<'t> Rounds<'t> {
@@ -2836,6 +2849,7 @@ impl<'t> Rounds<'t> {
             check: sequential::Index::default(),
             stays_sequential: true,
             locale_data: Vec::new(),
+            class_roots: Vec::new(),
             providers: Vec::new(),
             reflect_config: Vec::new(),
             parallel: None,
@@ -2843,6 +2857,7 @@ impl<'t> Rounds<'t> {
             string_array_writes: false,
             asked: None,
             newly_asked: Vec::new(),
+            replaced: Vec::new(),
         }
     }
 
@@ -2874,6 +2889,13 @@ impl<'t> Rounds<'t> {
         self
     }
 
+    /// Reachability in which a class name that code makes of a prefix, a computed part and a
+    /// suffix names the classes of these source roots that fit it (`by_name::name_pattern`).
+    pub fn with_class_roots(mut self, roots: Vec<PathBuf>) -> Rounds<'t> {
+        self.class_roots = roots;
+        self
+    }
+
     /// Reachability in which `ServiceLoader` finds these service providers, in its order
     /// (`modules::service_providers`).
     pub fn with_providers(mut self, providers: Vec<super::modules::ServiceProvider>) -> Rounds<'t> {
@@ -2895,16 +2917,26 @@ impl<'t> Rounds<'t> {
         self.restarts
     }
 
+    /// Replaces the unit added `index`th with a copy of it that has more members written into
+    /// its records (`javac::Completion::only_adds_to`), which the next units added take up: the
+    /// walks then go on as they would had the copy been there from the start
+    /// (`Walk::redeclare_units`).
+    pub fn replace(&mut self, index: usize, unit: &'t Value) {
+        self.units[index] = unit;
+        self.replaced.push(unit);
+    }
+
     /// Adds units to the program, and reaches what they add.
     pub fn add(&mut self, units: &[&'t Value]) -> Result<(), String> {
         self.units.extend(units);
+        let replaced = std::mem::take(&mut self.replaced);
         let asked = std::mem::take(&mut self.newly_asked);
         if let Some(all) = &mut self.asked {
             all.extend(asked.iter().cloned());
         }
         let sequential = match &mut self.sequential {
             Some(walk) => {
-                walk.add(units, &asked);
+                walk.add(units, &replaced, &asked);
                 if walk.stale {
                     self.restarts += 1;
                     self.check = sequential::Index::default();
@@ -2918,7 +2950,7 @@ impl<'t> Rounds<'t> {
                     &self.main,
                     true,
                     self.string_array_writes,
-                    &self.locale_data,
+                    (&self.locale_data, &self.class_roots),
                     (&self.providers, &self.reflect_config),
                     self.asked.clone(),
                 )?;
@@ -2928,7 +2960,7 @@ impl<'t> Rounds<'t> {
         self.stays_sequential = self.check.streams_stay_sequential(sequential);
         match &mut self.parallel {
             Some(walk) => {
-                walk.add(units, &asked);
+                walk.add(units, &replaced, &asked);
                 if walk.stale {
                     self.restarts += 1;
                     walk.restart(&self.main);
@@ -2940,7 +2972,7 @@ impl<'t> Rounds<'t> {
                     &self.main,
                     false,
                     self.string_array_writes,
-                    &self.locale_data,
+                    (&self.locale_data, &self.class_roots),
                     (&self.providers, &self.reflect_config),
                     self.asked.clone(),
                 )?;
@@ -3037,6 +3069,9 @@ enum Item {
     /// The constructor that makes a new exception of this class from another, once reachable
     /// code makes one (`Walk::recreatable`), which waited for a supertype of the class.
     Recreate(String),
+    /// The superinterfaces with code that an initialized class initializes
+    /// (`Walk::default_superinterfaces`).
+    Interfaces(String),
 }
 
 /// The declarations of the program, and the worklist over them.
@@ -3106,6 +3141,10 @@ struct Walk<'t> {
     /// can find (`by_name::locale_data_classes`), and whether reachable code has one.
     locale_data: Vec<String>,
     finds_locale_data: bool,
+    /// The source roots, in which a class name that code makes of a prefix, a computed part and
+    /// a suffix finds the classes it can name (`by_name::name_pattern`), and the patterns seen.
+    class_roots: Vec<PathBuf>,
+    patterns: HashSet<(String, String)>,
     /// Whether reachable code finds a class by a name it computes, `Class.forName(name)`, which
     /// initializes every class that it can find (`by_name.rs`).
     finds_named: bool,
@@ -3252,6 +3291,7 @@ impl<'t> Walk<'t> {
                         None => "branch of an instanceof in an initializer".to_string(),
                     },
                     Item::Recreate(c) => format!("new exception of class {c} from another"),
+                    Item::Interfaces(c) => format!("superinterfaces with code of {c}"),
                 };
                 eprintln!("  {line}");
                 match why.get(&item) {
@@ -3270,7 +3310,7 @@ impl<'t> Walk<'t> {
         main: &str,
         sequential: bool,
         string_array_writes: bool,
-        locale_data: &[String],
+        (locale_data, class_roots): (&[String], &[PathBuf]),
         (providers, reflect_config): (&[super::modules::ServiceProvider], &[ReflectEntry]),
         asked: Option<HashSet<String>>,
     ) -> Result<Walk<'t>, String> {
@@ -3279,6 +3319,7 @@ impl<'t> Walk<'t> {
             asked,
             why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::new()),
             locale_data: locale_data.to_vec(),
+            class_roots: class_roots.to_vec(),
             providers: providers.to_vec(),
             config_pending: (0..reflect_config.len()).collect(),
             reflect_config: reflect_config.to_vec(),
@@ -3322,6 +3363,7 @@ impl<'t> Walk<'t> {
             overriders: std::mem::take(&mut self.overriders),
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
+            class_roots: std::mem::take(&mut self.class_roots),
             providers: std::mem::take(&mut self.providers),
             config_pending: (0..self.reflect_config.len()).collect(),
             reflect_config: std::mem::take(&mut self.reflect_config),
@@ -3336,10 +3378,12 @@ impl<'t> Walk<'t> {
 
     /// Adds units, and walks on to what they add: the items that waited for a class they
     /// declare, the supertypes of their classes that are live, and their methods that override
-    /// a method whose overriders may run. Of the classes `asked` for since the last units, those
-    /// that no unit declares are not among the sources: the methods that waited for them are
-    /// external.
-    fn add(&mut self, units: &[&'t Value], asked: &[String]) {
+    /// a method whose overriders may run. Units walked before that come again with more members
+    /// written into their records are declared again (`redeclare_units`). Of the classes `asked`
+    /// for since the last units, those that no unit declares are not among the sources: the
+    /// methods that waited for them are external.
+    fn add(&mut self, units: &[&'t Value], replaced: &[&'t Value], asked: &[String]) {
+        self.redeclare_units(replaced);
         self.declare_units(units);
         for class in std::mem::take(&mut self.declared) {
             self.reach.missing.remove(&class);
@@ -3387,6 +3431,45 @@ impl<'t> Walk<'t> {
         }
     }
 
+    /// Declares again units walked before, which come again as copies with more members written
+    /// into their records (`javac::Completion::only_adds_to`): the accessors, `hashCode` and
+    /// `equals` that the units added since call for, and accessors that override more interface
+    /// methods. The walk then goes on as it would had they been there from the start. A new
+    /// method's overrides are found as a new unit's are (`add`); a method of these classes that
+    /// the walk took for an external one, as no unit declared it, is visited again, which makes
+    /// it an ordinary one (`method`). A record is final, so no class overrides the method that
+    /// was external, and nothing was reached through it that a walk from the start would not
+    /// reach. Reflection's lookups in these classes, and the reflection metadata that names
+    /// their members, are made again, as they may now find more. The rest of each unit is the
+    /// same as before: completing a record does nothing else that depends on the other units, and
+    /// the `implicit` marks it changes in `hashCode` and `equals` are not read here.
+    fn redeclare_units(&mut self, units: &[&'t Value]) {
+        if units.is_empty() {
+            return;
+        }
+        let before = self.declared.len();
+        self.declare_units(units);
+        let classes: HashSet<String> = self.declared.drain(before..).collect();
+        let external: Vec<MethodKey> = self
+            .reach
+            .external
+            .iter()
+            .filter(|key| classes.contains(&key.0) && self.methods.contains_key(*key))
+            .cloned()
+            .collect();
+        self.work.extend(external.into_iter().map(Item::Method));
+        self.reflected_keys.retain(|(class, _)| !classes.contains(class));
+        let pending: HashSet<usize> = self.config_pending.iter().copied().collect();
+        for index in 0..self.reflect_config.len() {
+            let entry = &self.reflect_config[index];
+            if !pending.contains(&index)
+                && self.declared_class(&entry.class).is_some_and(|class| classes.contains(&class))
+            {
+                self.config_pending.push(index);
+            }
+        }
+    }
+
     fn declare(&mut self, decl: &'t Value, outer: Option<&str>) {
         if !CLASS_KINDS.contains(&text(decl, "kind")) {
             return;
@@ -3416,13 +3499,19 @@ impl<'t> Walk<'t> {
             match text(member, "kind") {
                 "METHOD" => {
                     let key = (class.clone(), name, symbol_type(member).to_string());
+                    // A method declared again (`redeclare_units`) keeps the overrides found before.
+                    let known = self.methods.contains_key(&key);
                     for overridden in member["symbol"]["overrides"].as_array().into_iter().flatten() {
                         let overridden = (
                             text(overridden, "owner").to_string(),
                             key.1.clone(),
                             text(overridden, "type").to_string(),
                         );
-                        self.overriders.entry(overridden.clone()).or_default().push(key.clone());
+                        let overriders = self.overriders.entry(overridden.clone()).or_default();
+                        if known && overriders.contains(&key) {
+                            continue;
+                        }
+                        overriders.push(key.clone());
                         self.found_overriders.push((overridden, key.clone()));
                     }
                     if self.methods.insert(key.clone(), member).is_none() {
@@ -3483,6 +3572,7 @@ impl<'t> Walk<'t> {
                     Item::Field(key) => self.field(key),
                     Item::Branch(index) => self.branch(index),
                     Item::Recreate(class) => self.recreatable(&class),
+                    Item::Interfaces(class) => self.default_superinterfaces(class),
                 }
                 if let (Some(why), Some(current)) = (&mut self.why, current) {
                     for pushed in &self.work[before.min(self.work.len())..] {
@@ -3536,34 +3626,45 @@ impl<'t> Walk<'t> {
         }
         self.work.push(Item::Class(class.clone()));
         self.initializers(decl, &class, true);
-        // A class's initialization initializes its superinterfaces that declare a method with
-        // code that is not static (`codegen::default_superinterfaces`).
         if !matches!(text(decl, "kind"), "INTERFACE" | "ANNOTATION_TYPE") {
-            let mut interfaces = Vec::new();
-            self.default_interfaces(decl, &mut interfaces);
-            for interface in interfaces {
-                self.work.push(Item::Init(interface));
-            }
+            self.work.push(Item::Interfaces(class));
+        }
+    }
+
+    /// A class's initialization initializes its superinterfaces that declare a method with code
+    /// that is not static (`codegen::default_superinterfaces`). Which those are may depend on
+    /// interfaces that no unit declares yet: this waits for each of them (`block`), and is
+    /// decided again once a unit declares it, as it would have been with that unit from the
+    /// start.
+    fn default_superinterfaces(&mut self, class: String) {
+        let decl = self.classes[&class].0;
+        let (mut with_code, mut undeclared) = (Vec::new(), Vec::new());
+        self.default_interfaces(decl, &mut with_code, &mut undeclared);
+        for interface in with_code {
+            self.work.push(Item::Init(interface));
+        }
+        for interface in undeclared {
+            self.block(&interface, Item::Interfaces(class.clone()));
         }
     }
 
     /// The interfaces that the declaration `decl` implements, directly or not, that declare a
-    /// method with code that is not static, and those that no unit declares yet, which `init`
-    /// waits for.
-    fn default_interfaces(&self, decl: &Value, out: &mut Vec<String>) {
+    /// method with code that is not static (`out`), and those that no unit declares
+    /// (`undeclared`).
+    fn default_interfaces(&self, decl: &Value, out: &mut Vec<String>, undeclared: &mut Vec<String>) {
         let named = match &decl["implementsClause"] {
             Value::Array(items) => items.iter().filter_map(supertype).collect(),
             _ => Vec::new(),
         };
         for name in named {
-            if out.contains(&name) {
+            if out.contains(&name) || undeclared.contains(&name) {
                 continue;
             }
             let Some(&(interface, _)) = self.classes.get(&name) else {
-                out.push(name);
+                undeclared.push(name);
                 continue;
             };
-            self.default_interfaces(interface, out);
+            self.default_interfaces(interface, out, undeclared);
             let has_code = members(interface)
                 .any(|m| text(m, "kind") == "METHOD" && !m["body"].is_null() && !has_flag(m, "STATIC"));
             if has_code && !out.contains(&name) {
@@ -3651,6 +3752,19 @@ impl<'t> Walk<'t> {
                 // writes it (`lower::object`).
                 if key.0 == "java.lang.CharSequence" && key.1 == "isEmpty" {
                     self.work.push(Item::Method((key.0.clone(), "length".into(), "()int".into())));
+                }
+                // A builder reads a `CharSequence` that it appends, or that it is made from, with
+                // its `length()` and `charAt` (`lower::sequence_texts`, `codegen::char_sequence`).
+                if matches!(
+                    key.0.as_str(),
+                    "java.lang.StringBuilder" | "java.lang.StringBuffer" | "java.lang.AbstractStringBuilder"
+                ) && matches!(key.1.as_str(), "append" | "<init>")
+                    && key.2.starts_with("(java.lang.CharSequence")
+                {
+                    for (name, signature) in [("length", "()int"), ("charAt", "(int)char")] {
+                        let method = ("java.lang.CharSequence".to_string(), name.into(), signature.into());
+                        self.work.push(Item::Method(method));
+                    }
                 }
                 // A field updater's `getAndUpdate` and its kin apply their function, in the loop
                 // that lowering adds to the field's class (`lower::handles`).
@@ -4204,6 +4318,11 @@ impl<'t> Walk<'t> {
         {
             self.named(literal);
         }
+        if kind == "PLUS"
+            && let Some(pattern) = name_pattern(value)
+        {
+            self.named_by_pattern(pattern);
+        }
         // A lambda creates an object of a class that implements its interface with the
         // interface's abstract method.
         let descriptor = &value["descriptor"];
@@ -4619,6 +4738,83 @@ mod tests {
             // have any is not known, and the branch is reached.
             assert_eq!(reach.methods.contains(&inside), !base_comes, "{reach:?}");
             assert_eq!(reach.without_objects.contains("Target"), base_comes, "{reach:?}");
+        }
+    }
+
+    /// A walk from scratch over these units, in rounds that ask javac, with these classes asked
+    /// for.
+    fn from_scratch(units: &[&Value], asked: &[String]) -> String {
+        let mut rounds = Rounds::new("Main").asking();
+        rounds.asked(asked);
+        rounds.add(units).unwrap();
+        rounds.dump()
+    }
+
+    #[test]
+    fn rounds_take_up_the_members_that_a_later_unit_writes_into_a_record_walked_before() {
+        // `main` makes a `Point` and calls `Other.run()`, whose unit comes in the next round and
+        // calls `hashCode` on a point, so that `javac::Records` writes `Point.hashCode`, which
+        // calls `Hasher.mix`, into the record's unit, walked in the first round without it.
+        let new_point = json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "Point", "name": "<init>", "type": "()void"}}});
+        let constructor = json!({"kind": "METHOD", "name": "<init>", "symbol": {"type": "()void", "static": false},
+            "body": {"kind": "BLOCK", "statements": []}});
+        let hash_code = json!({"kind": "METHOD", "name": "hashCode", "symbol": {"type": "()int", "static": false},
+            "body": {"kind": "BLOCK", "statements": [call("Hasher", "mix")]}, "synthetic": true});
+        let point = |members: Vec<Value>| json!({"typeDecls": [{"kind": "RECORD", "symbol": {"type": "Point"}, "members": members}]});
+        let first = json!({"typeDecls": [
+            class("Main", &[("main", vec![new_point, call("Other", "run")])]),
+            class("Hasher", &[("mix", vec![])]),
+        ]});
+        let (before, after) = (point(vec![constructor.clone()]), point(vec![constructor, hash_code]));
+        let other = json!({"typeDecls": [class("Other", &[("run", vec![])])]});
+        let hash = ("Point".to_string(), "hashCode".to_string(), "()int".to_string());
+        let mix = ("Hasher".to_string(), "mix".to_string(), "()void".to_string());
+
+        let mut rounds = Rounds::new("Main").asking();
+        rounds.add(&[&first, &before]).unwrap();
+        // Without the method, `Object`'s `hashCode` runs on a point.
+        assert_eq!(rounds.missing(), ["Other"]);
+        let asked = rounds.missing();
+        rounds.asked(&asked);
+        rounds.replace(1, &after);
+        rounds.add(&[&other]).unwrap();
+        assert_eq!(rounds.restarts(), 0);
+        assert_eq!(rounds.dump(), from_scratch(&[&first, &after, &other], &asked));
+        let reach = rounds.finish();
+        assert!(reach.methods.contains(&hash) && !reach.external.contains(&hash), "{reach:?}");
+        assert!(reach.methods.contains(&mix), "{reach:?}");
+    }
+
+    #[test]
+    fn a_class_initializes_an_interface_that_a_later_unit_declares_only_when_it_has_code() {
+        // `main` makes a `Point`, which implements `Shape`, whose unit comes in the next round:
+        // `Shape` without code is not initialized, and with a default method it is.
+        let new_point = json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "Point", "name": "<init>", "type": "()void"}}});
+        let first = json!({"typeDecls": [
+            class("Main", &[("main", vec![new_point])]),
+            {"kind": "CLASS", "symbol": {"type": "Point"},
+             "implementsClause": [{"kind": "IDENTIFIER", "symbol": {"type": "Shape"}}],
+             "members": [{"kind": "METHOD", "name": "<init>", "symbol": {"type": "()void", "static": false},
+                          "body": {"kind": "BLOCK", "statements": []}}]},
+        ]});
+        for has_code in [false, true] {
+            let methods: Vec<Value> = if has_code {
+                vec![json!({"kind": "METHOD", "name": "area", "symbol": {"type": "()int", "static": false},
+                            "body": {"kind": "BLOCK", "statements": []}})]
+            } else {
+                Vec::new()
+            };
+            let shape = json!({"typeDecls": [{"kind": "INTERFACE", "symbol": {"type": "Shape"}, "members": methods}]});
+            let mut rounds = Rounds::new("Main").asking();
+            rounds.add(&[&first]).unwrap();
+            assert_eq!(rounds.missing(), ["Shape"]);
+            let asked = rounds.missing();
+            rounds.asked(&asked);
+            rounds.add(&[&shape]).unwrap();
+            assert_eq!(rounds.dump(), from_scratch(&[&first, &shape], &asked));
+            assert_eq!(rounds.finish().initialized.contains("Shape"), has_code);
         }
     }
 

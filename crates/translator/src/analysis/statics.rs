@@ -5,26 +5,39 @@
 //! assigns, nothing is observable: each static can be computed on its first access, as a lazily
 //! initialized cell, and no `init` function is needed.
 
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
-/// The classes, by index, that need an `init` function: they have a `<clinit>` that is not lazy.
-pub fn eager_classes(class: &Class) -> HashSet<usize> {
+/// The classes, by index, that need an `init` function: they have a `<clinit>` that is not lazy;
+/// and the statics, as (class index, name), that are assigned once, by their class's static
+/// initialization: declared `final`, not constants, and assigned by no other code (see
+/// `Facts::final_statics`).
+pub fn eager_and_final(class: &Class) -> (FastSet<usize>, FastSet<(usize, String)>) {
     let changed = changed_later(class);
-    let none = HashSet::new();
-    (0..class.types.len()).filter(|&t| eager(class, t, changed.get(&t).unwrap_or(&none))).collect()
+    let none = FastSet::default();
+    let eager =
+        (0..class.types.len()).filter(|&t| eager(class, t, changed.get(&t).unwrap_or(&none))).collect();
+    let finals = class
+        .types
+        .iter()
+        .enumerate()
+        .flat_map(|(t, decl)| decl.statics.iter().map(move |f| (t, f)))
+        .filter(|(t, f)| f.is_final && !f.constant && !changed.get(t).is_some_and(|c| c.contains(&f.name)))
+        .map(|(t, f)| (t, f.name.clone()))
+        .collect();
+    (eager, finals)
 }
 
 /// Whether class `index` needs an `init` function, given the statics of it that `changed_later`
 /// finds.
-fn eager(class: &Class, index: usize, changed: &HashSet<String>) -> bool {
+fn eager(class: &Class, index: usize, changed: &FastSet<String>) -> bool {
     debug_assert_eq!(class.hierarchy.overriders.len(), class.methods.len(), "the hierarchy is out of date");
     let methods = class.hierarchy.methods_of(index).iter().map(|&m| &class.methods[m]);
     let Some(clinit) = methods.into_iter().find(|m| m.class == index && m.name == "<clinit>") else {
         return false;
     };
     let decl = &class.types[index];
-    let mut assigned: HashSet<&str> = HashSet::new();
+    let mut assigned: FastSet<&str> = FastSet::default();
     !clinit.body.iter().all(|stmt| {
         let Stmt::Expr(Expr {
             kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, value },
@@ -44,8 +57,8 @@ fn eager(class: &Class, index: usize, changed: &HashSet<String>) -> bool {
 /// For each class, by index, the statics of it that code outside its static initialization
 /// assigns. A lazy cell computed from one of them would see its value at the cell's first access,
 /// not the value Java's initialization saw.
-fn changed_later(class: &Class) -> HashMap<usize, HashSet<String>> {
-    let mut changed: HashMap<usize, HashSet<String>> = HashMap::new();
+fn changed_later(class: &Class) -> FastMap<usize, FastSet<String>> {
+    let mut changed: FastMap<usize, FastSet<String>> = FastMap::default();
     for m in &class.methods {
         for stmt in &m.body {
             visit_stmt(
@@ -71,7 +84,7 @@ fn changed_later(class: &Class) -> HashMap<usize, HashSet<String>> {
 /// Whether evaluating `e` has no effect and cannot throw. A static of class `index` may be read
 /// only if it is a constant or was assigned before, so that a lazy cell never needs another one
 /// that is still being computed.
-fn pure(e: &Expr, index: usize, assigned: &HashSet<&str>, decl: &TypeDecl) -> bool {
+fn pure(e: &Expr, index: usize, assigned: &FastSet<&str>, decl: &TypeDecl) -> bool {
     let recur = |x: &Expr| pure(x, index, assigned, decl);
     match &e.kind {
         ExprKind::Int(_)
@@ -101,15 +114,16 @@ fn pure(e: &Expr, index: usize, assigned: &HashSet<&str>, decl: &TypeDecl) -> bo
 /// The static methods and constructors of eagerly initialized classes that start by running
 /// their class's `init`. Java initializes a class when one of them is first called; a method that
 /// only methods of its own class call, or any method of the class of `main` but `main` itself,
-/// cannot run before that has started, so it skips the check.
-pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
+/// cannot run before that has started, so it skips the check. A method that lowering adds for an
+/// expression (`Method::added`) never runs it: it is the code of its call sites.
+pub fn entry_inits(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
     let mains: Vec<&Method> = class.methods.iter().filter(|m| m.is_main).collect();
     let main_class = match mains[..] {
         [main] => Some(main.class),
         _ => None,
     };
     // The classes whose code calls each method or constructor.
-    let mut callers: HashMap<usize, HashSet<usize>> = HashMap::new();
+    let mut callers: FastMap<usize, FastSet<usize>> = FastMap::default();
     let mut scan = |e: &Expr, from: usize| {
         visit_expr(e, &mut |x| match &x.kind {
             ExprKind::Call { resolved: Some(callee), .. }
@@ -136,7 +150,7 @@ pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
     }
     // An enum whose constants are built by its static initialization (`lower/enum_tables.rs`):
     // its constants exist before it, so its instance methods initialize it too.
-    let with_tables: HashSet<usize> = (0..class.methods.len())
+    let with_tables: FastSet<usize> = (0..class.methods.len())
         .filter(|&m| class.builds_constants(m))
         .map(|m| class.methods[m].class)
         .collect();
@@ -150,6 +164,7 @@ pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
             std::iter::once(m.class).chain(class.hierarchy.ancestors(m.class)).any(|c| eager.contains(&c))
                 && (m.is_static || m.is_ctor)
                 && m.name != "<clinit>"
+                && !m.added
                 && (m.is_main
                     || (Some(m.class) != main_class
                         && callers.get(&i).is_some_and(|from| from.iter().any(|&c| c != m.class))))

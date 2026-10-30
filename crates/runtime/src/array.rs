@@ -133,7 +133,8 @@ impl<T> ElementClass<T> {
     /// a `String[]`), which the `ArrayStoreException` gives. A null fits any array.
     pub(crate) fn refuses(&self, v: &T) -> Option<&'static str> {
         let names = (self.names)(v)?;
-        (!names.contains(&self.element)).then(|| names.first().copied().unwrap_or("java.lang.Object"))
+        (!crate::class::names_contain(names, self.element))
+            .then(|| names.first().copied().unwrap_or("java.lang.Object"))
     }
 }
 
@@ -1222,12 +1223,14 @@ pub fn try_copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> Re
 }
 
 /// `a[i] = v` as an expression: stores `v` and gives it back.
+#[inline]
 pub fn store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> T {
     set(a, i, v.clone());
     v
 }
 
 /// `a[i] = v` as an expression, where the program observes the exception.
+#[inline]
 pub fn try_store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> Result<T, Exception> {
     try_set(a, i, v.clone())?;
     Ok(v)
@@ -1235,6 +1238,7 @@ pub fn try_store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> Result<T, Exce
 
 /// `a[i] = v` as an expression, where the elements may be null and `v` is not: the value of the
 /// assignment is `v` itself, not an `Option`.
+#[inline]
 pub fn store_some<T: Clone>(a: &impl Elements<Option<T>>, i: i32, v: T) -> T {
     set(a, i, Some(v.clone()));
     v

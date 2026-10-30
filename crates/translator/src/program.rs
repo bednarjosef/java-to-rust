@@ -10,7 +10,10 @@ mod modules;
 mod reach;
 mod survey;
 
-pub use census::{Census, census_program, messages_found_anew, round_by_round};
+pub use census::{
+    Census, census_program, generator_again, messages_found_anew, round_by_round, rounds_of_analyses,
+    runs_of_generator,
+};
 pub use modules::{Contents as ModuleContents, loader_name, loader_resources};
 pub use reach::{
     ANNOTATION_VALUES, CHANGED_PROPERTY, CLASS_KINDS, CLEANER_CHECK, FIELD_OFFSET_VALUE, FORMAT_IN_LOCALE,
@@ -356,16 +359,17 @@ fn narrow(
     }
     class.thread_statics = live.thread_statics.as_ref().map(|t| t.iter().copied().collect());
     let mut lists: std::collections::HashMap<Vec<usize>, std::sync::Arc<[usize]>> = Default::default();
-    class.receivers = live
-        .receivers
-        .iter()
-        .map(|(&id, classes)| {
-            let list: Vec<usize> = classes.iter().collect();
-            (id, lists.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone())
-        })
-        .collect();
+    class.receivers = crate::timings::phase("live methods: receivers", || {
+        live.receivers
+            .iter()
+            .map(|(&id, classes)| {
+                let list: Vec<usize> = classes.iter().collect();
+                (id, lists.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone())
+            })
+            .collect()
+    });
     let watched_runs = watched.iter().any(|&(ty, method)| live.runs(ty, method));
-    analysis::live_methods::prune(class, &live);
+    crate::timings::phase("live methods: prune", || analysis::live_methods::prune(class, &live));
     Some((running, live.unresolved, watched_runs))
 }
 
@@ -380,8 +384,10 @@ fn narrow(
 /// were asked for, so that the first unsupported construct reported is near the program's code.
 ///
 /// Each round walks only what its units add (`reach::Rounds`), over the units with their records
-/// complete (`javac::Records`). Which members a record gets depends on every unit, so when a new
-/// unit changes those of a unit walked before, the round walks all of them again.
+/// complete (`javac::Records`). Which members a record gets depends on every unit, so a new unit
+/// can add members to a record of a unit walked before: the walks take up the unit with them as
+/// they go on (`reach::Rounds::replace`). Were a member to go, the round would walk all the units
+/// again.
 ///
 /// With `Program::keep_going`, javac goes on past compile errors.
 ///
@@ -453,6 +459,7 @@ fn load_in_rounds(
         let rounds = reach::Rounds::new(&program.main)
             .asking()
             .with_locale_data(locale_data.clone())
+            .with_class_roots(program.sources.iter().chain(&program.libraries).cloned().collect())
             .with_providers(providers.clone())
             .with_reflect_config(reflect_config.clone());
         if string_array_writes { rounds.with_string_array_writes() } else { rounds }
@@ -460,12 +467,13 @@ fn load_in_rounds(
     let mut rounds = new_rounds();
     // The classes javac has been asked for (`reach::Rounds::asked`).
     let mut asked_so_far: BTreeSet<String> = BTreeSet::new();
-    let (mut round, mut for_records, mut stale) = (0, 0, 0);
+    let (mut round, mut for_records, mut stale, mut in_place) = (0, 0, 0, 0);
     let check = std::env::var_os("JAVA_TO_RUST_REACH_CHECK").is_some();
     let mut asked_in_rounds = (!string_array_writes).then(Vec::new);
     loop {
         round += 1;
         let start = std::time::Instant::now();
+        let reach_before = reaching;
         let units = given.push(std::mem::take(&mut new));
         let changes = records.add(units);
         let complete = |unit: &Value| {
@@ -473,15 +481,21 @@ fn load_in_rounds(
             records.complete(&mut copy);
             copy
         };
+        // The units walked before whose records get other members with this round's units, and
+        // whether those only add to the members they had, which the walks take up as they go on
+        // (`reach::Rounds::replace`); otherwise every unit is walked again.
         let mut changed: Vec<(usize, Value)> = Vec::new();
+        let mut adds_only = true;
         for (index, unit, of, completed) in &mut changing {
             let now = records.completion(of);
             if now != *completed {
+                adds_only &= now.only_adds_to(completed);
                 changed.push((*index, complete(unit)));
                 *completed = now;
             }
         }
-        let restart = !changed.is_empty();
+        let walked: Vec<usize> = changed.iter().map(|&(index, _)| index).collect();
+        let restart = !adds_only;
         let old = trees.len();
         for (unit, &changes) in units.iter().zip(&changes) {
             if changes {
@@ -502,6 +516,10 @@ fn load_in_rounds(
             rounds.asked(&asked_so_far.iter().cloned().collect::<Vec<_>>());
             rounds.add(&trees).map_err(fail)?;
         } else {
+            in_place += usize::from(!walked.is_empty());
+            for &index in &walked {
+                rounds.replace(index, trees[index]);
+            }
             rounds.add(&trees[old..]).map_err(fail)?;
         }
         if check {
@@ -514,6 +532,7 @@ fn load_in_rounds(
             asked_in_rounds = None;
         }
         reaching += start.elapsed();
+        let round_reach = (reaching - reach_before).as_secs_f64();
         // The proxy classes that javac is to add, by their files, rather than by name.
         let made = rounds.proxy_classes();
         let mut asked = rounds.missing();
@@ -537,8 +556,14 @@ fn load_in_rounds(
         if crate::timings::enabled() {
             // Each round as it ends, for a program whose loading takes long.
             let received = session.received as f64 / 1e6;
+            let again = match walked.len() {
+                _ if restart => ", from the start again".to_string(),
+                0 => String::new(),
+                n => format!(", {n} units with new members in their records"),
+            };
             eprintln!(
-                "timing: round {round}: {} units, {} more asked for, {received:.0} MB of trees{}",
+                "timing: round {round}: {} units, {} more asked for, {received:.0} MB of trees, reach \
+                 {round_reach:.3} s{again}{}",
                 trees.len(),
                 new.len(),
                 crate::timings::memory()
@@ -572,7 +597,8 @@ fn load_in_rounds(
         eprintln!("timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees{memory}", units.len());
         eprintln!(
             "timing: reach: {reaching:.3} s, {round} rounds ({} walks from the start again: {for_records} for records, \
-             {stale} stale), {classes} classes and {methods} methods",
+             {stale} stale; {in_place} rounds added members to records walked before), {classes} classes and \
+             {methods} methods",
             for_records + stale
         );
     }
@@ -903,6 +929,7 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     let mut rounds = reach::Rounds::new(&program.main)
         .with_locale_data(reach::locale_data_classes(&program.libraries))
+        .with_class_roots(program.sources.iter().chain(&program.libraries).cloned().collect())
         .with_providers(modules::service_providers(program.sources.iter().chain(&program.libraries)))
         .with_reflect_config(reach::reflect_config(program.sources.iter().chain(&program.libraries)));
     rounds.add(&trees).map_err(fail)?;

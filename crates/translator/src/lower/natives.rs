@@ -64,9 +64,10 @@ impl<'t> Lowering<'t> {
     }
 
     /// A call of the static native `symbol` that the runtime does not have and the program cannot
-    /// (`unlinked`): its arguments that do something evaluated, then `UnsatisfiedLinkError`
-    /// thrown. `None` for any
-    /// other call.
+    /// (`unlinked`): its arguments evaluated, then `UnsatisfiedLinkError` thrown. An argument
+    /// that can throw, such as a cast to the peer class a native takes, throws first, as in Java;
+    /// only constants and variables, which can do neither, are left out. `None` for any other
+    /// call.
     pub(super) fn unlinked_native_call(
         &self,
         node: Node<'t>,
@@ -82,7 +83,26 @@ impl<'t> Lowering<'t> {
         }
         let ty = self.ty(node, node.java_type())?;
         let message = self.unlinked_message(owner, symbol.name, symbol.ty);
-        let before = std::mem::take(args).into_iter().filter(has_effects).map(Stmt::Expr).collect();
+        let before = std::mem::take(args)
+            .into_iter()
+            .filter(|a| {
+                !matches!(
+                    a.kind,
+                    ExprKind::Int(_)
+                        | ExprKind::Long(_)
+                        | ExprKind::Double(_)
+                        | ExprKind::Char(_)
+                        | ExprKind::Float(_)
+                        | ExprKind::Bool(_)
+                        | ExprKind::Str(_)
+                        | ExprKind::Units(_)
+                        | ExprKind::Null
+                        | ExprKind::Var(_)
+                        | ExprKind::This
+                )
+            })
+            .map(Stmt::Expr)
+            .collect();
         match self.standard_thrown(crate::program::UNLINKED.0, Some(&message), before, ty, node.pos()) {
             Some(thrown) => Ok(Some(thrown.kind)),
             None => {
@@ -126,11 +146,20 @@ impl<'t> Lowering<'t> {
             ("Array", "clone") => return self.array_clone(node, receiver, args),
             ("java.lang.System", "arraycopy") => {
                 let (src, dest) = (args[0].ty, args[2].ty);
+                // A value of a Rust generic's type variable (`<T> T copy(T source, T dest)`) is
+                // converted to `Object`, which erases the generic: lowered again without it, it
+                // is an `Object` that holds an array, as below.
+                let generic = self.has_param(src) || self.has_param(dest);
+                if generic {
+                    self.fail_all_of(src);
+                    self.fail_all_of(dest);
+                }
                 // An `Object` that holds an array, as the JDK's code generic over the kind of array
                 // passes one (`SpinedBuffer.OfPrimitive`'s `T_ARR`): both are then `Object`s, and
                 // the generator matches their arrays' types.
-                if (Self::is_object(src) || Self::is_object(dest))
-                    && [src, dest].iter().all(|&ty| Self::is_object(ty) || matches!(ty, Type::Array(_)))
+                if generic
+                    || (Self::is_object(src) || Self::is_object(dest))
+                        && [src, dest].iter().all(|&ty| Self::is_object(ty) || matches!(ty, Type::Array(_)))
                 {
                     let all = std::mem::take(args).into_iter().enumerate();
                     *args = all

@@ -19,6 +19,21 @@ impl Steady {
     }
 }
 
+/// The `Steady` of the statement being written (and of the next one, where it is written with
+/// it), found the first time a field asks (`field_in_place`): most statements read no string
+/// field of a plain object, and finding it walks the statements, for each statement of a block
+/// and again for those nested in it.
+pub(super) struct SteadyOf<'a> {
+    stmts: [Option<&'a Stmt>; 2],
+    found: std::cell::OnceCell<Steady>,
+}
+
+impl<'a> SteadyOf<'a> {
+    pub(super) fn new(stmt: &'a Stmt, next: Option<&'a Stmt>) -> SteadyOf<'a> {
+        SteadyOf { stmts: [Some(stmt), next], found: std::cell::OnceCell::new() }
+    }
+}
+
 impl<'a> Gen<'a> {
     /// A string expression as a `&java::Wtf8`.
     pub(super) fn str_ref(&mut self, e: &'a Expr) -> String {
@@ -31,6 +46,12 @@ impl<'a> Gen<'a> {
                 ExprKind::Field { object, name } if self.field_in_place(object, name) => {
                     format!("{}.as_wtf8()", self.object_place(e))
                 }
+                ExprKind::Static { .. }
+                    if !self.nullable(e)
+                        && let Some(place) = self.final_place(e) =>
+                {
+                    format!("{place}.as_wtf8()")
+                }
                 _ => format!("{}.as_wtf8()", self.expr(e).at(ATOM)),
             };
         }
@@ -41,6 +62,12 @@ impl<'a> Gen<'a> {
             ExprKind::Var(name) => format!("&{}", self.local(name)),
             ExprKind::Field { object, name } if self.field_in_place(object, name) => {
                 format!("&{}", self.object_place(e))
+            }
+            ExprKind::Static { .. }
+                if !self.nullable(e)
+                    && let Some(place) = self.final_place(e) =>
+            {
+                format!("&{place}")
             }
             _ => format!("&{}", self.expr(e).at(UNARY)),
         }
@@ -63,16 +90,21 @@ impl<'a> Gen<'a> {
                     ExprKind::Var(name) => name.as_str(),
                     _ => return false,
                 };
-                self.steady.as_ref().is_some_and(|s| s.keeps(key, field))
+                self.steady.as_ref().is_some_and(|s| {
+                    let found = s.found.get_or_init(|| {
+                        let stmts: Vec<&Stmt> = s.stmts.iter().flatten().copied().collect();
+                        self.steady(&stmts)
+                    });
+                    found.keeps(key, field)
+                })
             }
             Type::Class(..) => true,
             _ => false,
         }
     }
 
-    /// What the statements and expressions do to the objects that `this` and the locals name
-    /// (see `Steady`).
-    pub(super) fn steady(&self, stmts: &[&Stmt], exprs: &[&Expr]) -> Steady {
+    /// What the statements do to the objects that `this` and the locals name (see `Steady`).
+    fn steady(&self, stmts: &[&Stmt]) -> Steady {
         // Per object: its uses, and those that only read a field or call a `&self` method.
         let mut uses: HashMap<String, (usize, usize)> = HashMap::new();
         let mut steady = Steady::default();
@@ -114,9 +146,6 @@ impl<'a> Gen<'a> {
         };
         for stmt in stmts {
             visit_stmt(stmt, &mut |e| visit_expr(e, &mut on_expr), &mut |_| {});
-        }
-        for e in exprs {
-            visit_expr(e, &mut on_expr);
         }
         // Any other use (an argument, a returned or stored value, a call of a `&mut self` method)
         // may move the object or borrow it mutably.
@@ -195,7 +224,13 @@ impl<'a> Gen<'a> {
             _ if matches!(e.ty, Type::Class(..)) => out.push(Part::Text(self.object_text(e))),
             // An enum is a `java::Piece` of the string its `toString` returns; a charset prints
             // through its `Display`, which is its name.
-            _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Text(self.expr(e))),
+            _ if matches!(e.ty, Type::Enum(_)) => {
+                let text = match self.checked_enum_text(e) {
+                    Some(text) => text,
+                    None => self.expr(e),
+                };
+                out.push(Part::Text(text))
+            }
             _ if e.ty == Type::Charset => out.push(Part::Arg(self.expr(e))),
             // A builder shows its text as it is when it is converted, before later operands run.
             _ if e.ty == Type::StringBuilder => {

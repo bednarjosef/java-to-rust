@@ -15,6 +15,6 @@ impl<'a> Gen<'a> {
         if !self.inits_throw(t) {
             return format!("{call};");
         }
-        format!("{};", self.passed_on(Code::atom(call)))
+        format!("{};", self.passed_on_thrown(Code::atom(call)))
     }
 }

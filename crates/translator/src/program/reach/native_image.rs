@@ -171,7 +171,7 @@ impl Walk<'_> {
     /// The class that a unit declares with the binary name `binary`, by the name that the walk
     /// knows it by (`a.B.C` for `a.B$C`, a local or anonymous class keeping its `$`), if it is
     /// translated.
-    fn declared_class(&self, binary: &str) -> Option<String> {
+    pub(super) fn declared_class(&self, binary: &str) -> Option<String> {
         [binary.to_string(), binary.replace('$', ".")]
             .into_iter()
             .find(|class| self.classes.contains_key(class) && !outside(class))

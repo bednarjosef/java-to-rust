@@ -30,6 +30,8 @@ enum Slot {
     },
     /// A static field: a `Cell` when `plain`, else a `RefCell`.
     Static { cell: String, plain: bool },
+    /// A static field that is a `java::Final`, read with no lock.
+    Final { cell: String },
 }
 
 impl Slot {
@@ -51,6 +53,8 @@ impl Slot {
             Slot::Static { cell, plain: false } => {
                 format!("{cell}.with_borrow({})", if copy { "|v| *v" } else { "|v| v.clone()" })
             }
+            Slot::Final { cell } if copy => format!("(*{cell}.get())"),
+            Slot::Final { cell } => format!("{cell}.get().clone()"),
         }
     }
 
@@ -67,6 +71,7 @@ impl Slot {
             }
             Slot::Static { cell, plain: true } => format!("{cell}.set({value});"),
             Slot::Static { cell, plain: false } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
+            Slot::Final { cell } => format!("{cell}.set({value});"),
         }
     }
 }
@@ -415,7 +420,7 @@ fn same_object(a: &Expr, b: &Expr) -> bool {
 }
 
 /// Whether an expression writes a field of `object` or calls a method that changes it.
-pub(super) fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
+pub(super) fn changes_object(e: &Expr, object: &Expr, mutating: &crate::analysis::FastSet<usize>) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| {
         found |= match &x.kind {
@@ -573,9 +578,15 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the celled objects of the class named `name` keep a monitor (`Facts::monitored`):
-    /// an `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s.
+    /// an `Arc<java::Monitored<C>>`.
     pub(super) fn monitored(&self, name: &str) -> bool {
         self.facts.monitored.contains(name)
+    }
+
+    /// Whether the fields of the celled objects of the class named `name` are
+    /// `java::SharedField`s (`Facts::shared_cells`): threads share them, or they keep a monitor.
+    pub(super) fn shared_cells(&self, name: &str) -> bool {
+        self.facts.shared_cells.contains(name)
     }
 
     /// The handle of a celled object of class `t` whose struct is `structure`.
@@ -604,16 +615,16 @@ impl<'a> Gen<'a> {
         matches!(object.ty, Type::Class(name, _) if self.celled(self.rep_name(name)))
     }
 
-    /// Whether the fields of `object` are `java::SharedField`s: it is an object of a monitored
-    /// class.
-    pub(super) fn monitored_object(&self, object: &Expr) -> bool {
-        matches!(object.ty, Type::Class(name, _) if self.monitored(self.rep_name(name)))
+    /// Whether the fields of `object` are `java::SharedField`s: it is an object of a class with
+    /// shared cells.
+    pub(super) fn shared_object(&self, object: &Expr) -> bool {
+        matches!(object.ty, Type::Class(name, _) if self.shared_cells(self.rep_name(name)))
     }
 
     /// Whether the field `name` of `object` is a `volatile` field's `java::SharedField`, whose
     /// accesses are sequentially consistent (`get_volatile`, `set_volatile`).
     pub(super) fn volatile_cell(&self, object: &Expr, name: &str) -> bool {
-        if !self.monitored_object(object) {
+        if !self.shared_object(object) {
             return false;
         }
         let owner = self.class.field_owner(object.ty, name);
@@ -625,11 +636,11 @@ impl<'a> Gen<'a> {
         owner.is_some_and(|o| self.volatile_field(o, name))
     }
 
-    /// Whether the field `name` that class `owner` declares is a `volatile` field of a monitored
-    /// class.
+    /// Whether the field `name` that class `owner` declares is a `volatile` field of a class with
+    /// shared cells.
     pub(super) fn volatile_field(&self, owner: usize, name: &str) -> bool {
         let decl = &self.class.types[owner];
-        self.monitored(&decl.name) && decl.fields.iter().any(|f| f.name == name && f.volatile)
+        self.shared_cells(&decl.name) && decl.fields.iter().any(|f| f.name == name && f.volatile)
     }
 
     /// The accessors of the cell of field `name` of `object`: `get` and `set`, or for a
@@ -640,7 +651,7 @@ impl<'a> Gen<'a> {
 
     /// The cell type of a field of class `t` whose value is of type `ty`.
     pub(super) fn cell_type(&self, t: usize, ty: &str) -> String {
-        if self.monitored(&self.class.types[t].name) {
+        if self.shared_cells(&self.class.types[t].name) {
             format!("java::SharedField<{ty}>")
         } else {
             format!("java::Field<{ty}>")
@@ -650,7 +661,7 @@ impl<'a> Gen<'a> {
     /// The value of a field in a struct literal of class `t`: a cell for a celled class.
     pub(super) fn field_cell(&self, t: usize, value: String) -> String {
         let name = &self.class.types[t].name;
-        if self.monitored(name) {
+        if self.shared_cells(name) {
             format!("java::SharedField::new({value})")
         } else if self.celled(name) {
             format!("java::Field::new({value})")
@@ -734,6 +745,21 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// Whether the field `name` of `object`, of type `ty`, is the cell of a fixed field (`fixed`)
+    /// that is read where it is, without copying its value out through the cell's `get`: the
+    /// object is celled, the field is not `volatile`, and the code is not a constructor's or a
+    /// field initializer's, which write the fixed fields. Once its object is built nothing writes
+    /// the field, so a reference into the cell aliases no write (the runtime's `Field::fixed`).
+    /// A primitive or a Java enum's value is a word that `get` copies as cheaply.
+    pub(super) fn fixed_cell(&self, object: &Expr, name: &str, ty: Type) -> bool {
+        !(ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_)))
+            && self.celled_object(object)
+            && self.fixed(object, name)
+            && !self.volatile_cell(object, name)
+            && !self.in_field_inits
+            && !self.class.methods[self.method].is_ctor
+    }
+
     /// The method that a call of `resolved` on `receiver` runs: the one it names for `super.m()`,
     /// else the implementation of the class whose objects the receiver is.
     pub(super) fn dispatch(&self, receiver: &Expr, resolved: usize, is_super: bool) -> usize {
@@ -793,7 +819,11 @@ impl<'a> Gen<'a> {
     /// The name of `this` in the code being written: `self` in a method that borrows its object,
     /// else `this`.
     pub(super) fn this_name(&self) -> &'static str {
-        if matches!(self.this_form, ThisForm::SelfRef | ThisForm::Enum) { "self" } else { "this" }
+        match self.this_form {
+            ThisForm::Enum if self.thin_this => "this",
+            ThisForm::SelfRef | ThisForm::Enum => "self",
+            ThisForm::Shared | ThisForm::Local => "this",
+        }
     }
 
     /// Whether the constructors of class `name` build a plain value, which `new` then shares.
@@ -860,14 +890,20 @@ impl<'a> Gen<'a> {
         };
         self.dereferenced.insert(id);
         // Java's message, where a `catch` may read it.
-        let call = match ids.iter().find_map(|id| self.facts.npe_messages.get(id)) {
+        let text = match ids.iter().find_map(|id| self.facts.npe_messages.get(id)) {
             Some(Some(message)) => {
                 let message = self.npe_message(message, self.facts.null_checked[&id]);
-                format!("{}({option}, {message})", self.runtime("try_non_null_message"))
+                self.passed_on_null(option, &message)
             }
-            _ => format!("{}({option})", self.runtime("try_non_null")),
+            _ => {
+                let call = format!("{}({option})", self.runtime("try_non_null"));
+                self.passed_on(Code::atom(call))
+            }
         };
-        self.passed_on(Code::atom(call))
+        // The object is mostly the receiver of a call or a field access, which a `match` before
+        // it would end where it starts a statement or a `match` arm (syn, which splits a program
+        // into crates, ends it there in an arm too).
+        if text.starts_with("match ") { format!("({text})") } else { text }
     }
 
     /// A message of `Facts::npe_messages`, at `pos`, as a Rust `&str`. One that names a variable
@@ -895,6 +931,10 @@ impl<'a> Gen<'a> {
     /// does not write the checked form, where its `NullPointerException` would end the program
     /// instead of reaching the `catch` or the `finally`.
     pub(super) fn check_dereferences(&mut self) {
+        // Mostly every one is written in it, and then no code needs a look.
+        if self.facts.null_checked.keys().all(|id| self.dereferenced.contains(id)) {
+            return;
+        }
         // The objects in the bodies that were not written, which nothing calls or which never run.
         let mut unwritten = HashSet::new();
         let methods = self.class.methods.iter().enumerate().filter(|(i, _)| !self.written.contains(i));
@@ -965,11 +1005,14 @@ impl<'a> Gen<'a> {
                 let field = self.field_path(object, name);
                 let obj = self.object(object);
                 if self.celled_object(object) {
-                    // A cell is read by value.
+                    // A cell is read by value, unless it is a fixed field's, which is a place.
                     let borrow = match self.enum_of(object) {
                         Some(t) => self.enum_borrow(t, false),
                         None => "",
                     };
+                    if self.fixed_cell(object, name, e.ty) {
+                        return (format!("(*{obj}{borrow}.{field}.fixed())"), true);
+                    }
                     let (get, _) = self.cell_accessors(object, name);
                     (format!("{obj}{borrow}.{field}.{get}()"), false)
                 } else if let Some(t) = self.enum_of(object) {
@@ -992,6 +1035,8 @@ impl<'a> Gen<'a> {
                     (format!("{obj}.borrow().{field}"), true)
                 }
             }
+            // A static that is a `java::Final` is borrowed where it is.
+            ExprKind::Static { .. } if let Some(place) = self.final_place(e) => (place, true),
             // An element of a plain array is a place too.
             ExprKind::Index(..) => {
                 let text = self.expr(e).receiver();
@@ -1035,7 +1080,9 @@ impl<'a> Gen<'a> {
     pub(super) fn object_ref(&mut self, e: &'a Expr) -> String {
         let e = self.peel(e);
         match &e.kind {
-            // A method that uses `this` as a value has it as a `&Rc<..>`.
+            // A method that uses `this` as a value has it as a `&Rc<..>`, a function of an enum's
+            // module as the value itself.
+            ExprKind::This if self.thin_this => "&this".to_string(),
             ExprKind::This => self.this_name().to_string(),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             _ => format!("&{}", self.object_place(e)),
@@ -1174,7 +1221,7 @@ impl<'a> Gen<'a> {
             };
             if let Some(obj) = obj {
                 self.need(Need::Body(index));
-                return format!("{obj}.{}()", self.fn_names[index]);
+                return self.enum_fn_call(t, &self.fn_names[index], &obj, "");
             }
         }
         let obj = self.handle_object(handle, e, index);
@@ -1204,8 +1251,9 @@ impl<'a> Gen<'a> {
             ExprKind::Var(name) if matches!(e.ty, Type::Class(..)) && self.borrowed.contains(name) => {
                 self.local(name)
             }
-            // So is a place that may be null, once checked: a variable, a field or an element.
-            ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..)
+            // So is a place that may be null, once checked: a variable, a field, an element or a
+            // `java::Final` static.
+            ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..) | ExprKind::Static { .. }
                 if matches!(e.ty, Type::Class(..)) && self.nullable(e) =>
             {
                 let (_, place) = self.object_parts(e);
@@ -1420,17 +1468,36 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The Rust path of a method or constructor, such as `Point::new` or `Point::norm`: a function
-    /// of the struct whose `impl` has it.
+    /// The Rust path of a method or constructor, such as `Point__new` or `Point::norm`: a function
+    /// of the module named after its struct (`module_fn`), or a function of the struct whose
+    /// `impl` has it.
     pub(super) fn qualified_fn(&self, index: usize) -> String {
         let owner = match self.homes[index] {
+            Home::Enum(t) if self.thin_fn(index) => return self.enum_fn(t, &self.fn_names[index]),
             Home::Enum(t) => {
                 return format!("{}::{}", struct_name(&self.class.types[t].name), self.fn_names[index]);
             }
             Home::Class(c) | Home::Fields(c) => c,
             Home::Free | Home::Nowhere => self.class.methods[index].class,
         };
-        format!("{}::{}", self.struct_of(owner), self.fn_names[index])
+        let between = if self.module_fn(index) { "__" } else { "::" };
+        format!("{}{between}{}", self.struct_of(owner), self.fn_names[index])
+    }
+
+    /// Whether method `index`, emitted on a struct, is a function of the struct's module rather
+    /// than of its `impl`: a constructor, or an instance method that takes its object as a
+    /// parameter (`this: &Arc<..>`) rather than as `self`, of a class that is not generic. It is
+    /// named after the struct and the method, `Point__new`, `Shape__area`. A split's header crate
+    /// declares such a function alone, where a function of an `impl` whose code moves keeps a
+    /// function that calls the declaration, which costs rustc about three times the declaration's
+    /// memory (`split.rs`).
+    pub(super) fn module_fn(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        let (Home::Class(t) | Home::Fields(t)) = self.homes[index] else { return false };
+        !m.is_static
+            && self.class.types[t].type_params.is_empty()
+            && self.class.types[t].enum_constants.is_none()
+            && (m.is_ctor || !self.facts.self_methods.contains(&index))
     }
 
     /// A value read from a field of an object.
@@ -1464,6 +1531,10 @@ impl<'a> Gen<'a> {
                 Some(t) => self.enum_borrow(t, false),
                 None => "",
             };
+            if self.fixed_cell(object, name, ty) {
+                let path = self.field_path(object, name);
+                return Code::atom(format!("(*{obj}{borrow}.{path}.fixed()){clone}"));
+            }
             let (get, _) = self.cell_accessors(object, name);
             return Code::atom(format!("{obj}{borrow}.{}.{get}()", self.field_path(object, name)));
         }
@@ -1506,8 +1577,7 @@ impl<'a> Gen<'a> {
     /// A read of the cell of a static, which initializes its class first. A static that starts
     /// empty holds its value once its class is initialized: it is that value, unless `optional`.
     fn static_cell_read(&mut self, class: usize, name: &str, ty: Type, optional: bool) -> Code {
-        let cell = self.cell_name(class, name);
-        let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
+        let read = self.static_slot(class, name, ty).read(self.clones(ty));
         let read = if !optional && self.facts.placeholder_statics.contains(&(class, name.to_string())) {
             format!("{}({read})", self.runtime("non_null"))
         } else {
@@ -1516,6 +1586,16 @@ impl<'a> Gen<'a> {
         match self.init_call(class) {
             Some(init) => Code::atom(format!("{{ {init} {read} }}")),
             None => Code::atom(read),
+        }
+    }
+
+    /// The cell of static `name` of class `class`, of type `ty`.
+    fn static_slot(&mut self, class: usize, name: &str, ty: Type) -> Slot {
+        let cell = self.cell_name(class, name);
+        if self.final_static(class, name) {
+            Slot::Final { cell }
+        } else {
+            Slot::Static { cell, plain: is_cell(ty) }
         }
     }
 
@@ -1808,7 +1888,7 @@ impl<'a> Gen<'a> {
 
     /// A name for a temporary that no Java local or function of this method uses.
     pub(super) fn temp(&self, base: &str) -> String {
-        let taken = |n: &str| self.locals.values().any(|v| v == n) || self.fn_names.iter().any(|f| f == n);
+        let taken = |n: &str| self.locals.values().any(|v| v == n) || self.fn_name_set.contains(n);
         let mut name = base.to_string();
         let mut i = 1;
         while taken(&name) {
@@ -2084,9 +2164,7 @@ impl<'a> Gen<'a> {
                 let field = self.field_path(object, name);
                 Slot::Field { obj, field, plain: false, on_enum, cell, volatile }
             }
-            Place::Static { class, name } => {
-                Slot::Static { cell: self.cell_name(*class, name), plain: is_cell(ty) }
-            }
+            Place::Static { class, name } => self.static_slot(*class, name, ty),
             Place::Var(_) => unreachable!("variables are assigned by `assignment`"),
             Place::Index(..) => unreachable!("array elements are assigned by `index_set`"),
         };
@@ -2210,22 +2288,41 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("}");
+        let mark = self.out.len();
         self.gap();
         self.line(&format!("impl{params} {name}{args} {{"));
         self.indent += 1;
+        let start = self.out.len();
         self.this_struct = index;
         self.field_inits(index);
-        // Its own constructors and methods first, then those it inherits.
+        // Its own constructors and methods first, then those it inherits. Those without a
+        // receiver are functions of the module (`module_fn`), written after the `impl`.
         let mut order: Vec<usize> = self.struct_methods.get(&index).cloned().unwrap_or_default();
         order.sort_by_key(|&i| class.methods[i].class != index);
+        let mut functions = String::new();
         for i in order {
-            if self.emitted_in(i, index) {
+            if !self.emitted_in(i, index) {
+                continue;
+            }
+            if self.module_fn(i) {
+                let at = self.out.len();
+                self.indent -= 1;
+                self.gap();
+                self.method(i);
+                self.indent += 1;
+                functions.push_str(&self.out.split_off(at));
+            } else {
                 self.gap();
                 self.method(i);
             }
         }
         self.indent -= 1;
-        self.line("}");
+        if self.out.len() == start {
+            self.out.truncate(mark);
+        } else {
+            self.line("}");
+        }
+        self.out.push_str(&functions);
     }
 
     /// Whether method `i` is emitted in the `impl` of the struct of class `t`: it lives there, and
@@ -2282,6 +2379,7 @@ impl<'a> Gen<'a> {
             ));
         }
         self.indent += 1;
+        let outer_inits = std::mem::replace(&mut self.in_field_inits, true);
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
             let outer = std::mem::replace(&mut self.guarded, true);
@@ -2298,6 +2396,7 @@ impl<'a> Gen<'a> {
                 self.line(&format!("this.borrow_mut().{field} = {value};"));
             }
         }
+        self.in_field_inits = outer_inits;
         if throws {
             let ok = self.ok("()".to_string());
             self.line(&ok);
@@ -2439,10 +2538,15 @@ impl<'a> Gen<'a> {
 
     /// A blank line before an item, unless the output is empty or a line of an item is last.
     pub(super) fn gap(&mut self) {
-        if self.out.ends_with("}\n") || self.out.ends_with(";\n") {
+        if ends_statement(&self.out) {
             self.out.push('\n');
         }
     }
+}
+
+/// Whether `text` ends a statement or a block, after which `gap` leaves a blank line.
+pub(super) fn ends_statement(text: &str) -> bool {
+    text.ends_with("}\n") || text.ends_with(";\n")
 }
 
 /// Whether evaluating `e` may see the static state of a class: it reads or writes a static

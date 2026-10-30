@@ -68,6 +68,19 @@ impl Bits {
         }
     }
 
+    /// The members that are not in `other`, in increasing order.
+    pub fn without(&self, other: &Bits) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (i, &w) in self.words.iter().enumerate() {
+            let mut w = w & !other.words.get(i).unwrap_or(&0);
+            while w != 0 {
+                out.push(i * 64 + w.trailing_zeros() as usize);
+                w &= w - 1;
+            }
+        }
+        out
+    }
+
     pub fn is_empty(&self) -> bool {
         self.words.iter().all(|&w| w == 0)
     }

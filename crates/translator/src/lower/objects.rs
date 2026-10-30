@@ -104,6 +104,8 @@ impl<'t> Lowering<'t> {
             object_tests: Default::default(),
             erased_casts: Default::default(),
             field_updates: Default::default(),
+            added_methods: Default::default(),
+            shared_methods: Default::default(),
             handle_calls: Default::default(),
             handle_slots: Default::default(),
             static_writes: Default::default(),
@@ -119,6 +121,7 @@ impl<'t> Lowering<'t> {
             plain_object: None,
             real: Default::default(),
             failed: Default::default(),
+            uses_real: RefCell::default(),
             aliases: Default::default(),
             functional: Default::default(),
             lambdas: Vec::new(),
@@ -444,7 +447,16 @@ impl<'t> Lowering<'t> {
             }
         };
         let volatile = node.has_flag("VOLATILE");
-        Ok(Field { name: node.str("name").to_string(), ty, init, constant, volatile, pos: node.pos() })
+        let is_final = node.has_flag("FINAL") || self.types[self.current.get()].node.kind() == "INTERFACE";
+        Ok(Field {
+            name: node.str("name").to_string(),
+            ty,
+            init,
+            constant,
+            volatile,
+            is_final,
+            pos: node.pos(),
+        })
     }
 
     /// The place that `node` names when it is a field: `name`, `this.name`, `object.name` or

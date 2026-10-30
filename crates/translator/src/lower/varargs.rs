@@ -48,9 +48,15 @@ impl<'t> Lowering<'t> {
         let passed = args.get(fixed).map(|a| a.ty);
         // An array of references is an `Object[]` too, passed for `Object...` (see `covariant`).
         let objects = matches!(ty, Type::Array(e) if Self::is_object(*e));
+        // javac says which calls it packs (`varargsElement`): one that it does not, which passes
+        // an array, passes it on, of whatever type (an `Item[]` for `ItemLike...`, which then meet
+        // as covariant arrays).
+        let call = matches!(node.kind(), "METHOD_INVOCATION" | "NEW_CLASS");
+        let made = node.str("varargsElement");
         let direct = args.len() == params.len()
             && (passed == Some(Type::Null)
                 || passed == Some(ty)
+                || call && made.is_empty() && matches!(passed, Some(Type::Array(_)))
                 || (of_variable || objects)
                     && matches!(passed, Some(Type::Array(e)) if Self::of_objects(*e)));
         if direct {
@@ -65,7 +71,6 @@ impl<'t> Lowering<'t> {
         // Java makes the array of the class javac gives its elements (`String[]` for
         // `Arrays.asList("a", "b")`), which it carries where the translation holds it as an
         // `Object[]` (`covariant`).
-        let made = node.str("varargsElement");
         if !made.is_empty() && !self.covariant.known.is_empty() {
             self.made_as(&packed, self.exact_ty(node, &format!("{made}[]"))?);
         }

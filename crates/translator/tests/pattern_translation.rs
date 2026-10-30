@@ -40,7 +40,7 @@ fn a_record_is_an_immutable_struct_with_java_text_and_hash() {
             "fn x(&self) -> i32 {\n        self.x\n    }",
             "fn hash_code(&self) -> i32 {\n        31i32.wrapping_mul(self.x).wrapping_add(self.y)\n    }",
             "java::concat!(format_args!(\"Point[x={}, y={}]\", self.x, self.y))",
-            "let p = Arc::new(APoint::new_i32_i32(3, -4));",
+            "let p = Arc::new(APoint__new_i32_i32(3, -4));",
         ],
     );
     // Nothing calls `y()` or `equals`, and the record never changes.

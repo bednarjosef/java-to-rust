@@ -141,7 +141,7 @@ impl<'a> Gen<'a> {
         let option = format!("{}.as_ref()", self.object_place(x));
         let (text, raises) = self.shared_handle_text("o", x);
         if raises {
-            let texts = self.passed_on(Code::atom(format!("{option}.map(|o| {text}).transpose()")));
+            let texts = self.passed_on_thrown(Code::atom(format!("{option}.map(|o| {text}).transpose()")));
             return Code::atom(format!("{texts}.unwrap_or_else(|| {null})"));
         }
         Code::atom(format!("{option}.map(|o| {text}).unwrap_or_else(|| {null})"))

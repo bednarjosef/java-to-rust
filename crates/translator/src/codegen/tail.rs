@@ -37,7 +37,7 @@ impl<'a> Gen<'a> {
                     }
                     None => {
                         let code = self.returned(value);
-                        self.ok(last_expression(value, code.text))
+                        self.ok_last(value, code.text)
                     }
                 };
                 self.line(&text);
@@ -69,7 +69,7 @@ impl<'a> Gen<'a> {
         let conflicts = self.stmt_conflicts(stmt);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         let code = self.returned(value);
-        let text = self.ok(last_expression(value, code.text));
+        let text = self.ok_last(value, code.text);
         self.line(&text);
         self.guarded = outer;
     }
@@ -77,6 +77,12 @@ impl<'a> Gen<'a> {
     /// The value `text` as the result of the current method: `Ok(text)` in a method that throws.
     pub(super) fn ok(&self, text: String) -> String {
         if self.throwing { format!("Ok({text})") } else { text }
+    }
+
+    /// `text`, the code of `value`, as the method's last expression and result (`ok`): inside
+    /// `Ok(..)` it starts no statement, so it needs no parentheses (`last_expression`).
+    fn ok_last(&self, value: &Expr, text: String) -> String {
+        if self.throwing { self.ok(text) } else { last_expression(value, text) }
     }
 
     /// The statements of a case of a switch expression, then its value. `T x = e; yield x;`, with

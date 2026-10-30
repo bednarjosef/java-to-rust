@@ -10,23 +10,23 @@
 //! (`Unsafe.arrayIndexScale`), or a new array of known length. A read of such a static during a
 //! circular initialization sees its default, so the call must raise nothing with that too.
 
+use super::super::FastMap;
 use super::*;
 use crate::analysis::constants::static_value;
-use std::collections::HashMap;
 
 /// How many times the program's code assigns each static, by its class and name, and the
 /// statements of its class's `<clinit>` that assign it (by method and statement), found once for
 /// the program instead of once for each read.
 #[derive(Clone, Default)]
 pub(in crate::analysis) struct StaticWrites {
-    of: HashMap<(usize, String), Writes>,
+    of: FastMap<(usize, String), Writes>,
 }
 
 /// How many times a static is assigned, and its `<clinit>`'s statements that assign it.
 type Writes = (usize, Vec<(usize, usize)>);
 
 pub(super) fn static_writes(class: &Class) -> StaticWrites {
-    let mut of: HashMap<(usize, String), Writes> = HashMap::new();
+    let mut of: FastMap<(usize, String), Writes> = FastMap::default();
     for (m, method) in class.methods.iter().enumerate() {
         let clinit = method.name == "<clinit>";
         for (i, s) in method.body.iter().enumerate() {
@@ -96,7 +96,7 @@ fn known(class: &Class, writes: &StaticWrites, e: &Expr) -> Option<Vec<Value>> {
     {
         return static_values(class, writes, *owner, name).map(|v| v.into_iter().map(Value::Int).collect());
     }
-    eval(class, writes, e, &HashMap::new()).map(|v| vec![v])
+    eval(class, writes, e, &FastMap::default()).map(|v| vec![v])
 }
 
 /// The values that the static `name` of class `owner` may have when read: what its class's
@@ -106,7 +106,7 @@ fn static_values(class: &Class, writes: &StaticWrites, owner: usize, name: &str)
     let value = assigned_once(class, writes, owner, name)?;
     let value = match jvm_value(value) {
         Some(v) => v,
-        None => match eval(class, writes, value, &HashMap::new())? {
+        None => match eval(class, writes, value, &FastMap::default())? {
             Value::Int(v) => v,
             Value::Array(_) => return None,
         },
@@ -118,7 +118,7 @@ fn static_values(class: &Class, writes: &StaticWrites, owner: usize, name: &str)
 /// statics that `static_values` knows: the JDK's `if (LegacyMergeSort.userRequested)`, whose
 /// flag is `Boolean.getBoolean` of a property that a translated program never sets.
 pub(super) fn known_condition(class: &Class, writes: &StaticWrites, cond: &Expr) -> Option<bool> {
-    match eval(class, writes, cond, &HashMap::new())? {
+    match eval(class, writes, cond, &FastMap::default())? {
         Value::Int(v) => Some(v != 0),
         Value::Array(_) => None,
     }
@@ -185,7 +185,7 @@ impl Run {
 /// What method `m` runs when called with `args`.
 pub(super) fn run(class: &Class, writes: &StaticWrites, m: usize, args: &[Option<Value>]) -> Run {
     let method = &class.methods[m];
-    let mut env: HashMap<&str, Value> = HashMap::new();
+    let mut env: FastMap<&str, Value> = FastMap::default();
     for (p, a) in method.params.iter().zip(args) {
         if let Some(v) = a {
             env.insert(&p.name, *v);
@@ -201,7 +201,7 @@ fn walk<'c>(
     class: &'c Class,
     writes: &StaticWrites,
     stmts: &'c [Stmt],
-    env: &mut HashMap<&'c str, Value>,
+    env: &mut FastMap<&'c str, Value>,
     run: &mut Run,
 ) {
     for s in stmts {
@@ -242,7 +242,7 @@ fn assigned(s: &Stmt) -> Vec<String> {
     out
 }
 
-fn forget(env: &mut HashMap<&str, Value>, names: &[String]) {
+fn forget(env: &mut FastMap<&str, Value>, names: &[String]) {
     for n in names {
         env.remove(n.as_str());
     }
@@ -252,7 +252,7 @@ fn stmt<'c>(
     class: &'c Class,
     writes: &StaticWrites,
     s: &'c Stmt,
-    env: &mut HashMap<&'c str, Value>,
+    env: &mut FastMap<&'c str, Value>,
     run: &mut Run,
 ) {
     // The array creations of the statement's own expressions whose sizes are known.
@@ -350,7 +350,7 @@ fn stmt<'c>(
 
 /// The value of an expression of the locals `env` that uses only operations that cannot fail,
 /// when it is within its type's range (Java's arithmetic wraps; within the range it is exact).
-fn eval(class: &Class, writes: &StaticWrites, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
+fn eval(class: &Class, writes: &StaticWrites, e: &Expr, env: &FastMap<&str, Value>) -> Option<Value> {
     let int = |e: &Expr| match eval(class, writes, e, env)? {
         Value::Int(v) => Some(v),
         Value::Array(_) => None,
@@ -380,7 +380,7 @@ fn eval(class: &Class, writes: &StaticWrites, e: &Expr, env: &HashMap<&str, Valu
             if !matches!(value.kind, ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Bool(_)) {
                 return None;
             }
-            return eval(class, writes, value, &HashMap::new());
+            return eval(class, writes, value, &FastMap::default());
         }
         ExprKind::NewArray(dims) => {
             let [d] = &dims[..] else { return None };

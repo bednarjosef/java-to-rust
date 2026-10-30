@@ -22,7 +22,7 @@ possible classes are known and dispatch can be a `match`.
    "the enum" of the type. A type with one such class is that class's object, with no enum.
    Enums are flat: every variant is a concrete class, never another enum, so a call through an
    interface over several class trees is one `match`.
-3. **Dispatch is a `match` in a method of the enum** (a *dispatcher*). A body that a class
+3. **Dispatch is a `match` in a function of the enum** (a *dispatcher*). A body that a class
    inherits is emitted once: on the fields struct when it uses `this` only for fields (a
    *field-level* method), otherwise on the enum of the declaring type or in the one concrete
    class's `impl` (an *object-level* method).
@@ -75,10 +75,17 @@ is asked for (two or three passes), so an enum has no dead code. A `match` over 
 written once, in such a method, and not at each use: `Object`'s enum has a variant for every
 class whose objects the program creates (javac's has thousands, the Minecraft server's some
 20 000). A method's `match` over more than 2048 classes is cut by class number into methods of
-2048 numbers each (`fmt_of_part_3`), which a `match` on the number's high bits calls: rustc
+256 numbers each (`fmt_of_part_3`), which a `match` on the number's high bits calls: rustc
 holds one function whole while it compiles it, and the server's `Display` alone was 9 MB of code,
-past 20 GB to compile; the parts are items of their own, which the split into crates spreads
-over the body crates (docs/several-crates.md).
+past 20 GB to compile; LLVM's time grows faster than a function's size, so the parts are small;
+they are items of their own, which the split into crates spreads over the body crates
+(docs/several-crates.md). A `match` over 2048 classes or fewer stays whole, so that its call is
+one jump, not two. `runtime_type_names()`, which `isInstance`, `cast` and array stores ask on
+every call, has no `match`: it reads a static at the crate root that holds each class's names by
+class number (`TYPE_NAMES_BY_CLASS_NUMBER`, `class_values::type_names_table`), one load at any
+optimization level, where a `match` over the thousand classes that implement `Comparable` is a
+thousand compares without optimizations; only an `Object[]` that carries its own class answers
+from its value first.
 
 Terms:
 
@@ -106,8 +113,9 @@ Terms:
   emitted as `impl DFields { fn m(&self | &mut self, ..) }`.
 - **object-level method**: every other instance method of a type that is not a leaf class:
   interface default methods, methods that make virtual calls or use `this` as a value. Emitted
-  on the enum (`self: &D`, `ThisForm::Enum`) or, when the type has one concrete class, in that
-  class's `impl`.
+  on the enum, as a function that takes the enum's value (`fn D__m(this: D, ..)`,
+  `ThisForm::Enum`), or, when the type has one concrete class, beside that class's struct (`fn
+  C__m(this: &Arc<..>, ..)`, see Naming).
 
 When in doubt a method is object-level: that is always correct, field-level is an
 optimization.
@@ -129,8 +137,20 @@ Naming:
   another type has the same name either way (`CSS.Value` beside `CSSValue`), with its package
   where that is shared too. The names are unique in the program, as every enum's conversions
   meet on `Object`: where two types still come to one name (`WinDef.LONG` and `Long`), all but
-  the one with fewest dots take the first free number (`as_long`, `as_long_2`). A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
+  the one with fewest dots take the first free number (`as_long`, `as_long_2`). `as_<type>()`
+  tests the class number and lends the object where it lies, as `view()` does, without the
+  `match` over all of the type's classes that `view()` is. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
   the class methods above gets a suffix (`base_2`, `clone_2`).
+- A constructor, and an instance method that takes its object as a parameter (`this:
+  &Arc<RefCell<C>>`) rather than as `self`, is a function of the module named after the struct
+  it belongs to and its own name: `Circle__new`, `Circle__describe`, `BaseFields__new`. So are
+  the dispatchers and the bodies of a type's enum, which take the enum's value, `Copy` and eight
+  bytes, as `this`: `Base__area(this: Base)`, called `Base__area(b)`. Methods that take `self`
+  stay in the struct's `impl`, as do all of a generic class's and the enum's own conversions
+  and views. A function of an
+  `impl` cannot be declared without its code, so a split's header crate would need a function
+  of its own for each one that moves, where a function of the module is declared alone
+  (docs/several-crates.md).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.
@@ -174,16 +194,16 @@ The shape of the Rust (simplified):
 ```rust
 struct BaseFields { name: java::JString, uses: i32 }
 impl BaseFields {
-    fn new(name: &java::Wtf8) -> BaseFields { BaseFields { name: name.to_owned(), uses: 0 } }
     fn get_name(&mut self) -> java::JString { self.uses = self.uses.wrapping_add(1); self.name.clone() }
 }
+fn BaseFields__new(name: &java::Wtf8) -> BaseFields { BaseFields { name: name.to_owned(), uses: 0 } }
 
 #[repr(C)]
 struct Circle { base: BaseFields, r: f64 }
 impl Circle {
-    fn new(r: f64) -> Circle { Circle { base: BaseFields::new(java::wtf8("circle")), r } }
     fn area(&self) -> f64 { 3.0 * self.r * self.r }
 }
+fn Circle__new(r: f64) -> Circle { Circle { base: BaseFields__new(java::wtf8("circle")), r } }
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
@@ -209,16 +229,16 @@ impl Base {
             tag => java::bad_tag(tag),
         }
     }
-    fn area(&self) -> f64 {
-        match self.0.tag() {
-            2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
-            3 => { let o: &Arc<RefCell<Rect>> = unsafe { self.0.as_pointer() }; o.borrow().area() }
-            tag => java::bad_tag(tag),
-        }
+}
+fn Base__area(this: Base) -> f64 {
+    match this.0.tag() {
+        2 => { let o: &Arc<RefCell<Circle>> = unsafe { this.0.as_pointer() }; o.borrow().area() }
+        3 => { let o: &Arc<RefCell<Rect>> = unsafe { this.0.as_pointer() }; o.borrow().area() }
+        tag => java::bad_tag(tag),
     }
-    fn to_string_in_base(&self) -> java::JString {
-        java::concat!(self.base().name.clone(), format_args!(":{}", java::Double(self.area())))
-    }
+}
+fn Base__to_string_in_base(this: Base) -> java::JString {
+    java::concat!(this.base().name.clone(), format_args!(":{}", java::Double(Base__area(this))))
 }
 impl PartialEq for Base { /* the same bits: the same class and address */ }
 impl fmt::Display for Base { /* each variant as its class shows it */ }
@@ -226,14 +246,16 @@ impl fmt::Display for Base { /* each variant as its class shows it */ }
 
 Rules:
 
-- A dispatcher exists on an enum for each method the program calls on a receiver of that type.
+- A dispatcher exists on an enum for each method the program calls on a receiver of that type,
+  a function named after the enum and the method that takes the value (`Base__area(b)`; a
+  receiver that is a reference to the value is read as `Base(r.0)`).
   It matches on the class number, and each arm lends the class's object where it lies, as
   `view()` would, so a call is one jump to the class's code. An arm calls what the variant's
   class runs, in the form that class uses (`o.borrow().m()`,
   `o.borrow_mut().m()`, `C::m(o, ..)`, `o.m()` for an immutable class). When every variant runs
   the same body emitted on the enum, the call names that body and no dispatcher is written. A
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
-  wraps the object in that type's enum (`Binary::Add(o.clone()).eval()`) rather than
+  wraps the object in that type's enum (`Binary__eval(Binary::Add(o.clone()))`) rather than
   converting the whole value.
 - An object is held by a `java::Arc`, a handle with no count (docs/collector.md). A value of an
   enum is that handle's address with the class's number in the top 16 bits (`java::Thin`,
@@ -251,7 +273,11 @@ Rules:
   string, a box, a Java enum constant, an array, a builder) is held in the low six bytes when it
   fits there and in a box otherwise; an array, a builder, a box with identity and a string with
   identity (`java::JStr`) are their own handles. A number that no class of the type has is a bug
-  the view reports (`java::bad_tag`).
+  the view reports (`java::bad_tag`). In a `match` of a method on the number, though, the arm
+  whose classes are in the most runs (more than four) is the last arm, `_`, in place of that
+  report: rustc tests a pattern's runs one by one before it switches on the other numbers, and
+  the Minecraft server's `Object::hash_code` spent its time walking the 3 750 runs of the classes
+  whose hash is their address.
 - A field read through an enum is `b.base().name` (with `.base` steps to the declaring class);
   a write is `b.base_mut().name = v`. `base_mut()` exists only for a mutable family. On a
   concrete receiver it is `c.borrow().base.name`.
@@ -260,9 +286,11 @@ Rules:
   the root of a class tree is at offset 0 of every object of the tree, and a
   `java::Monitored` keeps the object first too. For an immutable or celled family, `base()` is
   then one read with no `match`: `unsafe { self.0.as_prefix() }` (`java::Thin::as_prefix`)
-  lends the start of the object as the `&XFields`, after a `const` block that asserts each
-  variant's offset is 0. A dispatcher whose every variant runs one field-level body at or above
-  that fields struct calls it there, `self.base().get_name()`. A family behind `RefCell`s or
+  lends the start of the object as the `&XFields`, after it uses a constant, `BASE_AT_START`,
+  that asserts each variant's offset is 0. The checks are in that constant rather than in
+  `base()`, which stays small enough for a program split into crates to keep in the header,
+  inlined where it is called (`docs/several-crates.md`). A dispatcher whose every variant runs one field-level body at or above
+  that fields struct calls it there, `this.base().get_name()`. A family behind `RefCell`s or
   `java::Locked`s keeps the `match` above, whose `Ref::map` takes the borrow of the class's
   cell (std's `RefCell` gives no fixed place to its borrow flag), as does an enum with a Java
   enum's constant among its variants, held as a value rather than a handle.
@@ -287,7 +315,7 @@ any object type. A caller converts at the call: `total(&Base::Circle(c.clone()))
 There are two constructor forms.
 
 **The plain form** (the default). A constructor builds a plain value, a struct literal whose
-first entry is the superclass's part: `Circle { base: BaseFields::new("circle"), r }`. The
+first entry is the superclass's part: `Circle { base: BaseFields__new("circle"), r }`. The
 `base:` value is the superclass constructor that javac resolved (or the fields struct's
 `new()` for an implicit `super()`). Since `base` is the first thing Java runs and the first
 entry, `codegen/owned.rs::struct_literal` keeps Java's order by binding values with effects to
@@ -358,7 +386,10 @@ in the order of its `implements` clauses, each interface after its own superinte
 interface's initialization initializes none (`codegen::default_superinterfaces`, and
 reachability keeps those initializers, `Walk::default_interfaces`). Code in a class or its
 subclass does not initialize the class again (`codegen/statics.rs::init_call`), nor does a
-default method its interface, which the class's initialization has initialized.
+default method its interface, which the class's initialization has initialized. A method that
+lowering adds for an expression (`Method::added`, `lower/added_methods.rs`), such as the one
+every `Class.forName` with a computed name calls, is put in the class whose code it first meets
+but stands for the code at its call sites, so calling it does not initialize that class.
 
 ### 1.5 `instanceof`, patterns and casts
 
@@ -418,7 +449,10 @@ A string or a box inside `Object` is a plain value whose identity the translatio
 keep, so `==` between two `Object`s where both sides may be strings or boxes is
 `java::same_object` (`Facts::identity_checks`): different values are different objects, and two
 equal ones end the program (`java::unkept_identity`), as Java may or may not see one object in
-them. Never compare by value where Java compares references. Whether a side may be one is a points-to
+them. `same_object` is false for two class numbers, and the bits otherwise, but for the few
+classes that are such values, which it tests by number and compares through the view: a Java
+enum's constant, a `Boolean` and a `Byte` are equal exactly when their bits are, as are handles.
+Never compare by value where Java compares references. Whether a side may be one is a points-to
 analysis (`analysis/object_values.rs`): it follows, until nothing changes, whether each
 variable, parameter, return value, field, static and array element type may hold a string or a
 box, and which classes its objects may be of; each instance method is followed once per class
@@ -515,11 +549,12 @@ that declares `equals` or `hashCode` again (`Comparator`) dispatches a class wit
 An object's identity there is read from the value's bits rather than from its handle: the bits
 of two values are equal exactly when they are one object, and their address is the handle's
 (`java::Thin::address`), so `equals` is `b.0 == self.0` and `hashCode` is
-`java::address_hash(self.0.address())`, one text for every such class. A dispatcher writes an
+`java::address_hash(self.0.address())`, one text for every such class, and so is their arm of
+`object_identity_hash()`, which `System.identityHashCode` calls. A dispatcher writes an
 arm whose text does not read the object once, for all the classes that run it
 (`match_arms_or`), so the arms of the classes that keep `Object`'s methods are one range of class
 numbers rather than one arm each; `java::SameObject` tests the bits for them the same way. In a
-program as large as the Minecraft server, these three functions were otherwise millions of
+program as large as the Minecraft server, these four functions were otherwise millions of
 bytes each, one `match` that rustc compiled for most of an hour.
 
 The identity hash is the address of the class's struct (`java::address_hash` of
@@ -550,8 +585,9 @@ to run.
   (`o.count.get()`), a write puts a new one in (`o.count.set(v)`), so no borrow is held and
   none can conflict, and there is no borrow flag. Methods take `&self`, and `base()` lends the
   fields struct as `&XFields`. A field assignment whose object may be null computes the value
-  first, as Java does. A family that threads share, or whose monitor is kept, is an
-  `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s (docs/multi-threading.md, 2.1).
+  first, as Java does. A family that threads share has `java::SharedField`s, and one whose
+  objects a monitor site may lock is an `Arc<java::Monitored<C>>` (docs/multi-threading.md,
+  2.1).
 - **Fixed fields** (`analysis/fixed_fields.rs`): a field of a mutable class that only
   constructors write, through `this` (a `final` field, or one written the same way), keeps its
   value once the object is built. Its read on a concrete receiver is `java::fixed!(c, base.name)`
@@ -560,7 +596,12 @@ to run.
   object could not last (`{ c.borrow().name.clone() }`). In a program with threads, the fields of
   a class whose constructors, or whose subclasses' constructors, may start a thread are not
   fixed, since that thread could read one while the constructor writes it. The runtime's
-  `fixed.rs` gives the reasons that the borrow cannot alias a write.
+  `fixed.rs` gives the reasons that the borrow cannot alias a write. A fixed field of a celled
+  object is read where it is too, `(*c.name.fixed())`, outside the constructors and field
+  initializers, which write it (`Gen::fixed_cell`): a `java::SharedField` of a value that is not
+  one word (a `Class`, a lambda) is otherwise copied out under a striped spin lock, and a
+  lambda's handle counted, at each read. The Minecraft server's reflection table read each
+  member's class so.
 - A fields struct has no representation of its own: it is always inside a concrete object.
 
 ### 1.9 Comparable, Number, CharSequence, Enum, Record and other JDK interfaces
@@ -590,7 +631,12 @@ the program's classes implement:
   strings, builders and the program's classes that implement it. `length()`, `charAt`,
   `subSequence` and `getChars` answer as the string, the builder or the class does
   (`char_sequence_arm`); a class without `getChars` gets the interface's default, written as the
-  JDK has it. `toString()` is the value's text, `isEmpty()` a zero length. The JDK's
+  JDK has it. `toString()` is the value's text, `isEmpty()` a zero length. The `subSequence` of
+  a string or a builder is a string: a builder made from it, or appending it, copies that
+  string (`substring_text` in `lower/strings.rs`), and no class's `toString` runs. Where a class
+  of the program implements it, a builder made from a `CharSequence` or appending one reads it
+  as Java's `AbstractStringBuilder` does, by its `length()` and `charAt` (a string as the string
+  it is), with the length checked between the calls (`lower/sequence_texts.rs`). The JDK's
   `CharSequence` is not translated (it is among `RUNTIME_CLASSES`), and its other methods are
   rejected.
 - `ENUM` (`<E extends Enum<E>>`, the JDK's `EnumMap` and `EnumSet`): the program's enums, with
@@ -634,6 +680,10 @@ Other rules:
 - An interface method that a Java enum implements with a method every enum has (`name()`,
   `ordinal()`, `toString()`) dispatches to the enum's own; any other method of `java.lang.Enum`
   doing so is rejected.
+- `ordinal()` and `compareTo` of a constant held as an `Enum` or an `Object` read the value's
+  bits (`java::Thin::ordinal`): a Java enum is a Rust enum without fields, whose discriminant is
+  the ordinal, held in the low bytes. Where the type has classes that are not enums, the class
+  number is tested first and the others fail the cast to `Enum`.
 - A class may implement an interface's method with a method it inherits from a superclass that
   does not implement the interface (`Spliterators.EmptySpliterator.OfInt`). javac's `overrides`
   cannot list it, so `JavaTree` gives the class an `inherits` list of such pairs, and
@@ -716,9 +766,18 @@ supertype (a `Version[]` is an `Object[]`), and erasure makes `T[]` an array of 
 `list.toArray(new Version[0])` passes a `Version[]` where `T[]` is an `Object[]`, and `toArray(a)`
 fills `a` and returns it. Copying at the boundary would lose that identity. Instead, two different
 array types of references that meet (an argument, an assignment, a return, a cast, a substitution
-for an array of a type variable, an array passed for `Object...`) are each an `Object[]`
-everywhere in the program: lowering notes each such type and the program is lowered again
-(`real_generics::retry`). Element reads get the checked cast back, a for-each casts each element,
+for an array of a type variable, an array passed for `Object...` or, where javac does not pack the
+call's arguments, for any varargs) are each an `Object[]`
+everywhere in the program: a scan before the first lowering predicts them (see "Predicting both
+sets before the first lowering" below), and lowering notes each such type the scan missed and
+the program is lowered again (`real_generics::retry`). Types that meet only once others are `Object[]`s (a `String[][]` is an
+`Object[][]` once `String[]` is one; an array held as an `Object` meets an `Object[]` once a type
+an `Object` is cast to is one) are noted by the same lowering, which meets again the types that
+met as they would be translated then (`covariant::noted_later`), so one lowering more takes
+them all. That includes the Rust generics the lowering failed, which the next one erases: an
+array of a generic class with type arguments (`Box<String>[]`) is `Box[]` once the class is
+erased, and noting such an array fails the class itself, whose objects would be `Object`s as its
+elements. Element reads get the checked cast back, a for-each casts each element,
 and a store converts to `Object`. Every other array keeps its exact type.
 
 Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle
@@ -840,14 +899,29 @@ erased program has lost what the decision needs. Candidates:
   (a Rust struct must use its type parameters), that extends and implements nothing, has no
   subclasses and is not abstract;
 - a method whose type parameters have no bounds and each occur in a parameter's type (so Rust
-  can infer them).
+  can infer them);
+- and neither has an array of one of its type variables anywhere in it, in its signature, a
+  field, a variable or an expression's type (`T[]`, `T...`): `verify` would fail it every time,
+  and while it is tried its arrays meet no others and code that makes one (`Arrays.copyOf` into
+  a `T[]`) is rejected, which would erase it and the other candidates that code uses.
 
 Lowering translates them as real, then `real_generics::verify` fails every candidate whose type
 variables' values are used for anything but a store, a return, an argument to a parameter of a
 type variable or a comparison with `null`; whose types meet a cast or an `instanceof`; that is
-used raw, as an array element, or becomes an `Object`. Lowering runs again with the failed ones
-erased until nothing fails, and an error with candidates left is retried with all of them erased,
-so a real generic never turns a translated program into a rejected one.
+used raw, as an array element, or becomes an `Object` (lowering fails a candidate itself where
+its values go to `System.arraycopy`, whose arrays are `Object`s). Since the failed ones' type variables
+become `Object` the next time, a value of another candidate's type variable that goes to or comes
+from one of them (an argument, a return, a field) would be converted then, so `verify` checks
+again with them erased until no more fail. Lowering runs again with the failed ones erased until
+nothing fails (together with the covariant arrays a lowering found, when it found any), and an
+error with candidates left is retried with all of them erased,
+so a real generic never turns a translated program into a rejected one. A census, and a whole
+program, which go on past a rejection, retry only for one in code that can run and that uses a
+real generic (a class or method of them, or one of their type variables, while the method,
+field initializers or initializer block was lowered), and erase only the real generics that
+code used before the rejection: code that uses none is lowered the same without them, and so is
+a class the program does not have (`type`, `new`, `extending` or `implementing` a missing
+class) and asking for the caller (`getCallerClass`) where that is not supported.
 
 A type variable of a real generic is a synthetic type of kind `TypeKind::Param`, named
 `Owner#T`, with no members and no implementors, so every analysis sees an opaque value that is
@@ -855,6 +929,56 @@ stored, moved and cloned. `Type::Class` carries its type arguments (`Type::Class
 [String])`). Type parameters are bounded by `Clone` only (`impl<T: Clone> Box<T>`), and every use
 of a value clones it. A literal passed for a type variable gets its type suffix (`3i32`). Use
 sites keep javac's substituted types, with no cast.
+
+**Predicting both sets before the first lowering** (`lower/predict.rs`). Without a prediction,
+the first lowering finds the covariant arrays and the failing Rust generics, and a second one is
+made with them (Minecraft: 730 array types and 78 of 78 classes and 2806 of 2841 methods, 83 s
+an attempt; javac: 75 types, 7 of 8 classes and 353 of 361 methods). Before the first lowering,
+a scan of the trees of the declarations that lowering will lower predicts the two sets, and the
+first lowering starts with them (`Covariant::known`, and `Lowering::real` without the predicted
+failures, `Lowering::start_real`), so that it finds nothing new. Whatever the scan misses, the
+lowering notes as before, and the program is lowered again, so a miss costs time, never a
+wrong translation. A type predicted covariant that no two arrays meet would be an `Object[]` for
+nothing (slower, never wrong), so the scan is to be exact, not generous.
+
+- **Failing Rust generics** (built). The scan reads javac's types (`javaType`, a symbol's
+  type) with the candidates, in a fixpoint like `verify`'s, where each failure erases the type
+  variables of what failed, which can fail more: a method none of whose parameter types names a
+  type variable outside an erased class's arguments, which Rust cannot infer (`List<T>` once
+  `List` is erased; about half of Minecraft's), and a class none of whose instance fields does;
+  a method that overrides another or that another overrides; a type variable named in a lambda,
+  a local or anonymous class or an inner class (`type_var`); a candidate class used raw, or with
+  a wildcard, capture or intersection argument; a cast or `instanceof` of a type that names a
+  candidate; a value of a type variable used as an operand or receiver, or stored, passed
+  (packed varargs too) or returned where the type is not a type variable of a Rust generic; a
+  value of a type that names one converted to another type; and a member of an erased generic
+  whose result javac gives a type variable of a Rust generic, which lowering casts back. On
+  javac it predicts all 360 failing generics and no others, in 1.3 s. Erasing them before the
+  first lowering also spares the arrays that met only because a class was still a Rust generic
+  then: javac's `ConcurrentSkipListMap.Index[]` (noted as it and as `Index<Object, Object>[]`,
+  two of its 75 types) stays an array of its class.
+- **Covariant arrays** (built), predicted once the Rust generics are set and the plan for
+  `Object` is made (`Lowering::predict_arrays`), by lowering's own rules: a scan of the trees
+  (`Meets`) hands each place where lowering converts a value of one type to another to the
+  functions that lowering notes covariant arrays in (`meets_object_array`, `note_object_array`,
+  `object_array`): an argument and its parameter (packed varargs too), an assignment, a field's
+  or local's initializer, a return, a `?:`, an array initializer's element, a cast, an
+  `instanceof`, an array in a string concatenation, a member of an erased generic read back as
+  javac's type (`erased_use`), and a method's parameters and result against those of the methods
+  it overrides (the bridges). Code that lowering makes and the trees do not have is read from the
+  same inputs lowering makes it from: a field read or updated through `Unsafe`, a `VarHandle` or
+  a field updater, whose value is converted to the call's type (`handle_read`), and the members
+  of the reflection tables, whose arguments and fields are cast from `Object` and whose results
+  converted to it (`reflected_conversions`). `noted_later` then closes the set, and what the scan
+  recorded is forgotten, as nothing has been lowered yet. On javac it predicts all 73 types and
+  no others, in 0.6 s, and the census lowers the program once, to the same translation.
+- **Checking it**: with `JAVA_TO_RUST_PREDICTION_CHECK` set, the predicted arrays are not used,
+  and `--timings` prints how many of the array types the lowerings noted and of the Rust generics
+  that failed it predicted, then each one it missed or added (`timing: prediction missed array
+  String[]`). The lowerings still start without the Rust generics predicted to fail, since the
+  arrays they note depend on which are Rust generics; set to `unseeded`, they start with all the
+  candidates, which shows a generic predicted to fail that does not (the arrays' numbers then
+  mean nothing). `JAVA_TO_RUST_PREDICTION_WHY` prints why the scan fails each generic.
 
 ### 1.12 Interfaces: default and static methods, constants, enums implementing interfaces
 
@@ -884,10 +1008,10 @@ list of a million nodes needs nothing special (`corpus/features/LongChainsDrop.j
 
 An object that never leaves the method that makes it lives in a `java::Slot` in that method's
 frame instead, with the same handle type (docs/collector.md, "Objects on the stack";
-`analysis/escape.rs`, `codegen/stack_objects.rs`): `let p = slot_1.put(P::new(3));` for a plain
-constructor, `P::new_on_stack(&slot_1, 3)` for one that allocates its object itself (1.4). A
+`analysis/escape.rs`, `codegen/stack_objects.rs`): `let p = slot_1.put(P__new(3));` for a plain
+constructor, `P__new_on_stack(&slot_1, 3)` for one that allocates its object itself (1.4). A
 method that returns a new object of its own (a factory, such as an `iterator()`) gets a form
-that takes a slot after its receiver, `List::iterator_on_stack(this, &slot_2)`, which a caller
+that takes a slot after its receiver, `List__iterator_on_stack(this, &slot_2)`, which a caller
 that keeps the object uses (`corpus/features/StackObjects.java`, `StackFactories.java`,
 `StackObjectsInLists.java`).
 
@@ -984,7 +1108,10 @@ normal text stays plain UTF-8 at no cost:
   lone surrogate as `?`. A printed line with two or more strings or `char`s, which could be the
   halves of a pair, is made first and then printed.
 - **`switch` and `valueOf`.** A string `switch` and an enum's `valueOf` match the string's bytes
-  against byte string literals (`b"..."`), a string constant in a `case` by its text.
+  against byte string literals (`b"..."`), a string constant in a `case` by its text. A `switch`
+  with more than 64 labels, such as the list of a program's resources, instead looks the bytes
+  up in a sorted table of its labels (`java::string_case`) and matches the number of the case:
+  a match of thousands of byte strings keeps LLVM's register coalescing busy for most of an hour.
 
 What does not hold a lone surrogate exactly: the message of an exception the runtime raises
 (a Rust `String`), a thread's name (Rust's), and the text of a charset or a `Class`.

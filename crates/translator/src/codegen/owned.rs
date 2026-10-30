@@ -15,11 +15,16 @@ impl<'a> Gen<'a> {
         let decl = &class.types[m.class];
         self.this_form = ThisForm::Local;
         let body = self.prologue(&m.body);
+        // The call of the constructor that this one delegates to, when that one throws.
+        let mut delegated = None;
         let (start, rest, initialize) = match body.split_first() {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
                 let call = Code::atom(format!("{}({args})", self.qualified_fn(index)));
+                if self.facts.throwing.contains(&index) {
+                    delegated = Some(call.text.clone());
+                }
                 (self.raising(call, index).text, rest, false)
             }
             _ => {
@@ -32,8 +37,8 @@ impl<'a> Gen<'a> {
         let rest = without_final_return(rest);
         if rest.is_empty() && !initialize {
             // A constructor that only delegates to one that throws returns its `Result`.
-            let start = match start.strip_suffix('?') {
-                Some(result) if self.throwing => result.to_string(),
+            let start = match delegated {
+                Some(result) if self.throwing => result,
                 _ => self.ok(start),
             };
             self.line(&start);

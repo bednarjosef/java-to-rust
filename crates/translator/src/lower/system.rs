@@ -516,8 +516,8 @@ impl<'t> Lowering<'t> {
 
     /// `Integer.getInteger(key)`, `getInteger(key, default)` and `Long.getLong` likewise: the
     /// property's value decoded as a number, or the default (null without one) when the property
-    /// is unset or is no number. The key must be a constant, as for `System.getProperty`, and one
-    /// that the runtime answers (`user.dir`, ...) is no number.
+    /// is unset or is no number. A key that the runtime answers (`user.dir`, ...) is no number. A
+    /// key that code computes is `computed_number_property`.
     fn number_property(
         &self,
         node: Node<'t>,
@@ -530,10 +530,7 @@ impl<'t> Lowering<'t> {
             _ => self.constant_text(node.list("arguments").next()),
         };
         let Some(key) = key else {
-            return unsupported(
-                node,
-                &format!("`{}.{}` with a key that is not a constant", symbol.owner, symbol.name),
-            );
+            return self.computed_number_property(node, long, args);
         };
         let value = match property(&key) {
             Ok(Property::Fixed(text)) => decode(&text, long),
@@ -546,7 +543,7 @@ impl<'t> Lowering<'t> {
             return Ok(match args.get_mut(1) {
                 Some(default) => {
                     let default = std::mem::replace(default, self.synth(ExprKind::Null, pos, boxed));
-                    self.convert(default, boxed).kind
+                    self.boxed_number(default, boxed).kind
                 }
                 None => ExprKind::Null,
             });
@@ -565,7 +562,86 @@ impl<'t> Lowering<'t> {
         } else {
             self.synth(ExprKind::Int(value as i32), pos, Type::Int)
         };
-        Ok(self.convert(number, boxed).kind)
+        Ok(self.boxed_number(number, boxed).kind)
+    }
+
+    /// `e`, a number or its box, as the box `boxed` (`Integer` or `Long`) that `getInteger` and
+    /// `getLong` give: a primitive is boxed, as `Integer.valueOf` boxes it.
+    fn boxed_number(&self, e: Expr, boxed: Type) -> Expr {
+        if e.ty == boxed.unboxed() {
+            let pos = e.pos;
+            return self.synth(ExprKind::Builtin(Builtin::Boxed(BoxedOp::Box, e.ty), vec![e]), pos, boxed);
+        }
+        self.convert(e, boxed)
+    }
+
+    /// `Integer.getInteger` or `Long.getLong` of a key that code computes (`KeepAliveCache` reads
+    /// `"http.keepAlive.time." + type`): a `switch` over the keys of a plain run whose values are
+    /// numbers, each with its number, and the default (null without one) for any other key and
+    /// for a null one, which these methods answer with the default too. The key and the default
+    /// are held in locals first, in Java's order, as Java evaluates both whatever the value is.
+    fn computed_number_property(
+        &self,
+        node: Node<'t>,
+        long: bool,
+        args: &mut [Expr],
+    ) -> Result<ExprKind, Error> {
+        let Some(jdk) = jdk_properties() else {
+            return unsupported(
+                node,
+                "a number property without a `java` on the path to read the JDK's values from",
+            );
+        };
+        let pos = node.pos();
+        let boxed = Type::boxed(if long { Type::Long } else { Type::Int });
+        let mut body = Vec::new();
+        let key = self.fresh_name("key");
+        let given = std::mem::replace(&mut args[0], self.synth(ExprKind::Null, pos, Type::String));
+        body.push(Stmt::Local { ty: Type::String, name: key.clone(), init: Some(given), pos });
+        let default = match args.get_mut(1) {
+            Some(default) => {
+                let default = std::mem::replace(default, self.synth(ExprKind::Null, pos, boxed));
+                let default = self.boxed_number(default, boxed);
+                let name = self.fresh_name("default");
+                body.push(Stmt::Local { ty: boxed, name: name.clone(), init: Some(default), pos });
+                self.synth(ExprKind::Var(name), pos, boxed)
+            }
+            None => self.synth(ExprKind::Null, pos, boxed),
+        };
+        let mut keys: Vec<&String> = jdk.keys().collect();
+        keys.sort_unstable();
+        let mut cases = Vec::new();
+        for name in keys {
+            let Ok(Property::Fixed(text)) = property(name) else { continue };
+            let Some(value) = decode(&text, long) else { continue };
+            let number = if long {
+                self.synth(ExprKind::Long(value), pos, Type::Long)
+            } else {
+                self.synth(ExprKind::Int(value as i32), pos, Type::Int)
+            };
+            let label = self.synth(ExprKind::Str(name.clone()), pos, Type::String);
+            cases.push(Case {
+                labels: vec![CaseLabel::Value(label)],
+                body: vec![Stmt::Yield(self.boxed_number(number, boxed))],
+            });
+        }
+        cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(default)] });
+        let var = || self.synth(ExprKind::Var(key.clone()), pos, Type::String);
+        let null = self.synth(ExprKind::Null, pos, Type::Null);
+        let is_null =
+            self.synth(ExprKind::Binary(BinOp::Eq, Box::new(var()), Box::new(null)), pos, Type::Boolean);
+        let none = self.synth(ExprKind::Str(String::new()), pos, Type::String);
+        let selector = self.synth(
+            ExprKind::Conditional(Box::new(is_null), Box::new(none), Box::new(var())),
+            pos,
+            Type::String,
+        );
+        let read = self.synth(ExprKind::Switch { selector: Box::new(selector), cases }, pos, boxed);
+        body.push(Stmt::Yield(read));
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
     }
 
     /// The text of `node` when it reads a local `String` that the method being lowered declares

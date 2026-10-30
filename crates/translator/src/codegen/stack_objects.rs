@@ -47,8 +47,14 @@ impl<'a> Gen<'a> {
     }
 
     /// The `new`s and calls of factories of method `m` whose objects it makes in slots, with
-    /// their classes, in the order of the code.
+    /// their classes, in the order of the code: found once for the program, with the setup
+    /// (`find_stack_sites`).
     pub(super) fn stack_sites(&self, m: usize) -> Vec<(ExprId, usize)> {
+        self.stack_sites.get(&m).cloned().unwrap_or_default()
+    }
+
+    /// `stack_sites`, found in the code of `m`.
+    pub(super) fn find_stack_sites(&self, m: usize) -> Vec<(ExprId, usize)> {
         if self.facts.stack_objects.objects.is_empty() {
             return Vec::new();
         }
@@ -136,9 +142,9 @@ impl<'a> Gen<'a> {
                 return None;
             }
             self.need(Need::Body(t));
-            let obj = self.object(receiver);
+            let obj = self.thin_receiver(d, receiver);
             let args = self.call_args(t, args);
-            return Some(Code::atom(format!("{obj}.{name}({})", with(args))));
+            return Some(Code::atom(self.enum_fn_call(d, &name, &obj, &with(args))));
         }
         if self.dispatch(receiver, index, false) != t || self.is_object_method(t) {
             return None;
@@ -147,9 +153,9 @@ impl<'a> Gen<'a> {
         match self.homes[t] {
             Home::Enum(d) => {
                 self.need(Need::Body(t));
-                let obj = self.as_enum(d, receiver);
+                let obj = self.thin_as_enum(d, receiver);
                 let args = self.call_args(t, args);
-                return Some(Code::atom(format!("{obj}.{name}({})", with(args))));
+                return Some(Code::atom(self.enum_fn_call(d, &name, &obj, &with(args))));
             }
             Home::Class(_) => {}
             _ => return None,
@@ -197,14 +203,13 @@ impl<'a> Gen<'a> {
     /// The functions that get a form on the stack (see the module's comment): the factories and
     /// the constructors that make their object themselves, that a `new` or a call whose object
     /// goes in a slot runs, directly, through a factory or through `this(..)`.
-    pub(super) fn stack_forms(&self) -> HashSet<usize> {
+    pub(super) fn stack_forms(&self, sites: &HashMap<usize, Vec<(ExprId, usize)>>) -> HashSet<usize> {
         let mut found = HashSet::new();
         let mut made: Vec<&'a Expr> = Vec::new();
-        for m in 0..self.class.methods.len() {
-            let sites = self.stack_sites(m);
-            if !sites.is_empty() {
-                made.extend(sites.iter().filter_map(|&(id, _)| self.find_expr(m, id)));
-            }
+        let mut with_sites: Vec<usize> = sites.keys().copied().collect();
+        with_sites.sort_unstable();
+        for m in with_sites {
+            made.extend(sites[&m].iter().filter_map(|&(id, _)| self.find_expr(m, id)));
         }
         let mut ctors = Vec::new();
         while let Some(x) = made.pop() {

@@ -40,7 +40,7 @@ plainer form only where it proves the meaning is the same:
 | `int` arithmetic | `wrapping_add`, `java::rem`, ... | `+ - * / %` where range analysis proves no overflow and a nonzero divisor (`analysis/ranges.rs`) |
 | array | `java::Array<T>`, a shared cell | `Vec<T>` (or `Vec<Vec<T>>`) when no other name can see it (`analysis/arrays.rs`) |
 | string | `java::JString`, WTF-8 bytes | `&java::Wtf8` for a parameter never assigned; byte indexing for strings proven ASCII |
-| object in a threaded program | `Arc<java::Monitored<C>>` of `java::SharedField`s | `Arc<C>` when immutable; `Arc<C>` of `java::Field`s when no other thread can reach it |
+| object in a threaded program | `Arc<java::Monitored<C>>` of `java::SharedField`s | `Arc<C>` when immutable; `Arc<C>` of `java::Field`s when no other thread can reach it; no `java::Monitored` when no monitor site can lock it |
 
 Nullness analysis treats a field as not null when every constructor sets it to a non-null value
 before anything can read it. A static read while its own class's initialization is still under
@@ -318,7 +318,8 @@ Threads are real platform threads. `Thread` (subclassed or given a `Runnable`), 
 `sleep`, names, ids, priorities, daemon threads, interrupts, uncaught-exception handlers and
 thread groups behave as Java's; `java.lang.Thread` is `crates/translator/java/Threads.java` over
 the runtime's natives (`thread.rs`). In a program that can start a thread, the objects threads
-may share are `Arc<java::Monitored<C>>` (`Arc<C>` when immutable), arrays that threads may reach are
+may share are `Arc<C>` of `java::SharedField`s (`Arc<java::Monitored<C>>` where a monitor site may
+lock them, `Arc<C>` of plain fields when immutable), arrays that threads may reach are
 `java::SharedArray`,
 and the statics that a started thread can touch are process-wide; a program without threads
 translates exactly as before.
@@ -340,7 +341,9 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   Dog.class`) is a `matches!` of the variant. Any other class is a `java::Class` value, `Copy` and
   equal by binary name (`equals` of an object that is not a class is false), with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
   `isArray`, `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value
-  carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests.
+  carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests;
+  `isInstance` and `cast` test the names above the value's class, each name compared by its
+  length and last eight bytes before it is compared whole (`java::Class::is_instance`).
   `getModifiers`, `isMemberClass`, `isLocalClass`, `isAnonymousClass`, `getEnclosingClass` and
   `getDeclaringClass` answer from what the class value carries in a program that asks for them:
   the modifiers javac gives the class, implicit ones included, and where it is declared
@@ -406,14 +409,16 @@ Design: [natives-and-input.md](natives-and-input.md).
   and the `jrt:` file system over the JDK's `lib/modules` image.
 - `System.getProperty` gives what a plain `java Main` run gives (`lower/system.rs`): machine
   values at run time, other keys fixed from the JDK the translator ran with, and
-  `java.awt.headless` `"true"`, as with `-Djava.awt.headless=true`.
+  `java.awt.headless` `"true"`, as with `-Djava.awt.headless=true`. A key that code computes is
+  a `switch` over the keys of such a run; `Integer.getInteger` and `Long.getLong` of one give
+  the number of a key whose value is one, and the default for any other key.
   `sun.java.command` and `user.timezone` as constants are rejected. `System.setProperty` and
   `clearProperty` keep their changes, which every `getProperty` of a program that calls them
   reads (`java/overlay/java/lang/TranslatedProperties.java`). `System.getenv(name)` reads the
   environment, and in a whole program `System.getenv()` is the JDK's map of it.
 - `Runtime` is no value: its methods are translated on `Runtime.getRuntime()` or a local that
   holds it, and any other use of one is rejected. Its shutdown hooks run on the first exit, as
-  Java's do, but not on a signal ([multi-threading.md](multi-threading.md), 6).
+  Java's do, a `SIGTERM`, `SIGINT` or `SIGHUP` too ([multi-threading.md](multi-threading.md), 6).
 - A translation is headless, unlike a JVM on a machine with a display: AWT's natives are not
   translated, so `GraphicsEnvironment.isHeadless()` is always true, and a program that would
   open a window there (the Minecraft server without `nogui`) runs as it does on a server

@@ -30,7 +30,7 @@ the machine running out of memory.
 | `census` | first puts each jar's manifest in the source root of its classes (`META-INF/MANIFEST.MF`, as the jar has it), from which the translation takes the versioning attributes of the root's packages; then the translator's census from `main`, past every rejection and past every compile error (`--keep-going`, below), with the messages of a `NullPointerException` naming locals as the server's class files do (`--named-locals`: the server and its libraries were compiled with `-g`, [exceptions.md](exceptions.md#the-messages-of-nullpointerexception)) and approximating those whose wording is not certain (`--approximate-messages`), into `census/`; the census before it, if it wrote its `census.json`, is moved to `census-previous/` first | stopped by the memory cap, see below |
 | `summary` | splits the census by origin, into the server, each library and the JDK (`scripts/census-by-origin.py`), and compares it with the previous one (`scripts/census-compare.py`, below) | seconds |
 | `trial-write` | not run by default. Writes the trial translation again from the `trial-tree.bin` that the census saved, with the translator as it is now (see below) | |
-| `trial` | not run by default. Builds the trial translation that the census writes when `TRIAL_CRATES` is set: the whole server with each rejected piece of code ending the program with its rejection, as a workspace split into about that many body crates ([several-crates.md](several-crates.md)), in `trial/`, which stays between runs: the census rewrites only the files that change, so Cargo builds again only the crates whose code changed (all of them when the header changed). Then runs it in a new directory `trial-run/` with the EULA accepted, as `--nogui`, with `stop` on standard input once it logs that it is done starting (the server fails a `stop` that comes earlier, and keeps running), so that it makes a world, loads, and stops; the run ends when the server does, or after `SERVER_SECONDS` (600). The build is capped at `TRIAL_MEMORY_CAP` (16 GB; the whole server needs 23 GB). The header crate builds first and alone with `TRIAL_HEADER_JOBS` jobs (1), as rustc's memory for it grows past 20 GB with 2, then the body crates with `CARGO_BUILD_JOBS`; when that build is killed without a compile error (two of the largest bodies together passed the cap), the rest build one at a time, past the crates already built. It uses the `dev` profile unless `TRIAL_PROFILE` says otherwise, the runtime crate optimized (`opt-level` 2) all the same, and goes on past a crate that fails (`--keep-going`), so that `trial-build.txt` has the errors of every crate | |
+| `trial` | not run by default. Builds the trial translation that the census writes when `TRIAL_CRATES` is set: the whole server with each rejected piece of code ending the program with its rejection, as a workspace split into about that many body crates ([several-crates.md](several-crates.md)), in `trial/`, which stays between runs: the census rewrites only the files that change, so Cargo builds again only the crates whose code changed (all of them when the header changed). Then runs it in a new directory `trial-run/` with the EULA accepted, as `--nogui`, with `stop` on standard input once it logs that it is done starting (the server fails a `stop` that comes earlier, and keeps running), so that it makes a world, loads, and stops; the run ends when the server does, or after `SERVER_SECONDS` (600). The build is capped at `TRIAL_MEMORY_CAP` (16 GB; the whole server needs 23 GB). The header crate builds first and alone with `TRIAL_HEADER_JOBS` jobs (1), as rustc's memory for it grows past 20 GB with 2, then the body crates in groups of at most `TRIAL_BODY_MB` (64) megabytes of Rust, the largest first, with `CARGO_BUILD_JOBS` threads (the cores) among a group's few crates: a crate's memory grows with its size, and its code generation takes the threads (one 16 MB body builds in 40 s on 16 threads at `opt-level` 1, in minutes on one). When a group's build is killed without a compile error (it passed the cap), the rest build one at a time, past the crates already built. It uses the `dev` profile unless `TRIAL_PROFILE` says otherwise, the runtime crate optimized (`opt-level` 2) all the same, and goes on past a crate that fails (`--keep-going`), so that `trial-build.txt` has the errors of every crate | |
 | `java-run` | not run by default. The same run of the server on Java, from the jars, in `java-run/`: what the trial's run is compared with | |
 | `bench` | not run by default. The server's speed, on Java (`BENCH=java`) or as the trial built it (`BENCH=trial`), in `bench-java/` or `bench-trial/`: a new world of a fixed seed (`BENCH_SEED`); once started it force-loads the chunks within `BENCH_RADIUS` (5) chunks of the centre, waits `BENCH_WARMUP` (30) seconds for them to generate, runs a `tick sprint` of `BENCH_TICKS` (1000) ticks and stops. `result.txt` has the start time (the "Done" line), the sprint's ticks per second and milliseconds per tick, the peak memory and the processor time | |
 
@@ -232,6 +232,12 @@ bytecode the class file already has:
   round: declared `static`. Procyon writes a static interface method as `default` (`unbox` of
   DataFixerUpper's `CartesianLike`), which javac then rejects at every call from a static
   method.
+- **A loop that would spin for ever**, before the first round and in every file, as javac
+  accepts it: a `while (true)` whose body is only `if (c) ; else { .. }`, where `c` reads local
+  variables alone, so that once it holds nothing changes it. Vineflower writes a for-each loop in
+  a `finally` so, without its `break` (`IntervalSelectFunction.Sampler.sampleVolume`, which closes
+  its buffers), where the class file leaves the loop at the end of the array. The empty branch
+  becomes `break`.
 - **A decompiler's cast to exactly the type javac expects** that javac does not allow, as the
   two parameterizations are provably distinct: a cast through its class's wildcard type before
   it (`(PointFree<Function<A, C>>) (PointFree<?>) f`). The original's cast is still made, with its
@@ -583,8 +589,9 @@ These are plans. Work on several of them is under way but not merged yet.
    (it writes `jdk-src/modules.txt`), then the decompile, best-of, library-best-of and repair
    steps, then the census. Then compare its rejections with the last census's and with javac's,
    and list the new kinds.
-2. The census's speed. A failed try with Rust generics starts lowering over (about 50 s an
-   attempt); the walk for the methods that can run (about 10 s) stops at the first rejection
+2. The census's speed. A failed try with Rust generics (a rejection that can run, in code that
+   uses them, and not one that no type changes: a missing class, or asking for the caller with
+   `getCallerClass`) starts lowering over (about 70 s an attempt); the walk for the methods that can run (about 10 s) stops at the first rejection
    that can run, which is all a retry needs to know. A `String[]` written as an `Object[]` that
    can run starts the whole census over (javac, reach and lowering, several minutes before its
    walk); that walk stops at the first such write. Planned: cheaper retries, and knowing which
@@ -601,7 +608,7 @@ These are plans. Work on several of them is under way but not merged yet.
    - JDK APIs: datagram channels, `java.lang.management`, and service providers
      that live in JDK modules the code does not name;
    - small ones, one to four pieces each: `Runtime` held as a value, the whole `System.getenv()`
-     map, `Integer.getInteger` with a key that is not a constant, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some
+     map, `asSubclass` of a class value, `Arrays.copyOf` into another array type, some
      `String` constructors, switches and patterns on some types, a few lambda forms,
      `JavaLangAccess`'s thread and module calls, `isAnnotationPresent(Deprecated.class)`, and
      DataFixerUpper's generic method types as values.

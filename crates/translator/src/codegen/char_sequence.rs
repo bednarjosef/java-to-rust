@@ -47,16 +47,28 @@ impl<'a> Gen<'a> {
         let char_at = self.char_sequence_method(sequence, "charAt", 1);
         let throws = [length, char_at].map(|m| self.facts.throwing.contains(&m));
         let (builder, seq, index) = (self.temp("builder"), self.temp("seq"), self.temp("index"));
-        let length_call = format!("{seq}.{}()", self.dispatch_name(t, length));
-        let char_call = format!("{seq}.{}({index})", self.dispatch_name(t, char_at));
+        // `seq` borrows the value: a value of the enum, which the enum's functions take as it is,
+        // or an object of the one class it can be, whose methods are called on it.
+        let (length_call, char_call) = if self.enum_of(s) == Some(t) {
+            let value = format!("{}({seq}.0)", struct_name(&self.class.types[t].name));
+            let length_call = self.enum_fn_call(t, &self.dispatch_name(t, length), &value, "");
+            (length_call, self.enum_fn_call(t, &self.dispatch_name(t, char_at), &value, &index))
+        } else {
+            let length_call = format!("{seq}.{}()", self.dispatch_name(t, length));
+            (length_call, format!("{seq}.{}({index})", self.dispatch_name(t, char_at)))
+        };
         let length_call = if throws[0] { length_call } else { format!("Ok({length_call})") };
         let char_call = if throws[1] { char_call } else { format!("Ok({char_call})") };
         let error =
             if throws.contains(&true) { self.throwable_type() } else { "java::Exception".to_string() };
         let args = format!("{range}, {length_call}, |{index}| {char_call}");
         let call = if self.facts.raising.contains(&id) || throws.contains(&true) {
-            let call = format!("{builder}.try_append_seq_range::<{error}>({args})");
-            Code::atom(self.passed_on(Code::atom(call)))
+            let call = Code::atom(format!("{builder}.try_append_seq_range::<{error}>({args})"));
+            Code::atom(if throws.contains(&true) {
+                self.passed_on_thrown(call)
+            } else {
+                self.passed_on(call)
+            })
         } else {
             Code::atom(format!("{builder}.append_seq_range::<{error}>({args})"))
         };

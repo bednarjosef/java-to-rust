@@ -256,8 +256,12 @@ pub(crate) fn leaked<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de
     T::deserialize(d).map(|t| &*Box::leak(Box::new(t)))
 }
 
+/// What is interned, hashed as the hierarchy hashes names: the default hash is made to resist
+/// chosen keys, which a translator's own names need not.
+type FastInterned<T> = HashSet<T, std::hash::BuildHasherDefault<hierarchy::IndexHasher>>;
+
 pub(crate) fn interned_name(name: &str) -> &'static str {
-    static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
+    static NAMES: LazyLock<Mutex<FastInterned<&'static str>>> = LazyLock::new(Default::default);
     let mut names = NAMES.lock().unwrap();
     match names.get(name) {
         Some(&n) => n,
@@ -273,7 +277,7 @@ fn intern_types(types: &[Type]) -> &'static [Type] {
     if types.is_empty() {
         return &[];
     }
-    static LISTS: LazyLock<Mutex<HashSet<&'static [Type]>>> = LazyLock::new(Default::default);
+    static LISTS: LazyLock<Mutex<FastInterned<&'static [Type]>>> = LazyLock::new(Default::default);
     let mut lists = LISTS.lock().unwrap();
     match lists.get(types) {
         Some(&l) => l,
@@ -286,7 +290,7 @@ fn intern_types(types: &[Type]) -> &'static [Type] {
 }
 
 fn intern(ty: Type) -> &'static Type {
-    static TYPES: LazyLock<Mutex<HashSet<&'static Type>>> = LazyLock::new(Default::default);
+    static TYPES: LazyLock<Mutex<FastInterned<&'static Type>>> = LazyLock::new(Default::default);
     let mut types = TYPES.lock().unwrap();
     match types.get(&ty) {
         Some(&t) => t,
@@ -799,6 +803,10 @@ pub struct Field {
     /// Declared `volatile`: in an object that threads share, its accesses are sequentially
     /// consistent.
     pub volatile: bool,
+    /// Declared `final` (as every field of an interface is): Java assigns it once, a static one
+    /// in its class's static initializer.
+    #[serde(default)]
+    pub is_final: bool,
     pub pos: Pos,
 }
 
@@ -835,6 +843,11 @@ pub struct Method {
     /// a method that lowering adds (`lower::handles`): its body reads, compares and writes the
     /// field, which the generator writes as one atomic action where the field is shared.
     pub field_update: Option<(crate::program::FieldUpdate, String)>,
+    /// A method that lowering adds for an expression (`lower/added_methods.rs`), such as the one
+    /// `Class.forName` calls: it stands for code at its call sites, whatever class it is put in, so
+    /// calling it does not initialize that class (`analysis::statics::entry_inits`).
+    #[serde(default)]
+    pub added: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

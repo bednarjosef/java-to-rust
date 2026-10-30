@@ -195,6 +195,8 @@ impl<'a> Gen<'a> {
             ExprKind::Field { .. } | ExprKind::Index(..) if !self.formatting || self.lazy_text => {
                 format!("{}.as_deref()", self.object_place(e))
             }
+            // A `java::Final` static never changes once its class is initialized.
+            ExprKind::Static { .. } if let Some(place) = self.final_place(e) => format!("{place}.as_deref()"),
             _ => format!("{}.as_deref()", self.expr(e).at(ATOM)),
         }
     }
@@ -240,6 +242,9 @@ impl<'a> Gen<'a> {
                 // A variable or field is tested where it is, without a copy.
                 ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..) => {
                     format!("{}.{test}()", self.object_place(other))
+                }
+                ExprKind::Static { .. } if let Some(place) = self.final_place(other) => {
+                    format!("{place}.{test}()")
                 }
                 ExprKind::Static { class, name } if self.init_call(*class).is_none() => {
                     let cell = self.cell_name(*class, name);
@@ -334,6 +339,10 @@ impl<'a> Gen<'a> {
                 ExprKind::Var(name) if assigned.contains(name) => format!("{}.clone()", self.local(name)),
                 _ => self.option_ref(e),
             };
+            // A `toString` that throws is called, and its exception goes on from here.
+            if let Some(text) = self.checked_nullable_enum_text(e.ty, &option) {
+                return Some(Part::Text(text));
+            }
             return Some(Part::Text(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
         if matches!(e.ty, Type::Boxed(_)) {
@@ -356,7 +365,8 @@ impl<'a> Gen<'a> {
             let (text, raises) = self.handle_text("o", e);
             if raises {
                 // A `toString` that throws: its exception goes on from here, not from the closure.
-                let texts = self.passed_on(Code::atom(format!("{option}.map(|o| {text}).transpose()")));
+                let texts =
+                    self.passed_on_thrown(Code::atom(format!("{option}.map(|o| {text}).transpose()")));
                 return Some(Part::Text(Code::atom(format!("{}({texts})", self.runtime("or_null")))));
             }
             let option = match text.strip_suffix("(o)") {
@@ -649,8 +659,8 @@ impl<'a> Gen<'a> {
                 let source = self.pattern_source(value, ty);
                 let rest = self.and_chain(&parts[k + 1..], caught);
                 let name = self.local(name);
-                // A failure that goes on from the rest (`?`, `or_break!`) cannot leave a closure.
-                texts.push(if rest.contains('?') || rest.contains("or_break!") {
+                // A failure that goes on from the rest (`passes_on`) cannot leave a closure.
+                texts.push(if super::exceptions::passes_on(&rest) {
                     format!("match {source} {{ Some({name}) => {rest}, None => false }}")
                 } else {
                     format!("{source}.is_some_and(|{name}| {rest})")
@@ -738,7 +748,11 @@ fn let_else_source(source: String) -> String {
 
 /// The operands of the `&&`s of a chain that unbox a box, of those `&&`s in `catching`, each
 /// mapped to its `&&`.
-fn unboxing_ands(e: &Expr, catching: &HashMap<ExprId, Pos>, out: &mut HashMap<ExprId, ExprId>) {
+fn unboxing_ands(
+    e: &Expr,
+    catching: &crate::analysis::FastMap<ExprId, Pos>,
+    out: &mut HashMap<ExprId, ExprId>,
+) {
     let ExprKind::Binary(BinOp::And, l, r) = &e.kind else { return };
     for operand in [l, r] {
         if catching.contains_key(&e.id) && matches!(operand.ty, Type::Boxed(_)) {

@@ -126,9 +126,9 @@ which it is reached. They only change how the work is ordered:
   lowering attempt. The
   implementation that a call runs on a class is kept once found (`Hierarchy::implementation`),
   as the analyses and the generator ask for it once for every concrete class under a type.
-- **The reflection table, made once per lowering attempt.** Each of the 230 or so natives of
-  `java/Reflection.java` (`tablePart`, `invokePart`, `getPart` and the rest, one for each of
-  the 32 parts) asked for the whole table again, reading the types of every member of every
+- **The reflection table, made once per lowering attempt.** Each of the 400 or so natives of
+  `java/Reflection.java` (`tableInts`, `invokePart`, `getPart` and the rest, several for each
+  of the 32 parts) asked for the whole table again, reading the types of every member of every
   class that reflection can reach: on javac, about half of each lowering attempt. Lowering now
   keeps each table it makes (`Lowering::table`), keyed by what the table reads that can change
   during an attempt: whether a census's stub is being lowered, and for fields the type
@@ -257,8 +257,10 @@ the same text.
 In order of payoff for the effort:
 
 1. **Use every core.** Lowering, codegen and the per-method parts of the analyses are independent
-   per method or class, so they can run in parallel. The whole-program fixpoints (points-to,
-   exceptions, reachability) are harder and come later.
+   per method or class, so they can run in parallel. The generator can already write a round's
+   modules on several threads, but does so only when asked, until the allocator lets its threads
+   gain (see "Generator threads" in [performance.md](performance.md)). The whole-program
+   fixpoints (points-to, exceptions, reachability) are harder and come later.
 2. **Lower again only what an attempt changes.** A failed generics attempt should redo the methods
    it affects, not the program. Up to 4x on lowering for StreamPipeline.
 3. **Keep javac running.** `JavaTree --serve` already exists; a server kept between translations

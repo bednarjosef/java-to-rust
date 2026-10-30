@@ -18,7 +18,7 @@ impl<'a> Gen<'a> {
         // The body's read of the field names the object, `this`.
         let read = find(&m.body, &|e| matches!(&e.kind, ExprKind::Field { name, .. } if name == field))?;
         let ExprKind::Field { object, .. } = &read.kind else { unreachable!("found as a field read") };
-        if !self.monitored_object(object) {
+        if !self.shared_object(object) {
             return None;
         }
         let ty = read.ty;

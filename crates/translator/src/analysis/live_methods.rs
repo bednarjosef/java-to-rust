@@ -50,9 +50,8 @@
 //! exceptions among them (`Class::raised`), so a clause whose classes have none yet waits, and the
 //! method is walked again once one of them does.
 
-use super::FastMap as HashMap;
-use super::FastSet as HashSet;
 use super::object_values::{self, ClassSet, Flow, ObjectValues, STATIC};
+use super::{FastMap, FastSet};
 use crate::ast::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -62,25 +61,25 @@ mod known;
 /// What can run.
 pub struct LiveMethods {
     /// The methods that can run, by index into `Class::methods`.
-    pub methods: HashSet<usize>,
+    pub methods: FastSet<usize>,
     /// The types whose static initialization can run.
-    pub initialized: HashSet<usize>,
+    pub initialized: FastSet<usize>,
     /// The concrete classes that can have objects.
-    pub instantiated: HashSet<usize>,
+    pub instantiated: FastSet<usize>,
     /// The types above a class that can have objects, itself included: those whose instance
     /// field initializers can run.
-    pub constructed: HashSet<usize>,
+    pub constructed: FastSet<usize>,
     /// The types any of whose code can run: those initialized, those with a method that can run,
     /// and those above a class that can have objects.
-    pub touched: HashSet<usize>,
+    pub touched: FastSet<usize>,
     /// The calls that lowering left unresolved in code that can run: each rejects the program.
     pub unresolved: Vec<Error>,
     /// The types whose statics code that a started thread runs may touch (`Class::thread_statics`):
     /// `None` when the program starts no thread, or the facts do not tell.
-    pub thread_statics: Option<HashSet<usize>>,
+    pub thread_statics: Option<FastSet<usize>>,
     /// The classes whose objects the receiver of each instance call that can run may be, over
     /// every object of every class that runs the calling method (`Class::receivers`).
-    pub receivers: HashMap<ExprId, ClassSet>,
+    pub receivers: FastMap<ExprId, ClassSet>,
 }
 
 impl LiveMethods {
@@ -107,10 +106,8 @@ pub fn live_methods_unless(
     class: &Class,
     code: &[(usize, Option<usize>)],
 ) -> Result<Option<LiveMethods>, String> {
-    let values = object_values::analyze_for_dispatch(class);
-    if crate::timings::enabled() {
-        eprintln!("timing: points-to for dispatch done{}", crate::timings::memory());
-    }
+    let values =
+        crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
     let found = crate::timings::phase("live walk", || walk(class, code, &values, true));
     if std::env::var_os("JAVA_TO_RUST_LIVE_CHECK").is_some() {
         let slow =
@@ -141,31 +138,31 @@ fn walk(
         stop: Stop::new(class, code),
         state: RefCell::new(State {
             work: Vec::new(),
-            queued: HashSet::default(),
-            seen: HashSet::default(),
+            queued: FastSet::default(),
+            seen: FastSet::default(),
             rescans: [0; 4],
-            waiting: HashMap::default(),
-            waited: HashSet::default(),
-            contexts: HashMap::default(),
-            catching: HashMap::default(),
-            glued: HashSet::default(),
+            waiting: FastMap::default(),
+            waited: FastSet::default(),
+            contexts: FastMap::default(),
+            catching: FastMap::default(),
+            glued: FastSet::default(),
             known: known::Knowledge::default(),
             unknown: None,
             live: LiveMethods {
-                methods: HashSet::default(),
-                initialized: HashSet::default(),
-                instantiated: HashSet::default(),
-                constructed: HashSet::default(),
-                touched: HashSet::default(),
+                methods: FastSet::default(),
+                initialized: FastSet::default(),
+                instantiated: FastSet::default(),
+                constructed: FastSet::default(),
+                touched: FastSet::default(),
                 unresolved: Vec::new(),
                 thread_statics: None,
-                receivers: HashMap::default(),
+                receivers: FastMap::default(),
             },
-            built: HashSet::default(),
-            initialized_above: HashSet::default(),
-            prepared: HashMap::default(),
+            built: FastSet::default(),
+            initialized_above: FastSet::default(),
+            prepared: FastMap::default(),
             glued_classes: ClassSet::default(),
-            glued_any: HashSet::default(),
+            glued_any: FastSet::default(),
             stopped: false,
         }),
         memos: RefCell::default(),
@@ -183,7 +180,11 @@ fn walk(
     walk.run();
     let thread_statics = {
         let state = walk.state.borrow();
-        if state.unknown.is_none() && !state.stopped { walk.thread_statics() } else { None }
+        if state.unknown.is_none() && !state.stopped {
+            crate::timings::phase("live walk of the started threads", || walk.thread_statics())
+        } else {
+            None
+        }
     };
     let Walk { state, .. } = walk;
     let State { unknown, mut live, stopped, .. } = state.into_inner();
@@ -193,7 +194,7 @@ fn walk(
     if stopped {
         return Ok(None);
     }
-    let mut touched: HashSet<usize> = live.initialized.clone();
+    let mut touched: FastSet<usize> = live.initialized.clone();
     touched.extend(live.methods.iter().map(|&m| class.methods[m].class));
     touched.extend(live.constructed.iter().copied());
     live.touched = touched;
@@ -319,7 +320,7 @@ impl Walk<'_> {
     /// returns the expressions of it that cannot run (`dead`, `dead_catches`). A method walked on
     /// more than one object gets the same on each until something that they relied on changes,
     /// which walks it again (`rescan`): so they are remembered until then (`State::prepared`).
-    fn prepare(&self, m: usize) -> Rc<HashSet<ExprId>> {
+    fn prepare(&self, m: usize) -> Rc<FastSet<ExprId>> {
         let prepared = if self.fast { self.state.borrow().prepared.get(&m).cloned() } else { None };
         if let Some((env, dead)) = prepared {
             self.state.borrow_mut().known.env = env;
@@ -353,7 +354,7 @@ impl Walk<'_> {
     /// type that the thread's code reads or writes a static of, calls a static method or
     /// constructor of, or names an enum constant of; and it runs the field initializers of every
     /// class that the thread's code creates an object of (`State::built`).
-    fn thread_statics(&self) -> Option<HashSet<usize>> {
+    fn thread_statics(&self) -> Option<FastSet<usize>> {
         let class = self.class;
         let main = self.state.borrow();
         let mut roots: Vec<(usize, &Expr)> = Vec::new();
@@ -395,31 +396,31 @@ impl Walk<'_> {
             stop: Stop::default(),
             state: RefCell::new(State {
                 work: Vec::new(),
-                queued: HashSet::default(),
-                seen: HashSet::default(),
+                queued: FastSet::default(),
+                seen: FastSet::default(),
                 rescans: [0; 4],
-                waiting: HashMap::default(),
-                waited: HashSet::default(),
-                contexts: HashMap::default(),
-                catching: HashMap::default(),
-                glued: HashSet::default(),
+                waiting: FastMap::default(),
+                waited: FastSet::default(),
+                contexts: FastMap::default(),
+                catching: FastMap::default(),
+                glued: FastSet::default(),
                 known: main.known.clone(),
                 unknown: None,
                 live: LiveMethods {
-                    methods: HashSet::default(),
-                    initialized: HashSet::default(),
+                    methods: FastSet::default(),
+                    initialized: FastSet::default(),
                     instantiated: main.live.instantiated.clone(),
                     constructed: main.live.constructed.clone(),
-                    touched: HashSet::default(),
+                    touched: FastSet::default(),
                     unresolved: Vec::new(),
                     thread_statics: None,
-                    receivers: HashMap::default(),
+                    receivers: FastMap::default(),
                 },
-                built: HashSet::default(),
-                initialized_above: HashSet::default(),
-                prepared: HashMap::default(),
+                built: FastSet::default(),
+                initialized_above: FastSet::default(),
+                prepared: FastMap::default(),
                 glued_classes: ClassSet::default(),
-                glued_any: HashSet::default(),
+                glued_any: FastSet::default(),
                 stopped: false,
             }),
             memos: RefCell::default(),
@@ -527,7 +528,7 @@ fn methods_by_type(class: &Class, keep: impl Fn(usize) -> bool) -> Vec<Vec<usize
 fn supers(class: &Class) -> Vec<Vec<usize>> {
     (0..class.types.len())
         .map(|t| {
-            let mut seen = HashSet::default();
+            let mut seen = FastSet::default();
             let mut work = vec![t];
             while let Some(s) = work.pop() {
                 if seen.insert(s) {
@@ -551,7 +552,7 @@ struct Walk<'a> {
     /// (`Memos::handed`, `State::glued_classes`), initializing a type again
     /// (`State::initialized_above`), finding the values and dead code of a method again while
     /// nothing they relied on changed (`State::prepared`), and asking whether the classes with
-    /// objects return the same literal while no other has objects (`same_literal`).
+    /// objects return the same literal again (`same_literal`).
     /// `JAVA_TO_RUST_LIVE_CHECK` checks that the walk finds the same without.
     fast: bool,
     glue: Vec<usize>,
@@ -562,7 +563,7 @@ struct Walk<'a> {
     initializers: Vec<Vec<usize>>,
     /// The constructors of each type, in index order.
     constructors: Vec<Vec<usize>>,
-    index: HashMap<&'a str, usize>,
+    index: FastMap<&'a str, usize>,
     stop: Stop,
     state: RefCell<State>,
     /// What the points-to facts, which do not change during the walk, answer: the methods that
@@ -576,7 +577,7 @@ struct Walk<'a> {
 #[derive(Default)]
 struct Stop {
     /// The methods of the code, and every method of a type whose any code is.
-    methods: HashSet<usize>,
+    methods: FastSet<usize>,
     /// The types any of whose code is: one of them initialized or constructed stops the walk too.
     types: Vec<usize>,
 }
@@ -593,7 +594,7 @@ impl Stop {
             }
         }
         if !stop.types.is_empty() {
-            let types: HashSet<usize> = stop.types.iter().copied().collect();
+            let types: FastSet<usize> = stop.types.iter().copied().collect();
             stop.methods
                 .extend((0..class.methods.len()).filter(|&m| types.contains(&class.methods[m].class)));
         }
@@ -611,20 +612,18 @@ type Targets = Rc<[(usize, usize)]>;
 
 #[derive(Default)]
 struct Memos {
-    targets: HashMap<(ExprId, usize), Targets>,
+    targets: FastMap<(ExprId, usize), Targets>,
     /// Each list of targets once.
-    lists: HashSet<Targets>,
-    concretes: HashMap<usize, Rc<[usize]>>,
+    lists: FastSet<Targets>,
+    concretes: FastMap<usize, Rc<[usize]>>,
     /// What each call passed when it last ran all its targets, by call and list of targets
     /// (`Walk::call`).
-    passed: HashMap<(ExprId, usize), Passed>,
+    passed: FastMap<(ExprId, usize), Passed>,
     /// The expressions whose objects the runtime has been handed, each with its method and the
     /// object it runs on (`object_values::handed`), and the thrown expressions so (`handed_by`):
     /// handing them again hands the runtime nothing new.
-    handed: HashSet<(usize, ExprId, usize)>,
-    thrown: HashSet<(usize, ExprId, usize)>,
-    /// What `same_literal` found, by method and type, with how many classes had objects then.
-    literals: HashMap<(usize, usize), (usize, Option<i128>)>,
+    handed: FastSet<(usize, ExprId, usize)>,
+    thrown: FastSet<(usize, ExprId, usize)>,
 }
 
 /// What a call passed the methods it runs (`Walk::call`): what was known of the argument at
@@ -650,24 +649,24 @@ struct State {
     work: Vec<(usize, usize)>,
     /// Those on the work list: one already on it is not added again, as its walk reads what the
     /// walk knows by then.
-    queued: HashSet<(usize, usize)>,
-    seen: HashSet<(usize, usize)>,
+    queued: FastSet<(usize, usize)>,
+    seen: FastSet<(usize, usize)>,
     /// How many times a method was put on the work list again, by `Rescan`.
     rescans: [usize; 4],
     /// The instance methods called on objects of a class that no object of is created yet, by
     /// that class: they run once one is. Each once, in the order first called: a call on a
     /// receiver that may be any class calls the method on thousands of them, each time the
     /// calling method is walked.
-    waiting: HashMap<usize, Vec<usize>>,
-    waited: HashSet<(usize, usize)>,
+    waiting: FastMap<usize, Vec<usize>>,
+    waited: FastSet<(usize, usize)>,
     /// The objects that each method has been walked on, by method.
-    contexts: HashMap<usize, Vec<usize>>,
+    contexts: FastMap<usize, Vec<usize>>,
     /// The methods with a `catch` clause that catches no class with objects yet, by each type
     /// that the clause catches: they are walked again once an object of a class below it is
     /// created.
-    catching: HashMap<usize, HashSet<usize>>,
+    catching: FastMap<usize, FastSet<usize>>,
     /// The classes whose objects the runtime has been handed (`glue`).
-    glued: HashSet<usize>,
+    glued: FastSet<usize>,
     /// The values that the walk knows (`known`).
     known: known::Knowledge,
     /// The first thing that the walk met that the facts do not answer.
@@ -678,18 +677,18 @@ struct State {
     /// The classes whose field initializers the walk has run: those of `LiveMethods::instantiated`,
     /// except in the walk of the started threads (`thread_statics`), which starts with the
     /// objects of the first walk and runs the initializers of those that its code creates.
-    built: HashSet<usize>,
+    built: FastSet<usize>,
     /// The types whose static initialization has run with that of every type above them
     /// (`Walk::initialize`).
-    initialized_above: HashSet<usize>,
+    initialized_above: FastSet<usize>,
     /// What `prepare` found for each method walked on more than one object, until a change to
     /// what it relied on walks the method again (`rescan`), or makes a field unknown wherever it
     /// is (`Knowledge::unplaced`).
-    prepared: HashMap<usize, (Rc<known::Env>, Rc<HashSet<ExprId>>)>,
+    prepared: FastMap<usize, (Rc<known::Env>, Rc<FastSet<ExprId>>)>,
     /// `glued`, and the types that the runtime has been handed objects of any class of
     /// (`Walk::glue`).
     glued_classes: ClassSet,
-    glued_any: HashSet<Type>,
+    glued_any: FastSet<Type>,
 }
 
 impl Walk<'_> {
@@ -701,12 +700,11 @@ impl Walk<'_> {
         }
         let targets = self.values.targets(self.class, m, ctx, x);
         let mut memos = self.memos.borrow_mut();
-        let list = match memos.lists.get(targets.as_slice()) {
+        let list = match memos.lists.get(&*targets) {
             Some(list) => list.clone(),
             None => {
-                let list: Targets = targets.into();
-                memos.lists.insert(list.clone());
-                list
+                memos.lists.insert(targets.clone());
+                targets
             }
         };
         memos.targets.insert((x.id, ctx), list.clone());
@@ -844,8 +842,8 @@ impl Walk<'_> {
 
     /// The expressions of the `catch` clauses of method `m` that catch no class with objects yet
     /// (see the module's comment), which cannot run; the method waits for each type they catch.
-    fn dead_catches(&self, m: usize) -> HashSet<ExprId> {
-        let mut dead = HashSet::default();
+    fn dead_catches(&self, m: usize) -> FastSet<ExprId> {
+        let mut dead = FastSet::default();
         let mut waiting = Vec::new();
         {
             let state = self.state.borrow();
@@ -1076,7 +1074,7 @@ impl Walk<'_> {
             // A class implements only the groups that a type above it declares a method of: asking
             // for the others, of thousands of `toString`s and `equals`es, remembered an answer of
             // none for each class, which ran the Minecraft server's census out of memory.
-            let above: HashSet<usize> =
+            let above: FastSet<usize> =
                 self.supers[c].iter().flat_map(|&t| &self.glue_declared[t]).copied().collect();
             for &g in self.glue.iter().filter(|g| above.contains(g)) {
                 if let Some(target) = self.values.implementation(self.class, g, c) {

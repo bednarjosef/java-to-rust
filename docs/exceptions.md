@@ -1,7 +1,7 @@
 # Exceptions: `throw`, `try`/`catch`/`finally`, the standard exception classes
 
 Exceptions are values: a method that can throw something its callers catch returns
-`Result<T, Throwable>`, `?` passes the exception on, and every other method keeps its plain
+`Result<T, Throwable>`, a `match` passes the exception on, and every other method keeps its plain
 signature. This document describes how that works, why, and what is still rejected. It builds on
 the object model (`docs/object-model.md`): exception classes are ordinary class trees there.
 
@@ -19,7 +19,7 @@ the object model (`docs/object-model.md`): exception classes are ordinary class 
 3. **`Throwable` is an enum** with one variant per exception class whose objects exist (created
    by the program, or raised by the runtime where the program can see it). It stays an enum even
    with one variant, so the runtime's failures convert into it (`impl From<java::Exception> for
-   Throwable`, which `?` uses). Standard types between `Throwable` and the concrete classes
+   Throwable`, which the generated code calls as `Throwable::j2r_raised`). Standard types between `Throwable` and the concrete classes
    (`Exception`, `RuntimeException`, ...) declare no members of their own, so they are represented
    by `Throwable` too: no conversions between them are needed, and `catch (RuntimeException e)`
    binds the matched value as it is.
@@ -96,11 +96,25 @@ are immutable unless the program writes their fields after construction.
 ## Methods that throw
 
 In a method that returns `Result`, `return v` is `return Ok(v)`, a body that completes normally
-ends with `Ok(())`, `throw e` is `return Err(..)`, a call of a throwing method is `call?`, and an
-observed runtime failure is a `java::try_` function of the runtime with `?` (`java::try_non_null(..)?`, `java::try_floor_div(..)?`). In a method that does not return `Result`, a
-call of one that does (because other callers observe it) is `call.unwrap_or_else(java::uncaught)`,
-and `throw e` where nothing catches it is `java::throw_uncaught(e)`: nothing here observes the
-exception, so ending the program at once is what propagating it would do.
+ends with `Ok(())`, `throw e` is `return Err(..)`, a call of a throwing method is
+`match call { Ok(v) => v, Err(e) => return Err(e) }`, and an observed runtime failure is a
+`java::try_` function of the runtime whose `java::Exception` the `match` turns into the
+exception object with `Throwable::j2r_raised(e)` (`java::try_floor_div(..)`). A dereference that
+Java's message reaches matches the `Option` itself: `None => return
+Err(Throwable::j2r_null_pointer("Cannot invoke ..."))`. In a method that does not return `Result`,
+a call of one that does (because other callers observe it) is
+`call.unwrap_or_else(java::uncaught)`, and `throw e` where nothing catches it is
+`java::throw_uncaught(e)`: nothing here observes the exception, so ending the program at once is
+what propagating it would do.
+
+The `match` is written out, rather than a `?` or a macro, for the time rustc takes: a `?` leaves
+the `Try` trait and the `From` conversion to be worked out at each one, and a macro is expanded
+and parsed again at each use. On javac's code, written out, one of its crates checks and compiles
+with about a tenth less work (`docs/performance.md`, "Compile time"); the optimized code is the
+same. Inside
+`java::catching`'s closure (below), and where the program's `Throwable` has no `j2r_raised` (no
+failure of the runtime reaches a `catch`), a failure still goes on with `?` or
+`java::or_break!(expr, 'label)`, which convert with `From`.
 
 ```java
 static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty"); return Integer.parseInt(s); }
@@ -111,14 +125,16 @@ fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
     if s.is_empty() {
         return Err(Throwable::Bad(Arc::new(Bad::new(java::wtf8("empty")))));
     }
-    Ok(java::try_parse_radix::<i32>(Some(s), 10)?)   // checked only if a caller observes it
+    // checked only if a caller observes it
+    Ok(match java::try_parse_radix::<i32>(Some(s), 10) { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) })
 }
 ```
 
 - **Override groups agree**: if one member returns `Result`, all do, since a call may run any of
   them; the dispatcher forwards it unchanged.
 - **Constructors** that throw something a caller catches return `Result<C, Throwable>`; `new`,
-  `this(...)` and `super(...)` pass the failure on with `?`. A partly built object is dropped,
+  `this(...)` and `super(...)` pass the failure on (a constructor that only calls `this(...)`
+  returns that one's `Result`). A partly built object is dropped,
   which Java's program could not see either. An exception's own constructor may throw too:
   `throw new Fatal(d)` whose `d.toString()` fails throws that failure in place of the `Fatal`.
   The exception: the `(String)` constructors that the `From` impl builds the runtime's
@@ -141,7 +157,7 @@ A `try` is one of three forms, the plainest that is equivalent:
 
   ```rust
   let attempt: Result<(), Throwable> = 'attempt: {
-      java::or_break!(from.borrow_mut().withdraw(amount), 'attempt);
+      match from.borrow_mut().withdraw(amount) { Ok(v) => v, Err(e) => break 'attempt Err(e) };
       to.borrow_mut().balance += amount;
       Ok(())
   };
@@ -150,11 +166,11 @@ A `try` is one of three forms, the plainest that is equivalent:
       other => other,
   };
   java::println!("done");          // the finally
-  attempt?;                        // or or_break!, or unwrap_or_else(java::uncaught)
+  match attempt { Ok(v) => v, Err(e) => return Err(e) };   // or break, or unwrap_or_else(java::uncaught)
   ```
 
-  `java::or_break!(expr, 'label)` matches `expr` and breaks out of the labeled block with the
-  error converted by `From`. Without a `finally`, the catch bodies are plain arms and the last arm
+  Inside the block a failure breaks out of it with the error, converted as in a method
+  (`Throwable::j2r_raised` for the runtime's). Without a `finally`, the catch bodies are plain arms and the last arm
   passes on what no clause matches. A body that cannot complete normally is a block of
   `Result<Infallible, Throwable>`, its `return` is Rust's own, and the `match` has no `Ok` arm.
 - **The `java::Completion` form** when a `return`, `break` or `continue` leaves the `try` and a
@@ -273,8 +289,9 @@ handler really sees (`Facts::raised_classes`), and only those get a variant and 
 
 Specific cases:
 
-- **Regular expressions**: a constant pattern (and literal replacement) that compiles, or one
-  from `Pattern.quote`, never throws (`java_runtime::regex::never_fails`), so a handler around
+- **Regular expressions**: a constant pattern (and literal replacement) that compiles, a literal
+  or a constant variable (a `final` local initialized with one, which lowering replaces with its
+  value, as javac does), or one from `Pattern.quote`, never throws (`java_runtime::regex::never_fails`), so a handler around
   `split`, `matches`, `replaceAll` or `replaceFirst` does not block the program. A replacement
   that is not such a literal may throw `IllegalArgumentException` or `IndexOutOfBoundsException`,
   which a `catch` sees with Java's message. A non-constant pattern may throw
@@ -293,8 +310,9 @@ Specific cases:
   `try_parse_range` (`codegen/parse_range.rs`); that of another `CharSequence`, which a whole
   program parses with the JDK's sources through `TranslatedNumbers` (`program::REDIRECTED_CALLS`),
   throws it from `Objects.requireNonNull`, as Java's does.
-- **Checked operations inside a closure of the translation** would put a `?` where it cannot
-  leave the method; `codegen::exceptions::check_closures` rejects them on the generated text.
+- **Checked operations inside a closure of the translation** would put a `?`, or a `match` arm
+  that returns or breaks, where it cannot leave the method;
+  `codegen::exceptions::check_closures` rejects them on the generated text.
   An operation run inside `java::catching` whose own code also passes a failure on is rejected
   too.
 
@@ -420,9 +438,13 @@ one), that call is like any other: what the program's `toString` throws goes on.
 `toString` throws, the dispatching enum of its type gets `try_text`, which returns the exception. The `hashCode` that `Object.toString` shows, for a class without a
 `toString` of its own, is treated the same way.
 
+A Java enum translated as a plain Rust enum does the same: where the generator makes the text of
+a constant whose `toString` may throw what a `catch` sees, it calls the enum's `to_string`, which
+returns the exception.
+
 Elsewhere the text goes through the enum's `Display`, which cannot return an exception, so what the
-`toString` throws ends the program: the text of an enum constant, the message of an exception,
-`printf` (which makes all its text before printing), and the objects other library calls show.
+`toString` throws ends the program: the message of an exception, `printf` (which makes all its
+text before printing), and the objects other library calls show (the elements of a collection).
 Where a `toString` the program wrote may throw what a `catch` around such a text, or around a
 call on the way to it, would catch, the program is rejected ("catching an exception that this
 toString may throw not supported yet").
@@ -445,7 +467,8 @@ written in checked form exactly when it is in the analysis's set.
 
 - **Points**: `throw e` raises the concrete classes under `e`'s static type; a call raises what
   escapes any method it may run (every implementation of a virtual call, constructors,
-  `this(...)`, `super(...)`); a runtime operation raises its standard classes, from a table per
+  `this(...)`, `super(...)`; in a whole program, only the implementations of the classes whose
+  objects the points-to facts say its receiver can be, `Class::receivers`); a runtime operation raises its standard classes, from a table per
   builtin and expression kind (`analysis/exceptions/failures.rs`); a for-each loop over an array
   that may be null raises `NullPointerException` as it starts, where it reads the length.
 - **Escapes** of a method: what its points raise, minus what an enclosing `catch` in the same
@@ -467,7 +490,8 @@ written in checked form exactly when it is in the analysis's set.
   `NullPointerException` there. `o instanceof T` proves `o` non-null and a cast of it to `T` or a
   class above safe; `!` is followed; `if (c) return;` (or `throw`, `break`, `continue`) narrows
   the statements after it, in a block or a `switch` case; a local initialized from a value so
-  known is non-null. A cast cannot fail either when every object its value may be is under the
+  known is non-null, and so is an assignment of it, to a variable, a field or an element
+  (`(h[k] = c).next`). A cast cannot fail either when every object its value may be is under the
   target type (`Facts::flows`).
 - **Casts that lowering inserts** (javac's conversion of an erased type variable's value) are not
   counted as `ClassCastException`.
@@ -476,7 +500,9 @@ written in checked form exactly when it is in the analysis's set.
   stored value) are computed. Where one may have an effect, lowering computes it first into a
   local, and the receiver (the array) before it unless it is a local that nothing there assigns
   (`lower/argument_order.rs`); the message names the receiver itself, and an argument that the
-  call unboxes from its local is the value that javac unboxes as it computes it.
+  call unboxes from its local is the value that javac unboxes as it computes it. The locale's
+  language that lowering passes to `toLowerCase(locale)` and `toUpperCase(locale)` is read after
+  the check of the string, as the JDK's code reads it.
 - **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
   `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`, and the
   `NullPointerException` message facts below.
@@ -585,7 +611,8 @@ generator to tell which. The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
 back, an element with its index when that is a constant (an `int` constant field too, which
 javac writes as its value), a local (also one that the index increments, `a[i++]`, as javac loads
-the local) or a call, an enum's `ordinal()` among them (`[...]` otherwise),
+the local), a field, static or element that the index increments after (`a[this.i++]`, whose loaded
+value javac keeps; `[...]` for `++this.i` and a compound assignment) or a call, an enum's `ordinal()` among them (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
 writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
 the update starts, which `BytecodeNames` notes), no message for a pattern switch's
@@ -666,10 +693,11 @@ the field it is, a string `switch`'s temporary and a for-each loop's iterator as
 the slots javac would give (`javac::jdk_temps`), in an argument too, and in a lambda that uses
 nothing of `this` (javac's static method whose parameters are the variables it uses, then its
 own), counting the slots of `instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
-statement are declared just around it, those of an expression just for it). A method with record,
-primitive or `switch` patterns, or a binding that outlives its statement (`if (!(o instanceof
-String s)) return;`), has no known slots for its temporaries, and a null message of one is not
-certain. Also covered: a null locale of
+statement are declared just around it, those of an expression just for it, and a binding that
+outlives its statement, `if (!(o instanceof String s)) return;`, in the enclosing block before the
+statement, where whether the statement's branches complete is certain). A method with record,
+primitive or `switch` patterns, or with a binding that outlives a statement that is not one of a
+block's own, has no known slots for its temporaries, and a null message of one is not certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
 for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)` and
 a null array of a name or an address given to the name service's natives

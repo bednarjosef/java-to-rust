@@ -8,14 +8,20 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::{Arc, Mutex};
 
-/// A hash of type and method indices, which need no protection from chosen keys: the default
-/// hash took a tenth of a translation of javac, in `declared` and `implementations`.
+/// A hash of type and method indices and of the program's names, which need no protection from
+/// chosen keys: the default hash took a tenth of a translation of javac, in `declared` and
+/// `implementations`.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
-struct IndexHasher(u64);
+pub(crate) struct IndexHasher(u64);
 
 impl Hasher for IndexHasher {
+    /// A name, eight bytes at a time.
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for word in words {
+            self.write_usize(u64::from_le_bytes(*word) as usize);
+        }
+        for &b in rest {
             self.write_usize(b as usize);
         }
     }
@@ -29,7 +35,7 @@ impl Hasher for IndexHasher {
     }
 }
 
-type IndexMap<K, V> = HashMap<K, V, BuildHasherDefault<IndexHasher>>;
+pub(crate) type IndexMap<K, V> = HashMap<K, V, BuildHasherDefault<IndexHasher>>;
 
 /// The targets of each override group and type asked for (`Hierarchy::targets`).
 type Targets = IndexMap<(usize, usize), Arc<[usize]>>;
@@ -59,7 +65,7 @@ pub struct Hierarchy {
     /// The override group of each method, as the smallest index in the group.
     group_ids: Vec<usize>,
     /// The methods of each group, in index order, by the group's id.
-    groups: HashMap<usize, Vec<usize>>,
+    groups: IndexMap<usize, Vec<usize>>,
     /// The methods each type declares, in index order.
     by_class: Vec<Vec<usize>>,
     /// The methods of each group that each type declares, in index order, by group id and type.
@@ -79,10 +85,10 @@ pub struct Hierarchy {
     supertype_bits: Vec<u64>,
     words: usize,
     /// The index of each type by its qualified name (the first, as `Class::type_index` finds it).
-    names: HashMap<String, usize>,
+    names: IndexMap<String, usize>,
     /// The index of each runtime class by its name (the first, as `Class::runtime_index` finds
     /// it).
-    runtime_names: HashMap<String, usize>,
+    runtime_names: IndexMap<String, usize>,
 }
 
 impl Hierarchy {
@@ -120,7 +126,7 @@ impl Hierarchy {
             let root = find(&mut group_ids, m);
             group_ids[m] = root;
         }
-        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut groups: IndexMap<usize, Vec<usize>> = IndexMap::default();
         let mut declared: IndexMap<(usize, usize), Vec<usize>> = IndexMap::default();
         let mut by_class = vec![Vec::new(); types.len()];
         for (m, method) in methods.iter().enumerate() {
@@ -143,7 +149,7 @@ impl Hierarchy {
                 }
             }
         }
-        let (mut names, mut runtime_names) = (HashMap::new(), HashMap::new());
+        let (mut names, mut runtime_names) = (IndexMap::default(), IndexMap::default());
         for (t, decl) in types.iter().enumerate() {
             names.entry(decl.name.clone()).or_insert(t);
             if decl.kind == TypeKind::Runtime {
@@ -280,7 +286,11 @@ impl Hierarchy {
 
     /// The root of the class tree of `t`: its topmost superclass in the program.
     pub fn root(&self, t: usize) -> usize {
-        self.ancestors(t).last().copied().unwrap_or(t)
+        let mut at = t;
+        while let Some(s) = self.superclass[at] {
+            at = s;
+        }
+        at
     }
 
     /// The concrete classes of the class tree of `t`, which decide immutability together.

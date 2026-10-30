@@ -22,7 +22,8 @@ pub(super) fn entry_point(class: &Class, facts: &Facts, m: usize) -> Option<Poin
         return None;
     }
     let init = facts.init_class(class, method.class)?;
-    let clinit = class.methods.iter().position(|c| c.class == init && c.name == "<clinit>")?;
+    let clinit =
+        (class.hierarchy.methods_of(init).iter().copied()).find(|&c| class.methods[c].name == "<clinit>")?;
     Some(Point {
         raise: Raise::Call(vec![clinit]),
         pos: method.pos,

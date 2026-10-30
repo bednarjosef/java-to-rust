@@ -56,6 +56,8 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("Executable", "java.lang.reflect"),
     ("Member", "java.lang.reflect"),
     ("RecordComponent", "java.lang.reflect"),
+    ("MemberIndex", "java.lang.reflect"),
+    ("TableData", "java.lang.reflect"),
     ("DataFormatException", "java.util.zip"),
     ("UnsupportedCharsetException", "java.nio.charset"),
     ("IllegalCharsetNameException", "java.nio.charset"),
@@ -154,6 +156,12 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.AbstractStringBuilder#append(java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#append(java.lang.CharSequence,int,int)java.lang.StringBuilder",
             "java.lang.StringBuffer#append(java.lang.CharSequence,int,int)java.lang.StringBuffer",
+            // A `CharSequence` whose length changes between its calls (`lower::sequence_texts`).
+            "java.lang.AbstractStringBuilder#append(java.lang.CharSequence)java.lang.AbstractStringBuilder",
+            "java.lang.StringBuilder#append(java.lang.CharSequence)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(java.lang.CharSequence)java.lang.StringBuffer",
+            "java.lang.StringBuilder#<init>(java.lang.CharSequence)void",
+            "java.lang.StringBuffer#<init>(java.lang.CharSequence)void",
             // A range of the text to insert outside it.
             "java.lang.AbstractStringBuilder#insert(int,java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#insert(int,java.lang.CharSequence,int,int)java.lang.StringBuilder",
@@ -255,6 +263,7 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.String#charAt",
             "java.lang.String#getChars",
             "java.lang.String#substring",
+            "java.lang.String#subSequence",
             "java.lang.String#valueOf",
             "java.lang.String#copyValueOf",
             "java.lang.String#codePointAt",
@@ -293,6 +302,9 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.AbstractStringBuilder#substring",
             "java.lang.StringBuilder#substring",
             "java.lang.StringBuffer#substring",
+            "java.lang.AbstractStringBuilder#subSequence",
+            "java.lang.StringBuilder#subSequence",
+            "java.lang.StringBuffer#subSequence",
             // A string's or a builder's, as a `CharSequence`.
             "java.lang.CharSequence#charAt",
             "java.lang.CharSequence#subSequence",
@@ -882,6 +894,17 @@ impl Uses {
                     // A constructor, by its class, as `owner#<init>`.
                     "NEW_CLASS" => {
                         self.operations.insert(format!("{owner}#<init>"));
+                        self.operations.insert(format!("{owner}#<init>{}", text(symbol, "type")));
+                        // A builder made from a `CharSequence` throws for a negative length
+                        // (`lower::sequence_texts`).
+                        if matches!(owner.as_str(), "java.lang.StringBuilder" | "java.lang.StringBuffer")
+                            && text(symbol, "type") == "(java.lang.CharSequence)void"
+                        {
+                            let negative = "java.lang.NegativeArraySizeException".to_string();
+                            self.classes.insert(negative.clone());
+                            self.instantiated.insert(negative.clone());
+                            self.members.insert((negative, "<init>".into(), "(java.lang.String)void".into()));
+                        }
                         self.operations.insert(kind);
                     }
                     // A local `Field` that only a field's handle uses (`handles.rs`).

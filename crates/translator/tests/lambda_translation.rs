@@ -45,9 +45,9 @@ fn a_lambda_is_a_variant_of_its_interface() {
             "struct OpLambdaInMain {",
             "fn apply(&self, a: i32, b: i32) -> i32 {\n        a + b\n    }",
             "OpLambdaInMain(&'a Arc<OpLambdaInMain>) = 3,",
-            "3 => { let o: &Arc<OpLambdaInMain> = unsafe { self.0.as_pointer() }; o.apply(a, b) }",
+            "3 => { let o: &Arc<OpLambdaInMain> = unsafe { this.0.as_pointer() }; o.apply(a, b) }",
             "AOp::OpLambdaInMain({ thread_local! { static LAMBDA: std::cell::OnceCell<Arc<OpLambdaInMain>> = \
-             const { std::cell::OnceCell::new() }; } LAMBDA.with(|lambda| lambda.get_or_init(|| Arc::new(OpLambdaInMain::new())).clone()) })",
+             const { std::cell::OnceCell::new() }; } LAMBDA.with(|lambda| lambda.get_or_init(|| Arc::new(OpLambdaInMain__new())).clone()) })",
         ],
     );
 }
@@ -73,7 +73,7 @@ fn a_method_reference_is_a_closure_of_the_call_it_makes() {
         &[
             "let length = |a: &java::Wtf8| -> i32 { a.len() as i32 };",
             "let doubled = |a: &java::Wtf8| -> i32 { twice(a) };",
-            "let make = |a: i32| -> Arc<APoint> { Arc::new(APoint::new(a)) };",
+            "let make = |a: i32| -> Arc<APoint> { Arc::new(APoint__new(a)) };",
             "length(java::wtf8(\"abc\"))",
         ],
     );
@@ -246,9 +246,9 @@ fn a_lambda_reaches_the_enclosing_object_through_outer() {
     assert_contains(
         &rust,
         &[
-            "fn adder(this: &Arc<A>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(outer.base.get()) })\n    }",
-            "let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { outer.scaled(a) })\n",
-            "A::adder(&o)(1)",
+            "fn A__adder(this: &Arc<A>) -> AOp {\n    let outer = this.clone();\n    Rc::new(move |a: i32| -> i32 { a.wrapping_add(outer.base.get()) })\n}",
+            "let outer = this.clone();\n    Rc::new(move |a: i32| -> i32 { outer.scaled(a) })\n",
+            "A__adder(&o)(1)",
         ],
     );
 }
@@ -365,7 +365,7 @@ fn a_closure_in_a_field_only_constructors_write_is_called_in_place() {
             }
         }",
     );
-    assert_contains(&rust, &["(a.op.get())(3)"]);
+    assert_contains(&rust, &["((*a.op.fixed()))(3)"]);
 }
 
 #[test]

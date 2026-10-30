@@ -761,8 +761,8 @@ fn a_subclass_constructor_initializes_the_superclass_first() {
     assert_contains(
         &rust,
         &[
-            "fn new(name: &java::Wtf8) -> ShapeFields {",
-            "Circle { base: ShapeFields::new(java::wtf8(\"circle\")), radius: java::Field::new(radius) }",
+            "fn ShapeFields__new(name: &java::Wtf8) -> ShapeFields {",
+            "Circle { base: ShapeFields__new(java::wtf8(\"circle\")), radius: java::Field::new(radius) }",
         ],
     );
 }
@@ -813,7 +813,7 @@ fn a_superclass_constructor_that_calls_an_override_runs_on_the_whole_object() {
     assert_contains(
         &rust,
         &[
-            "let mut this = Impl { base: BaseFields::new() };",
+            "let mut this = Impl { base: BaseFields__new() };",
             "this.construct_base();",
             "fn construct_base(&self) {",
             "self.base.x.set(self.size());",
@@ -877,14 +877,15 @@ fn a_type_with_several_concrete_classes_is_an_enum() {
         &rust,
         &[
             "enum BaseView<'a> {\n    Circle(&'a Arc<Circle>) = 2,\n    Rect(&'a Arc<Rect>) = 3,\n}",
-            "    fn area(&self) -> f64 {\n        match self.0.tag() {\n            2 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.area() }\n            3 => { let o: &Arc<Rect> = unsafe { self.0.as_pointer() }; o.area() }\n            tag => java::bad_tag(tag),\n        }\n    }",
+            // A method of the enum is a function of its module, which takes the value.
+            "fn Base__area(this: Base) -> f64 {\n    match this.0.tag() {\n        2 => { let o: &Arc<Circle> = unsafe { this.0.as_pointer() }; o.area() }\n        3 => { let o: &Arc<Rect> = unsafe { this.0.as_pointer() }; o.area() }\n        tag => java::bad_tag(tag),\n    }\n}",
             // Every class keeps the fields struct at the start of its object, where `base()`
             // reads it whatever the class.
             "#[repr(C)]\nstruct Circle {\n    base: BaseFields,",
             "#[repr(C)]\nstruct Rect {\n    base: BaseFields,",
-            "    fn base(&self) -> &BaseFields {\n        const {\n            assert!(std::mem::offset_of!(Circle, base) == 0);\n            assert!(std::mem::offset_of!(Rect, base) == 0);\n        }\n        // Every variant is an object that starts with the fields struct (above).\n        unsafe { self.0.as_prefix() }\n    }",
+            "    const BASE_AT_START: () = {\n        assert!(std::mem::offset_of!(Circle, base) == 0);\n        assert!(std::mem::offset_of!(Rect, base) == 0);\n    };\n\n    fn base(&self) -> &BaseFields {\n        let () = Self::BASE_AT_START;\n        // Every variant is an object that starts with the fields struct (above).\n        unsafe { self.0.as_prefix() }\n    }",
             // A method that only touches the fields runs on the fields struct that `base()` lends.
-            "    fn get_name(&self) -> java::JString {\n        self.base().get_name()\n    }",
+            "fn Base__get_name(this: Base) -> java::JString {\n    this.base().get_name()\n}",
             "b.base().name",
         ],
     );
@@ -898,12 +899,12 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
         &rust,
         &[
             "impl Base {",
-            "fn to_string_in_base(&self) -> java::JString {",
-            "java::concat!(self.base().name.get(), format_args!(\":{}\", java::Double(self.area())))",
+            "fn Base__to_string_in_base(this: Base) -> java::JString {",
+            "java::concat!((*this.base().name.fixed()).clone(), format_args!(\":{}\", java::Double(Base__area(this))))",
             // `super.toString()` wraps the subclass's object in the enum to call the body there.
-            "Base::Circle(this.clone()).to_string_in_base()",
+            "Base__to_string_in_base(Base::Circle(this.clone()))",
             "impl fmt::Display for Base {",
-            "3 => fmt::Display::fmt(&self.to_string_in_base(), f),",
+            "3 => fmt::Display::fmt(&Base__to_string_in_base(*self), f),",
         ],
     );
 }
@@ -913,7 +914,7 @@ fn upcasts_wrap_the_handle() {
     let rust = translate(TREE);
     assert_contains(
         &rust,
-        &["let b = Base::Circle(c.clone());", "let r = Base::Rect(Arc::new(Rect::new(2.0, 3.0)));"],
+        &["let b = Base::Circle(c.clone());", "let r = Base::Rect(Arc::new(Rect__new(2.0, 3.0)));"],
     );
     // The last use of `c` moves it into the enum.
     assert_contains(&rust, &["let last = Base::Circle(c);"]);
@@ -950,7 +951,7 @@ fn an_immutable_family_has_no_refcell() {
         &[
             "enum NView<'a> {\n    Leaf(&'a Arc<Leaf>) = 2,\n    Twice(&'a Arc<Twice>) = 3,\n}",
             "fn base(&self) -> &NFields {",
-            "2 => { let o: &Arc<Leaf> = unsafe { self.0.as_pointer() }; o.eval() }",
+            "2 => { let o: &Arc<Leaf> = unsafe { this.0.as_pointer() }; o.eval() }",
             "self.inner.base().v",
         ],
     );
@@ -971,9 +972,9 @@ fn a_class_that_is_never_upcast_stays_a_plain_value_beside_its_siblings() {
         } }",
     );
     // `Tri` is only ever a `Tri`, so it is an owned value; only `Square` is a `Shape`.
-    assert_contains(&rust, &["let mut t = Tri::new();", "t.base.move_();", "t.base.moves"]);
+    assert_contains(&rust, &["let mut t = Tri__new();", "t.base.move_();", "t.base.moves"]);
     // With one class left, the type is that class: no enum.
-    assert_contains(&rust, &["let s = slot_1.put(RefCell::new(Square::new()));"]);
+    assert_contains(&rust, &["let s = slot_1.put(RefCell::new(Square__new()));"]);
     assert_lacks(&rust, &["enum Shape"]);
 }
 
@@ -996,7 +997,7 @@ fn a_class_that_is_upcast_is_shared() {
         &rust,
         &[
             "enum ShapeView<'a> {\n    Square(&'a Arc<Square>) = 2,\n    Tri(&'a Arc<Tri>) = 3,\n}",
-            "let s = slot_1.put(Square::new());",
+            "let s = slot_1.put(Square__new());",
             "total(&Shape::Square(s.clone()), &Shape::Tri(t))",
         ],
     );
@@ -1014,12 +1015,12 @@ fn immutable_objects_are_shared_without_a_refcell() {
             "struct P {",
             "fn field_inits(&mut self) {",
             "self.y = self.x.wrapping_add(1);",
-            "fn new(x: i32) -> P {",
+            "fn P__new(x: i32) -> P {",
             "let mut this = P { x: 0, y: 0 };",
             "this.field_inits();",
             "this.x = x;",
             "fn sum(&self) -> i32 {",
-            "let p = slot_1.put(P::new(3));",
+            "let p = slot_1.put(P__new(3));",
             "p.sum().wrapping_add(p.x)",
         ],
     );
@@ -1038,10 +1039,10 @@ fn methods_borrow_their_shared_object() {
     assert_contains(
         &rust,
         &[
-            "fn new(x: i32) -> P {\n        P { x: java::Field::new(x) }\n    }",
+            "fn P__new(x: i32) -> P {\n    P { x: java::Field::new(x) }\n}",
             "fn set(&self, v: i32) {\n        self.x.set(v);\n    }",
             "fn get(&self) -> i32 {",
-            "let p = slot_1.put(P::new(1));",
+            "let p = slot_1.put(P__new(1));",
             "p.set(2);",
             "java::println!(\"{}\", p.get());",
         ],
@@ -1064,11 +1065,11 @@ fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
     assert_contains(
         &rust,
         &[
-            "fn register(this: &Arc<P>) {\n        share(this);",
+            "fn P__register(this: &Arc<P>) {\n    share(this);",
             // `o` may be `this`, which the method then must not hold borrowed.
-            "fn copy(this: &Arc<P>, o: &Arc<P>) {\n        this.x.set(o.x.get());",
-            "P::register(&p);",
-            "P::copy(&q, &p);",
+            "fn P__copy(this: &Arc<P>, o: &Arc<P>) {\n    this.x.set(o.x.get());",
+            "P__register(&p);",
+            "P__copy(&q, &p);",
         ],
     );
 }
@@ -1086,10 +1087,10 @@ fn an_object_that_is_never_shared_is_a_plain_value() {
     assert_contains(
         &rust,
         &[
-            "fn new(x: i32) -> P {\n        P { x }\n    }",
+            "fn P__new(x: i32) -> P {\n    P { x }\n}",
             "fn set(&mut self, v: i32) {",
             "fn get(&self) -> i32 {",
-            "let mut p = P::new(1);",
+            "let mut p = P__new(1);",
             "p.set(p.x.wrapping_add(1));",
             "java::println!(\"{}\", p.get());",
         ],
@@ -1114,7 +1115,7 @@ fn constructors_keep_java_order_in_their_struct_literal() {
     // `a` is assigned by a call after `c`'s, and the calls run first, in Java's order.
     assert_contains(
         &rust,
-        &["let c = next();\n        let a = next();\n        let this = P { b: x, c, a };", "        this\n"],
+        &["let c = next();\n    let a = next();\n    let this = P { b: x, c, a };", "    this\n"],
     );
 }
 
@@ -1132,7 +1133,7 @@ fn printing_an_object_does_not_share_it() {
     assert_contains(
         &rust,
         &[
-            "let mut p = P::new();",
+            "let mut p = P__new();",
             "java::println!(\"{}\", p.to_string());",
             "java::println!(\"p={}\", p.to_string());",
         ],
@@ -1149,7 +1150,7 @@ fn a_local_that_no_later_statement_changes_is_not_mut() {
             System.out.println(p.get());
         } }",
     );
-    assert_contains(&rust, &["let p = P::new(1);"]);
+    assert_contains(&rust, &["let p = P__new(1);"]);
     assert_lacks(&rust, &["let mut p"]);
 }
 
@@ -1545,7 +1546,7 @@ fn packages_become_nested_modules() {
             // Imported, statically imported and fully qualified names are paths through the `use`
             // line of their module.
             "            use crate::com::example::util;\n",
-            "util::Counter::new(java::wtf8(\"clicks\"))",
+            "util::Counter__new(java::wtf8(\"clicks\"))",
             "util::square(7)",
             "util::NUMBERS_LIMIT - util::square(3)",
             "util::cube(3)",
@@ -1569,7 +1570,7 @@ fn unreachable_code_is_not_translated() {
 #[test]
 fn anonymous_classes_are_reached_through_their_creation_and_calls() {
     let rust = translate_project("anonymous", "app.Main");
-    assert_contains(&rust, &["fn run(", "fn area(", "java::concat!(\"task \", self.name.get())"]);
+    assert_contains(&rust, &["fn run(", "fn area(", "java::concat!(\"task \", (*self.name.fixed()))"]);
     // `audit` and `describe` are never called, nor is `never`, whose anonymous class uses `extra`.
     assert_lacks(&rust, &["extra", "Audit", "audit", "describe", "fn never", "\"never\""]);
 }
@@ -1581,9 +1582,9 @@ fn classes_with_one_name_in_two_packages() {
         &rust,
         &[
             // The packages inside `com.shop` are in scope in its module without a `use` line.
-            "model::Item::new_string_i32(java::wtf8(\"apple\"), 3)",
-            "legacy::Item::new(7)",
-            "model::RegistryEntry::new(4)",
+            "model::Item__new_string_i32(java::wtf8(\"apple\"), 3)",
+            "legacy::Item__new(7)",
+            "model::RegistryEntry__new(4)",
             "model::REGISTRY_CREATED.get()",
             "pub(crate) static COUNTER_HITS: java::Global<Cell<i32>>",
         ],
@@ -1612,7 +1613,7 @@ fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
         &rust,
         &[
             "\"app.Circle\" => {",
-            "Arc::new(Circle::new());",
+            "Arc::new(Circle__new());",
             "java::throw(\"java.lang.ClassNotFoundException\", &format!(\"{}, which is not in the translation\"",
         ],
     );
@@ -2158,7 +2159,7 @@ fn an_enum_field_set_first_by_every_constructor_needs_no_initializer() {
             public static void main(String[] args) { System.out.println(new Paint(Color.BLUE).color()); }
         }",
     );
-    assert_contains(&rust, &["fn new(color: AColor) -> APaint {\n        APaint { color }\n    }"]);
+    assert_contains(&rust, &["fn APaint__new(color: AColor) -> APaint {\n    APaint { color }\n}"]);
 }
 
 #[test]
@@ -2237,32 +2238,43 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_catches_it(
         &rust,
         &[
             "fn to_string(&self) -> Result<java::JString, Throwable> {",
-            "java::println!(\"item {}\", java::or_break!(Arc::new(AItem::new()).to_string(), 'attempt));",
+            "java::println!(\"item {}\", match Arc::new(AItem__new()).to_string() { Ok(v) => v, Err(e) => break 'attempt Err(e) });",
         ],
     );
 }
 
 #[test]
-fn a_catch_around_the_text_of_an_enum_constant_whose_to_string_throws_is_rejected() {
-    // An enum's text is its `Display`, which cannot pass the exception on to the `catch`.
-    let error = java_to_rust::translate(
-        "public class A {
-            enum Color {
-                RED;
-                public String toString() { throw new IllegalStateException(\"no text\"); }
-            }
-            public static void main(String[] args) {
-                try {
-                    System.out.println(\"color \" + Color.RED);
-                } catch (IllegalStateException e) {
-                    System.out.println(\"caught\");
-                }
-            }
-        }",
-    )
-    .expect_err("an enum's toString whose exception a catch around the text sees");
+fn a_catch_around_the_text_of_an_enum_constant_whose_to_string_throws_sees_it() {
+    // Where the generator makes the text, it calls the enum's `toString`, whose exception goes on
+    // to the `catch`; `printf` makes its text through the enum's `Display`, which cannot.
+    let program = |print: &str| {
+        format!(
+            "public class A {{
+                enum Color {{
+                    RED;
+                    public String toString() {{ throw new IllegalStateException(\"no text\"); }}
+                }}
+                public static void main(String[] args) {{
+                    try {{
+                        {print}
+                    }} catch (IllegalStateException e) {{
+                        System.out.println(\"caught\");
+                    }}
+                }}
+            }}"
+        )
+    };
+    let rust = java_to_rust::translate(&program("System.out.println(\"color \" + Color.RED);")).unwrap();
+    assert_contains(
+        &rust,
+        &[
+            "java::println!(\"color {}\", match AColor::to_string(AColor::Red) { Ok(v) => v, Err(e) => break 'attempt Err(e) });",
+        ],
+    );
+    let error = java_to_rust::translate(&program("System.out.printf(\"color %s%n\", Color.RED);"))
+        .expect_err("an enum's toString whose exception a catch around a printf sees");
     assert!(
-        error.to_string().ends_with("a toString that throws an exception that is caught not supported yet"),
+        error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
         "{error}"
     );
 }
@@ -2311,7 +2323,9 @@ fn a_hash_code_that_the_default_text_of_an_object_shows_passes_its_exception_on(
     );
     assert_contains(
         &rust,
-        &["java::default_text(\"A$Item\", java::or_break!(Arc::new(AItem::new()).hash_code(), 'attempt))"],
+        &[
+            "java::default_text(\"A$Item\", match Arc::new(AItem__new()).hash_code() { Ok(v) => v, Err(e) => break 'attempt Err(e) })",
+        ],
     );
 }
 
@@ -2362,8 +2376,8 @@ fn a_catch_on_the_way_to_the_text_of_an_object_whose_to_string_throws_catches_it
         &rust,
         &[
             "fn show(item: &Arc<AItem>) -> Result<(), Throwable> {",
-            "java::println!(\"item {}\", item.to_string()?);",
-            "java::or_break!(show(&Arc::new(AItem::new())), 'attempt);",
+            "java::println!(\"item {}\", match item.to_string() { Ok(v) => v, Err(e) => return Err(e) });",
+            "match show(&Arc::new(AItem__new())) { Ok(v) => v, Err(e) => break 'attempt Err(e) };",
         ],
     );
 }
@@ -2420,6 +2434,34 @@ fn switch_without_fall_through_is_a_match_on_int_char_and_string() {
         ],
     );
     assert_lacks(&rust, &["'sw", "let mut case"]);
+}
+
+#[test]
+fn a_string_switch_with_many_labels_matches_the_number_of_its_case() {
+    // A match on bytes with thousands of string labels makes LLVM's register coalescing run for
+    // most of an hour, so above a few dozen labels the label is looked up in a sorted table.
+    let cases: String = (0..70).map(|i| format!("case \"k{i}\" -> {i};\n")).collect();
+    let rust = translate(&format!(
+        "class A {{
+            static int code(String s) {{
+                return switch (s) {{
+                    {cases}
+                    default -> -1;
+                }};
+            }}
+            public static void main(String[] a) {{
+                System.out.println(code(a.length == 0 ? \"k7\" : a[0]));
+            }}
+        }}"
+    ));
+    assert_contains(
+        &rust,
+        &[
+            "java::string_case(",
+            "const CASES: &[(&[u8], usize)] = &[(b\"k0\", 0), (b\"k1\", 1), (b\"k10\", 10),",
+        ],
+    );
+    assert_lacks(&rust, &["b\"k7\" =>"]);
 }
 
 #[test]
@@ -2689,7 +2731,7 @@ fn object_fields_that_may_be_null_are_options() {
             "n = java::non_null(n.as_ref()).next.clone();",
             "fn sum(head: &Arc<Node>) -> i32 {",
             "let mut n: Option<Arc<Node>> = Some(head.clone());",
-            "sum(&slot_1.put(Node::new(1, Some(Arc::new(Node::new(2, None))))))",
+            "sum(&slot_1.put(Node__new(1, Some(Arc::new(Node__new(2, None))))))",
         ],
     );
 }
@@ -3543,7 +3585,7 @@ fn code_that_names_a_missing_class_throws_no_class_def_found_error_and_the_censu
     std::fs::write(&codec, java).unwrap();
     let rust =
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
-    assert_contains(&rust, &["NoClassDefFoundError::new(java::wtf8(\"fast/Native\"))", "\"plain\""]);
+    assert_contains(&rust, &["NoClassDefFoundError__new(java::wtf8(\"fast/Native\"))", "\"plain\""]);
 }
 
 #[test]
@@ -3568,7 +3610,7 @@ fn a_super_call_that_names_a_missing_class_throws_before_the_superclass_part_is_
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     assert_contains(
         &rust,
-        &["NoClassDefFoundError::new(java::wtf8(\"missing/Native\"))", "base: unreachable!()"],
+        &["NoClassDefFoundError__new(java::wtf8(\"missing/Native\"))", "base: unreachable!()"],
     );
 }
 
@@ -3729,7 +3771,7 @@ fn a_census_approximates_the_null_pointer_message_that_is_not_certain() {
     assert_contains(
         &rust,
         &[
-            "try_non_null_message(s.as_deref(), \"Cannot invoke \\\"String.length()\\\"\")",
+            "match s.as_deref() { Some(v) => v, None => return Err(Throwable::j2r_null_pointer(\"Cannot invoke \\\"String.length()\\\"\")) }",
             "Cannot invoke \\\"String.length()\\\" because \\\"<local1>\\\" is null",
         ],
     );
@@ -3906,7 +3948,7 @@ fn a_census_calls_a_native_that_the_runtime_lacks_through_the_interface_it_imple
     let census = census(&program);
     assert_contains(&census.report, &["p.Main.Impl.total"]);
     let rust = census.modules.expect("a translation").one_file();
-    assert_contains(&rust, &["fn total(this: &"]);
+    assert_contains(&rust, &["__total(this: &"]);
 }
 
 /// A program whose census takes a round of the analyses for each kind of check that rejects code
@@ -3938,6 +3980,14 @@ const ROUNDS: &str = r#"public class Main {
         System.out.println(c.compareTo("x"));
     }
 
+    static void level() {
+        try {
+            System.out.printf("level %s%n", Level.LOW);
+        } catch (IllegalStateException e) {
+            System.out.println("no level");
+        }
+    }
+
     public static void main(String[] args) throws InterruptedException {
         System.out.println(blank(args.length > 2 ? (Object) 1 : " "));
         Thread t = new Thread(Main::count);
@@ -3945,11 +3995,7 @@ const ROUNDS: &str = r#"public class Main {
         t.join();
         System.out.println(n);
         compare(new Name());
-        try {
-            System.out.println("level " + Level.LOW);
-        } catch (IllegalStateException e) {
-            System.out.println("no level");
-        }
+        level();
         String u = args.length > 3 ? "a" : null;
         try {
             System.out.println(u.length() + len(u, false));
@@ -3996,8 +4042,8 @@ class Drain {
 #[test]
 fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
     // The checks of the analyses reject a pattern variable and `synchronized` on a string (the
-    // checks that come before the range analysis and nullness), a `toString` whose exception is
-    // caught (exceptions) and the message of a `NullPointerException` (after the analyses); the
+    // checks that come before the range analysis and nullness), a `toString` whose exception a
+    // `catch` around a `printf` sees (exceptions) and the message of a `NullPointerException` (after the analyses); the
     // census stubs the code of each.
     let dir = write_sources("census_rounds", &[("Main.java", ROUNDS)]);
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
@@ -4005,14 +4051,290 @@ fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
     assert_contains(
         &census.report,
         &[
-            "  Program: 11 pieces; 6 (54.5%) translate, 5 rejected.",
-            "a parameter of a method that the runtime calls\n          at Main.java:51:16\n",
+            "  Program: 12 pieces; 7 (58.3%) translate, 5 rejected.",
+            "a parameter of a method that the runtime calls\n          at Main.java:55:16\n",
             "`synchronized` on a string not supported yet\n          at Main.java:10:9\n",
             "a pattern variable used here not supported yet\n          at Main.java:6:18\n",
-            "a toString that throws an exception that is caught not supported yet\n          at Main.java:58:5\n",
+            "catching an exception that this toString may throw not supported yet\n          at Main.java:30:45\n",
             "the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:19:30\n",
         ],
     );
+}
+
+#[test]
+fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
+    // A pattern variable read after the loop that tests it and `synchronized` on a string, in a
+    // program that starts a thread, are rejected by checks that read the code alone: the census
+    // stubs them before the analyses first run, which then run once.
+    let main = r#"public class Main {
+    static final String LOCK = "lock";
+    static int n;
+
+    static String first(Object[] items) {
+        int i = 0;
+        while (!(items[i] instanceof String s)) {
+            i++;
+        }
+        return s;
+    }
+
+    static void count() {
+        synchronized (LOCK) {
+            n++;
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        System.out.println(first(new Object[] {1, "two"}));
+        Thread t = new Thread(Main::count);
+        t.start();
+        t.join();
+        System.out.println(n);
+    }
+}
+"#;
+    let dir = write_sources("census_code_checks", &[("Main.java", main)]);
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    assert_contains(
+        &census.report,
+        &[
+            "`synchronized` on a string not supported yet\n          at Main.java:14:9\n",
+            "a pattern variable used here not supported yet\n          at Main.java:7:18\n",
+        ],
+    );
+    assert_eq!(rounds, 1, "{}", census.report);
+}
+
+#[test]
+fn a_census_stubs_a_class_converted_to_an_interface_the_runtime_lacks_before_the_analyses_run() {
+    // A class as an `AnnotatedElement` or a `TypeDescriptor.OfField`, which `java.lang.Class`
+    // implements but the runtime's classes do not, is rejected by the generator; the census finds
+    // it in the code before the analyses first run, which then run once.
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(std::path::PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this test");
+        return;
+    };
+    let main = r#"import java.lang.invoke.TypeDescriptor;
+import java.lang.reflect.AnnotatedElement;
+
+public class Main {
+    static String shown(AnnotatedElement e) {
+        return String.valueOf(e);
+    }
+
+    static String descriptor(TypeDescriptor.OfField<?> d) {
+        return d.descriptorString();
+    }
+
+    static void annotated() {
+        System.out.println(shown(Main.class));
+    }
+
+    static void primitive() {
+        System.out.println(descriptor(int.class));
+    }
+
+    public static void main(String[] args) {
+        if (args.length > 0) {
+            annotated();
+            primitive();
+        }
+        System.out.println("done");
+    }
+}
+"#;
+    let dir = write_sources("census_class_interfaces", &[("app/Main.java", main)]);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![java_base],
+        ..Default::default()
+    };
+    let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 5 pieces; 3 (60.0%) translate, 2 rejected.",
+            "1  a `java.lang.Class` as a `java.lang.invoke.TypeDescriptor.OfField` not supported yet\n",
+            "1  a `java.lang.Class` as a `java.lang.reflect.AnnotatedElement` not supported yet\n",
+            "          at Main.java:14:34, Main.java:18:39\n",
+        ],
+    );
+    assert_eq!(rounds, 1, "{}", census.report);
+}
+
+#[test]
+fn the_generator_writes_the_same_on_several_threads() {
+    // The generator can write the modules of a round on several threads, each with a generator
+    // of its own (`codegen::on_threads`). Programs of several packages translate the same on one
+    // thread and on three, and so does a census whose generator rejects code, with the JDK's
+    // packages as modules.
+    for (project, main) in
+        [("zoo", "zoo.app.Main"), ("library", "library.app.Main"), ("statics", "com.shop.Main")]
+    {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/projects").join(project);
+        let program = java_to_rust::Program {
+            main: main.into(),
+            sources: vec![root.join("src")],
+            ..Default::default()
+        };
+        let translate = |threads| {
+            java_to_rust::codegen::on_threads(threads, || java_to_rust::translate_program_modules(&program))
+                .unwrap_or_else(|e| panic!("translation failed: {e}"))
+        };
+        let (one, three) = (translate(1), translate(3));
+        assert!(one.modules.len() > 2, "{project} has modules");
+        assert_eq!(one.one_file(), three.one_file(), "{project}");
+        assert_eq!(one.dependencies(), three.dependencies(), "{project}");
+    }
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(std::path::PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run the census");
+        return;
+    };
+    let main = r#"import java.lang.reflect.AnnotatedElement;
+import java.util.*;
+
+public class Main {
+    static String shown(AnnotatedElement e) {
+        return String.valueOf(e);
+    }
+
+    public static void main(String[] args) {
+        if (args.length > 0) {
+            System.out.println(shown(Main.class));
+        }
+        List<String> names = new ArrayList<>(List.of("b", "a", "c"));
+        Collections.sort(names);
+        Map<String, Integer> lengths = new TreeMap<>();
+        for (String name : names) {
+            lengths.merge(name, name.length(), Integer::sum);
+        }
+        System.out.println(names + " " + lengths);
+    }
+}
+"#;
+    let dir = write_sources("generator_threads", &[("app/Main.java", main)]);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![java_base],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let one = java_to_rust::codegen::on_threads(1, || census(&program));
+    let three = java_to_rust::codegen::on_threads(3, || census(&program));
+    // The generator's rejection of the class as an `AnnotatedElement`.
+    assert_contains(&one.report, &["not supported yet\n          at Main.java:11:38\n"]);
+    assert_eq!(one.report, three.report);
+    assert_eq!(one.json, three.json);
+    let (one, three) = (one.modules.expect("a translation"), three.modules.expect("a translation"));
+    assert_eq!(one.one_file(), three.one_file());
+    assert_eq!(one.dependencies(), three.dependencies());
+}
+
+#[test]
+fn a_census_stubs_every_cast_the_generator_misses_in_one_round() {
+    // A cast whose `ClassCastException` a `catch` sees, in the argument of a native that the
+    // runtime lacks, is not written (the call is code that never runs), so the generator rejects
+    // it (`Gen::check_casts`). Each such cast is rejected, not only the first, so that one round
+    // stubs the three methods, and the generator goes on with the stubs in the same run, on the
+    // facts of the analyses, which run once. Those facts no longer hold the dereference of the
+    // code a stub replaced (`name.length()`), which the generator would find not written.
+    let peers = r#"package jdk.peers;
+
+public class Peers {
+    public interface Peer {
+        int f();
+    }
+
+    public static class XPeer implements Peer {
+        public int f() { return 1; }
+        long window() { return 2; }
+    }
+
+    public static class YPeer implements Peer {
+        public int f() { return 9; }
+    }
+
+    static native void focusNative(long window);
+
+    static native boolean gray(XPeer peer);
+
+    public static void setFocus(Peer peer) {
+        focusNative(((XPeer) peer).window());
+    }
+
+    public static int create(Peer peer) {
+        if (gray((XPeer) peer)) {
+            return 1;
+        }
+        return 2;
+    }
+
+    public static int named(Peer peer, String name) {
+        focusNative(((XPeer) peer).window());
+        return name.length();
+    }
+}
+"#;
+    let main = r#"import jdk.peers.Peers;
+
+public class Main {
+    public static void main(String[] args) {
+        Peers.Peer p = args.length > 7 ? null : new Peers.YPeer();
+        try {
+            Peers.setFocus(p);
+        } catch (ClassCastException e) {
+            System.out.println("cce 1");
+        }
+        try {
+            System.out.println(Peers.create(p));
+        } catch (ClassCastException e) {
+            System.out.println("cce 2");
+        }
+        try {
+            System.out.println(Peers.named(p, null));
+        } catch (ClassCastException | NullPointerException e) {
+            System.out.println("cce 3");
+        }
+    }
+}
+"#;
+    let dir = write_sources(
+        "census_missed_casts",
+        &[
+            ("src/Main.java", main),
+            // A module of the JDK's, whose natives the runtime may lack (`Native::Missing`).
+            ("lib/module-info.java", "module jdk.peers {\n    exports jdk.peers;\n}\n"),
+            ("lib/jdk/peers/Peers.java", peers),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("src")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let ((taken, rounds), runs) = java_to_rust::program::runs_of_generator(|| {
+        java_to_rust::program::rounds_of_analyses(|| census(&program))
+    });
+    assert_contains(
+        &taken.report,
+        &[
+            "       3  catching the `ClassCastException` of this cast not supported yet\n          at jdk/peers/Peers.java:22:22, jdk/peers/Peers.java:26:18, jdk/peers/Peers.java:33:22\n",
+        ],
+    );
+    assert_eq!(rounds, 1, "{}", taken.report);
+    assert_eq!(runs, 1, "{}", taken.report);
+    // The same as with a run of the generator for the stubs, the translation too.
+    let program = java_to_rust::Program { ends_rejected: true, ..program };
+    let (once, again) = (census(&program), java_to_rust::program::generator_again(|| census(&program)));
+    assert_eq!(once.report, again.report);
+    assert_eq!(once.json, again.json);
+    let rust = once.modules.expect("a translation").one_file();
+    assert_eq!(rust, again.modules.expect("a translation").one_file());
 }
 
 #[test]
@@ -4075,7 +4397,7 @@ fn a_census_finds_the_same_with_the_messages_of_unchanged_code_kept_from_round_t
 fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
     // The analyses run the steps that read none of each other's facts alongside each other
     // (`analysis::analyze_from`). Over a census whose analyses reject a pattern variable,
-    // `synchronized` on a string, a `toString` whose exception is caught and the message of a
+    // `synchronized` on a string, a `toString` whose exception a `catch` around a `printf` sees and the message of a
     // `NullPointerException`, and then whose generator rejects a local, the census is the same as
     // with the steps run one after another, its translation too.
     let dir = write_sources(
@@ -4108,7 +4430,7 @@ fn a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another() {
         &[
             "`synchronized` on a string not supported yet",
             "a pattern variable used here not supported yet",
-            "a toString that throws an exception that is caught not supported yet",
+            "catching an exception that this toString may throw not supported yet",
             "the message of the `NullPointerException` of this dereference not supported yet",
             "a local of type `Object` declared without a value",
         ],
@@ -4429,7 +4751,7 @@ fn initializer_blocks_run_in_constructors() {
         class A { public static void main(String[] a) { System.out.println(new C(2).n); } }",
     );
     // The block becomes part of the struct literal of `C()`; `C(int)` runs it through `C()`.
-    assert_contains(&rust, &["C { n: 3 }", "let mut this = C::new();"]);
+    assert_contains(&rust, &["C { n: 3 }", "let mut this = C__new();"]);
     // A field initializer written after a block runs after it, as an assignment.
     let rust = translate(
         "class C { int k = 1; { System.out.println(k); } int n = k + 2; }
@@ -4742,7 +5064,7 @@ fn a_native_that_the_runtime_implements_runs_through_the_interface_it_implements
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
     let rust =
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
-    assert_contains(&rust, &["fn init_i_ds("]);
+    assert_contains(&rust, &["__init_i_ds("]);
     assert!(!rust.contains("no object runs") && !rust.contains("never runs"), "{rust}");
 }
 
@@ -5065,8 +5387,8 @@ fn an_interface_is_an_enum_over_its_implementors() {
         &rust,
         &[
             "enum ShapeView<'a> {\n    Circle(&'a Arc<Circle>) = 1,\n    Rect(&'a Arc<RectFields>) = 2,\n    Square(&'a Arc<Square>) = 3,\n    Color(&'a Color) = 4,\n}",
-            "            3 => { let o: &Arc<Square> = unsafe { self.0.as_pointer() }; o.base.area() }\n            4 => { let o: &Color = unsafe { self.0.as_value() }; (*o).area() }",
-            "Shape::Circle(slot_2.put(Circle::new(1.0))), Shape::Rect(r.clone())",
+            "        3 => { let o: &Arc<Square> = unsafe { this.0.as_pointer() }; o.base.area() }\n        4 => { let o: &Color = unsafe { this.0.as_value() }; (*o).area() }",
+            "Shape::Circle(slot_2.put(Circle__new(1.0))), Shape::Rect(r.clone())",
             "&s == &Shape::Rect(r.clone())",
         ],
     );
@@ -5080,9 +5402,9 @@ fn default_methods_live_on_the_interface_enum() {
     assert_contains(
         &rust,
         &[
-            "            1 => { let o: &Arc<Circle> = unsafe { self.0.as_pointer() }; o.kind() }\n            2..=4 => self.kind_in_shape(),",
-            "    fn kind_in_shape(&self) -> java::JString {\n        java::JString::from(\"shape\")\n    }",
-            "    fn describe(&self) -> java::JString {\n        java::concat!(self.kind(), format_args!(\" {}\", java::Double(self.area())))\n    }",
+            "        1 => { let o: &Arc<Circle> = unsafe { this.0.as_pointer() }; o.kind() }\n        2..=4 => Shape__kind_in_shape(this),",
+            "fn Shape__kind_in_shape(this: Shape) -> java::JString {\n    java::JString::from(\"shape\")\n}",
+            "fn Shape__describe(this: Shape) -> java::JString {\n    java::concat!(Shape__kind(this), format_args!(\" {}\", java::Double(Shape__area(this))))\n}",
         ],
     );
 }
@@ -5118,7 +5440,7 @@ fn an_interface_with_one_implementor_is_that_class() {
     // body ignores.
     assert_contains(
         &rust,
-        &["let n = slot_4.put(Person::new());", "    fn hello(&self, _times: i32) -> java::JString {"],
+        &["let n = slot_4.put(Person__new());", "    fn hello(&self, _times: i32) -> java::JString {"],
     );
     assert_lacks(&rust, &["enum Named"]);
 }
@@ -5127,7 +5449,7 @@ fn an_interface_with_one_implementor_is_that_class() {
 fn a_class_whose_subclasses_never_become_its_values_is_not_an_enum() {
     let rust = translate(INTERFACES);
     // A `Square` is a `Shape` but never a `Rect`, so a `Rect` is always a `Rect` object.
-    assert_contains(&rust, &["let r = slot_1.put(RectFields::new(2.0, 3.0));", "java::Double(r.area())"]);
+    assert_contains(&rust, &["let r = slot_1.put(RectFields__new(2.0, 3.0));", "java::Double(r.area())"]);
     assert_lacks(&rust, &["enum Rect"]);
 }
 
@@ -5177,11 +5499,11 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
             "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "Err(Throwable::Missing(Arc::new(",
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
-            "find(xs, x)?",
+            "match find(xs, x) { Ok(v) => v, Err(e) => return Err(e) }",
             "Err(caught) => {",
             "let e = match caught.view() { ThrowableView::Missing(o) => o.clone(), _ => unreachable!(\"the arm matches its class\") };",
             "let attempt: Result<(), Throwable> = 'attempt: {",
-            "java::or_break!(twice(&xs, 5), 'attempt)",
+            "match twice(&xs, 5) { Ok(v) => v, Err(e) => break 'attempt Err(e) }",
         ],
     );
 }
@@ -5287,7 +5609,7 @@ fn a_finally_runs_after_the_block_and_then_the_exception_goes_on() {
             "fn withdraw(amount: i32) -> Result<(), Throwable> {",
             "let attempt: Result<(), Throwable> = 'attempt: {",
             "break 'attempt Err(Throwable::IllegalStateException(",
-            "attempt?;",
+            "match attempt { Ok(v) => v, Err(e) => return Err(e) };",
         ],
     );
     // A `try` that nothing leaves early is its block, then the `finally`.
@@ -5357,8 +5679,8 @@ fn a_runtime_failure_that_a_catch_sees_is_a_checked_call_that_throws() {
         &rust,
         &[
             "fn ratio(a: i32, b: i32) -> Result<i32, Throwable> {",
-            "java::try_div(a, b)?",
-            "java::or_break!(java::try_put(&mut v, ",
+            "match java::try_div(a, b) { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) }",
+            "match java::try_put(&mut v, argument_0, argument_1) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }",
             "impl From<java::Exception> for Throwable {",
             "\"java.lang.ArithmeticException\" => ",
             "_ => java::uncaught(e),",
@@ -5390,7 +5712,7 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
     assert_contains(
         &rust,
         &[
-            "java::or_break!(java::try_non_null(a.next.as_ref()), 'attempt).get()",
+            "(match java::try_non_null(a.next.as_ref()) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }).get()",
             "\"java.lang.NullPointerException\" => ",
         ],
     );
@@ -5462,7 +5784,7 @@ fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
         &rust,
         &[
             "static A_EMPTY_INSTANCE: java::Global<RefCell<Option<Arc<AEmpty>>>> = java::Global::new(RefCell::new(None));",
-            "A_EMPTY_INSTANCE.set(Some(Arc::new(AEmpty::new())));",
+            "A_EMPTY_INSTANCE.set(Some(Arc::new(AEmpty__new())));",
             "java::non_null(A_EMPTY_INSTANCE.with_borrow(|v| v.clone()))",
         ],
     );
@@ -5479,7 +5801,12 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
             catch (NegativeArraySizeException e) { System.out.println(\"negative\"); }
         } }",
     );
-    assert_contains(&rust, &["java::or_break!(java::catching(|| "]);
+    assert_contains(
+        &rust,
+        &[
+            "match java::catching(|| java::new_vec(a.len() as i32 - 1, 0)) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }",
+        ],
+    );
     // So does a replacement's, of the classes the runtime raises for it.
     let rust = translate(
         "class A { public static void main(String[] a) {
@@ -5534,7 +5861,9 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     );
     assert_contains(
         &rust,
-        &["java::or_break!(java::try_non_null(s(a.len() as i32).as_deref()), 'attempt).len()"],
+        &[
+            "(match java::try_non_null(s(a.len() as i32).as_deref()) { Ok(v) => v, Err(e) => break 'attempt Err(Throwable::j2r_raised(e)) }).len()",
+        ],
     );
     // A program's own exception constructor that throws passes its failure on from the `new`
     // (only the JDK's are taken to throw for bugs alone, `URISyntaxException`'s tests of its
@@ -5629,11 +5958,11 @@ fn a_constructor_that_throws_returns_a_result_that_new_passes_on() {
     assert_contains(
         &rust,
         &[
-            "fn new_i32_i32(low: i32, high: i32) -> Result<ARange, Throwable> {",
+            "fn ARange__new_i32_i32(low: i32, high: i32) -> Result<ARange, Throwable> {",
             "return Err(Throwable::IllegalArgumentException(",
             // A constructor that only delegates returns the other's `Result`.
-            "fn new_i32(high: i32) -> Result<ARange, Throwable> {\n        ARange::new_i32_i32(0, high)\n    }",
-            "java::or_break!(ARange::new_i32(",
+            "fn ARange__new_i32(high: i32) -> Result<ARange, Throwable> {\n    ARange__new_i32_i32(0, high)\n}",
+            "match ARange__new_i32(args.len() as i32 - 1) { Ok(v) => v, Err(e) => break 'attempt Err(e) }",
         ],
     );
 }
@@ -5708,7 +6037,7 @@ fn a_pattern_binds_the_object_with_if_let() {
     assert_contains(
         &rust,
         &[
-            "    fn as_rect(&self) -> Option<Arc<Rect>> {\n        match self.view() {\n            ShapeView::Rect(o) => Some(o.clone()),\n            _ => None,\n        }\n    }",
+            "    fn as_rect(&self) -> Option<Arc<Rect>> {\n        match self.0.tag() {\n            2 => { let o: &Arc<Rect> = unsafe { self.0.as_pointer() }; Some(o.clone()) }\n            _ => None,\n        }\n    }",
             "    if let Some(c) = s.as_circle() {\n",
             "    } else if let Some(r) = s.as_rect() && r.w == r.h {\n",
             "    s.as_rect().is_some_and(|r| r.w > r.h)",
@@ -5736,7 +6065,7 @@ fn downcasts_are_checked() {
         &[
             "let r = java::cast(&all[1], |o| o.as_rect(), (\"Rect\", java::APP));",
             "java::cast(&s, |o| o.as_unit(), (\"Unit\", java::APP)) as i32",
-            "    fn as_unit(&self) -> Option<Unit> {\n        match self.view() {\n            ShapeView::Unit(o) => Some(*o),",
+            "    fn as_unit(&self) -> Option<Unit> {\n        match self.0.tag() {\n            3 => { let o: &Unit = unsafe { self.0.as_value() }; Some(*o) }",
         ],
     );
 }
@@ -5826,9 +6155,9 @@ fn equals_takes_the_object_enum() {
         &rust,
         &[
             "fn equals(&self, o: &Object) -> bool {",
-            "fn equals(&self, other: &Object) -> bool {\n        match self.0.tag() {\n            1 => { let o: &Arc<Key> = unsafe { self.0.as_pointer() }; o.equals(other) }\n            2 => other.0 == self.0,\n            4 => { let o: &java::JString = unsafe { self.0.as_value() }; matches!(other.view(), ObjectView::String(b) if o == b) }",
-            "2 => java::address_hash(self.0.address()),",
-            "4 => { let o: &java::JString = unsafe { self.0.as_value() }; java::string_hash(o) }",
+            "fn Object__equals(this: Object, other: &Object) -> bool {\n    match this.0.tag() {\n        1 => { let o: &Arc<Key> = unsafe { this.0.as_pointer() }; o.equals(other) }\n        2 => other.0 == this.0,\n        4 => { let o: &java::JString = unsafe { this.0.as_value() }; matches!(other.view(), ObjectView::String(b) if o == b) }",
+            "2 => java::address_hash(this.0.address()),",
+            "4 => { let o: &java::JString = unsafe { this.0.as_value() }; java::string_hash(o) }",
             "2 => { let o: &Arc<Plain> = unsafe { self.0.as_pointer() }; fmt::Display::fmt(&java::default_text(\"Plain\", java::address_hash(Arc::as_ptr(o))), f) }",
         ],
     );
@@ -5940,7 +6269,7 @@ fn type_variables_erase_to_object() {
             "struct Box_ {\n    value: java::Field<Object>,\n}",
             "fn get(&self) -> Object {",
             "fn set(&self, v: Object) {",
-            "Box_::new(Object::Integer(3))",
+            "Box___new(Object::Integer(3))",
             "b.set(Object::Integer(x));",
         ],
     );
@@ -5969,8 +6298,8 @@ fn bounded_type_variables_erase_to_the_bound() {
         &[
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
             "enum ComparableView<'a> {\n    Point(&'a Arc<Point>) = 5,\n    String(&'a java::JString) = 7,\n}",
-            "5 => { let o: &Arc<Point> = unsafe { self.0.as_pointer() }; o.compare_to(other) }",
-            "7 => { let o: &java::JString = unsafe { self.0.as_value() }; match (&other).view() { ComparableView::String(b) => java::compare_to(o, b), _ => { let b = &other; java::cast_failed(java::CastSource::cast_class(&b), (\"java.lang.String\", java::BASE)) } } }",
+            "5 => { let o: &Arc<Point> = unsafe { this.0.as_pointer() }; o.compare_to(other) }",
+            "7 => { let o: &java::JString = unsafe { this.0.as_value() }; match (&other).view() { ComparableView::String(b) => java::compare_to(o, b), _ => { let b = &other; java::cast_failed(java::CastSource::cast_class(&b), (\"java.lang.String\", java::BASE)) } } }",
         ],
     );
 }
@@ -6001,7 +6330,7 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
             "fn max(a: Object, b: Object) -> Object {",
             // The argument, a cast that may fail, is computed before the receiver's check.
             "let receiver_0 = java::cast(&a, |o| o.as_comparable(), (\"java.lang.Comparable\", java::BASE));",
-            "receiver_0.compare_to(",
+            "Comparable__compare_to(receiver_0, ",
             "t.name()",
         ],
     );
@@ -6030,7 +6359,7 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
             "java::cast(&held, |o| o.as_int_array(), (\"[I\", java::BASE))",
             "fn eq(&self, other: &Object) -> bool {",
             "self.0 == other.0",
-            "11 => { let o: &java::Array<i32> = unsafe { self.0.as_pointer() }; java::identity_hash(o) }",
+            "11 => { let o: &java::Array<i32> = unsafe { this.0.as_pointer() }; java::identity_hash(o) }",
         ],
     );
 }
@@ -6168,7 +6497,7 @@ fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
         &[
             "StringBuilder(&'a java::StringBuilder) = 11,",
             "let held = Object::StringBuilder(sb.clone());",
-            "11 => { let o: &java::StringBuilder = unsafe { self.0.as_pointer() }; matches!(other.view(), ObjectView::StringBuilder(b) if o.same(b)) }",
+            "11 => { let o: &java::StringBuilder = unsafe { this.0.as_pointer() }; matches!(other.view(), ObjectView::StringBuilder(b) if o.same(b)) }",
             "11 => { let o: &java::StringBuilder = unsafe { self.0.as_pointer() }; fmt::Display::fmt(o, f) }",
         ],
     );
@@ -6264,7 +6593,7 @@ fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
         &rust,
         &[
             "fn count(xs: &[Object]) -> i32 {",
-            "let vs: Vec<Object> = vec![Object::V(Arc::new(V::new(1)))];",
+            "let vs: Vec<Object> = vec![Object::V(Arc::new(V__new(1)))];",
             "count(&vs)",
             "java::cast(&vs[0], |o| o.as_v(), (\"V\", java::APP)).n",
         ],
@@ -6322,7 +6651,7 @@ fn a_type_variable_hides_a_class_of_its_name() {
         class Holder<T> { T held; Holder(T held) { this.held = held; } T get() { return held; } }",
     );
     // The type variable is the Rust type parameter, and `T` the class only outside `Holder`.
-    assert_contains(&rust, &["struct Holder<T> {\n    held: T,\n}", "Holder::new(Arc::new(T::new()))"]);
+    assert_contains(&rust, &["struct Holder<T> {\n    held: T,\n}", "Holder::new(Arc::new(T__new()))"]);
 }
 
 const REAL_GENERICS: &str = "
@@ -6441,7 +6770,7 @@ fn new_object_creates_a_plain_object_with_its_identity() {
     );
     assert_contains(
         &rust,
-        &["struct PlainObject {", "let o = Arc::new(PlainObject::new());", "java.lang.Object"],
+        &["struct PlainObject {", "let o = Arc::new(PlainObject__new());", "java.lang.Object"],
     );
 }
 
@@ -6459,7 +6788,7 @@ fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
             }
         }",
     );
-    assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
+    assert_contains(&rust, &["PBox__start(java::non_null(boxes[i as usize].as_ref()));"]);
 }
 
 #[test]
@@ -6492,7 +6821,7 @@ fn clone_in_a_class_tree_copies_each_runtime_class() {
     assert_contains(
         &rust,
         &[
-            "AShapeView::Shape(_) => java::try_clone_refused(\"A$Shape\")?",
+            "AShapeView::Shape(_) => match java::try_clone_refused(\"A$Shape\") { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) },",
             "AShapeView::Circle(o) => { AShape::Circle(Arc::new(ACircle { base: AShapeFields { x: java::Field::new(o.base.x.get()) }, r: java::Field::new(o.r.get()) })) }",
         ],
     );
@@ -6518,7 +6847,7 @@ fn uncaught_exceptions_with_causes_are_printed_with_their_stack_trace() {
             throw new IllegalStateException(\"outer\", new RuntimeException(\"inner\"));
         } }",
     );
-    assert_contains(&with_cause, &["java::set_trace_hook(", "fn stack_trace_text("]);
+    assert_contains(&with_cause, &["java::set_trace_hook(", "fn Throwable__stack_trace_text("]);
     // An exception that has nothing more than its `toString()` is printed by it.
     let plain = translate(
         "class A { public static void main(String[] a) {
@@ -6605,7 +6934,7 @@ fn seeds_come_from_the_operating_system() {
 }
 
 #[test]
-fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_classes() {
+fn a_builder_made_from_a_char_sequence_copies_its_text_or_reads_a_program_class_unit_by_unit() {
     let rust = translate(
         "public class Main {
             public static void main(String[] a) {
@@ -6625,12 +6954,9 @@ fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_class
     let program = "package app;\npublic class Main implements CharSequence {\n    public int length() { return 0; }\n    public char charAt(int i) { return 'x'; }\n    public CharSequence subSequence(int s, int e) { return this; }\n    public String toString() { return \"\"; }\n    public static void main(String[] a) {\n        CharSequence s = new Main();\n        System.out.println(new StringBuilder(s));\n    }\n}\n";
     let dir = write_sources("builder-from-program-class", &[("app/Main.java", program)]);
     let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
-    let error =
-        java_to_rust::translate_program(&program).expect_err("a program class as a CharSequence").to_string();
-    assert!(
-        error.contains("creating a builder from a `CharSequence` that a program class implements"),
-        "{error}"
-    );
+    let rust = java_to_rust::translate_program(&program).expect("a program class as a CharSequence");
+    // Its `length()` sizes the builder, which appends it with its `length()` and `charAt`.
+    assert_contains(&rust, &["java::StringBuilder::with_capacity(", "append_seq_range::<"]);
 }
 
 #[test]

@@ -16,6 +16,7 @@
 //! the program is not translated where a `catch` may read it.
 
 use super::Facts;
+use super::{FastMap, FastSet};
 use crate::ast::*;
 use crate::javac::{BytecodeNames, CHECKED_JAVA, NameKind};
 use std::cell::RefCell;
@@ -40,7 +41,6 @@ pub(crate) fn compare_null_message(kind: Type) -> String {
     };
     format!("Cannot read field \"value\" because \"{param}\" is null")
 }
-use std::collections::{HashMap, HashSet};
 
 /// How many steps back the JVM follows where a null came from: `a.b.c.d.e` is shown from `b`.
 const MAX_DETAIL: usize = 5;
@@ -87,15 +87,15 @@ pub fn npe_messages_kept(
         return Err(vec![Error { pos, message }]);
     }
     // The first constructor of each class, which has the code of its fields' initializers.
-    let mut first_ctors = HashSet::new();
-    let mut classes = HashSet::new();
+    let mut first_ctors = FastSet::default();
+    let mut classes = FastSet::default();
     for (index, method) in class.methods.iter().enumerate() {
         if method.name == "<init>" && classes.insert(method.class) {
             first_ctors.insert(index);
         }
     }
-    let mut messages = HashMap::new();
-    let mut approximated = HashSet::new();
+    let mut messages = FastMap::default();
+    let mut approximated = FastSet::default();
     let mut anew = 0;
     for (index, method) in class.methods.iter().enumerate() {
         let first = first_ctors.contains(&index);
@@ -114,7 +114,7 @@ pub fn npe_messages_kept(
     }
     // To check that the kept messages are those found anew (`docs/performance.md`).
     if cache.keep && std::env::var_os("JAVA_TO_RUST_CHECK_KEPT_MESSAGES").is_some() {
-        let (mut again, mut again_approximated) = (HashMap::new(), HashSet::new());
+        let (mut again, mut again_approximated) = (FastMap::default(), FastSet::default());
         for (index, method) in class.methods.iter().enumerate() {
             let found = method_messages(class, names, approximate, method, first_ctors.contains(&index));
             again.extend(found.messages);
@@ -153,8 +153,8 @@ pub fn npe_messages_kept(
     }
     missing.sort_by_key(|(p, id)| (p.line, p.column, *id));
     // A position in the JDK's code may be in any of its many files: the message names the method.
-    let ids: HashSet<ExprId> = missing.iter().map(|(_, id)| *id).collect();
-    let mut in_jdk: HashMap<ExprId, &Method> = HashMap::new();
+    let ids: FastSet<ExprId> = missing.iter().map(|(_, id)| *id).collect();
+    let mut in_jdk: FastMap<ExprId, &Method> = FastMap::default();
     for m in class.methods.iter().filter(|m| super::exceptions::from_jdk(class, &class.types[m.class])) {
         for s in &m.body {
             let mut see = |x: &Expr| {
@@ -191,8 +191,8 @@ fn method_messages(
     first: bool,
 ) -> MethodMessages {
     let found = MethodMessages::default();
-    let messages = RefCell::new(HashMap::new());
-    let approximated = RefCell::new(HashSet::new());
+    let messages = RefCell::new(FastMap::default());
+    let approximated = RefCell::new(FastSet::default());
     let Some(outermost) = outermost(class, method.class) else { return found };
     // The JDK's classes are compiled with the names of their locals (`-g`), so the JVM shows
     // those. The standard classes of `java.lang` are the translator's own
@@ -207,8 +207,8 @@ fn method_messages(
     }
     // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
     let jdk = jdk || method.jdk_code;
-    let (mut receivers, mut arguments) = (HashMap::new(), HashMap::new());
-    let mut uninitialized = HashMap::new();
+    let (mut receivers, mut arguments) = (FastMap::default(), FastMap::default());
+    let mut uninitialized = FastMap::default();
     for s in &method.body {
         visit_stmt(s, &mut |_| {}, &mut |s| match s {
             Stmt::Local { name, init: Some(init), .. } if name.starts_with(crate::lower::RECEIVER) => {
@@ -226,7 +226,7 @@ fn method_messages(
     // The locals that hold an element that a run of statements reads more than once
     // (`lower/element_reads.rs`): declared where the first read is, which becomes
     // `(name = element)` there.
-    let mut elements = HashMap::new();
+    let mut elements = FastMap::default();
     for s in &method.body {
         visit_stmt(
             s,
@@ -272,8 +272,8 @@ fn method_messages(
 /// What `method_messages` finds for one method.
 #[derive(Default)]
 struct MethodMessages {
-    messages: HashMap<ExprId, Option<String>>,
-    approximated: HashSet<ExprId>,
+    messages: FastMap<ExprId, Option<String>>,
+    approximated: FastSet<ExprId>,
 }
 
 /// The messages of each method, kept from one run of `npe_messages_kept` to the next where its
@@ -281,7 +281,7 @@ struct MethodMessages {
 /// (`program/census.rs`), and finding the messages of every method takes minutes in a large one.
 #[derive(Default)]
 pub struct KeptMessages {
-    methods: HashMap<usize, MethodMessages>,
+    methods: FastMap<usize, MethodMessages>,
     /// Whether to keep them: not for a single run.
     keep: bool,
 }
@@ -289,7 +289,7 @@ pub struct KeptMessages {
 impl KeptMessages {
     /// Messages kept from run to run.
     pub fn new() -> KeptMessages {
-        KeptMessages { methods: HashMap::new(), keep: true }
+        KeptMessages { methods: FastMap::default(), keep: true }
     }
 
     /// Forgets the messages of the method of index `method`, whose code changed.
@@ -300,7 +300,7 @@ impl KeptMessages {
 
 /// The position of each dereference of `ids` (`Facts::null_checked`), with that of the method it
 /// is in (`None` for a field's initializer), in order.
-fn approximated_places(class: &Class, facts: &Facts, ids: &HashSet<ExprId>) -> Vec<(Pos, Option<Pos>)> {
+fn approximated_places(class: &Class, facts: &Facts, ids: &FastSet<ExprId>) -> Vec<(Pos, Option<Pos>)> {
     let mut found = Vec::new();
     let mut see = |x: &Expr, anchor: Option<Pos>| {
         if ids.contains(&x.id)
@@ -366,8 +366,8 @@ fn outermost(class: &Class, t: usize) -> Option<String> {
 /// those of its `catch` clauses.
 #[derive(Default)]
 struct Declared {
-    locals: HashSet<String>,
-    caught: HashSet<String>,
+    locals: FastSet<String>,
+    caught: FastSet<String>,
 }
 
 /// The messages of the code of one method.
@@ -384,19 +384,19 @@ struct Messages<'a> {
     jdk: bool,
     /// The locals that hold the receiver of a call until its arguments are computed
     /// (`lower/argument_order.rs`), with the receiver: the JVM names the receiver itself.
-    receivers: HashMap<&'a str, &'a Expr>,
+    receivers: FastMap<&'a str, &'a Expr>,
     /// The locals that hold an argument of a call that a receiver is computed before
     /// (`lower/argument_order.rs`), with the argument.
-    arguments: HashMap<&'a str, &'a Expr>,
+    arguments: FastMap<&'a str, &'a Expr>,
     /// The locals that hold an array element that lowering reads once for several reads
     /// (`lower/element_reads.rs`), with the element: the JVM loads the element at each.
-    elements: HashMap<&'a str, &'a Expr>,
+    elements: FastMap<&'a str, &'a Expr>,
     /// What the method's body declares (`declared`).
     declared: std::cell::OnceCell<Declared>,
     /// Whether the method is that of a method reference's class that the JVM makes (`proxied`).
     proxied: std::cell::OnceCell<bool>,
     /// With `Program::approximate_messages`: the objects whose message is approximated.
-    approximated: Option<&'a RefCell<HashSet<ExprId>>>,
+    approximated: Option<&'a RefCell<FastSet<ExprId>>>,
 }
 
 /// A field as the class file has it.
@@ -421,7 +421,7 @@ enum Source {
 
 impl Messages<'_> {
     /// The messages of the dereferences that expression `x` makes itself, by object.
-    fn expr(&self, x: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+    fn expr(&self, x: &Expr, out: &mut FastMap<ExprId, Option<String>>) {
         if let ExprKind::Conditional(cond, ..) = &x.kind {
             self.unboxing(cond, out);
         }
@@ -530,6 +530,15 @@ impl Messages<'_> {
                     false => self.call(x.pos, method),
                 };
                 add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
+            }
+            // The length of the `CharSequence` of `new StringBuilder(seq)`, which the JDK's
+            // constructor asks for (`lower::sequence_texts`; `-g`, so the parameter has its name).
+            ExprKind::MethodCall { receiver, name, .. }
+                if name == "length"
+                    && matches!(&receiver.kind, ExprKind::Var(v) if v.starts_with(crate::lower::SEQUENCE)) =>
+            {
+                let message = "Cannot invoke \"java.lang.CharSequence.length()\" because \"seq\" is null";
+                out.insert(receiver.id, Some(message.to_string()));
             }
             ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. }
                 if !self.class.methods[*r].is_static =>
@@ -997,7 +1006,7 @@ impl Messages<'_> {
     }
 
     /// The message of a `switch` on a string or an enum that is null.
-    fn switch(&self, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+    fn switch(&self, selector: &Expr, out: &mut FastMap<ExprId, Option<String>>) {
         match selector.ty {
             Type::Enum(name) => self.enum_switch(name, selector, out),
             _ => self.string_switch(selector, out),
@@ -1006,7 +1015,7 @@ impl Messages<'_> {
 
     /// The message of a `switch` on an enum that is null, of enum `name`: javac's switch asks for
     /// its `ordinal()`, named by the enum's binary name.
-    fn enum_switch(&self, name: &str, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+    fn enum_switch(&self, name: &str, selector: &Expr, out: &mut FastMap<ExprId, Option<String>>) {
         let Some(binary) = self.class.type_index(name).and_then(|t| self.binary_name(t)) else { return };
         if let Some(message) = self.message(&format!("Cannot invoke \"{binary}.ordinal()\""), selector) {
             out.insert(selector.id, Some(message));
@@ -1015,7 +1024,7 @@ impl Messages<'_> {
 
     /// The message of a `switch` on a string that is null. javac keeps the string in a local of
     /// its own (`s$`), and calls its `hashCode()` first.
-    fn string_switch(&self, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+    fn string_switch(&self, selector: &Expr, out: &mut FastMap<ExprId, Option<String>>) {
         if selector.ty != Type::String {
             return;
         }
@@ -1081,7 +1090,7 @@ impl Messages<'_> {
     }
 
     /// The messages of the dereferences that statement `s` makes itself, by object.
-    fn stmt(&self, s: &Stmt, out: &mut HashMap<ExprId, Option<String>>) {
+    fn stmt(&self, s: &Stmt, out: &mut FastMap<ExprId, Option<String>>) {
         if let Stmt::Switch { selector, .. } = s {
             self.switch(selector, out);
         }
@@ -1118,7 +1127,7 @@ impl Messages<'_> {
     /// see: a `Boolean` condition of `if`, `while` and the like, and of `?:` (`Gen::condition`),
     /// and any other box where a primitive is wanted (`Gen::boxing_value`). javac writes it as a
     /// call of the box's method (`Integer.intValue()`, also for a wider primitive).
-    fn unboxing(&self, value: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+    fn unboxing(&self, value: &Expr, out: &mut FastMap<ExprId, Option<String>>) {
         // An argument that the class the JVM makes for a method reference unboxes
         // (`Brightness::new` as a `BiFunction<Integer, Integer, Brightness>`): no message.
         if matches!(value.ty, Type::Boxed(_)) && self.reference_param(value) {
@@ -1207,63 +1216,32 @@ impl Messages<'_> {
                 self.jdk_local(name)?
             }
             ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
-            // A static field of the JDK's, by the class that javac names it by where lowering noted
-            // it (`Class::class_file`), else by its class's binary name: `java.util.Locale.ROOT`.
-            ExprKind::Static { class, name } if self.jdk => match self.jdk_static(e.pos, name) {
-                Some(named) => named?,
-                None => {
-                    let declared = self.class.types[*class].statics.iter().any(|f| &f.name == name);
-                    format!("{}.{name}", self.java_class_at(*class).filter(|_| declared)?)
-                }
-            },
-            ExprKind::Static { name, .. } => {
-                self.names.get(self.outermost, e.pos, NameKind::Static, name)?.to_string()
-            }
-            ExprKind::Field { object, name } => {
-                let name = match self.java_field(object, name)? {
-                    JavaField::Named(name) => name,
-                    JavaField::This => return self.source(object, detail),
-                    JavaField::Captured(local) => return Some(Source::Shown(local?)),
-                };
-                match self.source(object, detail - 1)? {
-                    Source::Shown(object) => format!("{object}.{name}"),
-                    Source::Hidden => name,
-                }
-            }
-            // A field of an enum in the table form (`lower/enum_tables.rs`): `e.f` is
-            // `fOfConstants[e.ordinal()]`, and `this.f` in a constructor
-            // `fOfConstants[constantOrdinal]`.
-            ExprKind::Index(array, index)
-                if let ExprKind::Static { class, name } = &array.kind
-                    && let Some(field) = crate::lower::tabled_field(name)
-                    && self.class.types[*class].kind == TypeKind::Enum =>
-            {
-                let object = match &index.kind {
-                    ExprKind::Builtin(Builtin::EnumOrdinal, args) => self.source(&args[0], detail - 1)?,
-                    ExprKind::Var(v) if v == crate::lower::TABLE_ORDINAL => Source::Shown("this".to_string()),
-                    _ => return None,
-                };
-                match object {
-                    Source::Shown(object) => format!("{object}.{field}"),
-                    Source::Hidden => field.to_string(),
-                }
-            }
-            ExprKind::Index(array, index) => {
-                let array = match self.source(array, detail - 1)? {
-                    Source::Shown(array) => array,
-                    Source::Hidden => "<array>".to_string(),
-                };
-                let index = match self.source(index, detail - 1)? {
-                    Source::Shown(index) => index,
-                    Source::Hidden => "...".to_string(),
-                };
-                format!("{array}[{index}]")
-            }
+            ExprKind::Static { class, name } => return self.static_source(e.pos, *class, name),
+            ExprKind::Field { object, name } => return self.field_source(object, name, detail),
+            ExprKind::Index(array, index) => return self.index_source(array, index, detail),
             // `i++` and `++i` of a local, an index as in `a[i++]`: javac loads the local before or
             // after its `iinc`, so the value is the local's.
             ExprKind::IncDec { target: Place::Var(name), .. } if e.ty.is_integral() => {
                 let read = Expr { kind: ExprKind::Var(name.clone()), pos: e.pos, ty: e.ty, id: e.id };
                 return self.source(&read, detail);
+            }
+            // `this.i++` (or of a static, or an element) keeps a copy of the value it loads
+            // (`dup_x1`), which the JVM follows back to that load; `++this.i` keeps the sum.
+            ExprKind::IncDec { target, prefix, .. } if e.ty.is_integral() => {
+                if *prefix {
+                    return Some(Source::Hidden);
+                }
+                return match target {
+                    Place::Field { object, name } => self.field_source(object, name, detail),
+                    Place::Static { class, name } => self.static_source(e.pos, *class, name),
+                    Place::Index(array, index) => self.index_source(array, index, detail),
+                    Place::Var(_) => None,
+                };
+            }
+            // A compound assignment to a field, a static or an element keeps the value it
+            // computes (one to a local may be an `iinc` and a load of the local).
+            ExprKind::Assign { op: Some(_), target, .. } if !matches!(target, Place::Var(_)) => {
+                return Some(Source::Hidden);
             }
             // Values that the JVM does not follow back: computed ones, and new objects.
             ExprKind::Conditional(..) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::New { .. } => {
@@ -1272,6 +1250,68 @@ impl Messages<'_> {
             _ => return None,
         };
         Some(Source::Shown(shown))
+    }
+
+    /// The source of the read of the static `class.name` at `pos`.
+    fn static_source(&self, pos: Pos, class: usize, name: &str) -> Option<Source> {
+        let shown = if self.jdk {
+            // A static field of the JDK's, by the class that javac names it by where lowering
+            // noted it (`Class::class_file`), else by its class's binary name:
+            // `java.util.Locale.ROOT`.
+            match self.jdk_static(pos, name) {
+                Some(named) => named?,
+                None => {
+                    let declared = self.class.types[class].statics.iter().any(|f| f.name == name);
+                    format!("{}.{name}", self.java_class_at(class).filter(|_| declared)?)
+                }
+            }
+        } else {
+            self.names.get(self.outermost, pos, NameKind::Static, name)?.to_string()
+        };
+        Some(Source::Shown(shown))
+    }
+
+    /// The source of the read of the field `object.name`.
+    fn field_source(&self, object: &Expr, name: &str, detail: usize) -> Option<Source> {
+        let name = match self.java_field(object, name)? {
+            JavaField::Named(name) => name,
+            JavaField::This => return self.source(object, detail),
+            JavaField::Captured(local) => return Some(Source::Shown(local?)),
+        };
+        Some(Source::Shown(match self.source(object, detail - 1)? {
+            Source::Shown(object) => format!("{object}.{name}"),
+            Source::Hidden => name,
+        }))
+    }
+
+    /// The source of the read of the element `array[index]`.
+    fn index_source(&self, array: &Expr, index: &Expr, detail: usize) -> Option<Source> {
+        // A field of an enum in the table form (`lower/enum_tables.rs`): `e.f` is
+        // `fOfConstants[e.ordinal()]`, and `this.f` in a constructor
+        // `fOfConstants[constantOrdinal]`.
+        if let ExprKind::Static { class, name } = &array.kind
+            && let Some(field) = crate::lower::tabled_field(name)
+            && self.class.types[*class].kind == TypeKind::Enum
+        {
+            let object = match &index.kind {
+                ExprKind::Builtin(Builtin::EnumOrdinal, args) => self.source(&args[0], detail - 1)?,
+                ExprKind::Var(v) if v == crate::lower::TABLE_ORDINAL => Source::Shown("this".to_string()),
+                _ => return None,
+            };
+            return Some(Source::Shown(match object {
+                Source::Shown(object) => format!("{object}.{field}"),
+                Source::Hidden => field.to_string(),
+            }));
+        }
+        let array = match self.source(array, detail - 1)? {
+            Source::Shown(array) => array,
+            Source::Hidden => "<array>".to_string(),
+        };
+        let index = match self.source(index, detail - 1)? {
+            Source::Shown(index) => index,
+            Source::Hidden => "...".to_string(),
+        };
+        Some(Source::Shown(format!("{array}[{index}]")))
     }
 
     /// The argument that `e` reads, where it is a local that holds one (or holds another such

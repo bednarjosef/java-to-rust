@@ -82,10 +82,11 @@ program where such a lookup can happen, so they can be checked before the progra
   `Runtime.class` and `System.class`, classes that have no objects and so are no types of a
   translation, are the runtime's classes of those names (`java::Class::RUNTIME`, `SYSTEM`).
   `isAssignableFrom` of any two classes tests the names of the classes and interfaces above the
-  second, which each class value carries. A computed name becomes a `switch` over the binary
-  names of the classes that code can find by name. The value of each class of the program that
-  code names is a constant at the crate root (`const CLASS__COM_FOO_BAR: java::Class`), written
-  once: the reflection table names a class for each of its members and their types, and written
+  second, which each class value carries. A computed name becomes a call of one method that
+  every such call shares, a `switch` over the binary names of the classes that code can find by
+  name, cut by the names' lengths into methods of a hundred or so names in a big program. The value of each class of the program that
+  code names is a static at the crate root (`static CLASS__COM_FOO_BAR: java::Class`), which
+  names its superclass, interfaces and declaring class by references to theirs, written once: the reflection table names a class for each of its members and their types, and written
   out at each of those, with the names above it, the Minecraft server's table had lines of 20 MB.
 - **The reflection table.** `getMethod`, `getDeclaredMethod`, `getField`, `getConstructor`,
   `newInstance` and the rest look members up in a table that the translation builds in. The
@@ -127,8 +128,25 @@ program where such a lookup can happen, so they can be checked before the progra
   translator's. Each holds a slot in the table, and `Method.invoke`, `Field.get` and
   `set` (with their typed forms) and `Constructor.newInstance` are a `switch` over the slots,
   each case a direct call, read or write. The table and these switches are in 32 parts by
-  `slot & 31`, each part a function of its own, so that a big program's table (the Minecraft server's holds about 100,000
-  methods) makes functions of a few thousand cases that rustc compiles one by one. Arguments are checked and unboxed as Java does: a wrong
+  `slot & 31`, each part a function of its own, and a part's switch of more than 128 cases is
+  cut into methods of 128 cases each, which a switch on the slot's high bits calls, so that a
+  big program's table (the Minecraft server's holds about 160,000 methods) makes functions of a
+  few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
+  size. The table itself is data: each part is three constant arrays, of the classes its members
+  name, of their names, and of numbers (indices into those two, modifiers and slots), which
+  `java/Reflection.java` makes the objects from, not code that makes each. A lookup reads only
+  the members of its class: the first lookup of methods, fields or constructors reads the
+  table's data (`TableData`) and groups the slots by the class that finds each member
+  (`MemberIndex`, a hash table from the class to the run of its members, in the table's order),
+  where reading the whole table for each lookup took over 2 s of the Minecraft server's start,
+  on the thread that starts it (`benchmarks/ReflectionLookups.java`, 120 classes looked up one
+  at a time: 7.3 s before, 0.15 s after, Java 0.16 s). A member's object is made the first time
+  a lookup returns it, from its numbers, as Java makes the objects of a class's members when it
+  is reflected on; a lookup tests a member's class, name and modifiers in the numbers first.
+  Made all at once, the Minecraft server's 160,000 methods and their fields, with their lists of
+  parameter classes, held about 120 MB of its heap (`benchmarks/ReflectionTableMemory.java`,
+  a table of 14,400 methods of which three classes' are read: 20.2 MB at peak before, 14.9 MB
+  after, Java 42 MB). Arguments are checked and unboxed as Java does: a wrong
   type is an `IllegalArgumentException` and a null receiver a `NullPointerException`, and an
   exception of the called code is wrapped in an `InvocationTargetException` (by
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final

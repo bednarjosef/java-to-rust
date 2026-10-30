@@ -30,8 +30,8 @@
 //! are null. Any other is decided by the objects at run time: the program's strings are then
 //! shared (`Class::shared_strings`), each made as Java makes it (`codegen::shared_strings`).
 
+use super::{FastMap, FastSet};
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 
 /// A node of the flow: a place that holds strings, or a kind of source.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -71,12 +71,12 @@ const ABOVE_STRING: [&str; 13] = [
 
 struct Graph<'c> {
     class: &'c Class,
-    ids: HashMap<Key, usize>,
+    ids: FastMap<Key, usize>,
     keys: Vec<Key>,
     /// The nodes whose strings flow into each node.
     preds: Vec<Vec<usize>>,
     /// The sites of each unknown source, for its message.
-    unknown_sites: HashMap<usize, Vec<Pos>>,
+    unknown_sites: FastMap<usize, Vec<Pos>>,
     /// The override groups of every `toString()`, whose results `String.valueOf(o)` may be.
     to_strings: Vec<usize>,
 }
@@ -158,7 +158,7 @@ impl<'c> Graph<'c> {
     /// The type that declares the static `name` that `Class.name` reads, `c` or above it.
     fn static_owner(&self, c: usize, name: &str) -> usize {
         let mut work = vec![c];
-        let mut seen = HashSet::new();
+        let mut seen = FastSet::default();
         while let Some(t) = work.pop() {
             if !seen.insert(t) {
                 continue;
@@ -506,7 +506,7 @@ impl<'c> Graph<'c> {
 
     /// The nodes that the strings of `from` may come from, `from` among them.
     fn closure(&self, from: &[usize]) -> Vec<usize> {
-        let mut seen: HashSet<usize> = from.iter().copied().collect();
+        let mut seen: FastSet<usize> = from.iter().copied().collect();
         let mut work: Vec<usize> = from.to_vec();
         while let Some(id) = work.pop() {
             for &p in &self.preds[id] {
@@ -738,15 +738,15 @@ fn decide(class: &mut Class) -> Result<(), Vec<Error>> {
         .enumerate()
         .filter(|(_, method)| method.name == "toString" && method.params.is_empty() && !method.is_static)
         .map(|(m, _)| class.hierarchy.group_id(m))
-        .collect::<HashSet<_>>()
+        .collect::<FastSet<_>>()
         .into_iter()
         .collect();
     let mut graph = Graph {
         class,
-        ids: HashMap::new(),
+        ids: FastMap::default(),
         keys: Vec::new(),
         preds: Vec::new(),
-        unknown_sites: HashMap::new(),
+        unknown_sites: FastMap::default(),
         to_strings,
     };
     for m in 0..class.methods.len() {
@@ -760,7 +760,7 @@ fn decide(class: &mut Class) -> Result<(), Vec<Error>> {
         .map(|(m, _, _, args)| args.iter().map(|a| graph.origins(m.unwrap_or(usize::MAX), a)).collect())
         .collect();
     let kinds = graph.kinds();
-    let mut decisions = HashMap::new();
+    let mut decisions = FastMap::default();
     let mut errors = Vec::new();
     for ((_, id, pos, _), sides) in sites.iter().zip(all_sides) {
         let kind = |nodes: &[usize]| nodes.iter().fold(0, |k, &n| k | kinds[n]);

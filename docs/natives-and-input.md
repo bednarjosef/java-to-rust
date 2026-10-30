@@ -71,7 +71,7 @@ something a translated program does not have.
 | `TimeZone.getSystemTimeZoneID`, `getSystemGMTOffsetID` | `time_zone.rs` | the local zone from `TZ` and the system's files, as the JDK finds it on Linux |
 | `FileDescriptor.getHandle(fd)` | `java::fd_handle(fd)` | -1 (Windows handles only) |
 | `FileDescriptor.getAppend(fd)` | `java::fd_append(fd)` | the descriptor's `O_APPEND` (from `/proc/self/fdinfo`, `false` where missing); `true` for a descriptor that is not open, as Java reads `fcntl`'s -1 |
-| `FileInputStream`, `FileOutputStream`, `RandomAccessFile`, `FileDescriptor` natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `write`, `seek0`, `close0`, ...) | `fd.rs` | a descriptor table of the process; 0, 1 and 2 are the standard streams |
+| `FileInputStream`, `FileOutputStream`, `RandomAccessFile`, `FileDescriptor` natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `write`, `seek0`, `close0`, ...) | `fd.rs` | a descriptor table of the process; 0, 1 and 2 are the standard streams; a read or write goes to its file with the table unlocked, so a read that waits on standard input or a pipe holds up no other descriptor |
 | `sun.nio.ch.UnixFileDispatcherImpl` natives (`read0`, `pread0`, `write0`, `pwrite0`, `seek0`, `size0`, `truncate0`, `available0`, `isOther0`, `setDirect0`, `force0`, `lock0`, `release0`); `FileKey.init`; `FileDispatcherImpl.init0`, `IOUtil.iovMax`, `IOUtil.writevMax`, `NativeThread.init`, `current0`, `signal0` | `file_channel.rs` | the channel natives of `FileChannelImpl`, on the descriptor table: `read0` and `pread0` give -1 at the end of the file; `seek0` with -1 gives the position; `setDirect0` always fails with an `IOException` ("Operation not supported": the standard library cannot set `O_DIRECT` on an open file); `force0` is `fsync`, or `fdatasync` without the metadata; `lock0` and `release0` are the system's record locks (`fcntl`), as the JVM takes them, and `FileKey.init` gives the file's device and inode, by which `FileLockTable` refuses an overlapping lock of the program's; `signal0` does nothing (no translated thread is blocked in a native call to wake); `current0` is never 0 |
 | `sun.nio.ch`'s natives of sockets, pipes and selectors: `Net` (`socket0`, `bind0`, `listen`, `connect0`, `accept`, `shutdown`, the local and remote addresses, the integer options, `poll`, `pollConnect`, `available` and the platform questions), `IOUtil` (`fdVal`, `setfdVal`, `configureBlocking`, `fdLimit`, `makePipe`, `write1`, `drain`), `SocketDispatcher` (`read0`, `readv0`, `write0`, `writev0`), `UnixDispatcher` (`close0`, `preClose0`), `UnixFileDispatcherImpl.closeIntFD`, `EPoll`, `EventFD` and `NativeThread.supportPendingSignals0`; `jdk.net.LinuxSocketOptions`'s extended options | `socket.rs`, through `java/overlay/sun/nio/ch/TranslatedSockets.java` | each call is redirected to the method of `TranslatedSockets` with the same parameters (`program::SOCKET_NATIVES`), which makes the system call on the descriptor's number (`ast::SOCKET_CALLS`) and throws what the JVM's C code throws for its error: `BindException`, `ConnectException`, `NoRouteToHostException`, `ProtocolException` or `SocketException` with the system's text of the error, as `handleSocketError` does, and `ConnectionResetException` for a reset read. Reads, writes and accepts answer `IOStatus` codes. A socket is IPv6, taking IPv4 too, where the system has IPv6; `readv0` and `writev0` are one `read` and one `write` of the blocks together; `preClose0` shuts the socket down both ways where the JVM moves a closed socket over its descriptor. Whether the system has the extended options (`TCP_KEEPIDLE` and its neighbours, `TCP_QUICKACK`, `SO_INCOMING_NAPI_ID`) is asked as the JDK's C code asks it, by trying the option on a fresh socket; an option the system lacks throws `UnsupportedOperationException`. `getSoPeerCred0`, a Unix domain socket's peer, throws the `SocketException` that Linux's answer for an internet socket gets. The answers about the platform are Linux's: no exclusive bind, `SO_REUSEPORT` available, an `epoll_event` of 12 bytes. Unix domain sockets are not supported, as on a platform without them: `UnixDomainSockets.init()` answers false, so the JDK refuses the family. Datagrams, out-of-band data and SCTP are not among them |
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; `getSpace0` is `statvfs`'s block size times its blocks, free or available blocks, 0 where it fails |
@@ -406,8 +406,10 @@ A translated program is closed: it knows all its classes. So:
   program, or the descriptor of an array of one, throws `ClassNotFoundException` when the call
   runs.
 - `(T) Class.forName(name).getDeclaredConstructor().newInstance()` with a computed name is a
-  `switch` over the classes whose binary names reachable code writes as string literals
-  (`program/reach/by_name.rs`, `lower/by_name.rs`); any other name throws a
+  `switch` over the classes whose binary names reachable code writes as string literals, or
+  makes of a constant package, one computed part and a constant rest of a name (`URL`'s
+  `"sun.net.www.protocol." + protocol + ".Handler"` names every protocol's handler in the
+  sources) (`program/reach/by_name.rs`, `lower/by_name.rs`); any other name throws a
   `ClassNotFoundException` that says so (`Builtin::UnknownClass`). A computed
   `Class.forName(module, name)` finds the locale data classes of the root locale, `en` and
   `en_US` (`Reach::found_by_name`), and `null` for any other name, as for a bundle the JDK lacks.
@@ -458,7 +460,10 @@ A translated program is closed: it knows all its classes. So:
   come from ([object-model.md](object-model.md), section 1.6).
 - `toUpperCase(locale)` and `toLowerCase(locale)` are the root locale's mapping, which is every
   language's but Turkish, Azeri and Lithuanian; for those three the program ends with a message
-  (`java_runtime::string::uppercase_in`).
+  (`java_runtime::string::uppercase_in`). Lowering passes the locale's language as the argument
+  (`lower/strings.rs`), read after the check of the string as the JDK's code reads it; a null
+  language, which no `Locale` has but the analyses may not rule out in a large program, maps as
+  the root locale's, since the JDK only compares it with those three.
 - `Character` is translated from the JDK, with its nested classes and `CharacterData` tables,
   except the box, its instance methods and the `char` and code point methods that the runtime
   answers (`lower::runtime_character_method`).

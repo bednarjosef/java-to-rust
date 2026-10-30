@@ -16,6 +16,11 @@
 //! `LazyLock` when its initializer is not a constant; such an eager class's flag is a
 //! `java::ClassInit`, which makes another thread wait while one runs the initialization. The other
 //! classes' statics are thread-local cells, which only the main thread uses.
+//!
+//! An object, array or string static of the process that only its class's static initialization
+//! assigns (`Facts::final_statics`) is a `java::Final` instead, which a read reaches with no lock:
+//! `X.get().clone()` as a value, and `(*X.get())`, a place, where the read is only borrowed (the
+//! object of a call or a field access, an array that is indexed, a string that is lent).
 
 use super::*;
 
@@ -184,7 +189,13 @@ impl<'a> Gen<'a> {
         }
         for (t, f) in cells {
             let (cell, ty, init, constant) = self.static_cell(t, f);
-            let kind = if is_cell(f.ty) { self.runtime("Atomic") } else { self.runtime("Locked") };
+            let kind = if is_cell(f.ty) {
+                self.runtime("Atomic")
+            } else if self.final_static(t, &f.name) {
+                self.runtime("Final")
+            } else {
+                self.runtime("Locked")
+            };
             let vis = self.vis();
             if constant {
                 self.line(&format!("{vis}static {cell}: {kind}<{ty}> = {kind}::new({init});"));
@@ -282,7 +293,7 @@ impl<'a> Gen<'a> {
     pub(super) fn init_run(&mut self, init: usize) -> String {
         let call = format!("{}()", init_name(&self.class.types[init].name));
         if crate::lower::rewritten_clinit(&self.class.types[init]) {
-            self.passed_on(Code::atom(call))
+            self.passed_on_thrown(Code::atom(call))
         } else {
             call
         }
@@ -293,6 +304,36 @@ impl<'a> Gen<'a> {
     pub(super) fn static_optional(&self, class: usize, name: &str) -> bool {
         let key = (class, name.to_string());
         self.facts.nullable_statics.contains(&key) || self.facts.placeholder_statics.contains(&key)
+    }
+
+    /// Whether static `name` of class `class` is a `java::Final`: an object, array or string of
+    /// the process's statics that only its class's static initialization assigns.
+    pub(super) fn final_static(&self, class: usize, name: &str) -> bool {
+        self.facts.process_statics(class)
+            && self.facts.final_statics.contains(&(class, name.to_string()))
+            && self.class.types[class].statics.iter().any(|f| f.name == name && !is_cell(f.ty))
+    }
+
+    /// A read of a `java::Final` static (`e`) as the place that holds the value that the read
+    /// would clone, after its class's initialization, for code that only borrows it:
+    /// `(*X.get())`, or for a static that starts empty (`Facts::placeholder_statics`), read where
+    /// it is set, `(*java::non_null(X.get().as_ref()))`. `None` for any other expression.
+    pub(super) fn final_place(&mut self, e: &Expr) -> Option<String> {
+        let ExprKind::Static { class, name } = &e.kind else { return None };
+        if !self.final_static(*class, name) {
+            return None;
+        }
+        let cell = self.cell_name(*class, name);
+        let placeholder = self.facts.placeholder_statics.contains(&(*class, name.clone()))
+            && !self.facts.early_static_reads.contains(&e.id);
+        let value = match placeholder {
+            true => format!("{}({cell}.get().as_ref())", self.runtime("non_null")),
+            false => format!("{cell}.get()"),
+        };
+        Some(match self.init_call(*class) {
+            Some(init) => format!("(*{{ {init} {value} }})"),
+            None => format!("(*{value})"),
+        })
     }
 
     /// The `const` read of a constant static field, or `None` for any other static field.
