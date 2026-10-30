@@ -45,9 +45,12 @@
 //! contains one of the names, its summary, and for every object it makes whether it stays, and
 //! if not, what holds it and the chain of calls that lets it escape.
 //!
-//! Within a method the analysis is flow-insensitive: each variable (by name) holds the set of
-//! parameters and `new`s that any assignment in the method gives it, and every use of the
-//! variable is a use of all of them.
+//! Within a method the analysis is flow-insensitive: each variable holds the set of parameters
+//! and `new`s that any assignment in the method gives it, and every use of the variable is a use
+//! of all of them. A variable is a declaration, found by Java's scopes (`Resolution`): two
+//! variables of one name in sibling blocks are two, so that a loop's `Node n = new Node(..)` is
+//! not held past its iteration by an earlier `for (Node n = head; ..)` outside the loop. A name
+//! with a mention that no declaration in scope covers (a pattern variable) is one variable.
 //!
 //! **Cost.** Each method's code is walked once and reduced to its flows (`Compiled`): numbered
 //! variables (the results of calls among them), what each assignment gives each, its calls with
@@ -657,14 +660,229 @@ fn own_fields(class: &Class) -> FastSet<FieldKey> {
     fields
 }
 
+/// A local variable or parameter: its name and which declaration of that name it is, by Java's
+/// scopes. Two variables of one name in sibling scopes (`for (Node n = head; ..)` and a later
+/// loop's `Node n = new Node(..)`) are two variables, so that what one holds is not taken for what
+/// the other may hold, nor the other's declaration outside a loop for its own. `MERGED` stands for
+/// every declaration of a name whose mentions are not all found in scope (a pattern variable,
+/// whose scope follows the flow of the code): all its mentions are one variable.
+type VarKey<'a> = (&'a str, u32);
+const MERGED: u32 = u32::MAX;
+
+/// Which declaration each mention of a variable in a method's body names (`VarKey`).
+#[derive(Default)]
+struct Resolution<'a> {
+    /// The declaration that each mention names: a read by its id, an assignment or an increment
+    /// of a variable by the id of the assignment.
+    mentions: FastMap<ExprId, u32>,
+    /// The number of each declaration of a local (a `Stmt::Local`, a `ForEach`) or of a catch's
+    /// parameter, by its address. Parameters are numbered by their place, the others after them.
+    declarations: FastMap<*const (), u32>,
+    /// The names that are one variable however often they are declared: pattern variables, and
+    /// names with a mention outside the scope of every declaration of them.
+    merged: FastSet<&'a str>,
+}
+
+impl<'a> Resolution<'a> {
+    fn of(method: &'a Method) -> Resolution<'a> {
+        let mut walk = Resolving { out: Resolution::default(), scopes: vec![Vec::new()], next: 0 };
+        for p in &method.params {
+            walk.declare(&p.name, None);
+        }
+        walk.scoped(|walk| method.body.iter().for_each(|s| walk.stmt(s)));
+        walk.out
+    }
+
+    fn key(&self, name: &'a str, declaration: Option<u32>) -> VarKey<'a> {
+        match declaration {
+            Some(d) if !self.merged.contains(name) => (name, d),
+            _ => (name, MERGED),
+        }
+    }
+
+    /// Parameter `i`, named `name`.
+    fn param(&self, name: &'a str, i: usize) -> VarKey<'a> {
+        self.key(name, Some(i as u32))
+    }
+
+    /// The variable that the mention `id` of `name` names: a read, or the target of an assignment
+    /// or an increment. A mention outside the method's body (in a field's initializer) names a
+    /// variable of its own initializer, merged by name.
+    fn mention(&self, name: &'a str, id: ExprId) -> VarKey<'a> {
+        self.key(name, self.mentions.get(&id).copied())
+    }
+
+    /// The variable that the local declaration `stmt` declares.
+    fn declaration(&self, name: &'a str, stmt: &Stmt) -> VarKey<'a> {
+        self.key(name, self.declarations.get(&(stmt as *const Stmt as *const ())).copied())
+    }
+
+    /// The parameter of `catch`.
+    fn catch(&self, name: &'a str, catch: &Catch) -> VarKey<'a> {
+        self.key(name, self.declarations.get(&(catch as *const Catch as *const ())).copied())
+    }
+}
+
+/// The walk of a method's body that finds `Resolution`: a stack of scopes, each the names it
+/// declares with their numbers.
+struct Resolving<'a> {
+    out: Resolution<'a>,
+    scopes: Vec<Vec<(&'a str, u32)>>,
+    next: u32,
+}
+
+impl<'a> Resolving<'a> {
+    fn declare(&mut self, name: &'a str, at: Option<*const ()>) {
+        let d = self.next;
+        self.next += 1;
+        self.scopes.last_mut().expect("a scope").push((name, d));
+        if let Some(at) = at {
+            self.out.declarations.insert(at, d);
+        }
+    }
+
+    fn scoped(&mut self, f: impl FnOnce(&mut Self)) {
+        self.scopes.push(Vec::new());
+        f(self);
+        self.scopes.pop();
+    }
+
+    fn mention(&mut self, name: &'a str, id: ExprId) {
+        let found = self.scopes.iter().rev().find_map(|scope| scope.iter().rev().find(|(n, _)| *n == name));
+        match found {
+            Some(&(_, d)) => _ = self.out.mentions.insert(id, d),
+            None => _ = self.out.merged.insert(name),
+        }
+    }
+
+    fn stmt(&mut self, s: &'a Stmt) {
+        match s {
+            Stmt::Local { name, init, .. } => {
+                // Java does not let the initializer mention the variable before it is declared
+                // other than to assign it, which it then names.
+                self.declare(name, Some(s as *const Stmt as *const ()));
+                if let Some(e) = init {
+                    self.expr(e);
+                }
+            }
+            Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e) | Stmt::Throw(e) => self.expr(e),
+            Stmt::If { cond, then, otherwise } => {
+                self.expr(cond);
+                self.scoped(|w| w.stmt(then));
+                if let Some(o) = otherwise {
+                    self.scoped(|w| w.stmt(o));
+                }
+            }
+            Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
+                self.expr(cond);
+                self.scoped(|w| w.stmt(body));
+            }
+            Stmt::For { init, cond, update, body } => self.scoped(|w| {
+                init.iter().for_each(|s| w.stmt(s));
+                cond.iter().chain(update).for_each(|e| w.expr(e));
+                w.scoped(|w| w.stmt(body));
+            }),
+            Stmt::ForEach { name, array, body, .. } => {
+                self.expr(array);
+                self.scoped(|w| {
+                    w.declare(name, Some(s as *const Stmt as *const ()));
+                    w.stmt(body);
+                });
+            }
+            Stmt::Block(stmts) => self.scoped(|w| stmts.iter().for_each(|s| w.stmt(s))),
+            Stmt::Switch { selector, cases } => {
+                self.expr(selector);
+                self.cases(cases);
+            }
+            Stmt::Labeled { body, .. } => self.stmt(body),
+            Stmt::Try { body, catches, finally } => {
+                self.scoped(|w| body.iter().for_each(|s| w.stmt(s)));
+                for catch in catches {
+                    self.scoped(|w| {
+                        w.declare(&catch.name, Some(catch as *const Catch as *const ()));
+                        catch.body.iter().for_each(|s| w.stmt(s));
+                    });
+                }
+                if let Some(f) = finally {
+                    self.scoped(|w| f.iter().for_each(|s| w.stmt(s)));
+                }
+            }
+            Stmt::Return(None, _)
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::BreakLabel(_)
+            | Stmt::ContinueLabel(_) => {}
+        }
+    }
+
+    /// The cases of a switch, one scope for all of them, as Java's switch block is.
+    fn cases(&mut self, cases: &'a [Case]) {
+        self.scoped(|w| {
+            for case in cases {
+                for label in &case.labels {
+                    if let CaseLabel::Value(e) = label {
+                        w.expr(e);
+                    }
+                }
+                case.body.iter().for_each(|s| w.stmt(s));
+            }
+        });
+    }
+
+    /// The mentions in `e`, and the statements of its switch expressions, each in a scope of its
+    /// own.
+    fn expr(&mut self, e: &'a Expr) {
+        // The expressions inside the statements of `e`'s switch expressions, which their own
+        // walk reaches.
+        let mut inner: FastSet<*const Expr> = FastSet::default();
+        visit_expr(e, &mut |x| {
+            if let ExprKind::Switch { cases, .. } = &x.kind
+                && !inner.contains(&(x as *const Expr))
+            {
+                for c in cases {
+                    for l in &c.labels {
+                        if let CaseLabel::Value(v) = l {
+                            visit_expr(v, &mut |y| _ = inner.insert(y));
+                        }
+                    }
+                    for s in &c.body {
+                        visit_stmt_exprs(s, &mut |y| _ = inner.insert(y));
+                    }
+                }
+            }
+        });
+        let mut mentions: Vec<(&'a str, ExprId)> = Vec::new();
+        let mut switches = Vec::new();
+        visit_expr(e, &mut |x| match &x.kind {
+            _ if inner.contains(&(x as *const Expr)) => {}
+            ExprKind::Var(name)
+            | ExprKind::Assign { target: Place::Var(name), .. }
+            | ExprKind::IncDec { target: Place::Var(name), .. } => mentions.push((name, x.id)),
+            ExprKind::InstanceOf { binding: Some(name), .. } => {
+                _ = self.out.merged.insert(name);
+            }
+            ExprKind::Switch { cases, .. } => switches.push(cases),
+            _ => {}
+        });
+        for (name, id) in mentions {
+            self.mention(name, id);
+        }
+        for cases in switches {
+            self.cases(cases);
+        }
+    }
+}
+
 /// The state of compiling one method.
 struct Compiling<'a, 'l> {
     class: &'a Class,
     lists: &'l mut Lists,
     code: Compiled,
-    names: FastMap<&'a str, u32>,
-    /// The names of `code.named`, in order.
-    order: Vec<&'a str>,
+    names: FastMap<VarKey<'a>, u32>,
+    /// The variables of `code.named`, in order.
+    order: Vec<VarKey<'a>>,
+    /// Which declaration each mention of a variable names.
+    resolved: Resolution<'a>,
     site_of: FastMap<ExprId, u32>,
     call_of: FastMap<ExprId, u32>,
     own_fields: &'a FastSet<FieldKey>,
@@ -692,13 +910,15 @@ fn compile<'a>(
         code,
         names: FastMap::default(),
         order: Vec::new(),
+        resolved: Resolution::of(method),
         site_of: FastMap::default(),
         call_of: FastMap::default(),
         own_fields,
         method: m,
     };
     for (i, p) in method.params.iter().enumerate() {
-        cx.var(&p.name);
+        let key = cx.resolved.param(&p.name, i);
+        cx.var(key);
         cx.code.named[i].param = Some(i);
     }
     // The sources: the `new`s of the body, and its calls of one method.
@@ -761,7 +981,8 @@ fn compile<'a>(
         match &x.kind {
             ExprKind::Assign { op: None, target: Place::Var(name), value }
             | ExprKind::InstanceOf { value, binding: Some(name), .. } => {
-                let v = cx.var(name);
+                let key = cx.resolved.mention(name, x.id);
+                let v = cx.var(key);
                 let value = cx.value(value);
                 cx.code.assigns.push((v, value));
             }
@@ -824,7 +1045,8 @@ fn compile<'a>(
     for s in stmts {
         match s {
             Stmt::Local { name, init: Some(init), .. } => {
-                let v = cx.var(name);
+                let key = cx.resolved.declaration(name, s);
+                let v = cx.var(key);
                 let value = cx.value(init);
                 cx.code.assigns.push((v, value));
             }
@@ -841,12 +1063,12 @@ fn compile<'a>(
         }
     }
     // Where the sources and the declarations are, in the loops.
-    let scopes = Scopes::of(method, &cx.site_of);
+    let scopes = Scopes::of(method, &cx.site_of, &cx.resolved);
     for site in &mut cx.code.sites {
         site.loops = scopes.sites.get(&site.id).cloned();
     }
-    for (named, name) in cx.code.named.iter_mut().zip(&cx.order) {
-        named.loops = scopes.declarations.get(name).map(|ds| {
+    for (named, key) in cx.code.named.iter_mut().zip(&cx.order) {
+        named.loops = scopes.declarations.get(key).map(|ds| {
             let mut all = ds.first().cloned().unwrap_or_default();
             for d in &ds[1..] {
                 all.retain(|l| d.contains(l));
@@ -858,15 +1080,15 @@ fn compile<'a>(
 }
 
 impl<'a> Compiling<'a, '_> {
-    /// The variable `name`.
-    fn var(&mut self, name: &'a str) -> u32 {
-        if let Some(&v) = self.names.get(name) {
+    /// The variable `key`.
+    fn var(&mut self, key: VarKey<'a>) -> u32 {
+        if let Some(&v) = self.names.get(&key) {
             return v;
         }
         let v = self.new_var();
-        self.names.insert(name, v);
+        self.names.insert(key, v);
         self.code.named.push(Named { var: v, param: None, loops: None });
-        self.order.push(name);
+        self.order.push(key);
         v
     }
 
@@ -922,7 +1144,8 @@ impl<'a> Compiling<'a, '_> {
     fn add(&mut self, e: &'a Expr, out: &mut Value) {
         match &e.kind {
             ExprKind::Var(name) => {
-                let v = self.var(name);
+                let key = self.resolved.mention(name, e.id);
+                let v = self.var(key);
                 out.vars.push(v);
             }
             ExprKind::This if self.code.has_this => out.sources.push(0),
@@ -1802,15 +2025,16 @@ struct Scopes<'m> {
     /// loops.
     sites: FastMap<ExprId, Vec<usize>>,
     /// For each variable, the loops around each of its declarations.
-    declarations: FastMap<&'m str, Vec<Vec<usize>>>,
+    declarations: FastMap<VarKey<'m>, Vec<Vec<usize>>>,
+    resolved: &'m Resolution<'m>,
 }
 
 impl<'m> Scopes<'m> {
-    fn of(method: &'m Method, made: &'m FastMap<ExprId, u32>) -> Scopes<'m> {
+    fn of(method: &'m Method, made: &'m FastMap<ExprId, u32>, resolved: &'m Resolution<'m>) -> Scopes<'m> {
         let mut scopes =
-            Scopes { count: 0, made, sites: FastMap::default(), declarations: FastMap::default() };
-        for p in &method.params {
-            scopes.declarations.entry(p.name.as_str()).or_default().push(Vec::new());
+            Scopes { count: 0, made, sites: FastMap::default(), declarations: FastMap::default(), resolved };
+        for (i, p) in method.params.iter().enumerate() {
+            scopes.declarations.entry(resolved.param(&p.name, i)).or_default().push(Vec::new());
         }
         for s in &method.body {
             scopes.stmt(s, &mut Vec::new());
@@ -1818,8 +2042,8 @@ impl<'m> Scopes<'m> {
         scopes
     }
 
-    fn declare(&mut self, name: &'m str, loops: &[usize]) {
-        self.declarations.entry(name).or_default().push(loops.to_vec());
+    fn declare(&mut self, key: VarKey<'m>, loops: &[usize]) {
+        self.declarations.entry(key).or_default().push(loops.to_vec());
     }
 
     /// Notes the `new`s and declarations of the statement `s`, inside the loops `loops`.
@@ -1838,7 +2062,7 @@ impl<'m> Scopes<'m> {
             };
         match s {
             Stmt::Local { name, init, .. } => {
-                self.declare(name, loops);
+                self.declare(self.resolved.declaration(name, s), loops);
                 if let Some(e) = init {
                     self.expr(e, loops, None);
                 }
@@ -1865,7 +2089,7 @@ impl<'m> Scopes<'m> {
                 self.expr(array, loops, None);
                 self.count += 1;
                 loops.push(self.count);
-                self.declare(name, loops);
+                self.declare(self.resolved.declaration(name, s), loops);
                 self.stmt(body, loops);
                 loops.pop();
             }
@@ -1885,7 +2109,7 @@ impl<'m> Scopes<'m> {
             Stmt::Try { body, catches, finally } => {
                 body.iter().for_each(|s| self.stmt(s, loops));
                 for catch in catches {
-                    self.declare(&catch.name, loops);
+                    self.declare(self.resolved.catch(&catch.name, catch), loops);
                     catch.body.iter().for_each(|s| self.stmt(s, loops));
                 }
                 finally.iter().flatten().for_each(|s| self.stmt(s, loops));
@@ -1929,7 +2153,7 @@ impl<'m> Scopes<'m> {
             }
             ExprKind::InstanceOf { binding: Some(name), .. } => {
                 let around = &loops[..bindings.unwrap_or(loops.len())];
-                self.declarations.entry(name.as_str()).or_default().push(around.to_vec());
+                self.declarations.entry(self.resolved.mention(name, x.id)).or_default().push(around.to_vec());
             }
             ExprKind::Switch { cases, .. } => switches.push(cases),
             _ => {}

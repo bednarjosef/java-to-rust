@@ -152,6 +152,9 @@ The collector needs nothing for them:
   the body of the innermost loop around the `new`, which makes it a new variable on each
   iteration that Java does not let the next iteration read before assigning it, and every
   object of the frame that holds it must be made in that loop and follow the same rule. A
+  variable is one declaration, by Java's scopes: another variable of the same name declared
+  outside the loop (`for (Node n = head; ..)` before a loop's `Node n = new Node(..)`) is
+  another variable, which neither holds the object nor counts against it. A
   factory's object is made outside every loop of the factory, once per call, and the caller's
   slot then follows the caller's loops by the same rule.
 - **Identity.** The identity hash is the address, unique while the object lives; two objects of

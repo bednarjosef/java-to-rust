@@ -67,7 +67,12 @@ made on the stack (`java::count_allocation`).
   and drops millions of short-lived ones; the collector marks that long-lived tree again at each
   of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads), which is
   most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million nodes again
-  at each of its 22 collections, which no helper can share. Idle markers now sleep instead of
+  at each of its collections, which no helper can share. Of the 60 million nodes its last loop
+  makes, the half that each iteration's `Node n` holds are made on the stack: the escape
+  analysis tells variables apart by their declaration, and took this `n` for the one of an
+  earlier `for (Node n = head; ..)`, declared outside the loop (docs/collector.md, "Objects on
+  the stack"). It took 1.31 s and 22 collections against 0.75 s and 12 (alternating runs at a
+  load of 15). Idle markers now sleep instead of
   spinning (docs/collector.md, "Marking and sweeping in parallel"), which at a load average of
   about 6 took BinaryTrees from 4.27 s to 2.16 s (Java 0.91 s at that load; the table above is
   from before) and `SmallObjects` from 0.64 s to 0.36 s (Java 0.17 s). The young
