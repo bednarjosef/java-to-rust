@@ -21,8 +21,8 @@ benchmarks that measure it are in "Memory".
 ## Results
 
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
-milliseconds) at a load average of 2.5 on 16 cores; MatrixMultiply's row is from a run of it
-alone at a load of 2.9.
+milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
+clock (4.8 GHz under load).
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -30,21 +30,33 @@ alone at a load of 2.9.
   with fat LTO, for processors with AVX2 (`target-cpu=x86-64-v3`, in the crate's
   `.cargo/config.toml`)
 
-| program        | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
-|----------------|--------:|--------:|----------:|------------:|------------:|-------------:|
-| BinaryTrees    |     686 |    1879 |      2.74 |           - |           - |            - |
-| Collatz        |    1131 |     567 |      0.50 |           - |           - |            - |
-| Interpreter    |    1086 |    1152 |      1.06 |         335 |         382 |         1.14 |
-| Mandelbrot     |    3359 |    1111 |      0.33 |        1114 |        1109 |         1.00 |
-| MatrixMultiply |     117 |     175 |      1.49 |          26 |          57 |         2.19 |
-| NBody          |    1776 |    1846 |      1.04 |         588 |         599 |         1.02 |
-| NodeList       |     207 |     148 |      0.72 |           - |           - |            - |
-| ParticleArray  |    1392 |    1019 |      0.73 |           - |           - |            - |
-| Sieve          |    1166 |     951 |      0.82 |           - |           - |            - |
-| SortMillion    |    1679 |    1753 |      1.04 |         519 |         581 |         1.12 |
-| Statics        |    1248 |    2632 |      2.11 |           - |           - |            - |
-| StringBuild    |      26 |       1 |      0.05 |           - |           - |            - |
-| TokenScanner   |     958 |    1624 |      1.70 |           - |           - |            - |
+| program               | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
+|-----------------------|--------:|--------:|----------:|------------:|------------:|-------------:|
+| BaseFields            |     170 |      69 |      0.41 |         145 |          66 |         0.46 |
+| BinaryTrees           |     686 |    1634 |      2.38 |           - |           - |            - |
+| ClassCast             |      85 |      83 |      0.97 |          37 |          71 |         1.92 |
+| Collatz               |    1155 |     581 |      0.50 |           - |           - |            - |
+| Interpreter           |    1046 |    1177 |      1.12 |         341 |         393 |         1.15 |
+| LargeArrays           |      34 |       7 |      0.21 |           - |           - |            - |
+| Mandelbrot            |    3400 |    1143 |      0.34 |        1128 |        1141 |         1.01 |
+| ManyThreadsAllocating |     136 |     108 |      0.79 |           - |           - |            - |
+| MatrixMultiply        |     124 |      80 |      0.65 |          27 |          25 |         0.93 |
+| MonitoredObjects      |      67 |      33 |      0.48 |           - |           - |            - |
+| NBody                 |    1811 |    1884 |      1.04 |         601 |         598 |         1.00 |
+| NodeList              |     175 |     110 |      0.63 |           - |           - |            - |
+| NoiseTree             |     363 |     480 |      1.32 |         282 |         432 |         1.53 |
+| ObjectDispatch        |     169 |     389 |      2.30 |         110 |         318 |         2.89 |
+| ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
+| ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
+| ReflectionLookups     |     155 |     183 |      1.18 |         106 |         162 |         1.53 |
+| ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
+| Sieve                 |    1278 |    1006 |      0.79 |           - |           - |            - |
+| SmallObjects          |     147 |     203 |      1.38 |           - |           - |            - |
+| SortMillion           |    1731 |    1727 |      1.00 |         535 |         577 |         1.08 |
+| Statics               |    1286 |    1266 |      0.98 |           - |           - |            - |
+| StringBuild           |      28 |       1 |      0.04 |           - |           - |            - |
+| TokenScanner          |     994 |     775 |      0.78 |           - |           - |            - |
+| UnlockedObjects       |      69 |      34 |      0.49 |           - |           - |            - |
 
 Differences of 20% or less between two runs are often noise or the placement of code and data
 (see "Colors" in docs/collector.md); the large ratios are not.
@@ -58,30 +70,31 @@ sites (class, the method the `new` is in, and "on the stack" for a `new` whose o
 slot on the stack) that made the most objects, on standard error, with the total and the share
 made on the stack (`java::count_allocation`).
 
-- **Allocation (BinaryTrees 2.7x, NodeList 0.7x).** Objects live in the runtime's garbage
-  collected heap (docs/collector.md): an allocation takes a slot from a per-thread list through the
-  global allocator, and a handle is copied without a count. The slot is zeroed word by word
-  rather than with a call of `memset`: BinaryTrees takes 7.8 s against 9.4 s (alternating runs,
-  at about 620 MHz). Taking the slot inlined at every `new` takes it to 5.8 s but slows other
-  loops, which the compiler no longer optimizes as well (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 89 MB alive while it builds
-  and drops millions of short-lived ones; the collector marks that long-lived tree again at each
-  of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads), which is
-  most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million nodes again
-  at each of its collections, which no helper can share. Of the 60 million nodes its last loop
-  makes, the half that each iteration's `Node n` holds are made on the stack: the escape
-  analysis tells variables apart by their declaration, and took this `n` for the one of an
-  earlier `for (Node n = head; ..)`, declared outside the loop (docs/collector.md, "Objects on
-  the stack"). It took 1.31 s and 22 collections against 0.75 s and 12 (alternating runs at a
-  load of 15). Idle markers now sleep instead of
-  spinning (docs/collector.md, "Marking and sweeping in parallel"), which at a load average of
-  about 6 took BinaryTrees from 4.27 s to 2.16 s (Java 0.91 s at that load; the table above is
-  from before) and `SmallObjects` from 0.64 s to 0.36 s (Java 0.17 s). The young
-  generation (`JAVA_GC_GENERATIONS=1`, docs/collector.md) collects the short-lived objects
-  without marking the old ones: `SmallObjects` 0.43 s against 0.34 s, with 1.2 s against 0.49 s
-  of processor time, and BinaryTrees 5.37 s against 5.86 s with 13.2 s against 20.4 s of
-  processor time (at about 850 MHz); it is opt-in because some peaks rise (`SmallObjects` 170 MB against 200 MB). NodeList walks and rebuilds a linked list of
-  about 667,000 nodes; its nodes are taken from blocks in address order, so the walk follows
-  memory.
+- **Allocation (BinaryTrees 2.4x, SmallObjects 1.4x, NodeList 0.6x).** Objects live in the
+  runtime's garbage collected heap (docs/collector.md): an allocation takes a slot from a
+  per-thread list through the global allocator, and a handle is copied without a count. The slot
+  is zeroed word by word rather than with a call of `memset`: BinaryTrees took 7.8 s against
+  9.4 s with the call (alternating runs, at about 620 MHz). Taking the slot inlined at every
+  `new` took it to 5.8 s but slowed other loops, which the compiler no longer optimized as well
+  (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 89 MB alive while it
+  builds and drops millions of short-lived ones; the collector marks that long-lived tree again
+  at each of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads),
+  which is most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million
+  nodes again at each of its collections, which no helper can share. Of the 60 million nodes its
+  last loop makes, the half that each iteration's `Node n` holds are made on the stack, because
+  the escape analysis tells variables apart by their declaration (docs/collector.md, "Objects on
+  the stack"); taking this `n` for the one of an earlier `for (Node n = head; ..)`, declared
+  outside the loop, it made them all on the heap: 1.31 s and 22 collections against 0.75 s and
+  12 (alternating runs at a load of 15). Idle markers sleep instead of spinning
+  (docs/collector.md, "Marking and sweeping in parallel"): spinning, at a load average of about
+  6, BinaryTrees took 4.27 s against 2.16 s (Java 0.91 s at that load) and `SmallObjects` 0.64 s
+  against 0.36 s (Java 0.17 s). The young generation (`JAVA_GC_GENERATIONS=1`,
+  docs/collector.md) collects the short-lived objects without marking the old ones:
+  `SmallObjects` 0.43 s against 0.34 s, with 1.2 s against 0.49 s of processor time, and
+  BinaryTrees 5.37 s against 5.86 s with 13.2 s against 20.4 s of processor time (at about
+  850 MHz); it is opt-in because some peaks rise (`SmallObjects` 170 MB against 200 MB).
+  NodeList walks and rebuilds a linked list of about 667,000 nodes; its nodes are taken from
+  blocks in address order, so the walk follows memory.
 - **Strings read from a field (TokenScanner 0.8x).** A parser that reads its input one character
   at a time with `input.substring(index, index + 1)` and checks `index < input.length()` runs in
   linear time:
@@ -101,7 +114,7 @@ made on the stack (`java::count_allocation`).
     inlined.
   - `"0123456789".contains(current)` searches for one byte without checking first that the text
     is UTF-8 (`Wtf8::find_from`).
-- **Elements of an object array read again (NBody 1.0x, ParticleArray 0.7x).** Consecutive
+- **Elements of an object array read again (NBody 1.0x, ParticleArray 0.6x).** Consecutive
   statements that read the same element, with an array that is a local, a field of `this` or a
   static and an index that is a local or a constant, read it once into a local, when none of
   those statements assigns the array, the index, or an element of any object array, and none of
@@ -116,7 +129,7 @@ made on the stack (`java::count_allocation`).
   `#[inline(never)]` throwing function (runtime `array.rs`). Interpreter's stack and locals are
   plain `Vec<i32>` with the same checks, since its indexes come from the program it interprets.
   `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`.
-- **MatrixMultiply (0.6x, kernel 0.6x).** The matrices are plain
+- **MatrixMultiply (0.65x, kernel 0.9x).** The matrices are plain
   `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
   and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
   is assigned. `create`'s store `m[i][j] = (x >>> 16) % 100` stays a plain store: Java computes a
@@ -135,36 +148,36 @@ made on the stack (`java::count_allocation`).
   whose address it does not know: each iteration stored the state and the next read it back
   (2.6 s). Reading or writing one element of a `java::Array` checks no borrow flag
   (`array.rs`, `ArrayData::raw`), whose store and reload also chained the iterations.
-- **Objects of many classes behind one type (ObjectDispatch).** 48 enums held as `Comparable`
-  and `Object`: a palette that also holds strings searched by `==` (`java::same_object`), casts
-  back to an enum (`as_<type>()`) and `ordinal()` through `Enum`, the operations at the top of
-  the Minecraft server's profile. Each tests the value's class number: a cast tests the one
-  number it passes, and an ordinal is the constant's bits (`java::Thin::ordinal`). Through
-  `view()` and a `match` over every class, the kernel took 1132 ms in release (fat LTO,
-  `opt-level = 3`) and 14751 ms at `opt-level = 1`, against 781 ms and 4183 ms with the class
-  numbers tested (medians of five, at a load of 6; Java's kernel is about 120 ms).
-  `same_object` compares the two values' bits first, which hold the class number: equal bits are
-  the same object and different bits different objects, but where both are strings or boxes. In
-  the palette's search the compiler then tests the key's class once, before the loop, and each
-  element is one compare, as in Java: the kernel took 549 ms comparing the class numbers first
-  and takes about 300 ms (at a load of 2.5 to 3.5; Java's kernel is about 116 ms there).
-- **Classes known only at run time (ClassCast).** `Class.cast` and `Class.isInstance` of values
-  of 258 classes behind `Comparable` with their own class and another, as the Minecraft server's
-  `StateHolder.getValue` casts each property's value. Each asks the value for the names above
-  its class, which is one read of a table by class number (`TYPE_NAMES_BY_CLASS_NUMBER`), and
-  compares each name by its length and last eight bytes before it compares it whole. Through a
-  `match` over the 258 classes and a `memcmp` of each name, the kernel took 184 ms in release,
-  446 ms at `opt-level = 1` and 1450 ms at `opt-level = 0` (the runtime at 2), against 89, 242
-  and 1030 ms now (medians of five, three at 0, at a load of 7; Java's kernel is about 48 ms).
-- **Objects of many classes hashed as `Object`s (ObjectHash).** An open-addressing set of 300
-  objects probed for each, as `ImmutableCollections.SetN.probe` is in the Minecraft server: two
-  classes in three hash by their address and the others override `hashCode`, numbered in turn,
-  so the classes that hash by address are 100 runs of class numbers. With them as the last arm
-  of `Object::hash_code`'s `match` (`_`) rather than 100 range tests before it, the kernel takes
-  70 ms in release against 192 ms, and 870 ms at `opt-level = 0` (the runtime at 2) against
-  1800 ms; at `opt-level = 1` both take about 140 ms (medians of five to nine, at a load of 7 to
-  9; Java's kernel is about 94 ms).
-- **Fields read through a type of several classes, split into crates (BaseFields).** Two final
+- **Objects of many classes behind one type (ObjectDispatch 2.3x, kernel 2.9x).** 48 enums held as
+  `Comparable` and `Object`: a palette that also holds strings searched by `==`
+  (`java::same_object`), casts back to an enum (`as_<type>()`) and `ordinal()` through `Enum`, the
+  operations at the top of the Minecraft server's profile. Each tests the value's class number: a
+  cast tests the one number it passes, and an ordinal is the constant's bits
+  (`java::Thin::ordinal`). Through `view()` and a `match` over every class, the kernel took 1132 ms
+  in release (fat LTO, `opt-level = 3`) and 14751 ms at `opt-level = 1`, against 781 ms and 4183 ms
+  with the class numbers tested (medians of five, at a load of 6; Java's kernel is about 120 ms).
+  `same_object` compares the two values' bits first, which hold the class number: equal bits are the
+  same object and different bits different objects, but where both are strings or boxes. In the
+  palette's search the compiler then tests the key's class once, before the loop, and each element
+  is one compare, as in Java; comparing the class numbers first, the kernel took 1.8 times as long.
+- **Classes known only at run time (ClassCast 1.0x, kernel 1.9x).** `Class.cast` and
+  `Class.isInstance` of values of 258 classes behind `Comparable` with their own class and another,
+  as the Minecraft server's `StateHolder.getValue` casts each property's value. Each asks the value
+  for the names above its class, which is one read of a table by class number
+  (`TYPE_NAMES_BY_CLASS_NUMBER`), and compares each name by its length and last eight bytes before
+  it compares it whole. Through a `match` over the 258 classes and a `memcmp` of each name, the
+  kernel took 184 ms in release, 446 ms at `opt-level = 1` and 1450 ms at `opt-level = 0` (the
+  runtime at 2), against 89, 242 and 1030 ms now (medians of five, three at 0, at a load of 7;
+  Java's kernel is about 48 ms).
+- **Objects of many classes hashed as `Object`s (ObjectHash 0.45x, kernel 0.7x).** An
+  open-addressing set of 300 objects probed for each, as `ImmutableCollections.SetN.probe` is in the
+  Minecraft server: two classes in three hash by their address and the others override `hashCode`,
+  numbered in turn, so the classes that hash by address are 100 runs of class numbers. With them as
+  the last arm of `Object::hash_code`'s `match` (`_`) rather than 100 range tests before it, the
+  kernel takes 70 ms in release against 192 ms, and 870 ms at `opt-level = 0` (the runtime at 2)
+  against 1800 ms; at `opt-level = 1` both take about 140 ms (medians of five to nine, at a load of
+  7 to 9; Java's kernel is about 94 ms).
+- **Fields read through a type of several classes, split into crates (BaseFields 0.4x).** Two final
   fields of an abstract class read from an array of four subclasses, in a translation split into
   three body crates (`--crates 3`), as the Minecraft server's noise chunk reads its density
   buffers. `base()` is one read, and its layout checks are in a constant of their own, so it is
@@ -174,20 +187,20 @@ made on the stack (`java::count_allocation`).
   takes about 70 ms either way. Without LTO, at `opt-level = 3`, it took 93 ms while `base()`,
   its checks inside it, was too long to stay, against 70 ms (medians of five, at a load of 7;
   Java's kernel is about 160 to 220 ms there).
-- **Static finals and arrays that threads share (NoiseTree 1.5x).** A tree of density
+- **Static finals and arrays that threads share (NoiseTree 1.3x, kernel 1.5x).** A tree of density
   functions computed on a worker thread, with Perlin noise at the leaves: each noise call reads a
-  byte permutation table 14 times and a `static final` array of gradient objects 8 times. The
-  thread makes every array a `java::SharedArray`, so each read loads the handle, then the
-  elements' address and length from the array's header, then the element, an atomic load. Java
-  reads the element after the array's header in one load, and takes a `static final` array for a
-  constant whose length it knows, so `GRADIENT[hash & 15]` has no check. The `static final` is a
-  `java::Final`, which a read reaches with one load of a pointer and a test
-  (docs/multi-threading.md, 2.3); inside a `LazyLock`, as it was, a read tested the `LazyLock` and
-  then the `OnceLock` inside it (kernel 2502 ms against 2480 ms now, alternating runs at about
-  850 MHz; Java's kernel is about 1610 ms there). With the permutation table a plain `[u8; 256]`
-  field and the gradients a constant table of numbers, edited by hand into the generated code,
-  the kernel takes 1966 ms; the table alone, 2321 ms.
-- **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
+  byte permutation table 14 times and a `static final` array of gradient objects 8 times. The thread
+  makes every array a `java::SharedArray`, so each read loads the handle, then the elements' address
+  and length from the array's header, then the element, an atomic load. Java reads the element after
+  the array's header in one load, and takes a `static final` array for a constant whose length it
+  knows, so `GRADIENT[hash & 15]` has no check. The `static final` is a `java::Final`, which a read
+  reaches with one load of a pointer and a test (docs/multi-threading.md, 2.3); inside a `LazyLock`,
+  as it was, a read tested the `LazyLock` and then the `OnceLock` inside it (kernel 2502 ms against
+  2480 ms with the `java::Final`, alternating runs at about 850 MHz; Java's kernel is about 1610 ms
+  there). With the permutation table a plain `[u8; 256]` field and the gradients a constant table of
+  numbers, edited by hand into the generated code, the kernel took 1966 ms; the table alone, 2321
+  ms.
+- **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.04x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
 
