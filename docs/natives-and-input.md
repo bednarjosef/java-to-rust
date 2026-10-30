@@ -372,31 +372,24 @@ A translated program is closed: it knows all its classes. So:
 
 - `jdk.internal.loader.` is untranslated ("class loading"), as are reflection
   (`java.lang.reflect.`, `java.lang.invoke.`, with the exceptions in `TRANSLATED_ANYWAY`),
-  serialization streams and security (`UNTRANSLATED`). Of security, the lookup of services by
-  name is translated as the JDK does it: `Security` and its properties, the JDK's own providers
-  (`SUN`, `SunRsaSign`, `SunEC`, `SunJSSE`, `SunJCE` and the others that the translation's
-  modules provide) with their registrations, and `GetInstance`, through which every engine's
-  `getInstance` finds a service, with or without a provider's name. A provider makes a service's
-  implementation from its class name by reflection; the translation instead has a `switch` over
-  the classes that the providers register for each type that reachable code looks up
-  (`program/reach/services.rs`, `java/patches/java/security/Provider.java`,
-  `TranslatedServices`), so a program that only digests has the digests' classes and none of
-  the ciphers'. The security properties are those of the translating JDK's
-  `conf/security/java.security`, written into the program. The services translated so far are
-  message digests and secure random numbers (`MessageDigest`, the `SUN` provider's digests,
-  generators and seed sources, as `UUID.randomUUID` uses them), and what a Minecraft server's
-  login needs: RSA key pairs, key factories, ciphers and signatures of `SunRsaSign`, the
-  ciphers, MACs, key generators, key derivation and key stores of `SunJCE` (`javax.crypto` and
-  `com.sun.crypto.provider` are translated), and the DER encoding of keys (`sun.security.util`'s
-  `Der*`, `ObjectIdentifier`, `KnownOIDs`, `AlgorithmId`, `X509Key`, `PKCS8Key`). A service whose
-  class is not translated, as JSSE's (`SSLContext`, `KeyManagerFactory`), X.509's, PKCS12's and
-  PKIX's are, fails when it is made, with the `NoSuchAlgorithmException` the JDK throws for a
-  class it cannot find, so a library that falls back from one algorithm to another does so; a
-  name no provider registers fails as in Java. Other keys and specs are not translated, except
-  their plain interfaces, which the program's own classes implement (see
-  [object-model.md](object-model.md) 1.9). The security APIs' exceptions (`KeyException`,
-  `SignatureException`, `CertificateException`, `InvalidKeySpecException` and the like) are
-  translated: plain constructors, which library code throws and catches as its own.
+  serialization streams and `SunJCE`'s `ChaCha20` ciphers (`UNTRANSLATED`). Security is
+  translated from the JDK's code, the lookup of services by name as the JDK does it: `Security`
+  and its properties, the JDK's own providers (`SUN`, `SunRsaSign`, `SunEC`, `SunJSSE`, `SunJCE`
+  and the others that the translation's modules provide) with their registrations, and
+  `GetInstance`, through which every engine's `getInstance` finds a service, with or without a
+  provider's name. A provider makes a service's implementation from its class name by
+  reflection; the translation instead has a `switch` over the classes that the providers
+  register for each type that reachable code looks up (`program/reach/services.rs`,
+  `java/patches/java/security/Provider.java`, `TranslatedServices`), so a program that only
+  digests has the digests' classes and none of the ciphers'. The security properties are those
+  of the translating JDK's `conf/security/java.security`, written into the program. So a program
+  has the services it looks up: message digests and secure random numbers (`UUID.randomUUID`),
+  RSA and EC keys, ciphers and signatures, and TLS (`SSLContext`, its key and trust managers,
+  X.509 certificates and their paths, PKCS12 key stores), which the HTTPS client uses. A
+  service whose class is not translated, as `ChaCha20`'s, fails when it is made, with the
+  `NoSuchAlgorithmException` the JDK throws for a class it cannot find, so a library that falls
+  back from one algorithm to another does so (TLS takes such cipher suites as unavailable); a
+  name no provider registers fails as in Java.
   `ResourceBundle`, `ServiceLoader` and
   `Module` are translated, the last two (and `ModuleLayer`) patched (see [reflection-and-plugins.md](reflection-and-plugins.md)).
 - `Class.forName` of a name spelled out as a literal is that class's literal, after its static

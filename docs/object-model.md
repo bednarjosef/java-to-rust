@@ -653,13 +653,11 @@ the program's classes implement:
   `Optional.of` of the value and `resolveConstantDesc(lookup)` the value itself, both on a value
   held as the interface (`constant_desc_arm` in `codegen/dispatch.rs`) and called on the string
   or box (`lower::object::constant_desc_call`, which calls the interface's method).
-- Plain interfaces of reflection and security that library code implements with classes of its
-  own (`java.lang.reflect.Type` and `ParameterizedType`, `WildcardType`, `GenericArrayType`,
-  `InvocationHandler`, `java.security.Key` and its private and public keys, `KeySpec`,
-  `AlgorithmParameterSpec`, `PrivilegedExceptionAction`) are translated from the JDK's sources as
-  any interface of the program (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their
-  objects in the JDK (a provider's keys, the parser of generic signatures) stays untranslated,
-  except `Proxy`, which makes the proxy classes the translator writes (see
+- Plain interfaces of reflection that library code implements with classes of its own
+  (`java.lang.reflect.Type` and `ParameterizedType`, `WildcardType`, `GenericArrayType`,
+  `InvocationHandler`) are translated from the JDK's sources as any interface of the program
+  (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their objects in the JDK (the parser of
+  generic signatures) stays untranslated, except `Proxy`, which makes the proxy classes the translator writes (see
   [reflection-and-plugins.md](reflection-and-plugins.md)).
   `Class` implements `Type` in Java, and so does the runtime's class where the program has
   `Type` (and `TypeDescriptor`, `Serializable` and `GenericDeclaration`, which a class's type
