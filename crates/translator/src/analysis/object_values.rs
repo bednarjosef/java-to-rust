@@ -24,7 +24,17 @@
 //!
 //! - An array element is read as any element of the program's arrays whose class fits the type,
 //!   since an array is written through one type and read through another (`Object[]` and
-//!   `String[]`, `T[]` and its argument's).
+//!   `String[]`, `T[]` and its argument's). The `Class` values in arrays are kept apart by where
+//!   each array was made (`sites`): an array that may hold them (`Class[]`, `Type[]`,
+//!   `Object[]`, `Class[][]` and the arrays inside it) is followed as a value from the expression
+//!   that makes it, a copy of one (`clone()`, `Arrays.copyOf`) as the array itself, and a read of
+//!   an element of an array known to be made at some places gives the `Class` values stored in
+//!   arrays made there. An array that the analysis does not follow (a library's result, a
+//!   variable it does not follow) may have been made anywhere: a read of it gives every `Class`
+//!   value stored in any array, and what is stored through it (`loose`) goes to every array that
+//!   such code may hold (`escaped`): those that the runtime or an unresolved call is given, and
+//!   the arrays in those. As for objects, the runtime is taken to reach no array but those it is
+//!   given and the arrays in them, not those in the fields of the objects it is given.
 //! - An instance method is followed for every concrete class under its own, as `super.m()` runs
 //!   it on objects of a class that overrides it, and so is an instance field's initializer.
 //! - The constants of an enum set its instance fields.
@@ -68,6 +78,10 @@ const HOLDING_VALUES: [&str; 10] = [
     "java.lang.constant.Constable",
 ];
 
+/// The types of the program that an array is a value of.
+const ARRAY_SUPERTYPES: [&str; 4] =
+    [OBJECT, "java.lang.Object", "java.lang.Cloneable", "java.io.Serializable"];
+
 /// What a place or an expression may hold.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub(super) struct Flow {
@@ -81,11 +95,39 @@ pub(super) struct Flow {
     /// the runtime) is in neither: the reflection table has no members of it.
     pub any_class: bool,
     pub class_values: ClassSet,
+    /// For dispatch, arrays that may hold `Class` values (`Types::holds_class_values`) made
+    /// anywhere; `arrays` lists them otherwise, by their places (`ObjectValues::sites`).
+    pub any_array: bool,
+    pub arrays: ClassSet,
 }
 
 impl Flow {
     fn top() -> Flow {
-        Flow { value: true, any: true, any_class: true, ..Flow::default() }
+        Flow { value: true, any: true, any_class: true, any_array: true, ..Flow::default() }
+    }
+
+    /// The array made at the place `site`.
+    fn array(site: usize) -> Flow {
+        let mut arrays = ClassSet::default();
+        arrays.insert(site);
+        Flow { arrays, ..Flow::default() }
+    }
+
+    /// Only the `Class` values and the arrays of this flow, what the places of arrays made at a
+    /// place keep (`ObjectValues::site_elements`).
+    fn class_part(&self) -> Flow {
+        Flow {
+            any_class: self.any_class,
+            class_values: self.class_values.clone(),
+            any_array: self.any_array,
+            arrays: self.arrays.clone(),
+            ..Flow::default()
+        }
+    }
+
+    /// This flow without its `Class` values and arrays.
+    fn object_part(self) -> Flow {
+        Flow { value: self.value, any: self.any, classes: self.classes, ..Flow::default() }
     }
 
     /// The `Class` values of `class`.
@@ -108,13 +150,17 @@ impl Flow {
 
     /// Adds what `other` may hold; whether that changed anything.
     fn join(&mut self, other: &Flow) -> bool {
-        let before = (self.value, self.any, self.any_class);
+        let before = (self.value, self.any, self.any_class, self.any_array);
         self.value |= other.value;
         self.any |= other.any;
         self.any_class |= other.any_class;
+        self.any_array |= other.any_array;
         let grew = !self.any && self.classes.union(&other.classes);
         let grew_classes = !self.any_class && self.class_values.union(&other.class_values);
-        grew || grew_classes || before != (self.value, self.any, self.any_class)
+        let grew_arrays = !self.any_array && self.arrays.union(&other.arrays);
+        grew || grew_classes
+            || grew_arrays
+            || before != (self.value, self.any, self.any_class, self.any_array)
     }
 }
 
@@ -305,6 +351,24 @@ pub struct ObjectValues {
     /// they grow: a read of an array element would otherwise join every place of `elements`,
     /// thousands on the Minecraft server, and a great many visits read one.
     all_elements: Flow,
+    /// For dispatch, the place of each array that may hold `Class` values
+    /// (`Types::holds_class_values`), by the expression that makes it and, for the arrays inside
+    /// a `new T[a][b]`, how deep it is (0 for the outer one).
+    sites: FastMap<(ExprId, usize), usize>,
+    /// The `Class` values and the arrays that code stores in the arrays made at each place
+    /// (`Flow::class_part`): a read of an element of those arrays gives these alone, with
+    /// `loose`, where the analysis knows where its array was made (`element_of`).
+    site_elements: Vec<Flow>,
+    /// The `Class` values and arrays stored in arrays that may have been made anywhere: through
+    /// an array that the analysis does not follow, and by the runtime into the arrays it is
+    /// given.
+    loose: Flow,
+    /// The places of the arrays that code the analysis does not follow may hold (`escape`): those
+    /// given to the runtime or to an unresolved call, the arrays in them, and those stored in
+    /// arrays that may have been made anywhere. Only these may be an array that the analysis
+    /// does not know where it was made, so only their elements may hold what is stored through
+    /// one (`loose`).
+    escaped: ClassSet,
     /// The variables of each method that the analysis follows, each with its slot in `vars`: its
     /// parameters (unless the runtime may call it) and the variables it declares, loops over or
     /// binds with a pattern.
@@ -387,6 +451,10 @@ enum Read {
     Element(Type),
     /// The elements of every array (for dispatch, see `elements_of`).
     Elements,
+    /// The `Class` values and arrays in the arrays made at a place (`ObjectValues::site_elements`).
+    Site(usize),
+    /// Those stored in arrays made anywhere (`ObjectValues::loose`).
+    Loose,
     /// The `Class` values that the lookups of a kind get (`ObjectValues::receivers`).
     Receivers(TableKind),
     Handed,
@@ -405,6 +473,9 @@ struct Types {
     /// Types that a `Class` value may be a value of: the open ones and every interface, as
     /// `Class` implements `Type`, `GenericDeclaration`, `AnnotatedElement` and more.
     holds_class: Vec<bool>,
+    /// Types that an array may be a value of: `Object`, `Cloneable`, `Serializable` and type
+    /// variables.
+    holds_array: Vec<bool>,
     /// The concrete classes that are each type or its subtypes.
     concretes: Vec<Vec<usize>>,
     /// The same, as sets.
@@ -438,6 +509,11 @@ impl Types {
             .collect();
         let holds_class =
             class.types.iter().enumerate().map(|(t, d)| open[t] || d.kind == TypeKind::Interface).collect();
+        let holds_array = class
+            .types
+            .iter()
+            .map(|d| d.kind == TypeKind::Param || ARRAY_SUPERTYPES.contains(&d.name.as_str()))
+            .collect();
         let excluded = class
             .types
             .iter()
@@ -481,6 +557,7 @@ impl Types {
             excluded,
             open,
             holds_class,
+            holds_array,
             concretes,
             concrete_sets,
             subtypes,
@@ -543,6 +620,26 @@ impl Types {
         }
     }
 
+    /// Whether a value of type `ty` may be a `Class`, or an array of those (`Class[][]` too):
+    /// for dispatch, the arrays of such a type have places (`ObjectValues::sites`).
+    fn holds_class_values(&self, ty: Type) -> bool {
+        match ty {
+            Type::JavaClass => true,
+            Type::Class(name, _) => self.index.get(name).is_none_or(|&t| self.holds_class[t]),
+            Type::Array(element) => self.holds_class_values(*element),
+            _ => false,
+        }
+    }
+
+    /// Whether a value of type `ty` may be an array that may hold `Class` values.
+    fn may_be_array(&self, ty: Type) -> bool {
+        match ty {
+            Type::Array(element) => self.bounded && self.holds_class_values(*element),
+            Type::Class(name, _) => self.index.get(name).is_none_or(|&t| self.holds_array[t]),
+            _ => false,
+        }
+    }
+
     /// What a value of type `ty` may hold, of what `flow` says.
     fn filter(&self, mut flow: Flow, ty: Type) -> Flow {
         match ty {
@@ -554,6 +651,10 @@ impl Types {
                     if !self.holds_class[t] {
                         flow.any_class = false;
                         flow.class_values = ClassSet::default();
+                    }
+                    if !self.holds_array[t] {
+                        flow.any_array = false;
+                        flow.arrays = ClassSet::default();
                     }
                     if !self.open[t] && self.bounded && flow.any {
                         flow.any = false;
@@ -570,6 +671,9 @@ impl Types {
             },
             Type::Enum(_) => Flow { any: true, ..Flow::default() },
             Type::JavaClass => flow.class_values(),
+            Type::Array(element) if self.bounded && self.holds_class_values(*element) => {
+                Flow { any_array: flow.any_array, arrays: flow.arrays, ..Flow::default() }
+            }
             Type::Null | Type::Void | Type::Array(_) | Type::StringBuilder => Flow::default(),
             _ => Flow { value: true, ..Flow::default() },
         }
@@ -675,6 +779,53 @@ impl ObjectValues {
         self.types.filter(self.all_elements.clone(), element)
     }
 
+    /// What a read of an element of `array`, evaluated in method `m` on an object of class
+    /// `ctx`, may give: `elements_of` its type, but for dispatch, where the analysis knows where
+    /// the array was made, its `Class` values and arrays are only those stored in arrays made
+    /// there (`site_elements`) or in arrays that may have been made anywhere (`loose`).
+    pub(super) fn element_of(&self, class: &Class, m: usize, ctx: usize, array: &Expr) -> Flow {
+        let element = array.ty.element();
+        let all = self.elements_of(element);
+        if !self.dispatch || !self.types.holds_class_values(element) {
+            return all;
+        }
+        self.elements_in(&self.eval(class, m, ctx, array), element, all)
+    }
+
+    /// `element_of` an array that may be what `made` holds, of element type `element`, whose
+    /// elements of that type hold `all` (`elements_of`).
+    fn elements_in(&self, made: &Flow, element: Type, all: Flow) -> Flow {
+        if made.any_array {
+            return all;
+        }
+        let mut flow = all.object_part();
+        let mut escaped = false;
+        for site in made.arrays.iter() {
+            self.read(|| Read::Site(site));
+            flow.join(&self.site_elements[site]);
+            escaped |= self.escaped.contains(site);
+        }
+        if escaped {
+            self.read(|| Read::Loose);
+            flow.join(&self.loose);
+        }
+        self.types.filter(flow, element)
+    }
+
+    /// The updates that a store of `flow` into an element of `array`, evaluated in method `m` on
+    /// an object of class `ctx`, makes: to the elements of its type and, for dispatch, of the
+    /// `Class` values and arrays in it, to the arrays that the analysis knows it was made at, or
+    /// to `loose` where it may have been made anywhere.
+    fn element_updates(&self, class: &Class, m: usize, ctx: usize, array: &Expr, flow: Flow) -> Vec<Update> {
+        let element = array.ty.element();
+        let mut out = Vec::new();
+        if self.dispatch && self.types.holds_class_values(element) {
+            out = stores_into(&self.eval(class, m, ctx, array), &flow);
+        }
+        out.push(Update::Element(element, flow));
+        out
+    }
+
     /// The concrete classes whose objects a value of type `ty` may be, whatever it holds.
     pub(super) fn concretes_of(&self, ty: Type) -> &[usize] {
         self.types.concretes_of(ty)
@@ -689,7 +840,13 @@ impl ObjectValues {
     /// What `e`, evaluated in method `m` on an object of class `ctx`, may be.
     pub(super) fn eval(&self, class: &Class, m: usize, ctx: usize, e: &Expr) -> Flow {
         let flow = match &e.kind {
-            ExprKind::Null | ExprKind::NewArray(_) | ExprKind::ArrayLit(_) => Flow::default(),
+            // An array that may hold `Class` values without a place (none in the code that
+            // `array_sites` goes over) may be any.
+            ExprKind::NewArray(_) | ExprKind::ArrayLit(_) => match self.sites.get(&(e.id, 0)) {
+                Some(&site) => Flow::array(site),
+                None => Flow { any_array: true, ..Flow::default() },
+            },
+            ExprKind::Null => Flow::default(),
             ExprKind::This if ctx == STATIC => Flow::top(),
             ExprKind::This => Flow::of(ctx),
             ExprKind::New { class: c, .. } => Flow::of(*c),
@@ -713,7 +870,7 @@ impl ObjectValues {
                 self.read(|| Read::Static(*c, name.clone()));
                 self.statics.get(&(*c, name.clone())).cloned().unwrap_or_default()
             }
-            ExprKind::Index(array, _) => self.elements_of(array.ty.element()),
+            ExprKind::Index(array, _) => self.element_of(class, m, ctx, array),
             ExprKind::Call { resolved: Some(_), .. } | ExprKind::MethodCall { resolved: Some(_), .. } => {
                 let targets = self.call_targets(class, m, ctx, e);
                 if let Some(id) = self.joined_returns(ctx, e, &targets) {
@@ -741,6 +898,11 @@ impl ObjectValues {
             {
                 self.eval(class, m, ctx, &args[args.len() - 1])
             }
+            // A copy of an array holds what the array holds, as if it were the array.
+            ExprKind::Builtin(
+                Builtin::ArraysCopyOf | Builtin::Arrays(ArraysOp::CopyOfRange | ArraysOp::Clone),
+                args,
+            ) if self.dispatch && !args.is_empty() => self.eval(class, m, ctx, &args[0]),
             ExprKind::Builtin(Builtin::ClassLiteral(ty), _) => match ty {
                 Type::Class(name, _) | Type::Enum(name) => {
                     self.types.index.get(*name).map_or(Flow::default(), |&t| Flow::class_value(t))
@@ -909,6 +1071,12 @@ enum Update {
     Field(usize, String, Flow),
     Static(usize, String, Flow),
     Element(Type, Flow),
+    /// The `Class` values and arrays stored in the arrays made at a place (`site_elements`).
+    Site(usize, Flow),
+    /// Those stored in arrays that may have been made anywhere (`loose`).
+    Loose(Flow),
+    /// The arrays of a flow, which code that the analysis does not follow is given (`escaped`).
+    Escape(ClassSet),
     /// Objects that the runtime is handed (see `handed`).
     Handed(Flow),
 }
@@ -989,7 +1157,12 @@ pub(super) fn handed_by(
         ty = *element;
     }
     match e.ty {
-        Type::Array(_) => (values.elements_of(ty), ty),
+        Type::Array(_) => {
+            // The runtime may also hand back the array itself, or the arrays in it.
+            let mut flow = values.elements_of(ty);
+            flow.any_array |= values.dispatch && values.types.holds_class_values(e.ty);
+            (flow, ty)
+        }
         _ => (values.eval(class, m, ctx, e), ty),
     }
 }
@@ -1051,6 +1224,7 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             if found.is_empty() { vec![STATIC] } else { found }
         })
         .collect();
+    let sites = if dispatch { array_sites(class, &types) } else { FastMap::default() };
     let mut values = ObjectValues {
         vars: FastMap::default(),
         returns: FastMap::default(),
@@ -1058,6 +1232,10 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         statics: FastMap::default(),
         elements: FastMap::default(),
         all_elements: Flow::default(),
+        site_elements: vec![Flow::default(); sites.len()],
+        sites,
+        loose: Flow::default(),
+        escaped: ClassSet::default(),
         param_slots,
         followed,
         runtime_params,
@@ -1186,6 +1364,20 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
             }
         }
     }
+    if timings && dispatch {
+        let any = values.site_elements.iter().filter(|f| f.any_class).count();
+        let escaped = values.escaped.iter().count();
+        let loose = match values.loose.any_class {
+            true => "any class".to_string(),
+            false => format!("{} classes", values.loose.class_values.iter().count()),
+        };
+        eprintln!(
+            "timing: points-to for dispatch: {runs} runs; {} places of arrays that may hold classes, \
+             {any} of them any class, {escaped} given to code not followed; stored in arrays made \
+             anywhere: {loose}",
+            values.sites.len()
+        );
+    }
     *values.reads.borrow_mut() = None;
     *values.calls.get_mut() = None;
     *values.joined.get_mut() = Joined::default();
@@ -1282,6 +1474,21 @@ fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> Vec<Read> {
                     changed.extend([Read::Element(ty), Read::Elements]);
                 }
             }
+            Update::Site(site, flow) => {
+                if values.site_elements[site].join(&flow) {
+                    changed.push(Read::Site(site));
+                    if values.escaped.contains(site) {
+                        escape(values, &flow.arrays, &mut changed);
+                    }
+                }
+            }
+            Update::Loose(flow) => {
+                if values.loose.join(&flow) {
+                    changed.push(Read::Loose);
+                    escape(values, &flow.arrays, &mut changed);
+                }
+            }
+            Update::Escape(arrays) => escape(values, &arrays, &mut changed),
             Update::Handed(flow) => {
                 if values.handed.join(&flow) {
                     changed.push(Read::Handed);
@@ -1290,6 +1497,34 @@ fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> Vec<Read> {
         }
     }
     changed
+}
+
+/// The updates of the places of the arrays that may be what `made` holds with the `Class` values
+/// and arrays of `flow`, stored into their elements: `loose` where they may have been made
+/// anywhere (`ObjectValues::element_updates`).
+fn stores_into(made: &Flow, flow: &Flow) -> Vec<Update> {
+    let part = flow.class_part();
+    match made.any_array {
+        true => vec![Update::Loose(part)],
+        false => made.arrays.iter().map(|site| Update::Site(site, part.clone())).collect(),
+    }
+}
+
+/// Adds the places `arrays` to those of the arrays that code the analysis does not follow may
+/// hold (`ObjectValues::escaped`), with the arrays in them.
+fn escape(values: &mut ObjectValues, arrays: &ClassSet, changed: &mut Vec<Read>) {
+    let mut work: Vec<usize> = arrays.iter().filter(|&site| !values.escaped.contains(site)).collect();
+    while let Some(site) = work.pop() {
+        if values.escaped.contains(site) {
+            continue;
+        }
+        values.escaped.insert(site);
+        // A read of its elements now gives `loose` too.
+        changed.push(Read::Site(site));
+        work.extend(
+            values.site_elements[site].arrays.iter().filter(|&inner| !values.escaped.contains(inner)),
+        );
+    }
 }
 
 /// What the statements `body` of method `m`, run on an object of class `ctx`, store.
@@ -1303,7 +1538,7 @@ fn visit(values: &ObjectValues, class: &Class, m: usize, ctx: usize, body: &[Stm
                 declared.extend(values.var_update(m, ctx, name, flow));
             }
             Stmt::ForEach { ty, name, array, .. } => {
-                let flow = values.elements_of(array.ty.element());
+                let flow = values.element_of(class, m, ctx, array);
                 declared.extend(values.var_update(m, ctx, name, values.types.filter(flow, *ty)));
             }
             Stmt::Return(Some(e), _) => declared.push(Update::Return(m, ctx, values.eval(class, m, ctx, e))),
@@ -1342,7 +1577,7 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
                     }
                 },
                 Place::Static { class: c, name } => out.push(Update::Static(*c, name.clone(), flow)),
-                Place::Index(array, _) => out.push(Update::Element(array.ty.element(), flow)),
+                Place::Index(array, _) => out.extend(values.element_updates(class, m, ctx, array, flow)),
             }
         }
         ExprKind::ArrayLit(items) => {
@@ -1358,8 +1593,26 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
                     None => true,
                 };
                 if named_by.is_none_or(named) {
-                    out.push(Update::Element(x.ty.element(), eval(item)));
+                    let flow = eval(item);
+                    if let Some(&site) = values.sites.get(&(x.id, 0)) {
+                        out.push(Update::Site(site, flow.class_part()));
+                    }
+                    out.push(Update::Element(x.ty.element(), flow));
                 }
+            }
+        }
+        // The arrays inside a `new T[a][b]` have places of their own, held by those outside them.
+        ExprKind::NewArray(sizes) if sizes.len() > 1 => {
+            let mut ty = x.ty;
+            for depth in 0..sizes.len() - 1 {
+                ty = ty.element();
+                let (Some(&outer), Some(&inner)) =
+                    (values.sites.get(&(x.id, depth)), values.sites.get(&(x.id, depth + 1)))
+                else {
+                    break;
+                };
+                out.push(Update::Site(outer, Flow::array(inner)));
+                out.push(Update::Element(ty, Flow::array(inner)));
             }
         }
         ExprKind::InstanceOf { value, ty, binding: Some(name) } => {
@@ -1417,18 +1670,53 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
             }
         }
         // A library function may store its arguments, or the elements of an array it is given,
-        // into the arrays it is given.
-        ExprKind::Builtin(_, args) if args.iter().any(|a| matches!(a.ty, Type::Array(_))) => {
-            let mut flow = Flow::default();
-            for a in args {
-                match a.ty {
-                    Type::Array(element) => flow.join(&values.elements_of(*element)),
-                    _ => flow.join(&eval(a)),
-                };
+        // into the arrays it is given. The `Class` values and arrays that an array's elements
+        // hold are in it already: only those of the other arguments are stored into it, so
+        // that sorting an array that may have been made anywhere stores nothing new (`loose`).
+        // For dispatch, an argument of another type (`Object`, as the natives of
+        // `java.lang.reflect.Array` take theirs) that holds arrays is an array given too, for
+        // the `Class` values and arrays stored into it.
+        ExprKind::Builtin(_, args)
+            if args.iter().any(|a| {
+                matches!(a.ty, Type::Array(_)) || values.dispatch && values.types.may_be_array(a.ty)
+            }) =>
+        {
+            let flows: Vec<Flow> = args.iter().map(eval).collect();
+            let typed = |i: usize| matches!(args[i].ty, Type::Array(_));
+            let held = |i: usize| {
+                values.dispatch
+                    && values.types.may_be_array(args[i].ty)
+                    && (flows[i].any_array || !flows[i].arrays.words.is_empty())
+            };
+            let arrays: Vec<usize> = (0..args.len()).filter(|&i| typed(i) || held(i)).collect();
+            if arrays.is_empty() {
+                return;
             }
-            for a in args {
-                if let Type::Array(element) = a.ty {
-                    out.push(Update::Element(*element, flow.clone()));
+            let given: Vec<Flow> = (0..args.len())
+                .map(|i| match (typed(i), arrays.contains(&i)) {
+                    (true, _) => values.element_of(class, m, ctx, &args[i]),
+                    (false, true) => {
+                        let all = values.elements_of(args[i].ty);
+                        values.elements_in(&flows[i], args[i].ty, all).class_part()
+                    }
+                    (false, false) => flows[i].clone(),
+                })
+                .collect();
+            let mut flow = Flow::default();
+            given.iter().for_each(|f| _ = flow.join(f));
+            for &i in &arrays {
+                let mut stored = flow.clone().object_part();
+                for (_, f) in given.iter().enumerate().filter(|&(j, _)| j != i) {
+                    stored.join(&f.class_part());
+                }
+                match (typed(i), values.dispatch) {
+                    (true, true) => out.extend(values.element_updates(class, m, ctx, &args[i], stored)),
+                    (true, false) => out.push(Update::Element(args[i].ty.element(), flow.clone())),
+                    (false, _) => {
+                        let part = stored.class_part();
+                        out.extend(stores_into(&flows[i], &part));
+                        out.push(Update::Element(args[i].ty, part));
+                    }
                 }
             }
         }
@@ -1436,7 +1724,27 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
     });
     if values.dispatch {
         visit_expr(e, &mut |x| {
-            out.extend(handed(values, class, m, ctx, x).into_iter().map(|(f, _)| Update::Handed(f)))
+            out.extend(handed(values, class, m, ctx, x).into_iter().map(|(f, _)| Update::Handed(f)));
+            // The arrays that the runtime or an unresolved call is given may be anywhere then.
+            let given: Vec<&Expr> = match &x.kind {
+                _ if hands(x) => match &x.kind {
+                    ExprKind::Builtin(_, args) => args.iter().collect(),
+                    ExprKind::Binary(_, l, r) => vec![l, r],
+                    ExprKind::Assign { value, .. } => vec![value],
+                    _ => Vec::new(),
+                },
+                ExprKind::Call { resolved: None, args, .. } => args.iter().collect(),
+                ExprKind::MethodCall { resolved: None, receiver, args, .. } => {
+                    std::iter::once(&**receiver).chain(args).collect()
+                }
+                _ => Vec::new(),
+            };
+            for a in given.into_iter().filter(|a| values.types.may_be_array(a.ty)) {
+                let flow = values.eval(class, m, ctx, a);
+                if !flow.arrays.words.is_empty() {
+                    out.push(Update::Escape(flow.arrays));
+                }
+            }
         });
     }
     out
@@ -1472,6 +1780,48 @@ pub(super) fn handed(
         _ => Vec::new(),
     };
     operands.into_iter().map(|a| handed_by(values, class, m, ctx, a)).collect()
+}
+
+/// The places of the arrays that may hold `Class` values (`ObjectValues::sites`), numbered in the
+/// order of the program's code.
+fn array_sites(class: &Class, types: &Types) -> FastMap<(ExprId, usize), usize> {
+    let mut sites = FastMap::default();
+    let mut note = |e: &Expr| {
+        visit_expr(e, &mut |x| {
+            let depths = match &x.kind {
+                ExprKind::NewArray(sizes) => sizes.len().max(1),
+                ExprKind::ArrayLit(_) => 1,
+                _ => return,
+            };
+            let mut ty = x.ty;
+            for depth in 0..depths {
+                let Type::Array(element) = ty else { break };
+                if !types.holds_class_values(*element) {
+                    break;
+                }
+                let next = sites.len();
+                sites.insert((x.id, depth), next);
+                ty = *element;
+            }
+        })
+    };
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(s, &mut note, &mut |_| {});
+        }
+    }
+    for decl in &class.types {
+        for init in decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()) {
+            note(init);
+        }
+        for value in decl.enum_constants.iter().flatten().flat_map(|c| &c.values) {
+            note(value);
+        }
+    }
+    for e in &class.raised {
+        note(e);
+    }
+    sites
 }
 
 /// The variables of `method` that the analysis follows, its parameters among them when `params`.

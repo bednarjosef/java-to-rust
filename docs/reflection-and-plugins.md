@@ -162,11 +162,16 @@ program where such a lookup can happen, so they can be checked before the progra
   (`Program::flow_classes`), so that a lookup never silently finds nothing
   (`corpus/whole-program/LookupsOnClassesWithoutLiterals.java`); each round adds classes, so the
   rounds end. Where the facts say a lookup of a kind may get any class, its candidates stay
-  reachability's. What the facts still merge: the
-  elements of every array are one place for each element type, so a `Class` value stored in
-  any array (a member's classes in the table's data among them) reaches every read of a
-  `Class[]`, `Type[]` or `Object[]` element, and a field of a class holds what any of its
-  objects holds, so the keys of every map are one. A lookup reads only
+  reachability's. The `Class` values in arrays are kept apart by where each array was made
+  (`Class[][]` and the arrays inside it too), so a read of an element of an array gets those
+  stored in arrays made where it was, unless the facts do not follow the array (a library's
+  result), when it gets those of every array, and what is stored through such an array goes to
+  every array that the runtime was given (`corpus/whole-program/ClassValuesInArrays.java`).
+  What the facts still merge: the elements of one array are one place (a lookup on
+  `groups[1][0]` gets the classes of `groups[0]` too), a field of a class holds what any of its
+  objects holds (the keys of every map are one, and so are the data of the three tables of
+  methods, fields and constructors, whose classes a field's type may be), and the lists of
+  parameter types of methods and constructors are made in one place. A lookup reads only
   the members of its class: the first lookup of methods, fields or constructors reads the
   table's data (`TableData`) and groups the slots by the class that finds each member
   (`MemberIndex`, a hash table from the class to the run of its members, in the table's order),
