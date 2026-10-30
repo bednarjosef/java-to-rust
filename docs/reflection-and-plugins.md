@@ -217,6 +217,8 @@ program where such a lookup can happen, so they can be checked before the progra
   literal reachable code has (`program/reach/reflection.rs`).
 - **`ClassLoader`** is a type. The system and platform loaders exist, with `getName`,
   `getParent` and `getClassLoader()` of a class. `loadClass` goes through the `forName` table.
+  `registerAsParallelCapable` answers true: with no class loading locks, every loader of the
+  translation loads in parallel.
   `getResource`, `getResources`, `getResourceAsStream` and their `getSystem…` forms find what
   Java's loaders would find among the files of the roots and the class files of their sources
   (`program::loader_resources`, the native `holder0` in `java/Threads.java`): the bootstrap and
