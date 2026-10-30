@@ -947,14 +947,18 @@ nothing (slower, never wrong), so the scan is to be exact, not generous.
   variables of what failed, which can fail more: a method none of whose parameter types names a
   type variable outside an erased class's arguments, which Rust cannot infer (`List<T>` once
   `List` is erased; about half of Minecraft's), and a class none of whose instance fields does;
-  a method that overrides another or that another overrides; a type variable named in a lambda,
+  a method that overrides another or that another overrides, an enum constant's body, a lambda
+  or a method reference implements; a type variable named in a lambda,
   a local or anonymous class or an inner class (`type_var`); a candidate class used raw, or with
   a wildcard, capture or intersection argument; a cast or `instanceof` of a type that names a
   candidate; a value of a type variable used as an operand or receiver, or stored, passed
   (packed varargs too) or returned where the type is not a type variable of a Rust generic; a
   value of a type that names one converted to another type; and a member of an erased generic
-  whose result javac gives a type variable of a Rust generic, which lowering casts back. On
-  javac it predicts all 360 failing generics and no others, in 1.3 s. Erasing them before the
+  whose result javac gives a type variable of a Rust generic (or a capture of `? extends U`,
+  which lowering reads as `U`), which lowering casts back; and,
+  once a call reaches a native of `TranslatedTypes` whose table lists the program's classes
+  (`typeParameters0`, `genericInterfaces0`, `bounds0`), each class it lists, whose class literal
+  the table names. On javac it predicts all 360 failing generics and no others, in 1.3 s. Erasing them before the
   first lowering also spares the arrays that met only because a class was still a Rust generic
   then: javac's `ConcurrentSkipListMap.Index[]` (noted as it and as `Index<Object, Object>[]`,
   two of its 75 types) stays an array of its class.
@@ -965,12 +969,15 @@ nothing (slower, never wrong), so the scan is to be exact, not generous.
   `object_array`): an argument and its parameter (packed varargs too), an assignment, a field's
   or local's initializer, a return, a `?:`, an array initializer's element, a cast, an
   `instanceof`, an array in a string concatenation, a member of an erased generic read back as
-  javac's type (`erased_use`), and a method's parameters and result against those of the methods
-  it overrides (the bridges). Code that lowering makes and the trees do not have is read from the
+  javac's type (`erased_use`), a method's parameters and result against those of the methods
+  it overrides (the bridges), and the value of a lambda's body or of a method reference's call
+  as the descriptor's return type, and that as the result of the method it implements (its
+  bridge; `Mode::values` as a `Supplier<E[]>`). Code that lowering makes and the trees do not have is read from the
   same inputs lowering makes it from: a field read or updated through `Unsafe`, a `VarHandle` or
   a field updater, whose value is converted to the call's type (`handle_read`), and the members
   of the reflection tables, whose arguments and fields are cast from `Object` and whose results
-  converted to it (`reflected_conversions`). `noted_later` then closes the set, and what the scan
+  converted to it (`reflected_conversions`), and an `Arrays.copyOf` into a class literal's
+  `Object[]`, whose copy is the source's array (`copy_of_with_class`). `noted_later` then closes the set, and what the scan
   recorded is forgotten, as nothing has been lowered yet. On javac it predicts all 73 types and
   no others, in 0.6 s, and the census lowers the program once, to the same translation.
 - **Checking it**: with `JAVA_TO_RUST_PREDICTION_CHECK` set, the predicted arrays are not used,

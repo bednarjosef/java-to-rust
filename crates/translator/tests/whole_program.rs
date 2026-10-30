@@ -517,13 +517,18 @@ fn assert_predicted_all(stderr: &str) {
 /// the old `Tag[]` that `getAndSet` of a `VarHandle` gives as an `Object`, read from the field
 /// (the call itself passes no array), meets the `(Object[])` cast; and the `Label[]` that `Method.invoke` gets in its `Object[]`
 /// meets the `Named[]` that the table of the program's methods casts it to for the call
-/// (`lower::reflection`). The prediction finds both, and the program is lowered once.
+/// (`lower::reflection`); and the `Step[]` that `Arrays.copyOf(.., Object[].class)` copies, which
+/// lowering copies as it is, meets the copy's `Object[]`, as in the queue of a
+/// `ScheduledThreadPoolExecutor`. The prediction finds them all, and the program is lowered once.
 const ARRAYS_IN_LOWERED_CODE: &str = r#"
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 
 public class Main {
+    static class Step {}
+
     static class Tag {
         final String name;
         Tag(String name) { this.name = name; }
@@ -555,6 +560,8 @@ public class Main {
         System.out.println(back.length + " " + (shelf.tags == null));
         Method count = Main.class.getMethod("count", Named[].class);
         System.out.println(count.invoke(null, new Object[] { new Label[2] }));
+        Step[] steps = { new Step(), new Step() };
+        System.out.println(Arrays.copyOf(steps, 1, Object[].class).length);
     }
 }
 "#;
@@ -572,9 +579,111 @@ fn arrays_held_as_objects_in_lowered_code_are_predicted() {
     std::fs::write(sources.join("Main.java"), ARRAYS_IN_LOWERED_CODE).unwrap();
     let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
     let again = stderr.lines().find(|l| l.contains("is lowered again for")).unwrap_or_default();
-    for array in ["Main.Tag[]", "Main.Label[]", "Main.Named[]"] {
+    for array in ["Main.Tag[]", "Main.Label[]", "Main.Named[]", "Main.Step[]"] {
         assert!(again.contains(array), "{array} not noted:\n{stderr}");
     }
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
+/// Arrays that a lambda's or a method reference's method returns as the descriptor's return
+/// type: the `Mode[]` of `Mode::values` as the `E[]` of a `Supplier<E[]>`, as Minecraft passes its
+/// enums' constants to `StringRepresentable.fromEnum`, and the `Shade[]` and `Size[]` that a
+/// lambda's expression and `return` give as `Object[]`s. The prediction finds them all, and the
+/// program is lowered once.
+const ARRAYS_FROM_LAMBDAS: &str = r#"
+import java.util.function.Supplier;
+
+public class Main {
+    interface Named { String serialName(); }
+
+    enum Mode implements Named {
+        FAST, SLOW;
+        public String serialName() { return name().toLowerCase(); }
+    }
+
+    enum Shade { LIGHT, DARK }
+
+    enum Size { SMALL, LARGE }
+
+    static <E extends Enum<E> & Named> String names(Supplier<E[]> values) {
+        StringBuilder out = new StringBuilder();
+        for (E e : values.get()) out.append(e.serialName()).append(' ');
+        return out.toString().trim();
+    }
+
+    static int count(Supplier<Object[]> values) { return values.get().length; }
+
+    public static void main(String[] args) {
+        System.out.println(names(Mode::values));
+        System.out.println(count(() -> Shade.values()));
+        System.out.println(count(() -> {
+            Size[] sizes = Size.values();
+            return sizes;
+        }));
+    }
+}
+"#;
+
+#[test]
+fn arrays_that_lambdas_return_are_predicted() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-arrays-from-lambdas");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), ARRAYS_FROM_LAMBDAS).unwrap();
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    let again = stderr.lines().find(|l| l.contains("is lowered again for")).unwrap_or_default();
+    for array in ["Main.Mode[]", "Main.Shade[]", "Main.Size[]"] {
+        assert!(again.contains(array), "{array} not noted:\n{stderr}");
+    }
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
+/// `getTypeParameters` of a class known only at run time reaches `TranslatedTypes`'s table of
+/// the program's generic classes, which names each one's class literal, a use of `Pair` without
+/// type arguments (`generic_types_native`). The prediction fails `Pair` with it, and the program
+/// is lowered once.
+const CLASSES_IN_THE_TABLE_OF_TYPE_PARAMETERS: &str = r#"
+public class Main {
+    static class Pair<A, B> {
+        final A first;
+        final B second;
+        Pair(A first, B second) { this.first = first; this.second = second; }
+        A first() { return first; }
+    }
+
+    public static void main(String[] args) {
+        Pair<String, Integer> p = new Pair<>("a", 1);
+        System.out.println(p.first() + p.second);
+        Class<?> c = args.length > 3 ? Main.class : Runnable.class;
+        System.out.println(c.getTypeParameters().length);
+    }
+}
+"#;
+
+#[test]
+fn classes_in_the_table_of_type_parameters_are_predicted_to_fail() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-type-parameters-table");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), CLASSES_IN_THE_TABLE_OF_TYPE_PARAMETERS).unwrap();
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    assert!(stderr.contains("1 of 1 failed Rust generics"), "{stderr}");
     assert_predicted_all(&stderr);
     let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
     assert_eq!(attempts(&stderr), 1, "{stderr}");
@@ -1782,9 +1891,22 @@ public class Main {
     static <T> T cast(Object o) { return keep((T) o); }
     static <T> Supplier<T> later(T v) { return () -> v; }
     static <T> List<T> one(T v) { return List.of(v); }
+    // `get` of an erased `Optional` read as the capture's bound `U`, which lowering casts back.
+    @SuppressWarnings("unchecked")
+    static <U> U orElse(Optional<? extends U> o, U other) { return (U) (o.isPresent() ? o.get() : other); }
+    // Implemented by a method reference, and overridden by enum constants' bodies.
+    interface Terminal { <T> String decode(List<T> ops, T input); }
+    static <T> String decodeAll(List<T> ops, T input) { return ops.size() + ":" + input; }
+    enum Kind {
+        ONE { <T> List<T> create(T value) { return List.of(value); } },
+        TWO { <T> List<T> create(T value) { return List.of(value, value); } };
+        abstract <T> List<T> create(T value);
+    }
 
     public static void main(String[] args) {
-        Box<String> box = new Box<>(keep("b"));
+        Terminal terminal = Main::decodeAll;
+        System.out.println(terminal.decode(List.of(1), 2) + Kind.TWO.create("k"));
+        Box<String> box = new Box<>(keep(orElse(Optional.of("b"), "c")));
         new Visitor<String>().visit(new Leaf(), "x");
         System.out.println(box.get() + first(one("f")) + text(3) + later("l").get()
             + new Pair<>("a", 1).equals(new Pair<>("a", 2)) + Main.<String>cast("c"));
