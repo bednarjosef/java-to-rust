@@ -18,7 +18,9 @@
 //! classes' statics are thread-local cells, which only the main thread uses.
 //!
 //! An object, array or string static of the process that only its class's static initialization
-//! assigns (`Facts::final_statics`) is a `java::Final` instead, which a read reaches with no lock:
+//! assigns (`Facts::final_statics`) is a `java::Final` instead, with no `LazyLock` around it (it
+//! builds a starting value that is not a constant itself, on its first read), which a read reaches
+//! with no lock:
 //! `X.get().clone()` as a value, and `(*X.get())`, a place, where the read is only borrowed (the
 //! object of a call or a field access, an array that is indexed, a string that is lent).
 
@@ -189,15 +191,18 @@ impl<'a> Gen<'a> {
         }
         for (t, f) in cells {
             let (cell, ty, init, constant) = self.static_cell(t, f);
+            let fixed = !is_cell(f.ty) && self.final_static(t, &f.name);
             let kind = if is_cell(f.ty) {
                 self.runtime("Atomic")
-            } else if self.final_static(t, &f.name) {
+            } else if fixed {
                 self.runtime("Final")
             } else {
                 self.runtime("Locked")
             };
             let vis = self.vis();
-            if constant {
+            if fixed && !constant {
+                self.line(&format!("{vis}static {cell}: {kind}<{ty}> = {kind}::lazy(|| {init});"));
+            } else if constant {
                 self.line(&format!("{vis}static {cell}: {kind}<{ty}> = {kind}::new({init});"));
             } else {
                 self.line(&format!(

@@ -17,9 +17,10 @@
 
 use std::cell::{OnceCell, RefCell, UnsafeCell};
 use std::ops::Deref;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{
-    AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize,
-    Ordering,
+    AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicPtr, AtomicU16, AtomicU32, AtomicU64,
+    AtomicUsize, Ordering,
 };
 use std::sync::{Condvar, Mutex, OnceLock};
 
@@ -212,37 +213,108 @@ impl<T: Primitive> Atomic<T> {
 /// initialization assigns, once (`set`). Until then it holds the value it starts with, Java's
 /// default (or, for a class initialized lazily, its initializer's value, which nothing replaces),
 /// as the initializer's own reads before the assignment see it. A reader lends the value with no
-/// lock (`get`): once the class is initialized it never changes, and the `OnceLock` publishes it
-/// to every thread that sees it set. A thread that reads it during another thread's initialization
-/// (code of the class itself, which waits for no initialization) sees one of the two values.
+/// lock (`get`): once the class is initialized it never changes.
+///
+/// A read is one load of `current`, the address of the value it lends, and a test that it is set:
+/// the static needs no `LazyLock` around it, though the value it starts with may be built at run
+/// time (`lazy`), since that value is built on the first read that finds `current` unset, out of
+/// line, and kept in `default`. `set` writes the assigned value into `value` and then points
+/// `current` at it with release, which publishes it to every thread that reads `current`. Neither
+/// value moves or changes once `current` points at it, so a lent value stays valid. A thread that
+/// reads the static during another thread's initialization (code of the class itself, which waits
+/// for no initialization) sees one of the two values.
 pub struct Final<T> {
-    value: OnceLock<T>,
-    default: T,
+    current: AtomicPtr<T>,
+    value: UnsafeCell<MaybeUninit<T>>,
+    assigned: AtomicBool,
+    default: OnceLock<T>,
+    start: Start<T>,
 }
+
+/// The value a `Final` starts with: a constant, or a function that builds it.
+enum Start<T> {
+    Value(T),
+    Built(fn() -> T),
+}
+
+// `value` is written once, before `current` publishes it, and only read after; the rest is `Sync`.
+unsafe impl<T: Send + Sync> Sync for Final<T> {}
 
 impl<T> Final<T> {
     pub const fn new(default: T) -> Final<T> {
-        Final { value: OnceLock::new(), default }
+        Final::starting(Start::Value(default))
+    }
+
+    /// A `Final` that starts with the value `make` builds, on its first read.
+    pub const fn lazy(make: fn() -> T) -> Final<T> {
+        Final::starting(Start::Built(make))
+    }
+
+    const fn starting(start: Start<T>) -> Final<T> {
+        Final {
+            current: AtomicPtr::new(std::ptr::null_mut()),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+            assigned: AtomicBool::new(false),
+            default: OnceLock::new(),
+            start,
+        }
     }
 
     /// The value: the one assigned, or the one it starts with.
     #[inline(always)]
     pub fn get(&self) -> &T {
-        self.value.get().unwrap_or(&self.default)
+        let p = self.current.load(Ordering::Acquire);
+        if p.is_null() {
+            return self.first_read();
+        }
+        // `current` points at `value` or a starting value, neither of which moves or changes
+        // while the `Final` lives.
+        unsafe { &*p }
+    }
+
+    /// A read before `current` is set: points it at the starting value, unless `set` has pointed
+    /// it at the assigned one meanwhile.
+    #[cold]
+    #[inline(never)]
+    fn first_read(&self) -> &T {
+        let start: *const T = match &self.start {
+            Start::Value(v) => v,
+            Start::Built(make) => self.default.get_or_init(*make),
+        };
+        let _ = self.current.compare_exchange(
+            std::ptr::null_mut(),
+            start as *mut T,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        // As in `get`.
+        unsafe { &*self.current.load(Ordering::Acquire) }
     }
 
     /// The assignment of the class's static initialization. Java assigns a `final` once, so a
     /// second assignment is a translation bug.
     pub fn set(&self, value: T) {
-        if self.value.set(value).is_err() {
+        if self.assigned.swap(true, Ordering::AcqRel) {
             panic!("a static final assigned twice");
         }
+        // Only this call writes `value`, and no reader reaches it until `current` points at it.
+        unsafe { (*self.value.get()).write(value) };
+        self.current.store(self.value.get() as *mut T, Ordering::Release);
     }
 
     /// Runs `f` on the value, as a `java::Locked` static's read but with no lock.
     #[inline(always)]
     pub fn with_borrow<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         f(self.get())
+    }
+}
+
+impl<T> Drop for Final<T> {
+    fn drop(&mut self) {
+        if *self.assigned.get_mut() {
+            // `set` wrote it, and nothing lends it once the `Final` is dropped.
+            unsafe { self.value.get_mut().assume_init_drop() };
+        }
     }
 }
 

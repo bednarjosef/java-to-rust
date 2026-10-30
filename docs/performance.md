@@ -174,6 +174,19 @@ made on the stack (`java::count_allocation`).
   takes about 70 ms either way. Without LTO, at `opt-level = 3`, it took 93 ms while `base()`,
   its checks inside it, was too long to stay, against 70 ms (medians of five, at a load of 7;
   Java's kernel is about 160 to 220 ms there).
+- **Static finals and arrays that threads share (NoiseTree 1.5x).** A tree of density
+  functions computed on a worker thread, with Perlin noise at the leaves: each noise call reads a
+  byte permutation table 14 times and a `static final` array of gradient objects 8 times. The
+  thread makes every array a `java::SharedArray`, so each read loads the handle, then the
+  elements' address and length from the array's header, then the element, an atomic load. Java
+  reads the element after the array's header in one load, and takes a `static final` array for a
+  constant whose length it knows, so `GRADIENT[hash & 15]` has no check. The `static final` is a
+  `java::Final`, which a read reaches with one load of a pointer and a test
+  (docs/multi-threading.md, 2.3); inside a `LazyLock`, as it was, a read tested the `LazyLock` and
+  then the `OnceLock` inside it (kernel 2502 ms against 2480 ms now, alternating runs at about
+  850 MHz; Java's kernel is about 1610 ms there). With the permutation table a plain `[u8; 256]`
+  field and the gradients a constant table of numbers, edited by hand into the generated code,
+  the kernel takes 1966 ms; the table alone, 2321 ms.
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
