@@ -128,6 +128,11 @@ made on the stack (`java::count_allocation`).
   range, so they keep Java's check, an inlined compare and a branch to a `#[cold]`,
   `#[inline(never)]` throwing function (runtime `array.rs`). Interpreter's stack and locals are
   plain `Vec<i32>` with the same checks, since its indexes come from the program it interprets.
+  Its kernel depends on where the linker puts `run`: two builds with the same instructions in
+  `run`, one starting 32 bytes past a 64-byte line and one at a line, ran the kernel in 390 ms
+  and 260 ms (the same instructions and branch misses executed, 4.9 against 7.3 instructions a
+  cycle). In the slow one, the block every opcode jumps back to, which reads the next opcode and
+  jumps through the table, spans two 64-byte lines.
   `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`.
 - **MatrixMultiply (0.65x, kernel 0.9x).** The matrices are plain
   `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
