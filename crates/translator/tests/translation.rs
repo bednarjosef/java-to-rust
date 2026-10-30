@@ -7104,6 +7104,34 @@ fn static_fields_of_stub_classes_are_rejected() {
 }
 
 #[test]
+fn a_resource_of_an_untranslated_class_is_null_and_not_closed() {
+    // No object of a class that the translation leaves out can be made (`program::reach::stubs`),
+    // so a try-with-resources over one has a null resource, which Java does not close: the JDK's
+    // key store reads a sealed key so (`SealedObjectForKeyProtector.getKey`).
+    let dir = write_sources(
+        "untranslated-resource",
+        &[
+            (
+                "app/Main.java",
+                "package app;\nimport java.io.ObjectInputStream;\npublic class Main {\n    static ObjectInputStream held;\n    public static void main(String[] a) throws Exception {\n        try (ObjectInputStream in = held) { System.out.println(in == null); }\n    }\n}\n",
+            ),
+            (
+                "lib/java/io/ObjectInputStream.java",
+                "package java.io;\npublic class ObjectInputStream implements AutoCloseable {\n    public void close() {}\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust = java_to_rust::translate_program(&program).expect("a resource that is null");
+    assert!(!rust.contains("close"), "{rust}");
+}
+
+#[test]
 fn a_copy_from_a_subclass_array_into_an_object_array_stores_each_element_as_it_is() {
     let rust = translate(
         "public class Main {

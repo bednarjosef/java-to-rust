@@ -372,7 +372,8 @@ A translated program is closed: it knows all its classes. So:
 
 - `jdk.internal.loader.` is untranslated ("class loading"), as are reflection
   (`java.lang.reflect.`, `java.lang.invoke.`, with the exceptions in `TRANSLATED_ANYWAY`),
-  serialization streams and `SunJCE`'s `ChaCha20` ciphers (`UNTRANSLATED`). Security is
+  serialization streams, `SunJCE`'s `ChaCha20` ciphers and its `JCEKS` key store, which reads
+  its keys by serialization (`UNTRANSLATED`). Security is
   translated from the JDK's code, the lookup of services by name as the JDK does it: `Security`
   and its properties, the JDK's own providers (`SUN`, `SunRsaSign`, `SunEC`, `SunJSSE`, `SunJCE`
   and the others that the translation's modules provide) with their registrations, and
@@ -386,10 +387,10 @@ A translated program is closed: it knows all its classes. So:
   has the services it looks up: message digests and secure random numbers (`UUID.randomUUID`),
   RSA and EC keys, ciphers and signatures, and TLS (`SSLContext`, its key and trust managers,
   X.509 certificates and their paths, PKCS12 key stores), which the HTTPS client uses. A
-  service whose class is not translated, as `ChaCha20`'s, fails when it is made, with the
-  `NoSuchAlgorithmException` the JDK throws for a class it cannot find, so a library that falls
-  back from one algorithm to another does so (TLS takes such cipher suites as unavailable); a
-  name no provider registers fails as in Java.
+  service whose class is not translated, as `ChaCha20`'s and `JCEKS`'s, fails when it is made,
+  with the `NoSuchAlgorithmException` the JDK throws for a class it cannot find, so a library
+  that falls back from one algorithm to another does so (TLS takes such cipher suites as
+  unavailable); a name no provider registers fails as in Java.
   `ResourceBundle`, `ServiceLoader` and
   `Module` are translated, the last two (and `ModuleLayer`) patched (see [reflection-and-plugins.md](reflection-and-plugins.md)).
 - `Class.forName` of a name spelled out as a literal is that class's literal, after its static

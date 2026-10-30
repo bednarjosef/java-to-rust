@@ -83,11 +83,13 @@ pub(crate) fn die(e: impl fmt::Display + 'static) -> ! {
 }
 
 /// How a `try` block with a `finally` ended, which the code after the `finally` acts on: it
-/// completed normally, returned a value, jumped out (a `break` or `continue`, numbered by the
-/// translation), or threw. A block that cannot return or jump has `Infallible` for `T` or `J`,
-/// so that a `match` on it needs no arm for them.
-pub enum Completion<T, E, J = usize> {
+/// completed normally, or did so with the values of the locals that it set for the code after
+/// the `finally` (`Carried`), returned a value, jumped out (a `break` or `continue`, numbered by
+/// the translation), or threw. A block that cannot return, jump or carry locals has `Infallible`
+/// for `T`, `J` or `N`, so that a `match` on it needs no arm for them.
+pub enum Completion<T, E, J = usize, N = std::convert::Infallible> {
     Normal,
+    Carried(N),
     Return(T),
     Jump(J),
     Throw(E),
@@ -105,7 +107,7 @@ impl<T, E> Thrown<E> for Result<T, E> {
     }
 }
 
-impl<T, E, J> Thrown<E> for Completion<T, E, J> {
+impl<T, E, J, N> Thrown<E> for Completion<T, E, J, N> {
     fn thrown(e: E) -> Self {
         Completion::Throw(e)
     }

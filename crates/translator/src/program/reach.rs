@@ -319,7 +319,8 @@ pub const TRANSLATED_NESTED: &[&str] = &[
 /// them, and their static state is method handles. The `ChaCha20` ciphers of `SunJCE`, which read
 /// arrays through method handles that the translation does not follow, are not translated: their
 /// services fail when made (`reach/services.rs`), and TLS takes them as unavailable and uses the
-/// cipher suites of AES.
+/// cipher suites of AES. Its `JCEKS` key store, which reads its keys by serialization
+/// (`SealedObject`), is not translated either: making it fails, and PKCS12 key stores are used.
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
@@ -328,6 +329,7 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.runtime.ObjectMethods", "reflection"),
     ("java.lang.runtime.SwitchBootstraps", "reflection"),
     ("com.sun.crypto.provider.ChaCha20", "security"),
+    ("com.sun.crypto.provider.JceKeyStore", "serialization"),
     ("java.lang.reflect.", "reflection"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
@@ -1150,6 +1152,8 @@ pub const UNSET_PROPERTIES: &[&str] = &[
     "jdk.traceVirtualThreadLocals",
     // What `sun.misc.Unsafe`'s memory access methods do (`--sun-misc-unsafe-memory-access`).
     "sun.misc.unsafe.memory.access",
+    // Whether TLS logs its handshakes (`SSLLogger`), whose log lines name their caller's frame.
+    "javax.net.debug",
 ];
 
 /// The `if` statements among the statements of `block` whose `then` branch never runs: their
@@ -4787,6 +4791,8 @@ mod tests {
         assert_eq!(untranslated("java.security.cert.X509Certificate"), None);
         assert_eq!(untranslated("sun.security.ssl.SSLContextImpl"), None);
         assert_eq!(untranslated("com.sun.crypto.provider.ChaCha20Cipher"), Some("security"));
+        assert_eq!(untranslated("com.sun.crypto.provider.JceKeyStore"), Some("serialization"));
+        assert_eq!(untranslated("com.sun.crypto.provider.KeyProtector"), None);
         assert_eq!(untranslated("java.util.ArrayList"), None);
         // Reachability stops at method handles, and goes into `Array`.
         let unit = json!({"typeDecls": [

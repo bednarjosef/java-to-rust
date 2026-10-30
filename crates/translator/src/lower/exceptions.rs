@@ -1353,6 +1353,14 @@ impl<'t> Lowering<'t> {
             _ => None,
         };
         let Some(close) = class.and_then(|t| self.close_method(t)) else {
+            // A class that a whole program does not translate has no constructors
+            // (`program::reach::stubs`): its resource is null, which Java does not close.
+            if let Type::Class(name, _) = ty
+                && crate::program::untranslated(name).is_some()
+            {
+                declared.push(Stmt::Block(body));
+                return Ok(declared);
+            }
             return unsupported(resource, "a resource without a `close()` of the program");
         };
         let Some(throwable) = self.type_index("java.lang.Throwable") else {
