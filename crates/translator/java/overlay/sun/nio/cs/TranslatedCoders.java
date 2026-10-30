@@ -17,7 +17,9 @@ import java.nio.charset.StandardCharsets;
  * of {@code UTF_8}, {@code US_ASCII}, {@code ISO_8859_1}, {@code UTF_16}, {@code UTF_16BE} or
  * {@code UTF_16LE}, which the patches of those classes ({@code java/patches/sun/nio/cs}) let this
  * class make, and which reachability enters although it does not enter the class they are in
- * ({@code program::TRANSLATED_NESTED}). Any other charset is a single-byte charset of the JDK
+ * ({@code program::TRANSLATED_NESTED}), or for {@code UTF-32}, {@code UTF-32BE} and
+ * {@code UTF-32LE} the JDK's {@code UTF_32Coder.Decoder} and {@code Encoder}, made as those
+ * charsets' classes make them. Any other charset is a single-byte charset of the JDK
  * that the program carries as a table (see {@code jdk_charsets.rs}), whose coders are the JDK's
  * own {@code SingleByte.Decoder} and {@code Encoder}, made from what the charset decodes each byte
  * to and encodes each char to.
@@ -45,6 +47,15 @@ public final class TranslatedCoders {
         if (cs == StandardCharsets.UTF_16LE) {
             return new UTF_16LE.Decoder(cs);
         }
+        if (cs == Charset.forName("UTF-32")) {
+            return new UTF_32Coder.Decoder(cs, UTF_32Coder.NONE);
+        }
+        if (cs == Charset.forName("UTF-32BE")) {
+            return new UTF_32Coder.Decoder(cs, UTF_32Coder.BIG);
+        }
+        if (cs == Charset.forName("UTF-32LE")) {
+            return new UTF_32Coder.Decoder(cs, UTF_32Coder.LITTLE);
+        }
         return new SingleByte.Decoder(cs, b2c(cs), false, false);
     }
 
@@ -67,6 +78,12 @@ public final class TranslatedCoders {
         }
         if (cs == StandardCharsets.UTF_16LE) {
             return new UTF_16LE.Encoder(cs);
+        }
+        if (cs == Charset.forName("UTF-32") || cs == Charset.forName("UTF-32BE")) {
+            return new UTF_32Coder.Encoder(cs, UTF_32Coder.BIG, false);
+        }
+        if (cs == Charset.forName("UTF-32LE")) {
+            return new UTF_32Coder.Encoder(cs, UTF_32Coder.LITTLE, false);
         }
         return tableEncoder(cs);
     }

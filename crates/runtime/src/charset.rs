@@ -2,7 +2,7 @@
 //! decoding follow the JDK (`sun.nio.cs` and `String.decodeUTF8_UTF16`), including how each
 //! charset replaces what it cannot encode or decode, so that the output matches Java's bytes.
 //!
-//! Besides the six that the runtime has, a program may carry the JDK's single-byte charsets
+//! Besides the nine that the runtime has (UTF-8, US-ASCII, ISO-8859-1 and the UTF-16 and UTF-32 ones), a program may carry the JDK's single-byte charsets
 //! (windows-1252, the ISO-8859 ones, KOI8-R, the IBM code pages, ...) as tables
 //! (`ByteCharset`), which the translator took from the JDK it was built with and which the
 //! program gives the runtime as it starts (`register_charsets`).
@@ -24,6 +24,11 @@ pub enum Charset {
     Utf16,
     Utf16Be,
     Utf16Le,
+    /// `UTF-32`: big-endian, with no byte order mark when encoding; decoding honours a mark.
+    Utf32,
+    /// `UTF-32BE` and `UTF-32LE`, whose decoding drops a leading mark of their own byte order.
+    Utf32Be,
+    Utf32Le,
     /// A single-byte charset of the JDK, which the program carries.
     Bytes(&'static ByteCharset),
 }
@@ -190,6 +195,9 @@ const NAMES: &[(&[&str], Charset)] = &[
     (&["UTF-16", "UTF_16", "utf16", "unicode", "UnicodeBig"], Charset::Utf16),
     (&["UTF-16BE", "UTF_16BE", "UnicodeBigUnmarked", "X-UTF-16BE", "ISO-10646-UCS-2"], Charset::Utf16Be),
     (&["UTF-16LE", "UTF_16LE", "UnicodeLittleUnmarked", "X-UTF-16LE"], Charset::Utf16Le),
+    (&["UTF-32", "UTF_32", "UTF32"], Charset::Utf32),
+    (&["UTF-32BE", "UTF_32BE", "X-UTF-32BE"], Charset::Utf32Be),
+    (&["UTF-32LE", "UTF_32LE", "X-UTF-32LE"], Charset::Utf32Le),
 ];
 
 impl Charset {
@@ -221,7 +229,7 @@ impl Charset {
             .map(|&(_, charset)| charset)
     }
 
-    /// The charset of the runtime's six that `forName(name)` finds, without failing: `None` where
+    /// The charset of the runtime's nine that `forName(name)` finds, without failing: `None` where
     /// the name is not one of theirs. The translator finds the charset of a constant name with it.
     pub fn known(name: &crate::Wtf8) -> Option<Charset> {
         let name = &*name.to_string_lossy();
@@ -237,6 +245,9 @@ impl Charset {
             Charset::Utf16 => "UTF-16",
             Charset::Utf16Be => "UTF-16BE",
             Charset::Utf16Le => "UTF-16LE",
+            Charset::Utf32 => "UTF-32",
+            Charset::Utf32Be => "UTF-32BE",
+            Charset::Utf32Le => "UTF-32LE",
             Charset::Bytes(table) => table.name,
         }
     }
@@ -251,6 +262,7 @@ impl Charset {
             Charset::Utf16 => "UTF-16",
             Charset::Utf16Be => "UnicodeBigUnmarked",
             Charset::Utf16Le => "UnicodeLittleUnmarked",
+            Charset::Utf32 | Charset::Utf32Be | Charset::Utf32Le => self.name(),
             Charset::Bytes(table) => table.historical,
         }
     }
@@ -314,6 +326,15 @@ impl Charset {
         if let Charset::Bytes(table) = self {
             return table.encode(s);
         }
+        // A lone surrogate is the JDK's replacement, the bytes of U+FFFD.
+        let lone = |c: u32| if (0xD800..=0xDFFF).contains(&c) { 0xFFFD } else { c };
+        match self {
+            Charset::Utf32 | Charset::Utf32Be => {
+                return s.code_points().flat_map(|c| lone(c).to_be_bytes()).collect();
+            }
+            Charset::Utf32Le => return s.code_points().flat_map(|c| lone(c).to_le_bytes()).collect(),
+            _ => {}
+        }
         let s = &*s.to_string_lossy();
         match self {
             Charset::Utf8 => s.as_bytes().to_vec(),
@@ -326,7 +347,9 @@ impl Charset {
             }
             Charset::Utf16Be => s.encode_utf16().flat_map(u16::to_be_bytes).collect(),
             Charset::Utf16Le => s.encode_utf16().flat_map(u16::to_le_bytes).collect(),
-            Charset::Bytes(_) => unreachable!("a table encodes above"),
+            Charset::Utf32 | Charset::Utf32Be | Charset::Utf32Le | Charset::Bytes(_) => {
+                unreachable!("encoded above")
+            }
         }
     }
 
@@ -335,6 +358,9 @@ impl Charset {
     pub fn decode(self, bytes: &[i8]) -> String {
         if let Charset::Bytes(table) = self {
             return table.decode(bytes);
+        }
+        if let Some(units) = self.decode_utf32(bytes) {
+            return String::from_utf16_lossy(&units);
         }
         let bytes: Vec<u8> = bytes.iter().map(|&b| b as u8).collect();
         match self {
@@ -346,8 +372,59 @@ impl Charset {
             Charset::Utf16 => decode_utf16(&bytes, true, true),
             Charset::Utf16Be => decode_utf16(&bytes, true, false),
             Charset::Utf16Le => decode_utf16(&bytes, false, false),
-            Charset::Bytes(_) => unreachable!("a table decodes above"),
+            Charset::Utf32 | Charset::Utf32Be | Charset::Utf32Le | Charset::Bytes(_) => {
+                unreachable!("decoded above")
+            }
         }
+    }
+
+    /// The UTF-16 units of `bytes` in one of the UTF-32 charsets, as the JDK's `UTF_32Coder`
+    /// decodes them: a leading byte order mark is dropped (`UTF-32` takes either and is big-endian
+    /// without one; the others only their own), each four bytes are a code point, one above
+    /// U+10FFFF is malformed and is U+FFFD, a surrogate is kept as it is, and the one to three
+    /// bytes left at the end are one U+FFFD.
+    fn decode_utf32(self, bytes: &[i8]) -> Option<Vec<u16>> {
+        let expected = match self {
+            Charset::Utf32 => None,
+            Charset::Utf32Be => Some(true),
+            Charset::Utf32Le => Some(false),
+            _ => return None,
+        };
+        let bytes: Vec<u8> = bytes.iter().map(|&b| b as u8).collect();
+        let mut big_endian = expected.unwrap_or(true);
+        let mut words = bytes.chunks_exact(4);
+        let mut units = Vec::with_capacity(bytes.len() / 2);
+        let mut first = true;
+        for word in words.by_ref() {
+            let word = [word[0], word[1], word[2], word[3]];
+            if first {
+                first = false;
+                match u32::from_be_bytes(word) {
+                    0xFEFF if expected != Some(false) => {
+                        big_endian = true;
+                        continue;
+                    }
+                    0xFFFE_0000 if expected != Some(true) => {
+                        big_endian = false;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            let code = if big_endian { u32::from_be_bytes(word) } else { u32::from_le_bytes(word) };
+            match code {
+                0..=0xFFFF => units.push(code as u16),
+                0x1_0000..=0x10_FFFF => {
+                    let code = code - 0x1_0000;
+                    units.extend([0xD800 + (code >> 10) as u16, 0xDC00 + (code & 0x3FF) as u16]);
+                }
+                _ => units.push(REPLACEMENT as u16),
+            }
+        }
+        if !words.remainder().is_empty() {
+            units.push(REPLACEMENT as u16);
+        }
+        Some(units)
     }
 }
 
@@ -358,7 +435,11 @@ pub fn get_bytes(s: &crate::Wtf8, charset: Charset) -> Array<i8> {
 
 /// `new String(bytes, charset)`.
 pub fn new_string(bytes: &[i8], charset: Charset) -> crate::JString {
-    charset.decode(bytes).into()
+    // UTF-32 can hold a lone surrogate, which the string keeps.
+    match charset.decode_utf32(bytes) {
+        Some(units) => crate::string::from_units(&units),
+        None => charset.decode(bytes).into(),
+    }
 }
 
 /// `new String(bytes, offset, length, charset)`, which throws for a range outside the array.
@@ -384,7 +465,7 @@ pub fn try_new_string_range(
         let message = format!("Range [{offset}, {offset} + {length}) out of bounds for length {len}");
         return Err(crate::Exception::new("java.lang.StringIndexOutOfBoundsException", message));
     }
-    Ok(charset.decode(&bytes.range(offset as usize..(offset + length) as usize)).into())
+    Ok(new_string(&bytes.range(offset as usize..(offset + length) as usize), charset))
 }
 
 /// A code point as a character; the callers only pass valid scalar values.
@@ -608,5 +689,23 @@ mod tests {
         for (bytes, text) in cases {
             assert_eq!(Charset::Utf16.decode(&signed(bytes)), *text, "{bytes:02X?}");
         }
+    }
+
+    #[test]
+    fn utf32_decodes_as_the_jdk_does() {
+        let units = |charset: Charset, bytes: &[u8]| charset.decode_utf32(&signed(bytes)).unwrap();
+        let be: &[u8] = &[0, 0, 0xFE, 0xFF, 0, 0, 0, 0x41];
+        let le: &[u8] = &[0xFF, 0xFE, 0, 0, 0x41, 0, 0, 0];
+        assert_eq!(units(Charset::Utf32, be), [0x41]);
+        assert_eq!(units(Charset::Utf32, le), [0x41]);
+        assert_eq!(units(Charset::Utf32Be, be), [0x41]);
+        // A mark of the other byte order is read as a code point: here a malformed one.
+        assert_eq!(units(Charset::Utf32Le, be), [0xFFFD, 0xFFFD]);
+        assert_eq!(units(Charset::Utf32Le, le), [0x41]);
+        assert_eq!(units(Charset::Utf32, &[0, 1, 0xF6, 0x00]), [0xD83D, 0xDE00]);
+        assert_eq!(units(Charset::Utf32, &[0, 0, 0xD8, 0x3D]), [0xD83D]);
+        assert_eq!(units(Charset::Utf32, &[0, 0x11, 0, 0, 0, 0, 0, 0x41, 0]), [0xFFFD, 0x41, 0xFFFD]);
+        assert_eq!(Charset::Utf32Le.encode(crate::Wtf8::new("A\u{1F600}")), [0x41, 0, 0, 0, 0, 0xF6, 1, 0]);
+        assert_eq!(Charset::Utf32.encode(crate::Wtf8::new("A")), [0, 0, 0, 0x41]);
     }
 }

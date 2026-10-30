@@ -263,6 +263,9 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "sun.nio.cs.UTF_16",
     "sun.nio.cs.UTF_16BE",
     "sun.nio.cs.UTF_16LE",
+    "sun.nio.cs.UTF_32",
+    "sun.nio.cs.UTF_32BE",
+    "sun.nio.cs.UTF_32LE",
     "sun.nio.cs.UTF_8",
 ];
 

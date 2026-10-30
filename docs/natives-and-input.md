@@ -562,8 +562,9 @@ formatted at the call and printed through the package-private `formattedText`.
 
 `Charset` and `StandardCharsets` are runtime classes, so reachability does not enter the JDK's
 charset lookup (whose provider search reaches `GB18030`, which reads a JVM property). The JDK's
-decoders and encoders of the six standard charsets are translated all the same and made by
-`java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and `newEncoder()`. For a
+decoders and encoders of the six standard charsets and of UTF-32 (`UTF_32Coder`) are translated
+all the same and made by `java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and
+`newEncoder()`. For a
 single-byte charset of the JDK that the program carries as a table
 ([supported-java.md](supported-java.md), charsets), it makes the JDK's `SingleByte.Decoder` and
 `Encoder` from what the charset decodes each byte to and `getBytes` encodes each char to.
