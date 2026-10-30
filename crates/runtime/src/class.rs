@@ -89,6 +89,10 @@ pub struct Class {
     /// the order the source names them (`getInterfaces`); an array's are `Cloneable` and
     /// `Serializable`, which `get_interface` answers by its kind.
     interfaces: &'static [&'static Class],
+    /// Whether no class is below this one, as for a final class or a class of the program that
+    /// no other class of the program extends: an instance is then exactly of this class, which
+    /// `is_instance` and `check_cast` test by the first of its names alone.
+    leaf: bool,
 }
 
 impl Class {
@@ -137,7 +141,7 @@ impl Class {
 
     /// A class of the runtime that is final, as most of the standard classes are.
     const fn standard(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), None, names, PUBLIC | FINAL)
+        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), None, names, PUBLIC | FINAL).leaf()
     }
 
     /// One of the runtime's abstract classes.
@@ -165,7 +169,13 @@ impl Class {
             nest: Nest::TopLevel,
             enclosing: None,
             interfaces: &[],
+            leaf: false,
         }
+    }
+
+    /// The class, which no class is below (`leaf`).
+    pub const fn leaf(self) -> Class {
+        Class { leaf: true, ..self }
     }
 
     /// The class as the program declares it: what `getModifiers` gives, where it is declared and
@@ -181,7 +191,7 @@ impl Class {
 
     /// A box of a number, whose superclass is `Number`.
     const fn number(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(&Class::NUMBER), None, names, PUBLIC | FINAL)
+        Class::made(name, simple, Kind::Class, Some(&Class::NUMBER), None, names, PUBLIC | FINAL).leaf()
     }
 
     const SERIALIZABLE: Class = Class::interface(SERIAL, "Serializable", &[SERIAL, OBJECT]);
@@ -493,7 +503,17 @@ impl Class {
     /// `isInstance(x)`, given the binary names of the class of `x` and of every class and
     /// interface above it (`None` for a null `x`), which the translation knows.
     pub fn is_instance(&self, names: Option<&[&str]>) -> bool {
-        names.is_some_and(|names| names_contain(names, self.name))
+        names.is_some_and(|names| self.above(names))
+    }
+
+    /// Whether the class is among `names`, those of a value's class and of the classes above it:
+    /// for a `leaf`, whether it is the first.
+    #[inline(always)]
+    fn above(&self, names: &[&str]) -> bool {
+        match self.leaf {
+            true => names_contain(names.get(..1).unwrap_or_default(), self.name),
+            false => names_contain(names, self.name),
+        }
     }
 
     /// `isAssignableFrom(other)`: whether `other` is this class or a class or interface below it,
@@ -521,7 +541,7 @@ impl Class {
     /// `ClassCastException` unless `x` is null or an instance.
     pub fn check_cast(&self, names: Option<&[&str]>) {
         if let Some(names) = names
-            && !names_contain(names, self.name)
+            && !self.above(names)
         {
             let from = names.first().copied().unwrap_or("java.lang.Object");
             crate::throw("java.lang.ClassCastException", &format!("Cannot cast {from} to {}", self.shown()));

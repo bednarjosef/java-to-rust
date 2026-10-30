@@ -337,6 +337,17 @@ impl<'a> Gen<'a> {
             true => format!("{value}.implementing(&[{}])", self.interface_values(c)),
             false => value,
         };
+        // A class that no class of the program extends has instances of exactly itself, which
+        // `isInstance` and `cast` test by one name. Not a `Throwable`: the runtime makes
+        // exceptions by name, of classes the translation may have no type of.
+        let throwable = self.class.type_index("java.lang.Throwable");
+        let leaf = matches!(kind, TypeKind::Class | TypeKind::Enum)
+            && !self.class.hierarchy.has_subtypes(c)
+            && throwable.is_none_or(|t| t != c && !self.class.hierarchy.ancestors(c).contains(&t));
+        let value = match leaf {
+            true => format!("{value}.leaf()"),
+            false => value,
+        };
         if !self.class_details {
             return value;
         }
