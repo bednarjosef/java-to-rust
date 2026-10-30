@@ -163,6 +163,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let h = &class.hierarchy;
     // What showing each type runs is the same for every point while the program does not change.
     TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
+    RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
     let mut points: Vec<Vec<Point>> = phase("exceptions: points", || {
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect()
     });
@@ -909,6 +910,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // The facts are kept with errors too: a census goes on past them as if they had passed
     // (`analysis::analyze_collecting`), and the messages of the dereferences read them.
     TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = None);
+    RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = None);
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -1563,7 +1565,7 @@ fn expr_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
-    let callees = class.callees(x);
+    let callees = callees(class, x);
     if !callees.is_empty() {
         let known = match callees[..] {
             [only] => Some(guards::known_args(class, &facts.static_writes, x))
@@ -1843,6 +1845,45 @@ thread_local! {
     /// `to_string_impls` of each type, while `analyze` runs (`Some`): a value of `Object` shows
     /// the text of every class, which many points ask for.
     static TO_STRING_IMPLS: std::cell::RefCell<Option<FastMap<Type, std::rc::Rc<[usize]>>>> = const { std::cell::RefCell::new(None) };
+    /// The methods that a call runs on the objects of a list of `Class::receivers`, by the list
+    /// and the called method, while `analyze` runs (`Some`): calls share the lists.
+    static RECEIVER_TARGETS: std::cell::RefCell<Option<FastMap<(usize, usize), std::rc::Rc<[usize]>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The methods that the call `x` may run (`Class::callees`); for an instance call that the
+/// points-to facts know the receiver of (`Class::receivers`), only those that the classes of its
+/// objects run, as the generated code dispatches it: a `Runnable`'s `run()` in a cleaner does not
+/// run every `run()` of the program.
+fn callees(class: &Class, x: &Expr) -> Vec<usize> {
+    let all = class.callees(x);
+    let ExprKind::MethodCall { receiver, resolved: Some(r), is_super: false, .. } = &x.kind else {
+        return all;
+    };
+    let Some(classes) = class.receivers.get(&receiver.id) else { return all };
+    if all.len() < 2 || classes.is_empty() || class.methods[*r].is_static {
+        return all;
+    }
+    let key = (classes.as_ptr() as usize, *r);
+    if let Some(found) =
+        RECEIVER_TARGETS.with_borrow(|cache| cache.as_ref().and_then(|c| c.get(&key).cloned()))
+    {
+        return found.to_vec();
+    }
+    let mut found: Vec<usize> = Vec::new();
+    for &c in classes.iter() {
+        match class.hierarchy.implementation(*r, c) {
+            Some(m) => found.push(m),
+            None => return all,
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    RECEIVER_TARGETS.with_borrow_mut(|cache| {
+        if let Some(cache) = cache {
+            cache.insert(key, found.as_slice().into());
+        }
+    });
+    found
 }
 
 /// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that

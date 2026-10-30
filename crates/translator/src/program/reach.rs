@@ -381,6 +381,10 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
     // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
     "sun.security.util.Debug",
+    // The check of a server certificate's host name that the HTTPS client makes, which only
+    // hands out its two checkers: checking a name is patched to fail, as certificates and TLS
+    // are not translated (`java/patches/sun/security/util/HostnameChecker.java`).
+    "sun.security.util.HostnameChecker",
     // The signers of a jar's entry, which `JarEntry` and `JarFile` keep in fields: abstract and
     // final classes, of which only signature verification, not translated, makes objects.
     "java.security.cert.Certificate",
