@@ -77,6 +77,12 @@ impl<'t> Lowering<'t> {
         let value = self.expr(node.child("expression")?)?;
         let type_node = node.child("type")?;
         let ty = self.ty(type_node, type_node.java_type())?;
+        // An array tested against an array type (`certs instanceof X509Certificate[]` of a
+        // `Certificate[]`) is tested as an `Object` holding it, by its class.
+        let value = match (value.ty, ty) {
+            (Type::Array(_), Type::Array(_)) => self.convert(value, Type::class(OBJECT)),
+            _ => value,
+        };
         let binding = match node.get("pattern") {
             Some(p) if p.kind() == "BINDING_PATTERN" => Some(p.child("variable")?.str("name").to_string()),
             Some(p) => return unsupported(p, "this pattern"),
@@ -85,13 +91,27 @@ impl<'t> Lowering<'t> {
         if let Some(name) = &binding {
             self.forget_alias(name);
         }
-        // `Object` may also hold a string, a box, an array, a builder, a class or a charset, `Comparable` a
-        // string or a box, `CharSequence` a string or a builder, `Appendable` a builder, `Type` a
-        // class, and `Number` a numeric box.
-        let char_sequence = matches!(value.ty, Type::Class(name, _) if name == CHAR_SEQUENCE);
-        let comparable = matches!(value.ty, Type::Class(name, _) if name == COMPARABLE);
+        if !self.may_be(value.ty, ty) {
+            return unsupported(node, "instanceof on these types");
+        }
+        self.object_array(node, ty)?;
+        let value = self.array_test(type_node, value, ty, type_node.java_type())?;
+        let raw = super::captures::raw(type_node.java_type());
+        if self.annotation_types.contains_key(&raw) {
+            return self.annotation_instance_of(node, value, ty, &raw, binding);
+        }
+        Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
+    }
+
+    /// Whether a value of type `value`, of the program's types, may be tested for type `ty`:
+    /// besides the program's classes, `Object` may also hold a string, a box, an array, a builder,
+    /// a class or a charset, `Comparable` a string or a box, `CharSequence` a string or a builder,
+    /// `Appendable` a builder, `Type` a class, and `Number` a numeric box.
+    pub(super) fn may_be(&self, value: Type, ty: Type) -> bool {
+        let char_sequence = matches!(value, Type::Class(name, _) if name == CHAR_SEQUENCE);
+        let comparable = matches!(value, Type::Class(name, _) if name == COMPARABLE);
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
-            || (Self::is_object(value.ty)
+            || (Self::is_object(value)
                 && matches!(
                     ty,
                     Type::String
@@ -103,19 +123,10 @@ impl<'t> Lowering<'t> {
                 ))
             || (comparable && matches!(ty, Type::String | Type::Boxed(_)))
             || (char_sequence && matches!(ty, Type::String | Type::StringBuilder))
-            || (self.is_appendable(value.ty) && ty == Type::StringBuilder)
-            || (Self::is_class_interface(value.ty) && ty == Type::JavaClass)
-            || Self::is_numeric_box_of(value.ty, ty);
-        if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
-            return unsupported(node, "instanceof on these types");
-        }
-        self.object_array(node, ty)?;
-        let value = self.array_test(type_node, value, ty, type_node.java_type())?;
-        let raw = super::captures::raw(type_node.java_type());
-        if self.annotation_types.contains_key(&raw) {
-            return self.annotation_instance_of(node, value, ty, &raw, binding);
-        }
-        Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
+            || (self.is_appendable(value) && ty == Type::StringBuilder)
+            || (Self::is_class_interface(value) && ty == Type::JavaClass)
+            || Self::is_numeric_box_of(value, ty);
+        matches!(value, Type::Class(..) | Type::Enum(_)) && target
     }
 
     /// Whether `ty` is a box of a number, which a value of type `value`, `Number`, may be.

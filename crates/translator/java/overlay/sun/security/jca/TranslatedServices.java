@@ -1,10 +1,6 @@
 package sun.security.jca;
 
 import java.lang.reflect.InvocationTargetException;
-import java.security.interfaces.RSAPrivateKey;
-import java.security.interfaces.RSAPublicKey;
-import javax.crypto.interfaces.DHPrivateKey;
-import javax.crypto.interfaces.DHPublicKey;
 
 /**
  * What the JDK's security providers find by name at run time, by reflection or in the JDK's
@@ -70,21 +66,5 @@ public final class TranslatedServices {
      */
     public static String securityProperties() {
         return null;
-    }
-
-    /**
-     * The key interface with the binary name {@code name}, which a provider names in a service's
-     * {@code SupportedKeyClasses} attribute, and the JDK finds by name: those of the JDK's
-     * providers that the translation has, and null for the others, whose keys no object of the
-     * translation is, as the JDK gives null for a class it cannot find.
-     */
-    public static Class<?> keyClass(String name) {
-        switch (name) {
-            case "java.security.interfaces.RSAPublicKey": return RSAPublicKey.class;
-            case "java.security.interfaces.RSAPrivateKey": return RSAPrivateKey.class;
-            case "javax.crypto.interfaces.DHPublicKey": return DHPublicKey.class;
-            case "javax.crypto.interfaces.DHPrivateKey": return DHPrivateKey.class;
-            default: return null;
-        }
     }
 }

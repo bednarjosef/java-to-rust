@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 mod by_name;
 mod initialize;
+mod jdk_resources;
 mod native_image;
 mod proxies;
 mod reflection;
@@ -32,6 +33,7 @@ pub use by_name::{
     module_for_name, name_pattern,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
+pub use jdk_resources::read as read_jdk_resources;
 pub use native_image::{ReflectEntry, reflect_config};
 pub use proxies::ProxyClass;
 pub use reflection::{FlowClasses, Kind as LookupKind, Lookup, lookup};
@@ -127,6 +129,12 @@ pub struct Reach {
     /// The classes whose entries of the libraries' reflection metadata apply, which name them
     /// (`native_image.rs`).
     pub configured: BTreeSet<String>,
+    /// The resources that reachable code reads from classes, by package and name, the strings
+    /// that reachable calls pass, by method and position, and the files of the resources that
+    /// the JDK holds, which the program carries, read after reachability (`jdk_resources.rs`).
+    resource_reads: BTreeSet<(String, jdk_resources::Name)>,
+    string_arguments: HashMap<(MethodKey, usize), BTreeSet<jdk_resources::Name>>,
+    pub jdk_resources: BTreeMap<String, Vec<u8>>,
     /// The modules of the program's roots, which its `java.lang.Module` and `ClassLoader` answer with
     /// (`modules::contents`, `lower/modules.rs`); set after reachability.
     pub modules: Vec<super::modules::Contents>,
@@ -268,6 +276,9 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "sun.nio.cs.UTF_16",
     "sun.nio.cs.UTF_16BE",
     "sun.nio.cs.UTF_16LE",
+    "sun.nio.cs.UTF_32",
+    "sun.nio.cs.UTF_32BE",
+    "sun.nio.cs.UTF_32LE",
     "sun.nio.cs.UTF_8",
 ];
 
@@ -311,9 +322,9 @@ pub const TRANSLATED_NESTED: &[&str] = &[
 /// record's methods and a `switch` on patterns, which the translation makes without them; only a
 /// class name that code computes, which `Class.forName` initializes (`reach::by_name`), reaches
 /// them, and their static state is method handles. The `ChaCha20` ciphers of `SunJCE`, which read
-/// arrays through method handles that the translation does not follow and whose MAC computes in
-/// `sun.security.util.math`, and its key generators and MACs for TLS and SSL, which serve only
-/// JSSE, are not translated: their services fail when made (`reach/services.rs`).
+/// arrays through method handles that the translation does not follow, are not translated: their
+/// services fail when made (`reach/services.rs`), and TLS takes them as unavailable and uses the
+/// cipher suites of AES.
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
@@ -322,13 +333,9 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.runtime.ObjectMethods", "reflection"),
     ("java.lang.runtime.SwitchBootstraps", "reflection"),
     ("com.sun.crypto.provider.ChaCha20", "security"),
-    ("com.sun.crypto.provider.SslMac", "security"),
-    ("com.sun.crypto.provider.Tls", "security"),
     ("java.lang.reflect.", "reflection"),
-    ("java.security.", "security"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
-    ("sun.security.", "security"),
 ];
 
 /// Classes under a prefix of `UNTRANSLATED` that are translated all the same:
@@ -347,24 +354,11 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.invoke.TypeDescriptor",
     "java.lang.invoke.TypeDescriptor.OfField",
     "java.lang.invoke.TypeDescriptor.OfMethod",
-    // The actions that `AccessController.doPrivileged` runs, which the translator's runs
-    // directly (`REDIRECTED_CALLS`): plain interfaces, and the plain exception that wraps a
-    // checked exception of an action that may throw one.
-    "java.security.PrivilegedAction",
-    "java.security.PrivilegedActionException",
-    "java.security.PrivilegedExceptionAction",
-    // A permission, which library code makes to check it, and the exception that the
-    // translator's `AccessController.checkPermission` throws for every permission
-    // (`REDIRECTED_CALLS`): plain classes, with nothing of a security manager's.
-    "java.security.AccessControlException",
-    "java.security.BasicPermission",
-    "java.security.Guard",
-    "java.security.Permission",
     // Plain interfaces that library code implements with classes of its own: abstract methods,
     // default methods over them and constants, nothing that the JVM or reflection gives. A class
     // of the program implements them as it would an interface of its own; what makes their
-    // objects in the JDK (`Class` as a `Type`, a provider's keys, `Proxy` calling a handler)
-    // stays untranslated, so only the program's objects ever implement them.
+    // objects in the JDK (`Class` as a `Type`, `Proxy` calling a handler) stays untranslated, so
+    // only the program's objects ever implement them.
     "java.lang.reflect.GenericArrayType",
     "java.lang.reflect.InvocationHandler",
     "java.lang.reflect.ParameterizedType",
@@ -375,277 +369,6 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // Neither is an `AnnotatedElement` (`java/patches/java/lang/reflect/`).
     "java.lang.reflect.GenericDeclaration",
     "java.lang.reflect.TypeVariable",
-    "java.security.AsymmetricKey",
-    "java.security.DEREncodable",
-    "java.security.Key",
-    "java.security.PrivateKey",
-    "java.security.PublicKey",
-    "java.security.spec.AlgorithmParameterSpec",
-    "java.security.spec.KeySpec",
-    // The security code's debugging output, off unless a property turns it on, which library
-    // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
-    // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
-    "sun.security.util.Debug",
-    // The check of a server certificate's host name that the HTTPS client makes, which only
-    // hands out its two checkers: checking a name is patched to fail, as certificates and TLS
-    // are not translated (`java/patches/sun/security/util/HostnameChecker.java`).
-    "sun.security.util.HostnameChecker",
-    // The signers of a jar's entry, which `JarEntry` and `JarFile` keep in fields: abstract and
-    // final classes, of which only signature verification, not translated, makes objects.
-    "java.security.cert.Certificate",
-    "java.security.CodeSigner",
-    // Reading a jar's manifest, as javac does for each jar on its class path, checks its size
-    // against `MAX_SIG_FILE_SIZE`, a static of this class, and `JarVerifier` asks it which
-    // entries are signature files; verifying a signature (`new SignatureFileVerifier`) needs
-    // `PKCS7` and stays rejected.
-    "sun.security.util.SignatureFileVerifier",
-    // Message digests, as javac's `-XDshowClass` computes a class file's checksum: the JDK's
-    // own code of `MessageDigest` and of the `SUN` provider's digests, which
-    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below), and `MD4`,
-    // which NTLM authentication in the HTTP client gets from a provider of its own.
-    "java.security.DigestException",
-    "java.security.DigestInputStream",
-    "java.security.DigestOutputStream",
-    "java.security.GeneralSecurityException",
-    "java.security.MessageDigest",
-    "java.security.MessageDigest.Delegate",
-    "java.security.MessageDigest.Delegate.CloneableDelegate",
-    "java.security.MessageDigestSpi",
-    "java.security.NoSuchAlgorithmException",
-    "java.security.ProviderException",
-    "sun.security.provider.ByteArrayAccess",
-    "sun.security.provider.ByteArrayAccess.BE",
-    "sun.security.provider.ByteArrayAccess.LE",
-    "sun.security.provider.DigestBase",
-    "sun.security.provider.MD2",
-    "sun.security.provider.MD4",
-    "sun.security.provider.MD5",
-    "sun.security.provider.SHA",
-    "sun.security.provider.SHA2",
-    "sun.security.provider.SHA2.SHA224",
-    "sun.security.provider.SHA2.SHA256",
-    "sun.security.provider.SHA3",
-    "sun.security.provider.SHA3.SHA224",
-    "sun.security.provider.SHA3.SHA256",
-    "sun.security.provider.SHA3.SHA384",
-    "sun.security.provider.SHA3.SHA512",
-    "sun.security.provider.SHA5",
-    "sun.security.provider.SHA5.SHA384",
-    "sun.security.provider.SHA5.SHA512",
-    "sun.security.provider.SHA5.SHA512_224",
-    "sun.security.provider.SHA5.SHA512_256",
-    // The interface of digests that take a key, which `MessageDigest`'s own `Delegate`
-    // implements.
-    "sun.security.util.MessageDigestSpi2",
-    // The security APIs' exceptions, which library code throws and catches as it would its own:
-    // constructors over `Exception`'s, nothing that the security code gives.
-    "java.security.InvalidAlgorithmParameterException",
-    "java.security.InvalidKeyException",
-    "java.security.InvalidParameterException",
-    "java.security.KeyException",
-    "java.security.KeyManagementException",
-    "java.security.KeyStoreException",
-    "java.security.NoSuchProviderException",
-    "java.security.SignatureException",
-    "java.security.UnrecoverableEntryException",
-    "java.security.UnrecoverableKeyException",
-    "java.security.cert.CertificateEncodingException",
-    "java.security.cert.CertificateException",
-    "java.security.cert.CertificateExpiredException",
-    "java.security.cert.CertificateNotYetValidException",
-    "java.security.cert.CertificateParsingException",
-    "java.security.cert.CRLException",
-    "java.security.spec.InvalidKeySpecException",
-    "java.security.spec.InvalidParameterSpecException",
-    // Secure random numbers, as `UUID.randomUUID` makes them: the JDK's own code of
-    // `SecureRandom` and of the `SUN` provider's generators, which `new SecureRandom()` and
-    // `SecureRandom.getInstance` look up as the JDK does (see the lookup below), and of their
-    // seed sources, the operating system's random devices. `SunEntries` is the `SUN` provider's
-    // registrations.
-    "java.security.SecureRandom",
-    "java.security.SecureRandom.StrongPatternHolder",
-    "java.security.SecureRandomParameters",
-    "java.security.SecureRandomSpi",
-    "sun.security.provider.FileInputStreamPool",
-    "sun.security.provider.FileInputStreamPool.StreamRef",
-    "sun.security.provider.FileInputStreamPool.UnclosableInputStream",
-    "sun.security.provider.NativePRNG",
-    "sun.security.provider.NativePRNG.Blocking",
-    "sun.security.provider.NativePRNG.NonBlocking",
-    "sun.security.provider.NativePRNG.RandomIO",
-    "sun.security.provider.NativePRNG.Variant",
-    "sun.security.provider.NativeSeedGenerator",
-    "sun.security.provider.SecureRandom",
-    "sun.security.provider.SecureRandom.SeederHolder",
-    "sun.security.provider.SeedGenerator",
-    "sun.security.provider.SeedGenerator.ThreadedSeedGenerator.BogusThread",
-    "sun.security.provider.SeedGenerator.ThreadedSeedGenerator",
-    "sun.security.provider.SeedGenerator.URLSeedGenerator",
-    "sun.security.provider.SunEntries",
-    // Key pairs, as a server makes one as it starts: the JDK's own code of `KeyPairGenerator` and
-    // of the `SunRsaSign` provider's RSA keys, which `KeyPairGenerator.getInstance` looks up as
-    // the JDK does (see the lookup below).
-    "java.security.KeyPair",
-    "java.security.KeyPairGenerator",
-    "java.security.KeyPairGenerator.Delegate",
-    "java.security.KeyPairGeneratorSpi",
-    "sun.security.jca.JCAUtil",
-    "sun.security.jca.JCAUtil.CachedSecureRandomHolder",
-    "sun.security.jca.TranslatedServices",
-    "sun.security.rsa.RSAKeyPairGenerator",
-    "sun.security.rsa.RSAKeyPairGenerator.Legacy",
-    "java.security.interfaces.RSAKey",
-    "java.security.interfaces.RSAPrivateCrtKey",
-    "java.security.interfaces.RSAPrivateKey",
-    "java.security.interfaces.RSAPublicKey",
-    "java.security.spec.EncodedKeySpec",
-    "java.security.spec.PKCS8EncodedKeySpec",
-    "java.security.spec.RSAKeyGenParameterSpec",
-    "java.security.spec.X509EncodedKeySpec",
-    "sun.security.pkcs.PKCS8Key",
-    "sun.security.rsa.RSAKeyFactory",
-    "sun.security.rsa.RSAPrivateCrtKeyImpl",
-    "sun.security.rsa.RSAPublicKeyImpl",
-    "sun.security.rsa.RSAUtil",
-    "sun.security.rsa.RSAUtil.KeyType",
-    "sun.security.util.BitArray",
-    "sun.security.util.DerEncoder",
-    "sun.security.util.DerIndefLenConverter",
-    "sun.security.util.DerInputStream",
-    "sun.security.util.DerOutputStream",
-    "sun.security.util.DerValue",
-    "sun.security.util.KnownOIDs",
-    "sun.security.util.ObjectIdentifier",
-    "sun.security.util.SecurityProviderConstants",
-    "sun.security.x509.AlgorithmId",
-    "sun.security.x509.X509Key",
-    "sun.security.internal.spec.TlsRsaPremasterSecretParameterSpec",
-    "java.security.Signature$1",
-    "sun.security.rsa.MGF1",
-    "sun.security.rsa.RSACore.BlindingParameters",
-    "sun.security.rsa.RSACore.BlindingRandomPair",
-    "sun.security.rsa.RSAPrivateKeyImpl",
-    "sun.security.util.ArrayUtil",
-    "java.security.KeyFactory",
-    "java.security.Signature",
-    "java.security.Signature.Delegate",
-    "java.security.Signature.Delegate.CloneableDelegate",
-    "java.security.SignatureSpi",
-    "sun.security.rsa.RSACore",
-    "sun.security.rsa.RSAKeyFactory.Legacy",
-    "sun.security.rsa.RSAPadding",
-    "sun.security.rsa.RSASignature",
-    "sun.security.rsa.RSASignature.MD2withRSA",
-    "sun.security.rsa.RSASignature.MD5withRSA",
-    "sun.security.rsa.RSASignature.SHA1withRSA",
-    "sun.security.rsa.RSASignature.SHA224withRSA",
-    "sun.security.rsa.RSASignature.SHA256withRSA",
-    "sun.security.rsa.RSASignature.SHA384withRSA",
-    "sun.security.rsa.RSASignature.SHA512withRSA",
-    "sun.security.rsa.RSASignature.SHA512_224withRSA",
-    "sun.security.rsa.RSASignature.SHA512_256withRSA",
-    "sun.security.rsa.RSASignature.SHA3_224withRSA",
-    "sun.security.rsa.RSASignature.SHA3_256withRSA",
-    "sun.security.rsa.RSASignature.SHA3_384withRSA",
-    "sun.security.rsa.RSASignature.SHA3_512withRSA",
-    "java.security.AlgorithmParameters",
-    "java.security.AlgorithmParametersSpi",
-    "java.security.KeyFactorySpi",
-    "java.security.spec.MGF1ParameterSpec",
-    "java.security.spec.PSSParameterSpec",
-    "java.security.spec.RSAPrivateCrtKeySpec",
-    "java.security.spec.RSAPrivateKeySpec",
-    "java.security.spec.RSAPublicKeySpec",
-    "sun.security.util.ByteArrayLexOrder",
-    "sun.security.util.ByteArrayTagOrder",
-    "sun.security.util.InternalPrivateKey",
-    // The lookup of security services by name, as the JDK does it: the registered providers
-    // (`Security`, `ProviderList`, `ProviderConfig`), the JDK's own providers and their
-    // registrations, and `GetInstance`, which asks them for a service and makes its
-    // implementation (`java/patches/java/security/Provider.java`,
-    // `java/overlay/sun/security/jca/TranslatedServices.java`, `reach/services.rs`). The
-    // services' classes are translated as other code is, but only those of a type that
-    // reachable code looks up; a provider that is not translated, such as `SunPKCS11`, is not
-    // there, and the JSSE, X.509 and PKIX services, which are not translated, fail when made.
-    "java.security.Provider",
-    "java.security.Provider.EngineDescription",
-    "java.security.Provider.OPType",
-    "java.security.Provider.Service",
-    "java.security.Provider.ServiceKey",
-    "java.security.Provider.UString",
-    "java.security.Security",
-    "java.security.Security.Criteria",
-    "java.security.Security.ProviderProperty",
-    "java.security.Security.SecPropLoader",
-    "java.security.Security.SecPropLoader.LoadingMode",
-    "sun.security.jca.GetInstance",
-    "sun.security.jca.GetInstance.Instance",
-    "sun.security.jca.ProviderConfig",
-    "sun.security.jca.ProviderConfig.ProviderLoader",
-    "sun.security.jca.ProviderList",
-    "sun.security.jca.ProviderList.PreferredEntry",
-    "sun.security.jca.ProviderList.PreferredList",
-    "sun.security.jca.ProviderList.ServiceIterator",
-    "sun.security.jca.Providers",
-    "sun.security.jca.ServiceId",
-    "sun.security.provider.Sun",
-    "sun.security.rsa.SunRsaSign",
-    "sun.security.rsa.SunRsaSignEntries",
-    "sun.security.ssl.SunJSSE",
-    "sun.security.ec.SunEC",
-    "sun.security.ec.SunEC.ProviderService",
-    "sun.security.ec.SunEC.ProviderServiceA",
-    "java.security.KeyStore",
-    "java.security.KeyStore.Builder",
-    "java.security.KeyStore.CallbackHandlerProtection",
-    "java.security.KeyStore.Entry",
-    "java.security.KeyStore.Entry.Attribute",
-    "java.security.KeyStore.LoadStoreParameter",
-    "java.security.KeyStore.PasswordProtection",
-    "java.security.KeyStore.PrivateKeyEntry",
-    "java.security.KeyStore.ProtectionParameter",
-    "java.security.KeyStore.SecretKeyEntry",
-    "java.security.KeyStore.SimpleLoadStoreParameter",
-    "java.security.KeyStore.TrustedCertificateEntry",
-    "java.security.KeyStoreSpi",
-    "java.security.cert.CertificateFactory",
-    "java.security.cert.CertificateFactorySpi",
-    "java.security.cert.CertStoreParameters",
-    "java.security.AlgorithmParameterGenerator",
-    "java.security.AlgorithmParameterGeneratorSpi",
-    "java.security.spec.ECField",
-    "java.security.spec.ECFieldF2m",
-    "java.security.spec.ECFieldFp",
-    "java.security.spec.ECParameterSpec",
-    "java.security.spec.ECPoint",
-    "java.security.spec.EllipticCurve",
-    "sun.security.provider.ParameterCache",
-    "sun.security.util.CurveDB",
-    "sun.security.util.IOUtils",
-    "sun.security.util.NamedCurve",
-    "sun.security.util.PBEUtil",
-    "sun.security.util.PBKDF2Parameters",
-    "sun.security.util.PBEUtil.PBES2Params",
-    "sun.security.util.SafeDHParameterSpec",
-    "sun.security.util.SecurityProperties",
-    "sun.security.util.KeyUtil",
-    "java.security.AlgorithmConstraints",
-    "java.security.AllPermission",
-    "java.security.AllPermissionCollection",
-    "java.security.CryptoPrimitive",
-    "sun.security.util.AbstractAlgorithmConstraints",
-    "sun.security.util.AlgorithmDecomposer",
-    "sun.security.util.CryptoAlgorithmConstraints",
-    "sun.security.util.CryptoAlgorithmConstraints.CryptoHolder",
-    "sun.security.util.PropertyExpander",
-    "sun.security.util.PropertyExpander.ExpandException",
-    "java.security.interfaces.DSAParams",
-    "java.security.spec.DSAParameterSpec",
-    "sun.security.util.SecurityConstants",
-    // What the `SunJCE` provider's services need besides: the parameters' `toString`, and the
-    // named curves of `DHKEM`.
-    "sun.security.util.HexDumpEncoder",
-    "java.security.spec.NamedParameterSpec",
     "java.lang.reflect.AccessFlag",
     "java.lang.reflect.AccessFlag.AccessFlagSet",
     "java.lang.reflect.AccessFlag.AccessFlagSet.AccessFlagIterator",
@@ -1432,6 +1155,8 @@ pub const UNSET_PROPERTIES: &[&str] = &[
     "jdk.traceVirtualThreadLocals",
     // What `sun.misc.Unsafe`'s memory access methods do (`--sun-misc-unsafe-memory-access`).
     "sun.misc.unsafe.memory.access",
+    // Whether TLS logs its handshakes (`SSLLogger`), whose log lines name their caller's frame.
+    "javax.net.debug",
 ];
 
 /// The `if` statements among the statements of `block` whose `then` branch never runs: their
@@ -1705,8 +1430,8 @@ pub fn untranslated(class: &str) -> Option<&'static str> {
     if TRANSLATED_ANYWAY.contains(&class) {
         return None;
     }
-    // A local or anonymous class (`java.security.Security$1`) is translated with the class that
-    // declares it.
+    // A local or anonymous class (`Proxy$1`) of one is translated with the class that declares
+    // it.
     if let Some((declaring, _)) = class.split_once('$')
         && TRANSLATED_ANYWAY.contains(&declaring)
     {
@@ -4288,6 +4013,7 @@ impl<'t> Walk<'t> {
             "METHOD_INVOCATION" | "NEW_CLASS" | "MEMBER_REFERENCE" | "STRING_LITERAL" | "MEMBER_SELECT"
         ) {
             self.reflection_scan(value);
+            self.jdk_resource_scan(value);
         }
         if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
             self.service_scan(value);
@@ -4347,6 +4073,9 @@ impl<'t> Walk<'t> {
             && let Some(literal) = value["value"].as_str()
         {
             self.named(literal);
+            for name in by_name::listed_class_names(literal) {
+                self.named(name);
+            }
         }
         if kind == "PLUS"
             && let Some(pattern) = name_pattern(value)
@@ -5087,7 +4816,8 @@ mod tests {
         assert_eq!(untranslated("java.security.PrivateKey"), None);
         assert_eq!(untranslated("java.security.KeyPair"), None);
         assert_eq!(untranslated("java.security.KeyStore"), None);
-        assert_eq!(untranslated("java.security.cert.X509Certificate"), Some("security"));
+        assert_eq!(untranslated("java.security.cert.X509Certificate"), None);
+        assert_eq!(untranslated("sun.security.ssl.SSLContextImpl"), None);
         assert_eq!(untranslated("com.sun.crypto.provider.ChaCha20Cipher"), Some("security"));
         assert_eq!(untranslated("java.util.ArrayList"), None);
         // Reachability stops at method handles, and goes into `Array`.

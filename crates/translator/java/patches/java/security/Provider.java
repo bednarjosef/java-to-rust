@@ -52,9 +52,16 @@ class Provider {
         @Remove
         private Constructor<?> getDefaultConstructor();
 
+        // A key interface that a `SupportedKeyClasses` attribute names, found by name as the
+        // literal that lists it names it (`program::reach::by_name`); there is no provider's class
+        // loader to ask next.
         @Replace
         private Class<?> getKeyClass(String name) {
-            return TranslatedServices.keyClass(name);
+            try {
+                return Class.forName(name);
+            } catch (ClassNotFoundException e) {
+                return null;
+            }
         }
     }
 }

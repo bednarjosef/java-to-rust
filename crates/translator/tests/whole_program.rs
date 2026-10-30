@@ -870,43 +870,6 @@ fn a_rust_generic_that_fails_erases_only_itself() {
     assert!(!stderr.contains("is lowered again"), "{stderr}");
 }
 
-/// A resource of a class of the JDK is not in the translation: `Character.getName` reads
-/// `uniName.dat`, a data file of the JDK that is generated when the JDK is built and is not in
-/// its sources, and the program ends there, naming it (`TranslatedModules.classResource`). The
-/// program's own resources are read from its roots (`corpus/whole-program/ClassPathResources`).
-#[test]
-fn a_resource_of_the_jdk_ends_the_program() {
-    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
-        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
-        return;
-    };
-    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-resource");
-    let sources = work.join("src");
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&sources).unwrap();
-    let java = "public class Main {
-    public static void main(String[] args) {
-        System.out.println(Character.getName('A'));
-    }
-}
-";
-    std::fs::write(sources.join("Main.java"), java).unwrap();
-    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
-        .args(["--main", "Main", "--source"])
-        .arg(&sources)
-        .arg("--library")
-        .arg(library)
-        .arg("-o")
-        .arg(work.join("main.rs"))
-        .output()
-        .unwrap();
-    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
-    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
-    for wanted in ["is not part of the translated program", "\"uniName.dat\""] {
-        assert!(rust.contains(wanted), "no {wanted} in the translation");
-    }
-}
-
 /// The manifest attributes of a package of the program's unnamed module are those of the
 /// manifest of its root (`META-INF/MANIFEST.MF`, that of the jar its classes come from): from
 /// the package's own section, else from the main attributes. A root without one is a directory

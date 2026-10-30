@@ -400,8 +400,8 @@ fn nested_classes(v: &Value, outermost: &str, out: &mut JdkTemps, top: bool) {
 /// Whether the code under `v` has patterns whose variables the walk of slots does not follow:
 /// a `switch` with patterns (or `case null`), a record pattern, `_` as a pattern, a pattern or
 /// `instanceof` of a primitive type, or a binding that may stay in scope after its statement
-/// (`preserved`) where that statement is not one of a block's own (the walk follows those, see
-/// `kept_bindings`).
+/// (`preserved`) where that statement is neither one of a block's own nor a branch or a loop's
+/// body, without braces, of one that is (the walk follows those, see `kept_bindings`).
 fn untracked_patterns(v: &Value) -> bool {
     fn untracked(v: &Value, in_block: bool) -> bool {
         match v {
@@ -419,7 +419,7 @@ fn untracked_patterns(v: &Value) -> bool {
                         Value::Array(items) if kind == "BLOCK" && key == "statements" => {
                             items.iter().any(|s| untracked(s, true))
                         }
-                        _ => key != "symbol" && untracked(value, false),
+                        _ => key != "symbol" && untracked(value, in_block && nested_statement(kind, key)),
                     })
             }
             Value::Array(items) => items.iter().any(|i| untracked(i, false)),
@@ -452,41 +452,64 @@ fn preserved(s: &Value) -> bool {
     }
 }
 
+/// Whether the part `key` of a statement of kind `kind` is a statement that javac's binding
+/// contexts reach the enclosing block from (`TransPatterns.BasicBindingContext`): an `if`'s
+/// branches and a loop's body, which declare no block of their own when written without braces.
+fn nested_statement(kind: &str, key: &str) -> bool {
+    matches!(
+        (kind, key),
+        ("IF", "thenStatement" | "elseStatement")
+            | ("WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP", "statement")
+    )
+}
+
 /// The number of binding variables of statement `s`, one of a block's own, that stay in scope
 /// after it (JLS 6.3.2), which javac declares in the block before the statement
 /// (`TransPatterns.visitBlock`'s `tryPrepend`) rather than around it: an `if`'s bindings when
 /// false where only its `else` (or the lack of one) completes normally, when true where only its
 /// `then` does (`Attr.visitIf`), and a loop's bindings when false where nothing breaks out of
-/// it. `None` where that is not certain: where whether a branch completes is not known
+/// it. So too those of the `if` statements and loops that are its branches or its body, without
+/// braces, at any depth (`else if (o instanceof T t) { .. } else { throw .. }`): javac marks
+/// them kept (`Attr.addBindings2Scope`), and the binding contexts in between pass them on to the
+/// block. `None` where that is not certain: where whether a branch completes is not known
 /// (`completes`), and for a labeled statement that may keep bindings.
 fn kept_bindings(s: &Value) -> Option<usize> {
-    match s["kind"].as_str().unwrap_or_default() {
+    let kind = s["kind"].as_str().unwrap_or_default();
+    let mut nested = 0;
+    for key in ["thenStatement", "elseStatement", "statement"] {
+        let part = &s[key];
+        if nested_statement(kind, key) && !part.is_null() && part["kind"].as_str() != Some("BLOCK") {
+            nested += kept_bindings(part)?;
+        }
+    }
+    let own = match kind {
         "IF" => {
             let (when_true, when_false) = condition_counts(&s["condition"]);
             if when_true + when_false == 0 {
-                return Some(0);
+                return Some(nested);
             }
             let then = completes(&s["thenStatement"])?;
             let otherwise = if s["elseStatement"].is_null() { true } else { completes(&s["elseStatement"])? };
-            Some(match (then, otherwise) {
+            match (then, otherwise) {
                 (true, false) => when_true,
                 (false, true) => when_false,
                 _ => 0,
-            })
+            }
         }
         "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP" => {
             let when_false = condition_counts(&s["condition"]).1;
-            Some(if jumps_out(&s["statement"], "BREAK") { 0 } else { when_false })
+            if jumps_out(&s["statement"], "BREAK") { 0 } else { when_false }
         }
         "LABELED_STATEMENT" => {
             let mut inner = &s["statement"];
             while inner["kind"].as_str() == Some("LABELED_STATEMENT") {
                 inner = &inner["statement"];
             }
-            if preserved(inner) { None } else { Some(0) }
+            return if preserved(inner) { None } else { Some(0) };
         }
-        _ => Some(0),
-    }
+        _ => 0,
+    };
+    Some(own + nested)
 }
 
 /// The numbers of the named bindings that the condition `e` introduces when true, and when
@@ -673,9 +696,11 @@ fn condition_bindings(e: &Value) -> (bool, bool) {
     }
 }
 
-/// Whether statement `s` may not complete normally, over-approximated: it has a jump, a `return`
-/// or a `throw` (outside the classes and lambdas in it), or a loop without a condition or with
-/// `true`.
+/// Whether statement `s` may not complete normally, over-approximated: as Java's rules have it
+/// for an `if` (one without `else` completes, one with `else` completes unless neither branch
+/// does), a block (unless one of its statements does not) and a `while` or `for` with a
+/// condition other than `true` (which completes); else when it has a jump, a `return` or a
+/// `throw` (outside the classes and lambdas in it), or a loop without a condition or with `true`.
 fn may_not_complete(s: &Value) -> bool {
     match s {
         Value::Object(fields) => {
@@ -689,6 +714,15 @@ fn may_not_complete(s: &Value) -> bool {
             }
             let endless = matches!(kind, "WHILE_LOOP" | "DO_WHILE_LOOP" | "FOR_LOOP")
                 && (condition.is_null() || condition["value"].as_bool() == Some(true));
+            match kind {
+                "IF" if s["elseStatement"].is_null() => return false,
+                "IF" => {
+                    return may_not_complete(&s["thenStatement"]) && may_not_complete(&s["elseStatement"]);
+                }
+                "BLOCK" => return may_not_complete(&s["statements"]),
+                "WHILE_LOOP" | "FOR_LOOP" if !endless => return false,
+                _ => {}
+            }
             endless
                 || matches!(kind, "RETURN" | "THROW" | "BREAK" | "CONTINUE" | "YIELD")
                 || fields.iter().any(|(key, value)| key != "symbol" && may_not_complete(value))
@@ -1079,7 +1113,7 @@ mod tests {
     use super::*;
 
     /// Methods with `instanceof` patterns and a for-each loop each; the slots of the iterators are
-    /// javac's (`javap -c` of the class compiled by javac 26): 4, 4, 5, 5, 4 and 5.
+    /// javac's (`javap -c` of the class compiled by javac 26): 4, 4, 5, 5, 4, 5 and 7.
     const PATTERNS: &str = "import java.util.List;
 
 class Patterns {
@@ -1146,6 +1180,25 @@ class Patterns {
         return n;
     }
 
+    int elseChain(Object o, Object t, List<String> l) {
+        int n = 0;
+        if (o instanceof String a) {
+            if (t instanceof Integer i) {
+                n += i;
+            } else if (t instanceof Long g) {
+                n += g.intValue();
+            } else if (t instanceof Short h) {
+                n += h;
+            } else {
+                throw new IllegalStateException(a);
+            }
+            for (String x : l) {
+                n += x.length();
+            }
+        }
+        return n;
+    }
+
     Object get() {
         return null;
     }
@@ -1162,6 +1215,8 @@ class Patterns {
             .collect();
         // `kept`'s and `loop`'s bindings outlive their statements, in slots of the method's block
         // before `n`'s; `notKept`'s `if` completes either way, its binding is its own.
+        // `elseChain`'s `h`, kept by the last `if` of the chain, which only the `throw` does not
+        // complete, is declared in the block before the chain, ahead of `i` and `g`.
         let expected = [
             (9, "<local4>"),
             (17, "<local4>"),
@@ -1169,6 +1224,7 @@ class Patterns {
             (39, "<local5>"),
             (50, "<local4>"),
             (61, "<local5>"),
+            (79, "<local7>"),
         ];
         assert_eq!(iterators, expected.map(|(line, text)| (line, text.to_string())));
     }

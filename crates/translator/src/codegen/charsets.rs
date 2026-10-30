@@ -63,6 +63,9 @@ impl<'a> Gen<'a> {
             CharsetOp::Utf16 => Code::atom(format!("{charset}::Utf16")),
             CharsetOp::Utf16Be => Code::atom(format!("{charset}::Utf16Be")),
             CharsetOp::Utf16Le => Code::atom(format!("{charset}::Utf16Le")),
+            CharsetOp::Utf32 => Code::atom(format!("{charset}::Utf32")),
+            CharsetOp::Utf32Be => Code::atom(format!("{charset}::Utf32Be")),
+            CharsetOp::Utf32Le => Code::atom(format!("{charset}::Utf32Le")),
             CharsetOp::ForName => {
                 let name = self.name_option(&args[0]);
                 Code::atom(format!("{charset}::for_name({name})"))

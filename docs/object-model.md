@@ -408,9 +408,11 @@ but stands for the code at its call sites, so calling it does not initialize tha
   `continue` or `throw`). An `if` whose condition is an `||` chain with a negated pattern is
   turned around into an `&&` chain of the negated operands with its branches swapped, and a
   `?:` whose condition is a negated pattern has its branches swapped (`!(o instanceof C c) ?
-  false : f(c)`, as decompilers write `equals`). An `if` whose condition negates an `&&` chain
-  with a pattern has it negated operand by operand first (`!(a && x instanceof C c)` is `!a ||
-  !(x instanceof C c)`), and an `||` inside the condition's `&&` chain whose negated pattern a
+  false : f(c)`, as decompilers write `equals`). An `if` whose condition, or an operand of its
+  `||` chain, negates an `&&` chain with a pattern has it negated operand by operand first (`!(a
+  && x instanceof C c)` is `!a || !(x instanceof C c)`; `m == null || !(s instanceof C c &&
+  f(c))`, as `SSLAlgorithmConstraints` writes it, is `m == null || !(s instanceof C c) ||
+  !f(c)`), and an `||` inside the condition's `&&` chain whose negated pattern a
   later operand reads becomes a conditional (`!(x instanceof C c) || f(c)` is `x instanceof C c
   ? f(c) : true`; all in `lower/negated_patterns.rs`). A read anywhere else is rejected: "a
   pattern variable used here not supported yet". A pattern variable may be assigned, except one of a record or switch
@@ -654,13 +656,11 @@ the program's classes implement:
   `Optional.of` of the value and `resolveConstantDesc(lookup)` the value itself, both on a value
   held as the interface (`constant_desc_arm` in `codegen/dispatch.rs`) and called on the string
   or box (`lower::object::constant_desc_call`, which calls the interface's method).
-- Plain interfaces of reflection and security that library code implements with classes of its
-  own (`java.lang.reflect.Type` and `ParameterizedType`, `WildcardType`, `GenericArrayType`,
-  `InvocationHandler`, `java.security.Key` and its private and public keys, `KeySpec`,
-  `AlgorithmParameterSpec`, `PrivilegedExceptionAction`) are translated from the JDK's sources as
-  any interface of the program (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their
-  objects in the JDK (a provider's keys, the parser of generic signatures) stays untranslated,
-  except `Proxy`, which makes the proxy classes the translator writes (see
+- Plain interfaces of reflection that library code implements with classes of its own
+  (`java.lang.reflect.Type` and `ParameterizedType`, `WildcardType`, `GenericArrayType`,
+  `InvocationHandler`) are translated from the JDK's sources as any interface of the program
+  (`TRANSLATED_ANYWAY` in `program/reach.rs`); what makes their objects in the JDK (the parser of
+  generic signatures) stays untranslated, except `Proxy`, which makes the proxy classes the translator writes (see
   [reflection-and-plugins.md](reflection-and-plugins.md)).
   `Class` implements `Type` in Java, and so does the runtime's class where the program has
   `Type` (and `TypeDescriptor`, `Serializable` and `GenericDeclaration`, which a class's type

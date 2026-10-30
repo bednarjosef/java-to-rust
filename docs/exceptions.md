@@ -174,10 +174,12 @@ A `try` is one of three forms, the plainest that is equivalent:
   passes on what no clause matches. A body that cannot complete normally is a block of
   `Result<Infallible, Throwable>`, its `return` is Rust's own, and the `match` has no `Ok` arm.
 - **The `java::Completion` form** when a `return`, `break` or `continue` leaves the `try` and a
-  `finally` must run first. `Completion<T, E, J>` has `Normal`, `Return(T)`, `Jump(J)` and
-  `Throw(E)`; the jump is `break 'attempt Completion::Jump(n)`, and a `match` after the `finally`
-  performs it. A block that no jump leaves has `Infallible` for `J`, one that no `return` leaves
-  `Infallible` for `T`, and a program without exceptions `Infallible` for `E`, so the `match` has
+  `finally` must run first. `Completion<T, E, J, N>` has `Normal`, `Carried(N)` (a normal end
+  with the locals that the block sets for the code after the `finally`, see below), `Return(T)`,
+  `Jump(J)` and `Throw(E)`; the jump is `break 'attempt Completion::Jump(n)`, and a `match` after
+  the `finally` performs it. A block that no jump leaves has `Infallible` for `J`, one that no
+  `return` leaves `Infallible` for `T`, one that carries no locals `Infallible` for `N`, and a
+  program without exceptions `Infallible` for `E`, so the `match` has
   only the arms that can happen (exhaustive patterns over uninhabited variants, Rust 1.82). When
   neither body nor catch completes normally, the code after the `finally` diverges as Java's does.
 
@@ -201,17 +203,21 @@ Rules the generator keeps:
   read, under `#[allow(unused_assignments)]`: Java's default for primitives and strings, an empty
   array, an enum's first constant, a plain box's zero. A local of an object type has no such
   value: a `try` without `finally` whose own statements set it carries it out in its `Ok` value
-  (`Ok((a, b))`), which the `match` arm stores. A `try` with a `finally` that nothing but an
-  exception leaves early carries it out the same way when the body and each `catch` clause that
-  completes normally set it with a statement of their own: the code after the `finally` takes
-  the value from the `Ok` that it passes on (`let (a_value,) = attempt?;`). A statement of its
-  own counts as setting the local when it is an `if` that sets it in both branches, or a `try`
+  (`Ok((a, b))`), which the `match` arm stores. A `try` with a `finally` that no jump leaves
+  early carries it out the same way when the body and each `catch` clause that completes
+  normally set it with a statement of their own: the code after the `finally` takes the value
+  from the `Ok` that it passes on (`let (a_value,) = attempt?;`), or where a `return` may leave
+  the block, from `Completion::Carried` (`ConstructKeys`' private key, set in a `catch` of a
+  block that returns). A statement of its
+  own counts as setting the local when it is an `if` that sets it in both branches (a branch
+  that never completes normally, such as a `throw`, counts as setting it), or a `try`
   that sets it in its block and in each `catch` clause that completes normally (with a `finally`,
-  one that nothing but an exception leaves early), as the two `try` statements of a
+  one that no jump leaves early), as the two `try` statements of a
   try-with-resources do (the inner one's clause throws again, the outer one closes the resource in
   its `finally`): so a local set in a try-with-resources that has a `catch`
-  (`PlayerSafetyServiceTextFilter`'s certificate), or in one branch of an `if` and directly in the
-  other, is carried out. A `try` that starts
+  (`PlayerSafetyServiceTextFilter`'s certificate), in one branch of an `if` and directly in the
+  other, or in every branch of an `if` chain but one that throws (`TlsKeyMaterialGenerator`'s
+  cipher keys), is carried out. A `try` that starts
   where the local already holds a value, as Rust sees it (a statement before it sets it whenever
   it completes, such as a loop whose condition assigns it: `while (null != (key =
   s.readObject()))` in `Component.readObject`), needs nothing. Set anywhere else (only inside an
@@ -244,7 +250,9 @@ starts. A resource that is not a new object may be null, and a null one is not c
 The resource's class must have a `close()` in the translated code ("a resource without a
 `close()` of the program" otherwise). In a single file that means the program's own classes;
 a library resource (`AutoCloseable` held as such, a lambda of it, the JDK's streams) is rejected
-there.
+there. In a whole program, a resource of a class that the translation leaves out
+(`program::untranslated`, such as serialization's `ObjectInputStream` in the JDK's key store)
+can only be null, as no object of it can be made, so the statement is its body alone.
 
 ## Failures of the runtime
 
@@ -695,9 +703,12 @@ nothing of `this` (javac's static method whose parameters are the variables it u
 own), counting the slots of `instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
 statement are declared just around it, those of an expression just for it, and a binding that
 outlives its statement, `if (!(o instanceof String s)) return;`, in the enclosing block before the
-statement, where whether the statement's branches complete is certain). A method with record,
-primitive or `switch` patterns, or with a binding that outlives a statement that is not one of a
-block's own, has no known slots for its temporaries, and a null message of one is not certain. Also covered: a null locale of
+statement, where whether the statement's branches complete is certain; so too one that
+outlives an `if` or loop that is a branch or a body, without braces, of a block's own statement,
+`else if (o instanceof T t) { .. } else { throw .. }`, which javac also declares in the block,
+ahead of the statement's other bindings). A method with record, primitive or `switch` patterns,
+or with a binding that outlives a statement elsewhere (in a `switch` case, after a label), has no
+known slots for its temporaries, and a null message of one is not certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
 for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)` and
 a null array of a name or an address given to the name service's natives
