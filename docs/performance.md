@@ -67,9 +67,11 @@ made on the stack (`java::count_allocation`).
   at each of its 22 collections, which no helper can share. Idle markers now sleep instead of
   spinning (docs/collector.md, "Marking and sweeping in parallel"), which at a load average of
   about 6 took BinaryTrees from 4.27 s to 2.16 s (Java 0.91 s at that load; the table above is
-  from before) and `SmallObjects` from 0.64 s to 0.36 s (Java 0.17 s). A young generation,
-  planned in docs/native-speed.md, would collect the short-lived objects without marking the old
-  ones. NodeList walks and rebuilds a linked list of
+  from before) and `SmallObjects` from 0.64 s to 0.36 s (Java 0.17 s). The young
+  generation (`JAVA_GC_GENERATIONS=1`, docs/collector.md) collects the short-lived objects
+  without marking the old ones: `SmallObjects` 0.43 s against 0.34 s, with 1.2 s against 0.49 s
+  of processor time, and BinaryTrees the same wall time with 4.9 s against 3.2 s of processor
+  time; it is opt-in because some peaks rise (`SmallObjects` 170 MB against 200 MB). NodeList walks and rebuilds a linked list of
   about 667,000 nodes; its nodes are taken from blocks in address order, so the walk follows
   memory.
 - **Strings read from a field (TokenScanner 0.8x).** A parser that reads its input one character

@@ -92,11 +92,12 @@ translated javac takes 14.5 s and 1.03 GB collecting after half as much as is al
 1.36 GB after as much, and 12.4 s and 2.0 GB after twice as much (the Java VM: 11.3 s, 4.1 GB). It:
 
 1. stops every other thread with a signal (`SIGPWR`); each records where its stack is and waits;
-2. marks every slot reachable from the roots, with an explicit stack, so a long chain of objects
-   needs no recursion;
-3. sweeps: frees the taken slots left unmarked (clears their bits), clears the marks for the next
-   collection, lists the blocks with free slots, and frees the blocks with nothing alive,
-   giving their memory back to the system where that empties a whole huge page.
+2. clears every mark, then marks every slot reachable from the roots, with an explicit stack, so
+   a long chain of objects needs no recursion;
+3. sweeps: frees the taken slots left unmarked (clears their bits), lists the blocks with free
+   slots, and frees the blocks with nothing alive, giving their memory back to the system where
+   that empties a whole huge page. The marks stay until the next collection, which is what the
+   young generation (below) builds on; the slots threads hold free lose theirs.
 
 The roots are scanned conservatively: any aligned word that points into a taken slot keeps that
 slot, which makes interior pointers and pointers held in registers work. The top 16 bits of a
@@ -195,6 +196,28 @@ On a test heap of 545 MB of small objects held by one array, eight threads mark 
 of 104 and sweep in 13 ms instead of 23. A heap that is one long linked list cannot be marked in parallel and marks about 25%
 slower than alone, the cost of the atomic mark bits.
 
+## Generations
+
+With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object that
+lives through a collection keeps its mark and is old. A minor collection marks from the roots
+and from the old objects on the pages written since the last collection, stops at marked
+objects, and frees the young ones left unmarked. A full collection, as above, runs once a quarter
+more (plus 1 MB) is alive than after the last full one, at once after the minor one that finds
+it, in the same pause.
+
+Which pages were written, the kernel says: the heap is registered with a `userfaultfd` in
+asynchronous write-protect mode, each collection protects the pages that now hold old objects
+that may hold pointers, and a write to one of them unprotects it in the kernel, with no thread
+woken; `PAGEMAP_SCAN` on `/proc/self/pagemap` lists the pages not protected (`track_writes`,
+`written`, `protect_old` in `gc.rs`). Every write counts, whatever code, thread or system call
+makes it, so nothing is emitted in the program. Everything Rust allocates is in the heap (the
+collector is the global allocator), and memory outside it that can hold a reference is the
+roots, scanned whole at every collection; docs/native-speed.md (1.3) lists it. Where the kernel
+refuses (before Linux 6.7, or a seccomp filter), every collection is full. It is opt-in until it
+has been measured on the Minecraft server: it saves processor time on programs whose old objects
+are many (`SmallObjects`, `BinaryTrees`), but keeps old objects that died until the next full
+collection, which raises the peak of some.
+
 ## Threads
 
 The runtime's `pthread_create` takes the C library's place: it registers the new thread (its
@@ -209,8 +232,13 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   output. A change to the collector or the runtime is checked by running the corpus with it set.
 - `JAVA_GC_THREADS=<n>` marks with `n` markers in all, and with more than one marks in parallel
   at every collection however small, which with `JAVA_GC_EVERY` tests the parallel marking.
-- `JAVA_GC_LOG=1` writes a line per collection to standard error: bytes taken since the last,
-  bytes alive, heap size, and the time spent marking and sweeping.
+- `JAVA_GC_LOG=1` writes a line per collection to standard error: whether it was minor or full,
+  bytes taken since the last, bytes alive, heap size, and the time spent marking and sweeping.
+- `JAVA_GC_GENERATIONS=1` with `JAVA_GC_EVERY=1` makes most collections minor ones, at every
+  refill of a thread's slots: the corpus run so is the test most likely to catch a write the
+  young generation misses. Running a program under `systemd-run --user --wait --pipe -p
+  SystemCallFilter=~userfaultfd -p SystemCallErrorNumber=EPERM` tests the fallback to full
+  collections.
 - `JAVA_GC_GROWTH=<percent>` sets the bytes taken between collections as a percentage of the
   bytes alive (100 by default), which trades memory for time.
 
@@ -223,5 +251,5 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   statics and thread-local storage are scanned, and the only
   memory outside them is the C library's own, which holds no handles except a starting thread's
   closure (covered above).
-- The plan for a faster and smaller heap (objects without headers, 4-byte references,
-  generations) is in docs/native-speed.md.
+- The plan for a faster and smaller heap (objects without headers, 4-byte references) is in
+  docs/native-speed.md.

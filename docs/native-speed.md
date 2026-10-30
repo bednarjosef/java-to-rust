@@ -119,29 +119,47 @@ at each collection, and marking in parallel. Planned beyond it:
   and stack bounds and waits. Each thread allocates from its own blocks.
 - **Values that own Rust memory** (a buffer of a runtime type) are dropped when their object is
   swept. Such classes are marked for it. Strings and arrays live in the heap, so there are few.
-- **Generations** (planned). Most objects die young, and every collection now marks everything
-  alive again: `BinaryTrees` marks its 89 MB tree at each of 72 collections, `SmallObjects` its
-  list of 2 million nodes at each of 22 (docs/performance.md, "Allocation"). The plan is a young
-  generation with sticky mark bits, in the runtime alone:
+- **Generations** (built, opt-in with `JAVA_GC_GENERATIONS=1`; docs/collector.md,
+  "Generations"). Most objects die young, and a full collection marks everything alive again:
+  `BinaryTrees` marks its 89 MB tree at each of 72 collections, `SmallObjects` its list of 2
+  million nodes at each of 22 (docs/performance.md, "Allocation"). The young generation uses
+  sticky mark bits, in the runtime alone:
   - **Old and young.** An object that survives a collection keeps its mark bit, and is old. A
-    minor collection marks from the roots and from the old objects written since the last
-    collection, stops at any marked object, and frees the taken slots left unmarked: the young
-    objects that died. A full collection, as now, clears every mark first, and runs when what
-    is old has grown by a factor (`JAVA_GC_GROWTH`'s share) since the last full one. Slots that
-    threads hold free (spans, free lists), which a collection keeps marked today, lose their
-    marks after the sweep, so that what is made in them is young. Sweeping visits only the
-    blocks allocated into since the last collection; the others hold only old objects.
+    minor collection marks from the roots and from the old objects on the pages written since
+    the last collection, stops at any marked object, and frees the taken slots left unmarked:
+    the young objects that died. A full collection clears every mark first. It runs once a
+    quarter more (plus 1 MB) is alive than after the last full one, in the same pause as the
+    minor collection that finds it, so that old objects that died do not decide when the next
+    collection runs. Slots that threads hold free (spans, free lists), which a collection keeps
+    marked, lose their marks after the sweep, so that what is made in them is young, and a slot
+    freed by Rust (`untake`) loses its mark too. Sweeping still visits every block.
   - **Which old objects were written: the kernel's write protection, not a barrier in the
     code.** The heap is registered with `userfaultfd` in asynchronous write-protect mode
     (`UFFD_FEATURE_WP_ASYNC`, Linux 6.7, unprivileged with `UFFD_USER_MODE_ONLY`). A write to a
     protected page faults once, and the kernel unprotects the page and notes it, without waking
-    any thread. Each collection, with the world stopped, asks `PAGEMAP_SCAN` for the pages
-    written since the last one and protects them again in the same call
-    (`PM_SCAN_WP_MATCHING`), and scans the old objects on those pages as roots. No barrier is
+    any thread. Each minor collection, with the world stopped, asks `PAGEMAP_SCAN` for the pages
+    not protected and scans the old objects on them; after the sweep, the pages among them that
+    now hold old objects that may hold pointers are protected again (`UFFDIO_WRITEPROTECT`, in
+    runs). Pages of young objects only stay writable, so allocation does not fault. No barrier is
     emitted, and every write counts: the generated code's, the runtime's, the standard
-    library's (a `Vec` or a `RefCell` written in place), atomics, and every thread's, since the
-    protection is the process's. Where the kernel refuses (an older kernel, a seccomp filter),
-    every collection is a full one, as now.
+    library's (a `Vec` or a `RefCell` written in place), atomics, the kernel's (a `read` into a
+    buffer), and every thread's, since the protection is the process's. Where the kernel
+    refuses (an older kernel, a seccomp filter), or stops answering, every collection is a full
+    one; this was tested with `systemd-run -p SystemCallFilter=~userfaultfd`.
+  - **Memory outside the heap that can hold a reference.** A reference held where neither
+    the roots nor the protected heap are would be missed by a minor collection. What exists:
+    - Rust's own allocations: every `Vec` buffer (an array's elements), `RefCell` contents,
+      `Box`, and the runtime's collections (the interned strings of `shared_string.rs`, the
+      thread table of `thread.rs`) are taken from the collector, which is the global allocator,
+      so they are in the protected heap.
+    - Statics (the writable segments of every loaded object), thread-local storage, the
+      threads' stacks and registers, and objects on the stack: roots, scanned whole at every
+      collection, minor or full.
+    - The C library's `malloc`: the runtime takes it only for a starting thread's closure
+      (`Start`), and no collection runs until the thread has registered and taken it.
+    - `native_memory.rs` blocks and mapped files: bytes, never references.
+    - The collector's own memory (block metadata, mark stacks, `PAGEMAP_SCAN`'s buffer):
+      reserved outside the heap, holding no references.
   - **Why not card marking.** A card barrier (`card[address >> 9] = 1` after a reference store)
     would have to see every reference written into the heap. `java::Field::set`,
     `java::SharedField::set` and an array's element store are the runtime's and could mark, but
@@ -157,16 +175,16 @@ at each collection, and marking in parallel. Planned beyond it:
     (NodeList 3%), except that a barrier on every 8-byte store slowed `ParticleArray`'s `double`
     stores by 53%, by stopping their vectorization: a real barrier would have to know a reference
     type from a `long`.
-  - **Expected cost.** The first write to a protected page in a cycle costs 0.26 µs (measured,
-    16,384 pages in 4.2 ms), and scanning and protecting 256 MB of heap 0.2 to 0.6 ms. Only pages
-    that hold old objects need protection: a page of young objects only is not protected, and
-    allocation fills free blocks first, so the faults come from old objects that change. A
-    protected huge page is split into 4 KB pages (the kernel's write protection is per page),
-    which costs TLB misses on old data; whether that is measurable is to be seen on the
-    Minecraft benchmark. Expected gain: a minor collection of `BinaryTrees` marks the young
-    trees that are alive and sweeps the blocks it allocated into, instead of 5 ms of marking
-    and 3 ms of sweeping, about 0.5 of its 1.7 s; `SmallObjects` stops marking its list 22
-    times (8 to 15 ms each).
+  - **What it costs and gains.** The first write to a protected page in a cycle costs 0.26 to
+    0.4 µs, and scanning and protecting 256 MB of heap 0.2 to 0.6 ms. A protected huge page is
+    split into 4 KB pages (the protection is per page). Measured (median of alternating runs,
+    off against on): `SmallObjects` 0.43 s and 1.2 s of processor time against 0.34 s and 0.49
+    s, but 170 MB against 200 MB at its peak, since the dead old nodes wait for a full
+    collection; `BinaryTrees` the same wall time with a third less processor time (4.9 s against
+    3.2 s); `ManyThreadsAllocating` 0.10 s against 0.13 s and 196 MB against 201 MB, from the
+    full collections that follow minor ones; `SortMillion` 47 MB against 56 MB at the same
+    speed. The others are unchanged. That mix is why it is opt-in: it is to be tried on the
+    Minecraft server before it becomes the default.
   - **Threads and forms.** Nothing changes in the generated code or the object forms
     (`java::Monitored`, `java::SharedField`, `RefCell`): the protection sees writes, not
     types. A `LazyMonitor` that makes its lock writes the lock's pointer into the object, a
