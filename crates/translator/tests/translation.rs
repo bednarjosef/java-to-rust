@@ -3314,7 +3314,7 @@ fn a_census_stubs_only_the_code_of_the_file_with_the_rejection() {
             ),
             (
                 "p/A.java",
-                "package p;\nclass A {\n    static Object drain(boolean fail) {\n        Object tasks;\n        try {\n            if (!fail) {\n                tasks = new Object();\n            } else {\n                throw new IllegalStateException(\"no\");\n            }\n        } catch (IllegalStateException e) {\n            tasks = e;\n        }\n        return tasks;\n    }\n}\n",
+                "package p;\nclass A {\n    static Object drain(boolean fail) {\n        Object tasks;\n        try {\n            switch (fail ? 1 : 0) {\n                case 0: tasks = new Object(); break;\n                default:\n                    throw new IllegalStateException(\"no\");\n            }\n        } catch (IllegalStateException e) {\n            tasks = e;\n        }\n        return tasks;\n    }\n}\n",
             ),
             (
                 "p/B.java",
@@ -4026,10 +4026,10 @@ class Drain {
     static Object drain(boolean fail) {
         Object tasks;
         try {
-            if (!fail) {
-                tasks = new Object();
-            } else {
-                throw new IllegalStateException("no");
+            switch (fail ? 1 : 0) {
+                case 0: tasks = new Object(); break;
+                default:
+                    throw new IllegalStateException("no");
             }
         } catch (IllegalStateException e) {
             tasks = e;
