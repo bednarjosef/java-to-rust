@@ -953,7 +953,8 @@ nothing (slower, never wrong), so the scan is to be exact, not generous.
   candidate; a value of a type variable used as an operand or receiver, or stored, passed
   (packed varargs too) or returned where the type is not a type variable of a Rust generic; a
   value of a type that names one converted to another type; and a member of an erased generic
-  whose result javac gives a type variable of a Rust generic, which lowering casts back; and,
+  whose result javac gives a type variable of a Rust generic (or a capture of `? extends U`,
+  which lowering reads as `U`), which lowering casts back; and,
   once a call reaches a native of `TranslatedTypes` whose table lists the program's classes
   (`typeParameters0`, `genericInterfaces0`, `bounds0`), each class it lists, whose class literal
   the table names. On javac it predicts all 360 failing generics and no others, in 1.3 s. Erasing them before the

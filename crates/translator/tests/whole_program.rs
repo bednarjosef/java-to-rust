@@ -1891,9 +1891,12 @@ public class Main {
     static <T> T cast(Object o) { return keep((T) o); }
     static <T> Supplier<T> later(T v) { return () -> v; }
     static <T> List<T> one(T v) { return List.of(v); }
+    // `get` of an erased `Optional` read as the capture's bound `U`, which lowering casts back.
+    @SuppressWarnings("unchecked")
+    static <U> U orElse(Optional<? extends U> o, U other) { return (U) (o.isPresent() ? o.get() : other); }
 
     public static void main(String[] args) {
-        Box<String> box = new Box<>(keep("b"));
+        Box<String> box = new Box<>(keep(orElse(Optional.of("b"), "c")));
         new Visitor<String>().visit(new Leaf(), "x");
         System.out.println(box.get() + first(one("f")) + text(3) + later("l").get()
             + new Pair<>("a", 1).equals(new Pair<>("a", 2)) + Main.<String>cast("c"));

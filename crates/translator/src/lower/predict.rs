@@ -347,8 +347,15 @@ impl<'t> Flow<'_, 't> {
         Scope { vars, ret }
     }
 
-    /// Type `text` as lowering has it in `scope`.
+    /// Type `text` as lowering has it in `scope`: a capture or a wildcard as its upper bound
+    /// (`Lowering::erased`), `capture#1 of ? extends U` as `U`.
     fn lowered<'a>(&self, text: &'a str, scope: &Scope) -> Lowered<'a> {
+        let wildcard = text
+            .strip_prefix("capture#")
+            .map_or(text, |rest| rest.split_once(" of ").map_or("?", |(_, b)| b));
+        if let Some(bound) = wildcard.strip_prefix("? extends ") {
+            return self.lowered(bound, scope);
+        }
         self.lower(&JavaType::parse(text), scope)
     }
 
