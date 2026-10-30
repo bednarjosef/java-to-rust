@@ -392,7 +392,8 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.util.SignatureFileVerifier",
     // Message digests, as javac's `-XDshowClass` computes a class file's checksum: the JDK's
     // own code of `MessageDigest` and of the `SUN` provider's digests, which
-    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below).
+    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below), and `MD4`,
+    // which NTLM authentication in the HTTP client gets from a provider of its own.
     "java.security.DigestException",
     "java.security.DigestInputStream",
     "java.security.DigestOutputStream",
@@ -408,6 +409,7 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.provider.ByteArrayAccess.LE",
     "sun.security.provider.DigestBase",
     "sun.security.provider.MD2",
+    "sun.security.provider.MD4",
     "sun.security.provider.MD5",
     "sun.security.provider.SHA",
     "sun.security.provider.SHA2",

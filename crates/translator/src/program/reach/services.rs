@@ -6,9 +6,11 @@
 //! The JDK's providers register their services in code, each with a call whose string literals
 //! are the service's type, its algorithm and the class (`add(p, "MessageDigest", "SHA-256",
 //! "sun.security.provider.SHA2$SHA256", attrs)`, `ps("Cipher", "AES", ..)`, `new
-//! Provider.Service(this, "SSLContext", ..)`): a call of reachable code with two string literals
-//! or more, the first a name and a later one that of a class, registers that class for a service
-//! of the first's type. A provider registers hundreds of services, and making every class
+//! Provider.Service(this, "SSLContext", ..)`), and a provider of its own registers them as
+//! legacy entries, the type and the algorithm in one key (`MD4`'s `put("MessageDigest.MD4",
+//! "sun.security.provider.MD4")`): a call of reachable code with two string literals or more,
+//! the first a name or a name, a dot and an algorithm, and a later one that of a class, registers
+//! that class for a service of that name's type. A provider registers hundreds of services, and making every class
 //! reachable would translate most of `javax.crypto` for a program that only digests: so a class
 //! is a case of the `switch` only once reachable code makes objects of the engine class of its
 //! service's type (`MessageDigest` for `"MessageDigest"`), which hold the services that it looks
@@ -58,7 +60,11 @@ fn registration(node: &Value) -> Option<(String, String)> {
         .filter(|a| text(a, "kind") == "STRING_LITERAL")
         .filter_map(|a| a["value"].as_str())
         .collect();
-    let (ty, rest) = literals.split_first()?;
+    let (first, rest) = literals.split_first()?;
+    // A provider's legacy entry names the type and the algorithm in one key
+    // (`put("MessageDigest.MD4", "sun.security.provider.MD4")`).
+    let ty =
+        first.split_once('.').map_or(*first, |(ty, algorithm)| if algorithm.is_empty() { "" } else { ty });
     if ty.is_empty() || !ty.chars().all(|c| c.is_ascii_alphanumeric()) {
         return None;
     }
@@ -182,6 +188,12 @@ mod tests {
             registered,
             Some(("MessageDigest".to_string(), "sun.security.provider.SHA2$SHA256".to_string()))
         );
+    }
+
+    #[test]
+    fn a_legacy_entry_names_the_type_and_the_class() {
+        let registered = registration(&call(&["MessageDigest.MD4", "sun.security.provider.MD4"]));
+        assert_eq!(registered, Some(("MessageDigest".to_string(), "sun.security.provider.MD4".to_string())));
     }
 
     #[test]
