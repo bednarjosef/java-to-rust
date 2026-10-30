@@ -22,7 +22,8 @@ benchmarks that measure it are in "Memory".
 
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
-clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (three runs a side).
+clock (4.8 GHz under load); NoiseTree's and ObjectDispatch's rows are from later runs of each
+alone (three runs a side).
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -45,7 +46,7 @@ clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (thr
 | NBody                 |    1811 |    1884 |      1.04 |         601 |         598 |         1.00 |
 | NodeList              |     175 |     110 |      0.63 |           - |           - |            - |
 | NoiseTree             |     369 |     442 |      1.20 |         287 |         400 |         1.39 |
-| ObjectDispatch        |     169 |     389 |      2.30 |         110 |         318 |         2.89 |
+| ObjectDispatch        |     169 |     376 |      2.23 |         111 |         311 |         2.80 |
 | ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
 | ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
 | ReflectionLookups     |     155 |     183 |      1.18 |         106 |         162 |         1.53 |
@@ -153,7 +154,7 @@ made on the stack (`java::count_allocation`).
   whose address it does not know: each iteration stored the state and the next read it back
   (2.6 s). Reading or writing one element of a `java::Array` checks no borrow flag
   (`array.rs`, `ArrayData::raw`), whose store and reload also chained the iterations.
-- **Objects of many classes behind one type (ObjectDispatch 2.3x, kernel 2.9x).** 48 enums held as
+- **Objects of many classes behind one type (ObjectDispatch 2.2x, kernel 2.8x).** 48 enums held as
   `Comparable` and `Object`: a palette that also holds strings searched by `==`
   (`java::same_object`), casts back to an enum (`as_<type>()`) and `ordinal()` through `Enum`, the
   operations at the top of the Minecraft server's profile. Each tests the value's class number: a
@@ -165,6 +166,19 @@ made on the stack (`java::count_allocation`).
   same object and different bits different objects, but where both are strings or boxes. In the
   palette's search the compiler then tests the key's class once, before the loop, and each element
   is one compare, as in Java; comparing the class numbers first, the kernel took 1.8 times as long.
+  The search reads the palette, a static, at each iteration; `java::Global::cloned` reads it without
+  writing its borrow flag, whose increment and decrement were stores the compiler could not tell
+  apart from the array, so the loop reloaded the array's element pointer at each element.
+  `java::len` stops the program for an array longer than `i32::MAX` elements, which Java's arrays
+  never are, and so tells the compiler that `i < palette.length` keeps `i` in bounds: the loop has
+  no bounds check left. What remains is the loop itself, about 1.3 cycles an element against Java's
+  0.5: the JIT unrolls it (its kernel takes 362 ms with `-XX:LoopUnrollLimit=1`, against 112 ms),
+  and LLVM does not unroll a loop with a second exit, the element found. With `-C
+  llvm-args=-unroll-runtime-multi-exit` it does, and the kernel takes 104 ms against 308 ms, but the
+  same flag slows SortMillion's kernel from 563 to 634 ms (its partition scans `while (a[i] < pivot)
+  i++` end after a few elements, and the unrolled loop runs more instructions and mispredicts more)
+  and ObjectHash's from 41 to 47 ms (its probes end after one or two slots), so the translation does
+  not set it.
 - **Classes known only at run time (ClassCast 1.0x, kernel 1.9x).** `Class.cast` and
   `Class.isInstance` of values of 258 classes behind `Comparable` with their own class and another,
   as the Minecraft server's `StateHolder.getValue` casts each property's value. Each asks the value

@@ -26,7 +26,7 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 /// A static field of a program that starts no thread: a `Cell` or a `RefCell` (`C`), which
 /// `Deref` reaches. `with_borrow`, `with_borrow_mut` and `set` of a `RefCell` are those of a
-/// thread-local one.
+/// thread-local one; `cloned` reads a `RefCell`'s value without writing its borrow flag.
 pub struct Global<C>(C);
 
 // Only the program's one thread runs Java code. The collector reads statics while that thread
@@ -85,6 +85,23 @@ macro_rules! like_thread_local {
                 f(&mut (**self).borrow_mut())
             }
 
+            /// A copy of the value, as `with_borrow(|v| v.clone())` makes it, but with the
+            /// borrow flag tested and not written: a `borrow` adds to the flag and takes away
+            /// from it again, stores to a static that the compiler cannot tell apart from the
+            /// objects a loop reads, so a loop that reads the static kept reloading what it read
+            /// through the value and was not unrolled. A clone of the translation's values runs
+            /// no Java code, so nothing writes the static while it is lent.
+            #[inline(always)]
+            pub fn cloned(&self) -> T
+            where
+                T: Clone,
+            {
+                match unsafe { (**self).try_borrow_unguarded() } {
+                    Ok(value) => value.clone(),
+                    Err(_) => already_borrowed(),
+                }
+            }
+
             #[inline(always)]
             pub fn set(&self, value: T) {
                 drop((**self).replace(value));
@@ -94,6 +111,13 @@ macro_rules! like_thread_local {
 }
 
 like_thread_local!(Global, LazyGlobal);
+
+/// A static read while it is being written, which `RefCell::borrow` refuses with this panic.
+#[cold]
+#[inline(never)]
+fn already_borrowed() -> ! {
+    panic!("already mutably borrowed")
+}
 
 /// A primitive static field shared by threads: every read acquires and every write releases, so
 /// a thread that sees a value sees everything the writing thread did before it. The value is

@@ -28,8 +28,9 @@ enum Slot {
         /// Whether the cell is a `volatile` field's, accessed in sequential consistency.
         volatile: bool,
     },
-    /// A static field: a `Cell` when `plain`, else a `RefCell`.
-    Static { cell: String, plain: bool },
+    /// A static field: a `Cell` when `plain`, else a `RefCell`; a `java::Global` when `global`
+    /// (a program that starts no thread), else a thread-local cell or a `java::Locked`.
+    Static { cell: String, plain: bool, global: bool },
     /// A static field that is a `java::Final`, read with no lock.
     Final { cell: String },
 }
@@ -49,8 +50,9 @@ impl Slot {
                 let borrow = if *on_enum { ".base()" } else { ".borrow()" };
                 format!("{obj}{borrow}.{field}{}", if copy { "" } else { ".clone()" })
             }
-            Slot::Static { cell, plain: true } => format!("{cell}.get()"),
-            Slot::Static { cell, plain: false } => {
+            Slot::Static { cell, plain: true, .. } => format!("{cell}.get()"),
+            Slot::Static { cell, plain: false, global: true } => format!("{cell}.cloned()"),
+            Slot::Static { cell, plain: false, global: false } => {
                 format!("{cell}.with_borrow({})", if copy { "|v| *v" } else { "|v| v.clone()" })
             }
             Slot::Final { cell } if copy => format!("(*{cell}.get())"),
@@ -69,8 +71,8 @@ impl Slot {
                 let borrow = if *on_enum { ".base_mut()" } else { ".borrow_mut()" };
                 format!("{obj}{borrow}.{field} = {value};")
             }
-            Slot::Static { cell, plain: true } => format!("{cell}.set({value});"),
-            Slot::Static { cell, plain: false } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
+            Slot::Static { cell, plain: true, .. } => format!("{cell}.set({value});"),
+            Slot::Static { cell, plain: false, .. } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
             Slot::Final { cell } => format!("{cell}.set({value});"),
         }
     }
@@ -1595,7 +1597,7 @@ impl<'a> Gen<'a> {
         if self.final_static(class, name) {
             Slot::Final { cell }
         } else {
-            Slot::Static { cell, plain: is_cell(ty) }
+            Slot::Static { cell, plain: is_cell(ty), global: !self.facts.threaded }
         }
     }
 
@@ -2068,7 +2070,8 @@ impl<'a> Gen<'a> {
             // The old string and then the right operand are formatted, in Java's order.
             Update::Compound(_, value) if ty == Type::String => {
                 lines.extend(init);
-                let old = Slot::Static { cell: cell.clone(), plain: false }.read(true);
+                let old = Slot::Static { cell: cell.clone(), plain: false, global: !self.facts.threaded }
+                    .read(true);
                 // A static that may be null shows as `null` and is written as `Some`.
                 let nullable = self.place_nullable(target);
                 let old = match nullable {

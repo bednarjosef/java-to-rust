@@ -1,9 +1,10 @@
 //! Code generation for static initialization. A `static final` compile-time constant is a Rust
 //! `const`, read without a cell. In a program that starts no thread, every other static field is
 //! a `java::Global` (or `java::LazyGlobal`, when its initializer is not a constant): a plain
-//! `static` that holds a `Cell` or a `RefCell` and is read and written with the text of a
-//! thread-local cell, which the compiler can keep in a register through a loop (see the runtime's
-//! `statics.rs`). A class whose static
+//! `static` that holds a `Cell` or a `RefCell` and is written with the text of a thread-local
+//! cell, which the compiler can keep in a register through a loop (see the runtime's
+//! `statics.rs`); a `RefCell`'s value is read with `cloned()`, which tests its borrow flag
+//! without writing it. A class whose static
 //! initialization must run eagerly (see `analysis::statics`) has an `init` function that runs its
 //! `<clinit>` once, and every static method, constructor and access from another class calls it
 //! first, as Java initializes a class on first use. The `init` function is inlined and only tests

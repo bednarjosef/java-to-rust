@@ -5788,7 +5788,7 @@ fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
         &[
             "static A_EMPTY_INSTANCE: java::Global<RefCell<Option<Arc<AEmpty>>>> = java::Global::new(RefCell::new(None));",
             "A_EMPTY_INSTANCE.set(Some(Arc::new(AEmpty__new())));",
-            "java::non_null(A_EMPTY_INSTANCE.with_borrow(|v| v.clone()))",
+            "java::non_null(A_EMPTY_INSTANCE.cloned())",
         ],
     );
     assert_lacks(&rust, &["try_non_null"]);
