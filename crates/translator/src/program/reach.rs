@@ -4041,6 +4041,9 @@ impl<'t> Walk<'t> {
             && let Some(literal) = value["value"].as_str()
         {
             self.named(literal);
+            for name in by_name::listed_class_names(literal) {
+                self.named(name);
+            }
         }
         if kind == "PLUS"
             && let Some(pattern) = name_pattern(value)
