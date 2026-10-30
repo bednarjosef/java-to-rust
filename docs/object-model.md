@@ -912,48 +912,49 @@ stored, moved and cloned. `Type::Class` carries its type arguments (`Type::Class
 of a value clones it. A literal passed for a type variable gets its type suffix (`3i32`). Use
 sites keep javac's substituted types, with no cast.
 
-**Plan: one lowering, by predicting both sets first.** Today the first lowering finds the
-covariant arrays and the failing Rust generics, and a second one is made with them (Minecraft:
-730 array types and 78 of 78 classes and 2806 of 2841 methods, 83 s an attempt; javac: 75
-types, 7 of 8 classes and 353 of 361 methods). The plan is a scan of the trees of the
-declarations that lowering will lower, before the first lowering, that computes the two sets,
-so that the first lowering starts with them (`Covariant::known`, `Lowering::real` without the
-predicted failures) and finds nothing new. The retry stays: whatever the scan misses, the
-lowering notes as now, and the program is lowered again, so a miss costs time, never a wrong
-translation. A type predicted covariant that no two arrays meet is an `Object[]` for nothing
-(slower, never wrong), so the scan is to be exact, not generous.
+**Predicting both sets before the first lowering** (`lower/predict.rs`). Without a prediction,
+the first lowering finds the covariant arrays and the failing Rust generics, and a second one is
+made with them (Minecraft: 730 array types and 78 of 78 classes and 2806 of 2841 methods, 83 s
+an attempt; javac: 75 types, 7 of 8 classes and 353 of 361 methods). Before the first lowering,
+a scan of the trees of the declarations that lowering will lower predicts the two sets, and the
+first lowering starts with them (`Covariant::known`, and `Lowering::real` without the predicted
+failures, `Lowering::start_real`), so that it finds nothing new. Whatever the scan misses, the
+lowering notes as before, and the program is lowered again, so a miss costs time, never a
+wrong translation. A type predicted covariant that no two arrays meet would be an `Object[]` for
+nothing (slower, never wrong), so the scan is to be exact, not generous.
 
-- **Failing Rust generics**, with javac's types (`javaType`, a symbol's `ty`) and the candidates
-  (`candidates`), in a fixpoint like `verify`'s: a method none of whose parameter types mentions a
-  type variable outside a non-real class's arguments, which Rust cannot infer (`List<T>` once
-  `List` is erased; about half of Minecraft's); a type variable of a method or class named
-  inside a lambda, local or anonymous class within it (`type_var`); a candidate class used raw,
-  or with a wildcard, capture or intersection argument; a cast or `instanceof` of a type that
-  mentions a candidate's type variable or class; a value of a type variable stored, read or
-  passed where the declared type is not that type variable; a candidate class's value going
-  where another type is declared (an argument, an assignment, a return); `System.arraycopy` of
-  a type variable's value. Each failure erases the type variable to its bound, which can fail
-  more, as in `verify`.
-- **Covariant arrays**, in erased types (a candidate with an array of its type variables is never
-  a Rust generic, so arrays meet as erased ones), at every place where lowering compares two
-  array types (`meets_object_array`): an argument and its parameter, including varargs and a
-  substituted `T[]` (`hierarchy`'s argument check, about half of Minecraft's), an assignment, a
-  return, a `?:`, an array initializer's element, a cast; and an array that becomes an `Object`
-  against each array type an `Object` is cast to or tested for (`meets_through_object`). Code that
-  lowering makes and the trees do not have is scanned from the same inputs: the reflection
-  table's members (`invokePart`, `getPart`: about 15% of Minecraft's types), proxies' interface
-  methods, an enum's `values` as a method reference (`Supplier<E[]>`), field initializers and
-  bridges. The closure that `noted_later` makes then runs on the predicted pairs.
-- **Checking it** (built, `lower/predict.rs`): with `JAVA_TO_RUST_PREDICTION_CHECK` set, the
-  prediction is made but not used, and `--timings` prints how many of the array types the
-  lowerings noted and of the Rust generics that failed it predicted, then each one it missed or
-  added (`timing: prediction missed array String[]`). The prediction itself is still empty.
-
-Expected: the generics at 98% or better (most fail by the inference and lambda rules, which the
-trees show exactly); the arrays at 90 to 95% at first, since lowering makes some of the code
-they meet in, so Minecraft keeps its second lowering until the misses are covered, and javac
-loses its second lowering sooner. The scan reads every reached tree once, a few seconds against
-a lowering attempt's 83 s.
+- **Failing Rust generics** (built). The scan reads javac's types (`javaType`, a symbol's
+  type) with the candidates, in a fixpoint like `verify`'s, where each failure erases the type
+  variables of what failed, which can fail more: a method none of whose parameter types names a
+  type variable outside an erased class's arguments, which Rust cannot infer (`List<T>` once
+  `List` is erased; about half of Minecraft's), and a class none of whose instance fields does;
+  a method that overrides another or that another overrides; a type variable named in a lambda,
+  a local or anonymous class or an inner class (`type_var`); a candidate class used raw, or with
+  a wildcard, capture or intersection argument; a cast or `instanceof` of a type that names a
+  candidate; a value of a type variable used as an operand or receiver, or stored, passed
+  (packed varargs too) or returned where the type is not a type variable of a Rust generic; a
+  value of a type that names one converted to another type; and a member of an erased generic
+  whose result javac gives a type variable of a Rust generic, which lowering casts back. On
+  javac it predicts all 360 failing generics and no others, in 1.3 s. Erasing them before the
+  first lowering also spares the arrays that met only because a class was still a Rust generic
+  then: javac's `ConcurrentSkipListMap.Index[]` (noted as it and as `Index<Object, Object>[]`,
+  two of its 75 types) stays an array of its class.
+- **Covariant arrays** (planned), in erased types (a candidate with an array of its type
+  variables is never a Rust generic, so arrays meet as erased ones), at every place where
+  lowering compares two array types (`meets_object_array`): an argument and its parameter,
+  including varargs and a substituted `T[]` (`hierarchy`'s argument check, about half of
+  Minecraft's), an assignment, a return, a `?:`, an array initializer's element, a cast; and an
+  array that becomes an `Object` against each array type an `Object` is cast to or tested for
+  (`meets_through_object`). Code that lowering makes and the trees do not have is scanned from the
+  same inputs: the reflection table's members (`invokePart`, `getPart`: about 15% of Minecraft's
+  types), proxies' interface methods, an enum's `values` as a method reference
+  (`Supplier<E[]>`), field initializers and bridges. The closure that `noted_later` makes then
+  runs on the predicted pairs. Expected at 90 to 95% at first, since lowering makes some of the
+  code they meet in.
+- **Checking it**: with `JAVA_TO_RUST_PREDICTION_CHECK` set, the prediction is made but not
+  used, and `--timings` prints how many of the array types the lowerings noted and of the Rust
+  generics that failed it predicted, then each one it missed or added (`timing: prediction
+  missed array String[]`). `JAVA_TO_RUST_PREDICTION_WHY` prints why the scan fails each generic.
 
 ### 1.12 Interfaces: default and static methods, constants, enums implementing interfaces
 

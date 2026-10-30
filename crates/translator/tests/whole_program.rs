@@ -514,7 +514,9 @@ fn a_covariant_array_of_a_rust_generic_class_erases_it_in_the_same_lowering() {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&sources).unwrap();
     std::fs::write(sources.join("Main.java"), ARRAY_OF_A_GENERIC_CLASS).unwrap();
+    // Without the prediction, which fails `Box` before the first lowering.
     let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .env("JAVA_TO_RUST_PREDICTION_CHECK", "1")
         .args(["--timings", "--main", "Main", "--source"])
         .arg(&sources)
         .arg("--library")
@@ -1651,4 +1653,85 @@ public class Main {
     for wanted in ["a proxy class of ", "the module of a proxy class, a dynamic module"] {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
+}
+
+/// Rust generics that fail for each of the reasons lowering finds, and two that stay: the
+/// prediction made before the first lowering names exactly those that fail
+/// (`lower::predict`, checked with `JAVA_TO_RUST_PREDICTION_CHECK`).
+const GENERICS_THAT_FAIL: &str = r#"
+import java.util.*;
+import java.util.function.Supplier;
+
+public class Main {
+    static class Box<T> { T value; Box(T v) { value = v; } T get() { return value; } }
+    static class Pair<A, B> {
+        A a; B b;
+        Pair(A a, B b) { this.a = a; this.b = b; }
+        public boolean equals(Object o) { return o instanceof Pair<?, ?> p && Objects.equals(a, p.a); }
+    }
+    interface Node { <A> void accept(A arg); }
+    static class Leaf implements Node { public <A> void accept(A arg) { System.out.println("leaf"); } }
+    static class Visitor<A> { void visit(Node n, A arg) { n.accept(arg); } }
+
+    static <T> T keep(T v) { return v; }
+    static <T> T first(List<T> list) { return list.get(0); }
+    static <T> String text(T v) { return "v" + v; }
+    static <T> T cast(Object o) { return keep((T) o); }
+    static <T> Supplier<T> later(T v) { return () -> v; }
+    static <T> List<T> one(T v) { return List.of(v); }
+
+    public static void main(String[] args) {
+        Box<String> box = new Box<>(keep("b"));
+        new Visitor<String>().visit(new Leaf(), "x");
+        System.out.println(box.get() + first(one("f")) + text(3) + later("l").get()
+            + new Pair<>("a", 1).equals(new Pair<>("a", 2)) + Main.<String>cast("c"));
+    }
+}
+"#;
+
+#[test]
+fn the_rust_generics_that_fail_are_predicted() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-predicted-generics");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), GENERICS_THAT_FAIL).unwrap();
+    let translate = |check: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
+        if check {
+            command.env("JAVA_TO_RUST_PREDICTION_CHECK", "1");
+        }
+        let translated = command
+            .args(["--timings", "--main", "Main", "--source"])
+            .arg(&sources)
+            .arg("--library")
+            .arg(&library)
+            .arg("-o")
+            .arg(work.join("main.rs"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&translated.stderr).into_owned();
+        assert!(translated.status.success(), "the translation failed:\n{stderr}");
+        (stderr, std::fs::read_to_string(work.join("main.rs")).unwrap())
+    };
+    let (checked, unseeded) = translate(true);
+    let line = checked
+        .lines()
+        .find(|l| l.starts_with("timing: prediction: ") && l.contains(" of "))
+        .unwrap_or_else(|| panic!("no prediction checked:\n{checked}"));
+    let generics = line.split("; ").nth(1).unwrap();
+    let numbers: Vec<&str> = generics.split(' ').collect();
+    assert_eq!(numbers[0], numbers[2], "{line}\n{checked}");
+    assert!(generics.ends_with(", 0 more"), "{line}\n{checked}");
+    assert!(!checked.contains("prediction missed generic"), "{checked}");
+    // The Rust generics that stay are the same with the prediction used.
+    let (_, seeded) = translate(false);
+    for generic in ["struct MainBox<T", "fn keep<T"] {
+        assert!(seeded.contains(generic) && unseeded.contains(generic), "no {generic} in the translation");
+    }
+    assert_eq!(seeded, unseeded);
 }

@@ -531,7 +531,7 @@ fn mentions_outside(ty: Type, p: Type, own: &str) -> bool {
 }
 
 /// Whether javac's type string `ty` mentions the type variable `name`.
-fn mentions_var(ty: &str, name: &str) -> bool {
+pub(super) fn mentions_var(ty: &str, name: &str) -> bool {
     ty.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.')).any(|w| w == name)
 }
 
