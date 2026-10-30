@@ -226,8 +226,11 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     }
     let splits = std::cell::RefCell::new(splits);
     let tree = &tree;
+    // No warnings, as in the body crates: the Minecraft server's header had thousands
+    // (parentheses, unreachable code after a call that throws, enum variants' names), which rustc
+    // renders and Cargo keeps with the crate's build.
     let header = format!(
-        "{}#![allow(dead_code, unused_imports, unused_mut, unused_variables, non_snake_case)]\n\n{}",
+        "{}#![allow(warnings)]\n\n{}",
         tree.header,
         nest(tree, &|_| true, &|m| {
             let uses = uses_text(&tree.modules[m].uses);
