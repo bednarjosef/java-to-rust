@@ -71,31 +71,32 @@ sites (class, the method the `new` is in, and "on the stack" for a `new` whose o
 slot on the stack) that made the most objects, on standard error, with the total and the share
 made on the stack (`java::count_allocation`).
 
-- **Allocation (BinaryTrees 2.4x, SmallObjects 1.4x, NodeList 0.6x).** Objects live in the
-  runtime's garbage collected heap (docs/collector.md): an allocation takes a slot from a
-  per-thread list through the global allocator, and a handle is copied without a count. The slot
-  is zeroed word by word rather than with a call of `memset`: BinaryTrees took 7.8 s against
-  9.4 s with the call (alternating runs, at about 620 MHz). Taking the slot inlined at every
-  `new` took it to 5.8 s but slowed other loops, which the compiler no longer optimized as well
-  (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 89 MB alive while it
-  builds and drops millions of short-lived ones; the collector marks that long-lived tree again
-  at each of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads),
-  which is most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million
+- **Allocation (BinaryTrees 2.4x, SmallObjects 1.4x, NodeList 0.6x).** Objects live in the runtime's
+  garbage collected heap (docs/collector.md): an allocation takes a slot from a per-thread list
+  through the global allocator, and a handle is copied without a count. The slot is zeroed word by
+  word rather than with a call of `memset`: BinaryTrees took 7.8 s against 9.4 s with the call
+  (alternating runs, at about 620 MHz). Taking the slot inlined at every `new` took it to 5.8 s but
+  slowed other loops, which the compiler no longer optimized as well (docs/collector.md,
+  "Allocation"). BinaryTrees keeps a tree of about 32 MB alive while it builds and drops millions of
+  short-lived ones; the collector marks that long-lived tree again at each of its 70 collections,
+  which at full clock pause the program for about 0.2 s of its 1.6 s in all (on 16 threads; 0.9 s on
+  one). The rest is the program itself: half of its own time is in the allocator, most of that in
+  the first store to each new slot, a cache miss, which not zeroing the slot moves to the
+  constructor's stores without saving time. `SmallObjects` likewise marks a linked list of 2 million
   nodes again at each of its collections, which no helper can share. Of the 60 million nodes its
-  last loop makes, the half that each iteration's `Node n` holds are made on the stack, because
-  the escape analysis tells variables apart by their declaration (docs/collector.md, "Objects on
-  the stack"); taking this `n` for the one of an earlier `for (Node n = head; ..)`, declared
-  outside the loop, it made them all on the heap: 1.31 s and 22 collections against 0.75 s and
-  12 (alternating runs at a load of 15). Idle markers sleep instead of spinning
-  (docs/collector.md, "Marking and sweeping in parallel"): spinning, at a load average of about
-  6, BinaryTrees took 4.27 s against 2.16 s (Java 0.91 s at that load) and `SmallObjects` 0.64 s
-  against 0.36 s (Java 0.17 s). The young generation (`JAVA_GC_GENERATIONS=1`,
-  docs/collector.md) collects the short-lived objects without marking the old ones:
-  `SmallObjects` 0.43 s against 0.34 s, with 1.2 s against 0.49 s of processor time, and
-  BinaryTrees 5.37 s against 5.86 s with 13.2 s against 20.4 s of processor time (at about
-  850 MHz); it is opt-in because some peaks rise (`SmallObjects` 170 MB against 200 MB).
-  NodeList walks and rebuilds a linked list of about 667,000 nodes; its nodes are taken from
-  blocks in address order, so the walk follows memory.
+  last loop makes, the half that each iteration's `Node n` holds are made on the stack, because the
+  escape analysis tells variables apart by their declaration (docs/collector.md, "Objects on the
+  stack"); taking this `n` for the one of an earlier `for (Node n = head; ..)`, declared outside the
+  loop, it made them all on the heap: 1.31 s and 22 collections against 0.75 s and 12 (alternating
+  runs at a load of 15). Idle markers sleep instead of spinning (docs/collector.md, "Marking and
+  sweeping in parallel"): spinning, at a load average of about 6, BinaryTrees took 4.27 s against
+  2.16 s (Java 0.91 s at that load) and `SmallObjects` 0.64 s against 0.36 s (Java 0.17 s). The
+  young generation (`JAVA_GC_GENERATIONS=1`, docs/collector.md) collects the short-lived objects
+  without marking the old ones: `SmallObjects` 0.17 s against 0.20 s, with 0.30 s against 0.60 s of
+  processor time, and BinaryTrees 1.5 s against 1.65 s with 3.2 s against 5.0 s of processor time
+  (alternating runs at full clock); it is opt-in because some peaks rise (`SmallObjects` 170 MB
+  against 200 MB). NodeList walks and rebuilds a linked list of about 667,000 nodes; its nodes are
+  taken from blocks in address order, so the walk follows memory.
 - **Strings read from a field (TokenScanner 0.8x).** A parser that reads its input one character
   at a time with `input.substring(index, index + 1)` and checks `index < input.length()` runs in
   linear time:
