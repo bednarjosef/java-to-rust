@@ -518,7 +518,14 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new()));
         }
         let ty = self.exact_ty(named, named.java_type())?;
-        if !ty.is_reference() && !ty.is_numeric() && !matches!(ty, Type::Boolean | Type::Void | Type::Enum(_))
+        // `Charset.class` is the runtime's one class of charsets (`codegen::class_values`), which
+        // the program has once a charset may be an `Object` (`Arena`'s proxy finds
+        // `allocateFrom(String, Charset)` with it).
+        if ty == Type::Charset {
+            self.note_object_array(ty);
+        } else if !ty.is_reference()
+            && !ty.is_numeric()
+            && !matches!(ty, Type::Boolean | Type::Void | Type::Enum(_))
         {
             return unsupported(node, "the class literal of this type");
         }
