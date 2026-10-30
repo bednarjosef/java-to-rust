@@ -194,13 +194,16 @@ fn lower_with<'t>(
     let unit = |t: usize| unit_of.get(t).copied().filter(|&u| u != usize::MAX);
     let rejected = lowering.census.take().unwrap_or_default().into_inner();
     // Whether each rejection may go away with the Rust generics erased: it is in code that uses
-    // them (`Lowering::uses_real`), and not of a missing class (`names_missing_class`), which
-    // stays missing, nor a question about the caller (`asks_caller`), which no type changes. Code
-    // that uses none of them is lowered the same without them.
+    // them (`Lowering::uses_real`), and not of a missing class (`names_missing_class`,
+    // `names_untranslated_class`), which stays missing, nor one that no type changes
+    // (`no_type_changes`). Code that uses none of them is lowered the same without them.
     let generic: Vec<bool> = rejected
         .iter()
         .map(|(.., error, uses_real)| {
-            !uses_real.is_empty() && !names_missing_class(error) && !asks_caller(error)
+            !uses_real.is_empty()
+                && !names_missing_class(error)
+                && !names_untranslated_class(error)
+                && !no_type_changes(error)
         })
         .collect();
     let (rejected, uses): (Vec<Rejected>, Vec<super::real_generics::Real>) = rejected
@@ -276,11 +279,41 @@ fn lower_with<'t>(
     }
 }
 
-/// Whether `error` rejects asking for the caller (`Reflection.getCallerClass` or
-/// `StackWalker.getCallerClass`, `callers`): where the method is and what it is, which the Rust
-/// generics do not change.
-fn asks_caller(error: &Error) -> bool {
-    error.message.contains("getCallerClass")
+/// Words of the errors that the Rust generics do not cause, each with why no type changes it.
+const NO_TYPE_CHANGES: &[&str] = &[
+    // Asking for the caller (`callers`): where the method is and what it is.
+    "getCallerClass",
+    // An access through a `VarHandle` that is neither a constant nor one that lowering follows:
+    // which handle a value holds, the trees tell (`handle_values`).
+    super::handles::UNFOLLOWED_HANDLE,
+    // A method of `JavaLangAccess` that the JVM implements (`lower.rs`).
+    ", which the JVM gives,",
+    // An annotation of the JDK's that the translation leaves out (`annotation_values`,
+    // `annotation_presence`).
+    " of the JDK's `",
+    // javac's own error in the source (`census`).
+    "javac reports a compile error",
+];
+
+/// Whether `error` is one that the Rust generics do not cause (`NO_TYPE_CHANGES`): the JDK's
+/// `AbstractMemorySegmentImpl` and `MetadataRepository` cost Minecraft a lowering each without
+/// it, erasing the Rust generics their methods use and leaving the rejections as they were.
+fn no_type_changes(error: &Error) -> bool {
+    NO_TYPE_CHANGES.iter().any(|words| error.message.contains(words))
+}
+
+/// Whether `error` is that of a class that the program does not translate, which it names with
+/// its feature (``new java.io.ObjectOutputStream` (serialization) not supported yet`, as of a
+/// static field of one or `super(..)` of one): erased, the class stays untranslated.
+fn names_untranslated_class(error: &Error) -> bool {
+    let Some((named, feature)) =
+        error.message.strip_suffix(") not supported yet").and_then(|rest| rest.rsplit_once(" ("))
+    else {
+        return false;
+    };
+    let class =
+        named.strip_suffix('`').and_then(|n| n.rsplit_once('`')).map(|(_, c)| c.trim_start_matches("new "));
+    class.and_then(crate::program::untranslated) == Some(feature)
 }
 
 /// Whether `error` is that of a class the program does not have (`type `a.b.C` not supported
@@ -491,6 +524,36 @@ mod tests {
 
     fn error(message: &str) -> Error {
         Error { pos: Pos::default(), message: message.to_string() }
+    }
+
+    #[test]
+    fn an_error_no_type_changes_is_no_reason_to_erase_the_rust_generics() {
+        let message =
+            format!("`VarHandle.set` {} not supported yet", super::super::handles::UNFOLLOWED_HANDLE);
+        assert!(no_type_changes(&error(&message)));
+        assert!(no_type_changes(&error("`getAnnotation` of the JDK's `jdk.jfr.Name` not supported yet")));
+        assert!(no_type_changes(&error(
+            "`JavaLangAccess.addExports`, which the JVM gives, not supported yet"
+        )));
+        assert!(no_type_changes(&error(
+            "asking for the caller (`getCallerClass`) in a method that is not static not supported yet"
+        )));
+        assert!(!no_type_changes(&error("`VarHandle.set` not supported yet")));
+        assert!(!no_type_changes(&error("an atomic update of an element of a `T[]` not supported yet")));
+    }
+
+    #[test]
+    fn an_untranslated_class_is_no_reason_to_erase_the_rust_generics() {
+        assert!(names_untranslated_class(&error(
+            "`new java.io.ObjectOutputStream` (serialization) not supported yet"
+        )));
+        assert!(names_untranslated_class(&error(
+            "`super(..)` of `java.io.ObjectInputStream` (serialization) not supported yet"
+        )));
+        assert!(!names_untranslated_class(&error(
+            "`new java.util.ArrayList` (serialization) not supported yet"
+        )));
+        assert!(!names_untranslated_class(&error("`Class.getAnnotations` (reflection) not supported yet")));
     }
 
     #[test]

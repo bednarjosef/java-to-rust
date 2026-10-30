@@ -205,6 +205,12 @@ const VAR_HANDLE: &str = "java.lang.invoke.VarHandle";
 const METHOD_HANDLE: &str = "java.lang.invoke.MethodHandle";
 const METHOD_TYPE: &str = "java.lang.invoke.MethodType";
 
+/// What the error of an access through a `VarHandle` that lowering cannot tell says after the
+/// access: which handle the receiver is, the trees tell (`var_handle`, `held_var_handle`), so no
+/// type changes it (`program::no_type_changes`).
+pub(super) const UNFOLLOWED_HANDLE: &str =
+    "of a handle that is neither a constant nor one handle the translation follows";
+
 /// `Integer.numberOfLeadingZeros(int)`, which turns a power of two into its exponent.
 const LEADING_ZEROS: (&str, &str, &str) = ("java.lang.Integer", "numberOfLeadingZeros", "(int)int");
 
@@ -1746,13 +1752,7 @@ impl<'t> Lowering<'t> {
         // (`handle_values`).
         let Some((receiver, (handle, nullable))) = receiver.and_then(|r| Some((r, self.held_var_handle(r)?)))
         else {
-            return unsupported(
-                node,
-                &format!(
-                    "`VarHandle.{}` of a handle that is neither a constant nor one handle the translation follows",
-                    symbol.name
-                ),
-            );
+            return unsupported(node, &format!("`VarHandle.{}` {UNFOLLOWED_HANDLE}", symbol.name));
         };
         let access = self.var_handle_access_of(node, symbol, handle, put, update)?;
         self.through_value(node, interned_name(symbol.name), receiver, nullable, access).map(Some)
