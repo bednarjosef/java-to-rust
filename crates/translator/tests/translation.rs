@@ -7080,11 +7080,11 @@ fn static_fields_of_stub_classes_are_rejected() {
         &[
             (
                 "app/Main.java",
-                "package app;\nimport sun.security.pkcs.PKCS7;\npublic class Main {\n    static PKCS7 held;\n    public static void main(String[] a) { System.out.println(PKCS7.LIMIT + (held.isOk() ? 1 : 0)); }\n}\n",
+                "package app;\nimport com.sun.crypto.provider.ChaCha20Cipher;\npublic class Main {\n    static ChaCha20Cipher held;\n    public static void main(String[] a) { System.out.println(ChaCha20Cipher.LIMIT + (held.isOk() ? 1 : 0)); }\n}\n",
             ),
             (
-                "lib/sun/security/pkcs/PKCS7.java",
-                "package sun.security.pkcs;\npublic class PKCS7 {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public boolean isOk() { return true; }\n}\n",
+                "lib/com/sun/crypto/provider/ChaCha20Cipher.java",
+                "package com.sun.crypto.provider;\npublic class ChaCha20Cipher {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public boolean isOk() { return true; }\n}\n",
             ),
         ],
     );
@@ -7096,9 +7096,9 @@ fn static_fields_of_stub_classes_are_rejected() {
     };
     let error = java_to_rust::translate_program(&program).expect_err("a static field of a stub");
     assert!(
-        error
-            .to_string()
-            .contains("a static field of `sun.security.pkcs.PKCS7` (security) not supported yet"),
+        error.to_string().contains(
+            "a static field of `com.sun.crypto.provider.ChaCha20Cipher` (security) not supported yet"
+        ),
         "{error}"
     );
 }
