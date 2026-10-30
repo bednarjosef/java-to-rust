@@ -46,7 +46,7 @@ impl Real {
         self.methods.extend(&other.methods);
     }
 
-    fn without(&self, failed: &Real) -> Real {
+    pub(super) fn without(&self, failed: &Real) -> Real {
         Real {
             classes: self.classes.difference(&failed.classes).copied().collect(),
             methods: self.methods.difference(&failed.methods).copied().collect(),
@@ -72,10 +72,21 @@ pub(super) fn retry<E: std::fmt::Debug>(
     let mut real: Option<Real> = None;
     let mut covariant = super::covariant::Covariant::default();
     let mut attempt = 0;
+    // For the check of the prediction: the Rust generics the first lowering tried.
+    let mut tried: Option<Real> = None;
     loop {
         attempt += 1;
         let result =
             crate::timings::phase(&format!("lowering attempt {attempt}"), || run(real.as_ref(), &covariant));
+        if let Ok((_, used, _)) = &result {
+            tried.get_or_insert_with(|| used.clone());
+        }
+        // The predicted arrays are `Object[]`s in every lowering, as in the first.
+        if !super::predict::checking()
+            && let Some(prediction) = &*covariant.predicted.borrow()
+        {
+            covariant.known.extend(prediction.arrays.iter().copied());
+        }
         let noted: Vec<Type> =
             covariant.noted.take().into_iter().filter(|ty| !covariant.known.contains(ty)).collect();
         if !noted.is_empty() {
@@ -98,7 +109,21 @@ pub(super) fn retry<E: std::fmt::Debug>(
             continue;
         }
         match result {
-            Ok((class, _, failed)) if failed.is_empty() => return Ok(class),
+            Ok((class, used, failed)) if failed.is_empty() => {
+                if super::predict::checking()
+                    && crate::timings::enabled()
+                    && let Some(prediction) = &*covariant.predicted.borrow()
+                {
+                    let mut noted: Vec<Type> = covariant.known.iter().copied().collect();
+                    noted.sort_by_key(Type::to_string);
+                    let mut failed = tried.as_ref().map_or_else(Real::default, |t| t.without(&used));
+                    if !super::predict::unseeded() {
+                        failed.extend(&prediction.failed);
+                    }
+                    super::predict::report(prediction, &noted, &failed, &class);
+                }
+                return Ok(class);
+            }
             Ok((class, used, failed)) => {
                 if crate::timings::enabled() {
                     eprintln!(
@@ -509,7 +534,7 @@ fn mentions_outside(ty: Type, p: Type, own: &str) -> bool {
 }
 
 /// Whether javac's type string `ty` mentions the type variable `name`.
-fn mentions_var(ty: &str, name: &str) -> bool {
+pub(super) fn mentions_var(ty: &str, name: &str) -> bool {
     ty.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.')).any(|w| w == name)
 }
 

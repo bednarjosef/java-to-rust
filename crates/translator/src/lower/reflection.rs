@@ -773,6 +773,66 @@ impl<'t> Lowering<'t> {
         }
     }
 
+    /// The types that the cases of the call `node` of the native `symbol` of `Method`, `Field` or
+    /// `Constructor` convert from `Object` (`unboxed`, with `true`) and to `Object` (`convert`,
+    /// with `false`), as `slot_case` makes them; empty for any other call. The prediction of
+    /// covariant arrays reads them (`predict`).
+    pub(super) fn reflected_conversions(&self, node: Node<'t>, symbol: &Symbol) -> Vec<(Type, bool)> {
+        let mut out = Vec::new();
+        let kind = match symbol.owner {
+            METHOD => LookupKind::Method,
+            FIELD => LookupKind::Field,
+            CONSTRUCTOR => LookupKind::Constructor,
+            _ => return out,
+        };
+        let native = symbol.name;
+        let part = node.list("arguments").next().filter(|p| p.kind() == "INT_LITERAL");
+        let Some(part) = part.and_then(|p| p.str("value").parse::<usize>().ok()) else { return out };
+        if !symbol.native
+            || !matches!(native, "invokePart" | "newInstancePart" | "getPart" | "setPart")
+            || part >= PARTS as usize
+        {
+            return out;
+        }
+        let Ok(entries) = self.table(node, kind) else { return out };
+        for entry in entries.iter().skip(part).step_by(PARTS as usize) {
+            match &entry.member {
+                Member::Method(m) => {
+                    let info = &self.methods[*m];
+                    let creates = native == "newInstancePart";
+                    if creates && self.types[info.owner].node.has_flag("ABSTRACT") {
+                        continue;
+                    }
+                    let Ok(params) = self.param_types(*m) else { break };
+                    out.extend(params.into_iter().map(|p| (p, true)));
+                    if !creates && let Ok(ret) = self.return_type(node, *m) {
+                        out.push((ret, false));
+                    }
+                }
+                Member::Class(name) => {
+                    let (_, ret, _) =
+                        CLASS_METHODS.iter().find(|(n, ..)| n == name).expect("one of `Class`'s");
+                    if let Ok(ret) = self.ty(node, ret) {
+                        out.push((ret, false));
+                    }
+                }
+                Member::Field(class, decl) => {
+                    let Ok(ty) = self.reflected_field_type(*decl) else { break };
+                    if super::enums::is_enum_constant(*decl) {
+                        continue;
+                    }
+                    if native == "getPart" {
+                        out.push((ty, false));
+                    } else if !decl.has_flag("FINAL") && self.types[*class].node.kind() != "INTERFACE" {
+                        out.push((ty, true));
+                    }
+                }
+                Member::Object(_) | Member::BoxParse(_) => {}
+            }
+        }
+        out
+    }
+
     /// `value`, an `Object`, as a `ty`: unboxed for a primitive, cast for any other type.
     pub(super) fn unboxed(&self, node: Node<'t>, value: Expr, ty: Type) -> Result<Expr, Error> {
         let pos = value.pos;
