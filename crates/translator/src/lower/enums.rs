@@ -115,10 +115,17 @@ impl<'t> Lowering<'t> {
         {
             let init = member.child("initializer")?;
             let args: Vec<Expr> = init.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+            let ctor = init.symbol().and_then(|s| self.enum_constructor(class, &s));
+            // The trailing arguments of a variable-arity constructor are one array, which is no
+            // constant: such an enum has tables (`X509Authentication`'s `String... keyTypes`).
+            let args = match ctor {
+                Some(c) => self.packed_args_of(init, c, args)?,
+                None => args,
+            };
             if let Some(arg) = args.iter().find(|a| !pure(a, false)) {
                 return error(arg.pos, "enum constant arguments that are not constants");
             }
-            let ctor = init.symbol().and_then(|s| self.enum_constructor(class, &s)).map(|c| &methods[c]);
+            let ctor = ctor.map(|c| &methods[c]);
             let params = ctor.map_or(Vec::new(), |c| c.params.iter().map(|p| p.name.as_str()).collect());
             let bound: Vec<(&str, &Expr)> = params.into_iter().zip(&args).collect();
             let mut values = Vec::new();
