@@ -292,6 +292,28 @@ impl<'t> Flow<'_, 't> {
         self.failed.borrow_mut().insert(owner);
     }
 
+    /// A native of `TranslatedTypes` that lowering makes a table of the program's classes for
+    /// (`generic_types_native`): it names the class literal of each class it lists, a use of the
+    /// class without type arguments.
+    fn reflected_classes(&self, symbol: &Symbol) {
+        let l = self.lowering;
+        if symbol.owner != super::generic_types::TRANSLATED_TYPES || !symbol.native {
+            return;
+        }
+        let listed = |decl: Node<'t>| match symbol.name {
+            "typeParameters0" => decl.list("typeParameters").next().is_some(),
+            "genericInterfaces0" => decl.list("implementsClause").any(|c| c.java_type().contains('<')),
+            "bounds0" => decl.list("typeParameters").any(|v| v.list("bounds").next().is_some()),
+            _ => false,
+        };
+        for &t in &self.real.classes {
+            let decl = l.types[t].node;
+            if matches!(decl.kind(), "CLASS" | "INTERFACE" | "ENUM" | "RECORD") && listed(decl) {
+                self.fail_owner(Owner::Class(t), "a class literal in the table of `TranslatedTypes`");
+            }
+        }
+    }
+
     fn is_real(&self, owner: Owner) -> bool {
         match owner {
             Owner::Class(t) => self.real.classes.contains(&t),
@@ -683,6 +705,7 @@ impl<'t> Flow<'_, 't> {
             self.nested_class(body, scope);
         }
         let Some(symbol) = node.symbol() else { return };
+        self.reflected_classes(&symbol);
         let Some(m) = l.method_index(&symbol) else {
             args.iter().for_each(|&a| self.flows(a, &Lowered::Erased("void"), scope));
             return;

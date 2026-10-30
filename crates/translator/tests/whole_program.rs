@@ -649,6 +649,47 @@ fn arrays_that_lambdas_return_are_predicted() {
     assert_eq!(predicted, unpredicted);
 }
 
+/// `getTypeParameters` of a class known only at run time reaches `TranslatedTypes`'s table of
+/// the program's generic classes, which names each one's class literal, a use of `Pair` without
+/// type arguments (`generic_types_native`). The prediction fails `Pair` with it, and the program
+/// is lowered once.
+const CLASSES_IN_THE_TABLE_OF_TYPE_PARAMETERS: &str = r#"
+public class Main {
+    static class Pair<A, B> {
+        final A first;
+        final B second;
+        Pair(A first, B second) { this.first = first; this.second = second; }
+        A first() { return first; }
+    }
+
+    public static void main(String[] args) {
+        Pair<String, Integer> p = new Pair<>("a", 1);
+        System.out.println(p.first() + p.second);
+        Class<?> c = args.length > 3 ? Main.class : Runnable.class;
+        System.out.println(c.getTypeParameters().length);
+    }
+}
+"#;
+
+#[test]
+fn classes_in_the_table_of_type_parameters_are_predicted_to_fail() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-type-parameters-table");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), CLASSES_IN_THE_TABLE_OF_TYPE_PARAMETERS).unwrap();
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    assert!(stderr.contains("1 of 1 failed Rust generics"), "{stderr}");
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
 /// `Box<String>[]` becomes an `Object[]` (`asList`'s `T[]`), whose elements are `Object`s, which
 /// the objects of the Rust generic class `Box` cannot be: `Box` is erased in the lowering that
 /// notes the array, and its array, `Box[]` once erased, is noted with it. The program is lowered
