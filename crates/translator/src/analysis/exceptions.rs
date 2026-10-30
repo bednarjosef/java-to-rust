@@ -1841,13 +1841,16 @@ pub fn generator_text(x: &Expr) -> bool {
     }
 }
 
+/// Lists of methods shared by key while `analyze` runs (`Some`).
+type SharedLists<K> = std::cell::RefCell<Option<FastMap<K, std::rc::Rc<[usize]>>>>;
+
 thread_local! {
     /// `to_string_impls` of each type, while `analyze` runs (`Some`): a value of `Object` shows
     /// the text of every class, which many points ask for.
-    static TO_STRING_IMPLS: std::cell::RefCell<Option<FastMap<Type, std::rc::Rc<[usize]>>>> = const { std::cell::RefCell::new(None) };
+    static TO_STRING_IMPLS: SharedLists<Type> = const { std::cell::RefCell::new(None) };
     /// The methods that a call runs on the objects of a list of `Class::receivers`, by the list
     /// and the called method, while `analyze` runs (`Some`): calls share the lists.
-    static RECEIVER_TARGETS: std::cell::RefCell<Option<FastMap<(usize, usize), std::rc::Rc<[usize]>>>> = const { std::cell::RefCell::new(None) };
+    static RECEIVER_TARGETS: SharedLists<(usize, usize)> = const { std::cell::RefCell::new(None) };
 }
 
 /// The methods that the call `x` may run (`Class::callees`); for an instance call that the
