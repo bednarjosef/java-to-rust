@@ -10,7 +10,8 @@
 //! JDK class it uses), and the tree of `java/Reflection.java`, the translator's
 //! `java.lang.reflect.Method`, `Field` and `Constructor`, as `reflection.json`. Last, runs
 //! `java/Charsets.java`, which prints this JDK's charsets and the tables of its single-byte ones,
-//! as `charsets.json` (see `jdk_charsets.rs`). Those are this JDK's, so the build runs again
+//! as `charsets.json` (see `jdk_charsets.rs`). It compiles `java/JdkResources.java` too, which the
+//! translator runs to read the JDK's data files (`program/reach/jdk_resources.rs`). Those are this JDK's, so the build runs again
 //! when the `java` on `PATH` is replaced, as an upgrade replaces it; and the translator asks the
 //! JDK it runs with again where that is another JDK, which an upgrade with older file times or a
 //! change of `PATH` can leave.
@@ -32,6 +33,7 @@ fn main() {
     println!("cargo:rerun-if-changed=java/ThreadLocalStub.java");
     println!("cargo:rerun-if-changed=java/Reflection.java");
     println!("cargo:rerun-if-changed=java/Charsets.java");
+    println!("cargo:rerun-if-changed=java/JdkResources.java");
     rerun_if_jdk_changes();
     let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
     let mut javac = Command::new("javac");
@@ -46,6 +48,7 @@ fn main() {
             "java/JdkPatch.java",
             "java/MissingClasses.java",
             "java/Charsets.java",
+            "java/JdkResources.java",
         ])
         .status()
         .expect("building the translator needs javac (a JDK, version 21 or newer) on PATH");

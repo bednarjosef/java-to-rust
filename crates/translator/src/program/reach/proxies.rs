@@ -344,7 +344,7 @@ impl<'t> Walk<'t> {
     }
 
     /// The package of the class `class`: the name of its top-level class without the last part.
-    fn package_of(&self, class: &str) -> String {
+    pub(super) fn package_of(&self, class: &str) -> String {
         let top = self.nest(class).last().map_or(class.to_string(), |(_, name)| name.clone());
         top.rsplit_once('.').map_or(String::new(), |(package, _)| package.to_string())
     }

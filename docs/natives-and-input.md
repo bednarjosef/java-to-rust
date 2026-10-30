@@ -417,11 +417,16 @@ A translated program is closed: it knows all its classes. So:
   sources (`TranslatedModules.classResource`, `MODULE_CALLS`): the name is taken from the
   class's package unless it starts with `/`, and the class's loader looks it up. A class file is
   `null`, a resource that is not there: the translation has no class files, since its classes
-  were translated from their source. A resource of a class of the JDK's own modules ends the
-  program with an `InternalError` naming it: data files such as `uniName.dat`
-  (`Character.getName`), `currency.data` and the ICU normalizer data are generated when the JDK
-  is built and are not in its sources. Without the JDK's sources, every such call but one of a
-  class file ends the program so (`Builtin::MissingResource`).
+  were translated from their source. A resource of a class of the JDK's own modules is one of
+  its data files, which are generated when the JDK is built and are not in its sources: the
+  program carries those that reachable code reads by a name the translator can tell, a constant
+  or one made of constants and of strings that reachable calls pass a parameter, on a class
+  literal or a `Class<C>` (`uniName.dat` for `Character.getName`, the IDN profile `uidna.spp`
+  that the HTTPS client's host names go through, the ICU property and normalizer data). The
+  translator reads them from the image of the JDK it runs with (`program/reach/jdk_resources.rs`,
+  `java/JdkResources.java`). Any other ends the program with an `InternalError` naming it, as
+  `getResource` of one does, which would need a URL into the image. Without the JDK's sources,
+  every such call but one of a class file ends the program so (`Builtin::MissingResource`).
 - A class loader's `getResource`, `getResources` and `getResourceAsStream` (and the
   `getSystem…` forms) look the name up among the roots' files and their sources' class files as
   Java's loaders would. The class path's files and directories are read from the roots when the

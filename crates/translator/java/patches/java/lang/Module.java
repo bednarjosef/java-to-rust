@@ -692,6 +692,13 @@ class Module {
     @Add
     static native String manifest0(String pn);
 
+    /**
+     * The data file {@code name} of the JDK, which the translator read from the image of the JDK
+     * it ran with, its bytes as the chars of the string; null for a name it did not read.
+     */
+    @Add
+    static native String jdkResource0(String name);
+
     /** The names of the translation's named modules, in the order of their roots. */
     @Add
     private static native String[] modules0();

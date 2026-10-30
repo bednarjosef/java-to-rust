@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 mod by_name;
 mod initialize;
+mod jdk_resources;
 mod native_image;
 mod proxies;
 mod reflection;
@@ -32,6 +33,7 @@ pub use by_name::{
     module_for_name, name_pattern,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
+pub use jdk_resources::read as read_jdk_resources;
 pub use native_image::{ReflectEntry, reflect_config};
 pub use proxies::ProxyClass;
 pub use reflection::{Kind as LookupKind, Lookup, lookup};
@@ -122,6 +124,12 @@ pub struct Reach {
     /// The classes whose entries of the libraries' reflection metadata apply, which name them
     /// (`native_image.rs`).
     pub configured: BTreeSet<String>,
+    /// The resources that reachable code reads from classes, by package and name, the strings
+    /// that reachable calls pass, by method and position, and the files of the resources that
+    /// the JDK holds, which the program carries, read after reachability (`jdk_resources.rs`).
+    resource_reads: BTreeSet<(String, jdk_resources::Name)>,
+    string_arguments: HashMap<(MethodKey, usize), BTreeSet<jdk_resources::Name>>,
+    pub jdk_resources: BTreeMap<String, Vec<u8>>,
     /// The modules of the program's roots, which its `java.lang.Module` and `ClassLoader` answer with
     /// (`modules::contents`, `lower/modules.rs`); set after reachability.
     pub modules: Vec<super::modules::Contents>,
@@ -3973,6 +3981,7 @@ impl<'t> Walk<'t> {
             "METHOD_INVOCATION" | "NEW_CLASS" | "MEMBER_REFERENCE" | "STRING_LITERAL" | "MEMBER_SELECT"
         ) {
             self.reflection_scan(value);
+            self.jdk_resource_scan(value);
         }
         if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
             self.service_scan(value);

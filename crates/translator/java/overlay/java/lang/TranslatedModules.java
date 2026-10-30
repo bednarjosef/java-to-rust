@@ -136,19 +136,33 @@ public final class TranslatedModules {
      * {@code c.getResource(name)}, as Java's: the name taken from the class's package unless it
      * starts with {@code /}, and found by the class's loader. A class file is not there, as the
      * program's classes were translated from their sources (javac's {@code -XDshowClass} asks
-     * for one it cannot find). Nor is a resource of the JDK's modules: its data files, such as
-     * {@code CharacterName}'s {@code uniName.dat}, are made when the JDK is built and are not in
-     * its sources, so asking for one ends the program.
+     * for one it cannot find). Nor is a resource of the JDK's modules as a URL: its data files,
+     * such as {@code CharacterName}'s {@code uniName.dat}, are made when the JDK is built and are
+     * not in its sources, so asking for one ends the program.
      */
     public static URL classResource(Class<?> c, String name) {
         String resolved = resolveName(c, name);
         return resolved.endsWith(".class") ? null : loaderOfResource(c, name).getResource(resolved);
     }
 
-    /** {@code c.getResourceAsStream(name)}: the class's loader's stream of the name, or null. */
+    /**
+     * {@code c.getResourceAsStream(name)}: the class's loader's stream of the name, or null. A
+     * data file of the JDK that code reads by a constant name from a class of the JDK's is the
+     * one the translator read from the JDK ({@code Module.jdkResource0}).
+     */
     public static InputStream classResourceAsStream(Class<?> c, String name) {
         String resolved = resolveName(c, name);
-        return resolved.endsWith(".class") ? null : loaderOfResource(c, name).getResourceAsStream(resolved);
+        if (resolved.endsWith(".class")) {
+            return null;
+        }
+        ClassLoader loader = classLoaderOf(c);
+        if (loader == null || loader == ClassLoader.getPlatformClassLoader()) {
+            String data = Module.jdkResource0(resolved);
+            if (data != null) {
+                return new java.io.ByteArrayInputStream(data.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+            }
+        }
+        return loaderOfResource(c, name).getResourceAsStream(resolved);
     }
 
     // The class loader that finds the resources of `c`, which is not one of the JDK's.

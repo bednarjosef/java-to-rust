@@ -179,7 +179,7 @@ fn is_class_value(node: &Value) -> bool {
 }
 
 /// Whether the code `node` assigns the variable `name`.
-fn assigns(node: &Value, name: &str) -> bool {
+pub(super) fn assigns(node: &Value, name: &str) -> bool {
     match node {
         Value::Object(map) => {
             let kind = text(node, "kind");
