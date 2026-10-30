@@ -451,9 +451,10 @@ A string or a box inside `Object` is a plain value whose identity the translatio
 keep, so `==` between two `Object`s where both sides may be strings or boxes is
 `java::same_object` (`Facts::identity_checks`): different values are different objects, and two
 equal ones end the program (`java::unkept_identity`), as Java may or may not see one object in
-them. `same_object` is false for two class numbers, and the bits otherwise, but for the few
-classes that are such values, which it tests by number and compares through the view: a Java
-enum's constant, a `Boolean` and a `Byte` are equal exactly when their bits are, as are handles.
+them. `same_object` compares the bits first, which hold the class number: equal bits are the
+same object, and different bits are different objects, but for the few classes that are such
+values, which it tests by number and compares through the view: a Java enum's constant, a
+`Boolean` and a `Byte` are equal exactly when their bits are, as are handles.
 Never compare by value where Java compares references. Whether a side may be one is a points-to
 analysis (`analysis/object_values.rs`): it follows, until nothing changes, whether each
 variable, parameter, return value, field, static and array element type may hold a string or a

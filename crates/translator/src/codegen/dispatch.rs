@@ -3224,15 +3224,24 @@ impl<'a> Gen<'a> {
         } else {
             // Values of two classes are never the same object. The few classes of the others
             // (strings, boxes, builders) are the test, not the many of the rest, which a `match`
-            // on the number would test one range after another.
-            self.line("let tag = self.0.tag();");
-            self.line("if tag != other.0.tag() {");
-            self.line("    return false;");
-            self.line("}");
-            if !by_bits.is_empty() {
+            // on the number would test one range after another. The bits are compared first:
+            // they hold the class number, so values whose bits differ are the same only when both
+            // are of one of the others, and a search for a key by `==` (a palette, a list of
+            // states) is then one compare per value once the compiler hoists the key's class.
+            if by_bits.is_empty() {
+                self.line("if self.0.tag() != other.0.tag() {");
+                self.line("    return false;");
+                self.line("}");
+            } else {
                 let tags = self.tags(&others, variants);
-                self.line(&format!("if !matches!(tag, {tags}) {{"));
-                self.line("    return self.0 == other.0;");
+                self.line("if self.0 == other.0 {");
+                self.line(&format!("    if !matches!(self.0.tag(), {tags}) {{"));
+                self.line("        return true;");
+                self.line("    }");
+                self.line(&format!(
+                    "}} else if !matches!(self.0.tag(), {tags}) || self.0.tag() != other.0.tag() {{"
+                ));
+                self.line("    return false;");
                 self.line("}");
             }
             self.line("match (self.view(), other.view()) {");
