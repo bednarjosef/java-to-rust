@@ -28,14 +28,15 @@ hand-written itself.
 3. **The fields of a thread-shared object are `java::SharedField` cells**, read and written by
    value, each access one atomic action: acquire loads and release stores of a word, sequentially
    consistent ones for a `volatile` field, a striped lock for a wider value. The object is an
-   `Arc<java::Monitored<C>>`, its fields and its monitor's lock. Every object is held by a
-   `java::Arc` (`shared.rs`, docs/collector.md), thread-shared or not. The generated text is the
-   same as for an object of one thread, whose fields are `java::Field` cells; only the type names
-   differ. An immutable shared class is `Arc<C>`, read without a lock. Which classes are shared
-   is decided per class, by type (section 4).
+   `Arc<C>`, or where a monitor site may lock it an `Arc<java::Monitored<C>>`, its fields and its
+   monitor's lock. Every object is held by a `java::Arc` (`shared.rs`, docs/collector.md),
+   thread-shared or not. The generated text is the same as for an object of one thread, whose
+   fields are `java::Field` cells; only the type names differ. An immutable shared class is
+   `Arc<C>`, read without a lock. Which classes are shared is decided per class, by type (section
+   4).
 4. **An object's monitor is the lock of its `java::Monitored`.** `synchronized` holds it for the
    region; field accesses take no lock. Monitors are kept only where the program can tell them
-   from none (section 3).
+   from none, and only the objects that such a site may lock have one (section 3).
 5. **The statics that a started thread can touch are process-wide `static` items**:
    `java::Atomic<T>` for primitives (acquire/release), `java::Locked<T>` for objects and strings,
    and a `java::ClassInit` per class that runs its static initialization once for the process.
@@ -146,7 +147,7 @@ Besides shared (`Arc<RefCell<C>>`), immutable (`Arc<C>`) and owned (a plain valu
 
 | | thread-local | thread-shared |
 | --- | --- | --- |
-| mutable | `Arc<C>` of `java::Field`s | `Arc<java::Monitored<C>>` of `java::SharedField`s |
+| mutable | `Arc<C>` of `java::Field`s | `Arc<C>` of `java::SharedField`s; `Arc<java::Monitored<C>>` of them where a monitor site may lock it (3.1) |
 | immutable (no field written after construction) | `Arc<C>` | `Arc<C>` |
 | owned | plain value | plain value, moved into the thread |
 | closure type (`docs/closures-and-nested-classes.md` 4.2) | `Rc<dyn Fn(..) -> R>` | `std::sync::Arc<dyn Fn(..) -> R + Send + Sync>` |
@@ -164,9 +165,10 @@ acquire and stored with release, which on x86-64 are plain moves; any other valu
 string without an identity) is copied and replaced under one of 64 striped spin locks, picked by
 the field's address and taken only once a second thread runs. A field that only constructors
 write (a fixed field, [object-model.md](object-model.md) 1.8) is read where it is, `fixed()`,
-with no lock and no copy, outside the constructors and field initializers. The object's `java::Monitored`
-holds the fields first and then the monitor's lock, so the object's address is its fields', as
-`&self` of a method sees it. A class tree is celled and monitored together, so an enum over it
+with no lock and no copy, outside the constructors and field initializers. A
+`java::Monitored` object holds the fields first and then a pointer to the monitor's lock, made
+the first time a thread takes it (`LazyMonitor`), so the object's address is its fields', as
+`&self` of a method sees it. A class tree is celled, shared and monitored together, so an enum over it
 lends every variant's fields struct as `&XFields`. A class tree with a Java enum keeps its
 `java::Locked`, whose `RefCell` API (`borrow`, `borrow_mut`, mapped guards) the generator writes
 as for a `RefCell`. Identity is `Arc::ptr_eq`; `Option` for null is unchanged.
@@ -291,22 +293,37 @@ Code: `analysis/monitors.rs` (which monitors are kept), `lower/sync.rs`, `codege
 
 ### 3.1 Which monitors are kept
 
-A monitor is kept where the program can tell it from none:
+A monitor site (a `synchronized` block or method, `wait`, `notify`, `holdsLock`) keeps the
+monitor of its lock where the program can tell it from none:
 
-- in a program that waits, notifies or asks `Thread.holdsLock`, every object's monitor, since
-  those answer as Java's only when the monitor is held;
-- otherwise, the monitors of objects whose class threads may share, and of builders where they
-  are shared;
+- in a program that waits, notifies or asks `Thread.holdsLock`, at every site, since those answer
+  as Java's only when the monitor is held;
+- otherwise, at the sites whose lock is of a class that threads may share, or a builder where
+  builders are shared;
 - class monitors in any program with threads.
 
 Everywhere else `synchronized` is the null check of its lock, so a program without threads or
 `wait` translates as before. `synchronized (this)` in a constructor keeps no monitor: no other
 thread has the object yet.
 
+Only the objects that a site keeping its monitor may lock have one (`analysis/lock_values.rs`):
+the classes of the lock's type, of `this` in a synchronized method, and of the objects the lock
+can be, found from where its value comes from. `new C()` is an object of `C`; a field holds what
+any assignment to it stores (reflection, deserialization and `Unsafe` write fields in code that
+lowering wrote out, so their stores are among them); a local variable what the method gives it;
+a constructor's or static method's parameter what its callers pass; a cast, `?:` and an
+assignment pass their operands' on. What is not followed (another method's parameter, which a
+call through an interface or the runtime may pass, an array's element, a call's result) is any
+object of its type (`hierarchy::flows`), so a lock of type `Object` that a call returns makes
+every class whose objects become `Object`s keep monitors. A class tree keeps them together, so
+the other objects of a locked class's tree have one too. `corpus/threads/WaitThroughInterface`
+and `WaitThroughArraysAndCalls` wait on objects reached each of these ways.
+
 An array's monitor is kept in any program with threads. An array that threads share
-(`java::SharedArray`) makes its lock the first time a thread takes it (`LazyMonitor` in
-`monitor.rs`, a pointer that stays null for the many arrays never locked); one that a single
-thread uses keeps its monitor by address, as a `RefCell` object does.
+(`java::SharedArray`), like a `java::Monitored` object, makes its lock the first time a thread
+takes it (`LazyMonitor` in `monitor.rs`, a pointer that stays null for the many objects and
+arrays never locked, eight bytes where the lock is sixteen); one that a single thread uses keeps
+its monitor by address, as a `RefCell` object does.
 
 Rejected, by name: `synchronized` on a string, a box, a Java enum's constant, or the class of a
 value (`o.getClass()`) where the monitor would be kept (they are values without a lock), and
@@ -319,9 +336,9 @@ held as an Object is not supported by the translation" (`java::unkept_monitor`).
 
 ### 3.2 One form: the monitor is the object's lock
 
-An object whose monitor is kept, of a class that threads share or one whose monitor the program
-waits on, notifies or asks about, is an `Arc<java::Monitored<C>>`, whose reentrant lock is its
-monitor. Its fields take no lock, so the monitor is the only lock its object has. (A builder and
+An object that a site keeping its monitor may lock (3.1) is an `Arc<java::Monitored<C>>`, whose
+reentrant lock is its monitor. Its fields take no lock, so the monitor is the only lock its
+object has. (A builder and
 a `java::Locked` object have their data lock as their monitor, and an array its elements', as 3.1
 says.)
 
@@ -745,7 +762,8 @@ unchanged and that a class no thread reaches has no monitor.
 - **A thread-shared mutable object** costs nothing more than an object of one thread on a field
   access of a word: an acquire load or a release store is a plain move on x86-64. A `volatile`
   store is an exchange. A wider value costs a striped spin lock once a second thread runs. Each
-  object carries its monitor's lock, 16 bytes. An immutable shared object costs nothing on reads,
+  object carries a pointer to its monitor's lock, 8 bytes, and the 16 bytes of the lock once a
+  thread first takes it. An immutable shared object costs nothing on reads,
   and copying a handle is copying a pointer, shared or not.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock. Until the
   program starts its first thread, taking the lock and giving it back are a plain increment and

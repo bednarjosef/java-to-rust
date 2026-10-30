@@ -30,6 +30,7 @@ mod fixed_fields;
 pub mod hierarchy;
 mod indexing;
 pub mod live_methods;
+mod lock_values;
 mod monitors;
 mod moves;
 pub(crate) mod npe_messages;
@@ -185,8 +186,12 @@ pub struct Facts {
     /// `Arc<C>` whose fields are cells, read and written by value, with no `RefCell` (see
     /// `objects::celled_classes`).
     pub celled: FastSet<String>,
-    /// The celled classes whose objects keep a monitor, because threads share them or the
-    /// program waits on them: an `Arc<java::Monitored<C>>` whose fields are `java::SharedField`s.
+    /// The celled classes whose fields are `java::SharedField`s, because threads share their
+    /// objects or the objects keep a monitor (`monitored`).
+    pub shared_cells: FastSet<String>,
+    /// The celled classes whose objects keep a monitor, because a monitor site of the program may
+    /// lock them (`monitors::kept`): an `Arc<java::Monitored<C>>`, where the other celled objects
+    /// are an `Arc<C>`.
     pub monitored: FastSet<String>,
     /// For each type (index into `Class::types`), the concrete classes and enums whose values
     /// become values of that type (see `hierarchy::flows`).
@@ -651,7 +656,7 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.not_plain = borrowing.not_plain;
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
-    (facts.celled, facts.monitored) =
+    (facts.celled, facts.shared_cells, facts.monitored) =
         phase("representation: celled", || objects::celled_classes(class, facts, &monitor_classes, &created));
     // A class without objects of a celled tree counts as celled, not immutable.
     facts.immutable.retain(|c| !facts.celled.contains(c));

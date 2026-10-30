@@ -40,7 +40,7 @@ plainer form only where it proves the meaning is the same:
 | `int` arithmetic | `wrapping_add`, `java::rem`, ... | `+ - * / %` where range analysis proves no overflow and a nonzero divisor (`analysis/ranges.rs`) |
 | array | `java::Array<T>`, a shared cell | `Vec<T>` (or `Vec<Vec<T>>`) when no other name can see it (`analysis/arrays.rs`) |
 | string | `java::JString`, WTF-8 bytes | `&java::Wtf8` for a parameter never assigned; byte indexing for strings proven ASCII |
-| object in a threaded program | `Arc<java::Monitored<C>>` of `java::SharedField`s | `Arc<C>` when immutable; `Arc<C>` of `java::Field`s when no other thread can reach it |
+| object in a threaded program | `Arc<java::Monitored<C>>` of `java::SharedField`s | `Arc<C>` when immutable; `Arc<C>` of `java::Field`s when no other thread can reach it; no `java::Monitored` when no monitor site can lock it |
 
 Nullness analysis treats a field as not null when every constructor sets it to a non-null value
 before anything can read it. A static read while its own class's initialization is still under
@@ -318,7 +318,8 @@ Threads are real platform threads. `Thread` (subclassed or given a `Runnable`), 
 `sleep`, names, ids, priorities, daemon threads, interrupts, uncaught-exception handlers and
 thread groups behave as Java's; `java.lang.Thread` is `crates/translator/java/Threads.java` over
 the runtime's natives (`thread.rs`). In a program that can start a thread, the objects threads
-may share are `Arc<java::Monitored<C>>` (`Arc<C>` when immutable), arrays that threads may reach are
+may share are `Arc<C>` of `java::SharedField`s (`Arc<java::Monitored<C>>` where a monitor site may
+lock them, `Arc<C>` of plain fields when immutable), arrays that threads may reach are
 `java::SharedArray`,
 and the statics that a started thread can touch are process-wide; a program without threads
 translates exactly as before.

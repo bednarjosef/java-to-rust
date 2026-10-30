@@ -32,9 +32,12 @@ owned, and that Rust therefore never freed, is found unreachable too.
   measured difference on a system that gives them to every aligned range anyway. A free block
   whose memory stays keeps what it held, so a large allocation zeroes such blocks when it takes
   them.
-- **Small blocks** hold slots of one size: one of 40 sizes from 16 bytes to 32 KB. Allocations
-  that may hold pointers and those that cannot (an alignment below 8, as in the bytes of a
-  string) use blocks of their own, and the collector does not scan the second kind.
+- **Small blocks** hold slots of one size: one of 47 sizes from 16 bytes to 32 KB, in steps of
+  8 bytes up to 128, where most objects are, so that an object takes at most 7 bytes more than
+  it needs, and then of a quarter of a power of two. A slot is aligned to 8 bytes, and to 16 when
+  its size is a multiple of 16, which an allocation aligned to 16 takes. Allocations that may
+  hold pointers and those that cannot (an alignment below 8, as in the bytes of a string) use
+  blocks of their own, and the collector does not scan the second kind.
 - **Large allocations** take whole blocks.
 - **Colors.** A small block's first slot is at one of eight cache lines past the block's start,
   chosen by the block's number, and each large allocation starts at one of the 64 cache lines of
@@ -46,7 +49,10 @@ owned, and that Rust therefore never freed, is found unreachable too.
   that held each iteration's loads behind the last one's store: 2.05 s for 10^9 iterations, and
   1.21 s with colors, Java's time. A power-of-two slot stays aligned to its size, which
   allocations aligned to more than 16 bytes need, and blocks of 1 KB slots and larger are not
-  moved.
+  moved. A large allocation's color stays within the room that the blocks its size needs leave,
+  so a size of whole blocks starts at its first block: a `Vec` that doubles grows to sizes of
+  whole blocks (128 KB), and colored it took one block more. The Minecraft server held 361 such
+  allocations, 23 MB of blocks that only their colors took.
 - **Bitmaps.** Each small block has a bit per slot saying that the slot is taken (an object, or
   a free slot that a thread holds) and a bit per slot for marking.
 
@@ -54,18 +60,23 @@ owned, and that Rust therefore never freed, is found unreachable too.
 
 A thread takes a slot of its size from its own free slots, a few instructions: first from the
 list of slots Rust freed (a freed slot goes on the list of the thread that frees it), then from
-its span, the untaken slots of one 64-slot word of a block's bitmap, held as a mask of bits, the
+its span, untaken slots of one 64-slot word of a block's bitmap, held as a mask of bits, the
 lowest one handed out next. When both are empty, the thread takes the next word with untaken
 slots under the heap's lock: of its span's block, or of a block from its class's list, or of a
-new block. That is one lock per 64 slots at most, and touches no slot. The slots of a new span
+new block. That is one lock per span, and touches no slot. A span takes no more
+slots than fit in 8 KB (`SPAN_BYTES`), one at least: from slots of 1 KB a word covers its whole
+block, and each thread keeps a span in every class it allocates in: with whole words, the
+Minecraft server's 41 threads held 28 MB of slots taken and never handed out, about one 64 KB
+block per thread and class of the larger sizes. The slots of a new span
 are fetched into the cache right away (up to 4 KB), before the program writes them. Linking every
 untaken slot of a block into a list, as the allocator did before, cost 5% of the translated
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
-The collector keeps every taken slot of the word of each thread's spans, after marking: those
-are the slots not handed out yet, and the one a thread stopped in `alloc` may be handing out
-before its address is in a register. A slot that may hold
+The collector keeps every taken slot of each thread's spans, after marking: the slots not handed
+out yet, and the one a thread stopped in `alloc` may be handing out before its address is in a
+register; the others the span handed out live one collection longer. Only the span's own
+slots are kept, not the rest of its word, which from slots of 1 KB is the whole block. A slot that may hold
 pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
 program does not write (the spare capacity of a `Vec`), keeps anything alive; a slot of a
 pointer-free block is zeroed only for `alloc_zeroed`. Zeroing there rather than when a slot is
@@ -81,11 +92,12 @@ translated javac takes 14.5 s and 1.03 GB collecting after half as much as is al
 1.36 GB after as much, and 12.4 s and 2.0 GB after twice as much (the Java VM: 11.3 s, 4.1 GB). It:
 
 1. stops every other thread with a signal (`SIGPWR`); each records where its stack is and waits;
-2. marks every slot reachable from the roots, with an explicit stack, so a long chain of objects
-   needs no recursion;
-3. sweeps: frees the taken slots left unmarked (clears their bits), clears the marks for the next
-   collection, lists the blocks with free slots, and frees the blocks with nothing alive,
-   giving their memory back to the system where that empties a whole huge page.
+2. clears every mark, then marks every slot reachable from the roots, with an explicit stack, so
+   a long chain of objects needs no recursion;
+3. sweeps: frees the taken slots left unmarked (clears their bits), lists the blocks with free
+   slots, and frees the blocks with nothing alive, giving their memory back to the system where
+   that empties a whole huge page. The marks stay until the next collection, which is what the
+   young generation (below) builds on; the slots threads hold free lose theirs.
 
 The roots are scanned conservatively: any aligned word that points into a taken slot keeps that
 slot, which makes interior pointers and pointers held in registers work. The top 16 bits of a
@@ -158,14 +170,23 @@ on a futex.
 
 - A mark bit is set with an atomic `or`, so two markers that reach one object scan it once.
 - Each marker has its own stack. When another marker is idle, a marker moves half of its stack,
-  the oldest items first (they tend to lead to the most work), to a shared pool, from which an
-  idle marker takes up to 256 items.
+  the oldest items first (they tend to lead to the most work), up to 4,096 items, to a shared
+  pool, from which an idle marker takes up to 256 items. Both are one copy under the pool's spin
+  lock, whose waiters read it until it is free before they try to take it.
 - A range longer than 64 KB (a large array) is split into 64 KB pieces as it is taken, all of
   which go on the stack at once, so other markers can take them.
 - A slot taken off a marker's stack waits in a ring of 8 while its memory is prefetched, and is
   scanned as it leaves the ring, so the cache misses of reading eight slots overlap instead of
   coming one after another. On the Minecraft benchmark this took the translated javac's marking
   from 3.9 s to 2.7 s in all (median of runs; 16 slots did no better).
+- An idle marker spins a little, yields a little, and then sleeps on a futex. A marker putting
+  work in the pool wakes one sleeper for each 256 items, and the end of marking wakes them all.
+  A heap that hands out no work (one long linked list) is marked by one thread while the others
+  sleep. Idle helpers that kept spinning and yielding, and woke all at once to queue on the
+  pool's lock, took `SmallObjects` (a linked list of 2 million nodes and an array of 1 million
+  objects, collected 22 times) from 0.36 s to 0.64 s and from 1.1 s to 6.0 s of processor time,
+  and `BinaryTrees` from 2.16 s to 4.27 s and from 5.7 s to 32.8 s (medians at a load average of
+  about 6 on 16 cores).
 - Marking ends when every marker is idle and the pool is empty: no marker can then make work.
 
 Sweeping is shared in chunks of 256 blocks: each thread sweeps the blocks of a chunk and records
@@ -174,6 +195,28 @@ in each block what lives; the collecting thread then lists the blocks and frees 
 On a test heap of 545 MB of small objects held by one array, eight threads mark in 23 ms instead
 of 104 and sweep in 13 ms instead of 23. A heap that is one long linked list cannot be marked in parallel and marks about 25%
 slower than alone, the cost of the atomic mark bits.
+
+## Generations
+
+With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object that
+lives through a collection keeps its mark and is old. A minor collection marks from the roots
+and from the old objects on the pages written since the last collection, stops at marked
+objects, and frees the young ones left unmarked. A full collection, as above, runs once a quarter
+more (plus 1 MB) is alive than after the last full one, at once after the minor one that finds
+it, in the same pause.
+
+Which pages were written, the kernel says: the heap is registered with a `userfaultfd` in
+asynchronous write-protect mode, each collection protects the pages that now hold old objects
+that may hold pointers, and a write to one of them unprotects it in the kernel, with no thread
+woken; `PAGEMAP_SCAN` on `/proc/self/pagemap` lists the pages not protected (`track_writes`,
+`written`, `protect_old` in `gc.rs`). Every write counts, whatever code, thread or system call
+makes it, so nothing is emitted in the program. Everything Rust allocates is in the heap (the
+collector is the global allocator), and memory outside it that can hold a reference is the
+roots, scanned whole at every collection; docs/native-speed.md (1.3) lists it. Where the kernel
+refuses (before Linux 6.7, or a seccomp filter), every collection is full. It is opt-in until it
+has been measured on the Minecraft server: it saves processor time on programs whose old objects
+are many (`SmallObjects`, `BinaryTrees`), but keeps old objects that died until the next full
+collection, which raises the peak of some.
 
 ## Threads
 
@@ -189,8 +232,13 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   output. A change to the collector or the runtime is checked by running the corpus with it set.
 - `JAVA_GC_THREADS=<n>` marks with `n` markers in all, and with more than one marks in parallel
   at every collection however small, which with `JAVA_GC_EVERY` tests the parallel marking.
-- `JAVA_GC_LOG=1` writes a line per collection to standard error: bytes taken since the last,
-  bytes alive, heap size, and the time spent marking and sweeping.
+- `JAVA_GC_LOG=1` writes a line per collection to standard error: whether it was minor or full,
+  bytes taken since the last, bytes alive, heap size, and the time spent marking and sweeping.
+- `JAVA_GC_GENERATIONS=1` with `JAVA_GC_EVERY=1` makes most collections minor ones, at every
+  refill of a thread's slots: the corpus run so is the test most likely to catch a write the
+  young generation misses. Running a program under `systemd-run --user --wait --pipe -p
+  SystemCallFilter=~userfaultfd -p SystemCallErrorNumber=EPERM` tests the fallback to full
+  collections.
 - `JAVA_GC_GROWTH=<percent>` sets the bytes taken between collections as a percentage of the
   bytes alive (100 by default), which trades memory for time.
 
@@ -203,5 +251,5 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   statics and thread-local storage are scanned, and the only
   memory outside them is the C library's own, which holds no handles except a starting thread's
   closure (covered above).
-- The plan for a faster and smaller heap (objects without headers, 4-byte references,
-  generations) is in docs/native-speed.md.
+- The plan for a faster and smaller heap (objects without headers, 4-byte references) is in
+  docs/native-speed.md.

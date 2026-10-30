@@ -11,8 +11,8 @@ It builds on three other designs:
   generics where proven), and an override with another erased signature gets a bridge method;
 - exceptions ([exceptions.md](exceptions.md)): a method returns `Result` exactly where a caller
   observes what escapes it, and the methods of an override group agree;
-- multi-threading ([multi-threading.md](multi-threading.md)): a class that threads may share is
-  `Arc<java::Monitored<C>>`, and a closure handed to a thread must be `Send`.
+- multi-threading ([multi-threading.md](multi-threading.md)): a class that threads may share has
+  `java::SharedField`s, and a closure handed to a thread must be `Send`.
 
 The guiding rules: generated code is safe Rust that prints what Java prints; what cannot be
 proven keeps a correct general representation; lambdas become Rust closures, not hand-made

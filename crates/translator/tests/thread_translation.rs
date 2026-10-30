@@ -55,9 +55,12 @@ fn a_thread_and_what_it_reaches_are_arcs() {
     assert_contains(
         &rust,
         &[
-            "enum ThreadView<'a> {\n    Worker(&'a Arc<java::Monitored<AWorker>>) = 11,",
-            "fn AWorker__run(this: &Arc<java::Monitored<AWorker>>) {",
-            "let w = Arc::new(java::Monitored::new(AWorker__new(10)));",
+            // Threads share a worker, but no monitor site locks one (`join` is the runtime's),
+            // so it has `java::SharedField`s and no lock word.
+            "enum ThreadView<'a> {\n    Worker(&'a Arc<AWorker>) = 11,",
+            "fn AWorker__run(this: &Arc<AWorker>) {",
+            "let w = Arc::new(AWorker__new(10));",
+            "sum: java::SharedField<i64>,",
             "impl PartialEq for Thread {\n    fn eq(&self, other: &Thread) -> bool {\n        self.0 == other.0",
             "fn base(&self) -> &ThreadFields {",
         ],

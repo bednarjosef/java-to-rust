@@ -45,6 +45,17 @@ use syn::spanned::Spanned;
 /// to another module: rustc compiles a module's code in one codegen unit, on one thread.
 const CODEGEN_UNIT: usize = 512 * 1024;
 
+/// The `.cargo/config.toml` of a translation's Cargo project on x86-64, one crate's or a split
+/// workspace's: it builds for processors with AVX2 (`x86-64-v3`), and builds a binary that is
+/// not position-independent (`relocation-model=static`). A position-independent binary is moved
+/// to a random address when it starts, and every pointer in its data is fixed up then: the
+/// Minecraft server's has 4.6 million of them (the place of every panic message, every table of
+/// functions), 105 MB of fix-ups that the loader reads and 61 MB of data that fixing them writes,
+/// 166 MB of its peak memory. A binary at a fixed address keeps those pointers in its file, read
+/// only where used.
+pub const CARGO_CONFIG: &str =
+    "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\", \"-C\", \"relocation-model=static\"]\n";
+
 /// The crates of a split program, each as its files under `src/`.
 pub struct Workspace {
     pub header: Vec<SourceFile>,
@@ -92,10 +103,7 @@ impl Workspace {
         )?;
         if cfg!(target_arch = "x86_64") {
             std::fs::create_dir_all(dir.join(".cargo"))?;
-            write_if_changed(
-                &dir.join(".cargo/config.toml"),
-                "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\"]\n",
-            )?;
+            write_if_changed(&dir.join(".cargo/config.toml"), CARGO_CONFIG)?;
         }
         let package = |crate_dir: &str, deps: &str, files: &[SourceFile]| -> std::io::Result<()> {
             let root = dir.join(crate_dir);

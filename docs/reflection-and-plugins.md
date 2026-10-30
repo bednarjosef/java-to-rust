@@ -133,14 +133,20 @@ program where such a lookup can happen, so they can be checked before the progra
   big program's table (the Minecraft server's holds about 160,000 methods) makes functions of a
   few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
   size. The table itself is data: each part is three constant arrays, of the classes its members
-  name, of their names, and of numbers (indices into those two, modifiers and slots), which a
-  loop of `java/Reflection.java` makes the objects from, not code that makes each. A lookup
-  reads only the members of its class: the first lookup of methods, fields or constructors
-  groups the table by the class that finds each member (`MemberIndex`, a hash table from the
-  class to the run of its members, in the table's order), where reading the whole table for
-  each lookup took over 2 s of the Minecraft server's start, on the thread that starts it
-  (`benchmarks/ReflectionLookups.java`, 120 classes looked up one at a time: 7.3 s before,
-  0.15 s after, Java 0.16 s). Arguments are checked and unboxed as Java does: a wrong
+  name, of their names, and of numbers (indices into those two, modifiers and slots), which
+  `java/Reflection.java` makes the objects from, not code that makes each. A lookup reads only
+  the members of its class: the first lookup of methods, fields or constructors reads the
+  table's data (`TableData`) and groups the slots by the class that finds each member
+  (`MemberIndex`, a hash table from the class to the run of its members, in the table's order),
+  where reading the whole table for each lookup took over 2 s of the Minecraft server's start,
+  on the thread that starts it (`benchmarks/ReflectionLookups.java`, 120 classes looked up one
+  at a time: 7.3 s before, 0.15 s after, Java 0.16 s). A member's object is made the first time
+  a lookup returns it, from its numbers, as Java makes the objects of a class's members when it
+  is reflected on; a lookup tests a member's class, name and modifiers in the numbers first.
+  Made all at once, the Minecraft server's 160,000 methods and their fields, with their lists of
+  parameter classes, held about 120 MB of its heap (`benchmarks/ReflectionTableMemory.java`,
+  a table of 14,400 methods of which three classes' are read: 20.2 MB at peak before, 14.9 MB
+  after, Java 42 MB). Arguments are checked and unboxed as Java does: a wrong
   type is an `IllegalArgumentException` and a null receiver a `NullPointerException`, and an
   exception of the called code is wrapped in an `InvocationTargetException` (by
   `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final

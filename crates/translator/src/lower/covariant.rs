@@ -317,13 +317,17 @@ impl<'t> Lowering<'t> {
                 }
                 return Ok(());
             }
-            // An enum's `values()` and a class literal's `getInterfaces()`, which make a new
-            // array of the call's type.
+            // An enum's `values()`, a class literal's `getInterfaces()` and the reflection
+            // table's `tableClasses` and `tableNames` (`reflection::table_data`), which make a
+            // new array of the call's type.
             "METHOD_INVOCATION"
                 if matches!(x.kind, ExprKind::ArrayLit(_) | ExprKind::NewArray(_))
                     && node.symbol().is_some_and(|s| {
                         s.is_static && s.name == "values" && self.enum_index(s.owner).is_some()
                             || !s.is_static && s.name == "getInterfaces" && s.owner == "java.lang.Class"
+                            || s.native
+                                && matches!(s.name, "tableClasses" | "tableNames")
+                                && s.owner.starts_with("java.lang.reflect.")
                     }) =>
             {
                 (node.java_type().to_string(), x)

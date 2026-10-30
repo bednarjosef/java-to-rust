@@ -293,11 +293,12 @@ fn write_dependencies(path: &str, tree: &java_to_rust::output::ModuleTree) -> Re
 /// checkout. Its debug builds keep line tables only, which backtraces need: full debug
 /// information makes a large program's binary several times larger and adds to its build's
 /// memory. Its release builds use fat LTO, which makes the translated javac about 10% faster
-/// (docs/performance.md, "The translated javac"). On x86-64, its `.cargo/config.toml` builds for
-/// processors with AVX2 (`x86-64-v3`, Haswell and later), whose wider vector instructions a loop
-/// over an array uses, as the JVM's compiler uses those of the processor it runs on; Cargo reads
-/// it when it runs in the project's directory, and adds flags given as `CARGO_BUILD_RUSTFLAGS` or
-/// `--config build.rustflags=..` to it (`RUSTFLAGS` replaces it).
+/// (docs/performance.md, "The translated javac"). On x86-64, its `.cargo/config.toml`
+/// (`split::CARGO_CONFIG`) builds for processors with AVX2 (`x86-64-v3`, Haswell and later),
+/// whose wider vector instructions a loop over an array uses, as the JVM's compiler uses those of
+/// the processor it runs on, and builds a binary that is not position-independent, which takes
+/// less memory; Cargo reads it when it runs in the project's directory, and adds flags given as
+/// `CARGO_BUILD_RUSTFLAGS` or `--config build.rustflags=..` to it (`RUSTFLAGS` replaces it).
 fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result<()> {
     let name = Path::new(input)
         .file_stem()
@@ -319,10 +320,7 @@ fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result
     )?;
     if cfg!(target_arch = "x86_64") {
         std::fs::create_dir_all(dir.join(".cargo"))?;
-        std::fs::write(
-            dir.join(".cargo/config.toml"),
-            "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\"]\n",
-        )?;
+        std::fs::write(dir.join(".cargo/config.toml"), java_to_rust::split::CARGO_CONFIG)?;
     }
     for file in files {
         let path = dir.join("src").join(&file.path);

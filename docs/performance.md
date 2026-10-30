@@ -13,7 +13,10 @@ Each program is compiled with `javac`, translated with `java-to-rust --crate`, b
 and exit with the same code as Java's, or the program is reported and not timed. Times are the
 median of the runs, wall clock. Java runs with its default flags, so JVM start-up is included. A
 program that warms up prints `kernel-ms N` on standard error; that is the time of the timed loop
-measured inside the program, and it is reported in the two kernel columns.
+measured inside the program, and it is reported in the two kernel columns. The last two columns
+are each side's peak memory: the most resident memory the process held, its `ru_maxrss`, the
+median over the runs. The table below is of the times; the memory of translated programs and the
+benchmarks that measure it are in "Memory".
 
 ## Results
 
@@ -60,8 +63,15 @@ made on the stack (`java::count_allocation`).
   handle is copied without a count. BinaryTrees keeps a tree of about 89 MB alive while it builds
   and drops millions of short-lived ones; the collector marks that long-lived tree again at each
   of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads), which is
-  most of the remaining gap. A young generation, planned in docs/native-speed.md, would collect
-  the short-lived trees without marking the old one. NodeList walks and rebuilds a linked list of
+  most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million nodes again
+  at each of its 22 collections, which no helper can share. Idle markers now sleep instead of
+  spinning (docs/collector.md, "Marking and sweeping in parallel"), which at a load average of
+  about 6 took BinaryTrees from 4.27 s to 2.16 s (Java 0.91 s at that load; the table above is
+  from before) and `SmallObjects` from 0.64 s to 0.36 s (Java 0.17 s). The young
+  generation (`JAVA_GC_GENERATIONS=1`, docs/collector.md) collects the short-lived objects
+  without marking the old ones: `SmallObjects` 0.43 s against 0.34 s, with 1.2 s against 0.49 s
+  of processor time, and BinaryTrees the same wall time with 4.9 s against 3.2 s of processor
+  time; it is opt-in because some peaks rise (`SmallObjects` 170 MB against 200 MB). NodeList walks and rebuilds a linked list of
   about 667,000 nodes; its nodes are taken from blocks in address order, so the walk follows
   memory.
 - **Strings read from a field (TokenScanner 0.8x).** A parser that reads its input one character
@@ -155,6 +165,93 @@ made on the stack (`java::count_allocation`).
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.05x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
+
+## Memory
+
+`scripts/benchmark.py` reports each side's peak resident memory beside its time. Six of the
+programs measure memory rather than time: `ReflectionTableMemory` (a reflection table of 14,400
+methods, of which three classes' are read), `LargeArrays` (arrays of 64, 128 and 256 KB alive
+together), `MonitoredObjects` (3 million small objects in a program that waits and notifies, of a
+class it locks, so every object keeps its monitor), `UnlockedObjects` (the same, of a class whose
+objects become `Object`s but no monitor site can lock), `SmallObjects` (3 million objects of 24
+and 40 bytes alive together, then 30 million that die young) and `ManyThreadsAllocating` (32
+threads that allocate arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak
+memory in MB, before and after the change that each measures (the median of three runs; of eight
+for `ManyThreadsAllocating`, 0.101 s before and 0.105 s after; of ten for `SmallObjects`, whose
+time is under "Allocation" below):
+
+| program               | before | after | Java |
+|-----------------------|-------:|------:|-----:|
+| ReflectionTableMemory |   20.2 |  14.9 | 42.0 |
+| LargeArrays           |  134.4 |  88.4 |  143 |
+| MonitoredObjects      |  124.5 |  76.6 |  148 |
+| UnlockedObjects       |  124.5 |  76.5 |  166 |
+| SmallObjects          |  153.2 | 145.6 |  734 |
+| ManyThreadsAllocating |  235.5 | 197.7 |  417 |
+
+### Where the Minecraft server's memory went
+
+The release trial of the server peaked at 1,498 MB on the bench (`minecraft-server.md`, step
+`bench`), Java at 1,092 MB. Measured on that binary after the tick sprint, from its block table
+(the collector's live bytes per slot size), its memory map and the contents of sampled slots:
+
+- **The binary's own pages: 485 MB**, against Java's 26 MB of mapped files. The code the server
+  ran: 292 MB of its 591 MB of `.text` were in memory, 278 MB with the kernel's mapping of the
+  neighbours of each faulted page turned off. The 105 MB of the loader's fix-ups of a
+  position-independent binary (`.rela.dyn`, 4.6 million of them: the place of every panic
+  message, every table of functions), all read at start, and the 61 MB of data that fixing them
+  up writes (`.data.rel.ro`, `.got`). The translator now builds binaries at a fixed address
+  (`split::CARGO_CONFIG`), which have neither: the pointers are in the file, read where used.
+  The saving grows with the binary: `ReflectionTableMemory`'s 6 MB binary loses 5,357 fix-ups
+  (126 KB) and 89 KB of `.data.rel.ro`, too little to move its peak (15.0 MB either way), and
+  runs the same.
+- **The heap: about 1,000 MB of blocks for 530 MB alive**, against Java's 186 MB alive (a full
+  collection's `jmap -histo:live`) in a heap of 442 MB. Both collect when the program has taken
+  about as much as is alive, so the heaps are about twice what is alive; the difference is
+  what is alive. Of the 530 MB:
+  - **the reflection table's objects, about 120 MB**: all 160,000 methods and 80,000 fields made
+    at the first lookup, each with three classes of 88 bytes held in it, its name, and lists of
+    parameter classes in which each class is a boxed copy. Java makes a class's member objects
+    when it is reflected on. The translation now makes each member's object the first time a
+    lookup returns it (docs/reflection-and-plugins.md).
+  - **monitors**: the server waits and notifies, which kept every object's monitor, and each
+    `java::Monitored` object held its lock, 16 bytes. It now holds a pointer to a lock made the
+    first time a thread takes it (`LazyMonitor`), 8 bytes, which puts about half of the objects
+    in a smaller slot (`MonitoredObjects`), and only the objects that a monitor site may lock
+    have one (docs/multi-threading.md 3.1, `UnlockedObjects`).
+  - **large allocations of whole blocks**: 361 arrays of exactly 128 KB (`float[32768]`, the
+    density buffers of world generation) took three blocks of 64 KB each, the third only for
+    the cache-line color of its start, 23 MB in all. A large allocation's color now stays
+    within the blocks its size needs (docs/collector.md).
+- **The heap by class.** A dump of the heap and its block table right after a collection, with
+  the server stopped (424 MB in taken slots, against Java's 186 MB alive), each object named by
+  the class number in the handles that point at it (`java::Thin`), or else by the chain of
+  objects that hold it up to one that has a number:
+  - the reflection table, 110 MB in this dump (above);
+  - **thread spans, 28 MB**: 641 words of the blocks' bitmaps whose taken slots nothing points
+    at, 1 to 2 MB in each slot size from 896 bytes to 32 KB, one 64 KB block for about each of
+    the 41 threads and the sizes it allocates. A thread took every untaken slot of a bitmap
+    word at once, which from slots of 1 KB is a whole block, and the collector kept all of the
+    word's taken slots. A span now takes at most 8 KB of slots, and the collector keeps only
+    its own (docs/collector.md, `ManyThreadsAllocating` above);
+  - **the same objects, larger**: `StructureTemplate$StructureBlockInfo` (308,000 of them) is
+    48 bytes against Java's 24, `BlockPos` (313,000) 32 against 24, `BlockState` 224 against
+    104, DataFixerUpper's `ProductType`, `NamedType`, `SumType` and `TagType` 64 against 32. A
+    handle is 8 bytes where Java's compressed references are 4, each object held a 16-byte lock
+    (now 8), and slots grew by 16 bytes where Java's objects grow by 8. From the furthest
+    nonzero word of each class's objects (slots that may hold pointers are zeroed when handed
+    out), the 214 MB of objects reached through numbered handles take 200 MB with the 8-byte
+    lock, 190 MB with no lock word in the classes no `synchronized`, `wait` or `notify`
+    reaches, and 185 MB with slot sizes in steps of 8 bytes to 128 as well. The translation now
+    does both (docs/multi-threading.md 3.1, docs/collector.md; `UnlockedObjects` and
+    `SmallObjects` above); how much of it the server gains is not yet measured;
+  - world generation's density buffers (`float[32768]` and `float[98304]`) come and go: up to
+    120 MB of them in one dump, a few MB in another. Their pools drop a buffer unused for 20
+    ticks, so they are not kept; Java's histogram was taken between them.
+- What remains larger than Java's: the handles above, a `java::Class` is an
+  88-byte value wherever it is held (a field, a boxed `Class` as an `Object`), a string field is
+  a 24-byte `Vec` with its own copy of the text, and the heap keeps free blocks until a whole
+  huge page of them is free (167 MB of free blocks in the sample).
 
 ## Translating whole programs
 
@@ -667,9 +764,9 @@ from rustup's `llvm-tools`). It takes a third off the time of fat LTO alone, and
 build with PGO takes about 30 minutes.
 
 javac starts one thread, the file manager's deferred close, which a normal run never starts, but
-its reachable `Thread.start()` makes the program threaded and most of its classes
-`java::Arc<java::Monitored<..>>` (docs/multi-threading.md, section 4), whose fields are
-`java::SharedField`s: an acquire load or release store of a word, a plain move on x86-64. Until a
+its reachable `Thread.start()` makes the program threaded and most of its classes thread-shared
+(docs/multi-threading.md, section 4), whose fields are `java::SharedField`s: an acquire load or
+release store of a word, a plain move on x86-64. Until a
 second thread starts, a monitor costs plain loads and stores only (`locked.rs`).
 Object parameters that may be null are borrowed (`&Option<java::Arc<..>>`,
 docs/supported-java.md) rather than copied. `charAt` and `String.hashCode` read a string's

@@ -34,12 +34,13 @@ pub fn remove_families(class: &Class, immutable: &mut FastSet<String>, classes: 
 }
 
 /// The classes whose objects change and are shared, whose fields are cells in an `Arc<C>`, read
-/// and written by value; and of those, the classes whose objects keep a monitor, because threads
-/// share them or the program waits on, notifies or asks about their monitor: an
-/// `Arc<java::Monitored<C>>` of `java::SharedField`s, where the others hold `java::Field`s. A
-/// class tree is celled and monitored together or not at all, like immutability, so that an enum
-/// over it reaches the fields it shares in one way; a tree with an owned class or a Java enum
-/// keeps its `RefCell`s or locks. A class that no `new` creates (an abstract one) can be
+/// and written by value; of those, the classes whose fields are `java::SharedField`s, because
+/// threads share their objects or the objects keep a monitor, where the others hold
+/// `java::Field`s; and of those, the classes whose objects keep a monitor, because a monitor site
+/// may lock them (`monitor_classes`): an `Arc<java::Monitored<C>>`. A class tree is celled,
+/// shared and monitored together or not at all, like immutability, so that an enum over it
+/// reaches the fields it shares in one way; a tree with an owned class or a Java enum keeps its
+/// `RefCell`s or locks. A class that no `new` creates (an abstract one) can be
 /// immutable while the classes below it are not: it has no objects that could change, and its
 /// tree is celled all the same.
 pub fn celled_classes(
@@ -47,29 +48,30 @@ pub fn celled_classes(
     facts: &Facts,
     monitor_classes: &FastSet<String>,
     created: &[bool],
-) -> (FastSet<String>, FastSet<String>) {
+) -> (FastSet<String>, FastSet<String>, FastSet<String>) {
     let celled = |t: usize| {
         let name = &class.types[t].name;
         class.types[t].enum_constants.is_none()
             && (!facts.immutable.contains(name) || !created[t])
             && !facts.owned.contains(name)
     };
-    let monitored =
-        |t: usize| monitor_classes.contains(&class.types[t].name) || facts.thread_shared.contains(&t);
+    let monitored = |t: usize| monitor_classes.contains(&class.types[t].name);
     // Every class of a tree decides, its abstract ones too, whose fields structs the concrete
     // ones embed.
     let classes = || (0..class.types.len()).filter(|&t| class.types[t].kind == TypeKind::Class);
-    let mut trees: FastMap<usize, (bool, bool)> = FastMap::default();
+    let mut trees: FastMap<usize, (bool, bool, bool)> = FastMap::default();
     for t in classes() {
-        let tree = trees.entry(class.hierarchy.root(t)).or_insert((true, false));
+        let tree = trees.entry(class.hierarchy.root(t)).or_insert((true, false, false));
         tree.0 &= celled(t);
-        tree.1 |= monitored(t);
+        tree.1 |= monitored(t) || facts.thread_shared.contains(&t);
+        tree.2 |= monitored(t);
     }
     let tree = |t: usize| trees[&class.hierarchy.root(t)];
     let name = |t: usize| class.types[t].name.clone();
     (
         classes().filter(|&t| tree(t).0).map(name).collect(),
-        classes().filter(|&t| tree(t) == (true, true)).map(name).collect(),
+        classes().filter(|&t| tree(t).0 && tree(t).1).map(name).collect(),
+        classes().filter(|&t| tree(t).0 && tree(t).2).map(name).collect(),
     )
 }
 

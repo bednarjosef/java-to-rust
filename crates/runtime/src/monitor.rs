@@ -36,19 +36,25 @@ pub fn unkept_monitor() -> ! {
 }
 
 /// The object of a class whose fields are cells (`java::SharedField`, or `java::Field` for one
-/// thread) and whose monitor is kept: its fields, then the reentrant lock that is its monitor.
-/// The fields come first, so the object's address is that of its fields, as `&self` of a method
-/// that borrows them sees it and an enum's `base()` reads them (`Thin::as_prefix`).
+/// thread) and whose monitor is kept: its fields, then the reentrant lock that is its monitor,
+/// made the first time a thread takes it (`LazyMonitor`). The fields come first, so the object's
+/// address is that of its fields, as `&self` of a method that borrows them sees it and an enum's
+/// `base()` reads them (`Thin::as_prefix`).
+///
+/// A program that waits or notifies keeps every object's monitor (docs/multi-threading.md, 3.1),
+/// and few objects are ever locked: a pointer that stays null until then takes eight bytes of
+/// each object, where the lock itself takes sixteen. In the Minecraft server, whose millions of
+/// objects are all monitored, that is a smaller slot for about half of them.
 #[repr(C)]
 pub struct Monitored<T> {
     value: T,
-    lock: RawLock,
+    lock: LazyMonitor,
 }
 
 impl<T> Monitored<T> {
     #[inline(always)]
     pub const fn new(value: T) -> Monitored<T> {
-        Monitored { value, lock: RawLock::new() }
+        Monitored { value, lock: LazyMonitor::new() }
     }
 
     pub fn into_inner(self) -> T {
@@ -68,7 +74,7 @@ impl<T> std::ops::Deref for Monitored<T> {
 impl<T> HasMonitor for Monitored<T> {
     #[inline]
     fn monitor(&self) -> MonitorOf<'_> {
-        MonitorOf::Shared(&self.lock)
+        MonitorOf::Shared(self.lock.get())
     }
 }
 
@@ -107,8 +113,9 @@ impl<T: ?Sized> HasMonitor for std::cell::RefCell<T> {
     }
 }
 
-/// The monitor of an array that threads share: a lock made the first time a thread takes it, which
-/// stays for the array's life.
+/// The monitor of an object or an array that threads share: a lock made the first time a thread
+/// takes it, which stays for the object's life. The lock is in the collected heap, held by this
+/// pointer, so it is freed with the object.
 pub(crate) struct LazyMonitor(AtomicPtr<RawLock>);
 
 impl LazyMonitor {
@@ -116,7 +123,17 @@ impl LazyMonitor {
         LazyMonitor(AtomicPtr::new(std::ptr::null_mut()))
     }
 
+    #[inline]
     fn get(&self) -> &RawLock {
+        let lock = self.0.load(Ordering::Acquire);
+        if lock.is_null() {
+            return self.make();
+        }
+        unsafe { &*lock }
+    }
+
+    #[cold]
+    fn make(&self) -> &RawLock {
         let mut lock = self.0.load(Ordering::Acquire);
         if lock.is_null() {
             let made = Box::into_raw(Box::new(RawLock::new()));
