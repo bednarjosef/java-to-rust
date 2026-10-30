@@ -400,7 +400,15 @@ impl<'t> Lowering<'t> {
             ("LAMBDA_EXPRESSION", "STATEMENT") => self.block(l.code)?,
             _ => self.tail(self.expr(l.code)?, ret),
         };
-        let overridden = self.method_index(&Symbol {
+        let overridden = self.implemented(node);
+        Ok((descriptor.str("name"), params, ret, body, overridden))
+    }
+
+    /// The method of the program that the lambda or method reference `node` implements: its
+    /// functional interface's abstract method.
+    pub(super) fn implemented(&self, node: Node<'t>) -> Option<usize> {
+        let descriptor = node.get("descriptor")?;
+        self.method_index(&Symbol {
             kind: "METHOD",
             name: descriptor.str("name"),
             owner: descriptor.str("owner"),
@@ -409,8 +417,7 @@ impl<'t> Lowering<'t> {
             native: false,
             ty: descriptor.str("type"),
             constant: None,
-        });
-        Ok((descriptor.str("name"), params, ret, body, overridden))
+        })
     }
 
     /// The body of a lambda whose body is the expression `e`: it returns its value, converted to

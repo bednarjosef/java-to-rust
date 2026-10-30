@@ -120,7 +120,31 @@ impl<'t> Lowering<'t> {
     /// Then a method that overrides or is overridden, and what the code does with the values of
     /// each one (`Flow`, as `verify`'s `Check` and lowering's own failures).
     fn predict_failed(&self, candidates: &Real) -> Real {
-        let mut real = candidates.clone();
+        // A method that another overrides or a lambda implements is called through the dispatch
+        // of its class's objects, which no type parameter of its own fits, whichever class
+        // declares the other: an enum constant's body, a lambda's or a method reference's.
+        // An enum constant's body is no method of its own: its override is an arm of the enum's
+        // method (`constant_bodies`), where the body's type variables meet the method's.
+        let bodies = self.types.iter().filter(|t| t.node.kind() == "ENUM").flat_map(|t| {
+            t.node
+                .list("members")
+                .filter_map(|c| c.get("initializer").and_then(|i| i.get("classBody")))
+                .flat_map(|body| body.list("members").filter(|m| m.kind() == "METHOD"))
+        });
+        let mut dispatched = Real::default();
+        for node in self.methods.iter().map(|info| info.node).chain(bodies) {
+            if node.get("symbol").and_then(|s| s.0["overrides"].as_array()).is_some_and(|o| !o.is_empty()) {
+                for o in self.overrides(node) {
+                    dispatched.insert(Owner::Method(o));
+                }
+            }
+        }
+        for lambda in &self.lambdas {
+            if let Some(o) = self.implemented(lambda.node) {
+                dispatched.insert(Owner::Method(o));
+            }
+        }
+        let mut real = candidates.without(&dispatched);
         let methods_by_node =
             self.methods.iter().enumerate().map(|(m, i)| (i.node.0 as *const Value, m)).collect();
         let types_by_node =
@@ -292,6 +316,28 @@ impl<'t> Flow<'_, 't> {
         self.failed.borrow_mut().insert(owner);
     }
 
+    /// A native of `TranslatedTypes` that lowering makes a table of the program's classes for
+    /// (`generic_types_native`): it names the class literal of each class it lists, a use of the
+    /// class without type arguments.
+    fn reflected_classes(&self, symbol: &Symbol) {
+        let l = self.lowering;
+        if symbol.owner != super::generic_types::TRANSLATED_TYPES || !symbol.native {
+            return;
+        }
+        let listed = |decl: Node<'t>| match symbol.name {
+            "typeParameters0" => decl.list("typeParameters").next().is_some(),
+            "genericInterfaces0" => decl.list("implementsClause").any(|c| c.java_type().contains('<')),
+            "bounds0" => decl.list("typeParameters").any(|v| v.list("bounds").next().is_some()),
+            _ => false,
+        };
+        for &t in &self.real.classes {
+            let decl = l.types[t].node;
+            if matches!(decl.kind(), "CLASS" | "INTERFACE" | "ENUM" | "RECORD") && listed(decl) {
+                self.fail_owner(Owner::Class(t), "a class literal in the table of `TranslatedTypes`");
+            }
+        }
+    }
+
     fn is_real(&self, owner: Owner) -> bool {
         match owner {
             Owner::Class(t) => self.real.classes.contains(&t),
@@ -325,8 +371,15 @@ impl<'t> Flow<'_, 't> {
         Scope { vars, ret }
     }
 
-    /// Type `text` as lowering has it in `scope`.
+    /// Type `text` as lowering has it in `scope`: a capture or a wildcard as its upper bound
+    /// (`Lowering::erased`), `capture#1 of ? extends U` as `U`.
     fn lowered<'a>(&self, text: &'a str, scope: &Scope) -> Lowered<'a> {
+        let wildcard = text
+            .strip_prefix("capture#")
+            .map_or(text, |rest| rest.split_once(" of ").map_or("?", |(_, b)| b));
+        if let Some(bound) = wildcard.strip_prefix("? extends ") {
+            return self.lowered(bound, scope);
+        }
         self.lower(&JavaType::parse(text), scope)
     }
 
@@ -683,6 +736,7 @@ impl<'t> Flow<'_, 't> {
             self.nested_class(body, scope);
         }
         let Some(symbol) = node.symbol() else { return };
+        self.reflected_classes(&symbol);
         let Some(m) = l.method_index(&symbol) else {
             args.iter().for_each(|&a| self.flows(a, &Lowered::Erased("void"), scope));
             return;
@@ -876,11 +930,6 @@ impl<'t> Meets<'_, 't> {
     fn bridges(&self, m: usize, node: Node<'t>) {
         let l = self.lowering;
         let Ok(params) = l.param_types(m) else { return };
-        let ret = |m: usize| {
-            let info = &l.methods[m];
-            let ret = info.node.get("returnType")?;
-            l.declared_type(ret, l.return_java_type(m, ret), info.owner, Some(m)).ok()
-        };
         for o in l.overrides(node) {
             let Ok(overridden) = l.param_types(o) else { continue };
             for (&p, &q) in params.iter().zip(&overridden) {
@@ -888,7 +937,7 @@ impl<'t> Meets<'_, 't> {
                     l.meets_object_array(p, q);
                 }
             }
-            if let (Some(a), Some(b)) = (ret(m), ret(o)) {
+            if let (Some(a), Some(b)) = (self.declared_ret(m), self.declared_ret(o)) {
                 l.meets_object_array(a, b);
             }
         }
@@ -1003,6 +1052,7 @@ impl<'t> Meets<'_, 't> {
                     }
                 }
             }
+            "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node),
             "MEMBER_SELECT" | "IDENTIFIER" => {
                 self.children(node, None);
                 if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD")
@@ -1014,6 +1064,66 @@ impl<'t> Meets<'_, 't> {
             }
             _ => self.children(node, None),
         }
+    }
+
+    /// A lambda or a method reference, whose method returns the value of its body, or of the call
+    /// that the reference makes, as the descriptor's return type (`lambda_body`).
+    fn lambda(&self, node: Node<'t>) {
+        let l = self.lowering;
+        let Some((_, code)) = l.lambda_class(node).and_then(|t| l.lambda_code(t)) else {
+            return self.children(node, None);
+        };
+        let current = l.current.get();
+        l.current.set(l.lambda_class(node).unwrap_or(current));
+        let Some(descriptor) = node.get("descriptor") else { return l.current.set(current) };
+        let ret = self.ty(node, signature(descriptor.str("substituted")).1).filter(|&ty| ty != Type::Void);
+        if node.kind() == "LAMBDA_EXPRESSION" && node.str("bodyKind") == "STATEMENT" {
+            self.stmt(code, ret);
+        } else {
+            self.expr(code);
+            self.flows(code, ret);
+        }
+        // The bridge to the method the lambda implements returns the result as that method's.
+        if let (Some(ret), Some(o)) = (ret, l.implemented(node))
+            && let Some(declared) = self.declared_ret(o)
+        {
+            self.convert(ret, declared);
+        }
+        l.current.set(current);
+    }
+
+    /// `Arrays.copyOf(a, n, Object[].class)` (or `copyOfRange`), whose copy is `a`'s array once
+    /// the two meet (`copy_of_with_class`).
+    fn copy_into_objects(&self, node: Node<'t>, symbol: &Symbol<'t>, args: &[Node<'t>]) {
+        let wanted = match symbol.name {
+            "copyOf" => 3,
+            "copyOfRange" => 4,
+            _ => return,
+        };
+        if symbol.owner != "java.util.Arrays" || args.len() != wanted {
+            return;
+        }
+        let mut class = args[wanted - 1];
+        while matches!(class.kind(), "TYPE_CAST" | "PARENTHESIZED") {
+            let Some(inner) = class.get("expression") else { return };
+            class = inner;
+        }
+        let literal = class.kind() == "MEMBER_SELECT" && class.str("identifier") == "class";
+        if let (true, Some(copy @ Type::Array(e)), Some(array @ Type::Array(f))) =
+            (literal, self.ty(node, node.java_type()), self.value(args[0]))
+            && Lowering::is_object(*e)
+            && Lowering::of_objects(*f)
+        {
+            self.lowering.meets_object_array(array, copy);
+        }
+    }
+
+    /// The declared return type of method `m`.
+    fn declared_ret(&self, m: usize) -> Option<Type> {
+        let l = self.lowering;
+        let info = &l.methods[m];
+        let ret = info.node.get("returnType")?;
+        l.declared_type(ret, l.return_java_type(m, ret), info.owner, Some(m)).ok()
     }
 
     /// A use of a member whose declared type is `declared`, where javac gave the use another:
@@ -1056,9 +1166,10 @@ impl<'t> Meets<'_, 't> {
                 self.convert(ty, Type::class(crate::ast::OBJECT));
             }
         }
+        let args: Vec<Node<'t>> = node.list("arguments").collect();
+        self.copy_into_objects(node, &symbol, &args);
         let Some(m) = l.method_index(&symbol) else { return };
         let Ok(params) = l.param_types(m) else { return };
-        let args: Vec<Node<'t>> = node.list("arguments").collect();
         let last = params.len().saturating_sub(1);
         for (i, &a) in args.iter().enumerate() {
             let Some(&param) = params.get(i.min(last)) else { continue };
