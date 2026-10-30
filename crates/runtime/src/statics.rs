@@ -16,8 +16,8 @@
 //!   once for the whole process, as JLS 12.4.2 describes.
 
 use std::cell::{OnceCell, RefCell, UnsafeCell};
-use std::ops::Deref;
 use std::mem::MaybeUninit;
+use std::ops::Deref;
 use std::sync::atomic::{
     AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicPtr, AtomicU16, AtomicU32, AtomicU64,
     AtomicUsize, Ordering,
