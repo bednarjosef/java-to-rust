@@ -166,12 +166,15 @@ program where such a lookup can happen, so they can be checked before the progra
   (`Class[][]` and the arrays inside it too), so a read of an element of an array gets those
   stored in arrays made where it was, unless the facts do not follow the array (a library's
   result), when it gets those of every array, and what is stored through such an array goes to
-  every array that the runtime was given (`corpus/whole-program/ClassValuesInArrays.java`).
+  every array that the runtime was given (`corpus/whole-program/ClassValuesInArrays.java`). Each
+  table's data is in a class of its own (`MethodTableData`, `FieldTableData`,
+  `ConstructorTableData`), as the facts hold one field for all the objects of a class: a field's
+  type then comes from the classes that the kept fields name, not from those of every table.
   What the facts still merge: the elements of one array are one place (a lookup on
   `groups[1][0]` gets the classes of `groups[0]` too), a field of a class holds what any of its
-  objects holds (the keys of every map are one, and so are the data of the three tables of
-  methods, fields and constructors, whose classes a field's type may be), and the lists of
-  parameter types of methods and constructors are made in one place. A lookup reads only
+  objects holds (the keys of every map are one, and so are the types of every `Field` object),
+  and the lists of parameter types of methods and constructors are made in one place. A lookup
+  reads only
   the members of its class: the first lookup of methods, fields or constructors reads the
   table's data (`TableData`) and groups the slots by the class that finds each member
   (`MemberIndex`, a hash table from the class to the run of its members, in the table's order),

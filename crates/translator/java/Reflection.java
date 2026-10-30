@@ -269,7 +269,7 @@ final class Method extends Executable {
 
     private static synchronized TableData load() {
         if (data == null) {
-            TableData d = new TableData();
+            TableData d = new MethodTableData();
             loadPart0(d);
             loadPart1(d);
             loadPart2(d);
@@ -357,12 +357,12 @@ final class Method extends Executable {
     private static Method member(TableData d, int slot) {
         Method m = table[slot];
         if (m == null) {
-            Class<?>[] classes = d.classes[slot & 31];
-            int[] ints = d.ints[slot & 31];
+            Class<?>[] classes = d.classes()[slot & 31];
+            int[] ints = d.ints()[slot & 31];
             int at = d.starts[slot];
             Class<?>[] parameterTypes = classList(classes, ints, at + 6);
             Class<?>[] exceptionTypes = classList(classes, ints, at + 7 + parameterTypes.length);
-            m = new Method(classes[ints[at]], classes[ints[at + 1]], d.names[slot & 31][ints[at + 3]], parameterTypes,
+            m = new Method(classes[ints[at]], classes[ints[at + 1]], d.names()[slot & 31][ints[at + 3]], parameterTypes,
                     classes[ints[at + 2]], exceptionTypes, ints[at + 4], ints[at + 5]);
             table[slot] = m;
         }
@@ -899,7 +899,7 @@ final class Field extends AccessibleObject implements Member {
 
     private static synchronized TableData load() {
         if (data == null) {
-            TableData d = new TableData();
+            TableData d = new FieldTableData();
             loadPart0(d);
             loadPart1(d);
             loadPart2(d);
@@ -986,10 +986,10 @@ final class Field extends AccessibleObject implements Member {
     private static Field member(TableData d, int slot) {
         Field f = table[slot];
         if (f == null) {
-            Class<?>[] classes = d.classes[slot & 31];
-            int[] ints = d.ints[slot & 31];
+            Class<?>[] classes = d.classes()[slot & 31];
+            int[] ints = d.ints()[slot & 31];
             int at = d.starts[slot];
-            f = new Field(classes[ints[at]], classes[ints[at + 1]], d.names[slot & 31][ints[at + 3]], classes[ints[at + 2]],
+            f = new Field(classes[ints[at]], classes[ints[at + 1]], d.names()[slot & 31][ints[at + 3]], classes[ints[at + 2]],
                     ints[at + 4], ints[at + 5]);
             table[slot] = f;
         }
@@ -1310,7 +1310,7 @@ final class Constructor<T> extends Executable {
 
     private static synchronized TableData load() {
         if (data == null) {
-            TableData d = new TableData();
+            TableData d = new ConstructorTableData();
             loadPart0(d);
             loadPart1(d);
             loadPart2(d);
@@ -1395,8 +1395,8 @@ final class Constructor<T> extends Executable {
     private static Constructor<?> member(TableData d, int slot) {
         Constructor<?> k = table[slot];
         if (k == null) {
-            Class<?>[] classes = d.classes[slot & 31];
-            int[] ints = d.ints[slot & 31];
+            Class<?>[] classes = d.classes()[slot & 31];
+            int[] ints = d.ints()[slot & 31];
             int at = d.starts[slot];
             Class<?>[] parameterTypes = classList(classes, ints, at + 3);
             Class<?>[] exceptionTypes = classList(classes, ints, at + 4 + parameterTypes.length);
@@ -1646,10 +1646,6 @@ final class Constructor<T> extends Executable {
     }
 }
 
-// The members of a reflection table grouped by the class that finds them, so that a lookup on a
-// class reads that class's members rather than the whole table (the Minecraft server's has
-// 160,000 methods, and log4j and gson look up members class by class): a hash table, open
-// addressing, from each class to the run of its members' indices in `order`, in the table's order.
 // The data of a reflection table (`Method`, `Field` or `Constructor`), as lowering writes it in 32
 // parts: per part the classes, the numbers and the names (`tableClasses`, `tableInts`,
 // `tableNames`), read once, with where each slot's member starts in its part's numbers and the
@@ -1658,17 +1654,26 @@ final class Constructor<T> extends Executable {
 // reflected on: a big program's table has 160,000 methods, whose objects with their lists of
 // classes held 100 MB that a program reflecting on a few thousand classes never reads. A lookup
 // tests a member's class, name and modifiers in the numbers before it makes the object.
-final class TableData {
-    final Class<?>[][] classes = new Class<?>[32][];
-    final int[][] ints = new int[32][];
-    final String[][] names = new String[32][];
+//
+// Each table's parts are in a class of their own (`MethodTableData`, `FieldTableData`,
+// `ConstructorTableData`), not in fields of this one: the points-to facts that cut the table
+// (`analysis/object_values.rs`) hold a field for all the objects of its class, and so would give
+// a field's type (`Field.getType()`) every class that any table names.
+abstract class TableData {
     int[] starts;
     MemberIndex owners;
 
+    // The parts' classes, numbers and names.
+    abstract Class<?>[][] classes();
+
+    abstract int[][] ints();
+
+    abstract String[][] names();
+
     void part(int p, Class<?>[] classes, int[] ints, String[] names) {
-        this.classes[p] = classes;
-        this.ints[p] = ints;
-        this.names[p] = names;
+        classes()[p] = classes;
+        ints()[p] = ints;
+        names()[p] = names;
     }
 
     // Finds where each slot's member starts: a member is `fixed` numbers, the first the index of
@@ -1677,6 +1682,8 @@ final class TableData {
     // its length and the indices. A whole program leaves out the members of the classes whose
     // `Class` values no lookup gets (`analysis::reflection_table`): their slots have none.
     void finish(int fixed, boolean lists) {
+        int[][] ints = ints();
+        Class<?>[][] classes = classes();
         int length = 0;
         for (int p = 0; p < 32; p++) {
             int[] data = ints[p];
@@ -1731,19 +1738,78 @@ final class TableData {
 
     // The number at `offset` in the member of `slot`.
     int number(int slot, int offset) {
-        return ints[slot & 31][starts[slot] + offset];
+        return ints()[slot & 31][starts[slot] + offset];
     }
 
     // The class whose index is at `offset` in the member of `slot`.
     Class<?> classAt(int slot, int offset) {
-        return classes[slot & 31][number(slot, offset)];
+        return classes()[slot & 31][number(slot, offset)];
     }
 
     // The name whose index is at `offset` in the member of `slot`.
     String name(int slot, int offset) {
-        return names[slot & 31][number(slot, offset)];
+        return names()[slot & 31][number(slot, offset)];
     }
 }
+
+final class MethodTableData extends TableData {
+    private final Class<?>[][] classes = new Class<?>[32][];
+    private final int[][] ints = new int[32][];
+    private final String[][] names = new String[32][];
+
+    Class<?>[][] classes() {
+        return classes;
+    }
+
+    int[][] ints() {
+        return ints;
+    }
+
+    String[][] names() {
+        return names;
+    }
+}
+
+final class FieldTableData extends TableData {
+    private final Class<?>[][] classes = new Class<?>[32][];
+    private final int[][] ints = new int[32][];
+    private final String[][] names = new String[32][];
+
+    Class<?>[][] classes() {
+        return classes;
+    }
+
+    int[][] ints() {
+        return ints;
+    }
+
+    String[][] names() {
+        return names;
+    }
+}
+
+final class ConstructorTableData extends TableData {
+    private final Class<?>[][] classes = new Class<?>[32][];
+    private final int[][] ints = new int[32][];
+    private final String[][] names = new String[32][];
+
+    Class<?>[][] classes() {
+        return classes;
+    }
+
+    int[][] ints() {
+        return ints;
+    }
+
+    String[][] names() {
+        return names;
+    }
+}
+
+// The members of a reflection table grouped by the class that finds them, so that a lookup on a
+// class reads that class's members rather than the whole table (the Minecraft server's has
+// 160,000 methods, and log4j and gson look up members class by class): a hash table, open
+// addressing, from each class to the run of its members' indices in `order`, in the table's order.
 
 final class MemberIndex {
     private final Class<?>[] keys;
