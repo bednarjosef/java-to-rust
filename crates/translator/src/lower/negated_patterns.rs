@@ -35,8 +35,10 @@
 //! !(o instanceof T name) ? false : f(name)     o instanceof T name ? f(name) : false
 //! ```
 //!
-//! An `if` whose condition negates an `&&` chain with a pattern has it negated operand by operand
-//! first, which runs the same: `!(a && x instanceof T name)` is `!a || !(x instanceof T name)`.
+//! An `if` whose condition (or an operand of its `||` chain) negates an `&&` chain with a pattern
+//! has it negated operand by operand first, which runs the same: `!(a && x instanceof T name)` is
+//! `!a || !(x instanceof T name)`, and `a || !(x instanceof T name && c(name))` is
+//! `a || !(x instanceof T name) || !c(name)`.
 //! An `||` chain inside the condition's `&&` chains (`a && (!(x instanceof T name) || c(name))`)
 //! whose negated pattern a later operand reads becomes a conditional, which binds the pattern
 //! for the operands it guards:
@@ -112,28 +114,29 @@ impl<'t> Lowering<'t> {
         stmts
     }
 
-    /// `cond`, an `&&` chain with a pattern under a negation, as the `||` chain of its operands
-    /// negated.
+    /// `cond` with each operand of its `||` chain that negates an `&&` chain with a pattern (the
+    /// whole of `cond`, or one operand as in `a || !(x instanceof T name && c(name))`) as the `||`
+    /// chain of that chain's operands negated.
     fn negated_and(&self, cond: Expr) -> Expr {
-        match cond.kind {
-            ExprKind::Unary(UnOp::Not, inner)
-                if matches!(inner.kind, ExprKind::Binary(BinOp::And, ..)) && binds_pattern(&inner) =>
-            {
-                let pos = cond.pos;
-                into_chain(*inner, BinOp::And)
-                    .into_iter()
-                    .map(|operand| self.negated(operand))
-                    .reduce(|left, right| {
-                        self.synth(
-                            ExprKind::Binary(BinOp::Or, Box::new(left), Box::new(right)),
-                            pos,
-                            Type::Boolean,
-                        )
-                    })
-                    .expect("an `&&` chain has operands")
-            }
-            kind => Expr { kind, ..cond },
+        let pos = cond.pos;
+        let splits = |operand: &Expr| matches!(&operand.kind, ExprKind::Unary(UnOp::Not, inner) if splits_inner(inner));
+        let mut operands = Vec::new();
+        chain(&cond, BinOp::Or, &mut operands);
+        if !operands.iter().any(|o| splits(o)) {
+            return cond;
         }
+        into_chain(cond, BinOp::Or)
+            .into_iter()
+            .flat_map(|operand| match operand.kind {
+                ExprKind::Unary(UnOp::Not, inner) if splits_inner(&inner) => {
+                    into_chain(*inner, BinOp::And).into_iter().map(|o| self.negated(o)).collect()
+                }
+                kind => vec![Expr { kind, ..operand }],
+            })
+            .reduce(|left, right| {
+                self.synth(ExprKind::Binary(BinOp::Or, Box::new(left), Box::new(right)), pos, Type::Boolean)
+            })
+            .expect("an `||` chain has operands")
     }
 
     /// `cond` with each `||` chain among the operands of its `&&` chains (those of its own `||`
@@ -291,6 +294,11 @@ fn mentions_stmt(stmt: &Stmt, name: &str) -> bool {
     let mut found = false;
     visit_stmt(stmt, &mut |e| found |= mentions(e, name), &mut |_| {});
     found
+}
+
+/// Whether `e` is an `&&` chain with a pattern, which `!e` in an `if`'s `||` chain splits into.
+fn splits_inner(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Binary(BinOp::And, ..)) && binds_pattern(e)
 }
 
 /// Whether `e` has a pattern with a variable (`x instanceof T t`).

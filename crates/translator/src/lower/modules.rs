@@ -275,6 +275,17 @@ impl<'t> Lowering<'t> {
                 let cases = cases.into_iter().map(|(packages, lines)| (packages, string(lines))).collect();
                 switch(var(0), cases, self.synth(ExprKind::Null, pos, Type::Null))
             }
+            // A data file of the JDK, its bytes as the chars of a string (`reach/jdk_resources.rs`).
+            ("jdkResource0", 1) => {
+                let cases = reach
+                    .jdk_resources
+                    .iter()
+                    .map(|(name, bytes)| {
+                        (vec![name.clone()], string(&bytes.iter().map(|&b| b as char).collect::<String>()))
+                    })
+                    .collect();
+                switch(var(0), cases, self.synth(ExprKind::Null, pos, Type::Null))
+            }
             ("classPath0", 0) => {
                 let roots = reach.modules.iter().filter(|m| m.name.is_empty()).flat_map(|m| &m.roots);
                 string(&roots.map(|r| r.to_string_lossy()).collect::<Vec<_>>().join("\n"))

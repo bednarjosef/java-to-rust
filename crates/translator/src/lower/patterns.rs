@@ -338,7 +338,8 @@ impl<'t> Lowering<'t> {
                 if self.always_is(value.ty, ty) {
                     return Ok((None, vec![Alias { name, ty, target: target(value) }]));
                 }
-                Ok((Some(self.instance_test(pattern, value, ty, name)?), Vec::new()))
+                let java = variable.symbol().map_or("", |s| s.ty);
+                Ok((Some(self.instance_test(pattern, value, ty, name, (variable, java))?), Vec::new()))
             }
             "DECONSTRUCTION_PATTERN" => self.record_test(pattern, value, fresh),
             kind => unsupported(pattern, &kind_words(kind)),
@@ -362,7 +363,8 @@ impl<'t> Lowering<'t> {
         let Some(record) = record else { return unsupported(pattern, "this record pattern") };
         let simple = self.types[record].node.str("simpleName");
         let name = fresh.name(&variable_name(simple));
-        let mut test = self.instance_test(pattern, value, ty, name.clone())?;
+        let typed = (deconstructor, deconstructor.java_type());
+        let mut test = self.instance_test(pattern, value, ty, name.clone(), typed)?;
         let mut aliases = Vec::new();
         let components = self.components(record)?;
         let nested: Vec<Node<'t>> = pattern.list("nestedPatterns").collect();
@@ -395,14 +397,22 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// `value instanceof ty name`.
-    fn instance_test(&self, pattern: Node<'t>, value: Expr, ty: Type, name: String) -> Result<Expr, Error> {
-        let target = matches!(ty, Type::Class(..) | Type::Enum(_))
-            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)))
-            || Self::is_numeric_box_of(value.ty, ty);
-        if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
+    /// `value instanceof ty name`, as `instanceof` tests it (`instance_of`): an array type
+    /// (`case byte[] b`, as `KeyUtil.clear` writes it) by the class the array carries. `typed`
+    /// is the node whose type `ty` is, and javac's name of the type.
+    fn instance_test(
+        &self,
+        pattern: Node<'t>,
+        value: Expr,
+        ty: Type,
+        name: String,
+        (typed, java): (Node<'t>, &str),
+    ) -> Result<Expr, Error> {
+        if !self.may_be(value.ty, ty) {
             return unsupported(pattern, "this pattern on a value of this type");
         }
+        self.object_array(pattern, ty)?;
+        let value = self.array_test(typed, value, ty, java)?;
         self.forget_alias(&name);
         let kind = ExprKind::InstanceOf { value: Box::new(value), ty, binding: Some(name) };
         Ok(self.synth(kind, pattern.pos(), Type::Boolean))

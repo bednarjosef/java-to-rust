@@ -94,8 +94,11 @@ program where such a lookup can happen, so they can be checked before the progra
   string literals of reachable code, plus the classes of its class literals for methods and
   fields, and for constructors the classes of the class literals among the values of
   annotations, which code that reads them makes objects of (log4j's
-  `@PluginVisitorStrategy(PluginValueVisitor.class)`); or only the class of the receiver when
-  it is a class literal. The annotations of a class that reachable code names are reached with
+  `@PluginVisitorStrategy(PluginValueVisitor.class)`), and on a `Class<? extends T>` of a `T`
+  other than `Object` those of its class literals too (the JDK's key store delegator makes
+  `PKCS12KeyStore.class`'s object); or only the class of the receiver when it is a class
+  literal. A lookup on a `Class<? extends T>` finds only the classes that are or extend or
+  implement `T`. The annotations of a class that reachable code names are reached with
   it, values included. The names of the classes
   that security providers register for their services are left out: the providers' own lookup
   makes those (`program/reach/services.rs`). The member names are

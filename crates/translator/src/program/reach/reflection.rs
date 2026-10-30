@@ -6,7 +6,7 @@
 //! classes it can look in are those that code can get a `Class` value of without naming them in
 //! a type: the classes that string literals of reachable code name (`by_name`), the locale data
 //! that a computed name finds, and, for methods and fields, the classes of the class literals of
-//! reachable code. A lookup on a class literal, or on `Class.forName` of a name spelled out,
+//! reachable code, as for constructors on a `Class<? extends T>` of a `T` other than `Object`. A lookup on a class literal, or on `Class.forName` of a name spelled out,
 //! looks in that class only, and one on a `Class<? extends T>` in those that are or extend or
 //! implement `T`. The names it can find are the one it
 //! spells out as a string literal, or for a name that code computes, any string literal of
@@ -179,7 +179,7 @@ fn is_class_value(node: &Value) -> bool {
 }
 
 /// Whether the code `node` assigns the variable `name`.
-fn assigns(node: &Value, name: &str) -> bool {
+pub(super) fn assigns(node: &Value, name: &str) -> bool {
     match node {
         Value::Object(map) => {
             let kind = text(node, "kind");
@@ -349,7 +349,15 @@ impl<'t> Walk<'t> {
                             let mut all: BTreeSet<&String> = self.named.iter().collect();
                             all.extend(self.reach.found_by_name.iter());
                             match lookup.kind {
-                                Kind::Constructor => all.extend(self.annotation_classes.iter()),
+                                Kind::Constructor => {
+                                    all.extend(self.annotation_classes.iter());
+                                    // A `Class<? extends T>` below `Object` holds the class
+                                    // literals of `T`'s classes that code passes it, whose objects
+                                    // it makes (`KeyStoreDelegator`'s `PKCS12KeyStore.class`).
+                                    if !is_subtype_of_object(bound) {
+                                        all.extend(self.class_literals.iter());
+                                    }
+                                }
                                 Kind::Record => {
                                     all.extend(self.class_literals.iter());
                                     all.extend(self.record_types.iter());

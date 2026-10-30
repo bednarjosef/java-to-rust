@@ -126,7 +126,8 @@ included (docs/collector.md).
   `String.format` and `printf` are the JDK's `Formatter` in that locale (a whole program; without
   the JDK's sources they are rejected).
 - **Charsets**: `getBytes` and `new String(bytes, ..)` for UTF-8, US-ASCII, ISO-8859-1, UTF-16,
-  UTF-16BE and UTF-16LE (`charset.rs`), and for the JDK's single-byte charsets (windows-1252
+  UTF-16BE, UTF-16LE, UTF-32, UTF-32BE and UTF-32LE (`charset.rs`, where UTF-32 keeps a
+  surrogate it decodes, as Java does), and for the JDK's single-byte charsets (windows-1252
   and the other Windows code pages, the ISO-8859 ones, KOI8-R, the IBM and Mac code pages: 103
   on JDK 26). Those are tables of the JDK that the translator was built with, taken from its own
   coders (`java/Charsets.java`, `jdk_charsets.rs`), and the translator asks the JDK it runs
@@ -136,13 +137,13 @@ included (docs/collector.md).
   gives the same value for each name of a charset, and `defaultCharset()` is UTF-8 (JEP 400).
   An unknown or malformed name throws `UnsupportedCharsetException` or
   `IllegalCharsetNameException` with Java's message, which a `catch` sees. A charset that Java
-  has but that is none of these (Shift_JIS, GBK, UTF-32 and the other multi-byte ones, and
+  has but that is none of these (Shift_JIS, GBK and the other multi-byte ones, and
   x-IBM1129, which encodes a second char to its replacement byte) is rejected where a constant
   names it; where the program computes its name, it carries the names of those charsets too,
   and `forName`, `isSupported`, `getBytes` and `new String` throw
   `UnsupportedOperationException` for one, which the census lists. `Charset.aliases()` and a
   `Charset` array element that starts out null are rejected. In a whole program
-  `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets and, made from
+  `newDecoder()`/`newEncoder()` give the JDK's own coders of the nine charsets and, made from
   the tables, the JDK's `SingleByte` coders of the others
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings compares what Java compares: by text where both sides can only be interned
@@ -234,11 +235,11 @@ Design: [object-model.md](object-model.md).
   clashes with the enum's or, for a static field, another body's.
 - A **record** is a class with the members Java gives it (written into javac's tree by
   `javac/records.rs`): canonical or compact constructor, accessors, `toString`, `equals` and
-  `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case null`, record patterns,
-  nested records) is an `if let` chain, exhaustive over a sealed hierarchy or enum without
-  `default`. The components of a generic record's pattern have the erasures its fields hold;
-  rejected: a record pattern of a record that is a Rust generic. An accessor written in the record
-  runs at each use of a pattern variable, not once. `java.lang.Record` is a type like `Object`: a
+  `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case byte[] b`, `case null`,
+  record patterns, nested records) is an `if let` chain, exhaustive over a sealed hierarchy or
+  enum without `default`. The components of a generic record's pattern have the erasures its
+  fields hold; rejected: a record pattern of a record that is a Rust generic. An accessor written
+  in the record runs at each use of a pattern variable, not once. `java.lang.Record` is a type like `Object`: a
   value of it holds any of the program's records.
 - Local records, enums and interfaces declared in a method or an initializer block move to the
   top level.

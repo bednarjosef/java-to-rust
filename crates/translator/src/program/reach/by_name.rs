@@ -24,7 +24,9 @@
 //! `LOCALE_DATA_PACKAGES` for the root locale, `en` and `en_US`, the locales of the translation
 //! (`locale_data_classes`), which are then candidates as if a literal named them. A name that
 //! `Class.forName(name)` computes is one of the classes named so far, or of those named later,
-//! and each of them is initialized, as the call would.
+//! and each of them is initialized, as the call would. A literal that lists class names, separated
+//! by `|`, `,`, `;` or white space, names each (`listed_class_names`), as a provider's
+//! `SupportedKeyClasses` attribute lists the key interfaces that `Provider.Service` finds by name.
 //!
 //! A name that code makes of a package, a computed part and the rest of a class name, as `URL`
 //! finds the handler of a protocol, `"sun.net.www.protocol." + protocol + ".Handler"`, names
@@ -456,6 +458,15 @@ impl Walk<'_> {
     }
 }
 
+/// The class names that a string lists, separated by `|`, `,`, `;` or white space, as a
+/// provider's `SupportedKeyClasses` attribute does (`Provider.Service` splits it and calls
+/// `Class.forName` on each): none for a string without such a separator.
+pub fn listed_class_names(text: &str) -> impl Iterator<Item = &str> {
+    let separated = |c: char| matches!(c, '|' | ',' | ';') || c.is_whitespace();
+    let listed = text.contains(separated);
+    text.split(separated).filter(move |part| listed && could_name_class(part))
+}
+
 /// Whether a string could be the binary name of a top-level class in a package: identifiers
 /// joined by dots, at least two (`sun.util.cldr.CLDRLocaleProviderAdapter`).
 fn could_name_class(text: &str) -> bool {
@@ -485,6 +496,22 @@ mod tests {
         assert_eq!(class_bound("java.lang.Class<Shape>"), "Shape");
         assert_eq!(class_bound("java.lang.Class<capture#1 of ?>"), "java.lang.Object");
         assert_eq!(class_bound("java.lang.Class"), "java.lang.Object");
+    }
+
+    #[test]
+    fn a_list_of_class_names_names_each() {
+        let listed = |text| listed_class_names(text).collect::<Vec<_>>();
+        assert_eq!(
+            listed("java.security.interfaces.ECPublicKey|java.security.interfaces.ECPrivateKey"),
+            ["java.security.interfaces.ECPublicKey", "java.security.interfaces.ECPrivateKey"]
+        );
+        assert_eq!(
+            listed("|java.security.interfaces.ECPrivateKey"),
+            ["java.security.interfaces.ECPrivateKey"]
+        );
+        assert_eq!(listed("a.B, c.D"), ["a.B", "c.D"]);
+        assert!(listed("java.security.interfaces.ECPublicKey").is_empty());
+        assert!(listed("not a class name").is_empty());
     }
 
     #[test]

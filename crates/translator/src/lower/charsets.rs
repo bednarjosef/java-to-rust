@@ -28,6 +28,9 @@ const STANDARD_CHARSET_CLASSES: &[(&str, CharsetOp)] = &[
     ("sun.nio.cs.UTF_16", CharsetOp::Utf16),
     ("sun.nio.cs.UTF_16BE", CharsetOp::Utf16Be),
     ("sun.nio.cs.UTF_16LE", CharsetOp::Utf16Le),
+    ("sun.nio.cs.UTF_32", CharsetOp::Utf32),
+    ("sun.nio.cs.UTF_32BE", CharsetOp::Utf32Be),
+    ("sun.nio.cs.UTF_32LE", CharsetOp::Utf32Le),
 ];
 
 /// The constant of the runtime's `charset`.
@@ -39,6 +42,9 @@ fn constant(charset: java_runtime::Charset) -> CharsetOp {
         java_runtime::Charset::Utf16 => CharsetOp::Utf16,
         java_runtime::Charset::Utf16Be => CharsetOp::Utf16Be,
         java_runtime::Charset::Utf16Le => CharsetOp::Utf16Le,
+        java_runtime::Charset::Utf32 => CharsetOp::Utf32,
+        java_runtime::Charset::Utf32Be => CharsetOp::Utf32Be,
+        java_runtime::Charset::Utf32Le => CharsetOp::Utf32Le,
         java_runtime::Charset::Bytes(_) => unreachable!("`Charset::known` finds only the runtime's own"),
     }
 }

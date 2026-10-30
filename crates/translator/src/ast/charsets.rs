@@ -17,6 +17,12 @@ pub enum CharsetOp {
     Utf16Be,
     /// `StandardCharsets.UTF_16LE`.
     Utf16Le,
+    /// `UTF-32`, which no `StandardCharsets` constant names: the JDK's `sun.nio.cs.UTF_32`.
+    Utf32,
+    /// `UTF-32BE` (`sun.nio.cs.UTF_32BE`).
+    Utf32Be,
+    /// `UTF-32LE` (`sun.nio.cs.UTF_32LE`).
+    Utf32Le,
     /// `Charset.forName(name)`; the name is the argument.
     ForName,
     /// `Charset.isSupported(name)`; the name is the argument.

@@ -583,6 +583,7 @@ fn load_in_rounds(
     }
     let roots = program.sources.iter().chain(&program.libraries);
     reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
+    reach.jdk_resources = reach::read_jdk_resources(&reach.jdk_resource_names());
     reach.added_exports = program.add_exports.clone();
     let changing: Vec<usize> = changing.iter().map(|&(index, ..)| index).collect();
     let mut units = given.into_values();

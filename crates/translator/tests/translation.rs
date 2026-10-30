@@ -3314,7 +3314,7 @@ fn a_census_stubs_only_the_code_of_the_file_with_the_rejection() {
             ),
             (
                 "p/A.java",
-                "package p;\nclass A {\n    static Object drain(boolean fail) {\n        Object tasks;\n        try {\n            if (!fail) {\n                tasks = new Object();\n            } else {\n                throw new IllegalStateException(\"no\");\n            }\n        } catch (IllegalStateException e) {\n            tasks = e;\n        }\n        return tasks;\n    }\n}\n",
+                "package p;\nclass A {\n    static Object drain(boolean fail) {\n        Object tasks;\n        try {\n            switch (fail ? 1 : 0) {\n                case 0: tasks = new Object(); break;\n                default:\n                    throw new IllegalStateException(\"no\");\n            }\n        } catch (IllegalStateException e) {\n            tasks = e;\n        }\n        return tasks;\n    }\n}\n",
             ),
             (
                 "p/B.java",
@@ -4026,10 +4026,10 @@ class Drain {
     static Object drain(boolean fail) {
         Object tasks;
         try {
-            if (!fail) {
-                tasks = new Object();
-            } else {
-                throw new IllegalStateException("no");
+            switch (fail ? 1 : 0) {
+                case 0: tasks = new Object(); break;
+                default:
+                    throw new IllegalStateException("no");
             }
         } catch (IllegalStateException e) {
             tasks = e;
@@ -7080,11 +7080,11 @@ fn static_fields_of_stub_classes_are_rejected() {
         &[
             (
                 "app/Main.java",
-                "package app;\nimport sun.security.pkcs.PKCS7;\npublic class Main {\n    static PKCS7 held;\n    public static void main(String[] a) { System.out.println(PKCS7.LIMIT + (held.isOk() ? 1 : 0)); }\n}\n",
+                "package app;\nimport com.sun.crypto.provider.ChaCha20Cipher;\npublic class Main {\n    static ChaCha20Cipher held;\n    public static void main(String[] a) { System.out.println(ChaCha20Cipher.LIMIT + (held.isOk() ? 1 : 0)); }\n}\n",
             ),
             (
-                "lib/sun/security/pkcs/PKCS7.java",
-                "package sun.security.pkcs;\npublic class PKCS7 {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public boolean isOk() { return true; }\n}\n",
+                "lib/com/sun/crypto/provider/ChaCha20Cipher.java",
+                "package com.sun.crypto.provider;\npublic class ChaCha20Cipher {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public boolean isOk() { return true; }\n}\n",
             ),
         ],
     );
@@ -7096,11 +7096,39 @@ fn static_fields_of_stub_classes_are_rejected() {
     };
     let error = java_to_rust::translate_program(&program).expect_err("a static field of a stub");
     assert!(
-        error
-            .to_string()
-            .contains("a static field of `sun.security.pkcs.PKCS7` (security) not supported yet"),
+        error.to_string().contains(
+            "a static field of `com.sun.crypto.provider.ChaCha20Cipher` (security) not supported yet"
+        ),
         "{error}"
     );
+}
+
+#[test]
+fn a_resource_of_an_untranslated_class_is_null_and_not_closed() {
+    // No object of a class that the translation leaves out can be made (`program::reach::stubs`),
+    // so a try-with-resources over one has a null resource, which Java does not close: the JDK's
+    // key store reads a sealed key so (`SealedObjectForKeyProtector.getKey`).
+    let dir = write_sources(
+        "untranslated-resource",
+        &[
+            (
+                "app/Main.java",
+                "package app;\nimport java.io.ObjectInputStream;\npublic class Main {\n    static ObjectInputStream held;\n    public static void main(String[] a) throws Exception {\n        try (ObjectInputStream in = held) { System.out.println(in == null); }\n    }\n}\n",
+            ),
+            (
+                "lib/java/io/ObjectInputStream.java",
+                "package java.io;\npublic class ObjectInputStream implements AutoCloseable {\n    public void close() {}\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust = java_to_rust::translate_program(&program).expect("a resource that is null");
+    assert!(!rust.contains("close"), "{rust}");
 }
 
 #[test]

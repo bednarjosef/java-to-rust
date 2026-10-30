@@ -301,7 +301,7 @@ fn tuple(items: &[String]) -> String {
 /// it, or leaves Rust nothing to follow: either the local holds a value where the `try` starts
 /// (`assigned_before`), so that what the `try` does keeps one in it; or the block sets it with a
 /// statement of its own or never completes normally, and without a `finally` it goes out in the
-/// `Ok` value (`carried_out`); with a `finally` that nothing but an exception leaves early, every
+/// `Ok` value (`carried_out`); with a `finally` that no jump leaves early (a `return` may), every
 /// block that completes normally, the `catch` clauses too, sets it with a statement of its own
 /// (`carried_through_finally`). A `try` whose block declares the local has nothing to carry out.
 /// The `try` statements in the cases of a switch expression are looked at too, at any depth, as
@@ -319,7 +319,7 @@ fn carriable(body: &[Stmt], name: &str) -> bool {
                 && !match finally {
                     None => !assigns(body, name) || sets_at_top(body, name) || !completes_all(body),
                     Some(_) => {
-                        leaves_early(body, catches) == (false, false)
+                        !leaves_early(body, catches).1
                             && std::iter::once(&body[..])
                                 .chain(catches.iter().map(|c| &c.body[..]))
                                 .all(|b| sets_at_top(b, name) || !completes_all(b))
@@ -398,13 +398,15 @@ fn assigned_within(s: &Stmt, name: &str, before: bool, out: &mut HashSet<usize>)
 }
 
 /// Whether statement `s` sets local `name` whenever it completes normally, as Rust also sees in
-/// the code it becomes.
+/// the code it becomes. A branch of an `if` that never completes normally (`throw`) sets it as
+/// far as the code after the `if` goes.
 fn sets(s: &Stmt, name: &str) -> bool {
+    let branch_sets = |b: &Stmt| sets(b, name) || !completes(b);
     match s {
         Stmt::Expr(e) | Stmt::Local { init: Some(e), .. } => always_sets(e, name),
         Stmt::Block(stmts) => !declares(stmts, name) && stmts.iter().any(|s| sets(s, name)),
         Stmt::If { cond, then, otherwise } => {
-            always_sets(cond, name) || otherwise.as_ref().is_some_and(|o| sets(then, name) && sets(o, name))
+            always_sets(cond, name) || otherwise.as_ref().is_some_and(|o| branch_sets(then) && branch_sets(o))
         }
         Stmt::While { cond, .. } => always_sets(cond, name),
         Stmt::For { init, cond, .. } => {
@@ -420,12 +422,12 @@ fn sets(s: &Stmt, name: &str) -> bool {
                 && (sets_at_top(body, name) || !completes_all(body))
                 && catches.iter().all(|c| sets_at_top(&c.body, name) || !completes_all(&c.body))
         }
-        // A `try` with a `finally` that nothing but an exception leaves early, whose blocks carry
-        // the local through the `finally` (`carried_through_finally`), as the closing of a
-        // try-with-resources does: where every block that completes normally sets it.
+        // A `try` with a `finally` that no jump leaves early, whose blocks carry the local through
+        // the `finally` (`carried_through_finally`), as the closing of a try-with-resources does:
+        // where every block that completes normally sets it.
         Stmt::Try { body, catches, finally: Some(_) } => {
             !declares_within(body, name)
-                && leaves_early(body, catches) == (false, false)
+                && !leaves_early(body, catches).1
                 && std::iter::once(&body[..])
                     .chain(catches.iter().map(|c| &c.body[..]))
                     .all(|b| sets_at_top(b, name) || !completes_all(b))
@@ -1396,25 +1398,30 @@ impl<'a> Gen<'a> {
             self.class.type_index("java.lang.Throwable").is_some_and(|t| !self.enum_variants(t).is_empty());
         let throwable = if exceptions { self.throwable_type() } else { never.to_string() };
         // The locals that the blocks set for the code after the `finally`, which Rust does not
-        // see set on the way through it, go out in their `Ok` value.
-        let carried = match completion {
+        // see set on the way through it, go out in their `Ok` value, or with a `return` in the
+        // block, in `Completion::Carried`.
+        let carried = match has_jump {
             true => Vec::new(),
             false => carried_through_finally(body, catches, &self.unset_locals),
         };
+        let types: Vec<String> = carried.iter().map(|n| self.ty_name(self.unset_locals[n])).collect();
         let ty = if completion {
             let value = if has_return { self.completion_value() } else { never.to_string() };
             let jump = if has_jump { "usize" } else { never };
-            format!("{}<{value}, {throwable}, {jump}>", self.runtime("Completion"))
+            let carries = if carried.is_empty() { String::new() } else { format!(", {}", tuple(&types)) };
+            format!("{}<{value}, {throwable}, {jump}{carries}>", self.runtime("Completion"))
         } else if !ends {
             format!("Result<{never}, {throwable}>")
         } else if carried.is_empty() {
             format!("Result<(), {throwable}>")
         } else {
-            let types: Vec<String> = carried.iter().map(|n| self.ty_name(self.unset_locals[n])).collect();
             format!("Result<{}, {throwable}>", tuple(&types))
         };
         let rust: Vec<String> = carried.iter().map(|n| self.local(n)).collect();
-        let normal = (!carried.is_empty()).then(|| format!("Ok({})", tuple(&rust)));
+        let normal = (!carried.is_empty()).then(|| match completion {
+            true => format!("{}({})", self.runtime("Completion::Carried"), tuple(&rust)),
+            false => format!("Ok({})", tuple(&rust)),
+        });
         let (arms, all) = self.catch_arms(catches);
         let finally_completes = completes_all(finally);
         // When the `finally` does not complete, what ended the `try` is not used after it.
@@ -1473,11 +1480,22 @@ impl<'a> Gen<'a> {
         self.line(&format!("match {result} {{"));
         self.indent += 1;
         let normal = self.runtime("Completion::Normal");
-        if ends {
+        if ends && carried.is_empty() {
             self.line(&format!("{normal} => {{}}"));
         } else {
             // Nothing writes it: the arm makes the `match` diverge, as the Java statement does.
             self.line(&format!("{normal} => unreachable!(\"the `try` does not complete normally\"),"));
+        }
+        if ends && !carried.is_empty() {
+            let values: Vec<String> = rust.iter().map(|r| self.temp(&format!("{r}_value"))).collect();
+            let carried_arm = self.runtime("Completion::Carried");
+            self.line(&format!("{carried_arm}({}) => {{", tuple(&values)));
+            self.indent += 1;
+            for (r, v) in rust.iter().zip(&values) {
+                self.line(&format!("{r} = {v};"));
+            }
+            self.indent -= 1;
+            self.line("}");
         }
         if has_return {
             let ret = self.runtime("Completion::Return");

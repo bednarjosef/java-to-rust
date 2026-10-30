@@ -372,31 +372,24 @@ A translated program is closed: it knows all its classes. So:
 
 - `jdk.internal.loader.` is untranslated ("class loading"), as are reflection
   (`java.lang.reflect.`, `java.lang.invoke.`, with the exceptions in `TRANSLATED_ANYWAY`),
-  serialization streams and security (`UNTRANSLATED`). Of security, the lookup of services by
-  name is translated as the JDK does it: `Security` and its properties, the JDK's own providers
-  (`SUN`, `SunRsaSign`, `SunEC`, `SunJSSE`, `SunJCE` and the others that the translation's
-  modules provide) with their registrations, and `GetInstance`, through which every engine's
-  `getInstance` finds a service, with or without a provider's name. A provider makes a service's
-  implementation from its class name by reflection; the translation instead has a `switch` over
-  the classes that the providers register for each type that reachable code looks up
-  (`program/reach/services.rs`, `java/patches/java/security/Provider.java`,
-  `TranslatedServices`), so a program that only digests has the digests' classes and none of
-  the ciphers'. The security properties are those of the translating JDK's
-  `conf/security/java.security`, written into the program. The services translated so far are
-  message digests and secure random numbers (`MessageDigest`, the `SUN` provider's digests,
-  generators and seed sources, as `UUID.randomUUID` uses them), and what a Minecraft server's
-  login needs: RSA key pairs, key factories, ciphers and signatures of `SunRsaSign`, the
-  ciphers, MACs, key generators, key derivation and key stores of `SunJCE` (`javax.crypto` and
-  `com.sun.crypto.provider` are translated), and the DER encoding of keys (`sun.security.util`'s
-  `Der*`, `ObjectIdentifier`, `KnownOIDs`, `AlgorithmId`, `X509Key`, `PKCS8Key`). A service whose
-  class is not translated, as JSSE's (`SSLContext`, `KeyManagerFactory`), X.509's, PKCS12's and
-  PKIX's are, fails when it is made, with the `NoSuchAlgorithmException` the JDK throws for a
-  class it cannot find, so a library that falls back from one algorithm to another does so; a
-  name no provider registers fails as in Java. Other keys and specs are not translated, except
-  their plain interfaces, which the program's own classes implement (see
-  [object-model.md](object-model.md) 1.9). The security APIs' exceptions (`KeyException`,
-  `SignatureException`, `CertificateException`, `InvalidKeySpecException` and the like) are
-  translated: plain constructors, which library code throws and catches as its own.
+  serialization streams and `SunJCE`'s `ChaCha20` ciphers (`UNTRANSLATED`). Security is
+  translated from the JDK's code, the lookup of services by name as the JDK does it: `Security`
+  and its properties, the JDK's own providers (`SUN`, `SunRsaSign`, `SunEC`, `SunJSSE`, `SunJCE`
+  and the others that the translation's modules provide) with their registrations, and
+  `GetInstance`, through which every engine's `getInstance` finds a service, with or without a
+  provider's name. A provider makes a service's implementation from its class name by
+  reflection; the translation instead has a `switch` over the classes that the providers
+  register for each type that reachable code looks up (`program/reach/services.rs`,
+  `java/patches/java/security/Provider.java`, `TranslatedServices`), so a program that only
+  digests has the digests' classes and none of the ciphers'. The security properties are those
+  of the translating JDK's `conf/security/java.security`, written into the program. So a program
+  has the services it looks up: message digests and secure random numbers (`UUID.randomUUID`),
+  RSA and EC keys, ciphers and signatures, and TLS (`SSLContext`, its key and trust managers,
+  X.509 certificates and their paths, PKCS12 key stores), which the HTTPS client uses. A
+  service whose class is not translated, as `ChaCha20`'s, fails when it is made, with the
+  `NoSuchAlgorithmException` the JDK throws for a class it cannot find, so a library that falls
+  back from one algorithm to another does so (TLS takes such cipher suites as unavailable); a
+  name no provider registers fails as in Java.
   `ResourceBundle`, `ServiceLoader` and
   `Module` are translated, the last two (and `ModuleLayer`) patched (see [reflection-and-plugins.md](reflection-and-plugins.md)).
 - `Class.forName` of a name spelled out as a literal is that class's literal, after its static
@@ -406,10 +399,11 @@ A translated program is closed: it knows all its classes. So:
   program, or the descriptor of an array of one, throws `ClassNotFoundException` when the call
   runs.
 - `(T) Class.forName(name).getDeclaredConstructor().newInstance()` with a computed name is a
-  `switch` over the classes whose binary names reachable code writes as string literals, or
-  makes of a constant package, one computed part and a constant rest of a name (`URL`'s
-  `"sun.net.www.protocol." + protocol + ".Handler"` names every protocol's handler in the
-  sources) (`program/reach/by_name.rs`, `lower/by_name.rs`); any other name throws a
+  `switch` over the classes whose binary names reachable code writes as string literals (or
+  lists in one, separated by `|`, `,`, `;` or white space, as a provider's `SupportedKeyClasses`
+  attribute lists the key interfaces), or makes of a constant package, one computed part and a
+  constant rest of a name (`URL`'s `"sun.net.www.protocol." + protocol + ".Handler"` names every
+  protocol's handler in the sources) (`program/reach/by_name.rs`, `lower/by_name.rs`); any other name throws a
   `ClassNotFoundException` that says so (`Builtin::UnknownClass`). A computed
   `Class.forName(module, name)` finds the locale data classes of the root locale, `en` and
   `en_US` (`Reach::found_by_name`), and `null` for any other name, as for a bundle the JDK lacks.
@@ -424,11 +418,16 @@ A translated program is closed: it knows all its classes. So:
   sources (`TranslatedModules.classResource`, `MODULE_CALLS`): the name is taken from the
   class's package unless it starts with `/`, and the class's loader looks it up. A class file is
   `null`, a resource that is not there: the translation has no class files, since its classes
-  were translated from their source. A resource of a class of the JDK's own modules ends the
-  program with an `InternalError` naming it: data files such as `uniName.dat`
-  (`Character.getName`), `currency.data` and the ICU normalizer data are generated when the JDK
-  is built and are not in its sources. Without the JDK's sources, every such call but one of a
-  class file ends the program so (`Builtin::MissingResource`).
+  were translated from their source. A resource of a class of the JDK's own modules is one of
+  its data files, which are generated when the JDK is built and are not in its sources: the
+  program carries those that reachable code reads by a name the translator can tell, a constant
+  or one made of constants and of strings that reachable calls pass a parameter, on a class
+  literal or a `Class<C>` (`uniName.dat` for `Character.getName`, the IDN profile `uidna.spp`
+  that the HTTPS client's host names go through, the ICU property and normalizer data). The
+  translator reads them from the image of the JDK it runs with (`program/reach/jdk_resources.rs`,
+  `java/JdkResources.java`). Any other ends the program with an `InternalError` naming it, as
+  `getResource` of one does, which would need a URL into the image. Without the JDK's sources,
+  every such call but one of a class file ends the program so (`Builtin::MissingResource`).
 - A class loader's `getResource`, `getResources` and `getResourceAsStream` (and the
   `getSystem…` forms) look the name up among the roots' files and their sources' class files as
   Java's loaders would. The class path's files and directories are read from the roots when the
@@ -562,8 +561,9 @@ formatted at the call and printed through the package-private `formattedText`.
 
 `Charset` and `StandardCharsets` are runtime classes, so reachability does not enter the JDK's
 charset lookup (whose provider search reaches `GB18030`, which reads a JVM property). The JDK's
-decoders and encoders of the six standard charsets are translated all the same and made by
-`java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and `newEncoder()`. For a
+decoders and encoders of the six standard charsets and of UTF-32 (`UTF_32Coder`) are translated
+all the same and made by `java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and
+`newEncoder()`. For a
 single-byte charset of the JDK that the program carries as a table
 ([supported-java.md](supported-java.md), charsets), it makes the JDK's `SingleByte.Decoder` and
 `Encoder` from what the charset decodes each byte to and `getBytes` encodes each char to.

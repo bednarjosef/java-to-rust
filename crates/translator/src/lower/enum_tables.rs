@@ -217,10 +217,17 @@ impl<'t> Lowering<'t> {
             }
         }
         // The constants, built in order before the rest of the static initialization, each
-        // followed by the initializers of its body's fields, where `this` is the constant.
+        // followed by the initializers of its body's fields, where `this` is the constant. An enum
+        // without a reachable constructor is never initialized, so no constant is built (the JDK's
+        // `NamedGroup`, a type of reachable code whose static initialization is not reached).
         let mut bodies = bodies.into_iter();
-        for (ordinal, member) in
-            self.types[index].node.list("members").filter(|m| enums::is_enum_constant(*m)).enumerate()
+        let built = if ctors.is_empty() { 0 } else { usize::MAX };
+        for (ordinal, member) in self.types[index]
+            .node
+            .list("members")
+            .filter(|m| enums::is_enum_constant(*m))
+            .enumerate()
+            .take(built)
         {
             let body_fields = bodies.next().unwrap_or_default();
             let init = member.child("initializer")?;
