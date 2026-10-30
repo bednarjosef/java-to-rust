@@ -80,6 +80,11 @@ pub struct LiveMethods {
     /// The classes whose objects the receiver of each instance call that can run may be, over
     /// every object of every class that runs the calling method (`Class::receivers`).
     pub receivers: FastMap<ExprId, ClassSet>,
+    /// The points-to facts that the walk followed, kept where the program looks members up
+    /// (`ReflectionTable::entries`): a census checks with them that the reflection table has
+    /// the classes that the lookups get and cuts the table by them (`live_methods_of_pruned`),
+    /// with the methods that lowering found can run (`Lowered::live`).
+    pub facts: Option<Box<ObjectValues>>,
 }
 
 impl LiveMethods {
@@ -108,12 +113,22 @@ pub fn live_methods_unless(
 ) -> Result<Option<LiveMethods>, String> {
     let values =
         crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
-    walk_checked(class, code, &values)
+    let mut found = walk_checked(class, code, &values);
+    if let Ok(Some(live)) = &mut found
+        && !class.reflection_table.entries.is_empty()
+    {
+        live.facts = Some(Box::new(values));
+    }
+    found
 }
 
 /// `live_methods_unless`, which first leaves out of the reflection table the members that no
 /// lookup can find (`reflection_table::prune`), by the same facts: they hold for the program
 /// without those members, which does less.
+///
+/// The facts are those of `found`, the methods that a walk over the same program found can run,
+/// where it kept them (`LiveMethods::facts`); where the table then loses nothing, those are the
+/// methods that can run.
 ///
 /// With `missing`, the classes that the facts find a lookup gets that the table lacks
 /// (`reflection_table::missing`) are put there first; where there are any, nothing is pruned and
@@ -122,9 +137,14 @@ pub fn live_methods_of_pruned(
     class: &mut Class,
     code: &[(usize, Option<usize>)],
     missing: Option<&mut Vec<(TableKind, String)>>,
+    mut found: Option<LiveMethods>,
 ) -> Result<Option<LiveMethods>, String> {
-    let values =
-        crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
+    let values = match found.as_mut().and_then(|live| live.facts.take()) {
+        Some(values) => *values,
+        None => crate::timings::phase("points-to for dispatch done", || {
+            object_values::analyze_for_dispatch(class)
+        }),
+    };
     if let Some(missing) = missing {
         *missing = crate::timings::phase("classes missing from the reflection table", || {
             super::reflection_table::missing(class, &values)
@@ -141,7 +161,10 @@ pub fn live_methods_of_pruned(
     if crate::timings::enabled() {
         eprintln!("timing: reflection table: kept {kept} of {of} members that a class finds");
     }
-    walk_checked(class, code, &values)
+    match found {
+        Some(live) if kept == of => Ok(Some(live)),
+        _ => walk_checked(class, code, &values),
+    }
 }
 
 /// The walk of `live_methods_unless`, checked against one that skips nothing with
@@ -199,6 +222,7 @@ fn walk(
                 unresolved: Vec::new(),
                 thread_statics: None,
                 receivers: FastMap::default(),
+                facts: None,
             },
             built: FastSet::default(),
             initialized_above: FastSet::default(),
@@ -457,6 +481,7 @@ impl Walk<'_> {
                     unresolved: Vec::new(),
                     thread_statics: None,
                     receivers: FastMap::default(),
+                    facts: None,
                 },
                 built: FastSet::default(),
                 initialized_above: FastSet::default(),

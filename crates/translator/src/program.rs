@@ -350,15 +350,16 @@ fn class_file_names(program: &Program, reached: &[String]) -> Result<javac::Byte
 
 /// The pieces of code that lowering rejected (`rejected`, stubs in `class`) that can run, and
 /// the calls that lowering left unresolved that can run; the methods that cannot run get a body
-/// that never runs (`analysis::live_methods::prune`). Where the methods that can run are looked
-/// for here, the reflection table first loses the members that no lookup can find
-/// (`analysis::reflection_table`), by the facts that find them. When those are not known, every
-/// rejection can run and nothing changes (and the unresolved calls are not looked for). `found`
-/// are the methods that can run when lowering found them already (`Lowered::live`), before
-/// `stamp_units`: the positions of their unresolved calls have no unit. With `missing`, where the
-/// methods that can run are looked for here, the classes that the facts find a lookup gets that
-/// the table lacks (`analysis::reflection_table::missing`) are put there, and where there are any
-/// the result is `None`, as the program is to be lowered again. `None`, with `class` as it was, when the
+/// that never runs (`analysis::live_methods::prune`). The reflection table first loses the
+/// members that no lookup can find (`analysis::reflection_table`), by the facts that find the
+/// methods that can run. When those are not known, every rejection can run and nothing changes
+/// (and the unresolved calls are not looked for). `found` are the methods that can run when
+/// lowering found them already (`Lowered::live`), before `stamp_units`: the positions of their
+/// unresolved calls have no unit. Where they come with their facts (`LiveMethods::facts`), the
+/// table is cut by those, and the methods that can run are found again unless it lost nothing.
+/// With `missing`, the classes that the facts find a lookup gets that the table lacks
+/// (`analysis::reflection_table::missing`) are put there, and where there are any the result is
+/// `None`, as the program is to be lowered again. `None`, with `class` as it was, when the
 /// methods that can run are looked for here and a rejection that `stops` can run: the walk
 /// stops there (`live_methods_unless`). Also whether any of the pieces of code `watched` (each
 /// as `lower::Rejected` names its code) can run.
@@ -371,11 +372,13 @@ fn narrow(
     missing: Option<&mut Vec<(crate::ast::TableKind, String)>>,
 ) -> Option<(Vec<lower::Rejected>, Vec<Error>, bool)> {
     let live = match found {
-        Some(live) => Ok(live),
-        None => {
+        // Without facts to cut the reflection table by (`LiveMethods::facts`), those found are
+        // the methods that can run.
+        Some(live) if live.facts.is_none() => Ok(live),
+        found => {
             let code: Vec<(usize, Option<usize>)> =
                 rejected.iter().filter(|r| stops(r)).map(|r| (r.ty, r.method)).collect();
-            analysis::live_methods::live_methods_of_pruned(class, &code, missing).transpose()?
+            analysis::live_methods::live_methods_of_pruned(class, &code, missing, found).transpose()?
         }
     };
     let live = match live {

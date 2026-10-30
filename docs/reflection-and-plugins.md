@@ -135,8 +135,10 @@ program where such a lookup can happen, so they can be checked before the progra
   few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
   size. The table itself is data: each part is three constant arrays, of the classes its members
   name, of their names, and of numbers (indices into those two, modifiers and slots), which
-  `java/Reflection.java` makes the objects from, not code that makes each. A whole program then
-  cuts the table to the members that a lookup can find (`analysis/reflection_table.rs`).
+  `java/Reflection.java` makes the objects from, not code that makes each. A whole program, and
+  a census, then cut the table to the members that a lookup can find
+  (`analysis/reflection_table.rs`); a census does it with the facts that lowering found the
+  methods that can run by, and walks those again only when the table lost members.
   Reachability puts in the members of every class that a lookup could look in by the trees
   alone: for a lookup on any `Class` value that is not a class literal, every class whose class
   literal reachable code has. The points-to facts that decide which methods can run
