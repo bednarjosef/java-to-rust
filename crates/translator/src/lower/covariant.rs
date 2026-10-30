@@ -64,6 +64,14 @@ pub(super) struct Covariant {
     met: RefCell<std::collections::HashSet<(Type, Type)>>,
 }
 
+impl Covariant {
+    /// Forgets the array types that met, which a prediction of the covariant arrays made before
+    /// this lowering lowered anything recorded (`predict::predict_arrays`).
+    pub(super) fn forget_meets(&self) {
+        self.met.take();
+    }
+}
+
 impl<'t> Lowering<'t> {
     /// Whether array types `a` and `b` meet as two different arrays of references (`Version[]`
     /// and `Object[]`, or `Integer[]` and the `Comparable[]` that `T[]` erases to when

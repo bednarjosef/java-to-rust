@@ -378,8 +378,9 @@ fn lower_into<'t>(
         })
         .collect();
     let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
-    lowering.start_real(real, &planned);
+    lowering.start_real(real);
     lowering.plan_object(&planned);
+    lowering.predict_arrays();
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {
         let mut decl = lowering.type_decl_or_stub(t).map_err(|e| (unit(t), e))?;

@@ -424,7 +424,8 @@ fn a_program_using_collections_has_only_reachable_units_attributed() {
 /// stored in; then `(Block[]) other` casts an `Object` to an `Object[]`, which the `Item[]` held
 /// as an `Object` may be; and `String[][]` with `String[]` noted is an `Object[][]`, which meets
 /// the `Object[]` it is stored in. The first lowering notes them all, the later steps by meeting
-/// again the types that met (`lower::covariant`), so the program is lowered twice, not four times.
+/// again the types that met (`lower::covariant`), so the program is lowered twice, not four times;
+/// once, with the arrays predicted before it (`lower::predict`).
 const COVARIANT_STEPS: &str = r#"
 public class Main {
     static class Item { String name; Item(String n) { name = n; } }
@@ -458,23 +459,126 @@ fn covariant_arrays_found_step_by_step_take_one_more_lowering() {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&sources).unwrap();
     std::fs::write(sources.join("Main.java"), COVARIANT_STEPS).unwrap();
-    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    assert_eq!(attempts(&stderr), 2, "{stderr}");
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
+}
+
+/// The translation of the program in `sources` with `--timings`, with
+/// `JAVA_TO_RUST_PREDICTION_CHECK` set to `check`: its timings and its Rust.
+fn translate_counted(sources: &Path, library: &Path, work: &Path, check: Option<&str>) -> (String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
+    if let Some(check) = check {
+        command.env("JAVA_TO_RUST_PREDICTION_CHECK", check);
+    }
+    let translated = command
         .args(["--timings", "--main", "Main", "--source"])
-        .arg(&sources)
+        .arg(sources)
         .arg("--library")
         .arg(library)
         .arg("-o")
         .arg(work.join("main.rs"))
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&translated.stderr);
+    let stderr = String::from_utf8_lossy(&translated.stderr).into_owned();
     assert!(translated.status.success(), "the translation failed:\n{stderr}");
-    // `timing: lowering attempt 2: 0.001 s, ...`
-    let attempts = stderr
+    (stderr, std::fs::read_to_string(work.join("main.rs")).unwrap())
+}
+
+/// How many times the timings `stderr` say the program was lowered: `timing: lowering attempt 2:
+/// 0.001 s, ...`.
+fn attempts(stderr: &str) -> usize {
+    stderr
         .lines()
         .filter(|l| l.strip_prefix("timing: lowering attempt ").is_some_and(|l| l.contains(": ")))
-        .count();
-    assert_eq!(attempts, 2, "{stderr}");
+        .count()
+}
+
+/// The checked prediction's line of the timings `stderr`, whose array types and Rust generics it
+/// predicted all (`N of N`) and no more: `timing: prediction: 3 of 3 covariant array types, 0
+/// more; 2 of 2 failed Rust generics, 0 more`.
+fn assert_predicted_all(stderr: &str) {
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with("timing: prediction: ") && l.contains(" of "))
+        .unwrap_or_else(|| panic!("no prediction checked:\n{stderr}"));
+    for half in line.trim_start_matches("timing: prediction: ").split("; ") {
+        let numbers: Vec<&str> = half.split(' ').collect();
+        assert_eq!(numbers[0], numbers[2], "{line}\n{stderr}");
+        assert!(half.ends_with(", 0 more"), "{line}\n{stderr}");
+    }
+    assert!(!stderr.contains("prediction missed"), "{stderr}");
+}
+
+/// Arrays that meet where lowering makes code of its own, not where the program converts them:
+/// the old `Tag[]` that `getAndSet` of a `VarHandle` gives as an `Object`, read from the field
+/// (the call itself passes no array), meets the `(Object[])` cast; and the `Label[]` that `Method.invoke` gets in its `Object[]`
+/// meets the `Named[]` that the table of the program's methods casts it to for the call
+/// (`lower::reflection`). The prediction finds both, and the program is lowered once.
+const ARRAYS_IN_LOWERED_CODE: &str = r#"
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.lang.reflect.Method;
+
+public class Main {
+    static class Tag {
+        final String name;
+        Tag(String name) { this.name = name; }
+    }
+
+    interface Named {}
+
+    static class Label implements Named {}
+
+    static class Shelf {
+        Tag[] tags = { new Tag("a") };
+    }
+
+    static final VarHandle TAGS;
+    static {
+        try {
+            TAGS = MethodHandles.lookup().findVarHandle(Shelf.class, "tags", Tag[].class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
+    public static int count(Named[] names) { return names.length; }
+
+    public static void main(String[] args) throws Exception {
+        Shelf shelf = new Shelf();
+        Object old = TAGS.getAndSet(shelf, null);
+        Object[] back = (Object[]) old;
+        System.out.println(back.length + " " + (shelf.tags == null));
+        Method count = Main.class.getMethod("count", Named[].class);
+        System.out.println(count.invoke(null, new Object[] { new Label[2] }));
+    }
+}
+"#;
+
+#[test]
+fn arrays_held_as_objects_in_lowered_code_are_predicted() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-arrays-in-lowered-code");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), ARRAYS_IN_LOWERED_CODE).unwrap();
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("1"));
+    let again = stderr.lines().find(|l| l.contains("is lowered again for")).unwrap_or_default();
+    for array in ["Main.Tag[]", "Main.Label[]", "Main.Named[]"] {
+        assert!(again.contains(array), "{array} not noted:\n{stderr}");
+    }
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
 }
 
 /// `Box<String>[]` becomes an `Object[]` (`asList`'s `T[]`), whose elements are `Object`s, which
@@ -514,32 +618,24 @@ fn a_covariant_array_of_a_rust_generic_class_erases_it_in_the_same_lowering() {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&sources).unwrap();
     std::fs::write(sources.join("Main.java"), ARRAY_OF_A_GENERIC_CLASS).unwrap();
-    // Without the prediction, which fails `Box` before the first lowering.
-    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
-        .env("JAVA_TO_RUST_PREDICTION_CHECK", "1")
-        .args(["--timings", "--main", "Main", "--source"])
-        .arg(&sources)
-        .arg("--library")
-        .arg(library)
-        .arg("-o")
-        .arg(work.join("main.rs"))
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&translated.stderr);
-    assert!(translated.status.success(), "the translation failed:\n{stderr}");
-    let attempts = stderr
-        .lines()
-        .filter(|l| l.strip_prefix("timing: lowering attempt ").is_some_and(|l| l.contains(": ")))
-        .count();
-    assert_eq!(attempts, 2, "{stderr}");
+    // Without the prediction, which fails `Box` and notes `Box[]` before the first lowering.
+    let (stderr, unpredicted) = translate_counted(&sources, &library, &work, Some("unseeded"));
+    assert_eq!(attempts(&stderr), 2, "{stderr}");
     assert!(stderr.contains("(Main.Box<String>[], Main.Box[])"), "{stderr}");
+    // The arrays are predicted with `Box` failed, as the lowerings find them with it.
+    let (stderr, _) = translate_counted(&sources, &library, &work, Some("1"));
+    assert_predicted_all(&stderr);
+    let (stderr, predicted) = translate_counted(&sources, &library, &work, None);
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, unpredicted);
 }
 
 /// A Rust generic whose values go to `System.arraycopy` (`copy`) is failed where lowering meets
 /// it, so the lowering that notes `Block[]` drops it too: the program is lowered twice. Were the
 /// call rejected instead, the next lowering would erase every Rust generic, `requireNonNull`'s
 /// among them, whose `Query[]` would then become an `Object` that meets the `(Object[])` cast,
-/// and be lowered twice more.
+/// and be lowered twice more. With the prediction, which fails `copy` and notes `Block[]` before,
+/// it is lowered once.
 const ARRAYCOPY_OF_A_TYPE_VARIABLE: &str = r#"
 import java.util.Objects;
 
@@ -616,13 +712,18 @@ fn a_rust_generic_that_fails_erases_only_itself() {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
         return;
     };
-    let translate = |name: &str, java: &str| {
+    // Without the prediction, unless `predicted`.
+    let translate_as = |name: &str, java: &str, predicted: bool| {
         let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
         let sources = work.join("src");
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&sources).unwrap();
         std::fs::write(sources.join("Main.java"), java).unwrap();
-        let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
+        if !predicted {
+            command.env("JAVA_TO_RUST_PREDICTION_CHECK", "unseeded");
+        }
+        let translated = command
             .args(["--timings", "--main", "Main", "--source"])
             .arg(&sources)
             .arg("--library")
@@ -638,16 +739,18 @@ fn a_rust_generic_that_fails_erases_only_itself() {
             std::fs::read_to_string(work.join("main.rs")).unwrap_or_default(),
         )
     };
+    let translate = |name: &str, java: &str| translate_as(name, java, false);
     let (ok, stderr, rust) = translate("whole-program-arraycopy-generic", ARRAYCOPY_OF_A_TYPE_VARIABLE);
     assert!(ok, "the translation failed:\n{stderr}");
-    let attempts = stderr
-        .lines()
-        .filter(|l| l.strip_prefix("timing: lowering attempt ").is_some_and(|l| l.contains(": ")))
-        .count();
-    assert_eq!(attempts, 2, "{stderr}");
+    assert_eq!(attempts(&stderr), 2, "{stderr}");
     for generic in ["fn pick<T", "fn require_non_null<T"] {
         assert!(rust.contains(generic), "no {generic} in the translation:\n{stderr}");
     }
+    let (ok, stderr, predicted) =
+        translate_as("whole-program-arraycopy-generic-predicted", ARRAYCOPY_OF_A_TYPE_VARIABLE, true);
+    assert!(ok, "the translation failed:\n{stderr}");
+    assert_eq!(attempts(&stderr), 1, "{stderr}");
+    assert_eq!(predicted, rust);
     let (_, stderr, _) = translate("whole-program-rejected-generic", REJECTED_WITH_A_RUST_GENERIC);
     assert!(
         stderr.contains("is lowered again without 0 of 0 Rust generic classes and 1 of 2 methods (Main.id)"),
@@ -1703,7 +1806,7 @@ fn the_rust_generics_that_fail_are_predicted() {
     let translate = |check: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
         if check {
-            command.env("JAVA_TO_RUST_PREDICTION_CHECK", "1");
+            command.env("JAVA_TO_RUST_PREDICTION_CHECK", "unseeded");
         }
         let translated = command
             .args(["--timings", "--main", "Main", "--source"])

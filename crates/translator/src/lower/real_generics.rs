@@ -116,7 +116,10 @@ pub(super) fn retry<E: std::fmt::Debug>(
                 {
                     let mut noted: Vec<Type> = covariant.known.iter().copied().collect();
                     noted.sort_by_key(Type::to_string);
-                    let failed = tried.as_ref().map_or_else(Real::default, |t| t.without(&used));
+                    let mut failed = tried.as_ref().map_or_else(Real::default, |t| t.without(&used));
+                    if !super::predict::unseeded() {
+                        failed.extend(&prediction.failed);
+                    }
                     super::predict::report(prediction, &noted, &failed, &class);
                 }
                 return Ok(class);

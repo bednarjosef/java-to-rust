@@ -4,10 +4,13 @@
 //! notes as before, and the program is lowered again (`real_generics::retry`): a miss costs time,
 //! never a wrong translation.
 //!
-//! With `JAVA_TO_RUST_PREDICTION_CHECK` set, the prediction is made but not used, and `--timings`
-//! compares it with what the lowerings found: how many of the array types they noted and of the
-//! Rust generics that failed it predicted, and each one it missed or added; with
-//! `JAVA_TO_RUST_PREDICTION_WHY` set, why it predicts each Rust generic to fail.
+//! With `JAVA_TO_RUST_PREDICTION_CHECK` set, the predicted arrays are not used, and `--timings`
+//! compares the prediction with what the lowerings found: how many of the array types they noted
+//! and of the Rust generics that failed it predicted, and each one it missed or added. The
+//! lowerings still start without the Rust generics predicted to fail, as the arrays they note
+//! depend on which are Rust generics; set to `unseeded`, they start with all the candidates, which
+//! shows a Rust generic predicted to fail that does not. With `JAVA_TO_RUST_PREDICTION_WHY` set,
+//! the prediction prints why it predicts each Rust generic to fail.
 
 use super::real_generics::{Owner, Real};
 use super::*;
@@ -18,6 +21,7 @@ use std::rc::Rc;
 #[derive(Clone, Default)]
 pub(super) struct Prediction {
     pub(super) arrays: Vec<Type>,
+    arrays_made: bool,
     pub(super) failed: Real,
 }
 
@@ -27,35 +31,84 @@ fn tracing() -> bool {
     *WHY.get_or_init(|| std::env::var_os("JAVA_TO_RUST_PREDICTION_WHY").is_some())
 }
 
-/// Whether the prediction is only compared with what lowering finds, not used.
+/// Whether the prediction is only compared with what lowering finds, not used: with
+/// `JAVA_TO_RUST_PREDICTION_CHECK` set, its arrays are not used; set to `unseeded`, nor are its
+/// Rust generics.
 pub(super) fn checking() -> bool {
     std::env::var_os("JAVA_TO_RUST_PREDICTION_CHECK").is_some()
+}
+
+/// Whether the predicted Rust generics are not used either (`checking`).
+pub(super) fn unseeded() -> bool {
+    std::env::var_os("JAVA_TO_RUST_PREDICTION_CHECK").is_some_and(|v| v == "unseeded")
 }
 
 impl<'t> Lowering<'t> {
     /// Sets the Rust generics this lowering tries: `real`, or, on a lowering that is given none
     /// (the first, or one after that only noted covariant arrays), the candidates without those
-    /// predicted to fail. The prediction is made once, for the declarations `decls`, and kept with
-    /// the covariant arrays (`Covariant::predicted`); its array types are `Object[]`s from the
-    /// first lowering on.
-    pub(super) fn start_real(&mut self, real: Option<&Real>, decls: &[Node<'t>]) {
+    /// predicted to fail. The prediction is made once and kept with the covariant arrays
+    /// (`Covariant::predicted`); its array types are `Object[]`s from the first lowering on.
+    pub(super) fn start_real(&mut self, real: Option<&Real>) {
         let candidates = self.candidates();
         let cell = Rc::clone(&self.covariant.predicted);
         let mut predicted = cell.borrow_mut();
         let prediction = predicted
-            .get_or_insert_with(|| crate::timings::phase("prediction", || self.predict(&candidates, decls)));
-        if checking() {
+            .get_or_insert_with(|| crate::timings::phase("prediction", || self.predict(&candidates)));
+        if unseeded() {
             self.real = real.cloned().unwrap_or(candidates);
             return;
         }
-        self.covariant.known.extend(prediction.arrays.iter().copied());
         self.real = real.cloned().unwrap_or_else(|| candidates.without(&prediction.failed));
     }
 
-    /// The prediction for the declarations `decls`, with the Rust generics `candidates`.
-    fn predict(&self, candidates: &Real, decls: &[Node<'t>]) -> Prediction {
-        let _ = decls;
-        Prediction { arrays: Vec::new(), failed: self.predict_failed(candidates) }
+    /// The prediction with the Rust generics `candidates`; its arrays are predicted once the
+    /// Rust generics are set (`predict_arrays`).
+    fn predict(&self, candidates: &Real) -> Prediction {
+        Prediction { arrays: Vec::new(), arrays_made: false, failed: self.predict_failed(candidates) }
+    }
+
+    /// Predicts, on the first lowering, once its Rust generics are set and the plan for
+    /// `Object` is made, the array types that will be `Object[]`s, which are from then on.
+    /// Lowering's own rules decide: the scan of the trees (`Meets`) hands each place where two
+    /// types meet to the conversions that lowering notes covariant arrays in
+    /// (`meets_object_array`, `note_object_array`, `object_array`), `noted_later` closes them,
+    /// and what that noted and recorded is then forgotten, as this lowering has not lowered
+    /// anything yet.
+    pub(super) fn predict_arrays(&mut self) {
+        let cell = Rc::clone(&self.covariant.predicted);
+        let mut predicted = cell.borrow_mut();
+        let Some(prediction) = predicted.as_mut() else { return };
+        if !prediction.arrays_made {
+            prediction.arrays_made = true;
+            prediction.arrays = crate::timings::phase("prediction of covariant arrays", || {
+                let (current, method) = (self.current.get(), self.method_ctx.get());
+                let methods_by_node =
+                    self.methods.iter().enumerate().map(|(m, i)| (i.node.0 as *const Value, m)).collect();
+                let types_by_node =
+                    self.types.iter().enumerate().map(|(t, i)| (i.node.0 as *const Value, t)).collect();
+                let meets = Meets {
+                    lowering: self,
+                    methods_by_node: &methods_by_node,
+                    types_by_node: &types_by_node,
+                };
+                meets.program();
+                self.noted_later(&mut Real::default());
+                self.current.set(current);
+                self.method_ctx.set(method);
+                let arrays = self.covariant.noted.take();
+                self.covariant.forget_meets();
+                self.object_arrays.take();
+                self.object_tests.take();
+                self.failed.take();
+                self.uses_real.take();
+                // The tables of reflection that the scan made, and what making them recorded.
+                self.reflection_tables.borrow_mut().clear();
+                arrays
+            });
+        }
+        if !checking() {
+            self.covariant.known.extend(prediction.arrays.iter().copied());
+        }
     }
 
     /// The candidates predicted to fail, as `verify` fails them, until no more do: a method none
@@ -710,6 +763,322 @@ impl<'t> Flow<'_, 't> {
         for (v, owner) in real {
             if names.iter().any(|ty| super::real_generics::mentions_var(ty, v)) {
                 self.fail_owner(owner, "named in a class of its own");
+            }
+        }
+    }
+}
+
+/// The scan of the trees for the places where lowering converts a value of one type to another,
+/// each handed to lowering's own rules for covariant arrays (`Lowering::predict_arrays`).
+struct Meets<'l, 't> {
+    lowering: &'l Lowering<'t>,
+    methods_by_node: &'l std::collections::HashMap<*const Value, usize>,
+    types_by_node: &'l std::collections::HashMap<*const Value, usize>,
+}
+
+impl<'t> Meets<'_, 't> {
+    fn ty(&self, node: Node<'t>, text: &str) -> Option<Type> {
+        if text.is_empty() || text.starts_with(['(', '<']) {
+            return None;
+        }
+        self.lowering.ty(node, text).ok()
+    }
+
+    fn value(&self, node: Node<'t>) -> Option<Type> {
+        match node.kind() {
+            "PARENTHESIZED" => self.value(node.get("expression")?),
+            "NULL_LITERAL" => None,
+            _ => self.ty(node, node.java_type()),
+        }
+    }
+
+    /// A value of type `value` converted to type `to` (`Lowering::convert`).
+    fn convert(&self, value: Type, to: Type) {
+        let l = self.lowering;
+        if l.param_owner(to).is_some() || value == to || matches!(value, Type::Null | Type::Void) {
+            return;
+        }
+        l.meets_object_array(value, to);
+        if Lowering::is_object(to) {
+            l.note_object_array(value);
+        }
+    }
+
+    /// The value of `node` going where a value of type `to` goes.
+    fn flows(&self, node: Node<'t>, to: Option<Type>) {
+        let Some(to) = to else { return };
+        match node.kind() {
+            "PARENTHESIZED" => {
+                if let Some(inner) = node.get("expression") {
+                    self.flows(inner, Some(to));
+                }
+            }
+            "CONDITIONAL_EXPRESSION" => {
+                for branch in ["trueExpression", "falseExpression"] {
+                    if let Some(b) = node.get(branch) {
+                        self.flows(b, Some(to));
+                    }
+                }
+            }
+            _ => {
+                if let Some(value) = self.value(node) {
+                    self.convert(value, to);
+                }
+            }
+        }
+    }
+
+    fn program(&self) {
+        let l = self.lowering;
+        for t in 0..l.types.len() {
+            if l.nesting(t).is_some_and(|n| n.method.is_some() || n.kind != super::inner::NestKind::Inner)
+                || l.lambda_of_type(t).is_some()
+            {
+                continue;
+            }
+            self.class(t);
+        }
+    }
+
+    fn class(&self, t: usize) {
+        let l = self.lowering;
+        let (current, method) = (l.current.get(), l.method_ctx.get());
+        l.current.set(t);
+        for member in l.types[t].node.list("members") {
+            l.method_ctx.set(None);
+            match member.kind() {
+                "VARIABLE" => {
+                    if let Some(init) = member.get("initializer") {
+                        let to = self.ty(member, member.symbol().map_or("", |s| s.ty));
+                        self.expr(init);
+                        self.flows(init, to);
+                    }
+                }
+                "METHOD" => {
+                    let Some(&m) = self.methods_by_node.get(&(member.0 as *const Value)) else { continue };
+                    l.method_ctx.set(Some(m));
+                    self.bridges(m, member);
+                    let ret = member.get("returnType").and_then(|r| self.ty(r, r.java_type()));
+                    if let Some(body) = member.get("body") {
+                        self.stmt(body, ret);
+                    }
+                }
+                "BLOCK" => self.stmt(member, None),
+                _ => {}
+            }
+        }
+        l.current.set(current);
+        l.method_ctx.set(method);
+    }
+
+    /// The parameters and the result of method `m` and of each method it overrides, which meet
+    /// in the bridge that calls one for the other (`object::bridges`).
+    fn bridges(&self, m: usize, node: Node<'t>) {
+        let l = self.lowering;
+        let Ok(params) = l.param_types(m) else { return };
+        let ret = |m: usize| {
+            let info = &l.methods[m];
+            let ret = info.node.get("returnType")?;
+            l.declared_type(ret, l.return_java_type(m, ret), info.owner, Some(m)).ok()
+        };
+        for o in l.overrides(node) {
+            let Ok(overridden) = l.param_types(o) else { continue };
+            for (&p, &q) in params.iter().zip(&overridden) {
+                if p != q && !Lowering::is_object(q) {
+                    l.meets_object_array(p, q);
+                }
+            }
+            if let (Some(a), Some(b)) = (ret(m), ret(o)) {
+                l.meets_object_array(a, b);
+            }
+        }
+    }
+
+    fn stmt(&self, node: Node<'t>, ret: Option<Type>) {
+        match node.kind() {
+            "BLOCK" => node.list("statements").for_each(|s| self.stmt(s, ret)),
+            "VARIABLE" => {
+                if let Some(init) = node.get("initializer") {
+                    let to = self.ty(node, node.symbol().map_or("", |s| s.ty));
+                    self.expr(init);
+                    self.flows(init, to);
+                }
+            }
+            "RETURN" => {
+                if let Some(e) = node.get("expression") {
+                    self.expr(e);
+                    self.flows(e, ret);
+                }
+            }
+            "CLASS" => self.nested_class(node),
+            _ => self.children(node, ret),
+        }
+    }
+
+    fn children(&self, node: Node<'t>, ret: Option<Type>) {
+        let Value::Object(map) = node.0 else { return };
+        for (field, value) in map {
+            if field == "symbol" {
+                continue;
+            }
+            for child in nodes_in(value) {
+                if child.0.get("kind").is_none() {
+                    continue;
+                }
+                if is_statement(child.kind()) {
+                    self.stmt(child, ret);
+                } else {
+                    self.expr(child);
+                }
+            }
+        }
+    }
+
+    fn nested_class(&self, node: Node<'t>) {
+        if let Some(&t) = self.types_by_node.get(&(node.0 as *const Value)) {
+            self.class(t);
+        }
+    }
+
+    fn expr(&self, node: Node<'t>) {
+        let l = self.lowering;
+        match node.kind() {
+            "METHOD_INVOCATION" | "NEW_CLASS" => self.call(node),
+            "ASSIGNMENT" => {
+                let (Some(target), Some(value)) = (node.get("variable"), node.get("expression")) else {
+                    return;
+                };
+                self.expr(target);
+                self.expr(value);
+                self.flows(value, self.ty(target, target.java_type()));
+            }
+            "CONDITIONAL_EXPRESSION" => {
+                self.children(node, None);
+                let to = self.ty(node, node.java_type());
+                for branch in ["trueExpression", "falseExpression"] {
+                    if let Some(b) = node.get(branch) {
+                        self.flows(b, to);
+                    }
+                }
+            }
+            "TYPE_CAST" => {
+                let Some(e) = node.get("expression") else { return };
+                self.expr(e);
+                let (Some(to), Some(value)) = (self.ty(node, node.java_type()), self.value(e)) else {
+                    return;
+                };
+                if Lowering::is_object(value) {
+                    let _ = l.object_array(node, to);
+                }
+                if value != to {
+                    l.meets_object_array(value, to);
+                }
+            }
+            "INSTANCE_OF" => {
+                self.children(node, None);
+                for field in ["type", "pattern"] {
+                    if let Some(tested) = node.get(field).and_then(|t| self.ty(t, t.java_type()))
+                        && matches!(tested, Type::Array(_))
+                    {
+                        let _ = l.object_array(node, tested);
+                    }
+                }
+            }
+            "PLUS" if node.java_type() == "java.lang.String" => {
+                self.children(node, None);
+                for operand in ["leftOperand", "rightOperand"] {
+                    if let Some(ty) = node.get(operand).and_then(|o| self.value(o))
+                        && matches!(ty, Type::Array(_))
+                    {
+                        let _ = l.object_array(node, ty);
+                        l.note_object_array(ty);
+                    }
+                }
+            }
+            "NEW_ARRAY" => {
+                self.children(node, None);
+                if let Some(Type::Array(element)) = self.ty(node, node.java_type()) {
+                    for init in node.list("initializers") {
+                        self.flows(init, Some(*element));
+                    }
+                }
+            }
+            "MEMBER_SELECT" | "IDENTIFIER" => {
+                self.children(node, None);
+                if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD")
+                    && let Some(class) = l.type_index(symbol.owner)
+                    && let Ok(declared) = l.declared_type(node, symbol.ty, class, None)
+                {
+                    self.read(node, declared);
+                }
+            }
+            _ => self.children(node, None),
+        }
+    }
+
+    /// A use of a member whose declared type is `declared`, where javac gave the use another:
+    /// lowering casts it back (`erased_use`).
+    fn read(&self, node: Node<'t>, declared: Type) {
+        let l = self.lowering;
+        let Some(used) = self.ty(node, node.java_type()) else { return };
+        if declared == used || used == Type::Void || l.has_param(declared) {
+            return;
+        }
+        if matches!(declared, Type::Array(_)) {
+            l.meets_object_array(used, declared);
+        } else if Lowering::is_object(declared) {
+            let _ = l.object_array(node, used);
+        }
+    }
+
+    fn call(&self, node: Node<'t>) {
+        let l = self.lowering;
+        self.children(node, None);
+        let Some(symbol) = node.symbol() else { return };
+        // An access of a field through a handle, which lowering makes of the field, not a call.
+        if let Some((class, field, is_static)) = l.handle_read(node, &symbol) {
+            let declared = l.types[class].node.list("members").find(|m| {
+                m.kind() == "VARIABLE" && m.str("name") == field && m.has_flag("STATIC") == is_static
+            });
+            if let Some(member) = declared
+                && let Ok(ty) = l.declared_type(member, member.symbol().map_or("", |s| s.ty), class, None)
+            {
+                self.convert(ty, self.ty(node, node.java_type()).unwrap_or(ty));
+            }
+            return;
+        }
+        for (ty, unboxed) in l.reflected_conversions(node, &symbol) {
+            if unboxed {
+                if matches!(ty, Type::Array(_)) {
+                    let _ = l.object_array(node, ty);
+                }
+            } else {
+                self.convert(ty, Type::class(crate::ast::OBJECT));
+            }
+        }
+        let Some(m) = l.method_index(&symbol) else { return };
+        let Ok(params) = l.param_types(m) else { return };
+        let args: Vec<Node<'t>> = node.list("arguments").collect();
+        let last = params.len().saturating_sub(1);
+        for (i, &a) in args.iter().enumerate() {
+            let Some(&param) = params.get(i.min(last)) else { continue };
+            let mut to = param;
+            if symbol.varargs && i >= last {
+                let packed = args.len() != params.len()
+                    || !matches!(self.value(a), Some(Type::Array(_)) | Some(Type::Null) | None);
+                if packed {
+                    let Type::Array(element) = param else { continue };
+                    to = *element;
+                }
+            }
+            self.flows(a, Some(to));
+        }
+        if node.kind() == "METHOD_INVOCATION" {
+            let info = &l.methods[m];
+            if let Some(ret) = info.node.get("returnType")
+                && let Ok(declared) = l.declared_type(ret, l.return_java_type(m, ret), info.owner, Some(m))
+            {
+                self.read(node, declared);
             }
         }
     }

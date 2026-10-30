@@ -151,8 +151,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.name_nested();
         lowering.plan_captures().map_err(|(_, e)| e)?;
         let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
-        lowering.start_real(real, &planned);
+        lowering.start_real(real);
         lowering.plan_object(&planned);
+        lowering.predict_arrays();
         let mut types: Vec<TypeDecl> =
             (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
         let mut methods: Vec<Method> =
