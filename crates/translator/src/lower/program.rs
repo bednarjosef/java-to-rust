@@ -297,8 +297,13 @@ const NO_TYPE_CHANGES: &[&str] = &[
     // `handles`), and a handle's call that it could not resolve: both read from the trees.
     " used as a value",
     "that lowering left unresolved",
-    // A method of `Class` that the translation does not give (`classes`).
+    // A method of `Class` or of a reflected member that the translation does not give
+    // (`classes`, `reflection`): the JDK's `GcInfoCompositeData` asks for
+    // `Method.getGenericReturnType` when it is initialized.
     "`Class.",
+    "`Method.",
+    "`Field.",
+    "`Constructor.",
     // `printStackTrace` of a stream or writer overridden (`exceptions`).
     "of a stream or writer",
 ];
@@ -548,6 +553,7 @@ mod tests {
         )));
         assert!(no_type_changes(&error("a `MethodHandle` used as a value not supported yet")));
         assert!(no_type_changes(&error("`Class.getAnnotations` (reflection) not supported yet")));
+        assert!(no_type_changes(&error("`Method.getGenericReturnType` not supported yet")));
         assert!(!no_type_changes(&error("`VarHandle.set` not supported yet")));
         assert!(!no_type_changes(&error(
             "a `java.lang.Class` as a `java.lang.reflect.AnnotatedElement` not supported yet"
