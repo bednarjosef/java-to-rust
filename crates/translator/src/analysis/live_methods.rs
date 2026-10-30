@@ -151,7 +151,14 @@ pub fn live_methods_of_pruned(
         });
         if !missing.is_empty() {
             if crate::timings::enabled() {
-                eprintln!("timing: reflection table: {} classes missing, translated again", missing.len());
+                let names: Vec<String> =
+                    missing.iter().take(10).map(|(kind, name)| format!("{kind:?} {name}")).collect();
+                let more = if missing.len() > 10 { ", ..." } else { "" };
+                eprintln!(
+                    "timing: reflection table: {} classes missing ({}{more}), translated again",
+                    missing.len(),
+                    names.join(", ")
+                );
             }
             return Ok(None);
         }
