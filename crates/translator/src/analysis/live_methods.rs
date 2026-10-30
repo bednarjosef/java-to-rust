@@ -108,10 +108,36 @@ pub fn live_methods_unless(
 ) -> Result<Option<LiveMethods>, String> {
     let values =
         crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
-    let found = crate::timings::phase("live walk", || walk(class, code, &values, true));
+    walk_checked(class, code, &values)
+}
+
+/// `live_methods_unless`, which first leaves out of the reflection table the members that no
+/// lookup can find (`reflection_table::prune`), by the same facts: they hold for the program
+/// without those members, which does less.
+pub fn live_methods_of_pruned(
+    class: &mut Class,
+    code: &[(usize, Option<usize>)],
+) -> Result<Option<LiveMethods>, String> {
+    let values =
+        crate::timings::phase("points-to for dispatch done", || object_values::analyze_for_dispatch(class));
+    let (kept, of) =
+        crate::timings::phase("reflection table", || super::reflection_table::prune(class, &values));
+    if crate::timings::enabled() {
+        eprintln!("timing: reflection table: kept {kept} of {of} members that a class finds");
+    }
+    walk_checked(class, code, &values)
+}
+
+/// The walk of `live_methods_unless`, checked against one that skips nothing with
+/// `JAVA_TO_RUST_LIVE_CHECK`.
+fn walk_checked(
+    class: &Class,
+    code: &[(usize, Option<usize>)],
+    values: &ObjectValues,
+) -> Result<Option<LiveMethods>, String> {
+    let found = crate::timings::phase("live walk", || walk(class, code, values, true));
     if std::env::var_os("JAVA_TO_RUST_LIVE_CHECK").is_some() {
-        let slow =
-            crate::timings::phase("live walk that skips nothing", || walk(class, code, &values, false));
+        let slow = crate::timings::phase("live walk that skips nothing", || walk(class, code, values, false));
         check(&found, &slow);
     }
     found

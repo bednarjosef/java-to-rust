@@ -381,7 +381,8 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   such call. A handle used as a value any other way is rejected.
 - Reflection over the program's classes (`getMethod`, `getField`, `Method.invoke`,
   `Constructor.newInstance`, ...) goes through a table of members built into the translation for
-  the names that reachable lookups can find (`lower/reflection.rs`). `ServiceLoader` finds the
+  the names that reachable lookups can find (`lower/reflection.rs`), and in a whole program for
+  the classes whose `Class` values those lookups can get (`analysis/reflection_table.rs`). `ServiceLoader` finds the
   providers that `module-info.java` and `META-INF/services` declare.
 - A static method that asks for its caller's class (`StackWalker.getCallerClass()`,
   `Reflection.getCallerClass()`) gets it as an extra parameter from each call

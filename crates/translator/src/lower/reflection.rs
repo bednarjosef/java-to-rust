@@ -25,7 +25,9 @@
 //! and looking them up throws as for a name that is not. `Class`'s own `isRecord` and
 //! `getRecordComponents` are in the table when reachability finds them, and so are the methods
 //! of a record's component, the translator's `RecordComponent`, whose native `components` lists
-//! the components of the records in `Reach::records`.
+//! the components of the records in `Reach::records`. Where each member's numbers and cases are
+//! is noted in `Class::reflection_table`, so that a whole program can leave out the members
+//! that no lookup can find (`analysis::reflection_table`).
 
 use super::*;
 use crate::program::{LookupKind, lookup};
@@ -347,8 +349,15 @@ impl<'t> Lowering<'t> {
                 let types: Vec<Type> = args.iter().map(|a| a.ty).collect();
                 let var = |i: usize| self.synth(ExprKind::Var(names[i].clone()), pos, types[i]);
                 let mut cases = Vec::new();
+                let table_kind = table_kind(kind);
                 for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
                     let Some(body) = self.slot_case(node, symbol.name, entry, &var)? else { continue };
+                    // The case, by the `yield` that ends it (`Class::reflection_table`).
+                    if let Some(Stmt::Yield(last)) = body.last() {
+                        let mut layout = self.reflection_layout.borrow_mut();
+                        layout.cases.insert(last.id, (table_kind, slot as i32));
+                        layout.found_on.insert((table_kind, slot as i32), entry.found_on);
+                    }
                     cases.push((slot as i32, body));
                 }
                 // A part of a big table is thousands of cases: they go to methods of a few
@@ -868,11 +877,20 @@ impl<'t> Lowering<'t> {
         let mut class_at: std::collections::HashMap<Type, i32> = Default::default();
         let mut names: Vec<String> = Vec::new();
         let mut name_at: std::collections::HashMap<String, i32> = Default::default();
+        // The slots whose members name each class, and the slot of the member being written.
+        let mut named_by: Vec<Vec<i32>> = Vec::new();
+        let writing = std::cell::Cell::new(0);
         let mut index = |ty: Type| {
-            *class_at.entry(ty).or_insert_with(|| {
+            let at = *class_at.entry(ty).or_insert_with(|| {
                 classes.push(ty);
+                named_by.push(Vec::new());
                 classes.len() as i32 - 1
-            })
+            });
+            let slots = &mut named_by[at as usize];
+            if slots.last() != Some(&writing.get()) {
+                slots.push(writing.get());
+            }
+            at
         };
         let mut name = |name: &str| {
             if let Some(&at) = name_at.get(name) {
@@ -887,8 +905,11 @@ impl<'t> Lowering<'t> {
             ints.push(types.len() as i32);
             ints.extend(types.into_iter().map(index));
         };
+        let mut members = Vec::new();
         for (slot, entry) in entries.iter().enumerate().skip(part).step_by(PARTS as usize) {
             ints[0] += 1;
+            writing.set(slot as i32);
+            let first = ints.len();
             let found_on = match entry.member {
                 Member::Class(_) => Type::JavaClass,
                 Member::BoxParse(primitive) => Type::boxed(primitive),
@@ -962,6 +983,7 @@ impl<'t> Lowering<'t> {
                     list(&mut ints, &mut index, Vec::new());
                 }
             }
+            members.push((slot as i32, entry.found_on, first, ints.len()));
         }
         // A `String[]` or `Class[]` may be held as an `Object[]` (`covariant_array`).
         let ret = self.covariant_array(ret);
@@ -982,7 +1004,51 @@ impl<'t> Lowering<'t> {
         if items.is_empty() {
             return Ok(ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]));
         }
+        // Where each member is, by the first item (`Class::reflection_table`).
+        let kind = table_kind(match class {
+            METHOD => LookupKind::Method,
+            FIELD => LookupKind::Field,
+            _ => LookupKind::Constructor,
+        });
+        let mut layout = self.reflection_layout.borrow_mut();
+        for &(slot, found_on, ..) in &members {
+            layout.found_on.insert((kind, slot), found_on);
+        }
+        let data = match which {
+            "tableClasses" => Some(TableData { kind, members: Vec::new(), named_by }),
+            "tableInts" => Some(TableData {
+                kind,
+                members: members.iter().map(|&(slot, _, from, to)| (slot, from, to)).collect(),
+                named_by: Vec::new(),
+            }),
+            _ => None,
+        };
+        if let Some(data) = data {
+            layout.data.insert(items[0].id, data);
+        }
         Ok(ExprKind::ArrayLit(items))
+    }
+
+    /// Where the members of the reflection table are in the code written for it
+    /// (`Class::reflection_table`), with the methods that look members up in a class.
+    pub(super) fn reflection_table(&self) -> ReflectionTable {
+        let mut layout = self.reflection_layout.take();
+        for &(name, class, method, sig, _) in LOOKUPS {
+            let kind = match class {
+                METHOD => TableKind::Method,
+                FIELD => TableKind::Field,
+                CONSTRUCTOR => TableKind::Constructor,
+                _ => continue,
+            };
+            if matches!(method, "find" | "list")
+                && name.starts_with("get")
+                && let Some(m) = self.template_method(class, method, sig)
+                && !layout.lookups.contains(&(kind, m))
+            {
+                layout.lookups.push((kind, m));
+            }
+        }
+        layout
     }
 
     /// The members of the table of one kind (see the module's comment), each with the slot that
@@ -1295,6 +1361,15 @@ impl<'t> Lowering<'t> {
     /// program has when it uses it.
     pub(super) fn template_method(&self, class: &str, name: &str, sig: &str) -> Option<usize> {
         self.method_named(class, name, sig)
+    }
+}
+
+/// The table of members of `kind`.
+fn table_kind(kind: LookupKind) -> TableKind {
+    match kind {
+        LookupKind::Method => TableKind::Method,
+        LookupKind::Field => TableKind::Field,
+        _ => TableKind::Constructor,
     }
 }
 

@@ -30,6 +30,13 @@
 //! - The constants of an enum set its instance fields.
 //! - The parameters of a method that the runtime may call itself (`runtime_called`) hold what
 //!   calls in the code pass them and what the runtime holds (`handed`): the objects it was given.
+//! - `Class` values: those of class literals of the program's types, `getClass()` of the objects
+//!   followed, and `getSuperclass()`, `getEnclosingClass()` and `getDeclaringClass()` of the
+//!   classes followed; anything else may be the `Class` of any class. They give the classes that
+//!   the lookups of the reflection table look in (`live_slot`), and the code that the table
+//!   gives only gives what a member that a lookup may find gives: the classes in its part's
+//!   data that those members name, and the cases of the `switch`es over its slots of those
+//!   members (`analysis::reflection_table`).
 //! - "Any class its type allows" is spelled out as those classes where the type is not open
 //!   (`Object`, a type variable), so that it stays within the type wherever the value goes. A
 //!   compound assignment stores a number or a string; a switch expression is one of the values it
@@ -69,11 +76,28 @@ pub(super) struct Flow {
     /// Objects of any class its type allows; `classes` lists them otherwise.
     pub any: bool,
     pub classes: ClassSet,
+    /// `Class` values of any class; `class_values` lists them otherwise, by type index. The
+    /// `Class` of a type that is not one of the program's (a primitive type, an array, a class of
+    /// the runtime) is in neither: the reflection table has no members of it.
+    pub any_class: bool,
+    pub class_values: ClassSet,
 }
 
 impl Flow {
     fn top() -> Flow {
-        Flow { value: true, any: true, classes: ClassSet::default() }
+        Flow { value: true, any: true, any_class: true, ..Flow::default() }
+    }
+
+    /// The `Class` values of `class`.
+    fn class_value(class: usize) -> Flow {
+        let mut class_values = ClassSet::default();
+        class_values.insert(class);
+        Flow { class_values, ..Flow::default() }
+    }
+
+    /// Only the `Class` values of this flow.
+    fn class_values(&self) -> Flow {
+        Flow { any_class: self.any_class, class_values: self.class_values.clone(), ..Flow::default() }
     }
 
     fn of(class: usize) -> Flow {
@@ -84,11 +108,13 @@ impl Flow {
 
     /// Adds what `other` may hold; whether that changed anything.
     fn join(&mut self, other: &Flow) -> bool {
-        let before = (self.value, self.any);
+        let before = (self.value, self.any, self.any_class);
         self.value |= other.value;
         self.any |= other.any;
+        self.any_class |= other.any_class;
         let grew = !self.any && self.classes.union(&other.classes);
-        grew || before != (self.value, self.any)
+        let grew_classes = !self.any_class && self.class_values.union(&other.class_values);
+        grew || grew_classes || before != (self.value, self.any, self.any_class)
     }
 }
 
@@ -152,6 +178,11 @@ impl ClassSet {
     pub(super) fn insert(&mut self, c: usize) {
         self.cover(c / 64, c / 64 + 1);
         Rc::make_mut(&mut self.words)[c / 64 - self.start] |= 1 << (c % 64);
+    }
+
+    /// Whether class `c` is in the set.
+    pub(super) fn contains(&self, c: usize) -> bool {
+        self.word(c / 64) >> (c % 64) & 1 != 0
     }
 
     /// The word at index `i`, of all of them.
@@ -288,6 +319,12 @@ pub struct ObjectValues {
     handed: Flow,
     /// The classes whose objects run each method, `STATIC` for one without `this`.
     pub(super) contexts: Vec<Vec<usize>>,
+    /// For dispatch, the `Class` values that the lookups of the reflection table get, by kind
+    /// (`table_kind`): the classes they look members up in (`ReflectionTable::lookups`).
+    receivers: [Flow; 3],
+    /// For dispatch, the kind of each lookup of the reflection table, by its method and the slot
+    /// of its `Class` parameter.
+    lookup_params: FastMap<(usize, usize), TableKind>,
     types: Types,
     /// The analysis for the calls that can run (see the module's comment).
     dispatch: bool,
@@ -350,6 +387,8 @@ enum Read {
     Element(Type),
     /// The elements of every array (for dispatch, see `elements_of`).
     Elements,
+    /// The `Class` values that the lookups of a kind get (`ObjectValues::receivers`).
+    Receivers(TableKind),
     Handed,
     /// The returns of a list of targets, by the number of their join (`Joined`).
     Joined(u32),
@@ -363,6 +402,9 @@ struct Types {
     /// Types that objects of every class may be values of: `Object` and its kin, and type
     /// variables.
     open: Vec<bool>,
+    /// Types that a `Class` value may be a value of: the open ones and every interface, as
+    /// `Class` implements `Type`, `GenericDeclaration`, `AnnotatedElement` and more.
+    holds_class: Vec<bool>,
     /// The concrete classes that are each type or its subtypes.
     concretes: Vec<Vec<usize>>,
     /// The same, as sets.
@@ -394,6 +436,8 @@ impl Types {
             .iter()
             .map(|d| d.kind == TypeKind::Param || HOLDING_VALUES.contains(&d.name.as_str()))
             .collect();
+        let holds_class =
+            class.types.iter().enumerate().map(|(t, d)| open[t] || d.kind == TypeKind::Interface).collect();
         let excluded = class
             .types
             .iter()
@@ -436,6 +480,7 @@ impl Types {
             index,
             excluded,
             open,
+            holds_class,
             concretes,
             concrete_sets,
             subtypes,
@@ -506,6 +551,10 @@ impl Types {
                     if self.excluded[t] {
                         flow.value = false;
                     }
+                    if !self.holds_class[t] {
+                        flow.any_class = false;
+                        flow.class_values = ClassSet::default();
+                    }
                     if !self.open[t] && self.bounded && flow.any {
                         flow.any = false;
                         flow.classes = self.concrete_sets[t].clone();
@@ -520,15 +569,48 @@ impl Types {
                 None => Flow { any: true, ..Flow::default() },
             },
             Type::Enum(_) => Flow { any: true, ..Flow::default() },
-            Type::Null | Type::Void | Type::Array(_) | Type::StringBuilder | Type::JavaClass => {
-                Flow::default()
-            }
+            Type::JavaClass => flow.class_values(),
+            Type::Null | Type::Void | Type::Array(_) | Type::StringBuilder => Flow::default(),
             _ => Flow { value: true, ..Flow::default() },
         }
     }
 }
 
+/// The index of the table of `kind` in `ObjectValues::receivers`.
+fn table_kind(kind: TableKind) -> usize {
+    match kind {
+        TableKind::Method => 0,
+        TableKind::Field => 1,
+        TableKind::Constructor => 2,
+    }
+}
+
 impl ObjectValues {
+    /// Whether a lookup may find the member in `slot` of the reflection table of `kind`: one
+    /// that no class finds, or one whose class finds it and is among the `Class` values that the
+    /// lookups of its kind get. In the analysis for dispatch only; otherwise every member.
+    pub(super) fn live_slot(&self, class: &Class, kind: TableKind, slot: i32) -> bool {
+        let Some(&Some(found_on)) = class.reflection_table.found_on.get(&(kind, slot)) else { return true };
+        if !self.dispatch {
+            return true;
+        }
+        self.read(|| Read::Receivers(kind));
+        let receivers = &self.receivers[table_kind(kind)];
+        receivers.any_class || receivers.class_values.contains(found_on)
+    }
+
+    /// Whether the case `body` of a `switch` may run: not one of a slot of the reflection table
+    /// that no lookup finds (`live_slot`).
+    pub(super) fn live_case(&self, class: &Class, body: &[Stmt]) -> bool {
+        match body.last() {
+            Some(Stmt::Yield(last)) => match class.reflection_table.cases.get(&last.id) {
+                Some(&(kind, slot)) => self.live_slot(class, kind, slot),
+                None => true,
+            },
+            _ => true,
+        }
+    }
+
     /// Whether `l` and `r`, the sides of a comparison in method `m`, may both be strings or boxes
     /// held as objects, on an object of some class that runs `m`.
     pub fn may_both_be_values(&self, class: &Class, m: usize, l: &Expr, r: &Expr) -> bool {
@@ -659,10 +741,42 @@ impl ObjectValues {
             {
                 self.eval(class, m, ctx, &args[args.len() - 1])
             }
-            // For dispatch, a switch expression is one of the values it yields.
+            ExprKind::Builtin(Builtin::ClassLiteral(ty), _) => match ty {
+                Type::Class(name, _) | Type::Enum(name) => {
+                    self.types.index.get(*name).map_or(Flow::default(), |&t| Flow::class_value(t))
+                }
+                _ => Flow::default(),
+            },
+            // The classes of the objects, or any class where those may be of any.
+            ExprKind::Builtin(Builtin::GetClass, args) if args.len() == 1 => {
+                let of = self.eval(class, m, ctx, &args[0]);
+                Flow { any_class: of.any, class_values: of.classes, ..Flow::default() }
+            }
+            ExprKind::Builtin(
+                Builtin::ClassMethod(
+                    op @ (ClassOp::GetSuperclass | ClassOp::GetEnclosingClass | ClassOp::GetDeclaringClass),
+                ),
+                args,
+            ) if !args.is_empty() => {
+                let of = self.eval(class, m, ctx, &args[0]);
+                let mut class_values = ClassSet::default();
+                for t in of.class_values.iter() {
+                    let next = match op {
+                        ClassOp::GetSuperclass => class.types[t].extends,
+                        _ => class.types[t].enclosing,
+                    };
+                    if let Some(next) = next {
+                        class_values.insert(next);
+                    }
+                }
+                Flow { any_class: of.any_class, class_values, ..Flow::default() }
+            }
+            // For dispatch, a switch expression is one of the values it yields, but a case of a
+            // member of the reflection table that no lookup finds (`live_slot`).
             ExprKind::Switch { cases, .. } if self.dispatch => {
                 let mut flow = Flow::default();
-                for s in cases.iter().flat_map(|c| &c.body) {
+                let live = cases.iter().filter(|c| self.live_case(class, &c.body));
+                for s in live.flat_map(|c| &c.body) {
                     visit_stmt_outside_switches(s, &mut |s| {
                         if let Stmt::Yield(e) = s {
                             flow.join(&self.eval(class, m, ctx, e));
@@ -949,12 +1063,24 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         runtime_params,
         handed: Flow::default(),
         contexts,
+        receivers: Default::default(),
+        lookup_params: FastMap::default(),
         types,
         dispatch,
         reads: RefCell::new(Some(FastSet::default())),
         calls: RefCell::new(Some(FastMap::default())),
         joined: RefCell::default(),
     };
+    // The lookups of the reflection table get what their `Class` parameter holds, and anything
+    // where the analysis does not follow it.
+    for &(kind, m) in class.reflection_table.lookups.iter().filter(|_| dispatch) {
+        match values.param_slots[m].first() {
+            Some(&Some(slot)) if values.runtime_params[m].is_empty() => {
+                values.lookup_params.insert((m, slot), kind);
+            }
+            _ => values.receivers[table_kind(kind)].any_class = true,
+        }
+    }
     // The visits, each of a method in one of its contexts or (`usize::MAX`) of the code outside
     // methods, run again whenever a place that they read changes, until none does. As every
     // visit only adds to what places hold, the order does not change what they end up holding.
@@ -1123,6 +1249,11 @@ fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> Vec<Read> {
                 if vars[slot].join(&flow) {
                     changed.push(Read::Vars(m, ctx));
                 }
+                if let Some(&kind) = values.lookup_params.get(&(m, slot))
+                    && values.receivers[table_kind(kind)].join(&flow.class_values())
+                {
+                    changed.push(Read::Receivers(kind));
+                }
             }
             Update::Return(m, ctx, flow) => {
                 if values.returns.entry((m, ctx)).or_default().join(&flow) {
@@ -1215,8 +1346,20 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
             }
         }
         ExprKind::ArrayLit(items) => {
-            for item in items {
-                out.push(Update::Element(x.ty.element(), eval(item)));
+            // The classes of a part of the reflection table's data hold only those that the
+            // members that a lookup may find name (`ObjectValues::live_slot`).
+            let named_by = items
+                .first()
+                .and_then(|first| class.reflection_table.data.get(&first.id))
+                .filter(|data| values.dispatch && !data.named_by.is_empty());
+            for (i, item) in items.iter().enumerate() {
+                let named = |data: &TableData| match data.named_by.get(i) {
+                    Some(slots) => slots.iter().any(|&slot| values.live_slot(class, data.kind, slot)),
+                    None => true,
+                };
+                if named_by.is_none_or(named) {
+                    out.push(Update::Element(x.ty.element(), eval(item)));
+                }
             }
         }
         ExprKind::InstanceOf { value, ty, binding: Some(name) } => {

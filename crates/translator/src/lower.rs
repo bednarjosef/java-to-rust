@@ -193,6 +193,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             volatile_elements: lowering.volatile_elements.take(),
             proxy_classes: Default::default(),
             receivers: Default::default(),
+            reflection_table: lowering.reflection_layout.take(),
         };
         Ok((class, lowering.real.clone(), failed))
     })
@@ -529,6 +530,9 @@ struct Lowering<'t> {
     callers: callers::Callers,
     /// The reflection tables made so far (`reflection::table`).
     reflection_tables: RefCell<std::collections::HashMap<reflection::TableKey, Vec<reflection::Entry<'t>>>>,
+    /// Where the members of the reflection table are in the code written for it so far
+    /// (`Class::reflection_table`).
+    reflection_layout: RefCell<ReflectionTable>,
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the

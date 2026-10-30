@@ -725,7 +725,7 @@ final class Field extends AccessibleObject implements Member {
     private static long offset(Field f) {
         TableData d = data();
         int i = 0;
-        while (d.classAt(i, 1) != f.clazz || !d.name(i, 3).equals(f.name)) {
+        while (!d.has(i) || d.classAt(i, 1) != f.clazz || !d.name(i, 3).equals(f.name)) {
             i++;
         }
         return 16L * (i + 1);
@@ -736,7 +736,7 @@ final class Field extends AccessibleObject implements Member {
     // object of that class; null for any other offset or base.
     static Field atOffset(Object base, long offset) {
         TableData d = data();
-        if (offset <= 0 || offset % 16 != 0 || offset / 16 > d.length()) {
+        if (offset <= 0 || offset % 16 != 0 || offset / 16 > d.length() || !d.has((int) (offset / 16) - 1)) {
             return null;
         }
         Field f = member(d, (int) (offset / 16) - 1);
@@ -1672,12 +1672,22 @@ final class TableData {
     }
 
     // Finds where each slot's member starts: a member is `fixed` numbers, the first the index of
-    // the class that finds it, then with `lists` the lists of its parameters' and exceptions'
-    // classes, each its length and the indices.
+    // the class that finds it and the last its slot (for a constructor of an abstract class
+    // `-1 - slot`), then with `lists` the lists of its parameters' and exceptions' classes, each
+    // its length and the indices. A whole program leaves out the members of the classes whose
+    // `Class` values no lookup gets (`analysis::reflection_table`): their slots have none.
     void finish(int fixed, boolean lists) {
         int length = 0;
         for (int p = 0; p < 32; p++) {
-            length += ints[p][0];
+            int[] data = ints[p];
+            int at = 1;
+            for (int i = 0; i < data[0]; i++) {
+                int slot = slotAt(data, at + fixed - 1);
+                if (slot + 1 > length) {
+                    length = slot + 1;
+                }
+                at = next(data, at, fixed, lists);
+            }
         }
         starts = new int[length];
         Class<?>[] of = new Class<?>[length];
@@ -1685,21 +1695,38 @@ final class TableData {
             int[] data = ints[p];
             int at = 1;
             for (int i = 0; i < data[0]; i++) {
-                int slot = i * 32 + p;
+                int slot = slotAt(data, at + fixed - 1);
                 starts[slot] = at;
                 of[slot] = classes[p][data[at]];
-                at += fixed;
-                if (lists) {
-                    at += 1 + data[at];
-                    at += 1 + data[at];
-                }
+                at = next(data, at, fixed, lists);
             }
         }
         owners = new MemberIndex(of);
     }
 
+    // The slot at `at` of `data`.
+    private static int slotAt(int[] data, int at) {
+        int slot = data[at];
+        return slot < 0 ? -1 - slot : slot;
+    }
+
+    // Where the member after the one at `at` of `data` starts.
+    private static int next(int[] data, int at, int fixed, boolean lists) {
+        at += fixed;
+        if (lists) {
+            at += 1 + data[at];
+            at += 1 + data[at];
+        }
+        return at;
+    }
+
     int length() {
         return starts.length;
+    }
+
+    // Whether `slot` has a member (`finish`).
+    boolean has(int slot) {
+        return starts[slot] != 0;
     }
 
     // The number at `offset` in the member of `slot`.
@@ -1724,13 +1751,17 @@ final class MemberIndex {
     private final int[] ends;
     private final int[] order;
 
-    // `owners[i]` is the class that finds member `i`.
+    // `owners[i]` is the class that finds member `i`, null for a slot left out.
     MemberIndex(Class<?>[] owners) {
         // There are at most as many classes as runs of members of one class.
         int runs = 0;
+        int members = 0;
         for (int i = 0; i < owners.length; i++) {
             if (i == 0 || owners[i] != owners[i - 1]) {
                 runs++;
+            }
+            if (owners[i] != null) {
+                members++;
             }
         }
         int size = 16;
@@ -1742,6 +1773,9 @@ final class MemberIndex {
         ends = new int[size];
         int[] slots = new int[owners.length];
         for (int i = 0; i < owners.length; i++) {
+            if (owners[i] == null) {
+                continue;
+            }
             int s = slot(owners[i]);
             keys[s] = owners[i];
             ends[s]++;
@@ -1753,8 +1787,11 @@ final class MemberIndex {
             at += ends[s];
             ends[s] = starts[s];
         }
-        order = new int[owners.length];
+        order = new int[members];
         for (int i = 0; i < owners.length; i++) {
+            if (owners[i] == null) {
+                continue;
+            }
             order[ends[slots[i]]] = i;
             ends[slots[i]]++;
         }

@@ -311,7 +311,9 @@ fn class_file_names(program: &Program, reached: &[String]) -> Result<javac::Byte
 
 /// The pieces of code that lowering rejected (`rejected`, stubs in `class`) that can run, and
 /// the calls that lowering left unresolved that can run; the methods that cannot run get a body
-/// that never runs (`analysis::live_methods::prune`). When the methods that can run are not
+/// that never runs (`analysis::live_methods::prune`). Where the methods that can run are looked
+/// for here, the reflection table first loses the members that no lookup can find
+/// (`analysis::reflection_table`). When the methods that can run are not
 /// known, every rejection can run and nothing changes (and the unresolved calls are not looked
 /// for). `found` are the methods that can run when lowering found them already (`Lowered::live`),
 /// before `stamp_units`: the positions of their unresolved calls have no unit. `None`, with
@@ -330,7 +332,7 @@ fn narrow(
         None => {
             let code: Vec<(usize, Option<usize>)> =
                 rejected.iter().filter(|r| stops(r)).map(|r| (r.ty, r.method)).collect();
-            analysis::live_methods::live_methods_unless(class, &code).transpose()?
+            analysis::live_methods::live_methods_of_pruned(class, &code).transpose()?
         }
     };
     let live = match live {

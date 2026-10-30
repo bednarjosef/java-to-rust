@@ -41,6 +41,7 @@ pub(crate) use objects::instantiated;
 mod owned;
 mod patterns;
 mod ranges;
+mod reflection_table;
 mod statics;
 mod string_identity;
 mod threads;

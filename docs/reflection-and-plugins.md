@@ -134,7 +134,28 @@ program where such a lookup can happen, so they can be checked before the progra
   few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
   size. The table itself is data: each part is three constant arrays, of the classes its members
   name, of their names, and of numbers (indices into those two, modifiers and slots), which
-  `java/Reflection.java` makes the objects from, not code that makes each. A lookup reads only
+  `java/Reflection.java` makes the objects from, not code that makes each. A whole program then
+  cuts the table to the members that a lookup can find (`analysis/reflection_table.rs`).
+  Reachability puts in the members of every class that a lookup could look in by the trees
+  alone: for a lookup on any `Class` value that is not a class literal, every class whose class
+  literal reachable code has. The points-to facts that decide which methods can run
+  (`analysis/object_values.rs`) follow `Class` values too, from class literals, `getClass()` of
+  the objects followed and `getSuperclass()`, `getEnclosingClass()` and `getDeclaringClass()`
+  of those (any other `Class` value may be of any class), and so give the classes that the
+  lookups of each kind get: methods, fields and constructors are looked up by the translator's
+  `Method`, `Field` and `Constructor`'s `find` and `list`, whose first parameter is the class.
+  A member found on a class that no lookup of its kind gets is left out, its numbers and its
+  cases; the members kept keep their slots, which each member's numbers hold. The table's own
+  data gives `Class` values too (a field's `getType()`, a method's result), and the facts take
+  those of the members kept only, so that the table does not keep itself. The class literals of a
+  registry's keys, of an `EnumSet` or of a logger's name then keep no members, while
+  `o.getClass().getDeclaredFields()` keeps those of the classes of the objects `o` can be
+  (`corpus/whole-program/LookupsOnClassesThatReachThem.java`); `JAVA_TO_RUST_TABLE_DUMP=file`
+  writes how many members of each class are kept and left out. What the facts still merge: the
+  elements of every array are one place for each element type, so a `Class` value stored in
+  any array (a member's classes in the table's data among them) reaches every read of a
+  `Class[]`, `Type[]` or `Object[]` element, and a field of a class holds what any of its
+  objects holds, so the keys of every map are one. A lookup reads only
   the members of its class: the first lookup of methods, fields or constructors reads the
   table's data (`TableData`) and groups the slots by the class that finds each member
   (`MemberIndex`, a hash table from the class to the run of its members, in the table's order),
