@@ -59,12 +59,11 @@ slot on the stack) that made the most objects, on standard error, with the total
 made on the stack (`java::count_allocation`).
 
 - **Allocation (BinaryTrees 2.7x, NodeList 0.7x).** Objects live in the runtime's garbage
-  collected heap (docs/collector.md): an allocation takes a slot from a per-thread list by a direct
-  call (`gc::allocate_object`), and a handle is copied without a count. Through the global
-  allocator, each `new` also worked out the slot's size class and zeroed it with a call of
-  `memset`: BinaryTrees takes 7.0 s against 9.4 s that way (alternating runs, at about 620 MHz).
-  Inlining the call at every `new` takes it to 5.8 s but slows ObjectDispatch's palette search
-  two times (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 89 MB alive while it builds
+  collected heap (docs/collector.md): an allocation takes a slot from a per-thread list through the
+  global allocator, and a handle is copied without a count. The slot is zeroed word by word
+  rather than with a call of `memset`: BinaryTrees takes 7.8 s against 9.4 s (alternating runs,
+  at about 620 MHz). Taking the slot inlined at every `new` takes it to 5.8 s but slows other
+  loops, which the compiler no longer optimizes as well (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 89 MB alive while it builds
   and drops millions of short-lived ones; the collector marks that long-lived tree again at each
   of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads), which is
   most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million nodes again

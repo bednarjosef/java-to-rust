@@ -73,17 +73,16 @@ untaken slot of a block into a list, as the allocator did before, cost 5% of the
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
-An object (`java::Arc::new`) takes its slot by a direct call of `gc::allocate_object`, not
-through the global allocator, whose call works out the slot's size class from the size it is
-given and zeroes the slot with a call of `memset`. BinaryTrees takes 7.0 s against 9.4 s through
-the global allocator (alternating runs on a throttled machine). Inlined at every `new`, the
-size, the class and the zeroing are constants and BinaryTrees takes 5.8 s, but the compiler then
-optimizes other loops worse, ones that allocate nothing: ObjectDispatch's search of a palette
-by identity, which it otherwise specializes for the key's class, took 4.0 s against 1.86 s (the
-cause inside the compiler is not pinned down). Where the collector is not the global allocator
-(the runtime's own tests), memory that Rust took elsewhere may hold handles it cannot see, so it
-never collects there: whether it is the global allocator is found out at the first refill of a
-thread's slots, by an allocation through the global allocator (`INSTALLED`).
+An object (`java::Arc::new`) takes its slot through the global allocator, a call that is not
+inlined: it works out the slot's size class from the size it is given, and zeroes a slot of up
+to 128 bytes word by word rather than with a call of `memset` (BinaryTrees 7.8 s against 9.4 s
+with the call, alternating runs on a throttled machine). The compiler knows that call for an
+allocation, which touches no memory of the program, and optimizes the loops around it as such.
+Taking the slot inside `Arc::new` instead, inlined at every `new` where the size and the zeroing
+are constants, made BinaryTrees take 5.8 s, but other loops lost optimizations, even ones that
+allocate nothing: ObjectDispatch's palette search by identity, which the compiler otherwise
+specializes for the key's class, took 4.0 s against 1.8 s, and Interpreter's kernel 2.2 s
+against 1.5 s; a direct call that is not inlined lost them all the same.
 
 The collector keeps every taken slot of each thread's spans, after marking: the slots not handed
 out yet, and the one a thread stopped in `alloc` may be handing out before its address is in a
