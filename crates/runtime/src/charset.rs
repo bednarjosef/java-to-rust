@@ -392,11 +392,10 @@ impl Charset {
         };
         let bytes: Vec<u8> = bytes.iter().map(|&b| b as u8).collect();
         let mut big_endian = expected.unwrap_or(true);
-        let mut words = bytes.chunks_exact(4);
+        let (words, rest) = bytes.as_chunks::<4>();
         let mut units = Vec::with_capacity(bytes.len() / 2);
         let mut first = true;
-        for word in words.by_ref() {
-            let word = [word[0], word[1], word[2], word[3]];
+        for &word in words {
             if first {
                 first = false;
                 match u32::from_be_bytes(word) {
@@ -421,7 +420,7 @@ impl Charset {
                 _ => units.push(REPLACEMENT as u16),
             }
         }
-        if !words.remainder().is_empty() {
+        if !rest.is_empty() {
             units.push(REPLACEMENT as u16);
         }
         Some(units)
