@@ -163,6 +163,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `sun/security/jca/ProviderConfig.java` | no `Apple` provider and no legacy loading of a provider class by name: a provider that is not built in is found by `ServiceLoader` |
 | `javax/crypto/Cipher.java`, `JceSecurity.java` | no signed providers or jurisdiction policy files: every provider and caller may make a cipher, and every key length is allowed (the JDK's default `crypto.policy=unlimited`) |
 | `com/sun/crypto/provider/JceKeyStore.java` | a `JCEKS` key store with sealed keys, which are serialized objects, is neither stored nor loaded: that throws an `IOException` |
+| `com/sun/crypto/provider/SealedObjectForKeyProtector.java` | a sealed key, a serialized object, is not read back: `getKey` throws an `IOException` (key managers ask a key store for its keys, which reaches it) |
 | `java/net/NetworkInterface.java`, `InterfaceAddress.java`, `Inet6Address.java` | the network interfaces listed and asked about through `TranslatedNet` (`net_interfaces`, the `ioctl`s of an interface's flags, MTU and hardware address), as the JVM lists them on Linux; `InterfaceAddress` and `Inet6Address` get factories that set what the JVM's natives set (an interface's IPv6 address has the interface as its scope) |
 | `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |
 | `java/net/URLClassLoader.java` | finds only what its parent finds; code from its URLs fails loudly |
