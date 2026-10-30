@@ -293,6 +293,14 @@ const NO_TYPE_CHANGES: &[&str] = &[
     " of the JDK's `",
     // javac's own error in the source (`census`).
     "javac reports a compile error",
+    // A handle or a field offset where lowering takes none (`handle_values::check_handle_value`,
+    // `handles`), and a handle's call that it could not resolve: both read from the trees.
+    " used as a value",
+    "that lowering left unresolved",
+    // A method of `Class` that the translation does not give (`classes`).
+    "`Class.",
+    // `printStackTrace` of a stream or writer overridden (`exceptions`).
+    "of a stream or writer",
 ];
 
 /// Whether `error` is one that the Rust generics do not cause (`NO_TYPE_CHANGES`): the JDK's
@@ -538,7 +546,12 @@ mod tests {
         assert!(no_type_changes(&error(
             "asking for the caller (`getCallerClass`) in a method that is not static not supported yet"
         )));
+        assert!(no_type_changes(&error("a `MethodHandle` used as a value not supported yet")));
+        assert!(no_type_changes(&error("`Class.getAnnotations` (reflection) not supported yet")));
         assert!(!no_type_changes(&error("`VarHandle.set` not supported yet")));
+        assert!(!no_type_changes(&error(
+            "a `java.lang.Class` as a `java.lang.reflect.AnnotatedElement` not supported yet"
+        )));
         assert!(!no_type_changes(&error("an atomic update of an element of a `T[]` not supported yet")));
     }
 
