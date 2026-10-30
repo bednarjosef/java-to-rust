@@ -601,6 +601,8 @@ fn generate_with(
         true => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         false => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
     };
+    // The functions of a module named after a struct (`objects::module_fn`), `Point__new`.
+    let header = format!("{header}#![allow(non_snake_case)]\n\n");
     // With threads a static holds objects that must be `Send`, which Rust proves through every
     // field of every class the object reaches: javac's `Arc<Locked<..>>` chains go deeper than
     // the default limit of 128.
@@ -696,6 +698,7 @@ impl<'a> Gen<'a> {
             int_receiver: false,
             double_receiver: false,
             this_form: ThisForm::Shared,
+            thin_this: false,
             lazy_text: false,
             formatting: false,
             chars: false,
@@ -916,6 +919,10 @@ struct Gen<'a> {
     double_receiver: bool,
     /// How `this` is written in the code being generated.
     this_form: ThisForm,
+    /// Whether the code being written is a function of the module of a type's enum, whose `this`
+    /// is the enum's value itself (`this: Shape`, see `Gen::enum_fn`), rather than a method of the
+    /// enum's `impl`, whose `self` borrows it.
+    thin_this: bool,
     /// Whether the concatenation being written takes objects, enums and builders as they are, as
     /// `java::Piece`s whose text is made when the string is built, rather than converted to a
     /// string first (see `parts`).
@@ -1040,7 +1047,7 @@ struct Gen<'a> {
     /// them in the last round, which takes the other items from the first (`generate_all`).
     only_enums: Option<&'a OnlyEnums>,
     /// The classes of the program whose `java::Class` values the code names, each declared once
-    /// as a constant at the crate root (`class_value_constants`).
+    /// as a static at the crate root (`class_value_constants`).
     class_values: std::collections::BTreeSet<usize>,
     /// The name of each class's constant, made when the first is named (`class_value_names`).
     class_value_names: Vec<String>,
@@ -1259,10 +1266,12 @@ impl<'a> Gen<'a> {
             return self.write_method(index);
         }
         let (start, indent, outer) = (self.out.len(), self.indent, WRITING.with(|w| w.get()));
+        let thin = self.thin_this;
         let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.write_method(index)));
         if let Err(panic) = written {
             self.out.truncate(start);
             self.indent = indent;
+            self.thin_this = thin;
             // Its code is not written, so what it dereferences is not looked for.
             self.written.remove(&index);
             WRITING.with(|w| w.set(outer));
@@ -1286,6 +1295,9 @@ impl<'a> Gen<'a> {
         let on_enum = matches!(self.homes[index], Home::Enum(_)) && !m.is_ctor;
         let borrows =
             !m.is_static && !m.is_ctor && !on_enum && (is_enum || self.facts.self_methods.contains(&index));
+        // A method of a type's enum is a function of its module, which takes the value itself.
+        let thin = self.thin_fn(index);
+        let outer_thin = std::mem::replace(&mut self.thin_this, thin);
         self.this_form = match () {
             _ if on_enum => ThisForm::Enum,
             _ if borrows => ThisForm::SelfRef,
@@ -1300,6 +1312,8 @@ impl<'a> Gen<'a> {
             let mutable = self.facts.mutating.contains(&index)
                 && !self.celled(&self.class.types[self.this_struct].name);
             params.push(if mutable { "&mut self" } else { "&self" }.to_string());
+        } else if thin {
+            params.push(format!("this: {}", struct_name(&self.class.types[self.this_struct].name)));
         } else if on_enum {
             params.push("&self".to_string());
         } else if !m.is_static && !m.is_ctor {
@@ -1346,6 +1360,10 @@ impl<'a> Gen<'a> {
             let init = statics::init_name(name);
             self.init_fast_path(m.class, &init, &ret);
             format!("{init}_slow")
+        } else if self.module_fn(index) {
+            format!("{}__{}", self.struct_of(self.this_struct), self.fn_names[index])
+        } else if thin {
+            self.enum_fn(self.this_struct, &self.fn_names[index])
         } else {
             self.fn_names[index].clone()
         };
@@ -1434,6 +1452,7 @@ impl<'a> Gen<'a> {
             self.closures.push(Error { pos: m.pos, ..e });
         }
         self.slots = outer_slots;
+        self.thin_this = outer_thin;
         WRITING.with(|w| w.set(outer));
     }
 

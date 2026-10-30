@@ -56,8 +56,8 @@ fn a_thread_and_what_it_reaches_are_arcs() {
         &rust,
         &[
             "enum ThreadView<'a> {\n    Worker(&'a Arc<java::Monitored<AWorker>>) = 11,",
-            "fn run(this: &Arc<java::Monitored<AWorker>>) {",
-            "let w = Arc::new(java::Monitored::new(AWorker::new(10)));",
+            "fn AWorker__run(this: &Arc<java::Monitored<AWorker>>) {",
+            "let w = Arc::new(java::Monitored::new(AWorker__new(10)));",
             "impl PartialEq for Thread {\n    fn eq(&self, other: &Thread) -> bool {\n        self.0 == other.0",
             "fn base(&self) -> &ThreadFields {",
         ],
@@ -68,7 +68,7 @@ fn a_thread_and_what_it_reaches_are_arcs() {
 fn a_class_no_thread_reaches_is_translated_as_before() {
     // `Local` never leaves `main`, so it is a plain value, as in a program without threads.
     let rust = translate(WORKER);
-    assert_contains(&rust, &["let mut l = ALocal::new();", "fn add(&mut self, k: i32) {"]);
+    assert_contains(&rust, &["let mut l = ALocal__new();", "fn add(&mut self, k: i32) {"]);
     assert_lacks(&rust, &["Arc<java::Monitored<ALocal>>"]);
 }
 
@@ -132,8 +132,8 @@ fn the_started_thread_runs_the_thread_object_it_was_given() {
     assert_contains(
         &rust,
         &[
-            "{ let t = t.clone(); move || { let t = &t; java::set_current_thread(t.clone()); t.run(); } }",
-            "java::join_thread(self.base().tid.get(), 0);",
+            "{ let t = t.clone(); move || { java::set_current_thread(t.clone()); Thread__run(t); } }",
+            "java::join_thread(this.base().tid.get(), 0);",
         ],
     );
 }
@@ -161,7 +161,7 @@ fn a_thread_object_is_never_borrowed_across_a_join() {
     // `join` waits for the other thread, which may need the object's lock: it is no method of the
     // fields struct, which would hold the lock for the call.
     let rust = translate(WORKER);
-    assert_contains(&rust, &["Thread::Worker(w.clone()).join();"]);
+    assert_contains(&rust, &["Thread__join(Thread::Worker(w.clone()));"]);
     assert_lacks(&rust, &[".borrow().base.join()"]);
 }
 
@@ -361,7 +361,7 @@ fn a_synchronized_method_of_a_shared_object_holds_its_monitor() {
     assert_contains(
         &rust,
         &[
-            "fn add(this: &Arc<java::Monitored<ACounter>>) {\n        let _monitor = java::enter(this);",
+            "fn ACounter__add(this: &Arc<java::Monitored<ACounter>>) {\n    let _monitor = java::enter(this);",
             "let _monitor = java::enter(&(*this.lock.fixed()));",
             "static A__MONITOR: java::Locked<()> = java::Locked::new(());",
             "fn hit() {\n    let _monitor = java::enter_class(&A__MONITOR);",

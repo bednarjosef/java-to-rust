@@ -169,10 +169,8 @@ struct NamesCursor {
     next: i32,
 }
 
-impl Names {
-    fn iterator(this: &Arc<RefCell<Names>>) -> Arc<RefCell<NamesCursor>> {
-        Arc::new(RefCell::new(NamesCursor::new(this.clone())))
-    }
+fn Names__iterator(this: &Arc<RefCell<Names>>) -> Arc<RefCell<NamesCursor>> {
+    Arc::new(RefCell::new(NamesCursor__new(this.clone())))
 }
 
 impl NamesCursor {
@@ -195,9 +193,9 @@ impl NamesCursor {
 
 | Java | Rust |
 | --- | --- |
-| `new Cursor()` in an instance method of `Names` | `NamesCursor::new(this.clone())` (the handle form, 1.3) |
-| `names.new Cursor()` | `NamesCursor::new(names.clone())`, after a null check of `names` |
-| `new Cursor()` in another inner class of `Names` | `NamesCursor::new(self.outer.clone())` |
+| `new Cursor()` in an instance method of `Names` | `NamesCursor__new(this.clone())` (the handle form, 1.3) |
+| `names.new Cursor()` | `NamesCursor__new(names.clone())`, after a null check of `names` |
+| `new Cursor()` in another inner class of `Names` | `NamesCursor__new(self.outer.clone())` |
 | `new Cursor()` in a lambda in `Names` | the lambda captures `this` and passes it |
 
 ### 2.3 Access to the outer
@@ -291,7 +289,7 @@ Labeler labeler = new Labeler();
 
 ```rust
 struct MainLabeler { prefix: String }
-let labeler = MainLabeler::new(prefix.clone());
+let labeler = MainLabeler__new(prefix.clone());
 ```
 
 The captures are fields and trailing constructor parameters (javac's `val$prefix`); `new

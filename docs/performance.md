@@ -712,13 +712,21 @@ The release build's code runs javac's check cases with about 3% fewer instructio
 is 31.1 MB instead of 33.4 MB without LTO).
 
 rustc's memory for a crate grows with its items more than with their size: on javac's header, a
-function that moves costs about 19 KB (its stub and its declaration), an empty function about
-13 KB and a declaration alone about 6 KB. The header is compiled before every body crate and
-holds an item for every function of the program, so it sets a build's peak: the Minecraft
-server's, 219 MB, needs 16 to 20 GB in release. Half of its text is the 274,000 functions that
-moved, a stub and a declaration each; then come the 178,000 small functions that keep their code
-there, and the 43,000 class constants (`CLASS__..`), whose superclass and interfaces are closures,
-93,000 of them, each a function body for rustc.
+method that moves costs about 19 KB (its stub and its declaration), an empty function about
+13 KB and a declaration alone about 6 KB. So a function that moves is a declaration alone, by
+its own name (`docs/several-crates.md`), and so are constructors and the methods that take
+their object as a parameter, which are functions of their module (`Circle__new`,
+`docs/object-model.md`), as are the dispatchers and bodies of a type's enum, which take its
+value (`Shape__area(this: Shape)`); only a method that takes `self` keeps a stub. The header is
+compiled before every body crate and holds an item for every function of the program, so it
+sets a build's peak: the Minecraft server's, 226 MB, needs 16 to 20 GB in release. Half of its
+text is the 285,000 functions and methods that move, of which about 68,000 took `self`, about
+45,000 of them dispatchers and bodies of a type's enum (counted by kind on a translation
+written before they became functions of their module). Then come the 178,000 small functions that keep their code there, and the 43,000 classes as values
+(`CLASS__..`). Those are statics that name their
+superclass, interfaces and declaring class by references: as constants that named them by
+closures, 93,000 function bodies for rustc, they alone took rustc 2.8 GB and 15.9 s in release,
+and as statics 1.8 GB and 13.0 s.
 
 Cranelift (`-Zcodegen-backend=cranelift`, nightly) builds javac's translation in debug in 55 s
 instead of 82 s with LLVM (two jobs), but the binary it builds ends with status 101 at once on

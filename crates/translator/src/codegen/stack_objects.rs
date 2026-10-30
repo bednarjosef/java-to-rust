@@ -142,9 +142,9 @@ impl<'a> Gen<'a> {
                 return None;
             }
             self.need(Need::Body(t));
-            let obj = self.object(receiver);
+            let obj = self.thin_receiver(d, receiver);
             let args = self.call_args(t, args);
-            return Some(Code::atom(format!("{obj}.{name}({})", with(args))));
+            return Some(Code::atom(self.enum_fn_call(d, &name, &obj, &with(args))));
         }
         if self.dispatch(receiver, index, false) != t || self.is_object_method(t) {
             return None;
@@ -153,9 +153,9 @@ impl<'a> Gen<'a> {
         match self.homes[t] {
             Home::Enum(d) => {
                 self.need(Need::Body(t));
-                let obj = self.as_enum(d, receiver);
+                let obj = self.thin_as_enum(d, receiver);
                 let args = self.call_args(t, args);
-                return Some(Code::atom(format!("{obj}.{name}({})", with(args))));
+                return Some(Code::atom(self.enum_fn_call(d, &name, &obj, &with(args))));
             }
             Home::Class(_) => {}
             _ => return None,

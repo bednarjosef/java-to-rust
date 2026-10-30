@@ -1,10 +1,12 @@
-//! Classes as values (see `lower::classes`): a `java::Class`, with its names, a function for its
-//! superclass or component type and the binary names of the classes and interfaces above it
-//! (`java::Class::new("Main$Dog", "Dog", Some(|| CLASS__MAIN_ANIMAL), &["Main$Dog", "Main$Animal",
-//! "java.lang.Object"])`). The class of the program that code names is a constant at the crate
-//! root (`const CLASS__MAIN_DOG: java::Class = ..;`), written once however many places name it,
-//! as the reflection tables name a class in each of its methods; the runtime's classes and arrays
-//! are written out where they are used. For a value of an enum of classes, the enum's
+//! Classes as values (see `lower::classes`): a `java::Class`, with its names, a reference to its
+//! superclass (or a function for an array's component type) and the binary names of the classes
+//! and interfaces above it (`java::Class::new("Main$Dog", "Dog", Some(&CLASS__MAIN_ANIMAL),
+//! &["Main$Dog", "Main$Animal", "java.lang.Object"])`). The class of the program that code names
+//! is a static at the crate root (`static CLASS__MAIN_DOG: java::Class = ..;`), written once
+//! however many places name it, as the reflection tables name a class in each of its methods; the
+//! runtime's classes and arrays are written out where they are used. A static rather than a
+//! constant, so that classes can name each other in a loop and no function is written to name
+//! one: rustc checks and compiles each function body, and the Minecraft server has 40,000 classes. For a value of an enum of classes, the enum's
 //! `runtime_class()` and `runtime_type_names()` hold the `match` over its variants
 //! (`dispatch::class_value_impls`).
 
@@ -260,7 +262,7 @@ impl<'a> Gen<'a> {
         format!("crate::{}", self.class_value_name(c))
     }
 
-    /// The name of the constant at the crate root that holds the `java::Class` of class `c` of the
+    /// The name of the static at the crate root that holds the `java::Class` of class `c` of the
     /// program: `CLASS__` and its name in capitals, with a number after it where two names are
     /// the same, made for every class at once so that each keeps its name.
     fn class_value_name(&mut self, c: usize) -> String {
@@ -286,7 +288,7 @@ impl<'a> Gen<'a> {
         self.class_value_names[c].clone()
     }
 
-    /// The constants of the classes that the program's code names (`decl_class`), and of their
+    /// The statics of the classes that the program's code names (`decl_class`), and of their
     /// superclasses, in the order of their names: the items of the crate root that hold them.
     pub(super) fn class_value_constants(&mut self) -> (String, std::collections::BTreeSet<String>) {
         let mut constants = std::collections::BTreeMap::new();
@@ -302,8 +304,10 @@ impl<'a> Gen<'a> {
                 constants.insert(self.class_value_name(c), value);
             }
         }
-        let text =
-            constants.iter().map(|(name, value)| format!("const {name}: java::Class = {value};\n")).collect();
+        let text = constants
+            .iter()
+            .map(|(name, value)| format!("static {name}: java::Class = {value};\n"))
+            .collect();
         (text, done.iter().map(|&c| self.class.types[c].name.clone()).collect())
     }
 
@@ -326,11 +330,11 @@ impl<'a> Gen<'a> {
                     None if record => "java::Class::RECORD".to_string(),
                     None => "java::Class::OBJECT".to_string(),
                 };
-                format!("java::Class::new({name}, {simple}, Some(|| {superclass}), {names})")
+                format!("java::Class::new({name}, {simple}, Some(&{superclass}), {names})")
             }
         };
         let value = match self.class_interfaces {
-            true => format!("{value}.implementing(|| const {{ &[{}] }})", self.interface_values(c)),
+            true => format!("{value}.implementing(&[{}])", self.interface_values(c)),
             false => value,
         };
         if !self.class_details {
@@ -346,15 +350,15 @@ impl<'a> Gen<'a> {
             _ => "TopLevel",
         };
         let enclosing = match enclosing {
-            Some(e) => format!("Some(|| {})", self.decl_class(e)),
+            Some(e) => format!("Some(&{})", self.decl_class(e)),
             None => "None".to_string(),
         };
         format!("{value}.declared({modifiers:#x}, java::Nest::{nest}, {enclosing})")
     }
 
-    /// The class values of the interfaces that class `c` implements directly, which only a
-    /// program that asks for them carries: an interface the translation has no type of is a class
-    /// value of its name that extends nothing.
+    /// References to the class values of the interfaces that class `c` implements directly, which
+    /// only a program that asks for them carries: an interface the translation has no type of is a
+    /// class value of its name that extends nothing.
     fn interface_values(&mut self, c: usize) -> String {
         let mut values = Vec::new();
         for interface in self.class.types[c].interfaces.clone() {
@@ -369,7 +373,7 @@ impl<'a> Gen<'a> {
                 }
             });
         }
-        values.join(", ")
+        values.iter().map(|value| format!("&{value}")).collect::<Vec<_>>().join(", ")
     }
 
     /// `ClassMethod(op)(class, args..)`.

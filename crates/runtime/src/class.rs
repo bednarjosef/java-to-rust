@@ -1,8 +1,10 @@
 //! `java.lang.Class`, as far as a program uses it without reflection: the class of a value with
 //! its names, its superclass, its component type and the binary names of the classes and
 //! interfaces above it. Two classes are the same when their binary names are, since no two
-//! classes of a program share one; the translator writes each class it needs where it is used, so
-//! a class names its superclass and component type by a function.
+//! classes of a program share one. A class of the program is a static at the translation's crate
+//! root, and names its superclass, its interfaces and the class that declares it by references,
+//! which may go round in a loop (`class Outer implements Outer.Inner`); a class the translator
+//! writes where it is used, an array's, names its component type by a function.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -71,7 +73,7 @@ pub struct Class {
     /// The name in the source, as `getSimpleName` gives it: `String`, `Point`, `int[]`.
     simple: &'static str,
     kind: Kind,
-    superclass: Option<fn() -> Class>,
+    superclass: Option<&'static Class>,
     component: Option<fn() -> Class>,
     /// The binary names of the class and of every class and interface above it, its own first,
     /// as `is_instance` takes them; empty for an array and a primitive type, which
@@ -82,11 +84,11 @@ pub struct Class {
     modifiers: u16,
     nest: Nest,
     /// The class that declares this one (`getEnclosingClass`), `None` for a top-level class.
-    enclosing: Option<fn() -> Class>,
+    enclosing: Option<&'static Class>,
     /// The interfaces that the class implements, or that an interface extends, directly and in
     /// the order the source names them (`getInterfaces`); an array's are `Cloneable` and
     /// `Serializable`, which `get_interface` answers by its kind.
-    interfaces: fn() -> &'static [Class],
+    interfaces: &'static [&'static Class],
 }
 
 impl Class {
@@ -94,7 +96,7 @@ impl Class {
     pub const fn new(
         name: &'static str,
         simple: &'static str,
-        superclass: Option<fn() -> Class>,
+        superclass: Option<&'static Class>,
         names: Names,
     ) -> Class {
         Class::made(name, simple, Kind::Class, superclass, None, names, PUBLIC)
@@ -102,7 +104,7 @@ impl Class {
 
     /// An enum, whose superclass is `Enum`.
     pub const fn enumeration(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Enum, Some(|| Class::ENUM), None, names, PUBLIC | FINAL | ENUM)
+        Class::made(name, simple, Kind::Enum, Some(&Class::ENUM), None, names, PUBLIC | FINAL | ENUM)
     }
 
     /// An interface, which has no superclass.
@@ -126,7 +128,7 @@ impl Class {
     /// An array class, `[Ljava.lang.String;`, whose superclass is `Object`.
     pub const fn array(name: &'static str, simple: &'static str, component: fn() -> Class) -> Class {
         // `getModifiers` answers from the component's.
-        Class::made(name, simple, Kind::Class, Some(|| Class::OBJECT), Some(component), &[], 0)
+        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), Some(component), &[], 0)
     }
 
     const fn primitive(name: &'static str) -> Class {
@@ -135,19 +137,19 @@ impl Class {
 
     /// A class of the runtime that is final, as most of the standard classes are.
     const fn standard(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(|| Class::OBJECT), None, names, PUBLIC | FINAL)
+        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), None, names, PUBLIC | FINAL)
     }
 
     /// One of the runtime's abstract classes.
     const fn abstract_standard(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(|| Class::OBJECT), None, names, PUBLIC | ABSTRACT)
+        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), None, names, PUBLIC | ABSTRACT)
     }
 
     const fn made(
         name: &'static str,
         simple: &'static str,
         kind: Kind,
-        superclass: Option<fn() -> Class>,
+        superclass: Option<&'static Class>,
         component: Option<fn() -> Class>,
         names: Names,
         modifiers: u16,
@@ -162,24 +164,24 @@ impl Class {
             modifiers,
             nest: Nest::TopLevel,
             enclosing: None,
-            interfaces: || &[],
+            interfaces: &[],
         }
     }
 
     /// The class as the program declares it: what `getModifiers` gives, where it is declared and
     /// the class that declares it.
-    pub const fn declared(self, modifiers: u16, nest: Nest, enclosing: Option<fn() -> Class>) -> Class {
+    pub const fn declared(self, modifiers: u16, nest: Nest, enclosing: Option<&'static Class>) -> Class {
         Class { modifiers, nest, enclosing, ..self }
     }
 
     /// The class with the interfaces it implements, or extends, directly (`getInterfaces`).
-    pub const fn implementing(self, interfaces: fn() -> &'static [Class]) -> Class {
+    pub const fn implementing(self, interfaces: &'static [&'static Class]) -> Class {
         Class { interfaces, ..self }
     }
 
     /// A box of a number, whose superclass is `Number`.
     const fn number(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(|| Class::NUMBER), None, names, PUBLIC | FINAL)
+        Class::made(name, simple, Kind::Class, Some(&Class::NUMBER), None, names, PUBLIC | FINAL)
     }
 
     const SERIALIZABLE: Class = Class::interface(SERIAL, "Serializable", &[SERIAL, OBJECT]);
@@ -194,15 +196,13 @@ impl Class {
         "String",
         &["java.lang.String", SERIAL, COMPARE, "java.lang.CharSequence", CONSTABLE, DESC, OBJECT],
     )
-    .implementing(|| {
-        &[
-            Class::SERIALIZABLE,
-            Class::COMPARABLE,
-            Class::CHAR_SEQUENCE,
-            Class::CONSTABLE,
-            Class::CONSTANT_DESC,
-        ]
-    });
+    .implementing(&[
+        &Class::SERIALIZABLE,
+        &Class::COMPARABLE,
+        &Class::CHAR_SEQUENCE,
+        &Class::CONSTABLE,
+        &Class::CONSTANT_DESC,
+    ]);
     pub const STRING_BUILDER: Class = Class::standard(
         "java.lang.StringBuilder",
         "StringBuilder",
@@ -216,7 +216,7 @@ impl Class {
             OBJECT,
         ],
     )
-    .implementing(|| &[Class::SERIALIZABLE, Class::COMPARABLE, Class::CHAR_SEQUENCE]);
+    .implementing(&[&Class::SERIALIZABLE, &Class::COMPARABLE, &Class::CHAR_SEQUENCE]);
     pub const CLASS: Class = Class::standard(
         "java.lang.Class",
         "Class",
@@ -237,13 +237,13 @@ impl Class {
         "Enum",
         &["java.lang.Enum", COMPARE, SERIAL, CONSTABLE, OBJECT],
     )
-    .implementing(|| &[Class::CONSTABLE, Class::COMPARABLE, Class::SERIALIZABLE]);
+    .implementing(&[&Class::CONSTABLE, &Class::COMPARABLE, &Class::SERIALIZABLE]);
     pub const COMPARABLE: Class = Class::interface(COMPARE, "Comparable", &[COMPARE, OBJECT]);
     pub const RECORD: Class =
         Class::abstract_standard("java.lang.Record", "Record", &["java.lang.Record", OBJECT]);
     /// `Runtime.class` and `System.class`, classes without objects in a translation.
     pub const RUNTIME: Class =
-        Class::new("java.lang.Runtime", "Runtime", Some(|| Class::OBJECT), &["java.lang.Runtime", OBJECT]);
+        Class::new("java.lang.Runtime", "Runtime", Some(&Class::OBJECT), &["java.lang.Runtime", OBJECT]);
     pub const SYSTEM: Class = Class::standard("java.lang.System", "System", &["java.lang.System", OBJECT]);
     pub const CHAR_SEQUENCE: Class =
         Class::interface("java.lang.CharSequence", "CharSequence", &["java.lang.CharSequence", OBJECT]);
@@ -252,51 +252,51 @@ impl Class {
         "Integer",
         &["java.lang.Integer", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
     )
-    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
+    .implementing(&[&Class::COMPARABLE, &Class::CONSTABLE, &Class::CONSTANT_DESC]);
     pub const LONG: Class = Class::number(
         "java.lang.Long",
         "Long",
         &["java.lang.Long", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
     )
-    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
+    .implementing(&[&Class::COMPARABLE, &Class::CONSTABLE, &Class::CONSTANT_DESC]);
     pub const DOUBLE: Class = Class::number(
         "java.lang.Double",
         "Double",
         &["java.lang.Double", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
     )
-    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
+    .implementing(&[&Class::COMPARABLE, &Class::CONSTABLE, &Class::CONSTANT_DESC]);
     pub const FLOAT: Class = Class::number(
         "java.lang.Float",
         "Float",
         &["java.lang.Float", NUMBER, SERIAL, COMPARE, CONSTABLE, DESC, OBJECT],
     )
-    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE, Class::CONSTANT_DESC]);
+    .implementing(&[&Class::COMPARABLE, &Class::CONSTABLE, &Class::CONSTANT_DESC]);
     pub const SHORT: Class = Class::number(
         "java.lang.Short",
         "Short",
         &["java.lang.Short", NUMBER, SERIAL, COMPARE, CONSTABLE, OBJECT],
     )
-    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE]);
+    .implementing(&[&Class::COMPARABLE, &Class::CONSTABLE]);
     pub const BYTE: Class = Class::number(
         "java.lang.Byte",
         "Byte",
         &["java.lang.Byte", NUMBER, SERIAL, COMPARE, CONSTABLE, OBJECT],
     )
-    .implementing(|| &[Class::COMPARABLE, Class::CONSTABLE]);
+    .implementing(&[&Class::COMPARABLE, &Class::CONSTABLE]);
     pub const CHARACTER: Class = Class::standard(
         "java.lang.Character",
         "Character",
         &["java.lang.Character", SERIAL, COMPARE, CONSTABLE, OBJECT],
     )
-    .implementing(|| &[Class::SERIALIZABLE, Class::COMPARABLE, Class::CONSTABLE]);
+    .implementing(&[&Class::SERIALIZABLE, &Class::COMPARABLE, &Class::CONSTABLE]);
     pub const BOOLEAN: Class = Class::standard(
         "java.lang.Boolean",
         "Boolean",
         &["java.lang.Boolean", SERIAL, COMPARE, CONSTABLE, OBJECT],
     )
-    .implementing(|| &[Class::SERIALIZABLE, Class::COMPARABLE, Class::CONSTABLE]);
+    .implementing(&[&Class::SERIALIZABLE, &Class::COMPARABLE, &Class::CONSTABLE]);
     pub const NUMBER: Class = Class::abstract_standard(NUMBER, "Number", &[NUMBER, SERIAL, OBJECT])
-        .implementing(|| &[Class::SERIALIZABLE]);
+        .implementing(&[&Class::SERIALIZABLE]);
     pub const INT: Class = Class::primitive("int");
     pub const LONG_PRIMITIVE: Class = Class::primitive("long");
     pub const DOUBLE_PRIMITIVE: Class = Class::primitive("double");
@@ -332,25 +332,25 @@ impl Class {
 
     /// How many interfaces `getInterfaces()` gives.
     pub fn get_interface_count(&self) -> i32 {
-        if self.is_array() { 2 } else { (self.interfaces)().len() as i32 }
+        if self.is_array() { 2 } else { self.interfaces.len() as i32 }
     }
 
     /// The `index`th of the interfaces that `getInterfaces()` gives.
     pub fn get_interface(&self, index: i32) -> Class {
         match self.is_array() {
             true => [Class::CLONEABLE, Class::SERIALIZABLE][index as usize],
-            false => (self.interfaces)()[index as usize],
+            false => *self.interfaces[index as usize],
         }
     }
 
     /// `getEnclosingClass()`.
     pub fn get_enclosing_class(&self) -> Option<Class> {
-        self.enclosing.map(|f| f())
+        self.enclosing.copied()
     }
 
     /// `getDeclaringClass()`: a member class's enclosing class, `null` for any other.
     pub fn get_declaring_class(&self) -> Option<Class> {
-        self.enclosing.filter(|_| self.nest == Nest::Member).map(|f| f())
+        self.enclosing.filter(|_| self.nest == Nest::Member).copied()
     }
 
     /// `getName()`.
@@ -457,7 +457,7 @@ impl Class {
 
     /// `getSuperclass()`: `null` for `Object`, an interface and a primitive type.
     pub fn get_superclass(&self) -> Option<Class> {
-        self.superclass.map(|f| f())
+        self.superclass.copied()
     }
 
     /// `getComponentType()`: the type of an array's elements, `null` for any other class.
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn a_class_shows_and_compares_as_java_does() {
-        let point = Class::new("Main$Point", "Point", Some(|| Class::OBJECT), &["Main$Point", OBJECT]);
+        let point = Class::new("Main$Point", "Point", Some(&Class::OBJECT), &["Main$Point", OBJECT]);
         let points =
             Class::array("[LMain$Point;", "Point[]", || Class::new("Main$Point", "Point", None, &[]));
         assert_eq!(point.to_string(), "class Main$Point");
@@ -588,9 +588,9 @@ mod tests {
     #[test]
     fn assignability_is_javas() {
         let shape = Class::interface("Shape", "Shape", &["Shape", OBJECT]);
-        let point = Class::new("Point", "Point", Some(|| Class::OBJECT), &["Point", "Shape", OBJECT]);
+        let point = Class::new("Point", "Point", Some(&Class::OBJECT), &["Point", "Shape", OBJECT]);
         let points = Class::array("[LPoint;", "Point[]", || {
-            Class::new("Point", "Point", Some(|| Class::OBJECT), &["Point", "Shape", OBJECT])
+            Class::new("Point", "Point", Some(&Class::OBJECT), &["Point", "Shape", OBJECT])
         });
         let shapes =
             Class::array("[LShape;", "Shape[]", || Class::interface("Shape", "Shape", &["Shape", OBJECT]));
@@ -613,18 +613,18 @@ mod tests {
         let ints = Class::array("[[I", "int[][]", || Class::array("[I", "int[]", || Class::INT));
         assert_eq!(&*ints.get_type_name(), crate::Wtf8::new("int[][]"));
         assert_eq!(&*Class::STRING.get_type_name(), crate::Wtf8::new("java.lang.String"));
-        let inner = Class::new("a.Outer$Inner", "Inner", Some(|| Class::OBJECT), &["a.Outer$Inner", OBJECT]);
+        let inner = Class::new("a.Outer$Inner", "Inner", Some(&Class::OBJECT), &["a.Outer$Inner", OBJECT]);
         assert_eq!(&*inner.get_type_name(), crate::Wtf8::new("a.Outer$Inner"));
     }
 
     #[test]
     fn canonical_and_package_names_are_javas() {
-        let inner = Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT), &[]);
-        let local = Class::new("a.b.Outer$1Local", "Local", Some(|| Class::OBJECT), &[]);
-        let anonymous = Class::new("a.b.Outer$1", "", Some(|| Class::OBJECT), &[]);
-        let in_local = Class::new("Outer$1Local$Inner", "Inner", Some(|| Class::OBJECT), &[]);
+        let inner = Class::new("a.b.Outer$Inner", "Inner", Some(&Class::OBJECT), &[]);
+        let local = Class::new("a.b.Outer$1Local", "Local", Some(&Class::OBJECT), &[]);
+        let anonymous = Class::new("a.b.Outer$1", "", Some(&Class::OBJECT), &[]);
+        let in_local = Class::new("Outer$1Local$Inner", "Inner", Some(&Class::OBJECT), &[]);
         let inners = Class::array("[La.b.Outer$Inner;", "Inner[]", || {
-            Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT), &[])
+            Class::new("a.b.Outer$Inner", "Inner", Some(&Class::OBJECT), &[])
         });
         assert_eq!(inner.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner")));
         assert_eq!(inners.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner[]")));

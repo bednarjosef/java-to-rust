@@ -132,10 +132,19 @@ Crates cannot name each other in a loop, and translated classes do, so `split.rs
 along classes. It splits declarations from code, as C splits headers from sources:
 
 - **The header crate** has every module and item of the program, made `pub`: the structs, the
-  enums of the hierarchies, the statics, the traits, and every function and method. A function or
-  method whose code can move keeps only its signature there. Its body calls a function declared
-  in an `unsafe extern "Rust"` block of its module (`safe fn j2r__<module>__<type>__<name>(..)`),
-  with its parameters renamed `p0`, `p1`, .. so that every pattern is a plain name.
+  enums of the hierarchies, the statics, the traits, and every function and method. A function
+  whose code can move is only declared there, in an `unsafe extern "Rust"` block of its module,
+  by its own name and with the name of its code: `#[link_name = "j2r__<module>__<name>"] pub safe
+  fn <name>(..)`. Callers name it as they did, and the header has no function of its own for it.
+  Constructors and the methods that take their object as a parameter are such functions too,
+  named after their struct (`Circle__new`, docs/object-model.md), and so are the dispatchers
+  and bodies of a type's enum, which take its value (`Shape__area`). A method that takes `self`
+  keeps only its signature, as Rust has no declaration of a method without its code. Its body
+  calls a function declared in that block (`safe fn j2r__<module>__<type>__<name>(..)`). Both have their parameters renamed `p0`, `p1`,
+  .. so that every pattern is a plain name. A function of the header that only calls a
+  declaration costs rustc about three times what the declaration does: about 21 KB of memory
+  against 8 KB, measured on synthetic header crates of 40,000 moved functions in a release
+  build.
 - **Each body crate** depends on the header alone and defines those functions for the items
   given to it: a function with `#[unsafe(no_mangle)]`, a method as below. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names
@@ -159,9 +168,11 @@ What cannot move stays in the header with its code: generic functions and the me
 call them), functions with an `impl Trait` in their signature, methods of a trait `impl` whose
 signature names `Self::..`, and the initializers of statics. Small functions stay too: one whose
 code is at most 48 tokens (`split.rs`, `small`; a `match` that passes a failure on counts as the
-`?` it stands for) and that is not `#[cold]`, such as a getter, a buffer's `get`, the check
-that a class is initialized or `Mth.lerp`, keeps its code in the header, and both it and the
-header's wrapper of each moved function are `#[cfg_attr(not(debug_assertions), inline)]`, so
+`?` it stands for) and that is neither `#[cold]` nor `#[inline(never)]`, such as a getter, a
+buffer's `get` or `Mth.lerp`, keeps its code in the header, and so does one that the generator
+marked `#[inline]` itself: the check that a class is initialized (`init_x`, whose `init_x_slow`
+moves), a variant's constructor, the view of a type's enum. Both those the generator did not mark
+and the header's wrapper of each moved method are `#[cfg_attr(not(debug_assertions), inline)]`, so
 that an optimized build inlines them into the crates that call them: a wrapper becomes a direct
 call of the body crate's function, and a small function no call at all. A build at
 `opt-level = 0` inlines nothing, and there each crate would compile a copy of every `#[inline]`
