@@ -1229,7 +1229,10 @@ fn narrowing_casts_follow_java() {
             }
         }",
     );
-    assert_contains(&rust, &["i as i8", "d as i32 as u16", "f as i32", "\"-56 A 4464\""]);
+    assert_contains(
+        &rust,
+        &["i as i8", "java::double_to_int(d) as u16", "java::float_to_int(f)", "\"-56 A 4464\""],
+    );
 }
 
 #[test]

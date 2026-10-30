@@ -22,7 +22,7 @@ benchmarks that measure it are in "Memory".
 
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
-clock (4.8 GHz under load).
+clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (three runs a side).
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -44,7 +44,7 @@ clock (4.8 GHz under load).
 | MonitoredObjects      |      67 |      33 |      0.48 |           - |           - |            - |
 | NBody                 |    1811 |    1884 |      1.04 |         601 |         598 |         1.00 |
 | NodeList              |     175 |     110 |      0.63 |           - |           - |            - |
-| NoiseTree             |     363 |     480 |      1.32 |         282 |         432 |         1.53 |
+| NoiseTree             |     369 |     442 |      1.20 |         287 |         400 |         1.39 |
 | ObjectDispatch        |     169 |     389 |      2.30 |         110 |         318 |         2.89 |
 | ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
 | ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
@@ -192,7 +192,7 @@ made on the stack (`java::count_allocation`).
   takes about 70 ms either way. Without LTO, at `opt-level = 3`, it took 93 ms while `base()`,
   its checks inside it, was too long to stay, against 70 ms (medians of five, at a load of 7;
   Java's kernel is about 160 to 220 ms there).
-- **Static finals and arrays that threads share (NoiseTree 1.3x, kernel 1.5x).** A tree of density
+- **Static finals and arrays that threads share (NoiseTree 1.2x, kernel 1.4x).** A tree of density
   functions computed on a worker thread, with Perlin noise at the leaves: each noise call reads a
   byte permutation table 14 times and a `static final` array of gradient objects 8 times. The thread
   makes every array a `java::SharedArray`, so each read loads the handle, then the elements' address
@@ -204,7 +204,13 @@ made on the stack (`java::count_allocation`).
   2480 ms with the `java::Final`, alternating runs at about 850 MHz; Java's kernel is about 1610 ms
   there). With the permutation table a plain `[u8; 256]` field and the gradients a constant table of
   numbers, edited by hand into the generated code, the kernel took 1966 ms; the table alone, 2321
-  ms.
+  ms. `Mth.floor`'s `(int) v` is `java::double_to_int(v)`: on x86-64, one conversion instruction and
+  a compare of its result with `i32::MIN`, which only NaN, values out of range and those that
+  truncate to `i32::MIN` give, and which sends them to Rust's `as`. Rust's `as` alone clamps the
+  value with a `max` and a `min` before it converts and tests for NaN after, a longer chain: the
+  kernel took 433 ms against 400 ms (alternating runs at full clock). LLVM does not vectorize Rust's
+  `as` from `f64` to `i32` for `x86-64-v3` either, so a loop of such conversions loses nothing: 4096
+  of them took 1.7 µs with `as` and 1.2 µs with the call.
 - **Arithmetic loops (Mandelbrot 0.3x, Collatz 0.5x, StringBuild 0.04x).** These need nothing
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.

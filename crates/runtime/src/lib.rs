@@ -277,6 +277,46 @@ macro_rules! integer {
 
 integer!(i32, i64);
 
+/// Java's `(int)`, `(long)` of a `double` or `float`: truncates toward zero, saturates at the
+/// type's bounds, and gives 0 for NaN, as Rust's `as` does. Rust's `as` clamps the value with a
+/// `max` and a `min` before it converts and tests for NaN after; on x86-64 the conversion
+/// instruction alone gives the exact result for every value in range, and the type's `MIN` for
+/// the others, so only that result is converted again, with `as`.
+macro_rules! float_to_integer {
+    ($($name:ident: $from:ty => $to:ty, $set:ident, $convert:ident;)*) => {$(
+        #[inline(always)]
+        pub fn $name(v: $from) -> $to {
+            #[cfg(target_arch = "x86_64")]
+            {
+                use std::arch::x86_64::{$convert, $set};
+                // SSE2 is part of x86-64, so the intrinsics are safe to call.
+                #[allow(unused_unsafe)]
+                let converted = unsafe { $convert($set(v)) };
+                if converted != <$to>::MIN {
+                    return converted;
+                }
+                #[cold]
+                #[inline(never)]
+                fn saturate(v: $from) -> $to {
+                    v as $to
+                }
+                saturate(v)
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                v as $to
+            }
+        }
+    )*};
+}
+
+float_to_integer! {
+    double_to_int: f64 => i32, _mm_set_sd, _mm_cvttsd_si32;
+    double_to_long: f64 => i64, _mm_set_sd, _mm_cvttsd_si64;
+    float_to_int: f32 => i32, _mm_set_ss, _mm_cvttss_si32;
+    float_to_long: f32 => i64, _mm_set_ss, _mm_cvttss_si64;
+}
+
 /// Java's `/` on `int` and `long`: truncates, wraps `MIN / -1`, throws on zero.
 pub fn div<T: Integer>(a: T, b: T) -> T {
     a.java_div(b)

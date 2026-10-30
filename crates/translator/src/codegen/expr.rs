@@ -239,6 +239,9 @@ impl<'a> Gen<'a> {
                 _ => Literal::Double(d),
             });
         }
+        if let Some(integer) = self.float_to_integer(&code, from, to) {
+            return integer;
+        }
         Code::new(format!("{} as {}", code.cast_operand(), rust_type(to)), AS)
     }
 
