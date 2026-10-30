@@ -55,7 +55,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
+};
 
 /// The heap's blocks are `1 << BLOCK_SHIFT` bytes, aligned to their size.
 const BLOCK_SHIFT: usize = 16;
@@ -930,37 +932,36 @@ extern "C" fn begin(start: *mut u8) -> *mut u8 {
 /// The collector of translated programs, installed as the global allocator.
 pub struct Allocator;
 
+/// Whether the collector is the program's global allocator (`YES`, `NO`, or `UNKNOWN` until a
+/// thread first refills its slots). Objects are also made straight from a thread's slots
+/// (`allocate_object`, which `java::Arc::new` uses); where the collector is not the global
+/// allocator (the runtime's own tests), memory that Rust took elsewhere may hold handles the
+/// collector cannot see, so it never collects there.
+static INSTALLED: AtomicU8 = AtomicU8::new(UNKNOWN);
+const UNKNOWN: u8 = 0;
+const YES: u8 = 1;
+const NO: u8 = 2;
+
+/// Finds out whether the collector is the global allocator, by allocating through the global
+/// allocator: ours hands out a slot of the heap (and starts the heap if need be).
+#[cold]
+fn find_installed() {
+    let layout = Layout::new::<usize>();
+    let p = unsafe { std::alloc::alloc(layout) };
+    let base = BASE.load(Ordering::Acquire);
+    let ours = base != 0 && (p as usize).wrapping_sub(base) < HEAP_BYTES;
+    if INSTALLED.load(Ordering::Relaxed) == UNKNOWN {
+        INSTALLED.store(if ours { YES } else { NO }, Ordering::Relaxed);
+    }
+    if !p.is_null() {
+        unsafe { std::alloc::dealloc(p, layout) };
+    }
+}
+
 unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let Some(index) = size_index(layout.size(), layout.align()) else {
-            return allocate_large(layout);
-        };
-        let class = index * 2 + (layout.align() < 8) as usize;
-        let p = LISTS
-            .try_with(|lists| {
-                let head = lists.heads[class].get();
-                if !head.is_null() {
-                    let next = unsafe { (head as *mut *mut u8).read() };
-                    lists.heads[class].set(next);
-                    lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
-                    return head;
-                }
-                let bits = lists.span_bits[class].get();
-                if bits != 0 {
-                    lists.span_bits[class].set(bits & (bits - 1));
-                    let slot = bits.trailing_zeros() as usize;
-                    return (lists.span_base[class].get() + slot * SIZES[index] as usize) as *mut u8;
-                }
-                if lists.ended.get() { allocate_without_lists(class) } else { refill(lists, class) }
-            })
-            .unwrap_or_else(|_| allocate_without_lists(class));
-        // A slot that may hold pointers is zeroed whole as it is handed out, so that no old word
-        // in a part the program does not write keeps an object alive.
-        if layout.align() >= 8 {
-            unsafe { ptr::write_bytes(p, 0, SIZES[index] as usize) };
-        }
-        p
+        unsafe { allocate(layout, true) }
     }
 
     #[inline]
@@ -1025,6 +1026,49 @@ unsafe impl GlobalAlloc for Allocator {
     }
 }
 
+/// A slot for `layout` from the calling thread's free slots, or a large allocation. `global`
+/// says that the call came through the global allocator (see `INSTALLED`).
+#[inline(always)]
+unsafe fn allocate(layout: Layout, global: bool) -> *mut u8 {
+    let Some(index) = size_index(layout.size(), layout.align()) else {
+        return allocate_large(layout);
+    };
+    let class = index * 2 + (layout.align() < 8) as usize;
+    let p = LISTS
+        .try_with(|lists| {
+            let head = lists.heads[class].get();
+            if !head.is_null() {
+                let next = unsafe { (head as *mut *mut u8).read() };
+                lists.heads[class].set(next);
+                lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
+                return head;
+            }
+            let bits = lists.span_bits[class].get();
+            if bits != 0 {
+                lists.span_bits[class].set(bits & (bits - 1));
+                let slot = bits.trailing_zeros() as usize;
+                return (lists.span_base[class].get() + slot * SIZES[index] as usize) as *mut u8;
+            }
+            refill_or_without_lists(lists, class, global)
+        })
+        .unwrap_or_else(|_| allocate_without_lists(class));
+    // A slot that may hold pointers is zeroed whole as it is handed out, so that no old word in a
+    // part the program does not write keeps an object alive.
+    if layout.align() >= 8 {
+        unsafe { ptr::write_bytes(p, 0, SIZES[index] as usize) };
+    }
+    p
+}
+
+/// Memory for an object of `layout`, taken where it is called rather than through the global
+/// allocator, whose call the compiler does not inline: an object's size is a constant there, and
+/// so are its slot's class and the zeroing of its slot, which the object's own fields then
+/// overwrite. A null pointer when the heap is out of address space for a large one.
+#[inline(always)]
+pub(crate) fn allocate_object(layout: Layout) -> *mut u8 {
+    unsafe { allocate(layout, false) }
+}
+
 /// The lock, with the heap set up, the calling thread registered and a collection run when
 /// enough has been taken since the last.
 fn prepare() -> Guard {
@@ -1042,7 +1086,7 @@ fn prepare() -> Guard {
         })
         .unwrap_or(false);
     // A thread that is not registered cannot collect: its own stack would not be scanned.
-    if registered && heap(&g).taken >= heap(&g).next_collection {
+    if registered && INSTALLED.load(Ordering::Relaxed) == YES && heap(&g).taken >= heap(&g).next_collection {
         collect(&g);
     }
     g
@@ -1081,6 +1125,22 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
         lists.span_block[class].set(h.next_block(class) as u32);
         lists.span_next[class].set(0);
     }
+}
+
+/// `refill`, or on a thread whose free lists are gone, `allocate_without_lists`: out of line, so
+/// that `alloc` stays small enough to be inlined where it is called, where an object's size and
+/// so its class and the zeroing of its slot are constants.
+#[cold]
+#[inline(never)]
+fn refill_or_without_lists(lists: &Lists, class: usize, global: bool) -> *mut u8 {
+    if INSTALLED.load(Ordering::Relaxed) != YES {
+        if global {
+            INSTALLED.store(YES, Ordering::Relaxed);
+        } else if INSTALLED.load(Ordering::Relaxed) == UNKNOWN {
+            find_installed();
+        }
+    }
+    if lists.ended.get() { allocate_without_lists(class) } else { refill(lists, class) }
 }
 
 /// An allocation on a thread whose free lists are gone (while its thread-local storage is
@@ -1975,9 +2035,19 @@ fn push_old(h: &Heap, marker: &mut Marker, from: usize, to: usize) {
                 if low < high {
                     let first = (low - start) / size;
                     let last = ((high - 1 - start) / size).min(m.slots as usize - 1);
-                    for slot in first..=last {
-                        let (w, bit) = (slot / 64, 1u64 << (slot % 64));
-                        if m.taken[w] & m.marks[w] & bit != 0 {
+                    // A word of the bitmaps at a time, and only its old slots: the pages written
+                    // since the last collection are mostly young objects, whose marks are clear.
+                    for w in first / 64..=last / 64 {
+                        let mut old = m.taken[w] & m.marks[w];
+                        if w == first / 64 {
+                            old &= u64::MAX << (first % 64);
+                        }
+                        if w == last / 64 && last % 64 < 63 {
+                            old &= (1u64 << (last % 64 + 1)) - 1;
+                        }
+                        while old != 0 {
+                            let slot = w * 64 + old.trailing_zeros() as usize;
+                            old &= old - 1;
                             marker.stack.push((start + slot * size, size));
                         }
                     }

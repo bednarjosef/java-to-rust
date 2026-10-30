@@ -59,8 +59,11 @@ slot on the stack) that made the most objects, on standard error, with the total
 made on the stack (`java::count_allocation`).
 
 - **Allocation (BinaryTrees 2.7x, NodeList 0.7x).** Objects live in the runtime's garbage
-  collected heap (docs/collector.md): an allocation takes a slot from a per-thread list, and a
-  handle is copied without a count. BinaryTrees keeps a tree of about 89 MB alive while it builds
+  collected heap (docs/collector.md): an allocation takes a slot from a per-thread list, inlined
+  where the object is made (`gc::allocate_object`), and a handle is copied without a count.
+  Through the global allocator, which the compiler does not inline, each `new` was a call that
+  worked out the slot's size class and zeroed it with a call of `memset`: BinaryTrees took 8.45 s
+  against 5.95 s now (alternating runs, at about 850 MHz). BinaryTrees keeps a tree of about 89 MB alive while it builds
   and drops millions of short-lived ones; the collector marks that long-lived tree again at each
   of its 72 collections (5 ms of marking and 3 ms of sweeping each, on several threads), which is
   most of the remaining gap. `SmallObjects` likewise marks a linked list of 2 million nodes again
@@ -70,8 +73,8 @@ made on the stack (`java::count_allocation`).
   from before) and `SmallObjects` from 0.64 s to 0.36 s (Java 0.17 s). The young
   generation (`JAVA_GC_GENERATIONS=1`, docs/collector.md) collects the short-lived objects
   without marking the old ones: `SmallObjects` 0.43 s against 0.34 s, with 1.2 s against 0.49 s
-  of processor time, and BinaryTrees the same wall time with 4.9 s against 3.2 s of processor
-  time; it is opt-in because some peaks rise (`SmallObjects` 170 MB against 200 MB). NodeList walks and rebuilds a linked list of
+  of processor time, and BinaryTrees 5.37 s against 5.86 s with 13.2 s against 20.4 s of
+  processor time (at about 850 MHz); it is opt-in because some peaks rise (`SmallObjects` 170 MB against 200 MB). NodeList walks and rebuilds a linked list of
   about 667,000 nodes; its nodes are taken from blocks in address order, so the walk follows
   memory.
 - **Strings read from a field (TokenScanner 0.8x).** A parser that reads its input one character

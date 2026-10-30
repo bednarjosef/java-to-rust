@@ -73,6 +73,17 @@ untaken slot of a block into a list, as the allocator did before, cost 5% of the
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
+An object (`java::Arc::new`) takes its slot right where it is made (`gc::allocate_object`),
+not through the global allocator: the compiler does not inline the global allocator's call, so
+each `new` was a call that worked out the slot's size class from the size it was given and
+zeroed the slot with a call of `memset`. Inlined, the size is a constant, and so are the class
+and the zeroing, two stores for a 16-byte object, which the object's own fields then overwrite.
+BinaryTrees takes about 30% less time (alternating runs on a throttled machine, 8.45 s against
+5.95 s). Where the collector is not the global allocator (the runtime's own tests), memory that
+Rust took elsewhere may hold handles it cannot see, so it never collects there: whether it is
+the global allocator is found out at the first refill of a thread's slots, by an allocation
+through the global allocator (`INSTALLED`).
+
 The collector keeps every taken slot of each thread's spans, after marking: the slots not handed
 out yet, and the one a thread stopped in `alloc` may be handing out before its address is in a
 register; the others the span handed out live one collection longer. Only the span's own
@@ -201,7 +212,11 @@ slower than alone, the cost of the atomic mark bits.
 With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object that
 lives through a collection keeps its mark and is old. A minor collection marks from the roots
 and from the old objects on the pages written since the last collection, stops at marked
-objects, and frees the young ones left unmarked. A full collection, as above, runs once a quarter
+objects, and frees the young ones left unmarked. The old objects of a written page are found a
+word of the bitmaps at a time, from the slots both taken and marked: a page of young objects
+only, as most written pages are, costs a few word reads. Testing each slot's bits one by one
+took BinaryTrees' minor collections 10 ms each (at about 850 MHz), for the 64 MB of young
+objects written since the last; they now take under a millisecond. A full collection, as above, runs once a quarter
 more (plus 1 MB) is alive than after the last full one, at once after the minor one that finds
 it, in the same pause.
 
