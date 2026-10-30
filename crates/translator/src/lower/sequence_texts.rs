@@ -12,7 +12,7 @@
 //! switch (0) { default -> {
 //!     StringBuilder receiver$ = b; CharSequence argument$ = s;
 //!     if (argument$ instanceof String text$) yield receiver$.append(text$);
-//!     yield receiver$.append(argument$, 0, receiver$ == null || argument$ == null ? 4 : argument$.length());
+//!     yield receiver$.append(argument$, 0, argument$ == null ? 4 : receiver$ == null ? 4 : argument$.length());
 //! } }
 //! ```
 //!
@@ -61,15 +61,17 @@ impl<'t> Lowering<'t> {
                 Type::Boolean,
             )
         };
-        let either = ExprKind::Binary(
-            BinOp::Or,
+        // Two tests, each of one variable, so that the arm that asks `s` sees it tested.
+        let four = || self.synth(ExprKind::Int(4), pos, Type::Int);
+        let held_test = ExprKind::Conditional(
             Box::new(is_null(&held, Type::StringBuilder)),
-            Box::new(is_null(&given, ty)),
+            Box::new(four()),
+            Box::new(self.sequence_length(var(&given, ty))),
         );
         let end = ExprKind::Conditional(
-            Box::new(self.synth(either, pos, Type::Boolean)),
-            Box::new(self.synth(ExprKind::Int(4), pos, Type::Int)),
-            Box::new(self.sequence_length(var(&given, ty))),
+            Box::new(is_null(&given, ty)),
+            Box::new(four()),
+            Box::new(self.synth(held_test, pos, Type::Int)),
         );
         let builder_var = var(&held, Type::StringBuilder);
         let append = self.range_append(

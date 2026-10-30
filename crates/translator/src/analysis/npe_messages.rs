@@ -1216,63 +1216,32 @@ impl Messages<'_> {
                 self.jdk_local(name)?
             }
             ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
-            // A static field of the JDK's, by the class that javac names it by where lowering noted
-            // it (`Class::class_file`), else by its class's binary name: `java.util.Locale.ROOT`.
-            ExprKind::Static { class, name } if self.jdk => match self.jdk_static(e.pos, name) {
-                Some(named) => named?,
-                None => {
-                    let declared = self.class.types[*class].statics.iter().any(|f| &f.name == name);
-                    format!("{}.{name}", self.java_class_at(*class).filter(|_| declared)?)
-                }
-            },
-            ExprKind::Static { name, .. } => {
-                self.names.get(self.outermost, e.pos, NameKind::Static, name)?.to_string()
-            }
-            ExprKind::Field { object, name } => {
-                let name = match self.java_field(object, name)? {
-                    JavaField::Named(name) => name,
-                    JavaField::This => return self.source(object, detail),
-                    JavaField::Captured(local) => return Some(Source::Shown(local?)),
-                };
-                match self.source(object, detail - 1)? {
-                    Source::Shown(object) => format!("{object}.{name}"),
-                    Source::Hidden => name,
-                }
-            }
-            // A field of an enum in the table form (`lower/enum_tables.rs`): `e.f` is
-            // `fOfConstants[e.ordinal()]`, and `this.f` in a constructor
-            // `fOfConstants[constantOrdinal]`.
-            ExprKind::Index(array, index)
-                if let ExprKind::Static { class, name } = &array.kind
-                    && let Some(field) = crate::lower::tabled_field(name)
-                    && self.class.types[*class].kind == TypeKind::Enum =>
-            {
-                let object = match &index.kind {
-                    ExprKind::Builtin(Builtin::EnumOrdinal, args) => self.source(&args[0], detail - 1)?,
-                    ExprKind::Var(v) if v == crate::lower::TABLE_ORDINAL => Source::Shown("this".to_string()),
-                    _ => return None,
-                };
-                match object {
-                    Source::Shown(object) => format!("{object}.{field}"),
-                    Source::Hidden => field.to_string(),
-                }
-            }
-            ExprKind::Index(array, index) => {
-                let array = match self.source(array, detail - 1)? {
-                    Source::Shown(array) => array,
-                    Source::Hidden => "<array>".to_string(),
-                };
-                let index = match self.source(index, detail - 1)? {
-                    Source::Shown(index) => index,
-                    Source::Hidden => "...".to_string(),
-                };
-                format!("{array}[{index}]")
-            }
+            ExprKind::Static { class, name } => return self.static_source(e.pos, *class, name),
+            ExprKind::Field { object, name } => return self.field_source(object, name, detail),
+            ExprKind::Index(array, index) => return self.index_source(array, index, detail),
             // `i++` and `++i` of a local, an index as in `a[i++]`: javac loads the local before or
             // after its `iinc`, so the value is the local's.
             ExprKind::IncDec { target: Place::Var(name), .. } if e.ty.is_integral() => {
                 let read = Expr { kind: ExprKind::Var(name.clone()), pos: e.pos, ty: e.ty, id: e.id };
                 return self.source(&read, detail);
+            }
+            // `this.i++` (or of a static, or an element) keeps a copy of the value it loads
+            // (`dup_x1`), which the JVM follows back to that load; `++this.i` keeps the sum.
+            ExprKind::IncDec { target, prefix, .. } if e.ty.is_integral() => {
+                if *prefix {
+                    return Some(Source::Hidden);
+                }
+                return match target {
+                    Place::Field { object, name } => self.field_source(object, name, detail),
+                    Place::Static { class, name } => self.static_source(e.pos, *class, name),
+                    Place::Index(array, index) => self.index_source(array, index, detail),
+                    Place::Var(_) => None,
+                };
+            }
+            // A compound assignment to a field, a static or an element keeps the value it
+            // computes (one to a local may be an `iinc` and a load of the local).
+            ExprKind::Assign { op: Some(_), target, .. } if !matches!(target, Place::Var(_)) => {
+                return Some(Source::Hidden);
             }
             // Values that the JVM does not follow back: computed ones, and new objects.
             ExprKind::Conditional(..) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::New { .. } => {
@@ -1281,6 +1250,68 @@ impl Messages<'_> {
             _ => return None,
         };
         Some(Source::Shown(shown))
+    }
+
+    /// The source of the read of the static `class.name` at `pos`.
+    fn static_source(&self, pos: Pos, class: usize, name: &str) -> Option<Source> {
+        let shown = if self.jdk {
+            // A static field of the JDK's, by the class that javac names it by where lowering
+            // noted it (`Class::class_file`), else by its class's binary name:
+            // `java.util.Locale.ROOT`.
+            match self.jdk_static(pos, name) {
+                Some(named) => named?,
+                None => {
+                    let declared = self.class.types[class].statics.iter().any(|f| f.name == name);
+                    format!("{}.{name}", self.java_class_at(class).filter(|_| declared)?)
+                }
+            }
+        } else {
+            self.names.get(self.outermost, pos, NameKind::Static, name)?.to_string()
+        };
+        Some(Source::Shown(shown))
+    }
+
+    /// The source of the read of the field `object.name`.
+    fn field_source(&self, object: &Expr, name: &str, detail: usize) -> Option<Source> {
+        let name = match self.java_field(object, name)? {
+            JavaField::Named(name) => name,
+            JavaField::This => return self.source(object, detail),
+            JavaField::Captured(local) => return Some(Source::Shown(local?)),
+        };
+        Some(Source::Shown(match self.source(object, detail - 1)? {
+            Source::Shown(object) => format!("{object}.{name}"),
+            Source::Hidden => name,
+        }))
+    }
+
+    /// The source of the read of the element `array[index]`.
+    fn index_source(&self, array: &Expr, index: &Expr, detail: usize) -> Option<Source> {
+        // A field of an enum in the table form (`lower/enum_tables.rs`): `e.f` is
+        // `fOfConstants[e.ordinal()]`, and `this.f` in a constructor
+        // `fOfConstants[constantOrdinal]`.
+        if let ExprKind::Static { class, name } = &array.kind
+            && let Some(field) = crate::lower::tabled_field(name)
+            && self.class.types[*class].kind == TypeKind::Enum
+        {
+            let object = match &index.kind {
+                ExprKind::Builtin(Builtin::EnumOrdinal, args) => self.source(&args[0], detail - 1)?,
+                ExprKind::Var(v) if v == crate::lower::TABLE_ORDINAL => Source::Shown("this".to_string()),
+                _ => return None,
+            };
+            return Some(Source::Shown(match object {
+                Source::Shown(object) => format!("{object}.{field}"),
+                Source::Hidden => field.to_string(),
+            }));
+        }
+        let array = match self.source(array, detail - 1)? {
+            Source::Shown(array) => array,
+            Source::Hidden => "<array>".to_string(),
+        };
+        let index = match self.source(index, detail - 1)? {
+            Source::Shown(index) => index,
+            Source::Hidden => "...".to_string(),
+        };
+        Some(Source::Shown(format!("{array}[{index}]")))
     }
 
     /// The argument that `e` reads, where it is a local that holds one (or holds another such

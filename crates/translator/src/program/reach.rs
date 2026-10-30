@@ -381,6 +381,10 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
     // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
     "sun.security.util.Debug",
+    // The check of a server certificate's host name that the HTTPS client makes, which only
+    // hands out its two checkers: checking a name is patched to fail, as certificates and TLS
+    // are not translated (`java/patches/sun/security/util/HostnameChecker.java`).
+    "sun.security.util.HostnameChecker",
     // The signers of a jar's entry, which `JarEntry` and `JarFile` keep in fields: abstract and
     // final classes, of which only signature verification, not translated, makes objects.
     "java.security.cert.Certificate",
@@ -392,7 +396,8 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.util.SignatureFileVerifier",
     // Message digests, as javac's `-XDshowClass` computes a class file's checksum: the JDK's
     // own code of `MessageDigest` and of the `SUN` provider's digests, which
-    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below).
+    // `MessageDigest.getInstance` looks up as the JDK does (see the lookup below), and `MD4`,
+    // which NTLM authentication in the HTTP client gets from a provider of its own.
     "java.security.DigestException",
     "java.security.DigestInputStream",
     "java.security.DigestOutputStream",
@@ -408,6 +413,7 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     "sun.security.provider.ByteArrayAccess.LE",
     "sun.security.provider.DigestBase",
     "sun.security.provider.MD2",
+    "sun.security.provider.MD4",
     "sun.security.provider.MD5",
     "sun.security.provider.SHA",
     "sun.security.provider.SHA2",

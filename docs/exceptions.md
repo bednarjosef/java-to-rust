@@ -467,7 +467,8 @@ written in checked form exactly when it is in the analysis's set.
 
 - **Points**: `throw e` raises the concrete classes under `e`'s static type; a call raises what
   escapes any method it may run (every implementation of a virtual call, constructors,
-  `this(...)`, `super(...)`); a runtime operation raises its standard classes, from a table per
+  `this(...)`, `super(...)`; in a whole program, only the implementations of the classes whose
+  objects the points-to facts say its receiver can be, `Class::receivers`); a runtime operation raises its standard classes, from a table per
   builtin and expression kind (`analysis/exceptions/failures.rs`); a for-each loop over an array
   that may be null raises `NullPointerException` as it starts, where it reads the length.
 - **Escapes** of a method: what its points raise, minus what an enclosing `catch` in the same
@@ -610,7 +611,8 @@ generator to tell which. The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
 back, an element with its index when that is a constant (an `int` constant field too, which
 javac writes as its value), a local (also one that the index increments, `a[i++]`, as javac loads
-the local) or a call, an enum's `ordinal()` among them (`[...]` otherwise),
+the local), a field, static or element that the index increments after (`a[this.i++]`, whose loaded
+value javac keeps; `[...]` for `++this.i` and a compound assignment) or a call, an enum's `ordinal()` among them (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
 writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
 the update starts, which `BytecodeNames` notes), no message for a pattern switch's
@@ -691,10 +693,11 @@ the field it is, a string `switch`'s temporary and a for-each loop's iterator as
 the slots javac would give (`javac::jdk_temps`), in an argument too, and in a lambda that uses
 nothing of `this` (javac's static method whose parameters are the variables it uses, then its
 own), counting the slots of `instanceof` pattern bindings and of the tested values javac keeps for them (the bindings of a
-statement are declared just around it, those of an expression just for it). A method with record,
-primitive or `switch` patterns, or a binding that outlives its statement (`if (!(o instanceof
-String s)) return;`), has no known slots for its temporaries, and a null message of one is not
-certain. Also covered: a null locale of
+statement are declared just around it, those of an expression just for it, and a binding that
+outlives its statement, `if (!(o instanceof String s)) return;`, in the enclosing block before the
+statement, where whether the statement's branches complete is certain). A method with record,
+primitive or `switch` patterns, or with a binding that outlives a statement that is not one of a
+block's own, has no known slots for its temporaries, and a null message of one is not certain. Also covered: a null locale of
 `toLowerCase(Locale)`,
 for which the JDK's code throws an exception without a message, and `Thread.holdsLock(null)` and
 a null array of a name or an address given to the name service's natives
