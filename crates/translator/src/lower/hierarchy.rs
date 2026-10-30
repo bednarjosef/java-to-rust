@@ -77,6 +77,12 @@ impl<'t> Lowering<'t> {
         let value = self.expr(node.child("expression")?)?;
         let type_node = node.child("type")?;
         let ty = self.ty(type_node, type_node.java_type())?;
+        // An array tested against an array type (`certs instanceof X509Certificate[]` of a
+        // `Certificate[]`) is tested as an `Object` holding it, by its class.
+        let value = match (value.ty, ty) {
+            (Type::Array(_), Type::Array(_)) => self.convert(value, Type::class(OBJECT)),
+            _ => value,
+        };
         let binding = match node.get("pattern") {
             Some(p) if p.kind() == "BINDING_PATTERN" => Some(p.child("variable")?.str("name").to_string()),
             Some(p) => return unsupported(p, "this pattern"),
