@@ -566,9 +566,18 @@ impl<'t> Lowering<'t> {
     }
 
     /// `e`, a number or its box, as the box `boxed` (`Integer` or `Long`) that `getInteger` and
-    /// `getLong` give: a primitive is boxed, as `Integer.valueOf` boxes it.
+    /// `getLong` give: a primitive is boxed, as `Integer.valueOf` boxes it, after the widening
+    /// that the call gives a smaller one (`Long.getLong(key, 0)`, as `LdapPoolManager` reads its
+    /// timeout).
     fn boxed_number(&self, e: Expr, boxed: Type) -> Expr {
-        if e.ty == boxed.unboxed() {
+        let number = boxed.unboxed();
+        let e = if e.ty.is_numeric() && e.ty != number {
+            let pos = e.pos;
+            self.synth(ExprKind::Cast(number, Box::new(e)), pos, number)
+        } else {
+            e
+        };
+        if e.ty == number {
             let pos = e.pos;
             return self.synth(ExprKind::Builtin(Builtin::Boxed(BoxedOp::Box, e.ty), vec![e]), pos, boxed);
         }

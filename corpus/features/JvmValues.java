@@ -3,6 +3,9 @@
 // that is only a hint. And the exponents of doubles and floats.
 public class JvmValues {
     static int calls;
+    private static final int DEFAULT_TIMEOUT = 0;
+    // A smaller default, which the call widens, unboxed into a field, as `LdapPoolManager` does.
+    private static final long IDLE_TIMEOUT = Long.getLong("no.such.timeout", DEFAULT_TIMEOUT);
 
     static int sideEffect() {
         calls++;
@@ -19,6 +22,9 @@ public class JvmValues {
         System.out.println(Long.getLong("java.vm.specification.version"));
         System.out.println(Long.getLong("no.such.number", 5L));
         System.out.println(Long.getLong("user.dir", 9L));
+        short small = 12;
+        System.out.println(IDLE_TIMEOUT + " " + Long.getLong("no.such.number", 'A') + " "
+                + Integer.getInteger("no.such.number", small) + " " + Long.getLong("java.class.version", small));
         System.out.println(Runtime.version().feature() >= 17);
         System.out.println(Runtime.version().feature() == Integer.getInteger("java.specification.version"));
         System.gc();
