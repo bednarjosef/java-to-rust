@@ -50,13 +50,16 @@ owned, and that Rust therefore never freed, is found unreachable too.
   bottom and whole huge pages above them empty and go back to the system. On the Minecraft
   server's bench this lowered the peak from 1,030–1,089 MB to 1,013–1,020 MB, at the same tick
   speed (`JAVA_GC_LOW_FIRST=0` turns it off).
-- **Code pages.** At most every 10 seconds (`JAVA_GC_CODE_PAGES=<seconds>`, 0 never), a
-  collection gives the pages of the executable's code and constants back to the system once the
-  program's threads run again. They are the file's own pages, which the loader does not write,
-  so a page that is used again comes back from the system's cached copy of the file. A large
-  program runs much of its code once, at startup: the Minecraft server held 181 MB of its 286 MB
-  of code and 47 MB of its 85 MB of constants after its tick sprint, and its peak went from
-  1,030–1,089 MB to 953–957 MB, at the same tick speed.
+- **Code pages.** A second after the heap starts, then after waits that double up to 10 seconds
+  (`JAVA_GC_CODE_PAGES=<seconds>` sets that most, 0 never), a collection gives the pages of the
+  executable's code and constants back to the system once the program's threads run again. They
+  are the file's own pages, which the loader does not write, so a page that is used again comes
+  back from the system's cached copy of the file. A large program runs much of its code once, at
+  startup: the Minecraft server held 181 MB of its 286 MB of code and 47 MB of its 85 MB of
+  constants after its tick sprint, and its peak went from 1,030–1,089 MB to 953–957 MB, at the
+  same tick speed. With every give-back 10 seconds apart, it held 172 MB of code and constants
+  until the first, at 10 seconds, which was its peak (702 MB) once the heap was kept smaller
+  (`JAVA_GC_GROWTH=50`); the doubling waits give startup's code back within its first seconds.
 - **Stack pages.** Each collection, while the threads are stopped, gives back the pages of each
   thread's stack below where it stopped (less 64 KB that the stop's handler still uses):
   nothing below a stack pointer is alive, and a page the thread reaches again comes back zeroed.

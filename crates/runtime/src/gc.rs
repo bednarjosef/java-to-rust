@@ -145,7 +145,10 @@ const MIN_COLLECT: usize = 64 << 20;
 const TIME_SHARE: usize = 50;
 
 /// Seconds between the times a collection gives the program's code pages back to the system
-/// (`give_code_pages_back`).
+/// (`give_code_pages_back`), once the program has run a while. The first time is after a second,
+/// and the wait doubles from there up to this: startup runs most of the code that is run once,
+/// within its first seconds, and the Minecraft server held 172 MB of code and constants until its
+/// first give-back at 10 seconds, its peak once the heap is kept smaller (`JAVA_GC_GROWTH=50`).
 const CODE_PAGES_EVERY: usize = 10;
 const SCALE_STEP: f64 = 1.1;
 const MAX_SCALE: usize = 200;
@@ -348,11 +351,12 @@ struct Heap {
     next_full: usize,
     /// Whether the last collection was minor.
     minor: bool,
-    /// Seconds between the times a collection gives the program's code pages back to the system
-    /// (`CODE_PAGES_EVERY`, or `JAVA_GC_CODE_PAGES`; 0 never), and the monotonic second it last
-    /// did.
+    /// The most seconds between the times a collection gives the program's code pages back to the
+    /// system (`CODE_PAGES_EVERY`, or `JAVA_GC_CODE_PAGES`; 0 never), the monotonic second it last
+    /// did, and the seconds until the next time, from 1 doubling up to `code_pages`.
     code_pages: u64,
     code_pages_at: u64,
+    code_pages_wait: u64,
     /// Whether each collection gives back the pages of the threads' stacks below where each
     /// stopped (`give_stack_pages_back`; `JAVA_GC_STACK_PAGES=0` turns it off).
     stack_pages: bool,
@@ -397,6 +401,7 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     minor: false,
     code_pages: 0,
     code_pages_at: 0,
+    code_pages_wait: 1,
     stack_pages: true,
     low_first: false,
     log_sizes: false,
@@ -669,6 +674,7 @@ fn start(h: &mut Heap) {
     }
     h.code_pages = number_from(c"JAVA_GC_CODE_PAGES").unwrap_or(CODE_PAGES_EVERY) as u64;
     h.code_pages_at = monotonic_seconds();
+    h.code_pages_wait = h.code_pages.min(1);
     h.stack_pages = number_from(c"JAVA_GC_STACK_PAGES") != Some(0);
     h.low_first = number_from(c"JAVA_GC_LOW_FIRST") != Some(0);
     let census = number_from(c"JAVA_GC_CENSUS").unwrap_or(0);
@@ -2292,8 +2298,9 @@ fn collect(g: &Guard) {
     }
     resume_others(stopped);
     let h = heap(g);
-    if h.code_pages > 0 && monotonic_seconds() >= h.code_pages_at + h.code_pages {
+    if h.code_pages > 0 && monotonic_seconds() >= h.code_pages_at + h.code_pages_wait {
         h.code_pages_at = monotonic_seconds();
+        h.code_pages_wait = (h.code_pages_wait * 2).min(h.code_pages);
         give_code_pages_back();
     }
 }
