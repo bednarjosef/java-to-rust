@@ -192,7 +192,8 @@ def main():
 
     print("building java-to-rust", file=sys.stderr)
     subprocess.run(["cargo", "build", "--release", "-q", "-p", "java-to-rust"], cwd=ROOT, check=True)
-    translator = ROOT / "target" / "release" / "java-to-rust"
+    # Cargo builds where CARGO_TARGET_DIR says, when it is set.
+    translator = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "release" / "java-to-rust"
 
     print(environment())
     print(f"median of {args.runs} runs, wall clock, milliseconds; peak resident memory, MB\n")
