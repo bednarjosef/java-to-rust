@@ -152,12 +152,57 @@ fn a_static_final_array_that_is_only_read_is_frozen() {
     assert_contains(
         &rust,
         &[
-            "static A_PRIMES: java::Final<java::Frozen<i32>> = java::Final::lazy(|| java::freeze(java::shared_from_vec(vec![2, 3, 5, 7])));",
+            "static A_PRIMES: java::Final<java::Frozen<i32, 4>> = java::Final::lazy(|| java::freeze_fixed(java::shared_from_vec(vec![2, 3, 5, 7])));",
             "static A_NAMES: java::Final<java::Frozen<",
             "static A_COUNTS: java::Final<java::SharedArray<i32>>",
             "static A_SHOWN: java::Final<java::SharedArray<i32>>",
         ],
     );
+}
+
+#[test]
+fn an_array_field_only_its_constructor_makes_and_writes_is_frozen() {
+    // `table` and `sized` are made and filled by the constructor only, then only indexed and
+    // measured: frozen, of length 16 and of no constant length. `counts` has its elements written
+    // by a method, and `given` leaves its object: shared arrays.
+    let rust = translate(
+        "class A {
+            final int[] table = new int[16];
+            final long[] sized;
+            final int[] counts = new int[2];
+            final int[] given = {1, 2};
+            A(int n) {
+                sized = new long[n];
+                for (int i = 0; i < 16; i++) {
+                    table[i] = i * i;
+                }
+                sized[0] = n;
+            }
+            void count() { counts[0]++; }
+            int[] given() { return given; }
+            int read(int h) { return table[h & 15] + (int) sized[h % sized.length] + counts[0]; }
+            public static void main(String[] args) throws InterruptedException {
+                A a = new A(3);
+                int[] seen = new int[1];
+                Thread t = new Thread(() -> { a.count(); seen[0] = a.read(5) + a.given()[1]; });
+                t.start();
+                t.join();
+                System.out.println(seen[0]);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "table: java::Frozen<i32, 16>,",
+            "sized: java::Frozen<i64>,",
+            "table: java::freeze_fixed(java::shared_filled(16, 0))",
+            "sized: java::freeze(java::shared_filled(n, 0i64))",
+            "java::set(&this.table, i, i * i);",
+            "java::get(&self.table, h & 15)",
+        ],
+    );
+    assert_lacks(&rust, &["counts: java::Frozen", "given: java::Frozen"]);
 }
 
 #[test]

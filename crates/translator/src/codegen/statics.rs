@@ -25,8 +25,9 @@
 //! `X.get().clone()` as a value, and `(*X.get())`, a place, where the read is only borrowed (the
 //! object of a call or a field access, an array that is indexed, a string that is lent). Such an
 //! array that the program only indexes to read and measures (`Facts::frozen_statics`) is a
-//! `java::Final<java::Frozen<T>>`: the new array is frozen as it is stored (`java::freeze`), and
-//! its elements are a plain boxed slice, read with no atomic load.
+//! `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` where every array it is given has the
+//! constant length `N`: the new array is frozen as it is stored (`java::freeze`,
+//! `java::freeze_fixed`), and its elements are read with no atomic load.
 
 use super::*;
 
@@ -197,13 +198,7 @@ impl<'a> Gen<'a> {
             let (cell, ty, init, constant) = self.static_cell(t, f);
             let fixed = !is_cell(f.ty) && self.final_static(t, &f.name);
             let (ty, init) = match self.frozen_static(t, &f.name) {
-                true => {
-                    let elem = self.element_ty_name(f.ty.element());
-                    (
-                        format!("{}<{elem}>", self.runtime("Frozen")),
-                        format!("{}({init})", self.runtime("freeze")),
-                    )
-                }
+                true => (self.frozen_ty(t, &f.name, f.ty), format!("{}({init})", self.freezer(t, &f.name))),
                 false => (ty, init),
             };
             let kind = if is_cell(f.ty) {
@@ -339,6 +334,41 @@ impl<'a> Gen<'a> {
         self.final_static(class, name)
             && self.facts.frozen_statics.contains(&(class, name.to_string()))
             && !self.static_optional(class, name)
+    }
+
+    /// The type of frozen static or field `name` of class `class`, an array of type `ty`:
+    /// `java::Frozen<T>`, or `java::Frozen<T, N>` where its arrays have one constant length.
+    pub(super) fn frozen_ty(&mut self, class: usize, name: &str, ty: Type) -> String {
+        let elem = self.element_ty_name(ty.element());
+        match self.facts.frozen_lengths.get(&(class, name.to_string())) {
+            Some(n) => format!("{}<{elem}, {n}>", self.runtime("Frozen")),
+            None => format!("{}<{elem}>", self.runtime("Frozen")),
+        }
+    }
+
+    /// The runtime function that makes a new array into the `java::Frozen` of frozen static or
+    /// field `name` of class `class`: `freeze`, or `freeze_fixed` for one of a constant length.
+    pub(super) fn freezer(&mut self, class: usize, name: &str) -> String {
+        match self.facts.frozen_lengths.contains_key(&(class, name.to_string())) {
+            true => self.runtime("freeze_fixed"),
+            false => self.runtime("freeze"),
+        }
+    }
+
+    /// `code`, the new array `e`, frozen where a frozen field is given it (`Facts::frozen_news`).
+    /// The field's type gives the length, where it has one.
+    pub(super) fn frozen_new(&mut self, e: &Expr, code: Code) -> Code {
+        let Some(&fixed) = self.facts.frozen_news.get(&e.id) else { return code };
+        let freeze = self.runtime(if fixed { "freeze_fixed" } else { "freeze" });
+        Code::atom(format!("{freeze}({})", code.text))
+    }
+
+    /// Whether `e` reads a frozen field (`Facts::frozen_fields`).
+    pub(super) fn frozen_field_read(&self, e: &Expr) -> bool {
+        let ExprKind::Field { object, name } = &e.kind else { return false };
+        self.class
+            .field_owner(object.ty, name)
+            .is_some_and(|t| self.facts.frozen_fields.contains(&(t, name.clone())))
     }
 
     /// A read of a `java::Final` static (`e`) as the place that holds the value that the read

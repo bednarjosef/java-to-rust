@@ -29,7 +29,7 @@
 use crate::Arc;
 use crate::lent::{Lent, LentMut};
 use crate::{Class, Exception, SharedField, throw};
-use std::cell::RefCell;
+use std::cell::{RefCell, UnsafeCell};
 use std::ops::{Deref, Range};
 
 pub type Array<T> = Arc<ArrayData<RefCell<Vec<T>>, T>>;
@@ -698,36 +698,83 @@ impl<T> Elements<T> for SharedArray<T> {
     }
 }
 
-/// An array that nothing writes once it is made: a `static final` array that its class's static
-/// initialization assigns a new array, and that the program only indexes and measures (the
-/// translator's `frozen_statics`). Its elements are a boxed slice, read where they are, with no
-/// atomic load and no borrow flag; the `java::Final` that holds it publishes them to every
-/// thread with the array. It is never a value of the program, so nothing compares, copies or
-/// stores into it: the trait's writes are never called.
-pub struct Frozen<T>(Box<[T]>);
+/// An array that is written only before any other thread can reach it, and then only read: a
+/// `static final` array that its class's static initialization assigns a new array, and that
+/// the program only indexes and measures (the translator's `frozen_statics`), or such a field
+/// that only its object's constructor makes and writes, through `this` (`frozen_fields`), while
+/// the object is a value the constructor holds. Its elements are read and written where they
+/// are, with no atomic access and no borrow flag; the `java::Final` that holds a static one
+/// publishes them with the array, and the object of a field one is published with the array in
+/// it. `N`, when not 0, is the length of every array the static or field is given, a constant:
+/// the compiler then drops the bounds check of an index it can bound (`h & 15` in an array of 16),
+/// as the JIT does for a `static final` array, whose length it knows. A copy of the handle (the
+/// constructor's hold of an array it stores into, `lower::argument_order`) shares the elements.
+pub struct Frozen<T, const N: usize = 0>(std::sync::Arc<[UnsafeCell<T>]>);
 
-/// The elements of the new array `a`, frozen (see `Frozen`).
-pub fn freeze<T: Clone>(a: impl Elements<T>) -> Frozen<T> {
-    Frozen(a.take_items().into_boxed_slice())
-}
+// Its elements are written before another thread can reach them (see `Frozen`).
+unsafe impl<T: Send + Sync, const N: usize> Sync for Frozen<T, N> {}
+unsafe impl<T: Send + Sync, const N: usize> Send for Frozen<T, N> {}
 
-impl<T> Frozen<T> {
-    #[cold]
-    #[inline(never)]
-    fn written() -> ! {
-        unreachable!("a frozen array is never written")
+impl<T, const N: usize> Clone for Frozen<T, N> {
+    fn clone(&self) -> Self {
+        Frozen(self.0.clone())
     }
 }
 
-impl<T> Elements<T> for Frozen<T> {
+/// The elements of the new array `a`, frozen (see `Frozen`).
+pub fn freeze<T: Clone>(a: impl Elements<T>) -> Frozen<T> {
+    Frozen(a.take_items().into_iter().map(UnsafeCell::new).collect())
+}
+
+/// The elements of the new array `a`, whose length is `N`, frozen (see `Frozen`).
+pub fn freeze_fixed<T: Clone, const N: usize>(a: impl Elements<T>) -> Frozen<T, N> {
+    let items = a.take_items();
+    assert_eq!(items.len(), N, "an array frozen with another length");
+    Frozen(items.into_iter().map(UnsafeCell::new).collect())
+}
+
+impl<T, const N: usize> Frozen<T, N> {
+    #[inline(always)]
+    fn len(&self) -> usize {
+        if N == 0 { self.0.len() } else { N }
+    }
+
+    /// The cell of element `k`, which the caller has checked is below `len`.
+    #[inline(always)]
+    fn cell(&self, k: usize) -> &UnsafeCell<T> {
+        // `len` is the slice's length: `freeze_fixed` checks that it is `N`.
+        unsafe { self.0.get_unchecked(k) }
+    }
+
+    #[inline(always)]
+    fn items(&self) -> &[T] {
+        // `UnsafeCell<T>` has `T`'s layout, and no write runs while the slice is lent.
+        unsafe { &*(&raw const *self.0 as *const [T]) }
+    }
+
+    /// Runs `f` on the elements to change them.
+    #[inline(always)]
+    fn changing<R>(&self, f: impl FnOnce(&mut [T]) -> R) -> R {
+        // As `items`; the constructor that writes is the array's only user, and `f` runs no code
+        // of the program.
+        f(unsafe { &mut *(&raw const *self.0 as *mut [T]) })
+    }
+
+    #[inline(always)]
+    fn replace(&self, k: usize, v: T) -> T {
+        unsafe { std::mem::replace(&mut *self.cell(k).get(), v) }
+    }
+}
+
+impl<T, const N: usize> Elements<T> for Frozen<T, N> {
     #[inline(always)]
     fn length(&self) -> usize {
-        self.0.len()
+        self.len()
     }
 
     #[inline(always)]
     fn in_place(&self) -> Option<&[T]> {
-        Some(&self.0)
+        Some(self.items())
     }
 
     #[inline(always)]
@@ -735,7 +782,7 @@ impl<T> Elements<T> for Frozen<T> {
     where
         T: Clone,
     {
-        self.0[position(self.0.len(), i)].clone()
+        unsafe { (*self.cell(position(self.len(), i)).get()).clone() }
     }
 
     #[inline(always)]
@@ -743,61 +790,88 @@ impl<T> Elements<T> for Frozen<T> {
     where
         T: Clone,
     {
-        Ok(self.0[try_position(self.0.len(), i)?].clone())
+        Ok(unsafe { (*self.cell(try_position(self.len(), i)?).get()).clone() })
     }
 
-    fn put(&self, _: i32, _: T) {
-        Self::written()
+    #[inline(always)]
+    fn put(&self, i: i32, v: T) {
+        self.replace(position(self.len(), i), v);
     }
 
-    fn try_put(&self, _: i32, _: T) -> Result<(), Exception> {
-        Self::written()
+    #[inline(always)]
+    fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
+        self.replace(try_position(self.len(), i)?, v);
+        Ok(())
     }
 
-    fn try_swap(&self, _: i32, _: T) -> Result<T, Exception> {
-        Self::written()
+    fn try_swap(&self, i: i32, v: T) -> Result<T, Exception> {
+        Ok(self.replace(try_position(self.len(), i)?, v))
     }
 
-    fn try_compare_exchange(&self, _: i32, _: T, _: T, _: impl Fn(&T, &T) -> bool) -> Result<T, Exception>
+    fn try_compare_exchange(
+        &self,
+        i: i32,
+        expected: T,
+        value: T,
+        same: impl Fn(&T, &T) -> bool,
+    ) -> Result<T, Exception>
     where
         T: Clone,
     {
-        Self::written()
+        let k = try_position(self.len(), i)?;
+        let old = unsafe { (*self.cell(k).get()).clone() };
+        if same(&old, &expected) {
+            self.replace(k, value);
+        }
+        Ok(old)
     }
 
-    fn try_get_and_update(&self, _: i32, _: impl Fn(&T) -> T) -> Result<T, Exception>
+    fn try_get_and_update(&self, i: i32, f: impl Fn(&T) -> T) -> Result<T, Exception>
     where
         T: Clone,
     {
-        Self::written()
+        let k = try_position(self.len(), i)?;
+        let old = unsafe { (*self.cell(k).get()).clone() };
+        self.replace(k, f(&old));
+        Ok(old)
     }
 
     fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
     where
         T: Clone,
     {
-        f(&self.0[range])
+        f(&self.items()[range])
     }
 
-    fn writing<R>(&self, _: Range<usize>, _: impl FnOnce(&mut [T]) -> R) -> R
+    fn writing<R>(&self, range: Range<usize>, f: impl FnOnce(&mut [T]) -> R) -> R
     where
         T: Clone,
     {
-        Self::written()
+        self.changing(|items| f(&mut items[range]))
     }
 
-    fn store_from(&self, _: usize, _: &[T])
+    fn store_from(&self, at: usize, values: &[T])
     where
         T: Clone,
     {
-        Self::written()
+        self.changing(|items| items[at..at + values.len()].clone_from_slice(values));
     }
 
-    fn copy_within(&self, _: usize, _: usize, _: usize)
+    fn copy_within(&self, from: usize, to: usize, n: usize)
     where
         T: Clone,
     {
-        Self::written()
+        self.changing(|items| {
+            if from >= to {
+                for k in 0..n {
+                    items[to + k] = items[from + k].clone();
+                }
+            } else {
+                for k in (0..n).rev() {
+                    items[to + k] = items[from + k].clone();
+                }
+            }
+        });
     }
 
     fn address(&self) -> *const u8 {
@@ -812,7 +886,7 @@ impl<T> Elements<T> for Frozen<T> {
     where
         T: Clone,
     {
-        self.0.to_vec()
+        self.items().to_vec()
     }
 }
 
@@ -1629,6 +1703,28 @@ pub fn try_check_sizes(dims: &[i32]) -> Result<(), Exception> {
 mod tests {
     use super::*;
     use crate::JString;
+
+    #[test]
+    fn a_frozen_array_is_written_while_it_is_made_and_then_read_where_it_is() {
+        let squares: Frozen<i32, 4> = freeze_fixed(shared_filled(4, 0));
+        let held = squares.clone();
+        for i in 0..4 {
+            set(&held, i, i * i);
+        }
+        update(&squares, 3, |old| old + 100);
+        assert_eq!((0..4).map(|i| get(&squares, i)).collect::<Vec<_>>(), [0, 1, 4, 109]);
+        assert_eq!((len(&squares), squares.in_place()), (4, Some(&[0, 1, 4, 109][..])));
+        let error = try_get(&squares, 4).unwrap_err();
+        assert_eq!(error.message.as_deref(), Some("Index 4 out of bounds for length 4"));
+        let names: Frozen<Option<JString>> = freeze(from_vec(vec![None, Some(JString::from("b"))]));
+        assert_eq!((len(&names), get(&names, 1)), (2, Some(JString::from("b"))));
+    }
+
+    #[test]
+    #[should_panic(expected = "an array frozen with another length")]
+    fn a_frozen_array_of_a_constant_length_has_that_length() {
+        let _: Frozen<i32, 4> = freeze_fixed(shared_filled(3, 0));
+    }
 
     #[test]
     fn a_shared_array_is_read_and_written_one_element_at_a_time() {

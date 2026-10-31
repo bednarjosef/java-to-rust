@@ -331,12 +331,14 @@ impl<'a> Gen<'a> {
             Some(init) => {
                 let code = self.value(init, ty);
                 // An array's element type cannot be inferred from `from_vec(vec![])`, so it is always written.
-                let annotation = if code.untyped || matches!(ty, Type::Array(_)) {
-                    let ty_text = self.ty_name(ty);
-                    self.annotation(ty, format!(": {ty_text}"))
-                } else {
-                    String::new()
-                };
+                // A frozen field held for a store into it (`analysis::frozen_fields`) has its own type.
+                let annotation =
+                    if code.untyped || matches!(ty, Type::Array(_)) && !self.frozen_field_read(init) {
+                        let ty_text = self.ty_name(ty);
+                        self.annotation(ty, format!(": {ty_text}"))
+                    } else {
+                        String::new()
+                    };
                 self.line(&format!("let {mutable}{rust}{annotation} = {};", code.text));
             }
         }

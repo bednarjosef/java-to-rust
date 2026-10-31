@@ -1606,7 +1606,7 @@ impl<'a> Gen<'a> {
     fn static_slot(&mut self, class: usize, name: &str, ty: Type) -> Slot {
         let cell = self.cell_name(class, name);
         if self.final_static(class, name) {
-            let freeze = self.frozen_static(class, name).then(|| self.runtime("freeze"));
+            let freeze = self.frozen_static(class, name).then(|| self.freezer(class, name));
             Slot::Final { cell, freeze }
         } else {
             Slot::Static { cell, plain: is_cell(ty), global: !self.facts.threaded }
@@ -2069,7 +2069,7 @@ impl<'a> Gen<'a> {
                 let nullable = self.place_nullable(target);
                 let v = self.field_value(value, ty, nullable);
                 let v = match self.frozen_static(*class, name) {
-                    true => format!("{}({v})", self.runtime("freeze")),
+                    true => format!("{}({v})", self.freezer(*class, name)),
                     false => v,
                 };
                 // Java computes the value before it initializes the class to write it.
@@ -2301,7 +2301,10 @@ impl<'a> Gen<'a> {
             self.line(&format!("{}base: {},", self.vis(), self.struct_of(base)));
         }
         for f in fields {
-            let ty = self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name));
+            let ty = match self.facts.frozen_fields.contains(&(index, f.name.clone())) {
+                true => self.frozen_ty(index, &f.name, f.ty),
+                false => self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name)),
+            };
             let ty = if self.celled(&decl.name) { self.cell_type(index, &ty) } else { ty };
             self.line(&format!("{}{}: {ty},", self.vis(), field_name(decl, &f.name)));
         }

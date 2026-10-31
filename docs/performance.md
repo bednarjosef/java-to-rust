@@ -250,7 +250,15 @@ made on the stack (`java::count_allocation`).
   reaches with one load of a pointer and a test (docs/multi-threading.md, 2.3), holding a frozen
   array (`java::Frozen`), since the program only indexes it: its elements are a plain slice, read
   with no atomic load, which took the program 2.10 G cycles against 2.25 G with a `SharedArray`
-  (alternating runs, about 6% less); inside a `LazyLock`,
+  (alternating runs, about 6% less). The permutation table, a `final` field that only the
+  constructor makes and shuffles, is a frozen field (`java::Frozen<i8, 256>`), and both arrays
+  have their constant length in their type, so `p[x & 255]` and `GRADIENT[hash & 15]` have no
+  check; the `java::Final` is read through its settled address, a plain load, so with no check
+  between the 8 reads of one noise call the compiler reads the gradient table's address once
+  (docs/multi-threading.md, 2.3). The program runs 6.81 G instructions against 8.95 G, but the
+  kernel only 370 ms against 383 ms (medians of five alternating runs at a load of 12; Java 282
+  ms): each noise call is a chain of dependent table reads, whose latency the instructions saved
+  did not shorten. Inside a `LazyLock`,
   as it was, a read tested the `LazyLock` and then the `OnceLock` inside it (kernel 2502 ms against
   2480 ms with the `java::Final`, alternating runs at about 850 MHz; Java's kernel is about 1610 ms
   there). With the permutation table a plain `[u8; 256]` field and the gradients a constant table of
