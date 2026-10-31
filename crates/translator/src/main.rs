@@ -296,8 +296,8 @@ fn write_dependencies(path: &str, tree: &java_to_rust::output::ModuleTree) -> Re
 /// (docs/performance.md, "The translated javac"). On x86-64, its `.cargo/config.toml`
 /// (`split::CARGO_CONFIG`) builds for processors with AVX2 (`x86-64-v3`, Haswell and later),
 /// whose wider vector instructions a loop over an array uses, as the JVM's compiler uses those of
-/// the processor it runs on, and builds a binary that is not position-independent, which takes
-/// less memory; Cargo reads it when it runs in the project's directory, and adds flags given as
+/// the processor it runs on, starts each loop at a 64-byte line, and builds a binary that is not
+/// position-independent, which takes less memory; Cargo reads it when it runs in the project's directory, and adds flags given as
 /// `CARGO_BUILD_RUSTFLAGS` or `--config build.rustflags=..` to it (`RUSTFLAGS` replaces it).
 fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result<()> {
     let name = Path::new(input)

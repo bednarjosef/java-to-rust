@@ -23,13 +23,14 @@ benchmarks that measure it are in "Memory".
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
 clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (three runs a side),
-and ObjectDispatch's from one of five runs a side at a load average of 6.
+ObjectDispatch's from one of five runs a side at a load average of 6, and Interpreter's and
+SortMillion's from one at a load average of 6.3.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
 - Rust: rustc 1.99.0 (b940084d7 2026-09-28); the crates the translator writes build in release
-  with fat LTO, for processors with AVX2 (`target-cpu=x86-64-v3`, in the crate's
-  `.cargo/config.toml`)
+  with fat LTO, for processors with AVX2 (`target-cpu=x86-64-v3`), with each loop starting at a
+  64-byte line (`-align-loops=64`), both in the crate's `.cargo/config.toml`
 
 | program               | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
 |-----------------------|--------:|--------:|----------:|------------:|------------:|-------------:|
@@ -37,7 +38,7 @@ and ObjectDispatch's from one of five runs a side at a load average of 6.
 | BinaryTrees           |     686 |    1634 |      2.38 |           - |           - |            - |
 | ClassCast             |      85 |      83 |      0.97 |          37 |          71 |         1.92 |
 | Collatz               |    1155 |     581 |      0.50 |           - |           - |            - |
-| Interpreter           |    1046 |    1177 |      1.12 |         341 |         393 |         1.15 |
+| Interpreter           |    1314 |    1000 |      0.76 |         382 |         300 |         0.79 |
 | LargeArrays           |      34 |       7 |      0.21 |           - |           - |            - |
 | Mandelbrot            |    3400 |    1143 |      0.34 |        1128 |        1141 |         1.01 |
 | ManyThreadsAllocating |     136 |     108 |      0.79 |           - |           - |            - |
@@ -53,7 +54,7 @@ and ObjectDispatch's from one of five runs a side at a load average of 6.
 | ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
 | Sieve                 |    1278 |    1006 |      0.79 |           - |           - |            - |
 | SmallObjects          |     147 |     203 |      1.38 |           - |           - |            - |
-| SortMillion           |    1731 |    1727 |      1.00 |         535 |         577 |         1.08 |
+| SortMillion           |    1780 |    1639 |      0.92 |         542 |         547 |         1.01 |
 | Statics               |    1286 |    1266 |      0.98 |           - |           - |            - |
 | StringBuild           |      28 |       1 |      0.04 |           - |           - |            - |
 | TokenScanner          |     994 |     775 |      0.78 |           - |           - |            - |
@@ -122,7 +123,7 @@ made on the stack (`java::count_allocation`).
   those statements assigns the array, the index, or an element of any object array, and none of
   them calls a method (`lower/element_reads.rs`). The local is declared without `mut` when it is
   assigned once.
-- **Plain arrays (Sieve 0.8x, SortMillion 1.0x, Interpreter 1.1x).** An array that is not
+- **Plain arrays (Sieve 0.8x, SortMillion 0.9x, Interpreter 0.8x).** An array that is not
   shared is a `Vec`, borrowed as a slice by the methods it is passed to. Sieve's indexes are
   proven in range, so every access is `composite[i as usize]` with no check: `i * i <= limit`
   with `i >= 2` gives `i <= limit`, and the size `limit + 1` is longer than any of them.
@@ -130,12 +131,17 @@ made on the stack (`java::count_allocation`).
   range, so they keep Java's check, an inlined compare and a branch to a `#[cold]`,
   `#[inline(never)]` throwing function (runtime `array.rs`). Interpreter's stack and locals are
   plain `Vec<i32>` with the same checks, since its indexes come from the program it interprets.
-  Its kernel depends on where the linker puts `run`: two builds with the same instructions in
+  Its kernel depended on where the linker put `run`: two builds with the same instructions in
   `run`, one starting 32 bytes past a 64-byte line and one at a line, ran the kernel in 390 ms
   and 260 ms (the same instructions and branch misses executed, 4.9 against 7.3 instructions a
   cycle). In the slow one, the block every opcode jumps back to, which reads the next opcode and
-  jumps through the table, spans two 64-byte lines.
-  `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`.
+  jumps through the table, spanned two 64-byte lines. The crates are now built with each loop
+  starting at a line (`-align-loops=64`, `split.rs`): the kernel runs in 270-300 ms, 3.8 G
+  cycles against 5.7 G for the same build without it. Across the 25 benchmarks the binaries
+  are 2-3% larger and none runs more cycles (BinaryTrees, SortMillion and ObjectHash 2-8%
+  fewer); aligning loops to 32 bytes instead does not help Interpreter.
+  `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`;
+  `Arrays.sort` of integers is Rust's unstable sort, since equal integers cannot be told apart.
 - **MatrixMultiply (0.65x, kernel 0.9x).** The matrices are plain
   `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
   and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
