@@ -55,6 +55,7 @@
 //! runs is only known to the C library.
 
 mod census;
+mod who;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, UnsafeCell};
@@ -595,6 +596,7 @@ fn start(h: &mut Heap) {
     h.low_first = number_from(c"JAVA_GC_LOW_FIRST") != Some(0);
     let census = number_from(c"JAVA_GC_CENSUS").unwrap_or(0);
     census::LEVEL.store(census, Ordering::Relaxed);
+    census::FROM.store(number_from(c"JAVA_GC_CENSUS_FROM").unwrap_or(0), Ordering::Relaxed);
     if census >= 3 {
         census::start_types(h.base);
     }

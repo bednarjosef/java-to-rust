@@ -70,11 +70,11 @@ const CLASSES_LISTED: usize = 60;
 const TYPES_LISTED: usize = 150;
 
 /// The most type names recorded; a type past them counts as the last.
-const MAX_TYPES: usize = 1 << 16;
+pub(super) const MAX_TYPES: usize = 1 << 16;
 
 /// The bytes of the heap per entry of `SHADOW`: every slot starts in an entry of its own, as
 /// slots are 16 bytes or more.
-const GRANULE_SHIFT: usize = 4;
+pub(super) const GRANULE_SHIFT: usize = 4;
 
 unsafe extern "C" {
     fn munmap(addr: *mut u8, len: usize) -> i32;
@@ -83,6 +83,10 @@ unsafe extern "C" {
 /// What the census reports: nothing (0), the totals (1), also the sizes and classes (2), also
 /// the types (3), from `JAVA_GC_CENSUS`.
 pub(super) static LEVEL: AtomicUsize = AtomicUsize::new(0);
+
+/// The full collections so far, and the first whose census is reported (`JAVA_GC_CENSUS_FROM`).
+static FULL: AtomicUsize = AtomicUsize::new(0);
+pub(super) static FROM: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether allocations record their types (`JAVA_GC_CENSUS=3`).
 pub(super) static TYPES: AtomicBool = AtomicBool::new(false);
@@ -194,7 +198,7 @@ struct TypeCounts {
 
 /// Where an address in the heap points.
 #[derive(Clone, Copy)]
-enum Target {
+pub(super) enum Target {
     /// The start of a live small slot of `size` bytes, number `slot` of block `block`.
     Slot { block: usize, slot: usize, size: usize },
     /// The first page of a live large allocation of `blocks` blocks from `block`.
@@ -214,19 +218,19 @@ fn vec_layout() -> (usize, usize, usize) {
 }
 
 /// A bitmap with a bit per slot of the heap (`BITMAP_WORDS` words per block), outside the heap.
-struct Bits {
+pub(super) struct Bits {
     words: *mut u64,
     bytes: usize,
 }
 
 impl Bits {
-    fn new(h: &Heap) -> Bits {
+    pub(super) fn new(h: &Heap) -> Bits {
         let bytes = (h.top * BITMAP_WORDS * 8).max(PAGE);
         Bits { words: reserve(bytes) as *mut u64, bytes }
     }
 
     /// Sets the bit of `target`, returning whether it was clear.
-    fn set(&mut self, target: &Target) -> bool {
+    pub(super) fn set(&mut self, target: &Target) -> bool {
         let (block, slot) = match *target {
             Target::Slot { block, slot, .. } => (block, slot),
             Target::Large { block, .. } => (block, 0),
@@ -239,7 +243,7 @@ impl Bits {
         clear
     }
 
-    fn get(&self, block: usize, slot: usize) -> bool {
+    pub(super) fn get(&self, block: usize, slot: usize) -> bool {
         unsafe { *self.words.add(block * BITMAP_WORDS + slot / 64) & (1u64 << (slot % 64)) != 0 }
     }
 }
@@ -251,18 +255,18 @@ impl Drop for Bits {
 }
 
 /// Memory outside the heap for `n` values of `T` that are zero at first.
-struct Table<T> {
+pub(super) struct Table<T> {
     items: *mut T,
     n: usize,
 }
 
 impl<T> Table<T> {
-    fn new(n: usize) -> Table<T> {
+    pub(super) fn new(n: usize) -> Table<T> {
         Table { items: reserve((n * std::mem::size_of::<T>()).max(PAGE)) as *mut T, n }
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn all(&self) -> &mut [T] {
+    pub(super) fn all(&self) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.items, self.n) }
     }
 }
@@ -273,9 +277,9 @@ impl<T> Drop for Table<T> {
     }
 }
 
-struct Census<'h> {
-    h: &'h Heap,
-    end: usize,
+pub(super) struct Census<'h> {
+    pub(super) h: &'h Heap,
+    pub(super) end: usize,
     vec: (usize, usize, usize),
     /// The objects that thin references reach whose class has been counted.
     classes_seen: Bits,
@@ -284,7 +288,7 @@ struct Census<'h> {
 }
 
 impl Census<'_> {
-    fn target(&self, address: usize) -> Target {
+    pub(super) fn target(&self, address: usize) -> Target {
         if address < self.h.base || address >= self.end {
             return Target::Inside;
         }
@@ -331,7 +335,7 @@ impl Census<'_> {
 
     /// Whether word `i` of `words`, which points to `target`, is the pointer of a `Vec` or of a
     /// boxed slice.
-    fn buffer(&self, words: &[usize], i: usize, target: &Target) -> bool {
+    pub(super) fn buffer(&self, words: &[usize], i: usize, target: &Target) -> bool {
         let (cap, ptr, len) = self.vec;
         if i >= ptr && i - ptr + 3 <= words.len() {
             let at = i - ptr;
@@ -434,7 +438,7 @@ impl Census<'_> {
 
     /// The words of a target, its slot's size (0 for a large allocation), and whether they may
     /// hold pointers.
-    fn words_of(&self, target: &Target) -> (&'static [usize], usize, bool) {
+    pub(super) fn words_of(&self, target: &Target) -> (&'static [usize], usize, bool) {
         match *target {
             Target::Slot { block, slot, size } => {
                 let m = self.h.meta(block);
@@ -450,9 +454,29 @@ impl Census<'_> {
         }
     }
 
+    /// The address where `target` starts.
+    pub(super) fn start_of(&self, target: &Target) -> Option<usize> {
+        match *target {
+            Target::Slot { block, slot, size } => {
+                Some(self.h.block_address(block) + self.h.meta(block).start as usize + slot * size)
+            }
+            Target::Large { block, .. } => {
+                let (words, _, _) = self.words_of(target);
+                let at = self.h.block_address(block);
+                // A large allocation starts at the first entry of the shadow in its first page.
+                let shadow = SHADOW.load(Ordering::Relaxed);
+                (0..PAGE >> GRANULE_SHIFT)
+                    .map(|g| at + (g << GRANULE_SHIFT))
+                    .find(|&a| unsafe { *shadow.add((a - self.h.base) >> GRANULE_SHIFT) } != 0)
+                    .or(Some(words.as_ptr() as usize))
+            }
+            Target::Inside => None,
+        }
+    }
+
     /// The type recorded for `target` (0 for none). A large allocation's entry is where it
     /// starts, within its first page.
-    fn type_of(&self, target: &Target) -> usize {
+    pub(super) fn type_of(&self, target: &Target) -> usize {
         let shadow = SHADOW.load(Ordering::Relaxed);
         let entry =
             |address: usize| unsafe { *shadow.add((address - self.h.base) >> GRANULE_SHIFT) } as usize;
@@ -490,7 +514,7 @@ fn saving(size: usize, less: usize) -> usize {
 }
 
 /// Every live slot and large allocation, in address order.
-fn each_live(h: &Heap, mut each: impl FnMut(Target)) {
+pub(super) fn each_live(h: &Heap, mut each: impl FnMut(Target)) {
     let mut b = 0;
     while b < h.top {
         let m = h.meta(b);
@@ -521,6 +545,10 @@ fn each_live(h: &Heap, mut each: impl FnMut(Target)) {
 /// Counts the words of every live slot that may hold pointers, after a full collection (the
 /// marks are those of the live slots), and reports them, at `level` (see `LEVEL`).
 pub(super) fn census(h: &Heap, level: usize) {
+    let n = FULL.fetch_add(1, Ordering::Relaxed) + 1;
+    if n < FROM.load(Ordering::Relaxed) {
+        return;
+    }
     let mut census = Census {
         h,
         end: h.block_address(h.top),
@@ -570,6 +598,9 @@ pub(super) fn census(h: &Heap, level: usize) {
     }
     if level >= 3 && TYPES.load(Ordering::Acquire) {
         census_types(&mut census);
+        if level >= 4 {
+            super::who::who(&census);
+        }
     }
 }
 
@@ -689,7 +720,7 @@ fn census_types(census: &mut Census) {
 }
 
 /// The name of type `t`.
-fn type_name(t: usize) -> &'static str {
+pub(super) fn type_name(t: usize) -> &'static str {
     let names = NAMES.load(Ordering::Acquire);
     let (key, len) = unsafe { &*names.add(t) };
     let (key, len) = (key.load(Ordering::Acquire), len.load(Ordering::Acquire));
@@ -762,7 +793,7 @@ fn report_types(types: &Table<TypeCounts>) {
 }
 
 /// A Rust type's name without its paths: `Arc<ArrayData<RefCell<Vec<i32>>, i32>>`.
-struct Short(&'static str);
+pub(super) struct Short(pub(super) &'static str);
 
 impl std::fmt::Display for Short {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -849,7 +880,7 @@ fn report_classes(classes: &mut [Counts]) {
 }
 
 /// Writes a line to standard error, without allocating; a longer line is cut.
-fn line(args: std::fmt::Arguments) {
+pub(super) fn line(args: std::fmt::Arguments) {
     const LONGEST: usize = 1024;
     let mut buffer = [0u8; LONGEST];
     let len = {

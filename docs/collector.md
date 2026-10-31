@@ -310,6 +310,12 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   string's bytes), and the slots of no type by size, to set beside a JVM's class histogram. Level
   3 records each allocation's type from the start, in a table beside the heap of 2 bytes per 16;
   without it the cost is one load and branch per allocation, not measurable on BinaryTrees.
+  With 4 (`gc/who.rs`), also what holds the objects of the types that `JAVA_GC_CENSUS_WHO`
+  names (parts of type names, comma-separated, or `untyped:<size>` for the slots of that size
+  of no type that no object owns): the holders' types (an object, the buffer an object of a type
+  owns, a slot of no type), how many objects no slot holds (the roots keep them), and for two of
+  them a chain of holders back to a root, naming it (static data, thread-local storage, a
+  thread's stack). `JAVA_GC_CENSUS_FROM=<n>` reports only from the nth full collection on.
 - `JAVA_GC_GROWTH=<percent>` sets the bytes taken between collections as a percentage of the
   bytes alive (100 by default), which trades memory for time.
 - `JAVA_GC_TIME=<percent>` sets the share of processor time above which that grows (50 by
