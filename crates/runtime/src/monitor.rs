@@ -164,18 +164,19 @@ impl Drop for LazyMonitor {
     }
 }
 
-impl<T> HasMonitor for crate::SharedElements<T> {
+/// A shared array's monitor is in its header's record (`SharedHeader`).
+impl<T> HasMonitor for crate::ArrayData<crate::SharedHeader<T>, T> {
     #[inline]
     fn monitor(&self) -> MonitorOf<'_> {
-        MonitorOf::Shared(self.1.get())
+        MonitorOf::Shared(self.extra().monitor.get())
     }
 }
 
-/// An array's monitor is its cell's.
-impl<C: HasMonitor, T> HasMonitor for crate::ArrayData<C, T> {
+/// An array of one thread: its monitor is kept by address.
+impl<T> HasMonitor for crate::ArrayData<crate::PlainHeader<T>, T> {
     #[inline]
     fn monitor(&self) -> MonitorOf<'_> {
-        (**self).monitor()
+        MonitorOf::Local(self as *const Self as *const u8 as usize)
     }
 }
 
