@@ -800,6 +800,7 @@ impl<'a> Gen<'a> {
             class_interfaces: false,
             arms_method: None,
             arm_parts: String::new(),
+            arm_frames: None,
         }
     }
 }
@@ -1122,6 +1123,11 @@ struct Gen<'a> {
     arms_method: Option<dispatch::ArmsMethod>,
     /// The methods those cuts make, which `flush_arm_parts` writes after the method.
     arm_parts: String,
+    /// The parameters after the object (`, t: Option<Object>`), their names (`, t`) and the return
+    /// type of the dispatcher whose `match` `tag_match` writes, while one is set: the arms of a
+    /// `match` of more than `dispatch::OWN_FRAME_ABOVE` classes each run their call in a function
+    /// of their own.
+    arm_frames: Option<(String, String, String)>,
 }
 
 impl<'a> Gen<'a> {

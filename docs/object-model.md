@@ -80,7 +80,15 @@ holds one function whole while it compiles it, and the server's `Display` alone 
 past 20 GB to compile; LLVM's time grows faster than a function's size, so the parts are small;
 they are items of their own, which the split into crates spreads over the body crates
 (docs/several-crates.md). A `match` over 2048 classes or fewer stays whole, so that its call is
-one jump, not two. `runtime_type_names()`, which `isInstance`, `cast` and array stores ask on
+one jump, not two. A dispatcher's `match` over more than 64 classes runs each arm's call in a
+function of its own (`#[inline(never)] fn arm(o: &C0, ..) { o.area() }` in the arm), which the
+called method may still be inlined into but which is never inlined into the dispatcher: built
+with a profile (`-Cprofile-use`), LLVM inlined the hot arms of the Minecraft server's
+`Function.apply`, a `match` over 11 200 classes, into it, and their stack slots added up to a
+frame of 122 KB against 344 bytes without, which a deep recursion of the server's codecs
+overflowed. An arm costs the same instructions either way (a jump to the method or to its arm).
+An arm that reads the receiver itself, and a dispatcher with type parameters, which a nested
+function cannot name, keep the call in place. `runtime_type_names()`, which `isInstance`, `cast` and array stores ask on
 every call, has no `match`: it reads a static at the crate root that holds each class's names by
 class number (`TYPE_NAMES_BY_CLASS_NUMBER`, `class_values::type_names_table`), one load at any
 optimization level, where a `match` over the thousand classes that implement `Comparable` is a

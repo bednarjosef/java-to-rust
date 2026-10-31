@@ -981,6 +981,34 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
 }
 
 #[test]
+fn a_dispatcher_over_many_classes_runs_each_call_in_a_function_of_its_own() {
+    // With a profile, LLVM inlines the hot arms of a `match` over thousands of classes into the
+    // dispatcher, whose frame then holds all their stack slots; a function of its own per arm
+    // keeps the dispatcher's frame small.
+    let shapes = |n: usize| {
+        let classes: String = (0..n)
+            .map(|k| format!("class C{k} implements Shape {{ int k; C{k}(int k) {{ this.k = k; }} public int area() {{ return k * {k}; }} }}\n"))
+            .collect();
+        let made: Vec<String> = (0..n).map(|k| format!("new C{k}(a.length + {k})")).collect();
+        translate(&format!(
+            "interface Shape {{ int area(); }}
+            {classes}
+            class A {{
+                public static void main(String[] a) {{
+                    Shape[] shapes = {{ {} }};
+                    int total = 0;
+                    for (Shape s : shapes) total += s.area();
+                    System.out.println(total);
+                }}
+            }}",
+            made.join(", ")
+        ))
+    };
+    assert_contains(&shapes(70), &["#[inline(never)] fn arm(o: &", "arm(o)"]);
+    assert_lacks(&shapes(60), &["fn arm("]);
+}
+
+#[test]
 fn upcasts_wrap_the_handle() {
     let rust = translate(TREE);
     assert_contains(
