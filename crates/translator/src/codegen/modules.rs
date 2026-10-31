@@ -658,10 +658,18 @@ impl<'a> Gen<'a> {
         let outer_traits = std::mem::take(&mut self.traits);
         self.indent = 0;
         let mut items: Vec<WrittenItem> = Vec::new();
+        // How long the crate root's pieces take, for the timings: it is the slowest module of a
+        // large program.
+        let mut times: Option<Vec<(std::time::Duration, Piece)>> =
+            (package.is_empty() && crate::timings::enabled()).then(Vec::new);
         // Each piece the generator writes is an item: the text it added, and what it named.
-        let write = |g: &mut Self, piece: Piece, items: &mut Vec<WrittenItem>| {
+        let mut write = |g: &mut Self, piece: Piece, items: &mut Vec<WrittenItem>| {
             let start = g.item_start();
+            let clock = std::time::Instant::now();
             let origin = g.piece(piece);
+            if let Some(times) = &mut times {
+                times.push((clock.elapsed(), piece));
+            }
             let named = take_refers();
             let closures = std::mem::take(&mut g.closures);
             if g.out.len() > start {
@@ -722,6 +730,9 @@ impl<'a> Gen<'a> {
                 replaces = true;
             }
         }
+        if let Some(times) = times {
+            self.piece_timing(times);
+        }
         self.out = outer;
         let traits = std::mem::replace(&mut self.traits, outer_traits);
         let imports = with(|r| std::mem::take(&mut r.imports)).unwrap_or_default();
@@ -735,6 +746,35 @@ impl<'a> Gen<'a> {
             replaces,
             rejected: std::mem::take(&mut self.rejected),
         }
+    }
+
+    /// The `--timings` line of the pieces of the crate root that took longest to write.
+    fn piece_timing(&self, mut times: Vec<(std::time::Duration, Piece)>) {
+        let all: std::time::Duration = times.iter().map(|(time, _)| *time).sum();
+        times.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let class = self.class;
+        let slowest: Vec<String> = times
+            .iter()
+            .take(5)
+            .map(|&(time, piece)| {
+                let what = match piece {
+                    Piece::Class(t) => format!("class {}", class.types[t].name),
+                    Piece::ClassEnum(t) => format!("the enum of {}", class.types[t].name),
+                    Piece::Enum(t) => format!("enum {}", class.types[t].name),
+                    Piece::Statics => "the statics".to_string(),
+                    Piece::Monitors => "the monitors".to_string(),
+                    Piece::Function(m) => format!("function {}", class.methods[m].name),
+                    Piece::Main(_) => "main".to_string(),
+                };
+                format!("{what} {:.3} s", time.as_secs_f64())
+            })
+            .collect();
+        eprintln!(
+            "timing: codegen: the crate root's {} pieces in {:.3} s, the slowest {}",
+            times.len(),
+            all.as_secs_f64(),
+            slowest.join(", ")
+        );
     }
 
     /// The classes of the module being written, for the items that are collected per module.
