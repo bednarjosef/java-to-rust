@@ -7,10 +7,9 @@
 //! methods, which a census does not catch (`catch_panics`), comes out of the first module in
 //! their order that panicked, with its place in the translator, as it would with one thread.
 //!
-//! The generator writes on one thread unless `JAVA_TO_RUST_GENERATOR_THREADS` asks for more:
-//! the translator allocates from one arena of glibc's (`main.rs`), and threads that allocate as
-//! much as the generator does wait for each other's turns at it (see "Generator threads" in
-//! docs/performance.md).
+//! The generator writes on one thread unless `JAVA_TO_RUST_GENERATOR_THREADS` asks for more,
+//! until a census of the Minecraft server shows its peak memory on several (see "Generator
+//! threads" in docs/performance.md).
 
 use super::*;
 use std::panic::AssertUnwindSafe;
