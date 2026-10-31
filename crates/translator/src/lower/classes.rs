@@ -546,6 +546,7 @@ impl<'t> Lowering<'t> {
                 | Type::Boxed(_)
                 | Type::Array(_)
                 | Type::StringBuilder
+                | Type::JavaClass
         );
         if !known {
             return unsupported(node, "getClass() of this type");

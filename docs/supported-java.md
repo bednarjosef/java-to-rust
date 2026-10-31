@@ -193,7 +193,9 @@ Design: [object-model.md](object-model.md).
   record patterns, negated patterns (`if (!(x instanceof T t)) return;` becomes `let .. else`,
   and the branches of `!(o instanceof T t) ? false : ..t..` swap), `||` chains with a negated
   pattern, and an `if` whose negated `&&` chain or `||` inside an `&&` chain binds a pattern
-  (`lower/negated_patterns.rs`). A failed downcast throws `ClassCastException`.
+  (`lower/negated_patterns.rs`). A failed downcast throws `ClassCastException`. A value of an
+  interface that strings and boxes implement (`Serializable`, `Constable`, `ConstantDesc`) may
+  be tested for a string or a box.
 - **`Object`** is an enum with a variant per class of the program whose values become `Object`s,
   plus strings, boxes, arrays, builders and class values (`Object::String(..)`,
   `Object::Integer(5)`, `Object::IntArray(..)`). `equals`/`hashCode` are the program's where
