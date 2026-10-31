@@ -763,23 +763,15 @@ impl Heap {
         start
     }
 
-    /// Gives `n` blocks from `start` back. Their memory goes back to the system, zeroed, only as
-    /// whole huge pages: the huge page that one 64 KB block was cut out of would become small
-    /// pages. A free block whose memory stays keeps what it held (`dirty`).
+    /// Gives `n` blocks from `start` back to the heap. Their memory stays and keeps what it held
+    /// (`dirty`): it goes back to the system only at a collection, beyond what the program takes
+    /// before the next one (`give_back`).
     fn free_blocks(&mut self, start: usize, n: usize) {
         for b in start..start + n {
             let m = self.meta(b);
             m.kind = FREE;
             m.listed = false;
             m.dirty = true;
-        }
-        const PER_PAGE: usize = HUGE_PAGE >> BLOCK_SHIFT;
-        let (first, end) = (start / PER_PAGE * PER_PAGE, (start + n).div_ceil(PER_PAGE) * PER_PAGE);
-        for page in (first..end).step_by(PER_PAGE) {
-            if (page..page + PER_PAGE).all(|b| self.meta(b).kind == FREE) {
-                unsafe { madvise(self.block_address(page) as *mut u8, HUGE_PAGE, MADV_DONTNEED) };
-                (page..page + PER_PAGE).for_each(|b| self.meta(b).dirty = false);
-            }
         }
         unsafe { *self.runs.add(self.run_count) = (start as u32, n as u32) };
         self.run_count += 1;
@@ -2151,6 +2143,7 @@ fn collect(g: &Guard) {
         mark_and_sweep(g, me, shares, false, taken, started);
     }
     scale_by_time(heap(g), started_time);
+    give_back(heap(g));
     for t in &THREADS {
         t.stopped_sp.set(0);
         t.thread_pointer.set(0);
@@ -2160,6 +2153,59 @@ fn collect(g: &Guard) {
     if h.code_pages > 0 && monotonic_seconds() >= h.code_pages_at + h.code_pages {
         h.code_pages_at = monotonic_seconds();
         give_code_pages_back();
+    }
+}
+
+/// Gives the memory of free blocks back to the system, beyond what the program takes before the
+/// next collection: whole huge pages of free blocks, the highest first, since free blocks and
+/// slots are taken lowest first. A huge page that one 64 KB block was cut out of would become
+/// small pages, so a page with a block in use stays. Memory given back when a block emptied came
+/// back at once, faulted in and zeroed by the system: BinaryTrees, whose trees die between
+/// collections, spent 0.14 s of its 2.5 s in the system (with one marker), and up to 0.43 s
+/// where the system had no huge pages to give.
+fn give_back(h: &mut Heap) {
+    const PER_PAGE: usize = HUGE_PAGE >> BLOCK_SHIFT;
+    // The room the program takes from before the next collection: the untaken slots of small
+    // blocks, the free blocks whose memory stays, and then whole free pages, lowest first.
+    let mut room = 0;
+    let mut whole = 0;
+    for page in (0..h.top).step_by(PER_PAGE) {
+        let mut free = 0;
+        let mut dirty = 0;
+        for b in page..page + PER_PAGE {
+            let m = h.meta(b);
+            match m.kind {
+                FREE => {
+                    free += 1;
+                    dirty += m.dirty as usize;
+                }
+                SMALL => room += (m.slots - m.live) as usize * m.size as usize,
+                _ => {}
+            }
+        }
+        if free < PER_PAGE {
+            room += dirty << BLOCK_SHIFT;
+        } else if dirty > 0 {
+            whole += 1;
+        }
+    }
+    let needed = h.next_collection.saturating_sub(h.taken);
+    let mut kept_pages = needed.saturating_sub(room).div_ceil(HUGE_PAGE);
+    if whole <= kept_pages {
+        return;
+    }
+    for page in (0..h.top).step_by(PER_PAGE) {
+        if (page..page + PER_PAGE).any(|b| h.meta(b).kind != FREE)
+            || !(page..page + PER_PAGE).any(|b| h.meta(b).dirty)
+        {
+            continue;
+        }
+        if kept_pages > 0 {
+            kept_pages -= 1;
+            continue;
+        }
+        unsafe { madvise(h.block_address(page) as *mut u8, HUGE_PAGE, MADV_DONTNEED) };
+        (page..page + PER_PAGE).for_each(|b| h.meta(b).dirty = false);
     }
 }
 

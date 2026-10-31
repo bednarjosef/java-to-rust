@@ -35,6 +35,16 @@ owned, and that Rust therefore never freed, is found unreachable too.
   measured difference on a system that gives them to every aligned range anyway. A free block
   whose memory stays keeps what it held, so a large allocation zeroes such blocks when it takes
   them.
+- **Giving memory back.** A block that empties, in a sweep or when Rust frees a large
+  allocation, keeps its memory. At the end of each collection, the whole free huge pages beyond
+  the room the program takes before the next collection go back to the system, the highest
+  first: that room is what the next collection waits for, less the untaken slots of small
+  blocks and the free blocks on pages that stay. So the heap keeps what the next cycle fills
+  again, and gives back what a program whose live objects shrank no longer needs. Giving every
+  whole free page back as the sweep found it had the system fault that memory in and zero it
+  again moments later: BinaryTrees, whose trees die between collections, ran 1.53 s instead of
+  1.17 s (median of 7 alternating runs), and spent 0.14 s to 0.43 s in the system, the more
+  where the system was short of huge pages.
 - **Lowest first.** A new block is taken from the free run lowest in the heap, and each slot
   size hands out its partly free blocks lowest first, so the objects that live gather at the
   bottom and whole huge pages above them empty and go back to the system. On the Minecraft
@@ -144,8 +154,8 @@ translated javac takes 14.5 s and 1.03 GB collecting after half as much as is al
 2. clears every mark, then marks every slot reachable from the roots, with an explicit stack, so
    a long chain of objects needs no recursion;
 3. sweeps: frees the taken slots left unmarked (clears their bits), lists the blocks with free
-   slots, and frees the blocks with nothing alive, giving their memory back to the system where
-   that empties a whole huge page. The marks stay until the next collection, which is what the
+   slots, and frees the blocks with nothing alive; then gives back the whole free huge pages
+   beyond what the next cycle takes (above). The marks stay until the next collection, which is what the
    young generation (below) builds on; the slots threads hold free lose theirs.
 
 The roots are scanned conservatively: any aligned word that points into a taken slot keeps that
