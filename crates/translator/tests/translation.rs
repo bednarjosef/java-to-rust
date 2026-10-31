@@ -7290,3 +7290,26 @@ fn a_for_loop_whose_bound_is_a_field_the_body_writes_stays_a_while_loop() {
     assert_contains(&rust, &["while i < self.count.get() {"]);
     assert_lacks(&rust, &["for i in"]);
 }
+
+#[test]
+fn a_shared_string_is_given_itself_to_the_methods_that_take_an_index() {
+    let rust = translate(
+        "class A {
+            static int walk(String s) {
+                int n = 0;
+                for (int i = s.indexOf(' '); i >= 0; i = s.indexOf(' ', i + 1)) {
+                    n += s.substring(0, i).length() + s.charAt(i);
+                }
+                return n;
+            }
+            public static void main(String[] a) {
+                String s = a.length > 0 ? a[0] : \"a b c\";
+                System.out.println(walk(s) + \" \" + (s == \"a b c\"));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["java::index_of_char(s.as_text(), ' ' as i32, 0)", "java::char_at(s.as_text(), i)"],
+    );
+}

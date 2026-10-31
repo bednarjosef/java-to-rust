@@ -26,7 +26,8 @@ pub fn char_to_string(c: u16) -> JString {
 }
 
 /// Java's `s.charAt(index)`: the UTF-16 code unit at `index`.
-pub fn char_at(s: &Wtf8, index: i32) -> u16 {
+#[inline]
+pub fn char_at<S: crate::Text + ?Sized>(s: &S, index: i32) -> u16 {
     try_char_at(s, index).unwrap_or_else(crate::uncaught)
 }
 
@@ -36,7 +37,15 @@ pub fn ascii_char_at(s: &Wtf8, index: i32) -> u16 {
 }
 
 /// `char_at` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_char_at(s: &Wtf8, index: i32) -> Result<u16, Exception> {
+#[inline]
+pub fn try_char_at<S: crate::Text + ?Sized>(s: &S, index: i32) -> Result<u16, Exception> {
+    if s.ascii_text() {
+        return try_ascii_char_at(s.wtf8_text(), index);
+    }
+    char_at_in(s.wtf8_text(), index)
+}
+
+fn char_at_in(s: &Wtf8, index: i32) -> Result<u16, Exception> {
     let bytes = s.as_bytes();
     // Up to an ASCII unit, units are bytes: a word-at-a-time check of the bytes before it, rather
     // than decoding every unit from the start.

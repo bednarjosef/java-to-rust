@@ -35,6 +35,17 @@ impl<'a> SteadyOf<'a> {
 }
 
 impl<'a> Gen<'a> {
+    /// The first argument of a runtime function that takes any `java::Text` (`substring`,
+    /// `index_of`, `char_at`, `string_length`, ...), made from what `text_ref` or `str_ref` gave:
+    /// a shared string as itself (`as_text`) rather than its text (`as_wtf8`), since the string
+    /// keeps whether it is ASCII and its text would be scanned at each call.
+    pub(super) fn text_owner(&self, text: String) -> String {
+        match text.strip_suffix(".as_wtf8()") {
+            Some(base) => format!("{base}.as_text()"),
+            None => text,
+        }
+    }
+
     /// A string expression as a `&java::Wtf8`.
     pub(super) fn str_ref(&mut self, e: &'a Expr) -> String {
         // A shared string's text.

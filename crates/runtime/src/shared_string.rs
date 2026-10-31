@@ -21,7 +21,8 @@ use std::sync::{Mutex, OnceLock};
 /// A string with an identity: copies are the same object, `same_str` compares objects. Its text
 /// is WTF-8, as a `JString`'s.
 ///
-/// The object is the text's length in four bytes, then its hash in four (0 until `hash_code`
+/// The object is the text's length in four bytes, whose top bit tells whether the text is all
+/// ASCII (Java's coder, see `JString::is_ascii_text`), then its hash in four (0 until `hash_code`
 /// computes it, as Java's `String.hash`), then the text, in the collected heap, and a `JStr` is
 /// its address: one word, copied without a count. Its alignment of four puts it
 /// in a block that the collector does not scan for pointers. The top 16 bits of the address are
@@ -32,6 +33,9 @@ pub struct JStr(NonNull<u32>);
 
 /// Where the text starts in a string object: after its length and its hash.
 const TEXT: usize = 8;
+
+/// The bit of the length word set when the text is all ASCII.
+const ASCII_BIT: u32 = 1 << 31;
 
 // The text never changes once made.
 unsafe impl Send for JStr {}
@@ -44,7 +48,11 @@ impl JStr {
     /// A new string object with the text `text`.
     pub fn new(text: impl AsRef<Wtf8>) -> JStr {
         let bytes = text.as_ref().as_bytes();
-        let len = u32::try_from(bytes.len()).expect("a string of less than 4 GB of text");
+        let len = u32::try_from(bytes.len())
+            .ok()
+            .filter(|&len| len & ASCII_BIT == 0)
+            .expect("a string of less than 2 GB of text");
+        let len = if bytes.is_ascii() { len | ASCII_BIT } else { len };
         let layout = Layout::from_size_align(TEXT + bytes.len(), 4).expect("a string's size fits");
         // The allocation has room for the length, the hash and the text, aligned for the length.
         unsafe {
@@ -69,7 +77,16 @@ impl JStr {
     fn bytes(&self) -> &[u8] {
         let header = self.header();
         // The object is the length and then that many bytes, alive while it is reachable.
-        unsafe { std::slice::from_raw_parts((header as *const u8).add(TEXT), *header as usize) }
+        unsafe {
+            std::slice::from_raw_parts((header as *const u8).add(TEXT), (*header & !ASCII_BIT) as usize)
+        }
+    }
+
+    /// Whether the text is all ASCII, so that its code units are its bytes.
+    #[inline]
+    pub fn is_ascii_text(&self) -> bool {
+        // The object's first word is its length and this bit, alive while it is reachable.
+        unsafe { *self.header() & ASCII_BIT != 0 }
     }
 
     /// `hashCode()`: computed on first use and kept in the object, as Java keeps it. Threads that
@@ -93,6 +110,12 @@ impl JStr {
     }
 
     /// The text, borrowed.
+    /// The string itself, as the `java::Text` that a `String` method taking an index reads,
+    /// which keeps whether it is ASCII; `as_wtf8` gives the text alone.
+    pub fn as_text(&self) -> &JStr {
+        self
+    }
+
     pub fn as_wtf8(&self) -> &Wtf8 {
         // SAFETY: a `JStr` holds the bytes of a `Wtf8`.
         unsafe { Wtf8::from_bytes_unchecked(self.bytes()) }

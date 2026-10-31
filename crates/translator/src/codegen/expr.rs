@@ -918,6 +918,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::StringLength => {
                 let s = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_ref(&args[0]) };
+                let s = self.text_owner(s);
                 Code::atom(format!("{}({})", self.runtime("string_length"), s))
             }
             Builtin::StringEquals => self.equals_optional(args),

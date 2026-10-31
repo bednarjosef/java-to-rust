@@ -39,7 +39,7 @@ plainer form only where it proves the meaning is the same:
 | reference that may be null | `Option<..>` | the plain value where nullness analysis proves it is never null (`analysis/nullness.rs`) |
 | `int` arithmetic | `wrapping_add`, `java::rem`, ... | `+ - * / %` where range analysis proves no overflow and a nonzero divisor (`analysis/ranges.rs`) |
 | array | `java::Array<T>`, a shared cell | `Vec<T>` (or `Vec<Vec<T>>`) when no other name can see it (`analysis/arrays.rs`) |
-| string | `java::JString`, WTF-8 bytes | `&java::Wtf8` for a parameter never assigned; byte indexing for strings proven ASCII |
+| string | `java::JString`, WTF-8 bytes and whether they are all ASCII | `&java::Wtf8` for a parameter never assigned; byte indexing for strings proven ASCII, or kept as ASCII |
 | object in a threaded program | `Arc<java::Monitored<C>>` of `java::SharedField`s | `Arc<C>` when immutable; `Arc<C>` of `java::Field`s when no other thread can reach it; no `java::Monitored` when no monitor site can lock it |
 
 Nullness analysis treats a field as not null when every constructor sets it to a non-null value
