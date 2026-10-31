@@ -289,6 +289,7 @@ impl<'a> Gen<'a> {
             return Code::new(format!("{s}.as_bytes()[{i}] as u16"), AS);
         }
         let s = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_ref(&args[0]) };
+        let s = if ascii { s } else { self.text_owner(s) };
         let f = if ascii { "ascii_char_at" } else { "char_at" };
         self.may_fail(id, f, "", &format!("{s}, {}", index.text))
     }

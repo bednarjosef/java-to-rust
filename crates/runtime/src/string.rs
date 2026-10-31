@@ -74,8 +74,67 @@ pub fn substring_from(s: &Wtf8, begin: i32) -> JString {
     try_substring_from(s, begin).unwrap_or_else(crate::uncaught)
 }
 
+/// A string that a `String` method taking a code unit index reads: its text, and whether that
+/// is all ASCII, in which case a unit index is a byte offset. A `JString` and a `JStr` keep that
+/// (Java's coder; `JString::is_ascii_text`), so a loop over a long string that is not known to be
+/// ASCII from its translation does not scan all of it at each call; a borrowed `Wtf8` is scanned.
+pub trait Text {
+    fn wtf8_text(&self) -> &Wtf8;
+    fn ascii_text(&self) -> bool;
+}
+
+impl Text for Wtf8 {
+    #[inline]
+    fn wtf8_text(&self) -> &Wtf8 {
+        self
+    }
+    #[inline]
+    fn ascii_text(&self) -> bool {
+        self.is_ascii()
+    }
+}
+
+impl Text for JString {
+    #[inline]
+    fn wtf8_text(&self) -> &Wtf8 {
+        self.as_wtf8()
+    }
+    #[inline]
+    fn ascii_text(&self) -> bool {
+        self.is_ascii_text()
+    }
+}
+
+impl Text for crate::JStr {
+    #[inline]
+    fn wtf8_text(&self) -> &Wtf8 {
+        self.as_wtf8()
+    }
+    #[inline]
+    fn ascii_text(&self) -> bool {
+        self.is_ascii_text()
+    }
+}
+
+macro_rules! text_through {
+    ($($t:ty),*) => {$(
+        impl<T: Text + ?Sized> Text for $t {
+            #[inline]
+            fn wtf8_text(&self) -> &Wtf8 {
+                (**self).wtf8_text()
+            }
+            #[inline]
+            fn ascii_text(&self) -> bool {
+                (**self).ascii_text()
+            }
+        }
+    )*};
+}
+
+text_through!(&T, &mut T, Box<T>, crate::locked::Ref<'_, T>, crate::locked::RefMut<'_, T>);
+
 /// `s.substring(begin, end)`.
-pub fn substring(s: &Wtf8, begin: i32, end: i32) -> JString {
+pub fn substring<S: Text + ?Sized>(s: &S, begin: i32, end: i32) -> JString {
     try_substring(s, begin, end).unwrap_or_else(crate::uncaught)
 }
 
@@ -96,7 +155,7 @@ pub fn ascii_substring_from(s: &Wtf8, begin: i32) -> JString {
 #[inline]
 pub fn try_ascii_substring(s: &Wtf8, begin: i32, end: i32) -> Result<JString, crate::Exception> {
     check_begin_end(begin, end, s.len())?;
-    Ok(s.slice(begin as usize, end as usize).to_owned())
+    Ok(JString::from_ascii(s.as_bytes()[begin as usize..end as usize].to_vec()))
 }
 
 /// `ascii_substring_from` where the program observes the `StringIndexOutOfBoundsException`.
@@ -106,16 +165,23 @@ pub fn try_ascii_substring_from(s: &Wtf8, begin: i32) -> Result<JString, crate::
 }
 
 /// `substring_from` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_substring_from(s: &Wtf8, begin: i32) -> Result<JString, crate::Exception> {
-    let len = length(s);
-    try_substring(s, begin, len as i32)
+#[inline]
+pub fn try_substring_from<S: Text + ?Sized>(s: &S, begin: i32) -> Result<JString, crate::Exception> {
+    let (ascii, s) = (s.ascii_text(), s.wtf8_text());
+    let len = if ascii { s.len() } else { length(s) };
+    substring_in(s, ascii, begin, len as i32)
 }
 
 /// `substring` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_substring(s: &Wtf8, begin: i32, end: i32) -> Result<JString, crate::Exception> {
-    if s.is_ascii() {
-        check_begin_end(begin, end, s.len())?;
-        return Ok(s.slice(begin as usize, end as usize).to_owned());
+#[inline]
+pub fn try_substring<S: Text + ?Sized>(s: &S, begin: i32, end: i32) -> Result<JString, crate::Exception> {
+    substring_in(s.wtf8_text(), s.ascii_text(), begin, end)
+}
+
+/// `try_substring` of the text `s`, `ascii` when it is all ASCII.
+fn substring_in(s: &Wtf8, ascii: bool, begin: i32, end: i32) -> Result<JString, crate::Exception> {
+    if ascii {
+        return try_ascii_substring(s, begin, end);
     }
     check_begin_end(begin, end, length(s))?;
     Ok(match (byte_offset(s, begin as usize), byte_offset(s, end as usize)) {
@@ -138,9 +204,14 @@ fn code_point_units(ch: i32, buf: &mut [u16; 2]) -> Option<&[u16]> {
 }
 
 /// `s.indexOf(ch, from)`, where `ch` is a code point (a `char` widened to `int`).
-pub fn index_of_char(s: &Wtf8, ch: i32, from: i32) -> i32 {
+#[inline]
+pub fn index_of_char<S: Text + ?Sized>(s: &S, ch: i32, from: i32) -> i32 {
+    index_of_char_in(s.wtf8_text(), s.ascii_text(), ch, from)
+}
+
+fn index_of_char_in(s: &Wtf8, ascii: bool, ch: i32, from: i32) -> i32 {
     let from = from.max(0) as usize;
-    if s.is_ascii() {
+    if ascii {
         if !(0..0x80).contains(&ch) || from >= s.len() {
             return -1;
         }
@@ -154,11 +225,16 @@ pub fn index_of_char(s: &Wtf8, ch: i32, from: i32) -> i32 {
 }
 
 /// `s.lastIndexOf(ch, from)`, where `ch` is a code point.
-pub fn last_index_of_char(s: &Wtf8, ch: i32, from: i32) -> i32 {
+#[inline]
+pub fn last_index_of_char<S: Text + ?Sized>(s: &S, ch: i32, from: i32) -> i32 {
+    last_index_of_char_in(s.wtf8_text(), s.ascii_text(), ch, from)
+}
+
+fn last_index_of_char_in(s: &Wtf8, ascii: bool, ch: i32, from: i32) -> i32 {
     if from < 0 {
         return -1;
     }
-    if s.is_ascii() {
+    if ascii {
         if !(0..0x80).contains(&ch) || s.is_empty() {
             return -1;
         }
@@ -185,8 +261,13 @@ fn index_of_units(s: &Wtf8, t: &Wtf8, from: usize) -> i32 {
 }
 
 /// `s.indexOf(t, from)`.
-pub fn index_of(s: &Wtf8, t: &Wtf8, from: i32) -> i32 {
-    if s.is_ascii() {
+#[inline]
+pub fn index_of<S: Text + ?Sized>(s: &S, t: &Wtf8, from: i32) -> i32 {
+    index_of_in(s.wtf8_text(), s.ascii_text(), t, from)
+}
+
+fn index_of_in(s: &Wtf8, ascii: bool, t: &Wtf8, from: i32) -> i32 {
+    if ascii {
         let from = from.clamp(0, s.len() as i32) as usize;
         return s.find_from(t, from).map_or(-1, |i| i as i32);
     }
@@ -204,8 +285,14 @@ pub fn index_of(s: &Wtf8, t: &Wtf8, from: i32) -> i32 {
 }
 
 /// `s.lastIndexOf(t, from)`.
-pub fn last_index_of(s: &Wtf8, t: &Wtf8, from: i32) -> i32 {
-    let (len, t_len) = (length(s) as i64, length(t) as i64);
+#[inline]
+pub fn last_index_of<S: Text + ?Sized>(s: &S, t: &Wtf8, from: i32) -> i32 {
+    last_index_of_in(s.wtf8_text(), s.ascii_text(), t, from)
+}
+
+fn last_index_of_in(s: &Wtf8, ascii: bool, t: &Wtf8, from: i32) -> i32 {
+    let len = if ascii { s.len() } else { length(s) };
+    let (len, t_len) = (len as i64, length(t) as i64);
     let from = (from as i64).min(len - t_len);
     if from < 0 {
         return -1;
@@ -213,7 +300,7 @@ pub fn last_index_of(s: &Wtf8, t: &Wtf8, from: i32) -> i32 {
     if t.is_empty() {
         return from as i32;
     }
-    if s.is_ascii() {
+    if ascii {
         let end = (from as usize + t.len()).min(s.len());
         return s.rfind_before(t, end).map_or(-1, |i| i as i32);
     }
@@ -1013,6 +1100,77 @@ mod tests {
         assert_eq!(uppercase_in(w("title"), w("")), "TITLE");
         assert_eq!(lowercase_in(w("\u{39f}\u{394}\u{39f}\u{3a3}"), w("de")), "\u{3bf}\u{3b4}\u{3bf}\u{3c2}");
         assert_eq!(lowercase_in(w("ISTANBUL"), w("fr")), "istanbul");
+    }
+
+    #[test]
+    fn a_string_keeps_whether_it_is_ascii_until_it_changes() {
+        let mut s = JString::from("plain");
+        assert!(s.is_ascii_text());
+        s.push_str("é");
+        assert!(!s.is_ascii_text());
+        s.clear();
+        s.push_unit(b'x' as u16);
+        assert!(s.is_ascii_text());
+        s.push_unit(0xD800);
+        assert!(!s.is_ascii_text());
+        assert!(s.clone() == s && !s.clone().is_ascii_text());
+        assert!(crate::JStr::new("plain").is_ascii_text());
+        assert!(!crate::JStr::new("caf\u{e9}").is_ascii_text());
+        assert_eq!(crate::JStr::new("caf\u{e9}").as_wtf8(), w("caf\u{e9}"));
+        assert!(substring(&JString::from("abcdef"), 1, 3).is_ascii_text());
+    }
+
+    #[test]
+    fn index_methods_on_a_kept_string_match_those_on_its_text() {
+        let mut lone = JString::from("a b");
+        lone.push_unit(0xD800);
+        lone.push_str(" x😀y é ab ");
+        let texts = [JString::from("ab cd ab x"), JString::from("caf\u{e9} x😀y ab "), lone, JString::new()];
+        for owned in &texts {
+            let shared = crate::JStr::new(owned.as_wtf8());
+            let text = owned.as_wtf8();
+            let len = crate::string_length(text);
+            assert_eq!(crate::string_length(owned), len);
+            assert_eq!(crate::string_length(&shared), len);
+            for i in -1..=len + 1 {
+                assert_eq!(index_of_char(owned, ' ' as i32, i), index_of_char(text, ' ' as i32, i));
+                assert_eq!(index_of_char(&shared, 'x' as i32, i), index_of_char(text, 'x' as i32, i));
+                assert_eq!(last_index_of_char(owned, 'a' as i32, i), last_index_of_char(text, 'a' as i32, i));
+                assert_eq!(index_of(owned, w("ab"), i), index_of(text, w("ab"), i));
+                assert_eq!(last_index_of(&shared, w("ab"), i), last_index_of(text, w("ab"), i));
+                assert_eq!(crate::try_char_at(owned, i).ok(), crate::try_char_at(text, i).ok());
+                assert_eq!(crate::try_char_at(&shared, i).ok(), crate::try_char_at(text, i).ok());
+                for end in i..=len + 1 {
+                    let a = try_substring(owned, i, end).ok();
+                    assert_eq!(a, try_substring(text, i, end).ok());
+                    assert_eq!(try_substring(&shared, i, end).ok(), a);
+                }
+                assert_eq!(try_substring_from(&shared, i).ok(), try_substring_from(text, i).ok());
+            }
+        }
+    }
+
+    #[test]
+    fn a_search_past_many_near_misses_finds_what_a_search_of_units_finds() {
+        let naive = |s: &Wtf8, t: &Wtf8, from: i32| index_of_units(s, t, from.max(0) as usize);
+        let naive_last = |s: &Wtf8, t: &Wtf8, from: i32| {
+            let (s, t) = (units(s), units(t));
+            let end = (from as i64).min(s.len() as i64 - t.len() as i64);
+            (0..=end).rev().find(|&i| s[i as usize..].starts_with(&t)).map_or(-1, |i| i as i32)
+        };
+        let mut lone = JString::from(&*"a".repeat(150));
+        lone.push_unit(0xD800);
+        lone.push_str(&"ab".repeat(80));
+        lone.push_str("aab😀");
+        let texts = [JString::from(&*format!("{}ab{}", "a".repeat(200), "a".repeat(100))), lone];
+        for s in &texts {
+            for t in ["ab", "aab", "aab😀", "ba", "abc"] {
+                for from in [0, 1, 70, 149, 150, 151, 200, 400] {
+                    assert_eq!(index_of(s, w(t), from), naive(s, w(t), from), "{t} from {from}");
+                    assert_eq!(last_index_of(s, w(t), from), naive_last(s, w(t), from), "{t} before {from}");
+                }
+            }
+        }
     }
 
     #[test]

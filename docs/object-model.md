@@ -493,8 +493,9 @@ is then:
 - `a == null && b == null` where no string can be on both sides: one side only interned and the
   other only new, or a side that is only ever null;
 - otherwise by the objects at run time. Every string of the program is then a `java::JStr`, the
-  address of an object in the collected heap that holds the text's length, its hash once
-  `hashCode` has computed it (cached, as Java's `String.hash` is), and its WTF-8 bytes (see 4),
+  address of an object in the collected heap that holds the text's length (and whether it is all
+  ASCII), its hash once `hashCode` has computed it (cached, as Java's `String.hash` is), and its
+  WTF-8 bytes (see 4),
   copied as one word and compared by address (`java::same_str`), and the program-wide switch
   (`Class::shared_strings`) makes each place that makes a string make the object Java makes: a
   literal is interned once (`java::interned_literal`), a new string is new, a method that may
@@ -1106,10 +1107,19 @@ normal text stays plain UTF-8 at no cost:
   `s += ...` is `java::append!`), whose pieces (`java::Piece`) are pushed one after another:
   each string, `char`, builder or object's string as it is, and the text between them as a
   literal or a `format_args!` of numbers and the like, so that halves that meet join.
-- **Code units.** `charAt`, `substring` and the other unit-indexed methods keep their ASCII fast
-  paths (`charAt` and `hashCode` read the ASCII bytes before the first other character as they
-  are, and decode only from there); their other path decodes WTF-8 to units exactly and encodes a lone surrogate back
-  (`from_units`). A builder holds UTF-16 units, so its `toString` (`text()`) is exact.
+- **Code units.** `charAt`, `substring`, `length`, `indexOf` and `lastIndexOf` take any
+  `java::Text`: a string that keeps whether its text is all ASCII, as Java's `String` keeps its
+  coder, so that on an ASCII string a unit index is a byte offset and no call scans the whole
+  text first. A `JString` finds that out by a scan the first time something asks and keeps it
+  until its text changes (an `AtomicU8` beside the bytes, so a `JString` is 32 bytes); a `JStr`
+  has it as the top bit of its length word, set when it is made; a borrowed `&Wtf8` (a string
+  parameter that the method never assigns, a literal) is scanned at each call. A `JStr` is passed
+  as itself (`as_text()`, `codegen/strings.rs`, `text_owner`) where other methods get its text.
+  Searching for a string looks for the pattern's first byte and compares the rest there, so a
+  match near `from` costs only the bytes up to it. On other text these methods decode WTF-8 to
+  units exactly and encode a lone surrogate back (`from_units`); `charAt` and `hashCode` read the
+  ASCII bytes before the first other character as they are, and decode only from there. A builder
+  holds UTF-16 units, so its `toString` (`text()`) is exact.
 - **Objects.** A `toString` is a method returning the string, never a `Display` (see 1.10), so
   the string it returns is kept exactly; an enum's string is `java_string()`, and in a
   concatenation an enum value is a piece that pushes it.

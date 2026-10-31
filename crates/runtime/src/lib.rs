@@ -364,8 +364,9 @@ pub fn min(a: f64, b: f64) -> f64 {
 }
 
 /// Java's `String.length()`, which counts UTF-16 code units.
-pub fn string_length(s: &Wtf8) -> i32 {
-    s.unit_len() as i32
+#[inline]
+pub fn string_length<S: Text + ?Sized>(s: &S) -> i32 {
+    if s.ascii_text() { s.wtf8_text().len() as i32 } else { s.wtf8_text().unit_len() as i32 }
 }
 
 /// Java's `System.exit`.

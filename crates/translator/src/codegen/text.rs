@@ -48,9 +48,11 @@ impl<'a> Gen<'a> {
         match op {
             StringOp::Substring => {
                 let s = self.text_ref(&args[0]);
+                let ascii_proved = self.facts.ascii_length.contains(&id);
+                let s = if ascii_proved { s } else { self.text_owner(s) };
                 let begin = self.int_arg(&args[1]);
                 // Of an ASCII string, a range of units is the same range of bytes.
-                let ascii = if self.facts.ascii_length.contains(&id) { "ascii_" } else { "" };
+                let ascii = if ascii_proved { "ascii_" } else { "" };
                 match args.get(2) {
                     None => {
                         self.may_fail(id, &format!("{ascii}substring_from"), "", &format!("{s}, {begin}"))
@@ -64,6 +66,7 @@ impl<'a> Gen<'a> {
             StringOp::IndexOf | StringOp::LastIndexOf => {
                 let first = op == StringOp::IndexOf;
                 let s = self.text_ref(&args[0]);
+                let s = self.text_owner(s);
                 let (target, f) = if char_like(&args[1]) {
                     let v = self.value(&args[1], Type::Int).text;
                     (v, if first { "index_of_char" } else { "last_index_of_char" })

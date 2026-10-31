@@ -12,6 +12,7 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The text of a string literal.
 pub const fn wtf8(s: &str) -> &Wtf8 {
@@ -205,30 +206,12 @@ impl Wtf8 {
     /// Bytes compare as units unless `t` starts with a low surrogate or ends with a high one
     /// (`has_half_edges`), which can match half of a pair.
     pub fn find_from(&self, t: &Wtf8, from: usize) -> Option<usize> {
-        let (h, n) = (&self.0[from..], &t.0);
-        // A one-byte pattern is searched for as a byte, without checking that the text is UTF-8.
-        let found = match n.len() {
-            0 => Some(0),
-            1 => h.iter().position(|&b| b == n[0]),
-            _ => match (std::str::from_utf8(h), std::str::from_utf8(n)) {
-                (Ok(h), Ok(n)) => h.find(n),
-                _ => h.windows(n.len()).position(|w| w == n),
-            },
-        };
-        found.map(|i| i + from)
+        find_bytes(&self.0[from..], &t.0).map(|i| i + from)
     }
 
     /// The byte offset of the last occurrence of `t` that ends by byte `end`.
     pub fn rfind_before(&self, t: &Wtf8, end: usize) -> Option<usize> {
-        let (h, n) = (&self.0[..end], &t.0);
-        match n.len() {
-            0 => Some(end),
-            1 => h.iter().rposition(|&b| b == n[0]),
-            _ => match (std::str::from_utf8(h), std::str::from_utf8(n)) {
-                (Ok(h), Ok(n)) => h.rfind(n),
-                _ => h.windows(n.len()).rposition(|w| w == n),
-            },
-        }
+        rfind_bytes(&self.0[..end], &t.0)
     }
 
     /// Whether it starts with a low surrogate or ends with a high one: then, as a pattern, it can
@@ -280,6 +263,56 @@ impl Wtf8 {
 /// Whether WTF-8 `bytes` end with a high surrogate.
 fn ends_high(bytes: &[u8]) -> bool {
     bytes.len() >= 3 && bytes[bytes.len() - 3] == 0xED && (0xA0..0xB0).contains(&bytes[bytes.len() - 2])
+}
+
+/// How many first-byte candidates `find_bytes` and `rfind_bytes` try before they search the rest
+/// with the standard library's linear-time search.
+const CANDIDATES: usize = 64;
+
+/// The first occurrence of `n` in `h`: a scan for its first byte, comparing the rest there, so
+/// that a match near the start costs only the bytes up to it (a search of the whole text as a
+/// `str` checked all of it to be UTF-8 first, which made a loop of `indexOf(t, from)` over a long
+/// string quadratic). After `CANDIDATES` misses the rest goes to the standard library's search,
+/// linear in the worst case, where it is UTF-8. A pattern's first byte is never inside a code
+/// point, so a candidate is a code point boundary.
+fn find_bytes(h: &[u8], n: &[u8]) -> Option<usize> {
+    let Some((&first, rest)) = n.split_first() else { return Some(0) };
+    let mut at = 0;
+    for _ in 0..CANDIDATES {
+        let p = at + h[at..].iter().position(|&b| b == first)?;
+        if h.len() - p < n.len() {
+            return None;
+        }
+        if &h[p + 1..p + n.len()] == rest {
+            return Some(p);
+        }
+        at = p + 1;
+    }
+    let h = &h[at..];
+    let found = match (std::str::from_utf8(h), std::str::from_utf8(n)) {
+        (Ok(h), Ok(n)) => h.find(n),
+        _ => h.windows(n.len()).position(|w| w == n),
+    };
+    found.map(|i| i + at)
+}
+
+/// The last occurrence of `n` in `h`, as `find_bytes` from the end.
+fn rfind_bytes(h: &[u8], n: &[u8]) -> Option<usize> {
+    let Some((&first, rest)) = n.split_first() else { return Some(h.len()) };
+    let mut end = h.len().checked_sub(n.len() - 1)?;
+    for _ in 0..CANDIDATES {
+        let p = h[..end].iter().rposition(|&b| b == first)?;
+        if &h[p + 1..p + n.len()] == rest {
+            return Some(p);
+        }
+        end = p;
+    }
+    // A match starts before `end`, so ends before `end + n.len() - 1`.
+    let h = &h[..end + n.len() - 1];
+    match (std::str::from_utf8(h), std::str::from_utf8(n)) {
+        (Ok(h), Ok(n)) => h.rfind(n),
+        _ => h.windows(n.len()).rposition(|w| w == n),
+    }
 }
 
 /// Whether WTF-8 `bytes` start with a low surrogate.
@@ -439,21 +472,58 @@ impl ToOwned for Wtf8 {
     type Owned = JString;
 
     fn to_owned(&self) -> JString {
-        JString(self.0.to_vec())
+        JString::of(self.0.to_vec())
     }
 }
 
-/// An owned string of WTF-8 bytes.
-#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct JString(Vec<u8>);
+/// An owned string of WTF-8 bytes, and whether they are all ASCII once something has asked
+/// (`is_ascii_text`), as Java's `String` keeps its coder: on an ASCII string a code unit index
+/// is a byte offset, so the `String` methods that take an index need no walk of the text
+/// (`java::Text`). Any change to the text forgets it.
+pub struct JString(Vec<u8>, AtomicU8);
+
+/// What a `JString` knows of its bytes: nothing yet, all ASCII, or not.
+const UNKNOWN: u8 = 0;
+const ASCII: u8 = 1;
+const NOT_ASCII: u8 = 2;
 
 impl JString {
     pub const fn new() -> JString {
-        JString(Vec::new())
+        JString(Vec::new(), AtomicU8::new(UNKNOWN))
+    }
+
+    const fn of(bytes: Vec<u8>) -> JString {
+        JString(bytes, AtomicU8::new(UNKNOWN))
+    }
+
+    /// The text `bytes`, which the caller knows are ASCII.
+    pub(crate) fn from_ascii(bytes: Vec<u8>) -> JString {
+        debug_assert!(bytes.is_ascii());
+        JString(bytes, AtomicU8::new(ASCII))
     }
 
     pub fn with_capacity(capacity: usize) -> JString {
-        JString(Vec::with_capacity(capacity))
+        JString::of(Vec::with_capacity(capacity))
+    }
+
+    /// Whether every byte is ASCII, so that each is a code unit: found by a scan the first time,
+    /// then kept until the text changes.
+    #[inline]
+    pub fn is_ascii_text(&self) -> bool {
+        match self.1.load(Ordering::Relaxed) {
+            ASCII => true,
+            NOT_ASCII => false,
+            _ => {
+                let ascii = self.0.is_ascii();
+                self.1.store(if ascii { ASCII } else { NOT_ASCII }, Ordering::Relaxed);
+                ascii
+            }
+        }
+    }
+
+    /// Forgets whether the text is ASCII, before it changes.
+    fn changing(&mut self) {
+        *self.1.get_mut() = UNKNOWN;
     }
 
     /// The string of UTF-16 code units `units`, exactly: a pair is its character, a lone
@@ -464,6 +534,12 @@ impl JString {
             out.push_unit(u);
         }
         out
+    }
+
+    /// The string itself, as the `java::Text` that a `String` method taking an index reads,
+    /// which keeps whether it is ASCII; `as_wtf8` gives the text alone.
+    pub fn as_text(&self) -> &JString {
+        self
     }
 
     pub fn as_wtf8(&self) -> &Wtf8 {
@@ -477,6 +553,7 @@ impl JString {
 
     /// Appends `text`; a low surrogate at its start joins a high one at the end of this string.
     pub fn push_wtf8(&mut self, text: &Wtf8) {
+        self.changing();
         if let (Some(high), Some(low)) = (self.last_high(), text.first_low()) {
             self.0.truncate(self.0.len() - 3);
             let c = 0x10000 + ((u32::from(high) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
@@ -489,6 +566,7 @@ impl JString {
 
     /// Appends a Rust string, which never starts with a lone surrogate.
     pub fn push_str(&mut self, text: &str) {
+        self.changing();
         self.0.extend_from_slice(text.as_bytes());
     }
 
@@ -499,6 +577,7 @@ impl JString {
 
     /// Appends one UTF-16 code unit, which may be half of a pair.
     pub fn push_unit(&mut self, unit: u16) {
+        self.changing();
         if (0xDC00..0xE000).contains(&unit)
             && let Some(high) = self.last_high()
         {
@@ -512,6 +591,7 @@ impl JString {
 
     /// Appends code point `c`, which may be a lone surrogate.
     pub fn push_code_point(&mut self, c: u32) {
+        self.changing();
         if c < 0x10000 {
             self.push_unit(c as u16);
         } else {
@@ -520,7 +600,46 @@ impl JString {
     }
 
     pub fn clear(&mut self) {
+        self.changing();
         self.0.clear();
+    }
+}
+
+impl Clone for JString {
+    fn clone(&self) -> JString {
+        JString(self.0.clone(), AtomicU8::new(self.1.load(Ordering::Relaxed)))
+    }
+}
+
+impl Default for JString {
+    fn default() -> JString {
+        JString::new()
+    }
+}
+
+impl PartialEq for JString {
+    fn eq(&self, other: &JString) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for JString {}
+
+impl PartialOrd for JString {
+    fn partial_cmp(&self, other: &JString) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JString {
+    fn cmp(&self, other: &JString) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl Hash for JString {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
     }
 }
 
@@ -546,13 +665,13 @@ impl AsRef<Wtf8> for JString {
 
 impl From<&str> for JString {
     fn from(s: &str) -> JString {
-        JString(s.as_bytes().to_vec())
+        JString::of(s.as_bytes().to_vec())
     }
 }
 
 impl From<String> for JString {
     fn from(s: String) -> JString {
-        JString(s.into_bytes())
+        JString::of(s.into_bytes())
     }
 }
 
