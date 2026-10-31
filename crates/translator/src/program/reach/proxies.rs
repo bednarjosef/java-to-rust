@@ -54,7 +54,7 @@ pub struct ProxyClass {
 /// The array of interfaces that the call `node` makes proxies of, if it is
 /// `Proxy.newProxyInstance` or `Proxy.getProxyClass`: its elements when it is an array creation
 /// with them, or `None`.
-fn creation(node: &Value) -> Option<Option<&Vec<Value>>> {
+fn creation(node: &Value) -> Option<Option<&[Value]>> {
     let symbol = &node["symbol"];
     let creates = text(node, "kind") == "METHOD_INVOCATION"
         && text(symbol, "owner") == "java.lang.reflect.Proxy"
@@ -66,7 +66,7 @@ fn creation(node: &Value) -> Option<Option<&Vec<Value>>> {
     if text(array, "kind") != "NEW_ARRAY" {
         return Some(None);
     }
-    Some(array["initializers"].as_array())
+    Some(array["initializers"].as_array().map(|a| a.as_slice()))
 }
 
 /// A method of a proxy class: its name, erased parameter and return types as the listed

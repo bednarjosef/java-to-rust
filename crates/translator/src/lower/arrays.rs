@@ -230,7 +230,7 @@ impl<'t> Lowering<'t> {
         let literal = class.kind() == "MEMBER_SELECT" && class.str("identifier") == "class";
         let of_variable = class.kind() == "METHOD_INVOCATION"
             && class.symbol().is_some_and(|s| s.name == "getClass")
-            && class.get("arguments").is_none_or(|a| a.0.as_array().is_none_or(Vec::is_empty))
+            && class.get("arguments").is_none_or(|a| a.0.as_array().is_none_or(|a| a.is_empty()))
             && class
                 .get("methodSelect")
                 .and_then(|s| s.get("expression"))

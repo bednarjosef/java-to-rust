@@ -58,7 +58,7 @@ fn hoist_in_enum(decl: &mut Value) {
         let (moved, kept): (Vec<Value>, Vec<Value>) = body.drain(..).partition(|m| {
             is_static_field(m) && m["name"].as_str().is_some_and(|n| declared.get(n) == Some(&1))
         });
-        *body = kept;
+        *body = kept.into();
         for mut field in moved {
             let name = field["name"].as_str().unwrap_or("").to_string();
             for m in body.iter_mut() {

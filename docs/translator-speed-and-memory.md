@@ -159,7 +159,13 @@ TextAdventure, and from more than 55 minutes of CPU (never finished) to about 2 
   list of its fields and every string, name or value, is interned once for the whole run. On
   javac's census the peak after loading went from 3.15 GB to 1.07 GB (328 MB of JSON), and the
   peak of the whole run from 3.22 GB to 1.43 GB; the census and the corpus's translations are
-  the same as before.
+  the same as before. A value is 16 bytes and a field 24: an interned string is one pointer, to
+  the place that holds its text's address and length, and an array's elements and an object's
+  fields are behind one pointer to their length and items (`thin_vec::ThinVec`), read into a
+  list of their exact length. With a `&str` and `Vec`s, a value took 32 bytes and a field 48:
+  javac's census (435 MB of JSON, 3.7 million objects with 21 million fields) held 1.73 GB
+  after loading and peaked at 2.25 GB; it now holds 0.87 GB and peaks at 1.40 GB, with the same
+  translation.
 - **Not done: lowering the generics attempts only where they change.** Each attempt lowers the
   whole program again from the same trees, which are already held, so no tree is read twice. The
   scans of the trees whose answers don't depend on the attempt are made once and handed on to the

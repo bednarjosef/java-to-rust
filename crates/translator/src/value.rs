@@ -4,62 +4,97 @@
 //! takes over half a kilobyte, about ten times its JSON text. Here an object is a list of its
 //! fields, and every string, key or value, is interned: the few hundred keys and the names and
 //! types that repeat across the units are each held once, for the whole run.
+//!
+//! A value is 16 bytes and a field 24: an interned string is a pointer to the one copy of its
+//! text, and the elements of an array and the fields of an object are behind one pointer to their
+//! length and items (`ThinVec`). With a `&str` and `Vec`s, a value took 32 bytes and a field 48,
+//! and the Minecraft server's trees about 9 GB.
 
 use std::fmt;
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::{LazyLock, Mutex};
+use thin_vec::ThinVec;
 
-/// An interned string: held once for the whole run, so a copy is a pointer.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Str(&'static str);
+/// An interned string: held once for the whole run, so a copy is a pointer, to the place that
+/// holds the text's address and length.
+#[derive(Clone, Copy)]
+pub struct Str(&'static &'static str);
 
 /// The strings interned so far.
-static STRINGS: LazyLock<Mutex<crate::analysis::FastSet<&'static str>>> = LazyLock::new(Default::default);
+static STRINGS: LazyLock<Mutex<crate::analysis::FastSet<Str>>> = LazyLock::new(Default::default);
 
 impl Str {
     pub fn new(s: &str) -> Str {
         let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&held) = strings.get(s) {
-            return Str(held);
+            return held;
         }
-        let held: &'static str = Box::leak(s.to_owned().into_boxed_str());
+        let held = Str(Box::leak(Box::new(&*Box::leak(s.to_owned().into_boxed_str()))));
         strings.insert(held);
-        Str(held)
+        held
     }
 
     pub fn as_str(&self) -> &'static str {
-        self.0
+        *self.0
+    }
+}
+
+// Strings are interned, so two are the same string exactly when they are at the same place; their
+// hash and order are those of their text, as a `Str` is looked up by a `&str` (`Borrow`).
+impl PartialEq for Str {
+    fn eq(&self, other: &Str) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for Str {}
+
+impl std::hash::Hash for Str {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl PartialOrd for Str {
+    fn partial_cmp(&self, other: &Str) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Str {
+    fn cmp(&self, other: &Str) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
     }
 }
 
 impl Deref for Str {
     type Target = str;
     fn deref(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl AsRef<str> for Str {
     fn as_ref(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl std::borrow::Borrow<str> for Str {
     fn borrow(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl fmt::Debug for Str {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self.0, f)
+        fmt::Debug::fmt(self.as_str(), f)
     }
 }
 
 impl fmt::Display for Str {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -83,37 +118,37 @@ impl From<&String> for Str {
 
 impl From<Str> for String {
     fn from(s: Str) -> String {
-        s.0.to_string()
+        s.as_str().to_string()
     }
 }
 
 impl PartialEq<str> for Str {
     fn eq(&self, other: &str) -> bool {
-        self.0 == other
+        self.as_str() == other
     }
 }
 
 impl PartialEq<&str> for Str {
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
+        self.as_str() == *other
     }
 }
 
 impl PartialEq<String> for Str {
     fn eq(&self, other: &String) -> bool {
-        self.0 == other
+        self.as_str() == other
     }
 }
 
 impl PartialEq<Str> for str {
     fn eq(&self, other: &Str) -> bool {
-        self == other.0
+        self == other.as_str()
     }
 }
 
 impl PartialEq<Str> for &str {
     fn eq(&self, other: &Str) -> bool {
-        *self == other.0
+        *self == other.as_str()
     }
 }
 
@@ -175,28 +210,32 @@ impl fmt::Display for Number {
 /// A JSON object: its fields in the order of their names, as `serde_json`'s `BTreeMap` keeps
 /// them (the walks of the trees see them in that order).
 #[derive(Clone, PartialEq, Default)]
-pub struct Map(Vec<(Str, Value)>);
+pub struct Map(ThinVec<(Str, Value)>);
 
 /// The most fields of an object that `Map::find` scans rather than searches.
 const SCANNED: usize = 12;
 
 impl Map {
     pub fn new() -> Map {
-        Map(Vec::new())
+        Map(ThinVec::new())
     }
 
     /// Where field `key` is, or would be.
     fn search(&self, key: &str) -> Result<usize, usize> {
         // The first bytes decide most comparisons, without comparing the strings in full.
         let first = key.as_bytes().first();
-        self.0.binary_search_by(|(k, _)| k.0.as_bytes().first().cmp(&first).then_with(|| k.0.cmp(key)))
+        self.0.binary_search_by(|(k, _)| {
+            k.as_str().as_bytes().first().cmp(&first).then_with(|| k.as_str().cmp(key))
+        })
     }
 
     /// Where field `key` is, if the object has it. A tree's node has a few fields, which a scan
     /// that compares lengths first finds sooner than a binary search of the names.
     fn find(&self, key: &str) -> Option<usize> {
         match self.0.len() {
-            0..=SCANNED => self.0.iter().position(|(k, _)| k.0.len() == key.len() && k.0 == key),
+            0..=SCANNED => {
+                self.0.iter().position(|(k, _)| k.as_str().len() == key.len() && k.as_str() == key)
+            }
             _ => self.search(key).ok(),
         }
     }
@@ -264,10 +303,6 @@ impl Map {
             self.insert(k, v);
         }
     }
-
-    fn shrink(&mut self) {
-        self.0.shrink_to_fit();
-    }
 }
 
 impl<'a> IntoIterator for &'a Map {
@@ -292,7 +327,7 @@ impl<'a> IntoIterator for &'a mut Map {
 
 impl IntoIterator for Map {
     type Item = (Str, Value);
-    type IntoIter = std::vec::IntoIter<(Str, Value)>;
+    type IntoIter = thin_vec::IntoIter<(Str, Value)>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
@@ -322,7 +357,7 @@ pub enum Value {
     Bool(bool),
     Number(Number),
     String(Str),
-    Array(Vec<Value>),
+    Array(ThinVec<Value>),
     Object(Map),
 }
 
@@ -331,7 +366,7 @@ static NULL: Value = Value::Null;
 impl Value {
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::String(s) => Some(s.0),
+            Value::String(s) => Some(s.as_str()),
             _ => None,
         }
     }
@@ -364,14 +399,14 @@ impl Value {
         }
     }
 
-    pub fn as_array(&self) -> Option<&Vec<Value>> {
+    pub fn as_array(&self) -> Option<&ThinVec<Value>> {
         match self {
             Value::Array(items) => Some(items),
             _ => None,
         }
     }
 
-    pub fn as_array_mut(&mut self) -> Option<&mut Vec<Value>> {
+    pub fn as_array_mut(&mut self) -> Option<&mut ThinVec<Value>> {
         match self {
             Value::Array(items) => Some(items),
             _ => None,
@@ -651,6 +686,12 @@ impl From<i32> for Value {
 
 impl From<Vec<Value>> for Value {
     fn from(items: Vec<Value>) -> Value {
+        Value::Array(items.into())
+    }
+}
+
+impl From<ThinVec<Value>> for Value {
+    fn from(items: ThinVec<Value>) -> Value {
         Value::Array(items)
     }
 }
@@ -686,12 +727,12 @@ impl From<&Value> for serde_json::Value {
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Number(Number::Int(n)) => serde_json::Value::from(*n),
             Value::Number(Number::Float(x)) => serde_json::Value::from(*x),
-            Value::String(s) => serde_json::Value::String(s.0.to_string()),
+            Value::String(s) => serde_json::Value::String(s.as_str().to_string()),
             Value::Array(items) => {
                 serde_json::Value::Array(items.iter().map(serde_json::Value::from).collect())
             }
             Value::Object(fields) => serde_json::Value::Object(
-                fields.iter().map(|(k, v)| (k.0.to_string(), serde_json::Value::from(v))).collect(),
+                fields.iter().map(|(k, v)| (k.as_str().to_string(), serde_json::Value::from(v))).collect(),
             ),
         }
     }
@@ -732,7 +773,7 @@ impl serde::Serialize for Value {
             Value::Bool(b) => serializer.serialize_bool(*b),
             Value::Number(Number::Int(n)) => serializer.serialize_i64(*n),
             Value::Number(Number::Float(x)) => serializer.serialize_f64(*x),
-            Value::String(s) => serializer.serialize_str(s.0),
+            Value::String(s) => serializer.serialize_str(s.as_str()),
             Value::Array(items) => {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {
@@ -750,7 +791,7 @@ impl serde::Serialize for Map {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(self.len()))?;
         for (k, v) in self {
-            map.serialize_entry(k.0, v)?;
+            map.serialize_entry(k.as_str(), v)?;
         }
         map.end()
     }
@@ -803,24 +844,50 @@ impl<'de> serde::de::Visitor<'de> for Visitor {
     }
 
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(item) = seq.next_element()? {
-            items.push(item);
+        // The elements go on a stack that every array being read shares, and are moved from there
+        // into an array of their exact length: one allocation per array, not one per doubling.
+        let start = ITEMS.with_borrow(Vec::len);
+        while let Some(item) = seq.next_element::<Value>()? {
+            ITEMS.with_borrow_mut(|items| items.push(item));
         }
-        items.shrink_to_fit();
-        Ok(Value::Array(items))
+        Ok(Value::Array(ITEMS.with_borrow_mut(|items| exact(items.drain(start..)))))
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
-        let mut fields = Map(Vec::with_capacity(access.size_hint().unwrap_or(0)));
+        let start = FIELDS.with_borrow(Vec::len);
         while let Some(key) = access.next_key::<KeyStr>()? {
-            let value = access.next_value()?;
-            // A key that javac writes twice keeps the last value, as `serde_json` does.
-            fields.insert(key.0, value);
+            let value = access.next_value::<Value>()?;
+            FIELDS.with_borrow_mut(|fields| fields.push((key.0, value)));
         }
-        fields.shrink();
-        Ok(Value::Object(fields))
+        Ok(Value::Object(FIELDS.with_borrow_mut(|fields| {
+            let read = &mut fields[start..];
+            // In the order of their names; a key that javac writes twice keeps the last value, as
+            // `serde_json` does.
+            read.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+            let mut kept: ThinVec<(Str, Value)> = ThinVec::with_capacity(read.len());
+            for (key, value) in fields.drain(start..) {
+                match kept.last_mut() {
+                    Some(last) if last.0 == key => last.1 = value,
+                    _ => kept.push((key, value)),
+                }
+            }
+            Map(kept)
+        })))
     }
+}
+
+thread_local! {
+    /// The elements of the arrays being read, innermost last (`Visitor::visit_seq`).
+    static ITEMS: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The fields of the objects being read, innermost last (`Visitor::visit_map`).
+    static FIELDS: std::cell::RefCell<Vec<(Str, Value)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The items, in a list of their exact length.
+fn exact<T>(items: impl ExactSizeIterator<Item = T>) -> ThinVec<T> {
+    let mut out = ThinVec::with_capacity(items.len());
+    out.extend(items);
+    out
 }
 
 /// A key of an object, interned as it is read.

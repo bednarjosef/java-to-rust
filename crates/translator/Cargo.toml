@@ -13,3 +13,4 @@ java-runtime = { path = "../runtime" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", default-features = false, features = ["full", "parsing", "printing"] }
 mimalloc = { version = "0.1.52", default-features = false }
+thin-vec = "0.2.21"

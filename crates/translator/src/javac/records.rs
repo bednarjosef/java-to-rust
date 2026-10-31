@@ -316,7 +316,7 @@ fn members(decl: &Value) -> impl Iterator<Item = &Value> {
 }
 
 fn params(method: &Value) -> &[Value] {
-    method["parameters"].as_array().map_or(&[], Vec::as_slice)
+    method["parameters"].as_array().map_or(&[], |a| a.as_slice())
 }
 
 /// A type without its type arguments: `R.Named` for `R.Named<T>`.
@@ -378,7 +378,7 @@ fn take_local_types(v: &mut Value, in_body: bool, out: &mut Vec<Value>) {
             if in_body && let Some(Value::Array(statements)) = fields.get_mut("statements") {
                 let local = |s: &Value| matches!(text(s, "kind"), "RECORD" | "ENUM" | "INTERFACE");
                 let (taken, rest): (Vec<Value>, Vec<Value>) = statements.drain(..).partition(local);
-                *statements = rest;
+                *statements = rest.into();
                 for mut decl in taken {
                     take_local_types(&mut decl, true, out);
                     out.push(decl);

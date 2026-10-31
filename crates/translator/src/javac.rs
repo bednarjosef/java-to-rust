@@ -279,7 +279,7 @@ impl Session {
         self.received += line.len();
         let mut tree = parse(&line).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
         Ok(match tree["units"].take() {
-            Value::Array(units) => units,
+            Value::Array(units) => units.into(),
             _ => Vec::new(),
         })
     }

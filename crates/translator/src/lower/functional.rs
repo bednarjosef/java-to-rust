@@ -45,7 +45,7 @@ fn template() -> &'static [Value] {
             serde_json::from_str(text).expect("build.rs writes the tree of Functional.java");
         rename(&mut tree);
         match tree["units"][0]["tree"]["typeDecls"].take() {
-            Value::Array(decls) => decls,
+            Value::Array(decls) => decls.into(),
             _ => panic!("the tree of Functional.java has its interfaces"),
         }
     })
