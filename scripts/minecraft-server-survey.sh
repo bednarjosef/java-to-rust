@@ -654,16 +654,26 @@ trial() {
     echo "$(cat "$dir"src/*.rs | wc -c) ${dir%/}"
   done | sort -rn)
   [ ${#group[@]} -gt 0 ] && groups+=("${group[*]}")
+  # Each part's time goes to trial-times.txt: the header, each group of bodies, the binary.
+  : > "$cache/trial-times.txt"
+  timed() {
+    local name=$1 began=$SECONDS
+    shift
+    "$@" || return
+    echo "$name $((SECONDS - began)) s" >> "$cache/trial-times.txt"
+  }
   bodies() {
-    local g
+    local g n=0
     for g in "${groups[@]}"; do
+      n=$((n + 1))
       # shellcheck disable=SC2086 # each group is its `-p` arguments
-      CARGO_BUILD_JOBS=$jobs "${slot[@]}" "${cap[@]}" "${build[@]}" $g || return
+      timed "bodies $n of ${#groups[@]}" env CARGO_BUILD_JOBS="$jobs" "${slot[@]}" "${cap[@]}" "${build[@]}" $g \
+        || return
     done
-    CARGO_BUILD_JOBS=${TRIAL_LINK_JOBS:-$(nproc)} "${slot[@]}" "${cap[@]}" "${build[@]}"
+    timed binary env CARGO_BUILD_JOBS="${TRIAL_LINK_JOBS:-$(nproc)}" "${slot[@]}" "${cap[@]}" "${build[@]}"
   }
   (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
-    && CARGO_BUILD_JOBS=${TRIAL_HEADER_JOBS:-1} "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
+    && timed header env CARGO_BUILD_JOBS="${TRIAL_HEADER_JOBS:-1}" "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
     && bodies) > "$cache/trial-build.txt" 2>&1 \
     || { [ "$jobs" -gt 1 ] && ! grep -q '^error' "$cache/trial-build.txt" \
       && echo "the trial build was killed; building the rest one crate at a time" >&2 \
@@ -671,6 +681,7 @@ trial() {
         && CARGO_BUILD_JOBS=1 "${slot[@]}" "${cap[@]}" "${build[@]}") >> "$cache/trial-build.txt" 2>&1; } \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
+  cat "$cache/trial-times.txt"
   run_server "$cache/trial-run" "$(trial_binary)"
 }
 
