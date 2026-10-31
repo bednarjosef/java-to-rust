@@ -91,42 +91,14 @@ impl<'a> Gen<'a> {
             Stmt::ForEach { name, array, body, .. } => self.for_each(name, array, body),
             Stmt::If { cond, then, otherwise } => self.if_stmt(cond, then, otherwise.as_deref(), false),
             Stmt::While { cond, body } => {
-                if matches!(cond.kind, ExprKind::Bool(true)) {
-                    self.line("loop {");
-                } else if let Some((cond_text, narrowed)) = self.let_chain(cond, &[body], &[]) {
-                    self.line(&format!("while {cond_text} {{"));
-                    self.loop_body(Loop::Plain, body, &[]);
-                    self.line("}");
-                    self.unnarrow(narrowed);
-                    return;
-                } else {
-                    let cond_text = self.condition(cond);
-                    self.line(&format!("while {cond_text} {{"));
-                }
-                self.loop_body(Loop::Plain, body, &[]);
-                self.line("}");
+                let fields = self.bind_loop_fields(Some(cond), &[], body);
+                self.while_loop(cond, body);
+                self.unbind_loop_fields(fields);
             }
             Stmt::DoWhile { body, cond } => {
-                let kind = if has_continue(body) { Loop::DoWhile(cond) } else { Loop::Plain };
-                self.line("loop {");
-                let fenced = !matches!(cond.kind, ExprKind::Bool(true)) && self.narrows_for(body, cond);
-                if fenced {
-                    self.indent += 1;
-                    self.line("{");
-                }
-                self.loop_body(kind, body, &[]);
-                if fenced {
-                    self.line("}");
-                    self.indent -= 1;
-                }
-                // `while (true)` never leaves, so the loop is an expression of any type, as
-                // Rust's `loop` without a `break` is.
-                if !matches!(cond.kind, ExprKind::Bool(true)) {
-                    self.indent += 1;
-                    self.exit_unless(cond);
-                    self.indent -= 1;
-                }
-                self.line("}");
+                let fields = self.bind_loop_fields(Some(cond), &[], body);
+                self.do_while_loop(body, cond);
+                self.unbind_loop_fields(fields);
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
             Stmt::Return(None, _) => self.return_stmt(None),
@@ -151,6 +123,46 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
         }
+    }
+
+    fn while_loop(&mut self, cond: &'a Expr, body: &'a Stmt) {
+        if matches!(cond.kind, ExprKind::Bool(true)) {
+            self.line("loop {");
+        } else if let Some((cond_text, narrowed)) = self.let_chain(cond, &[body], &[]) {
+            self.line(&format!("while {cond_text} {{"));
+            self.loop_body(Loop::Plain, body, &[]);
+            self.line("}");
+            self.unnarrow(narrowed);
+            return;
+        } else {
+            let cond_text = self.condition(cond);
+            self.line(&format!("while {cond_text} {{"));
+        }
+        self.loop_body(Loop::Plain, body, &[]);
+        self.line("}");
+    }
+
+    fn do_while_loop(&mut self, body: &'a Stmt, cond: &'a Expr) {
+        let kind = if has_continue(body) { Loop::DoWhile(cond) } else { Loop::Plain };
+        self.line("loop {");
+        let fenced = !matches!(cond.kind, ExprKind::Bool(true)) && self.narrows_for(body, cond);
+        if fenced {
+            self.indent += 1;
+            self.line("{");
+        }
+        self.loop_body(kind, body, &[]);
+        if fenced {
+            self.line("}");
+            self.indent -= 1;
+        }
+        // `while (true)` never leaves, so the loop is an expression of any type, as
+        // Rust's `loop` without a `break` is.
+        if !matches!(cond.kind, ExprKind::Bool(true)) {
+            self.indent += 1;
+            self.exit_unless(cond);
+            self.indent -= 1;
+        }
+        self.line("}");
     }
 
     /// The value of a `return`: a string variable is moved out rather than copied, since the
@@ -249,6 +261,7 @@ impl<'a> Gen<'a> {
                 _ => self.stmt(stmt, &[]),
             }
         }
+        let fields = self.bind_loop_fields(cond, update, body);
         match cond {
             // `for (..; true; ..)` never leaves but by `break`, as `loop` does, so the loop is an
             // expression of any type, as a method's last statement.
@@ -262,6 +275,7 @@ impl<'a> Gen<'a> {
         let kind = if has_continue(body) && !update.is_empty() { Loop::For(update) } else { Loop::Plain };
         self.loop_body(kind, body, update);
         self.line("}");
+        self.unbind_loop_fields(fields);
     }
 
     /// A counting loop as `for i in a..b`, `(a..b).rev()` or `(a..b).step_by(k)`.
@@ -290,9 +304,11 @@ impl<'a> Gen<'a> {
             range
         };
         let viewed = self.bind_views(body);
+        let fields = self.bind_loop_fields(None, &[], body);
         self.line(&format!("for {var} in {range} {{"));
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");
+        self.unbind_loop_fields(fields);
         for id in viewed {
             self.views.remove(&id);
         }

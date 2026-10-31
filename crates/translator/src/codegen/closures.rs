@@ -47,6 +47,7 @@ struct Saved<'a> {
     annotations: Vec<(String, Type, String)>,
     elements: HashMap<ExprId, String>,
     views: HashMap<ExprId, String>,
+    loop_fields: HashMap<ExprId, String>,
     sliced: HashMap<String, (String, usize)>,
     sliced_accesses: HashSet<ExprId>,
     out: String,
@@ -532,6 +533,7 @@ impl<'a> Gen<'a> {
             annotations: std::mem::take(&mut self.annotations),
             elements: std::mem::take(&mut self.elements),
             views: std::mem::take(&mut self.views),
+            loop_fields: std::mem::take(&mut self.loop_fields),
             sliced: std::mem::take(&mut self.sliced),
             sliced_accesses: std::mem::take(&mut self.sliced_accesses),
             out: std::mem::take(&mut self.out),
@@ -572,6 +574,7 @@ impl<'a> Gen<'a> {
         self.annotations = s.annotations;
         self.elements = s.elements;
         self.views = s.views;
+        self.loop_fields = s.loop_fields;
         self.sliced = s.sliced;
         self.sliced_accesses = s.sliced_accesses;
         self.out = s.out;

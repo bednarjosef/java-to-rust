@@ -67,6 +67,7 @@ mod arrays;
 mod borrow_args;
 mod java_arrays;
 mod java_objects;
+mod loop_fields;
 mod main_args;
 mod modules;
 mod natives;
@@ -763,6 +764,7 @@ impl<'a> Gen<'a> {
             boxed: HashMap::new(),
             elements: HashMap::new(),
             views: HashMap::new(),
+            loop_fields: HashMap::new(),
             sliced: HashMap::new(),
             sliced_accesses: HashSet::new(),
             out: String::new(),
@@ -1033,6 +1035,9 @@ struct Gen<'a> {
     /// Accesses of arrays at indexes proven in bounds that go through the view a counting loop
     /// took of the array before it (`bind_views`), by expression: the view's Rust name.
     views: HashMap<ExprId, String>,
+    /// Field reads that a loop takes once before it (`loop_fields.rs`), by expression: the
+    /// local that holds the value.
+    loop_fields: HashMap<ExprId, String>,
     /// The plain arrays that the loop being written reaches through slices (see
     /// `sliced_loops.rs`): Java name to the slice's Rust name and how many rows it skips.
     sliced: HashMap<String, (String, usize)>,
