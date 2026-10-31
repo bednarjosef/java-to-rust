@@ -751,7 +751,7 @@ impl<'a> Gen<'a> {
     /// The `--timings` line of the pieces of the crate root that took longest to write.
     fn piece_timing(&self, mut times: Vec<(std::time::Duration, Piece)>) {
         let all: std::time::Duration = times.iter().map(|(time, _)| *time).sum();
-        times.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        times.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
         let class = self.class;
         let slowest: Vec<String> = times
             .iter()
