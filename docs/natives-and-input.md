@@ -100,7 +100,7 @@ something a translated program does not have.
 | `ProcessImpl.spawn0(...)` | `java::spawn_process(...)` | starts a process (see "Processes" below) |
 | `Inflater` natives (`inflateBytesBytes`, `inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, ...) | `inflate.rs` | zlib inflation, from arrays or from memory outside the heap by address (direct buffers) |
 | `Deflater` natives (`init`, `deflateBytesBytes`, `deflateBytesBuffer`, `deflateBufferBytes`, `deflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, `getAdler`, `reset`, `end`) | `deflate.rs` | a compressor of the runtime's own, see "Compression" below |
-| `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()`, `getAndClearReferencePendingList()`, `waitForReferencePendingList()` | code on the field `referent`; `false`; `null`; `java::wait_for_pending_references()`, which parks for ever | see "References" below |
+| `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()`, `waitForReferencePendingList()`; `TranslatedReferences.register`, `next` | code on the field `referent`; `java::has_pending_references()`, `java::wait_for_pending_references()`; `java::register_reference`, `java::take_pending_reference` | see "References" below |
 | `Unsafe.getLoadAverage0(loadavg, nelems)` | `java::load_average` | the C library's `getloadavg`: the number of samples written, or -1 |
 | `OperatingSystemImpl.initialize0`, `getTotalMemorySize0`, `getFreeMemorySize0`, `getTotalSwapSpaceSize0`, `getFreeSwapSpaceSize0`, `getCommittedVirtualMemorySize0`, `getProcessCpuTime0`, `getOpenFileDescriptorCount0`, `getMaxFileDescriptorCount0`, `getHostOnlineCpuCount0` | nothing; `java::os_total_memory`, ... (`vm.rs`) | as the JDK's `libmanagement_ext` reads them on Linux: `sysconf`'s pages times the page size, `sysinfo`'s swap, `vsize` of `/proc/self/stat`, `times()` in whole clock ticks, the entries of `/proc/self/fd` but the one that reads it, and the hard `RLIMIT_NOFILE` (HotSpot raises the soft limit to it when it starts) |
 | `VMManagementImpl.getStartupTime`, `getUptime0` | `java::vm_startup_time`, `vm_uptime` (`vm.rs`) | the JVM's start is the process's, from `/proc` as `ProcessHandleImpl.isAlive0` reads it, the same on every call; the uptime is the milliseconds since then. The other natives that `java.management` reaches at start are the translator's patch ([jdk-overlays.md](jdk-overlays.md)) |
@@ -497,13 +497,12 @@ A translated program is closed: it knows all its classes. So:
 
 ### References
 
-`java.lang.ref` is translated from the JDK (`lower/references.rs`). A reference holds its
-referent in an ordinary field, which the collector ([collector.md](collector.md)) traces as any
-other, so it keeps the referent alive and nothing clears it behind the program's back. So a
-reference behaves as on a JVM whose collector never needs the memory: `get` gives the referent until `clear`, and no reference is enqueued but
-by `enqueue`. No reference is ever pending, so the reference handler thread that `Reference`
-starts waits for ever in `waitForReferencePendingList`; it is a daemon thread, so the program
-ends without it.
+`java.lang.ref` is translated from the JDK (`lower/references.rs`), with a patch of `Reference`
+and `ReferenceQueue` (`java/patches/java/lang/ref/`). The referent natives are code on the field
+`referent`, a `java::WeakField` that the collector clears once nothing else keeps the referent;
+a reference registers itself with the collector through `TranslatedReferences.register`, and
+the cleared ones with a queue come back through `TranslatedReferences.next`. How the collector
+treats them, and what a program can see, is in [collector.md](collector.md), "References".
 
 ## Standard streams and `java.io` in a translation
 

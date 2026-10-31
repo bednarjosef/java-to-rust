@@ -174,6 +174,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/util/PropertyResourceBundle.java` | reads a stream through `TranslatedPropertyFiles` |
 | `java/util/ServiceLoader.java` | the providers the translator read from the sources |
 | `java/util/WeakHashMap.java` | matches a key by reading the referent, `k == key \|\| key.equals(k)`, instead of `refersTo` |
+| `java/lang/ref/Reference.java`, `ReferenceQueue.java` | a reference registers itself with the collector (`TranslatedReferences`, docs/collector.md, "References"); `poll` moves the cleared references onto their queues itself, and the Reference Handler thread starts only when a thread waits in `remove` |
 | `jdk/internal/foreign/Utils.java` | no method handles of address layouts; `makeRawSegmentViewVarHandle` throws |
 | `jdk/internal/jimage/BasicImageReader.java` | reads the image's index and resources into arrays instead of mapping the file |
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |

@@ -6,7 +6,8 @@
 //! element or a static, returned, thrown, handed to the runtime (a builtin, a string
 //! concatenation, which calls its `toString`), or passed to a call whose callee lets that
 //! parameter escape, or to a call that is not known. Anything the analysis does not model
-//! escapes.
+//! escapes. A `java.lang.ref.Reference` always does: the collector clears its referent in the
+//! heap.
 //!
 //! Each method gets a summary of its parameters, `this` first: whether each may escape, and
 //! whether each may be what the method returns (`ListBuffer.append` returns `this`), so that a
@@ -946,8 +947,15 @@ fn compile<'a>(
             &mut |_| {},
         );
     }
+    // A `Reference` (or a subclass, such as `WeakHashMap.Entry`) never stays: the collector's
+    // registry of references holds the reference's address in the heap, to clear its referent
+    // there (`java::register_reference`).
+    let reference = class.type_index("java.lang.ref.Reference");
     for x in made {
         let site = match x.kind {
+            ExprKind::New { class: c, .. } if reference.is_some_and(|r| class.hierarchy.is_subtype(c, r)) => {
+                None
+            }
             ExprKind::New { class: c, .. } => Some((c, None)),
             _ => match cx.targets(x) {
                 Some(l) => match cx.lists.targets[l as usize][..] {

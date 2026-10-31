@@ -657,6 +657,9 @@ impl<'a> Gen<'a> {
 
     /// The cell type of field `f` of class `t`, whose value is of type `ty`.
     pub(super) fn cell_type(&self, t: usize, f: &Field, ty: &str) -> String {
+        if self.weak_referent(t, f) {
+            return format!("java::WeakField<{ty}>");
+        }
         let compact = if self.compact_field(t, f) { "Ref" } else { "" };
         if self.shared_cells(&self.class.types[t].name) {
             format!("java::Shared{compact}Field<{ty}>")
@@ -668,6 +671,9 @@ impl<'a> Gen<'a> {
     /// The value of field `f` in a struct literal of class `t`: a cell for a celled class.
     pub(super) fn field_cell(&self, t: usize, f: &Field, value: String) -> String {
         let name = &self.class.types[t].name;
+        if self.weak_referent(t, f) {
+            return format!("java::WeakField::new({value})");
+        }
         let compact = if self.compact_field(t, f) { "Ref" } else { "" };
         if self.shared_cells(name) {
             format!("java::Shared{compact}Field::new({value})")
@@ -678,6 +684,14 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether field `f` of class `t` is the referent of `java.lang.ref.Reference` in a celled
+    /// class, a `java::WeakField`, which the collector does not trace and clears once nothing
+    /// else keeps the referent (docs/collector.md, "References").
+    pub(super) fn weak_referent(&self, t: usize, f: &Field) -> bool {
+        let name = &self.class.types[t].name;
+        name == "java.lang.ref.Reference" && f.name == "referent" && self.celled(name)
+    }
+
     /// Whether field `f` of class `t` holds its reference in 4 bytes, in a `java::RefField` or a
     /// `java::SharedRefField` (`codegen::compact_references`): a field of a celled class whose
     /// value is the handle of an object of one class, of an array, or of a string with an identity
@@ -686,6 +700,7 @@ impl<'a> Gen<'a> {
     pub(super) fn compact_field(&self, t: usize, f: &Field) -> bool {
         let decl = &self.class.types[t];
         compact_references()
+            && !self.weak_referent(t, f)
             && self.celled(&decl.name)
             && !self.facts.frozen_fields.contains(&(t, f.name.clone()))
             && self.compact_type(f.ty)
@@ -806,6 +821,8 @@ impl<'a> Gen<'a> {
         !(ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_)))
             && self.celled_object(object)
             && !self.compact_cell(object, name)
+            && !(name == "referent"
+                && self.class.field_owner_name(object.ty, name) == Some("java.lang.ref.Reference"))
             && self.fixed(object, name)
             && !self.volatile_cell(object, name)
             && !self.in_field_inits

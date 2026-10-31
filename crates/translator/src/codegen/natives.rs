@@ -376,7 +376,12 @@ impl<'a> Gen<'a> {
             | Native::DeflateEnd
             | Native::DeflateSetDictionary
             | Native::DeflateSetDictionaryBuffer => self.deflate_native(native, args, id),
-            Native::NoPendingReferences => Code::atom("false"),
+            Native::HasPendingReferences => call(self, "has_pending_references", vec![]),
+            Native::RegisterReference => self.register_reference(args),
+            Native::NextPendingReference => {
+                let ty = self.ty_name(ty);
+                call(self, &format!("take_pending_reference::<{ty}>"), vec![])
+            }
             Native::WaitForPendingReferences => call(self, "wait_for_pending_references", vec![]),
             Native::LoadAverage => {
                 let n = self.value(&args[1], Type::Int).text;
@@ -403,6 +408,32 @@ impl<'a> Gen<'a> {
     /// `Thread.start0(t, tid, name, daemon)` with the call `t.run()` that lowering added: the new
     /// thread gets its own handle of `t`, makes it its current thread and runs the call, outside
     /// any `try` of the code that starts it. An exception that escapes `run` ends that thread.
+    /// `TranslatedReferences.register(reference, kind, queued)`: the reference's handle and its
+    /// referent's cell, a `java::WeakField` (`weak_referent`), for the collector's registry. A
+    /// reference whose referent is an ordinary field (of a class that is not celled) is not
+    /// registered, and keeps its referent.
+    fn register_reference(&mut self, args: &'a [Expr]) -> Code {
+        let [reference, kind, queued] = args else { unreachable!("register has three arguments") };
+        let referent = self.class.type_index("java.lang.ref.Reference").and_then(|t| {
+            let f = self.class.types[t].fields.iter().find(|f| f.name == "referent")?;
+            self.weak_referent(t, f).then_some(())
+        });
+        if referent.is_none() {
+            return Code::atom("()");
+        }
+        let handle = self.object_handle(reference);
+        let borrow = match self.enum_of(reference) {
+            Some(t) => self.enum_borrow(t, false),
+            None => "",
+        };
+        let path = self.field_path(reference, "referent");
+        let (kind, queued) = (self.value(kind, Type::Int).text, self.value(queued, Type::Boolean).text);
+        let register = self.runtime("register_reference");
+        Code::atom(format!(
+            "{{ let reference = {handle}; {register}(&reference, &reference{borrow}.{path}, {kind}, {queued}) }}"
+        ))
+    }
+
     fn thread_start(&mut self, args: &'a [Expr]) -> Code {
         let [thread, tid, name, daemon, run] = args else { unreachable!("start0 has the call of run") };
         let ExprKind::Var(var) = &thread.kind else { unreachable!("start0's thread is a parameter") };

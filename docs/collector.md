@@ -275,6 +275,55 @@ has been measured on the Minecraft server: it saves processor time on programs w
 are many (`SmallObjects`, `BinaryTrees`), but keeps old objects that died until the next full
 collection, which raises the peak of some.
 
+## References
+
+Soft, weak and phantom references (`java.lang.ref`, translated from the JDK's sources with a patch
+of `Reference` and `ReferenceQueue`) are real: the collector clears a referent that nothing else
+keeps (`gc/references.rs`, `weak.rs`).
+
+- **The cell.** The referent of `java.lang.ref.Reference` is a `java::WeakField`, which holds its
+  word inverted (null stays 0), so marking, which reads every word of a slot as a possible
+  reference, never follows it, and a minor collection's scan of written pages does not either.
+  `get` decodes it, and stores the collector's clock into the cell beside it when it differs,
+  for the soft policy below.
+- **The registry.** As its constructor ends, a reference registers itself
+  (`TranslatedReferences.register`): its handle, the address of its cell, its kind and whether
+  it has a queue, in a table outside the heap, under the heap's lock. A `FinalReference` is not
+  registered: the translation runs no finalizers, so it keeps its referent as long as it lives,
+  and is never cleared or enqueued. Nor is a reference to `null`. A reference never lives on a
+  method's stack (`analysis/escape.rs`), as the registry holds its address in the heap.
+- **A collection**, after marking and before the sweep, (1) marks the references that wait to
+  be put on their queues; (2) keeps the soft referents that the policy keeps and marks what they
+  reach, until no more are kept, so that an object both softly and weakly reachable stays with
+  its soft reference; (3) forgets the references that died and those whose referent is null, and
+  clears every other reference whose referent is not marked, adding it to the pending list if it
+  has a queue. In a minor collection old objects keep their marks, so only young referents are
+  cleared, and every soft referent is kept.
+- **The soft policy** is HotSpot's (`SoftRefLRUPolicyMSPerMB`): at a full collection, a soft
+  referent that nothing else keeps is cleared when the bytes alive after the last collection are
+  past `JAVA_GC_SOFT_LIMIT` MB (by default a quarter of the machine's memory), or when it was last
+  read longer ago than `JAVA_GC_SOFT_MS_PER_MB` milliseconds (1000 by default) per MB that the
+  live heap is below that limit. The clock is the milliseconds from the heap's start to the start
+  of the last collection.
+- **Queues.** No Reference Handler thread runs until a thread waits in `ReferenceQueue.remove`,
+  which starts it: `ReferenceQueue.poll` first moves the pending references onto their queues
+  itself, so a program that only polls, as `WeakHashMap` does, starts no thread. That matters
+  beyond the thread: a program that may start one is translated as a threaded program, with
+  process-wide statics and shared objects (docs/multi-threading.md), so a `WeakHashMap` must not
+  make a single-threaded program threaded. With nothing pending, a poll's check costs one atomic
+  load.
+- **Threads stopped mid-read.** Threads are stopped by a signal wherever they are, so one may be
+  stopped between loading a referent's inverted word and decoding it. Once any reference is
+  registered, every root word is therefore also read inverted, which may keep a referent for one
+  more collection, never lose one.
+
+What a program can see: a referent that nothing else keeps is cleared at some collection after
+the last strong use, as on a JVM; when depends on when the collector runs, which here is when the
+program has allocated enough (`System.gc()` does nothing), and on the conservative scan of the
+stacks, which may keep a referent that a copy of its address left on a stack points to. A
+`WeakHashMap` loses the entries of keys that nothing else keeps, and a cache of soft references
+keeps what it read lately while memory is plentiful.
+
 ## Threads
 
 The runtime's `pthread_create` takes the C library's place: it registers the new thread (its
@@ -310,6 +359,12 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   string's bytes), and the slots of no type by size, to set beside a JVM's class histogram. Level
   3 records each allocation's type from the start, in a table beside the heap of 2 bytes per 16;
   without it the cost is one load and branch per allocation, not measurable on BinaryTrees.
+  With 4 (`gc/who.rs`), also what holds the objects of the types that `JAVA_GC_CENSUS_WHO`
+  names (parts of type names, comma-separated, or `untyped:<size>` for the slots of that size
+  of no type that no object owns): the holders' types (an object, the buffer an object of a type
+  owns, a slot of no type), how many objects no slot holds (the roots keep them), and for two of
+  them a chain of holders back to a root, naming it (static data, thread-local storage, a
+  thread's stack). `JAVA_GC_CENSUS_FROM=<n>` reports only from the nth full collection on.
 - `JAVA_GC_GROWTH=<percent>` sets the bytes taken between collections as a percentage of the
   bytes alive (100 by default), which trades memory for time.
 - `JAVA_GC_TIME=<percent>` sets the share of processor time above which that grows (50 by

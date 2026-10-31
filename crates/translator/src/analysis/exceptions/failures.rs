@@ -408,8 +408,10 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             | Native::DeflateAdler
             | Native::DeflateReset
             | Native::DeflateEnd
-            | Native::NoPendingReferences
+            | Native::HasPendingReferences
             | Native::WaitForPendingReferences
+            | Native::RegisterReference
+            | Native::NextPendingReference
             | Native::LoadAverage
             | Native::OperatingSystem(_)
             | Native::MappingLoaded
