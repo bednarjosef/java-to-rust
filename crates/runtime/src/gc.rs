@@ -353,6 +353,9 @@ struct Heap {
     /// did.
     code_pages: u64,
     code_pages_at: u64,
+    /// Whether each collection gives back the pages of the threads' stacks below where each
+    /// stopped (`give_stack_pages_back`; `JAVA_GC_STACK_PAGES=0` turns it off).
+    stack_pages: bool,
     /// Whether small slots and free blocks are taken lowest address first (`JAVA_GC_LOW_FIRST=0`
     /// turns it off).
     low_first: bool,
@@ -394,6 +397,7 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     minor: false,
     code_pages: 0,
     code_pages_at: 0,
+    stack_pages: true,
     low_first: false,
     log_sizes: false,
 }));
@@ -508,11 +512,14 @@ const PROT_READ_WRITE: i32 = 3;
 const MAP_PRIVATE_ANONYMOUS_NORESERVE: i32 = 0x02 | 0x20 | 0x4000;
 const MADV_DONTNEED: i32 = 4;
 const MADV_HUGEPAGE: i32 = 14;
+const MADV_NOHUGEPAGE: i32 = 15;
 /// The size of a huge page, to which the heap is aligned.
 const HUGE_PAGE: usize = 2 << 20;
 const SIGPWR: i32 = 30;
 const SA_SIGINFO_RESTART: i32 = 4 | 0x1000_0000;
 const SYS_FUTEX: i64 = 202;
+const SYS_GETPID: i64 = 39;
+const SYS_GETTID: i64 = 186;
 const FUTEX_WAIT_PRIVATE: i32 = 128;
 const FUTEX_WAKE_PRIVATE: i32 = 129;
 const PT_LOAD: u32 = 1;
@@ -577,12 +584,24 @@ fn futex_wake_some(word: &AtomicU32, n: i32) {
     unsafe { syscall(SYS_FUTEX, word as *const AtomicU32, FUTEX_WAKE_PRIVATE, n) };
 }
 
-/// Maps `len` bytes of zeroed memory that is only committed when touched.
-fn reserve(len: usize) -> *mut u8 {
+/// Maps `len` bytes of zeroed memory that is only committed when touched, on the system's
+/// default pages.
+fn map(len: usize) -> *mut u8 {
     let p = unsafe { mmap(ptr::null_mut(), len, PROT_READ_WRITE, MAP_PRIVATE_ANONYMOUS_NORESERVE, -1, 0) };
     if p as isize == -1 {
         std::process::abort();
     }
+    p
+}
+
+/// Maps `len` bytes as `map` does, on pages of 4 KB: a side table reserved large and touched
+/// only at its start (a mark stack, the list of free runs, the references) would otherwise take
+/// a whole huge page of 2 MB at its first write, on a system that gives huge pages to every
+/// aligned range (`transparent_hugepage=always`). The Minecraft server's 17 mark stacks (the
+/// collecting thread's, the shared pool's and 15 helpers') held 34 MB so, 2 MB each.
+fn reserve(len: usize) -> *mut u8 {
+    let p = map(len);
+    unsafe { madvise(p, len, MADV_NOHUGEPAGE) };
     p
 }
 
@@ -615,7 +634,7 @@ fn start(h: &mut Heap) {
     h.base = if low == LOW_HEAP {
         low
     } else {
-        let raw = reserve(HEAP_BYTES + HUGE_PAGE) as usize;
+        let raw = map(HEAP_BYTES + HUGE_PAGE) as usize;
         (raw + HUGE_PAGE - 1) & !(HUGE_PAGE - 1)
     };
     // The heap asks for huge pages, which the system then makes at a fault even when it would
@@ -625,7 +644,9 @@ fn start(h: &mut Heap) {
     if number_from(c"JAVA_GC_HUGE_PAGES") != Some(0) {
         unsafe { madvise(h.base as *mut u8, HEAP_BYTES, MADV_HUGEPAGE) };
     }
-    h.meta = reserve(MAX_BLOCKS * std::mem::size_of::<Meta>()) as *mut Meta;
+    // The blocks' descriptions are read at every candidate pointer marking finds, all over the
+    // table, which is as dense as the heap: they stay on the system's default pages.
+    h.meta = map(MAX_BLOCKS * std::mem::size_of::<Meta>()) as *mut Meta;
     h.runs = reserve(MAX_BLOCKS * std::mem::size_of::<(u32, u32)>()) as *mut (u32, u32);
     BASE.store(h.base, Ordering::Release);
     END.store(h.base, Ordering::Release);
@@ -648,6 +669,7 @@ fn start(h: &mut Heap) {
     }
     h.code_pages = number_from(c"JAVA_GC_CODE_PAGES").unwrap_or(CODE_PAGES_EVERY) as u64;
     h.code_pages_at = monotonic_seconds();
+    h.stack_pages = number_from(c"JAVA_GC_STACK_PAGES") != Some(0);
     h.low_first = number_from(c"JAVA_GC_LOW_FIRST") != Some(0);
     let census = number_from(c"JAVA_GC_CENSUS").unwrap_or(0);
     census::LEVEL.store(census, Ordering::Relaxed);
@@ -970,6 +992,9 @@ struct Thread {
     used: AtomicBool,
     pthread: Cell<usize>,
     stack_top: Cell<usize>,
+    /// The lowest address of its stack, page-aligned; 0 for the process's first thread, whose
+    /// stack the system grows down on demand (`give_stack_pages_back`).
+    stack_low: Cell<usize>,
     /// Where its stack pointer and thread pointer were when it stopped.
     stopped_sp: Cell<usize>,
     thread_pointer: Cell<usize>,
@@ -986,6 +1011,7 @@ static THREADS: [Thread; MAX_THREADS] = [const {
         used: AtomicBool::new(false),
         pthread: Cell::new(0),
         stack_top: Cell::new(0),
+        stack_low: Cell::new(0),
         stopped_sp: Cell::new(0),
         thread_pointer: Cell::new(0),
         lists: Cell::new(ptr::null()),
@@ -1030,6 +1056,8 @@ fn register(h: &Guard, lists: &Lists) {
     let t = &THREADS[i];
     t.pthread.set(me);
     t.stack_top.set(addr + size);
+    let first = unsafe { syscall(SYS_GETTID) == syscall(SYS_GETPID) };
+    t.stack_low.set(if first { 0 } else { addr.next_multiple_of(PAGE) });
     t.lists.set(lists);
     t.used.store(true, Ordering::Release);
     lists.entry.set(i);
@@ -2255,6 +2283,9 @@ fn collect(g: &Guard) {
     }
     scale_by_time(heap(g), started_time);
     give_back(heap(g));
+    if heap(g).stack_pages {
+        give_stack_pages_back(me);
+    }
     for t in &THREADS {
         t.stopped_sp.set(0);
         t.thread_pointer.set(0);
@@ -2317,6 +2348,31 @@ fn give_back(h: &mut Heap) {
         }
         unsafe { madvise(h.block_address(page) as *mut u8, HUGE_PAGE, MADV_DONTNEED) };
         (page..page + PER_PAGE).for_each(|b| h.meta(b).dirty = false);
+    }
+}
+
+/// How far below the stack pointer a stopped thread recorded its stack is kept: the handler that
+/// stopped it (`stopped`) goes on to wait on a futex and return, a few calls deeper.
+const STACK_PAGES_KEPT: usize = 16 * PAGE;
+
+/// Gives back to the system the pages of each stopped thread's stack below where it stopped:
+/// nothing there is alive, and a page the thread reaches again comes back zeroed at its first
+/// touch. A thread keeps every page it ever touched otherwise, so a deep call made once (a
+/// recursion in world generation, a parser at startup) holds its pages for the rest of the run.
+/// The threads are stopped, so none is running below its recorded stack pointer. The calling
+/// thread's stack, and the process's first thread's (`stack_low` 0), are left as they are.
+/// Pages not in memory cost the system nothing to give back, and a page given back costs a
+/// fault of a zeroed page when the thread reaches it again, so this runs at every collection.
+fn give_stack_pages_back(me: usize) {
+    for (i, t) in THREADS.iter().enumerate() {
+        let (low, sp) = (t.stack_low.get(), t.stopped_sp.get());
+        if i == me || !t.used.load(Ordering::Acquire) || low == 0 || sp == 0 {
+            continue;
+        }
+        let to = sp.saturating_sub(STACK_PAGES_KEPT) & !(PAGE - 1);
+        if to > low {
+            unsafe { madvise(low as *mut u8, to - low, MADV_DONTNEED) };
+        }
     }
 }
 
