@@ -684,6 +684,13 @@ byte for byte, and its generator takes 7.4 s: 3.4 s for the first round, 2.0 s f
 rounds of enum items together, and 1.9 s for the last, which wrote the whole program again in
 5.3 s.
 
+**The enum of `Object`.** Its dispatchers ask, for each class among its variants, whether a
+method is `Object`'s own, and finding the interface `Object` could go over every type of the
+program, so the enum took time in the square of the number of classes: 4.2 s of each round that
+wrote it on the Minecraft server. The generator finds `Object` once (`Gen::object_type`). On a
+program of 20,000 classes that each override some of `Object`'s methods, the generator goes from
+5.3 s to 2.3 s, and the rounds that write the enum of `Object` from 2.2 s and 1.9 s to 0.6 s each.
+
 **Generator threads.** Each round writes the program's modules one by one, and what it writes
 of a module depends on the module alone (`Gen::module`), so the modules of a round can be
 written on several threads (`codegen/threads.rs`): each thread has a generator of its own and
