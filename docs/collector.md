@@ -291,7 +291,9 @@ thread unregisters when it ends; its later frees during its exit go straight bac
 - `JAVA_GC_CENSUS=<level>` reports after each full collection what the live slots hold
   (`gc/census.rs`): with 1, how many of their words are zero, references (a `java::Thin` or the
   address of a slot's start), the buffers of `Vec`s and boxed slices, numbers below 2^32 and other
-  words, and what 4-byte references would save, three ways, from a low bound to a high one; with
+  words, and what 4-byte references would save, three ways, from a low bound to a high one, and
+  how many 4-byte halves of the other words would read as a 4-byte reference to a live slot (the
+  numbers a scan for such references without types would take for references); with
   2, also per slot size, and per class number of the objects that `java::Thin`s reach; with 3,
   also per Rust type, each type's objects and the buffers they own (an array's elements, a plain
   string's bytes), and the slots of no type by size, to set beside a JVM's class histogram. Level

@@ -540,6 +540,7 @@ pub(super) fn census(h: &Heap, level: usize) {
         unscanned >> 20
     ));
     report_counts(format_args!("all"), &all);
+    lookalikes(&census);
     if level >= 2 {
         for (i, counts) in by_size.iter().enumerate() {
             if counts.slots > 0 {
@@ -556,6 +557,48 @@ pub(super) fn census(h: &Heap, level: usize) {
     if level >= 3 && TYPES.load(Ordering::Acquire) {
         census_types(&mut census);
     }
+}
+
+/// Where the heap would start in the reservation of a heap whose 4-byte references are addresses
+/// divided by 8 (`lookalikes`).
+const PLACEMENTS: [usize; 3] = [1 << 30, 4 << 30, 16 << 30];
+
+/// Counts the 4-byte halves of the words of live slots that are not addresses in the heap and
+/// that would read as a 4-byte reference to a live slot, were the heap placed so that its 4-byte
+/// references are addresses divided by 8, from each of `PLACEMENTS`: the numbers that a scan of
+/// slots for 4-byte references, without knowing their types, would take for references. This
+/// census sees only live slots, so the count is a rate (lookalikes per half), which dead slots
+/// share: each lookalike that hits a dead slot keeps it, and what it reaches, alive.
+fn lookalikes(census: &Census) {
+    let h = census.h;
+    let span = census.end - h.base;
+    let (mut halves, mut hits) = (0u64, [0u64; 3]);
+    each_live(h, |target| {
+        let (words, _, scanned) = census.words_of(&target);
+        if !scanned {
+            return;
+        }
+        for &word in words {
+            if word == 0 || (word & crate::thin::ADDRESS).wrapping_sub(h.base) < span {
+                continue;
+            }
+            for half in [word & 0xFFFF_FFFF, word >> 32] {
+                halves += 1;
+                let address = half << 3;
+                for (i, &start) in PLACEMENTS.iter().enumerate() {
+                    if address.wrapping_sub(start) < span
+                        && !matches!(census.target(h.base + (address - start)), Target::Inside)
+                    {
+                        hits[i] += 1;
+                    }
+                }
+            }
+        }
+    });
+    line(format_args!(
+        "[gc census lookalikes: of {} halves of words that are not addresses, {}, {} and {} read as a 4-byte reference to a live slot with the heap from 1, 4 and 16 GB]",
+        halves, hits[0], hits[1], hits[2]
+    ));
 }
 
 /// Counts each type's objects and the buffers they own, and the slots of no type that no object
