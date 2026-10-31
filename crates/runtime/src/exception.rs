@@ -6,6 +6,15 @@
 
 use std::fmt;
 
+/// Runs `make` out of line, as code that rarely runs: the making of an exception that a `throw`
+/// throws (`throw new X(message)`), whose message and object would otherwise make the function
+/// that checks a condition too large to inline where it is called.
+#[cold]
+#[inline(never)]
+pub fn cold<T>(make: impl FnOnce() -> T) -> T {
+    make()
+}
+
 /// An exception that the runtime raises: the qualified name of its standard class, such as
 /// `java.lang.ArithmeticException`, and its message.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -46,6 +46,7 @@ impl<'a> Gen<'a> {
                 // A `throw` that ends a method that throws is its `Err` result.
                 Stmt::Throw(value) if tail && rest.is_empty() && self.throwing => {
                     let text = self.thrown_text(value);
+                    let text = self.cold_thrown(value, text);
                     self.line(&format!("Err({text})"));
                 }
                 _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),

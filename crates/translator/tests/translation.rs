@@ -5504,7 +5504,7 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
         &rust,
         &[
             "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
-            "Err(Throwable::Missing(Arc::new(",
+            "Err(java::cold(|| Throwable::Missing(Arc::new(",
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "match find(xs, x) { Ok(v) => v, Err(e) => return Err(e) }",
             "Err(caught) => {",
@@ -5532,7 +5532,10 @@ fn an_exception_that_nothing_catches_ends_the_program_where_it_is_thrown() {
     // Nothing observes the exception, so `check` keeps its plain signature.
     assert_contains(
         &rust,
-        &["fn check(x: i32) -> i32 {", "java::throw_uncaught(Throwable::IllegalArgumentException("],
+        &[
+            "fn check(x: i32) -> i32 {",
+            "java::throw_uncaught(java::cold(|| Throwable::IllegalArgumentException(",
+        ],
     );
     assert_lacks(&rust, &["Result<", "'attempt"]);
 }
@@ -5615,7 +5618,7 @@ fn a_finally_runs_after_the_block_and_then_the_exception_goes_on() {
         &[
             "fn withdraw(amount: i32) -> Result<(), Throwable> {",
             "let attempt: Result<(), Throwable> = 'attempt: {",
-            "break 'attempt Err(Throwable::IllegalStateException(",
+            "break 'attempt Err(java::cold(|| Throwable::IllegalStateException(",
             "match attempt { Ok(v) => v, Err(e) => return Err(e) };",
         ],
     );
@@ -5966,7 +5969,7 @@ fn a_constructor_that_throws_returns_a_result_that_new_passes_on() {
         &rust,
         &[
             "fn ARange__new_i32_i32(low: i32, high: i32) -> Result<ARange, Throwable> {",
-            "return Err(Throwable::IllegalArgumentException(",
+            "return Err(java::cold(|| Throwable::IllegalArgumentException(",
             // A constructor that only delegates returns the other's `Result`.
             "fn ARange__new_i32(high: i32) -> Result<ARange, Throwable> {\n    ARange__new_i32_i32(0, high)\n}",
             "match ARange__new_i32(args.len() as i32 - 1) { Ok(v) => v, Err(e) => break 'attempt Err(e) }",

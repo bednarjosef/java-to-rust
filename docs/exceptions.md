@@ -105,7 +105,11 @@ Err(Throwable::j2r_null_pointer("Cannot invoke ..."))`. In a method that does no
 a call of one that does (because other callers observe it) is
 `call.unwrap_or_else(java::uncaught)`, and `throw e` where nothing catches it is
 `java::throw_uncaught(e)`: nothing here observes the exception, so ending the program at once is
-what propagating it would do.
+what propagating it would do. A `throw new X(..)` makes its exception inside `java::cold(|| ..)`,
+a closure that runs out of line, where the expression has no `return`, `break`, `continue` or `?`
+of its own: the message and the object stay out of the method, and a method that checks a
+condition and throws (`Validate.inclusiveBetween`) stays small enough to inline where it is
+called, also from another crate of a split program.
 
 The `match` is written out, rather than a `?` or a macro, for the time rustc takes: a `?` leaves
 the `Try` trait and the `From` conversion to be worked out at each one, and a macro is expanded
@@ -123,7 +127,7 @@ static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty");
 ```rust
 fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
     if s.is_empty() {
-        return Err(Throwable::Bad(Arc::new(Bad::new(java::wtf8("empty")))));
+        return Err(java::cold(|| Throwable::Bad(Arc::new(Bad::new(java::wtf8("empty"))))));
     }
     // checked only if a caller observes it
     Ok(match java::try_parse_radix::<i32>(Some(s), 10) { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) })
