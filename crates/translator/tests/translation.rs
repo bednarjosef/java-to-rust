@@ -4193,7 +4193,10 @@ fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
     let dir = write_sources("census_code_checks", &[("Main.java", main)]);
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
     let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
-    assert_contains(&census.report, &["`synchronized` on a string not supported yet\n          at Main.java:6:9\n"]);
+    assert_contains(
+        &census.report,
+        &["`synchronized` on a string not supported yet\n          at Main.java:6:9\n"],
+    );
     assert_eq!(rounds, 1, "{}", census.report);
 }
 

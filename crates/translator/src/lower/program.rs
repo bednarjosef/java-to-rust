@@ -382,7 +382,10 @@ fn lower_into<'t>(
             }
         }
         if let Some(file) = reach.unit_files.get(index).filter(|f| !f.is_empty()) {
-            lowering.source_files.borrow_mut().extend((first..lowering.types.len()).map(|t| (t, file.as_str())));
+            lowering
+                .source_files
+                .borrow_mut()
+                .extend((first..lowering.types.len()).map(|t| (t, file.as_str())));
         }
         unit_of.resize(lowering.types.len(), index);
         packages.resize(lowering.types.len(), package);

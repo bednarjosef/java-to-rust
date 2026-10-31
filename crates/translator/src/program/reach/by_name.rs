@@ -368,7 +368,9 @@ impl Walk<'_> {
     pub(super) fn named(&mut self, literal: &str) {
         let member = literal.contains('$').then(|| literal.replace('$', "."));
         let literal = match &member {
-            Some(member) if !self.classes.contains_key(literal) && self.classes.contains_key(member) => member,
+            Some(member) if !self.classes.contains_key(literal) && self.classes.contains_key(member) => {
+                member
+            }
             _ => literal,
         };
         // A provider's registration names its class for the services alone (`services.rs`).

@@ -443,7 +443,8 @@ impl<'t> Lowering<'t> {
             Ok(initialize) => call(initialize)?,
             Err(computed) => {
                 let flag = self.synth(ExprKind::Var(computed), pos, Type::Boolean);
-                let kind = ExprKind::Conditional(Box::new(flag), Box::new(call(true)?), Box::new(call(false)?));
+                let kind =
+                    ExprKind::Conditional(Box::new(flag), Box::new(call(true)?), Box::new(call(false)?));
                 self.synth(kind, pos, Type::JavaClass)
             }
         };
