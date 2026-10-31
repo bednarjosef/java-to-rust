@@ -345,7 +345,7 @@ impl<'a> Gen<'a> {
             && !self.class.hierarchy.has_subtypes(c)
             && throwable.is_none_or(|t| t != c && !self.class.hierarchy.ancestors(c).contains(&t));
         let value = match leaf {
-            true => format!("{value}.leaf()"),
+            true => format!("{value}.numbered({})", self.class_tag(c)),
             false => value,
         };
         if !self.class_details {
@@ -514,7 +514,38 @@ impl<'a> Gen<'a> {
         };
         let names = self.instance_names(&args[1]);
         let method = if check { "check_cast" } else { "is_instance" };
-        Code::atom(format!("{class}.{method}({names})"))
+        match self.instance_number(&args[1]) {
+            Some(number) => Code::atom(format!("{class}.{method}_numbered({number}, || {names})")),
+            None => Code::atom(format!("{class}.{method}({names})")),
+        }
+    }
+
+    /// The class number of the value of `x`, as an `Option<u16>` that is `None` when `x` is null,
+    /// where the value carries it (a value of an enum of classes) or its class has no subclass;
+    /// `None` for any other `x`, and for an `x` that is not a variable, which the names read again.
+    fn instance_number(&mut self, x: &'a Expr) -> Option<String> {
+        if !matches!(x.kind, ExprKind::Var(_) | ExprKind::This) || x.ty == Type::Null {
+            return None;
+        }
+        let nullable = self.nullable(x);
+        if self.enum_of(x).is_some() {
+            return Some(match nullable {
+                true => {
+                    format!("{}.map(|o| o.0.tag())", Code::new(self.enum_option(x), LOWEST).left_at(ATOM))
+                }
+                false => format!("Some({}.0.tag())", super::dispatch::operand(&self.expr(x).at(ATOM))),
+            });
+        }
+        let c = self.class.type_of(x.ty).filter(|_| matches!(x.ty, Type::Class(..) | Type::Enum(_)))?;
+        let decl = &self.class.types[c];
+        if !matches!(decl.kind, TypeKind::Class | TypeKind::Enum) || self.class.hierarchy.has_subtypes(c) {
+            return None;
+        }
+        let tag = self.class_tag(c);
+        Some(match nullable {
+            true => format!("{}.as_ref().map(|_| {tag}u16)", self.expr(x).at(ATOM)),
+            false => format!("Some({tag}u16)"),
+        })
     }
 
     /// The binary names of the class of the value of `x` and of every class and interface above

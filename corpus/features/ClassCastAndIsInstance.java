@@ -75,6 +75,13 @@ public class ClassCastAndIsInstance {
             System.out.println(line);
         }
         System.out.println(Op.class.cast(more[1]).apply(6, 7) + " " + Color.class.cast(more[3]));
+        // Variables of a class with no subclass, and one that is null: their class numbers are known.
+        Point point = new Point();
+        Point none = args.length > 5 ? point : null;
+        Object held = args.length > 5 ? null : Color.RED;
+        System.out.println(Point.class.isInstance(point) + " " + Point.class.isInstance(none) + " "
+            + Color.class.isInstance(point) + " " + Object.class.isInstance(point) + " "
+            + Color.class.isInstance(held) + " " + Op.class.isInstance(held) + " " + (Point.class.cast(none) == null));
         try {
             System.out.println(1 / (args.length));
         } catch (RuntimeException e) {

@@ -93,6 +93,9 @@ pub struct Class {
     /// no other class of the program extends: an instance is then exactly of this class, which
     /// `is_instance` and `check_cast` test by the first of its names alone.
     leaf: bool,
+    /// The class number of a `leaf` of the program (`numbered`), which its values carry: a test
+    /// of a value whose number the translation has compares the numbers; 0 when unknown.
+    number: u16,
 }
 
 impl Class {
@@ -170,12 +173,18 @@ impl Class {
             enclosing: None,
             interfaces: &[],
             leaf: false,
+            number: 0,
         }
     }
 
     /// The class, which no class is below (`leaf`).
     pub const fn leaf(self) -> Class {
         Class { leaf: true, ..self }
+    }
+
+    /// The `leaf` of the program whose values carry class number `number`.
+    pub const fn numbered(self, number: u16) -> Class {
+        Class { leaf: true, number, ..self }
     }
 
     /// The class as the program declares it: what `getModifiers` gives, where it is declared and
@@ -504,6 +513,34 @@ impl Class {
     /// interface above it (`None` for a null `x`), which the translation knows.
     pub fn is_instance(&self, names: Option<&[&str]>) -> bool {
         names.is_some_and(|names| self.above(names))
+    }
+
+    /// `is_instance`, given the class number of `x` where the translation has it (`None` for a
+    /// null `x` or one of unknown class) and the names as a function: for a `numbered` class, a
+    /// compare of the numbers, without asking `x` for its names.
+    #[inline(always)]
+    pub fn is_instance_numbered<'n>(
+        &self,
+        number: Option<u16>,
+        names: impl FnOnce() -> Option<&'n [&'n str]>,
+    ) -> bool {
+        match number {
+            Some(n) if self.number != 0 => n == self.number,
+            _ => self.is_instance(names()),
+        }
+    }
+
+    /// `check_cast` with the class number of `x`, as for `is_instance_numbered`.
+    #[inline(always)]
+    pub fn check_cast_numbered<'n>(
+        &self,
+        number: Option<u16>,
+        names: impl FnOnce() -> Option<&'n [&'n str]>,
+    ) {
+        match number {
+            Some(n) if self.number != 0 && n == self.number => {}
+            _ => self.check_cast(names()),
+        }
     }
 
     /// Whether the class is among `names`, those of a value's class and of the classes above it:
