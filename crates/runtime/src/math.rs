@@ -240,6 +240,40 @@ mod dd {
     }
 }
 
+/// `Math.random()`: the next `double` of one generator that the whole program shares, which is
+/// `java.util.Random`'s, as the JDK's `Math` keeps one (`RandomNumberGeneratorHolder`). Its seed
+/// is made the way `new Random()` makes one, from a counter mixed with the time, so the numbers
+/// differ from run to run as in Java; the generator's steps are atomic, so threads may share it.
+pub fn math_random() -> f64 {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    const MULTIPLIER: i64 = 0x5DEECE66D;
+    const ADDEND: i64 = 0xB;
+    const MASK: i64 = (1 << 48) - 1;
+    static SEED: OnceLock<AtomicI64> = OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        // `Random.seedUniquifier()`'s first value, mixed with the time as `new Random()` mixes
+        // `System.nanoTime()`.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as i64);
+        let uniquifier = 8682522807148012_i64.wrapping_mul(1181783497276652981);
+        AtomicI64::new(((uniquifier ^ nanos) ^ MULTIPLIER) & MASK)
+    });
+    let next = |bits: u32| -> i64 {
+        let mut old = seed.load(Ordering::Relaxed);
+        loop {
+            let new = old.wrapping_mul(MULTIPLIER).wrapping_add(ADDEND) & MASK;
+            match seed.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return ((new as u64) >> (48 - bits)) as i64,
+                Err(current) => old = current,
+            }
+        }
+    };
+    let high = next(26) << 27;
+    ((high + next(27)) as f64) * (1.0 / (1_i64 << 53) as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +357,12 @@ mod tests {
         for k in 0..23 {
             assert_eq!(log10(10f64.powi(k)), k as f64);
         }
+    }
+
+    #[test]
+    fn random_numbers_are_in_the_unit_interval_and_vary() {
+        let numbers: Vec<f64> = (0..100).map(|_| math_random()).collect();
+        assert!(numbers.iter().all(|x| (0.0..1.0).contains(x)));
+        assert!(numbers.windows(2).any(|w| w[0] != w[1]));
     }
 }

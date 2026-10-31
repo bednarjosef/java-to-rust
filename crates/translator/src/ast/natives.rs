@@ -822,6 +822,7 @@ pub fn unix_call(name: &str) -> Option<&'static str> {
 
 /// The `Math` and `StrictMath` functions the native layer covers (beyond `abs`, `max`, `min`).
 pub const MATH_FUNCTIONS: &[&str] = &[
+    "random",
     "sin",
     "cos",
     "tan",

@@ -7,6 +7,10 @@ use super::*;
 impl<'a> Gen<'a> {
     /// The methods of this file; `None` for any other method, which `math` translates.
     pub(super) fn math_extra(&mut self, name: &str, args: &'a [Expr], ty: Type) -> Option<Code> {
+        // `random()`: the runtime's one generator (`java::math_random`).
+        if name == "random" {
+            return Some(Code::atom(format!("{}()", self.runtime("math_random"))));
+        }
         // `scalb(x, n)` takes an `int` after its operand, and is the same in `Math` and
         // `StrictMath` (`scalb_f32` for `float`).
         if name == "scalb" {

@@ -108,7 +108,8 @@ included (docs/collector.md).
   `NumberFormatException` messages are Java's. `StrictMath` is a port of fdlibm and matches Java
   bit for bit; so does `Math` where HotSpot uses fdlibm. HotSpot's own `Math.sin`, `cos`, `tan`,
   `exp`, `log`, `pow`, `cbrt`, `sinh` and `tanh` cannot be ported and use the platform's libm,
-  which agrees on all but about 0.1 percent of arguments.
+  which agrees on all but about 0.1 percent of arguments. `Math.random` is one shared
+  generator with `java.util.Random`'s steps, seeded from the time as `new Random()` is.
 - **Regular expressions** (`split`, `replaceAll`, `replaceFirst`, `matches`) run a small
   backtracking engine in the runtime (`regex.rs`): literals, escapes, classes, `\R`, groups
   (atomic too), lookahead, back references, alternation, anchors, the word boundaries `\b` and
