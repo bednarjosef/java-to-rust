@@ -80,8 +80,8 @@ with the call, alternating runs on a throttled machine). The compiler knows that
 allocation, which touches no memory of the program, and optimizes the loops around it as such.
 Taking the slot inside `Arc::new` instead, inlined at every `new` where the size and the zeroing
 are constants, made BinaryTrees take 5.8 s, but other loops lost optimizations, even ones that
-allocate nothing: ObjectDispatch's palette search by identity, which the compiler otherwise
-specializes for the key's class, took 4.0 s against 1.8 s, and Interpreter's kernel 2.2 s
+allocate nothing: ObjectDispatch's palette search by identity, then a loop that the compiler
+specialized for the key's class, took 4.0 s against 1.8 s, and Interpreter's kernel 2.2 s
 against 1.5 s; a direct call that is not inlined lost them all the same.
 
 The collector keeps every taken slot of each thread's spans, after marking: the slots not handed

@@ -502,6 +502,36 @@ fn counting_loops_that_only_read_elements_become_iterators() {
 }
 
 #[test]
+fn loops_that_search_an_array_call_search() {
+    let rust = translate(
+        "class A {
+            static Object[] palette = new Object[3];
+            static int idFor(Object key) {
+                for (int i = 0; i < palette.length; i++) { if (palette[i] == key) { return i; } }
+                return -1;
+            }
+            static boolean has(int[] a, int x, int n) {
+                for (int i = 1; i < n; i++) if (a[i] == x) return true;
+                return false;
+            }
+            static int called(int[] a) {
+                for (int i = 0; i < a.length; i++) { if (a[i] == f()) { return i; } }
+                return -1;
+            }
+            static int f() { return 2; }
+            public static void main(String[] args) {
+                int[] a = { 1, 2, 3 };
+                System.out.println(idFor(args) + \" \" + has(a, 3, 3) + \" \" + called(a));
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::search_same(&A_PALETTE.cloned(), 0, None, Some(key), true, |item| "]);
+    assert_contains(&rust, &["java::slice_search_eq(a, 1, Some(n), x);", "if found.is_some() {"]);
+    // A condition that calls a method stays a loop.
+    assert_contains(&rust, &["a[i as usize] == f()"]);
+}
+
+#[test]
 fn element_loops_that_write_or_use_the_index_stay_indexed() {
     let rust = translate(
         "class A { public static void main(String[] args) {

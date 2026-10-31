@@ -3183,6 +3183,16 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The pattern of the class numbers of the enum of type `t` whose values may be equal to
+    /// another value without having its bits (`same_by_bits`), for `==` (`identity_impl`) as for
+    /// `java::same_object` (`same_object_impl`); `None` where every value is equal to another
+    /// exactly when their bits are.
+    pub(super) fn unequal_bits_tags(&mut self, t: usize) -> Option<String> {
+        let variants = self.enum_variants(t);
+        let others: Vec<usize> = variants.iter().copied().filter(|&c| !self.same_by_bits(c)).collect();
+        (!others.is_empty()).then(|| self.tags(&others, &variants))
+    }
+
     /// Whether two values of class `c`'s variant are the same object exactly when their bits are
     /// (`same_object_impl`): a handle compared by identity, or an enum's constant, a `Boolean` or
     /// a `Byte` held in the low bytes, as `same_variant` compares them with `==`.

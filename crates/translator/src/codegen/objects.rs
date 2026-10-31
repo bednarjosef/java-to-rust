@@ -1069,7 +1069,7 @@ impl<'a> Gen<'a> {
     }
 
     /// An object reference as an `Option<&Rc<..>>`: `None` for null.
-    fn object_option(&mut self, e: &'a Expr) -> String {
+    pub(super) fn object_option(&mut self, e: &'a Expr) -> String {
         let e = self.peel(e);
         match &e.kind {
             ExprKind::Null => "None".to_string(),

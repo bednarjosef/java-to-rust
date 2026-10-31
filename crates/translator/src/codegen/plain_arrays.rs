@@ -210,7 +210,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The array a path denotes, as a slice argument.
-    fn path_ref(&mut self, path: &Path<'a>, mutable: bool) -> String {
+    pub(super) fn path_ref(&mut self, path: &Path<'a>, mutable: bool) -> String {
         let (text, form) = self.path_form(path, mutable);
         self.reference(text, form, mutable)
     }
