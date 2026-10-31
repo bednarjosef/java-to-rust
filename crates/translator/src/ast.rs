@@ -476,6 +476,11 @@ pub struct Class {
     /// whose `Class` values no lookup gets (`analysis::reflection_table`).
     #[serde(default)]
     pub reflection_table: ReflectionTable,
+    /// The methods that `analysis::whole_objects` made of constructors (`construct<Name>`) and
+    /// of field initializers (`initializeFields`), by index, each with whether it is a
+    /// constructor's: called on `this`, they build the object as a constructor would.
+    #[serde(default)]
+    pub construction_methods: HashMap<usize, bool>,
 }
 
 /// The kinds of members in the reflection table, each a table of its own.

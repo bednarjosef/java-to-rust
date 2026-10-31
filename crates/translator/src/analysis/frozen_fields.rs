@@ -71,6 +71,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 && !matches!(f.ty.element(), Type::Array(_))
                 && !f.volatile
                 && !facts.nullable_fields.contains(&(decl.name.clone(), f.name.clone()))
+                && !facts.assigned_fields.contains(&(decl.name.clone(), f.name.clone()))
                 && f.init.as_ref().is_none_or(new_array)
             {
                 candidates.insert((t, f.name.clone()));

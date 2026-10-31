@@ -16,6 +16,7 @@
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
 mod alongside;
+mod assigned_fields;
 pub use alongside::one_after_another;
 mod arrays;
 mod borrowing;
@@ -146,6 +147,11 @@ pub struct Facts {
     pub nullable_returns: FastSet<usize>,
     /// String and object fields, as (class, field), that can hold null: `Option`s.
     pub nullable_fields: FastSet<(String, String)>,
+    /// String and object fields, as (class, field), that are null only while their object is
+    /// being built: every constructor sets them, to a value that is not null, before anything can
+    /// read them (`assigned_fields.rs`). Their cells are `Option`s, which start empty, and a read
+    /// takes the value with no test (`java::assigned`).
+    pub assigned_fields: FastSet<(String, String)>,
     /// String and object static fields, as (class index, field), that can hold null.
     pub nullable_statics: FastSet<(usize, String)>,
     /// Statics of object type, of a class initialized eagerly, that are never null once the class
@@ -335,11 +341,30 @@ impl Facts {
         std::iter::once(t).chain(class.hierarchy.ancestors(t)).find(|c| self.eager_init.contains(c))
     }
 
-    /// Whether the field `name` of an object of type `ty` can hold null.
+    /// Whether a read of the field `name` of an object of type `ty` can give null.
     pub fn field_nullable(&self, ty: Type, name: &str) -> bool {
-        let Type::Class(c, _) = ty else { return false };
+        self.field_key(ty, name).is_some_and(|key| self.nullable_fields.contains(&key))
+    }
+
+    /// Whether the field `name` of an object of type `ty` is an `Option`: it can hold null, or it
+    /// does while its object is being built (`assigned_fields`).
+    pub fn field_optional(&self, ty: Type, name: &str) -> bool {
+        self.field_key(ty, name)
+            .is_some_and(|key| self.nullable_fields.contains(&key) || self.assigned_fields.contains(&key))
+    }
+
+    /// Whether the field `name` of an object of type `ty` is an `Option` whose reads never find it
+    /// empty (`assigned_fields`).
+    pub fn field_assigned(&self, ty: Type, name: &str) -> bool {
+        self.field_key(ty, name).is_some_and(|key| self.assigned_fields.contains(&key))
+    }
+
+    /// The key of the field `name` of an object of type `ty` in the field facts: its declaring
+    /// class and its name.
+    fn field_key(&self, ty: Type, name: &str) -> Option<(String, String)> {
+        let Type::Class(c, _) = ty else { return None };
         let owner = self.field_owners.get(&(c.to_string(), name.to_string())).map_or(c, String::as_str);
-        self.nullable_fields.contains(&(owner.to_string(), name.to_string()))
+        Some((owner.to_string(), name.to_string()))
     }
 }
 

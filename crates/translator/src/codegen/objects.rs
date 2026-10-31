@@ -906,16 +906,18 @@ impl<'a> Gen<'a> {
         crate::analysis::inline_initializers(self.class, t, self.facts)
     }
 
-    /// Whether the field `name` of class `owner` can hold null, so that it is an `Option`.
-    pub(super) fn field_nullable(&self, owner: &str, name: &str) -> bool {
-        self.facts.nullable_fields.contains(&(owner.to_string(), name.to_string()))
+    /// Whether the field `name` of class `owner` is an `Option`: it can hold null, or does while
+    /// its object is being built (`Facts::assigned_fields`).
+    pub(super) fn field_optional(&self, owner: &str, name: &str) -> bool {
+        let key = (owner.to_string(), name.to_string());
+        self.facts.nullable_fields.contains(&key) || self.facts.assigned_fields.contains(&key)
     }
 
-    /// Whether a field or static field can hold null.
+    /// Whether a field or static field is an `Option`, which an assignment writes `Some` into.
     pub(super) fn place_nullable(&self, place: &Place) -> bool {
         match place {
             // The field may be declared by a superclass of the object's type.
-            Place::Field { object, name } => self.facts.field_nullable(object.ty, name),
+            Place::Field { object, name } => self.facts.field_optional(object.ty, name),
             Place::Static { class, name } => self.static_optional(*class, name),
             Place::Var(_) | Place::Index(..) => false,
         }
@@ -1070,6 +1072,23 @@ impl<'a> Gen<'a> {
     /// `object_place`, and whether the text is a place that can be borrowed rather than a value.
     fn object_parts(&mut self, e: &'a Expr) -> (String, bool) {
         let e = self.peel(e);
+        let (text, place) = self.object_cell_parts(e);
+        match &e.kind {
+            // A field whose `Option` a read never finds empty, as its value.
+            ExprKind::Field { object, name }
+                if !matches!(object.ty, Type::Enum(_)) && self.facts.field_assigned(object.ty, name) =>
+            {
+                match place {
+                    true => (format!("(*{}(&{text}))", self.runtime("assigned_ref")), true),
+                    false => (format!("{}({text})", self.runtime("assigned")), false),
+                }
+            }
+            _ => (text, place),
+        }
+    }
+
+    /// `object_parts`, with a field as its cell holds it.
+    fn object_cell_parts(&mut self, e: &'a Expr) -> (String, bool) {
         match &e.kind {
             ExprKind::This => (self.this_name().to_string(), true),
             ExprKind::Var(name) => (self.local(name), true),
@@ -1590,6 +1609,21 @@ impl<'a> Gen<'a> {
         if matches!(object.ty, Type::Enum(_)) {
             return self.enum_field(object, name);
         }
+        let read = self.field_cell_read(object, name, ty);
+        // A class without objects reads nothing, as the type of a value that is not null.
+        if self.facts.field_assigned(object.ty, name) && !self.never_read(object) {
+            return Code::atom(format!("{}({})", self.runtime("assigned"), read.text));
+        }
+        read
+    }
+
+    /// Whether `object` is of a class without objects, whose field reads never run.
+    fn never_read(&self, object: &Expr) -> bool {
+        self.enum_of(object).is_some_and(|t| self.enum_variants(t).is_empty())
+    }
+
+    /// The value of a field of an object as its cell holds it: an `Option` where the field is.
+    fn field_cell_read(&mut self, object: &'a Expr, name: &str, ty: Type) -> Code {
         let clone = if self.clones(ty) { ".clone()" } else { "" };
         if matches!(object.kind, ExprKind::This)
             && let Some(local) = self.field_locals.get(name)
@@ -2393,7 +2427,7 @@ impl<'a> Gen<'a> {
         for f in fields {
             let ty = match self.facts.frozen_fields.contains(&(index, f.name.clone())) {
                 true => self.frozen_ty(index, &f.name, f.ty),
-                false => self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name)),
+                false => self.field_ty_name(f.ty, self.field_optional(&decl.name, &f.name)),
             };
             let ty = if self.celled(&decl.name) { self.cell_type(index, f, &ty) } else { ty };
             self.line(&format!("{}{}: {ty},", self.vis(), field_name(decl, &f.name)));
@@ -2495,7 +2529,7 @@ impl<'a> Gen<'a> {
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
             let outer = std::mem::replace(&mut self.guarded, true);
-            let nullable = self.field_nullable(name, &f.name);
+            let nullable = self.field_optional(name, &f.name);
             let value = self.field_value(f.init.as_ref().expect("filtered"), f.ty, nullable);
             self.guarded = outer;
             let field = field_name(&class.types[index], &f.name);
@@ -2556,7 +2590,7 @@ impl<'a> Gen<'a> {
             None => {
                 let mut fields: Vec<String> = base.into_iter().map(|b| format!("base: {b}")).collect();
                 fields.extend(decl.fields.iter().map(|f| {
-                    let value = self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name));
+                    let value = self.placeholder(f.ty, self.field_optional(&decl.name, &f.name));
                     format!("{}: {}", field_name(decl, &f.name), self.field_cell(m.class, f, value))
                 }));
                 let name = self.struct_of(m.class);

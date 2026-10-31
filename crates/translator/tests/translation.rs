@@ -7903,3 +7903,67 @@ fn a_failure_of_a_class_the_program_lacks_that_unwinds_to_a_catch_all_is_rejecte
         "{error}"
     );
 }
+
+#[test]
+fn a_field_that_every_constructor_sets_before_any_read_is_read_without_a_test() {
+    let rust = translate(
+        "class A {
+            static int made;
+            static final class Box {
+                final long[] data;
+                final String name;
+                Box(int n, long[] given) {
+                    made++;
+                    if (given != null) { this.data = given; } else { this.data = new long[n]; }
+                    name = \"box\";
+                    register(this);
+                }
+                long first() { return data[0] + name.length(); }
+            }
+            static Box last;
+            static void register(Box b) { last = b; }
+            public static void main(String[] a) {
+                System.out.println(new Box(2, null).first() + new Box(1, new long[] {5}).first());
+            }
+        }",
+    );
+    // Set after a call, in both branches of an `if`, and before `this` is passed on: read with no
+    // test.
+    assert_contains(
+        &rust,
+        &["java::assigned_ref(&(*self.data.fixed()))", "java::assigned_ref(&(*self.name.fixed()))"],
+    );
+    assert_lacks(&rust, &["java::non_null(self.data", "java::non_null(self.name"]);
+}
+
+#[test]
+fn a_field_that_a_constructor_reads_through_a_call_before_setting_it_stays_checked() {
+    let rust = translate(
+        "class A {
+            String value;
+            final int length;
+            A(String v) { length = measure(); value = v; }
+            int measure() { return value == null ? -1 : value.length(); }
+            int twice() { return value.length() * 2; }
+            static final class Holder {
+                String text;
+                Holder(String text) { if (text == null) throw new IllegalArgumentException(); this.text = text; }
+                void clear() { text = null; }
+                int length() { return text.length(); }
+            }
+            public static void main(String[] a) {
+                A x = new A(\"four\");
+                Holder h = new Holder(\"abc\");
+                h.clear();
+                System.out.println(x.length + x.twice() + h.length());
+            }
+        }",
+    );
+    // `value` is read before the constructor sets it, and `Holder.text` is set to null later: both
+    // keep Java's null test.
+    assert_lacks(&rust, &["java::assigned"]);
+    assert_contains(
+        &rust,
+        &["java::non_null(self.value.as_deref())", "java::non_null(self.text.as_deref())"],
+    );
+}

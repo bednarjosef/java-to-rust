@@ -142,8 +142,8 @@ pub use native_memory::*;
 pub use natives::*;
 pub use net::*;
 pub use null::{
-    Handle, OrNull, SameObject, non_null, non_null_message, or_null, same, same_object, try_non_null,
-    try_non_null_message, unkept_identity,
+    Handle, OrNull, SameObject, assigned, assigned_ref, non_null, non_null_message, or_null, same,
+    same_object, try_non_null, try_non_null_message, unkept_identity,
 };
 pub use out::{
     Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,

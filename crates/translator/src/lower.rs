@@ -195,6 +195,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             proxy_classes: Default::default(),
             receivers: Default::default(),
             reflection_table: lowering.reflection_layout.take(),
+            construction_methods: Default::default(),
         };
         Ok((class, lowering.real.clone(), failed))
     })

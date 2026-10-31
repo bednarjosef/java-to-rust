@@ -25,6 +25,43 @@ fn null_pointer_thrown(message: &str) -> ! {
     crate::throw("java.lang.NullPointerException", message)
 }
 
+/// The value of a field that every constructor of its object sets, to a value that is not null,
+/// before anything can read it (`analysis/assigned_fields.rs`): its cell starts empty, as there is
+/// no object to start it with, and holds a value by the time any code reads it, so the read has no
+/// test. A build with debug assertions checks it all the same.
+#[inline(always)]
+pub fn assigned<T>(value: Option<T>) -> T {
+    match value {
+        Some(value) => value,
+        None => unset_field(),
+    }
+}
+
+/// `assigned` of a field read where it is.
+#[inline(always)]
+pub fn assigned_ref<T>(value: &Option<T>) -> &T {
+    match value {
+        Some(value) => value,
+        None => unset_field(),
+    }
+}
+
+/// A read of a field of `assigned` that found it empty: the analysis was wrong.
+#[inline(always)]
+fn unset_field() -> ! {
+    if cfg!(debug_assertions) {
+        unset_field_found()
+    }
+    // The analysis proves that every constructor sets the field before anything can read it.
+    unsafe { std::hint::unreachable_unchecked() }
+}
+
+#[cold]
+#[inline(never)]
+fn unset_field_found() -> ! {
+    panic!("a field read before its constructor set it, which the analysis ruled out")
+}
+
 /// `non_null` where the program observes the `NullPointerException`, without a message: where
 /// nothing reads it, or where Java's has none (as `Objects.requireNonNull`'s).
 #[inline]
