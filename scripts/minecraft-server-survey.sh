@@ -48,6 +48,14 @@
 #                    crate (default: the cores)
 # TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
 #                    memory and time to build; its runtime crate is built optimized all the same)
+# TRIAL_LTO          how a release build's binary is optimized across crates: empty (default) as the
+#                    profile says, rustc's thin LTO for release; "off", none, for builds that are
+#                    rebuilt often: each crate generates its own code and the binary's step only
+#                    links (the server runs slower); "lld", thin LTO by rust-lld at the link, which
+#                    keeps each module's code in $MINECRAFT_CACHE/thinlto-cache and generates again
+#                    only the modules whose code, or code they inline, changed. Each builds in a
+#                    profile of its own (TRIAL_PROFILE-no-lto, TRIAL_PROFILE-lld-lto), so that the
+#                    builds do not overwrite each other in trial-target
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
 # BENCH              which server the bench step measures: java (default) or trial; BENCH_SEED,
 #                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input)
@@ -621,8 +629,21 @@ trial() {
   # with thin LTO, the bodies' rustc only optimizes their code and the binary's generates all of
   # it, the longest step of a release build. When a group passes the memory cap and the build is killed without a
   # compile error, the rest build one crate at a time, past the crates already built.
-  local -a build=(cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}"
+  local -a build=(cargo build -q --keep-going --profile "$(trial_profile)"
     --config 'profile.dev.package.java-runtime.opt-level=2')
+  local profile=${TRIAL_PROFILE:-dev}
+  case ${TRIAL_LTO:-} in
+    '') ;;
+    off) build+=(--config "profile.$profile-no-lto.inherits = \"$profile\"" --config "profile.$profile-no-lto.lto = false") ;;
+    # rustc writes LLVM's bitcode rather than machine code for every crate, the binary's too, and
+    # passes its opt-level and target-cpu to the linker; the .cargo/config.toml's -align-loops
+    # goes to the linker's code generation by -mllvm. The cache's keys are each module's code and
+    # what it imports, so a module whose code and imports did not change is not optimized again;
+    # it keeps at most 4 GB, the modules used last.
+    lld) build+=(--config "profile.$profile-lld-lto.inherits = \"$profile\"" --config "profile.$profile-lld-lto.lto = false"
+      --config "build.rustflags = [\"-Clinker-plugin-lto\", \"-Clink-arg=-Wl,--thinlto-cache-dir=$cache/thinlto-cache\", \"-Clink-arg=-Wl,--thinlto-jobs=all\", \"-Clink-arg=-Wl,--thinlto-cache-policy=cache_size_bytes=4g\", \"-Clink-arg=-Wl,-mllvm,-align-loops=64\"]") ;;
+    *) echo "TRIAL_LTO is empty, off or lld, not $TRIAL_LTO" >&2; exit 1 ;;
+  esac
   local jobs=${CARGO_BUILD_JOBS:-$(nproc)} group=() size total=0 crate
   local -a groups=()
   while read -r size crate; do
@@ -635,16 +656,26 @@ trial() {
     echo "$(cat "$dir"src/*.rs | wc -c) ${dir%/}"
   done | sort -rn)
   [ ${#group[@]} -gt 0 ] && groups+=("${group[*]}")
+  # Each part's time goes to trial-times.txt: the header, each group of bodies, the binary.
+  : > "$cache/trial-times.txt"
+  timed() {
+    local name=$1 began=$SECONDS
+    shift
+    "$@" || return
+    echo "$name $((SECONDS - began)) s" >> "$cache/trial-times.txt"
+  }
   bodies() {
-    local g
+    local g n=0
     for g in "${groups[@]}"; do
+      n=$((n + 1))
       # shellcheck disable=SC2086 # each group is its `-p` arguments
-      CARGO_BUILD_JOBS=$jobs "${slot[@]}" "${cap[@]}" "${build[@]}" $g || return
+      timed "bodies $n of ${#groups[@]}" env CARGO_BUILD_JOBS="$jobs" "${slot[@]}" "${cap[@]}" "${build[@]}" $g \
+        || return
     done
-    CARGO_BUILD_JOBS=${TRIAL_LINK_JOBS:-$(nproc)} "${slot[@]}" "${cap[@]}" "${build[@]}"
+    timed binary env CARGO_BUILD_JOBS="${TRIAL_LINK_JOBS:-$(nproc)}" "${slot[@]}" "${cap[@]}" "${build[@]}"
   }
   (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
-    && CARGO_BUILD_JOBS=${TRIAL_HEADER_JOBS:-1} "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
+    && timed header env CARGO_BUILD_JOBS="${TRIAL_HEADER_JOBS:-1}" "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
     && bodies) > "$cache/trial-build.txt" 2>&1 \
     || { [ "$jobs" -gt 1 ] && ! grep -q '^error' "$cache/trial-build.txt" \
       && echo "the trial build was killed; building the rest one crate at a time" >&2 \
@@ -652,12 +683,23 @@ trial() {
         && CARGO_BUILD_JOBS=1 "${slot[@]}" "${cap[@]}" "${build[@]}") >> "$cache/trial-build.txt" 2>&1; } \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
+  cat "$cache/trial-times.txt"
   run_server "$cache/trial-run" "$(trial_binary)"
+}
+
+# The Cargo profile that the trial step builds with (TRIAL_PROFILE, and TRIAL_LTO's own).
+trial_profile() {
+  case ${TRIAL_LTO:-} in
+    off) echo "${TRIAL_PROFILE:-dev}-no-lto" ;;
+    lld) echo "${TRIAL_PROFILE:-dev}-lld-lto" ;;
+    *) echo "${TRIAL_PROFILE:-dev}" ;;
+  esac
 }
 
 # The binary that the trial step builds.
 trial_binary() {
-  local name profile=${TRIAL_PROFILE:-dev}
+  local name profile
+  profile=$(trial_profile)
   [ "$profile" = dev ] && profile=debug
   name=$(sed -n 's/^members = \[.*, "\([^"]*\)"\]$/\1/p' "$cache/trial/Cargo.toml")
   echo "$cache/trial-target/$profile/$name"
