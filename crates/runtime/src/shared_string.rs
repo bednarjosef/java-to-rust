@@ -63,8 +63,25 @@ impl JStr {
             (p as *mut u32).write(len);
             (p as *mut u32).add(1).write(0);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(TEXT), bytes.len());
+            crate::gc::note_name(p, "java.lang.String");
             JStr(NonNull::new_unchecked(p as *mut u32))
         }
+    }
+
+    /// The address of the object, which a 4-byte reference holds divided by 8 (`compact.rs`).
+    #[inline(always)]
+    pub(crate) fn address(&self) -> usize {
+        self.header() as usize
+    }
+
+    /// The string whose object is at `address`.
+    ///
+    /// # Safety
+    ///
+    /// `address` is that of a live string object (`address`).
+    #[inline(always)]
+    pub(crate) unsafe fn from_address(address: usize) -> JStr {
+        JStr(unsafe { NonNull::new_unchecked(address as *mut u32) })
     }
 
     /// The address of the object, without the tag that a `java::Thin` may have put in the top

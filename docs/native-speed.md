@@ -2,8 +2,9 @@
 
 The plan for making translated programs much faster and smaller than the same programs on the
 JVM, for any Java program, with no input beyond its sources, and how far it has got: of step 1,
-the collected heap (docs/collector.md), thin references and fields as cells are built (1.6 lists
-what is built and what is planned); of steps 2 and 3, escape within a method and objects on the
+the collected heap (docs/collector.md), thin references and fields as cells are built, and
+4-byte references in the fields of celled classes behind a switch (1.6 lists what is built and
+what is planned); of steps 2 and 3, escape within a method and objects on the
 stack are built, the rest is planned. The translated javac is the main
 benchmark. The object model it replaces is described in docs/object-model.md. The idiom side of
 the whole-program mode (designs a person would write, relaxations) stays in docs/thorough-mode.md.
@@ -40,7 +41,7 @@ experimental runtimes), on the 540 corpus features:
 
 On the Minecraft benchmark (4,754 decompiled server files), the fat-LTO and PGO build with
 reference counting took 60 s and 6.2 GB, against the real javac's 11.3 s and 4.1 GB; with the
-collector and 4-byte references it takes 13.1 s and 1.36 GB (see "Measuring"). With reference
+collector it takes 13.1 s and 1.36 GB (see "Measuring"). With reference
 counting, while it attributed types, it missed
 the data cache five times as often as the JVM, the instruction cache 5.6 times and the
 instruction TLB 17 times. The causes were 16-byte references (an enum tag and a pointer) against the
@@ -53,17 +54,28 @@ A heap managed by a tracing collector, references of 4 bytes, objects without he
 
 ### 1.1 Heap and references
 
-- The heap is one reserved range of address space (32 GB, committed as it is used). A reference
-  in a field or an array is a `u32`: the object's offset from the heap's base divided by 8.
-  `java::Gc<T>` is that reference with its static type. It is `Copy`: copying a reference is
-  copying four bytes, with no count.
-- The heap is cut into blocks. Each block holds objects of one class only ("big bag of pages"),
-  and its header names the class. An object therefore needs no header of its own: its class,
-  size and reference map are read from its block. An object is only its fields.
-- Arrays and other objects of variable size live in blocks of their own kind, with a small header
-  of length and element type.
-- Blocks of a class start small (4 KB) and grow (up to 64 KB), so the thousands of classes that
-  have few objects waste little.
+- Built: the heap is one reserved range of address space, from 4 GB to 32 GB, committed as it is
+  used (docs/collector.md, "The heap").
+- Built behind a switch, `JAVA_TO_RUST_COMPACT_REFERENCES=1` (compact references): a reference
+  held in a field of a celled class (docs/object-model.md 1.8) to an object of one class, an
+  array or a string is 4 bytes, the object's address divided by 8 (`java::RefField`,
+  `java::SharedRefField`, runtime `compact.rs`). With the heap below 32 GB there is no base to
+  add: decoding is one shift, which an x86-64 load folds into its address (`[r*8]`), and null
+  is 0, which no object's address is. `java::Arc` stays the form of a reference in locals,
+  parameters and registers, 8 bytes used with no decoding, so only a field's reads and writes
+  convert. The collector reads every 4 bytes it scans as a possible reference to the start of a
+  slot (docs/collector.md, "Collection"). An object on a method's stack is never stored in such
+  a field: its address is past 32 GB (writing it stops the program), and the escape analysis
+  keeps those objects out of fields altogether. Which other references become 4 bytes, and in
+  what order, is the plan in 1.6, item 2.
+- Planned: the heap is cut into blocks. Each block holds objects of one class only ("big bag of
+  pages"), and its header names the class. An object therefore needs no header of its own: its
+  class, size and reference map are read from its block. An object is only its fields. (Built:
+  blocks of one slot size, with no header in the object, docs/collector.md.)
+- Planned: an array is one allocation, a header of length and element type followed by its
+  elements.
+- Planned: blocks of a class start small (4 KB) and grow (up to 64 KB), so the thousands of
+  classes that have few objects waste little.
 - Allocation takes the next free slot of the current block of its class, kept per thread. That is
   a few instructions, like the JVM's pointer bump.
 
@@ -198,8 +210,8 @@ at each collection, and marking in parallel. Planned beyond it:
 
 - Built: a reference to an interface, an abstract class or `Object` is eight bytes, not an enum
   of handles: the class's number in the top 16 bits and the handle below (`java::Thin`,
-  docs/object-model.md 1.2). Planned: with `u32` references the number moves into the object's
-  block.
+  docs/object-model.md 1.2). With compact references such a reference keeps its 8 bytes for
+  now; how it becomes 4 is planned in 1.6, item 2.
 - Calls on it dispatch through the class: a `match` on the class number (built; a jump table),
   then per-class function tables where that is smaller (planned).
 - `Integer`, `Character`, `Short`, `Byte` and `Boolean` values held as `Object` or in generic
@@ -222,7 +234,58 @@ Each part lands on its own and passes the gate (all checks and the 28 targets):
 1. Built: uncounted `java::Arc` handles in a collected heap, replacing `Rc` and the counted
    handles for objects, with the enums and cells unchanged. This removed the counting and
    freeing code, which is where the measured third was. The collector scans conservatively.
-2. Header-free class blocks and `u32` references, with tracing from generated reference maps.
+2. Compact references (1.1): references of 4 bytes in the heap. Each stage below lands on its
+   own behind `JAVA_TO_RUST_COMPACT_REFERENCES=1`, on the corpus and the small programs before
+   the large targets, and the switch becomes the default once the gate passes with it. The
+   order is by the bytes each stage saves in the live heap of the Minecraft server, measured by
+   the census (`JAVA_GC_CENSUS=3`, docs/collector.md) after a 50,000-tick run, where ours was
+   293 MB against Java's 186 MB. Of the 249 MB of slots that may hold references, references
+   are 62 MB: 50 MB of `java::Thin`s and 12 MB of one-class handles; zero words, nulls among
+   them, are another 99 MB. Planned stages, the most bytes first, except the first, which the
+   others build on:
+
+   1. Built: the placement, the decoding and the cells of 1.1, for the fields of celled
+      classes. With the next stage it saves at most half the 12 MB of one-class handles.
+   2. Planned: the plain fields of immutable and owned classes, read by copying the reference
+      out instead of lending it in place.
+   3. Planned: references to objects of several classes, in fields and in array elements: 4
+      bytes instead of a `java::Thin`'s 8, about 25 MB of the 50, and up to 24 MB in reference
+      arrays, whose 380,000 element buffers hold 44 MB, nulls included, against Java's 24 MB of
+      reference arrays. The class number then has to live elsewhere. A 4-byte class word in
+      each object that thin references reach (3.05 million) costs 16 MB, as it pushes 2 million
+      objects of 38 classes into the next slot size: most of the gain. One class per block
+      costs nothing per object but a partly filled block per class: the 60 largest of the
+      10,537 classes hold 114 MB, the others 17 MB, about 1.6 KB each, so even a 4 KB page each
+      would waste about 25 MB. The plan is pages of one class for the classes that fill them,
+      and pages of mixed classes, with each slot's class number in the side table (2 bytes a
+      slot), for the rest: dispatch reads the class from the side table by the object's address,
+      a load that does not wait for the object's own. Small values held in the reference (1.4)
+      keep a place: the heap starts at 4 GB, so a 4-byte value below 2^29 is never a reference,
+      which leaves 29 bits for a value and its kind; larger values are boxed, which Java allows
+      outside the cached range of `valueOf`.
+   4. Planned: arrays as one allocation. An array is now a 32-byte object (its handle's target,
+      the cell of its elements and a `Vec`) and a separate buffer, so reading an element goes
+      from the object to the array, to the `Vec`, to the buffer, one dependent load more than
+      Java. The 514,000 live arrays' objects hold 16 MB; a 16-byte header in front of the
+      elements saves about 8 MB and the load.
+   5. Planned: an 8-byte slot size, for the objects that 4-byte references leave at 8 bytes
+      (one reference and an `int`, two references): the 848,000 objects in 16-byte slots hold
+      13 MB, of which 4-byte references save 0.6 to 5 MB.
+   6. Planned if needed: reference maps, so that marking reads only the reference fields. A
+      number that names a slot's start keeps that slot: 15,000 of the 20 million halves of the
+      server's words that are not references do, which is to be measured as live bytes with the
+      switch against without before deciding.
+   7. Planned: objects on the stack in the fields of other objects of the same frame again
+      (1.1, docs/collector.md, "Objects on the stack"), by keeping such a field at 8 bytes. With
+      the switch, StackCaptures keeps 4 of its 8 objects on the stack and StackObjectsInLists 8
+      of its 10.
+
+   Of the 107 MB more than Java's, then, about 25 to 50 MB is references at 8 bytes and 8 MB is
+   arrays in two parts. Most of the rest is objects that ours keeps and Java does not, outside
+   this item: 108,000 `Class` objects against Java's 26,000 (8 MB more), NBT tags (57,000
+   `StringTag`s against 5,400, 61,000 `ListTag`s against 218), 271,000 64-byte slots of numbers
+   that no object owns (17 MB), `int[]` buffers of 10.9 MB against 2 MB, and 17% more chunk
+   sections than Java at that point of the run.
 3. Built: thin references for multi-class types, replacing the enums of handles, with dispatch
    on the class number.
 4. Fields as cells, monitors and identity hashes in side tables, removing `RefCell` and

@@ -3,6 +3,7 @@
 //! Java's `Math` rules and uncaught exceptions.
 
 mod array;
+mod compact;
 mod slice;
 
 pub use array::*;
@@ -95,6 +96,7 @@ pub use code_point::{
     is_valid_code_point, low_surrogate, to_chars, to_code_point,
 };
 pub use code_point_chars::*;
+pub use compact::{Compress, RefField, SharedRefField};
 pub use copy_refs::*;
 pub use deflate::{
     deflate_adler, deflate_buffer_buffer, deflate_buffer_bytes, deflate_bytes, deflate_bytes_buffer,
@@ -112,7 +114,7 @@ pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects, print_format, print_format_objects};
 pub use fs::*;
-pub use gc::Allocator;
+pub use gc::{Allocator, CompactAllocator, compact_references};
 pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use inflate::{
     inflate_adler, inflate_buffer_buffer, inflate_buffer_bytes, inflate_bytes, inflate_bytes_buffer,

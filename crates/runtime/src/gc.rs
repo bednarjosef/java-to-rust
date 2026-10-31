@@ -54,6 +54,8 @@
 //! ends. No collection runs between the call and the registration, while the closure the thread
 //! runs is only known to the C library.
 
+mod census;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr;
@@ -63,8 +65,12 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize
 const BLOCK_SHIFT: usize = 16;
 const BLOCK: usize = 1 << BLOCK_SHIFT;
 
-/// The address space reserved for the heap.
-const HEAP_BYTES: usize = 64 << 30;
+/// The address space reserved for the heap: from `LOW_HEAP` to 32 GB when that range is free,
+/// where a 4-byte reference (`java::RefField`) is an object's address divided by 8.
+const HEAP_BYTES: usize = 28 << 30;
+const LOW_HEAP: usize = 4 << 30;
+/// The end of the addresses that 4-byte references reach.
+pub(crate) const COMPACT_END: usize = 32 << 30;
 const MAX_BLOCKS: usize = HEAP_BYTES >> BLOCK_SHIFT;
 
 /// The most slots a block has (of 16 bytes), and the words of a bitmap over them.
@@ -536,8 +542,26 @@ fn number_from(name: &std::ffi::CStr) -> Option<usize> {
 /// Sets the heap up, on the first allocation.
 #[cold]
 fn start(h: &mut Heap) {
-    let raw = reserve(HEAP_BYTES + HUGE_PAGE) as usize;
-    h.base = (raw + HUGE_PAGE - 1) & !(HUGE_PAGE - 1);
+    // From 4 GB to 32 GB when that is free, as it is in a Linux process (the program and its
+    // libraries are mapped above or below it), else anywhere: a program with 4-byte references
+    // then stops (`compact_references`).
+    const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
+    let low = unsafe {
+        mmap(
+            LOW_HEAP as *mut u8,
+            HEAP_BYTES,
+            PROT_READ_WRITE,
+            MAP_PRIVATE_ANONYMOUS_NORESERVE | MAP_FIXED_NOREPLACE,
+            -1,
+            0,
+        )
+    } as usize;
+    h.base = if low == LOW_HEAP {
+        low
+    } else {
+        let raw = reserve(HEAP_BYTES + HUGE_PAGE) as usize;
+        (raw + HUGE_PAGE - 1) & !(HUGE_PAGE - 1)
+    };
     // The heap asks for huge pages, which the system then makes at a fault even when it would
     // have to compact memory first: without them, each 4 KB of the heap takes an entry of the
     // processor's address cache (TLB), which a program that follows pointers across a large heap
@@ -569,6 +593,11 @@ fn start(h: &mut Heap) {
     h.code_pages = number_from(c"JAVA_GC_CODE_PAGES").unwrap_or(CODE_PAGES_EVERY) as u64;
     h.code_pages_at = monotonic_seconds();
     h.low_first = number_from(c"JAVA_GC_LOW_FIRST") != Some(0);
+    let census = number_from(c"JAVA_GC_CENSUS").unwrap_or(0);
+    census::LEVEL.store(census, Ordering::Relaxed);
+    if census >= 3 {
+        census::start_types(h.base);
+    }
 }
 
 /// Has the system track the writes into the heap's reservation: registers it with a
@@ -1043,7 +1072,11 @@ unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let Some(index) = size_index(layout.size(), layout.align()) else {
-            return allocate_large(layout);
+            let p = allocate_large(layout);
+            if census::TYPES.load(Ordering::Relaxed) {
+                census::note_untyped(p as usize);
+            }
+            return p;
         };
         let class = index * 2 + (layout.align() < 8) as usize;
         let p = LISTS
@@ -1083,6 +1116,9 @@ unsafe impl GlobalAlloc for Allocator {
             } else {
                 unsafe { zero_slot(p, size) };
             }
+        }
+        if census::TYPES.load(Ordering::Relaxed) {
+            census::note_untyped(p as usize);
         }
         p
     }
@@ -1146,6 +1182,39 @@ unsafe impl GlobalAlloc for Allocator {
         unsafe { ptr::copy_nonoverlapping(p, moved, layout.size().min(new_size)) };
         unsafe { self.dealloc(p, layout) };
         moved
+    }
+}
+
+/// The collector of a program whose objects hold 4-byte references (`compact.rs`), installed as
+/// the global allocator in place of `Allocator`: `Allocator`, which its first allocation tells to
+/// look for them (`compact_references`).
+pub struct CompactAllocator;
+
+unsafe impl GlobalAlloc for CompactAllocator {
+    #[inline]
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if !COMPACT.load(Ordering::Relaxed) {
+            compact_references();
+        }
+        unsafe { Allocator.alloc(layout) }
+    }
+
+    #[inline]
+    unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
+        unsafe { Allocator.dealloc(p, layout) }
+    }
+
+    #[inline]
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if !COMPACT.load(Ordering::Relaxed) {
+            compact_references();
+        }
+        unsafe { Allocator.alloc_zeroed(layout) }
+    }
+
+    #[inline]
+    unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        unsafe { Allocator.realloc(p, layout, new_size) }
     }
 }
 
@@ -1244,6 +1313,23 @@ pub(crate) fn take_slot<T>() -> *mut u8 {
         unsafe { zero_slot(p, size) };
     }
     p
+}
+
+/// Records, for the census of types (`JAVA_GC_CENSUS=3`), that the allocation at `p` holds a
+/// `T`.
+#[inline(always)]
+pub(crate) fn note_type<T>(p: *const T) {
+    if census::TYPES.load(Ordering::Relaxed) {
+        census::note(p as usize, std::any::type_name::<T>());
+    }
+}
+
+/// Records, for the census of types, that the allocation at `p` holds what `name` names.
+#[inline(always)]
+pub(crate) fn note_name(p: *const u8, name: &'static str) {
+    if census::TYPES.load(Ordering::Relaxed) {
+        census::note(p as usize, name);
+    }
 }
 
 /// Zeroes the `size` bytes at `p`, a slot being handed out, all of them. Inlined where the value
@@ -1576,6 +1662,7 @@ extern "C" fn helper(round: *mut u8) -> *mut u8 {
                 end: END.load(Ordering::Acquire),
                 stack,
                 shares: true,
+                compact: COMPACT.load(Ordering::Acquire),
             };
             marker.finish();
             stack = marker.stack;
@@ -1601,6 +1688,23 @@ fn set_mark(word: *mut u64, bit: u64, shared: bool) -> bool {
     }
 }
 
+/// Whether the program holds 4-byte references (`compact_references`), which marking then looks
+/// for in every half of every word it scans.
+static COMPACT: AtomicBool = AtomicBool::new(false);
+
+/// Says that the program holds references of 4 bytes in its objects (`compact.rs`), as
+/// `CompactAllocator` does at the first allocation: the heap must lie below 32 GB, and marking
+/// takes each 4 bytes of a word that, times 8, is the start of a taken slot for a reference to it.
+#[cold]
+pub fn compact_references() {
+    let g = prepare();
+    let h = heap(&g);
+    if h.base != LOW_HEAP {
+        fail(b"the heap could not be placed below 32 GB, which this program's 4-byte references need\n");
+    }
+    COMPACT.store(true, Ordering::Release);
+}
+
 /// One thread's marking: the collecting thread's or a helper's.
 struct Marker {
     meta: *mut Meta,
@@ -1609,12 +1713,27 @@ struct Marker {
     stack: MarkStack,
     /// Whether other markers run, so that mark bits are set atomically and work is offered.
     shares: bool,
+    /// Whether words are also read as two 4-byte references (`COMPACT`).
+    compact: bool,
 }
 
 impl Marker {
     /// Marks the slot that `word` points into, if it is a taken slot.
     #[inline(always)]
     fn candidate(&mut self, word: usize) {
+        self.mark::<false>(word)
+    }
+
+    /// Marks the slot that the 4-byte reference `bits` names (`java::RefField`), if it is the start of
+    /// a taken slot: a reference is never to the inside of one.
+    #[inline(always)]
+    fn reference(&mut self, bits: u32) {
+        self.mark::<true>((bits as usize) << 3)
+    }
+
+    /// Marks the slot that `word` points into, or with `EXACT` starts at, if it is a taken slot.
+    #[inline(always)]
+    fn mark<const EXACT: bool>(&mut self, word: usize) {
         // A `java::Thin` keeps its class number in the top bits of a handle.
         let word = word & crate::thin::ADDRESS;
         if word.wrapping_sub(self.base) >= self.end - self.base {
@@ -1630,7 +1749,9 @@ impl Marker {
                     return;
                 }
                 let slot = (((word - start) as u64 * unsafe { (*m).magic }) >> 32) as usize;
-                if slot >= unsafe { (*m).slots } as usize {
+                if slot >= unsafe { (*m).slots } as usize
+                    || EXACT && start + slot * unsafe { (*m).size } as usize != word
+                {
                     return;
                 }
                 let (w, bit) = (slot / 64, 1u64 << (slot % 64));
@@ -1645,6 +1766,10 @@ impl Marker {
                 }
             }
             LARGE | LARGE_REST => {
+                // A large allocation starts within its first page (`allocate_large`).
+                if EXACT && (unsafe { (*m).kind } == LARGE_REST || word & (BLOCK - 1) >= PAGE) {
+                    return;
+                }
                 if unsafe { (*m).kind } == LARGE_REST {
                     b = unsafe { (*m).size } as usize;
                     m = unsafe { self.meta.add(b) };
@@ -1671,6 +1796,10 @@ impl Marker {
         while p + 8 <= to {
             let word = unsafe { (p as *const usize).read() };
             self.candidate(word);
+            if self.compact {
+                self.reference(word as u32);
+                self.reference((word >> 32) as u32);
+            }
             p += 8;
         }
     }
@@ -1992,7 +2121,14 @@ fn mark_and_sweep(
     }
     let stack =
         MarkStack { items: MARK_STACK.load(Ordering::Relaxed), low: 0, len: 0, capacity: MARK_STACK_ITEMS };
-    let mut marker = Marker { meta: h.meta, base, end, stack, shares: helpers > 0 };
+    let mut marker = Marker {
+        meta: h.meta,
+        base,
+        end,
+        stack,
+        shares: helpers > 0,
+        compact: COMPACT.load(Ordering::Acquire),
+    };
     // In a minor collection, the old objects on the pages written since the last collection
     // are scanned: they are where an old object may point to a young one. Should the system stop
     // answering, this and every later collection are full.
@@ -2052,6 +2188,10 @@ fn mark_and_sweep(
     let marked = started.elapsed();
     sweep(h, helpers);
     release_kept(h);
+    let census = census::LEVEL.load(Ordering::Relaxed);
+    if census > 0 && !minor {
+        census::census(h, census);
+    }
     if h.pagemap >= 0 && !protect_old(h) {
         h.pagemap = -1;
     }

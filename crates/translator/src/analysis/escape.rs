@@ -628,6 +628,11 @@ fn field_of(class: &Class, t: usize, name: &str) -> Option<FieldKey> {
 /// object holds in them is read only by its own methods (see `Contents`). A read on another
 /// object whose class is not known counts for every field of its name.
 fn own_fields(class: &Class) -> FastSet<FieldKey> {
+    // A field of 4 bytes cannot hold the address of an object on the stack, so with 4-byte
+    // references whatever is stored in a field escapes (docs/native-speed.md 1.1).
+    if crate::codegen::compact_references() {
+        return FastSet::default();
+    }
     let mut fields: FastSet<FieldKey> = class
         .types
         .iter()
