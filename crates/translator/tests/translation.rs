@@ -6493,7 +6493,7 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
         &[
             "String(&'a java::JString) = 2,",
             "fn first(a: &[Object]) -> Object {",
-            "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || java::Class::STRING), \"java.lang.String\", java::BASE, |v| Some(v.runtime_type_names()), &[\"[Ljava.lang.String;\", \"[Ljava.io.Serializable;\", \"[Ljava.lang.Comparable;\", \"[Ljava.lang.CharSequence;\", \"[Ljava.lang.constant.Constable;\", \"[Ljava.lang.constant.ConstantDesc;\", \"[Ljava.lang.Object;\", \"java.lang.Cloneable\", \"java.io.Serializable\", \"java.lang.Object\"])));",
+            "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| &const { java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || &java::Class::STRING) }, \"java.lang.String\", java::BASE, |v| Some(v.runtime_type_names()), &[\"[Ljava.lang.String;\", \"[Ljava.io.Serializable;\", \"[Ljava.lang.Comparable;\", \"[Ljava.lang.CharSequence;\", \"[Ljava.lang.constant.Constable;\", \"[Ljava.lang.constant.ConstantDesc;\", \"[Ljava.lang.Object;\", \"java.lang.Cloneable\", \"java.io.Serializable\", \"java.lang.Object\"])));",
             "java::join(java::wtf8(\",\"), &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), (\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
         ],
     );
@@ -6971,7 +6971,7 @@ fn a_static_method_asking_for_its_caller_gets_the_calling_class() {
             public static void main(String[] a) { System.out.println(caller() + B.name()); }
         }",
     );
-    assert_contains(&rust, &["fn caller(caller_class: java::Class)", "caller(crate::CLASS__A)"]);
+    assert_contains(&rust, &["fn caller(caller_class: &'static java::Class)", "caller(&crate::CLASS__A)"]);
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let instance = reject(
         "class A {

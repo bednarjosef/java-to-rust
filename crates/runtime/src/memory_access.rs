@@ -13,7 +13,7 @@ static WARNED: AtomicBool = AtomicBool::new(false);
 
 /// `beforeMemoryAccess()` of the method `method` of `sun.misc.Unsafe`, called by class `caller`,
 /// with `--sun-misc-unsafe-memory-access=warn`, the default: the warning, once per run.
-pub fn memory_access_warning(caller: Class, method: &str) {
+pub fn memory_access_warning(caller: &Class, method: &str) {
     if WARNED.swap(true, Ordering::SeqCst) {
         return;
     }

@@ -1614,7 +1614,7 @@ impl<'a> Gen<'a> {
             None if self.struct_class(object).is_some_and(|c| self.class.proxy_classes.contains(&c)) => {
                 let c = self.struct_class(object).expect("an object has a class");
                 let class = self.type_class(Type::class(&self.class.types[c].name));
-                self.after_object(object, &format!("{class}.{method}()"))
+                self.after_object(object, &super::class_values::method_on(&class, method))
             }
             // An enum's constant with a body is of the body's class.
             None if self.struct_class(object).is_some_and(|c| self.has_bodies(c)) => {

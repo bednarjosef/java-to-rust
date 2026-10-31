@@ -340,8 +340,9 @@ An array's monitor is kept too, made the first time a thread takes it
 Design: [reflection-and-plugins.md](reflection-and-plugins.md).
 
 - Comparing the classes of the program's objects (`getClass() == o.getClass()`, `x.getClass() ==
-  Dog.class`) is a `matches!` of the variant. Any other class is a `java::Class` value, `Copy` and
-  equal by binary name (`equals` of an object that is not a class is false), with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
+  Dog.class`) is a `matches!` of the variant. Any other class is a `&'static java::Class`, a
+  reference to the class's static or constant, one word wherever it is held, and equal by binary
+  name (`equals` of an object that is not a class is false), with `getName`, `getSimpleName`, `getTypeName`, `getSuperclass`,
   `isArray`, `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value
   carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests;
   `isInstance` and `cast` test the names above the value's class, each name compared by its

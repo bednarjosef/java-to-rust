@@ -104,7 +104,7 @@ impl<T: Clone + std::fmt::Debug> std::fmt::Debug for SharedElements<T> {
 /// as the translator writes it where the array is made.
 pub struct ElementClass<T> {
     /// The array's class, which its `getClass()` gives.
-    pub(crate) class: fn() -> Class,
+    pub(crate) class: fn() -> &'static Class,
     /// The binary name of the class of the elements: `java.lang.String`.
     pub(crate) element: &'static str,
     /// The module and class loader of the class of the elements as HotSpot names them, which a
@@ -120,7 +120,7 @@ pub struct ElementClass<T> {
 
 impl<T> ElementClass<T> {
     pub fn new(
-        class: fn() -> Class,
+        class: fn() -> &'static Class,
         element: &'static str,
         module: &'static str,
         names: fn(&T) -> Option<&'static [&'static str]>,
@@ -932,7 +932,7 @@ pub fn tagged_like<T: Clone, A: MadeElements<T>, L: Elements<T>>(made: A, like: 
 }
 
 /// `a.getClass()` of an `Object[]`: the class of a covariant array, or `exact`, `Object[]`'s.
-pub fn array_class<T>(a: &impl Elements<T>, exact: fn() -> Class) -> Class {
+pub fn array_class<T>(a: &impl Elements<T>, exact: fn() -> &'static Class) -> &'static Class {
     a.element_class().map_or_else(exact, |c| (c.class)())
 }
 
@@ -956,13 +956,13 @@ pub fn array_type_names<T>(
 /// `o instanceof C[]` of an `Object[]` `a`, given the array class `class` (`C[]`) where the
 /// translation holds arrays of it as `Object[]`s: whether the class that `a` carries is `class`
 /// or below it. An array that carries no class passes, as one of `class` would.
-pub fn array_is<T>(a: &impl Elements<T>, class: Class) -> bool {
+pub fn array_is<T>(a: &impl Elements<T>, class: &Class) -> bool {
     a.element_class().is_none_or(|c| class.is_assignable_from((c.class)()))
 }
 
 /// `(C[]) o` of an `Object[]` `a` (as `array_is`): `a`, or the `ClassCastException` of a cast
 /// of its class to `to`, the class `class` names.
-pub fn try_cast_array<T, A: Elements<T>>(a: A, class: Class, to: crate::CastClass) -> Result<A, Exception> {
+pub fn try_cast_array<T, A: Elements<T>>(a: A, class: &Class, to: crate::CastClass) -> Result<A, Exception> {
     match a.element_class() {
         Some(c) if !class.is_assignable_from((c.class)()) => {
             Err(crate::cast_exception(((c.class)().binary_name(), c.module), to))
@@ -972,7 +972,7 @@ pub fn try_cast_array<T, A: Elements<T>>(a: A, class: Class, to: crate::CastClas
 }
 
 /// `try_cast_array`, which throws its `ClassCastException`.
-pub fn cast_array<T, A: Elements<T>>(a: A, class: Class, to: crate::CastClass) -> A {
+pub fn cast_array<T, A: Elements<T>>(a: A, class: &Class, to: crate::CastClass) -> A {
     try_cast_array(a, class, to).unwrap_or_else(|e| crate::throw_exception(e))
 }
 

@@ -4,7 +4,11 @@
 //! &["Main$Dog", "Main$Animal", "java.lang.Object"])`). The class of the program that code names
 //! is a static at the crate root (`static CLASS__MAIN_DOG: java::Class = ..;`), written once
 //! however many places name it, as the reflection tables name a class in each of its methods; the
-//! runtime's classes and arrays are written out where they are used. A static rather than a
+//! runtime's classes and arrays are written out where they are used. Code holds a class value as
+//! a reference to it (`&crate::CLASS__MAIN_DOG`, `&java::Class::STRING`, an array's
+//! `&const { java::Class::array(..) }`): one word, which a field of an object that threads share
+//! holds as an atomic word, where a whole class was 120 bytes to copy and was read under a lock.
+//! A static rather than a
 //! constant, so that classes can name each other in a loop and no function is written to name
 //! one: rustc checks and compiles each function body, and the Minecraft server has 40,000 classes. For a value of an enum of classes, the enum's
 //! `runtime_class()` and `runtime_type_names()` read tables by class number, with a `match` for
@@ -76,7 +80,7 @@ impl<'a> Gen<'a> {
             // A constant with a body is of the body's class.
             Type::Enum(_) if let Some(c) = self.class.type_of(object.ty).filter(|&c| self.has_bodies(c)) => {
                 let value = self.object(object);
-                return Code::atom(self.constant_class(c, &value));
+                return Code::borrow_or_atom(self.constant_class(c, &value));
             }
             ty => self.type_class(ty),
         };
@@ -201,7 +205,7 @@ impl<'a> Gen<'a> {
 
     /// The `java::Class` of type `ty`, as `T.class` names it.
     pub(super) fn type_class(&mut self, ty: Type) -> String {
-        let constant = |name: &str| format!("java::Class::{name}");
+        let constant = |name: &str| format!("&java::Class::{name}");
         match ty {
             Type::Int => constant("INT"),
             Type::Long => constant("LONG_PRIMITIVE"),
@@ -230,7 +234,7 @@ impl<'a> Gen<'a> {
                     (array_name(self, *element), format!("{}[]", simple_name(self, *element)));
                 let component = self.type_class(*element);
                 format!(
-                    "java::Class::array({}, {}, || {component})",
+                    "&const {{ java::Class::array({}, {}, || {component}) }}",
                     rust_string(&name),
                     rust_string(&simple)
                 )
@@ -244,7 +248,11 @@ impl<'a> Gen<'a> {
                     "&[{}, \"java.lang.annotation.Annotation\", \"java.lang.Object\"]",
                     rust_string(binary)
                 );
-                format!("java::Class::annotation({}, {}, {names})", rust_string(binary), rust_string(simple))
+                format!(
+                    "&const {{ java::Class::annotation({}, {}, {names}) }}",
+                    rust_string(binary),
+                    rust_string(simple)
+                )
             }
             _ => match self.class.type_of(ty) {
                 Some(c) => self.decl_class(c),
@@ -264,16 +272,16 @@ impl<'a> Gen<'a> {
             return self.type_class(ty);
         }
         match decl.name.as_str() {
-            OBJECT => return "java::Class::OBJECT".to_string(),
-            COMPARABLE => return "java::Class::COMPARABLE".to_string(),
-            ENUM => return "java::Class::ENUM".to_string(),
-            NUMBER => return "java::Class::NUMBER".to_string(),
-            CHAR_SEQUENCE => return "java::Class::CHAR_SEQUENCE".to_string(),
-            RECORD => return "java::Class::RECORD".to_string(),
+            OBJECT => return "&java::Class::OBJECT".to_string(),
+            COMPARABLE => return "&java::Class::COMPARABLE".to_string(),
+            ENUM => return "&java::Class::ENUM".to_string(),
+            NUMBER => return "&java::Class::NUMBER".to_string(),
+            CHAR_SEQUENCE => return "&java::Class::CHAR_SEQUENCE".to_string(),
+            RECORD => return "&java::Class::RECORD".to_string(),
             _ => {}
         }
         self.class_values.insert(c);
-        format!("crate::{}", self.class_value_name(c))
+        format!("&crate::{}", self.class_value_name(c))
     }
 
     /// The name of the static at the crate root that holds the `java::Class` of class `c` of the
@@ -349,7 +357,7 @@ impl<'a> Gen<'a> {
         let mut names = vec![rust_string(binary)];
         names.extend(self.decl_names(c).iter().map(|n| rust_string(n)));
         let value = format!(
-            "java::Class::new({}, \"\", Some(&{superclass}), &[{}])",
+            "java::Class::new({}, \"\", Some({superclass}), &[{}])",
             rust_string(binary),
             names.join(", ")
         );
@@ -359,7 +367,7 @@ impl<'a> Gen<'a> {
         };
         match self.class_details {
             // `static final enum`'s flags, as javac writes the body's class.
-            true => format!("{value}.declared(0x4010, java::Nest::Anonymous, Some(&{superclass}))"),
+            true => format!("{value}.declared(0x4010, java::Nest::Anonymous, Some({superclass}))"),
             false => value,
         }
     }
@@ -375,7 +383,7 @@ impl<'a> Gen<'a> {
         let mut arms: Vec<String> = Vec::new();
         for (ordinal, _) in &bodies {
             let name = self.body_class_value_name(c, *ordinal);
-            arms.push(format!("{} => crate::{name}", self.constant_path(c, *ordinal)));
+            arms.push(format!("{} => &crate::{name}", self.constant_path(c, *ordinal)));
         }
         let count = self.class.types[c].enum_constants.as_ref().map_or(0, Vec::len);
         if bodies.len() < count {
@@ -419,7 +427,7 @@ impl<'a> Gen<'a> {
             TypeKind::Enum => format!("java::Class::enumeration({name}, {simple}, {names})"),
             _ => {
                 let superclass = match extends {
-                    Some(s) => format!("Some(&{})", self.decl_class(s)),
+                    Some(s) => format!("Some({})", self.decl_class(s)),
                     None if record => "Some(&java::Class::RECORD)".to_string(),
                     None if object => "None".to_string(),
                     None => "Some(&java::Class::OBJECT)".to_string(),
@@ -455,7 +463,7 @@ impl<'a> Gen<'a> {
             _ => "TopLevel",
         };
         let enclosing = match enclosing {
-            Some(e) => format!("Some(&{})", self.decl_class(e)),
+            Some(e) => format!("Some({})", self.decl_class(e)),
             None => "None".to_string(),
         };
         format!("{value}.declared({modifiers:#x}, java::Nest::{nest}, {enclosing})")
@@ -469,16 +477,16 @@ impl<'a> Gen<'a> {
         for interface in self.class.types[c].interfaces.clone() {
             values.push(match interface {
                 Interface::Type(i) => self.decl_class(i),
-                Interface::Named(name) if name == COMPARABLE => "java::Class::COMPARABLE".to_string(),
-                Interface::Named(name) if name == CHAR_SEQUENCE => "java::Class::CHAR_SEQUENCE".to_string(),
+                Interface::Named(name) if name == COMPARABLE => "&java::Class::COMPARABLE".to_string(),
+                Interface::Named(name) if name == CHAR_SEQUENCE => "&java::Class::CHAR_SEQUENCE".to_string(),
                 Interface::Named(name) => {
                     let simple = name.rsplit('.').next().unwrap_or(&name);
                     let (name, simple) = (rust_string(&name), rust_string(simple));
-                    format!("java::Class::interface({name}, {simple}, &[{name}, {}])", rust_string(OBJECT))
+                    format!("&java::Class::interface({name}, {simple}, &[{name}, {}])", rust_string(OBJECT))
                 }
             });
         }
-        values.iter().map(|value| format!("&{value}")).collect::<Vec<_>>().join(", ")
+        values.join(", ")
     }
 
     /// `ClassMethod(op)(class, args..)`.
@@ -776,7 +784,7 @@ impl<'a> Gen<'a> {
         let Some((&last, _)) = by_number.last_key_value() else { return String::new() };
         let mut entries = vec!["&java::Class::OBJECT".to_string(); usize::from(last) + 1];
         for (number, c) in by_number {
-            entries[usize::from(number)] = format!("&{}", self.decl_class(c));
+            entries[usize::from(number)] = self.decl_class(c);
         }
         format!(
             "static {CLASSES}: [&java::Class; {}] = [\n{}];\n",
@@ -942,7 +950,7 @@ impl<'a> Gen<'a> {
     /// A class that may be null, as an `Option<java::Class>`.
     fn class_option(&mut self, e: &'a Expr) -> String {
         match &e.kind {
-            ExprKind::Null => "None::<java::Class>".to_string(),
+            ExprKind::Null => "None::<&'static java::Class>".to_string(),
             _ if self.nullable(e) => self.expr(e).at(ATOM),
             _ => format!("Some({})", self.expr(e).text),
         }

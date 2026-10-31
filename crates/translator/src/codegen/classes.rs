@@ -91,7 +91,7 @@ impl<'a> Gen<'a> {
             let text = self.expr(object).text;
             return Code::new(format!("{{ let _ = {text}; {value} }}"), LOWEST);
         }
-        Code::atom(value)
+        Code::borrow_or_atom(value)
     }
 
     /// Whether `object` is null or holds an operation whose failure a `catch` or a `finally`

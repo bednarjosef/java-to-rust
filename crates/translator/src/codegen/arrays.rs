@@ -270,7 +270,7 @@ impl<'a> Gen<'a> {
             items.iter().all(|e| matches!(constant(e).kind, ExprKind::Builtin(Builtin::ClassLiteral(_), _)));
         let (static_type, read) = match (strings, classes) {
             (true, _) => ("&str", "*x"),
-            (_, true) => ("&java::Class", "**x"),
+            (_, true) => ("&java::Class", "*x"),
             _ => return None,
         };
         let mut constants = Vec::with_capacity(items.len());
@@ -282,8 +282,9 @@ impl<'a> Gen<'a> {
             };
             // A class is a path to a constant or a static, or an array class, made by a `const fn`
             // that a static's initializer can call; named once in the element.
-            let path = constant.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
-            let array = constant.starts_with("java::Class::array(");
+            let path = (constant.strip_prefix('&'))
+                .is_some_and(|p| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'));
+            let array = constant.starts_with("&const { java::Class::array(");
             if (classes && !path && !array) || text.matches(constant.as_str()).count() != 1 {
                 return None;
             }
@@ -291,7 +292,7 @@ impl<'a> Gen<'a> {
             if template.get_or_insert_with(|| around.clone()) != &around {
                 return None;
             }
-            constants.push(if strings { constant } else { format!("&{constant}") });
+            constants.push(constant);
         }
         let template = template?;
         // In parentheses only where a method is called on it, which `*` would take first.

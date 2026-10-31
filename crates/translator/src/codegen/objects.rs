@@ -188,7 +188,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::String => "java::JString::new()",
         // A `java::StringBuilder`, or a `java::SharedStringBuilder` in a program with threads.
         Type::StringBuilder => "Default::default()",
-        Type::JavaClass => "java::Class::OBJECT",
+        Type::JavaClass => "&java::Class::OBJECT",
         Type::Boxed(_) | Type::Class(..) => "None",
         // A charset is never null, so its field starts as a placeholder; lowering rejects a
         // `Charset` field without an initializer, which assigns the field before it is read.

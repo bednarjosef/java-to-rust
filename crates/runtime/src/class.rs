@@ -4,7 +4,8 @@
 //! classes of a program share one. A class of the program is a static at the translation's crate
 //! root, and names its superclass, its interfaces and the class that declares it by references,
 //! which may go round in a loop (`class Outer implements Outer.Inner`); a class the translator
-//! writes where it is used, an array's, names its component type by a function.
+//! writes where it is used, an array's, names its component type by a function. A class value is
+//! a `&'static Class`, so the methods that give a class give a reference.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -74,7 +75,7 @@ pub struct Class {
     simple: &'static str,
     kind: Kind,
     superclass: Option<&'static Class>,
-    component: Option<fn() -> Class>,
+    component: Option<fn() -> &'static Class>,
     /// The binary names of the class and of every class and interface above it, its own first,
     /// as `is_instance` takes them; empty for an array and a primitive type, which
     /// `is_assignable_from` answers by their kind.
@@ -135,7 +136,7 @@ impl Class {
     }
 
     /// An array class, `[Ljava.lang.String;`, whose superclass is `Object`.
-    pub const fn array(name: &'static str, simple: &'static str, component: fn() -> Class) -> Class {
+    pub const fn array(name: &'static str, simple: &'static str, component: fn() -> &'static Class) -> Class {
         // `getModifiers` answers from the component's.
         Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), Some(component), &[], 0)
     }
@@ -159,7 +160,7 @@ impl Class {
         simple: &'static str,
         kind: Kind,
         superclass: Option<&'static Class>,
-        component: Option<fn() -> Class>,
+        component: Option<fn() -> &'static Class>,
         names: Names,
         modifiers: u16,
     ) -> Class {
@@ -358,29 +359,29 @@ impl Class {
     }
 
     /// The `index`th of the interfaces that `getInterfaces()` gives.
-    pub fn get_interface(&self, index: i32) -> Class {
+    pub fn get_interface(&self, index: i32) -> &'static Class {
         match self.is_array() {
-            true => [Class::CLONEABLE, Class::SERIALIZABLE][index as usize],
-            false => *self.interfaces[index as usize],
+            true => [&Class::CLONEABLE, &Class::SERIALIZABLE][index as usize],
+            false => self.interfaces[index as usize],
         }
     }
 
     /// `getEnclosingClass()`.
-    pub fn get_enclosing_class(&self) -> Option<Class> {
-        self.enclosing.copied()
+    pub fn get_enclosing_class(&self) -> Option<&'static Class> {
+        self.enclosing
     }
 
     /// `getDeclaringClass()`: a member class's enclosing class, `null` for any other.
-    pub fn get_declaring_class(&self) -> Option<Class> {
-        self.enclosing.filter(|_| self.nest == Nest::Member).copied()
+    pub fn get_declaring_class(&self) -> Option<&'static Class> {
+        self.enclosing.filter(|_| self.nest == Nest::Member)
     }
 
     /// `Enum.getDeclaringClass()` of a constant of this class: the enum, which is the superclass
     /// of the class of a constant's body.
-    pub fn enum_declaring_class(&self) -> Class {
+    pub fn enum_declaring_class(&'static self) -> &'static Class {
         match self.superclass {
-            Some(s) if s.kind == Kind::Enum => *s,
-            _ => *self,
+            Some(s) if s.kind == Kind::Enum => s,
+            _ => self,
         }
     }
 
@@ -472,7 +473,7 @@ impl Class {
     }
 
     fn type_name(&self) -> String {
-        let mut class = *self;
+        let mut class = self;
         let mut dimensions = 0;
         while let Some(component) = class.get_component_type() {
             class = component;
@@ -487,12 +488,12 @@ impl Class {
     }
 
     /// `getSuperclass()`: `null` for `Object`, an interface and a primitive type.
-    pub fn get_superclass(&self) -> Option<Class> {
-        self.superclass.copied()
+    pub fn get_superclass(&self) -> Option<&'static Class> {
+        self.superclass
     }
 
     /// `getComponentType()`: the type of an array's elements, `null` for any other class.
-    pub fn get_component_type(&self) -> Option<Class> {
+    pub fn get_component_type(&self) -> Option<&'static Class> {
         self.component.map(|f| f())
     }
 
@@ -569,7 +570,7 @@ impl Class {
     /// by the names above `other`. A primitive type is only itself; every other class is below
     /// `Object`; an array is below `Cloneable` and `Serializable`, and below the arrays of the
     /// classes above its component type where that is not primitive.
-    pub fn is_assignable_from(&self, other: Class) -> bool {
+    pub fn is_assignable_from(&self, other: &Class) -> bool {
         if self.name == other.name {
             return true;
         }
@@ -637,9 +638,12 @@ const fn name_hash(name: &str) -> i32 {
 }
 
 impl PartialEq for Class {
-    /// The same name, which two values of one class usually hold at one address.
+    /// The same class: usually the same static, else the same name, which two values of one
+    /// class usually hold at one address.
     fn eq(&self, other: &Class) -> bool {
-        std::ptr::eq(self.name, other.name) || (self.hash == other.hash && self.name == other.name)
+        std::ptr::eq(self, other)
+            || std::ptr::eq(self.name, other.name)
+            || (self.hash == other.hash && self.name == other.name)
     }
 }
 
@@ -676,12 +680,16 @@ mod tests {
     fn a_class_shows_and_compares_as_java_does() {
         let point = Class::new("Main$Point", "Point", Some(&Class::OBJECT), &["Main$Point", OBJECT]);
         let points =
-            Class::array("[LMain$Point;", "Point[]", || Class::new("Main$Point", "Point", None, &[]));
+            Class::array(
+                "[LMain$Point;",
+                "Point[]",
+                || &const { Class::new("Main$Point", "Point", None, &[]) },
+            );
         assert_eq!(point.to_string(), "class Main$Point");
         assert_eq!(Class::COMPARABLE.to_string(), "interface java.lang.Comparable");
         assert_eq!(Class::INT.to_string(), "int");
-        assert_eq!(points.get_component_type(), Some(point));
-        assert_eq!(points.get_superclass(), Some(Class::OBJECT));
+        assert_eq!(points.get_component_type(), Some(&point));
+        assert_eq!(points.get_superclass(), Some(&Class::OBJECT));
         assert_eq!(Class::OBJECT.get_superclass(), None);
         assert!(points.is_array() && !point.is_array());
         assert_ne!(point, Class::STRING);
@@ -700,27 +708,30 @@ mod tests {
         let shape = Class::interface("Shape", "Shape", &["Shape", OBJECT]);
         let point = Class::new("Point", "Point", Some(&Class::OBJECT), &["Point", "Shape", OBJECT]);
         let points = Class::array("[LPoint;", "Point[]", || {
-            Class::new("Point", "Point", Some(&Class::OBJECT), &["Point", "Shape", OBJECT])
+            &const { Class::new("Point", "Point", Some(&Class::OBJECT), &["Point", "Shape", OBJECT]) }
         });
-        let shapes =
-            Class::array("[LShape;", "Shape[]", || Class::interface("Shape", "Shape", &["Shape", OBJECT]));
-        let ints = Class::array("[I", "int[]", || Class::INT);
-        let longs = Class::array("[J", "long[]", || Class::LONG_PRIMITIVE);
-        assert!(shape.is_assignable_from(point) && !point.is_assignable_from(shape));
-        assert!(Class::OBJECT.is_assignable_from(shape) && !Class::OBJECT.is_assignable_from(Class::INT));
-        assert!(shapes.is_assignable_from(points) && !points.is_assignable_from(shapes));
-        assert!(ints.is_assignable_from(ints) && !ints.is_assignable_from(longs));
-        assert!(Class::OBJECT.is_assignable_from(ints) && !shape.is_assignable_from(ints));
-        assert!(Class::INT.is_assignable_from(Class::INT) && !Class::INTEGER.is_assignable_from(Class::INT));
+        let shapes = Class::array("[LShape;", "Shape[]", || {
+            &const { Class::interface("Shape", "Shape", &["Shape", OBJECT]) }
+        });
+        let ints = Class::array("[I", "int[]", || &Class::INT);
+        let longs = Class::array("[J", "long[]", || &Class::LONG_PRIMITIVE);
+        assert!(shape.is_assignable_from(&point) && !point.is_assignable_from(&shape));
+        assert!(Class::OBJECT.is_assignable_from(&shape) && !Class::OBJECT.is_assignable_from(&Class::INT));
+        assert!(shapes.is_assignable_from(&points) && !points.is_assignable_from(&shapes));
+        assert!(ints.is_assignable_from(&ints) && !ints.is_assignable_from(&longs));
+        assert!(Class::OBJECT.is_assignable_from(&ints) && !shape.is_assignable_from(&ints));
         assert!(
-            Class::NUMBER.is_assignable_from(Class::INTEGER)
-                && Class::COMPARABLE.is_assignable_from(Class::STRING)
+            Class::INT.is_assignable_from(&Class::INT) && !Class::INTEGER.is_assignable_from(&Class::INT)
+        );
+        assert!(
+            Class::NUMBER.is_assignable_from(&Class::INTEGER)
+                && Class::COMPARABLE.is_assignable_from(&Class::STRING)
         );
     }
 
     #[test]
     fn type_names_are_javas() {
-        let ints = Class::array("[[I", "int[][]", || Class::array("[I", "int[]", || Class::INT));
+        let ints = Class::array("[[I", "int[][]", || &const { Class::array("[I", "int[]", || &Class::INT) });
         assert_eq!(&*ints.get_type_name(), crate::Wtf8::new("int[][]"));
         assert_eq!(&*Class::STRING.get_type_name(), crate::Wtf8::new("java.lang.String"));
         let inner = Class::new("a.Outer$Inner", "Inner", Some(&Class::OBJECT), &["a.Outer$Inner", OBJECT]);
@@ -734,7 +745,7 @@ mod tests {
         let anonymous = Class::new("a.b.Outer$1", "", Some(&Class::OBJECT), &[]);
         let in_local = Class::new("Outer$1Local$Inner", "Inner", Some(&Class::OBJECT), &[]);
         let inners = Class::array("[La.b.Outer$Inner;", "Inner[]", || {
-            Class::new("a.b.Outer$Inner", "Inner", Some(&Class::OBJECT), &[])
+            &const { Class::new("a.b.Outer$Inner", "Inner", Some(&Class::OBJECT), &[]) }
         });
         assert_eq!(inner.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner")));
         assert_eq!(inners.get_canonical_name().as_deref(), Some(crate::Wtf8::new("a.b.Outer.Inner[]")));

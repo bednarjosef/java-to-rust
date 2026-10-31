@@ -79,7 +79,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("fn copy_kind(&self) -> {kind} {{"));
         self.line("    self.array_copy_kind()");
         self.line("}");
-        self.line(&format!("fn copy_class(&self) -> {class} {{"));
+        self.line(&format!("fn copy_class(&self) -> &'static {class} {{"));
         self.line("    self.runtime_class()");
         self.line("}");
         let methods: [(&str, &str, &str); 3] = [
