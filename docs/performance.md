@@ -23,7 +23,7 @@ benchmarks that measure it are in "Memory".
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
 clock (4.8 GHz under load); NoiseTree's and ObjectDispatch's rows are from later runs of each
-alone (three runs a side).
+alone (three runs a side), ReflectionLookups' from one of it alone (five runs a side).
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -49,7 +49,7 @@ alone (three runs a side).
 | ObjectDispatch        |     169 |     376 |      2.23 |         111 |         311 |         2.80 |
 | ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
 | ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
-| ReflectionLookups     |     155 |     183 |      1.18 |         106 |         162 |         1.53 |
+| ReflectionLookups     |     207 |     210 |      1.01 |         146 |         189 |         1.29 |
 | ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
 | Sieve                 |    1278 |    1006 |      0.79 |           - |           - |            - |
 | SmallObjects          |     147 |     203 |      1.38 |           - |           - |            - |
