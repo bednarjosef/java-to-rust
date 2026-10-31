@@ -5546,6 +5546,50 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
 }
 
 #[test]
+fn a_thrown_exception_whose_message_can_throw_is_made_out_of_line() {
+    let rust = translate(
+        "class Refused extends Exception { Refused(String m) { super(m); } }
+        class A {
+            static String describe(int code) throws Refused {
+                if (code < 0) throw new Refused(\"can't describe \" + code);
+                return \"code \" + code;
+            }
+            static int checked(int code) throws Refused {
+                if (code > 2) throw new Refused(\"can't take \" + describe(code));
+                return code;
+            }
+            static int caught(int code) {
+                try {
+                    if (code > 1) throw new Refused(\"'\" + describe(code) + \"' in a try\");
+                    return code;
+                } catch (Refused e) {
+                    return -1;
+                }
+            }
+            public static void main(String[] a) {
+                try {
+                    System.out.println(checked(1) + checked(3) + caught(2));
+                } catch (Refused e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // A message with a quote in a literal, and no call that throws.
+            "Err(java::cold(|| Throwable::Refused(",
+            // The call in the message throws out of the closure, as out of the method.
+            "Err(java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(Throwable::Refused(",
+            "match describe(code) { Ok(v) => v, Err(e) => return Err(e) }",
+        ],
+    );
+    // Inside a `try` the call's exception goes to the `catch`, so the message stays in place.
+    assert_contains(&rust, &["match describe(code) { Ok(v) => v, Err(e) => break 'attempt Err(e) }"]);
+}
+
+#[test]
 fn an_exception_that_nothing_catches_ends_the_program_where_it_is_thrown() {
     let rust = translate(
         "class A {
