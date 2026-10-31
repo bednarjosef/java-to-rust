@@ -4,7 +4,7 @@
 
 use super::inner::NestKind;
 use super::*;
-use std::collections::HashMap;
+use crate::analysis::FastMap;
 
 /// A class declared in the file, in `Class::types` order.
 pub(super) struct TypeInfo<'t> {
@@ -28,10 +28,10 @@ pub(super) struct TypeInfo<'t> {
 pub(super) struct Indices<'t> {
     types: usize,
     /// The first class with each name, as its declaration's or as javac's.
-    types_by_name: HashMap<String, usize>,
+    types_by_name: FastMap<String, usize>,
     methods: usize,
     /// The first method with each name and signature, by javac's name of its class.
-    methods_by_owner: HashMap<String, HashMap<(&'t str, &'t str), usize>>,
+    methods_by_owner: FastMap<String, FastMap<(&'t str, &'t str), usize>>,
     /// The methods of each class, by the class's index, in `Lowering::methods` order.
     methods_of: Vec<Vec<usize>>,
 }

@@ -5,7 +5,6 @@
 //! fields, and every string, key or value, is interned: the few hundred keys and the names and
 //! types that repeat across the units are each held once, for the whole run.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::{LazyLock, Mutex};
@@ -15,7 +14,7 @@ use std::sync::{LazyLock, Mutex};
 pub struct Str(&'static str);
 
 /// The strings interned so far.
-static STRINGS: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
+static STRINGS: LazyLock<Mutex<crate::analysis::FastSet<&'static str>>> = LazyLock::new(Default::default);
 
 impl Str {
     pub fn new(s: &str) -> Str {
@@ -178,6 +177,9 @@ impl fmt::Display for Number {
 #[derive(Clone, PartialEq, Default)]
 pub struct Map(Vec<(Str, Value)>);
 
+/// The most fields of an object that `Map::find` scans rather than searches.
+const SCANNED: usize = 12;
+
 impl Map {
     pub fn new() -> Map {
         Map(Vec::new())
@@ -190,12 +192,21 @@ impl Map {
         self.0.binary_search_by(|(k, _)| k.0.as_bytes().first().cmp(&first).then_with(|| k.0.cmp(key)))
     }
 
+    /// Where field `key` is, if the object has it. A tree's node has a few fields, which a scan
+    /// that compares lengths first finds sooner than a binary search of the names.
+    fn find(&self, key: &str) -> Option<usize> {
+        match self.0.len() {
+            0..=SCANNED => self.0.iter().position(|(k, _)| k.0.len() == key.len() && k.0 == key),
+            _ => self.search(key).ok(),
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.search(key).ok().map(|i| &self.0[i].1)
+        self.find(key).map(|i| &self.0[i].1)
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
-        self.search(key).ok().map(|i| &mut self.0[i].1)
+        self.find(key).map(|i| &mut self.0[i].1)
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
