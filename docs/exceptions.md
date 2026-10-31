@@ -105,9 +105,10 @@ Err(Throwable::j2r_null_pointer("Cannot invoke ..."))`. In a method that does no
 a call of one that does (because other callers observe it) is
 `call.unwrap_or_else(java::uncaught)`, and `throw e` where nothing catches it is
 `java::throw_uncaught(e)`: nothing here observes the exception, so ending the program at once is
-what propagating it would do. A `throw new X(..)` makes its exception inside `java::cold(|| ..)`,
-a closure that runs out of line, where the expression has no `return`, `break`, `continue` or `?`
-of its own: the message and the object stay out of the method, and a method that checks a
+what propagating it would do. A `throw new X(..)`, or a `throw` of what a call returns (the
+factory that `new` of a class tree calls, or a helper that makes the exception), makes its
+exception inside `java::cold(|| ..)`, a closure that runs out of line, where the expression has no
+`return`, `break`, `continue` or `?` of its own: the message and the object stay out of the method, and a method that checks a
 condition and throws (`Validate.inclusiveBetween`) stays small enough to inline where it is
 called, also from another crate of a split program.
 
