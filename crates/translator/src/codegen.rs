@@ -539,12 +539,11 @@ impl Setup {
     fn new(class: &Class, facts: &Facts) -> Setup {
         // The names of methods are made in the program's modules, before any is written.
         let _modules = modules::enter(class);
-        let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
-        let start = std::time::Instant::now();
-        let (fn_names, group_names) = method_names(class, &homes);
-        if crate::timings::enabled() {
-            eprintln!("timing: codegen: method names: {:.3} s", start.elapsed().as_secs_f64());
-        }
+        use crate::timings::phase;
+        let homes: Vec<Home> = phase("codegen: setup: homes", || {
+            (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect()
+        });
+        let (fn_names, group_names) = phase("codegen: method names", || method_names(class, &homes));
         // The methods that may be emitted in the `impl` of each class's struct (`emitted_in`),
         // in index order.
         let mut struct_methods: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -563,7 +562,7 @@ impl Setup {
             .collect();
         let fn_name_set = fn_names.iter().cloned().collect();
         let mut setup = Setup {
-            live: live_types(class, facts),
+            live: phase("codegen: setup: live types", || live_types(class, facts)),
             homes,
             fn_names,
             fn_name_set,
@@ -572,22 +571,27 @@ impl Setup {
             static_fn_names,
             receiver_sets: class.receivers.values().map(|s| (dispatch::receiver_key(s), s.clone())).collect(),
             class_tags: dispatch::class_numbers(class),
-            runs: running_types(class, facts),
-            super_targets: super_targets(class),
-            plans: modules::plans(class),
+            runs: phase("codegen: setup: running types", || running_types(class, facts)),
+            super_targets: phase("codegen: setup: super targets", || super_targets(class)),
+            plans: phase("codegen: setup: plans", || modules::plans(class)),
             conversion_names: std::sync::Arc::from([]),
             stack_forms: HashSet::new(),
             stack_sites: HashMap::new(),
-            checked_value_ofs: enums::checked_value_ofs(class, facts),
+            checked_value_ofs: phase("codegen: setup: checked valueOfs", || {
+                enums::checked_value_ofs(class, facts)
+            }),
         };
         let wanted = Needs::new();
         let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
         let g = Gen::new(class, facts, &setup, &round);
-        let sites: HashMap<usize, Vec<(ExprId, usize)>> = (0..class.methods.len())
-            .map(|m| (m, g.find_stack_sites(m)))
-            .filter(|(_, sites)| !sites.is_empty())
-            .collect();
-        let (conversion_names, stack_forms) = (g.conversion_names().into(), g.stack_forms(&sites));
+        let sites: HashMap<usize, Vec<(ExprId, usize)>> = phase("codegen: setup: stack sites", || {
+            (0..class.methods.len())
+                .map(|m| (m, g.find_stack_sites(m)))
+                .filter(|(_, sites)| !sites.is_empty())
+                .collect()
+        });
+        let conversion_names = phase("codegen: setup: conversion names", || g.conversion_names().into());
+        let stack_forms = phase("codegen: setup: stack forms", || g.stack_forms(&sites));
         setup.conversion_names = conversion_names;
         setup.stack_forms = stack_forms;
         setup.stack_sites = sites;

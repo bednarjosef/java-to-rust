@@ -94,20 +94,21 @@ pub fn npe_messages_kept(
             first_ctors.insert(index);
         }
     }
+    let local_classes = LocalClasses::new(class);
     let mut messages = FastMap::default();
     let mut approximated = FastSet::default();
     let mut anew = 0;
     for (index, method) in class.methods.iter().enumerate() {
         let first = first_ctors.contains(&index);
         if !cache.keep {
-            let found = method_messages(class, names, approximate, method, first);
+            let found = method_messages(class, names, &local_classes, approximate, method, first);
             messages.extend(found.messages);
             approximated.extend(found.approximated);
             continue;
         }
         let found = cache.methods.entry(index).or_insert_with(|| {
             anew += 1;
-            method_messages(class, names, approximate, method, first)
+            method_messages(class, names, &local_classes, approximate, method, first)
         });
         messages.extend(found.messages.iter().map(|(id, m)| (*id, m.clone())));
         approximated.extend(found.approximated.iter().copied());
@@ -116,7 +117,14 @@ pub fn npe_messages_kept(
     if cache.keep && std::env::var_os("JAVA_TO_RUST_CHECK_KEPT_MESSAGES").is_some() {
         let (mut again, mut again_approximated) = (FastMap::default(), FastSet::default());
         for (index, method) in class.methods.iter().enumerate() {
-            let found = method_messages(class, names, approximate, method, first_ctors.contains(&index));
+            let found = method_messages(
+                class,
+                names,
+                &local_classes,
+                approximate,
+                method,
+                first_ctors.contains(&index),
+            );
             again.extend(found.messages);
             again_approximated.extend(found.approximated);
         }
@@ -186,6 +194,7 @@ pub fn npe_messages_kept(
 fn method_messages(
     class: &Class,
     names: &BytecodeNames,
+    local_classes: &LocalClasses,
     approximate: bool,
     method: &Method,
     first: bool,
@@ -246,6 +255,7 @@ fn method_messages(
     let at = Messages {
         class,
         names,
+        local_classes,
         outermost: &outermost,
         method,
         jdk,
@@ -379,10 +389,29 @@ struct Declared {
     caught: FastSet<String>,
 }
 
+/// The program's local and anonymous classes by javac's names of them (`IsoFields.Field$1`), the
+/// first of each name, found once for every method's messages rather than by a search of every
+/// class at each name a message shows.
+struct LocalClasses<'a>(FastMap<&'a str, usize>);
+
+impl<'a> LocalClasses<'a> {
+    fn new(class: &'a Class) -> LocalClasses<'a> {
+        let mut by_name = FastMap::default();
+        for (t, decl) in class.types.iter().enumerate() {
+            if let Origin::Local { binary, .. } | Origin::Anonymous { binary, .. } = &decl.origin {
+                by_name.entry(binary.as_str()).or_insert(t);
+            }
+        }
+        LocalClasses(by_name)
+    }
+}
+
 /// The messages of the code of one method.
 struct Messages<'a> {
     class: &'a Class,
     names: &'a BytecodeNames,
+    /// The local and anonymous classes by javac's names of them (`shown_class`).
+    local_classes: &'a LocalClasses<'a>,
     /// The outermost class of the method's class (see `outermost`).
     outermost: &'a str,
     method: &'a Method,
@@ -1558,13 +1587,11 @@ impl Messages<'_> {
             "int" | "long" | "double" | "float" | "short" | "byte" | "char" | "boolean" => ty.to_string(),
             "java.lang.Object" => "Object".to_string(),
             "java.lang.String" => "String".to_string(),
-            _ => match self.class.types.iter().position(|d| d.name == ty) {
+            _ => match self.class.type_index(ty) {
                 Some(t) => self.java_class_at(t)?,
                 // A local or anonymous class of the JDK, by javac's name (`IsoFields.Field$1`).
-                None if let Some(decl) = self.class.types.iter().find(|d| {
-                    matches!(&d.origin, Origin::Local { binary, .. } | Origin::Anonymous { binary, .. } if binary == ty)
-                }) =>
-                {
+                None if let Some(&t) = self.local_classes.0.get(ty) => {
+                    let decl = &self.class.types[t];
                     let rest = ty.strip_prefix(decl.package.as_str())?.strip_prefix('.')?;
                     (super::exceptions::from_jdk(self.class, decl) && !decl.package.is_empty())
                         .then(|| format!("{}.{}", decl.package, rest.replace('.', "$")))?
@@ -1588,7 +1615,7 @@ impl Messages<'_> {
         let key = (self.class.types[self.method.class].name.clone(), pos, name.to_string());
         let qualifier = self.class.class_file.static_qualifiers.get(&key)?;
         Some(qualifier.as_deref().and_then(|qualifier| {
-            let t = self.class.types.iter().position(|d| d.name == qualifier)?;
+            let t = self.class.type_index(qualifier)?;
             Some(format!("{}.{name}", self.java_class_at(t)?))
         }))
     }
