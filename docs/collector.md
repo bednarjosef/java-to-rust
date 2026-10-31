@@ -106,6 +106,17 @@ a block into a list, as the allocator did before, cost 5% of the translated
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
+Where the heap's holes are short, a span is a few slots, and each costs a turn of the lock. So a
+thread that takes a run under the lock also takes the untaken slots after it in the same 64-slot
+word of the bitmap, as many as fit in the 8 KB with the run, and keeps them as bits of that word
+(`Lists::span_rest`). When its span is empty, the next run of those bits becomes the span without
+the lock (`span_from_rest`), about 40 instructions where a run under the lock takes about 300. In
+ChunkSections, where loading a section makes short-lived objects of the sizes it keeps, the
+sections that stay leave holes of about three slots, and at 24000 chunks the threads took 6.1
+million runs of 3.3 slots on average, which was a quarter of the program's instructions; with the
+rest of the word it runs 5.81 G instructions instead of 6.52 G (6.20 G instead of 7.13 G at 24000
+chunks), while BinaryTrees, SmallObjects and ManyThreadsAllocating run as many as before.
+
 An object (`java::Arc::new`) takes its slot inline (`take_slot`): its class and size are
 constants of the object's type there, so taking it is the thread-local free list's head or the
 span's next slot, and zeroing it a few stores; when both are empty it goes through the global
@@ -126,20 +137,23 @@ machine). An earlier inline take, when the search of ObjectDispatch's palette wa
 the compiler specialized for the key's class, lost that specialization (4.0 s against 1.8 s);
 the search is now a call of the runtime (`java::search_same`), and the benchmarks lose nothing.
 
-The collector keeps, after marking, the slots of each thread's spans not handed out yet, and the
-last one handed out, which a thread stopped in `alloc` may be handing out before its address is
-in a register; the marks it gives them go once the sweep is done, so that what the thread makes
-in them is young. A span that handed out slots to Rust code, through the global allocator's
-`alloc`, keeps all it handed out until the thread takes a new span, and their marks stay until
-the next full collection: some are held only by memory the marking does not read. A thread's std
-name is one: std keeps it in the thread's `Thread`, which it allocates with the C library's
-allocator, and the test harness names each test's thread. A span that handed out only objects and
-arrays keeps only its last slot, so that what weak references refer to dies (WeakReferencesCleared
-waited in vain when every span kept all). A name taken from a free list or an older span is
-still lost, and the thread's end then frees its slot a second time, so the runtime gives its own
-threads no std names; the runtime's tests, whose threads the harness names, rely on the names
-coming from the current span. Reading the C library allocator's memory would close this.
-A slot that may hold
+The collector keeps, after marking, the slots of each thread's spans not handed out yet, those it
+took beyond them in the word of its last run, and the last one handed out, which a thread stopped
+in `alloc` may be handing out before its address is in a register; the marks it gives them go
+once the sweep is done, so that what the thread makes in them is young. A thread may stop while
+it makes a span of the slots beyond its last one, without the lock: the span has no start, which
+the collector skips, while its bounds change, and its slots leave the word's bits only once they
+are the span, before the first is handed out. A span that handed out slots to Rust code, through
+the global allocator's `alloc`, keeps all it handed out until the thread takes a new span, and
+their marks stay until the next full collection: some are held only by memory the marking does
+not read. A thread's std name is one: std keeps it in the thread's `Thread`, which it allocates
+with the C library's allocator, and the test harness names each test's thread. A span that handed
+out only objects and arrays keeps only its last slot, so that what weak references refer to dies
+(WeakReferencesCleared waited in vain when every span kept all). A name taken from a free list or
+an older span is still lost, and the thread's end then frees its slot a second time, so the
+runtime gives its own threads no std names; the runtime's tests, whose threads the harness names,
+rely on the names coming from the current span. Reading the C library allocator's memory would
+close this. A slot that may hold
 pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
 program does not write (the spare capacity of a `Vec`, an enum's unused bytes, padding), keeps
 anything alive; a slot of a

@@ -882,6 +882,22 @@ impl Heap {
         Some((first, n))
     }
 
+    /// Takes the untaken slots of block `b` from slot `from` up to slot `upto`, both in one word
+    /// of its bitmap: their bits in that word.
+    fn take_rest(&mut self, b: usize, from: usize, upto: usize) -> u64 {
+        let m = self.meta(b);
+        let w = from / 64;
+        let upto = upto.min(m.slots as usize).min(w * 64 + 64);
+        if upto <= from {
+            return 0;
+        }
+        let window = (u64::MAX >> (64 - (upto - from))) << (from % 64);
+        let bits = window & !m.taken[w];
+        m.taken[w] |= bits;
+        self.taken += bits.count_ones() as usize * m.size as usize;
+        bits
+    }
+
     /// Puts a block with untaken slots on its class's list, unless it is there.
     fn list(&mut self, b: usize) {
         let m = self.meta(b);
@@ -929,6 +945,12 @@ struct Lists {
     /// The block the span is in, and the slot of it to look for the next run from.
     span_block: [Cell<u32>; CLASSES],
     span_from: [Cell<u32>; CLASSES],
+    /// Slots of the span's block that the thread took with the span's run, beyond it, and has not
+    /// handed out: the untaken slots left in the run's word of the bitmap, as bits of that word,
+    /// and the address of the word's first slot. Their runs become spans without the heap's
+    /// lock (`span_from_rest`), which matters where the heap's holes are a few slots long.
+    span_rest: [Cell<u64>; CLASSES],
+    span_rest_at: [Cell<usize>; CLASSES],
     /// This thread's entry in `THREADS`, once registered.
     entry: Cell<usize>,
     /// Set when the thread has unregistered at its end: it allocates without lists from then on.
@@ -947,6 +969,8 @@ thread_local! {
             span_rust: [const { Cell::new(false) }; CLASSES],
             span_block: [const { Cell::new(NONE) }; CLASSES],
             span_from: [const { Cell::new(0) }; CLASSES],
+            span_rest: [const { Cell::new(0) }; CLASSES],
+            span_rest_at: [const { Cell::new(0) }; CLASSES],
             entry: Cell::new(NO_ENTRY),
             ended: Cell::new(false),
         }
@@ -1061,6 +1085,11 @@ fn unregister(lists: &Lists) {
         while p < lists.span_end[class].get() {
             untake(h, p);
             p += size;
+        }
+        let mut rest = lists.span_rest[class].replace(0);
+        while rest != 0 {
+            untake(h, lists.span_rest_at[class].get() + rest.trailing_zeros() as usize * size);
+            rest &= rest - 1;
         }
         lists.span_next[class].set(0);
         lists.span_end[class].set(0);
@@ -1363,42 +1392,92 @@ fn prepare() -> Guard {
     g
 }
 
-/// Starts a new span of `class` when the free list and the span are empty: the next run of
-/// untaken slots of the span's block, or of a block from the heap. Collects first when enough
-/// has been taken. Returns the first slot of the span, handed out.
+/// Starts a new span of `class` when the free list and the span are empty: the next run of the
+/// slots the thread took beyond its last span, or else the next run of untaken slots of the
+/// span's block, or of a block from the heap, together with the untaken slots after it in its
+/// word of the bitmap. Collects first when enough has been taken. Returns the first slot of the
+/// span, handed out.
 #[cold]
 #[inline(never)]
 fn refill(lists: &Lists, class: usize) -> *mut u8 {
+    let size = SIZES[class / SCANS] as usize;
+    let rest = lists.span_rest[class].get();
+    if rest != 0 {
+        return span_from_rest(lists, class, size, rest);
+    }
     let g = prepare();
     let h = heap(&g);
-    let size = SIZES[class / SCANS] as usize;
     loop {
         let b = lists.span_block[class].get();
+        let most = (SPAN_BYTES / size).max(1);
         // The span's block may have been freed, and taken for another class, since: when every
         // slot the span handed out was freed.
         if b != NONE
             && h.meta(b as usize).kind == SMALL
             && h.meta(b as usize).class as usize == class
-            && let Some((first, n)) =
-                h.take_run(b as usize, lists.span_from[class].get() as usize, (SPAN_BYTES / size).max(1))
+            && let Some((first, n)) = h.take_run(b as usize, lists.span_from[class].get() as usize, most)
         {
-            let start = h.block_address(b as usize) + h.meta(b as usize).start as usize + first * size;
+            let b = b as usize;
+            let slot0 = h.block_address(b) + h.meta(b).start as usize;
+            let start = slot0 + first * size;
             let end = start + n * size;
-            lists.span_from[class].set((first + n) as u32);
+            let mut from = first + n;
+            if !from.is_multiple_of(64) {
+                // The span and the rest together hold no more than a span may.
+                let upto = (first + most).min(from / 64 * 64 + 64);
+                let rest = h.take_rest(b, from, upto);
+                if rest != 0 {
+                    lists.span_rest[class].set(rest);
+                    lists.span_rest_at[class].set(slot0 + from / 64 * 64 * size);
+                }
+                from = upto;
+            }
+            lists.span_from[class].set(from as u32);
             lists.span_start[class].set(start);
             lists.span_rust[class].set(false);
             lists.span_next[class].set(start + size);
             lists.span_end[class].set(end);
-            // The span's slots are fetched into the cache now, before the program writes them.
-            for line in (start..end.min(start + PREFETCH_SPAN)).step_by(64) {
-                unsafe {
-                    std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(line as *const i8)
-                };
-            }
+            prefetch_span(start, end);
             return start as *mut u8;
         }
         lists.span_block[class].set(h.next_block(class) as u32);
         lists.span_from[class].set(0);
+    }
+}
+
+/// Starts a new span of `class` from the first run of the slots the thread took beyond its last
+/// span (`rest`, see `Lists::span_rest`), without the heap's lock. A collection may stop the
+/// thread at any point here, and then keeps the slots of the span not handed out and those of the
+/// rest (`keep_spans`): so the span is empty, with no start, while it changes, and its run leaves
+/// the rest only once it is the span, before its first slot is handed out.
+#[inline(never)]
+fn span_from_rest(lists: &Lists, class: usize, size: usize, rest: u64) -> *mut u8 {
+    let first = rest.trailing_zeros() as usize;
+    let n = (rest >> first).trailing_ones() as usize;
+    let start = lists.span_rest_at[class].get() + first * size;
+    let end = start + n * size;
+    let order = || std::sync::atomic::compiler_fence(Ordering::SeqCst);
+    lists.span_start[class].set(0);
+    lists.span_rust[class].set(false);
+    order();
+    lists.span_next[class].set(start);
+    lists.span_end[class].set(end);
+    order();
+    lists.span_start[class].set(start);
+    order();
+    let run = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << first };
+    lists.span_rest[class].set(rest & !run);
+    order();
+    lists.span_next[class].set(start + size);
+    prefetch_span(start, end);
+    start as *mut u8
+}
+
+/// Fetches a new span's slots into the cache, before the program writes them.
+#[inline(always)]
+fn prefetch_span(start: usize, end: usize) {
+    for line in (start..end.min(start + PREFETCH_SPAN)).step_by(64) {
+        unsafe { std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(line as *const i8) };
     }
 }
 
@@ -2484,14 +2563,15 @@ fn mark_and_sweep(
     minor
 }
 
-/// Keeps the slots of each thread's spans not handed out yet, once marking is done, and the last
-/// one handed out, which a thread stopped in `alloc` may have been handing out before its address
-/// was anywhere the marking looks. A span that handed out slots to Rust code (`span_rust`) keeps
-/// all it handed out, until the thread takes a new span: some are held only by memory the marking
-/// does not read, as a thread's name is, which std keeps in the thread's `Thread`, allocated by
-/// the C library's allocator. Spans of only objects keep only the last, so that what weak
-/// references refer to dies. Marking scans each slot that something reaches the first time it
-/// marks it, which a mark set here before would prevent.
+/// Keeps the slots of each thread's spans not handed out yet and those it took beyond them
+/// (`Lists::span_rest`), once marking is done, and the last one handed out, which a thread
+/// stopped in `alloc` may have been handing out before its address was anywhere the marking
+/// looks. A span that handed out slots to Rust code (`span_rust`) keeps all it handed out, until
+/// the thread takes a new span: some are held only by memory the marking does not read, as a
+/// thread's name is, which std keeps in the thread's `Thread`, allocated by the C library's
+/// allocator. Spans of only objects keep only the last, so that what weak references refer to
+/// dies. Marking scans each slot that something reaches the first time it marks it, which a mark
+/// set here before would prevent.
 fn keep_spans(h: &mut Heap) {
     for t in &THREADS {
         if !t.used.load(Ordering::Acquire) {
@@ -2519,6 +2599,23 @@ fn keep_spans(h: &mut Heap) {
                 }
             }
             set_bits(&mut m.marks, first + (next - start) / size, (end - next) / size, true);
+        }
+        rest_marks(h, lists, true);
+    }
+}
+
+/// Sets or clears the marks of the slots a thread took beyond its spans (`Lists::span_rest`).
+fn rest_marks(h: &Heap, lists: &Lists, set: bool) {
+    for class in 0..CLASSES {
+        let rest = lists.span_rest[class].get();
+        if rest == 0 {
+            continue;
+        }
+        if let Some((m, first)) = span_slots(h, class, lists.span_rest_at[class].get()) {
+            match set {
+                true => m.marks[first / 64] |= rest,
+                false => m.marks[first / 64] &= !rest,
+            }
         }
     }
 }
@@ -2689,6 +2786,7 @@ fn release_kept(h: &mut Heap) {
                 set_bits(&mut m.marks, unused - kept, (end - next) / size + kept, false);
             }
         }
+        rest_marks(h, lists, false);
     }
 }
 
