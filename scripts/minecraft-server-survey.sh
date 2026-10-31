@@ -6,7 +6,7 @@
 #
 # Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, multi-release,
 # repair, jdk-sources, parse, census, summary, and on their own (not run by default) trial-write,
-# trial, java-run and bench.
+# trial, java-run, bench and join.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -48,6 +48,8 @@
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
 # BENCH              which server the bench step measures: java (default) or trial; BENCH_SEED,
 #                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input)
+# JOIN               which server a bot joins in the join step: java (default) or trial; JOIN_PORT
+#                    (default 25599) and JOIN_SECONDS (default 15, how long the bot plays)
 # PREVIOUS_CENSUS    the census that the summary compares the latest with, a directory with a
 #                    census.json (default $MINECRAFT_CACHE/census-previous, where the census step
 #                    moves the census before it, if it has one)
@@ -727,6 +729,59 @@ bench() {
   } | tee "$dir/result.txt"
 }
 
+# The commands that a join run gives the server, run by shell $1: once started, a bot
+# (minecraft-join-bot.py) joins and plays, writing what it saw to bot.txt; then stop.
+join_input() {
+  local shell=$1 waited=0
+  until grep -q 'Done (' stdout.txt 2>/dev/null; do
+    kill -0 "$shell" 2>/dev/null || exit 0
+    [ $waited -ge "${SERVER_SECONDS:-600}" ] && { echo stop; exit 0; }
+    sleep 1
+    waited=$((waited + 1))
+  done
+  python3 -I "$root/scripts/minecraft-join-bot.py" "$cache/reports/packets.json" "${JOIN_PORT:-25599}" \
+    "${JOIN_SECONDS:-15}" > bot.txt 2>&1
+  echo "bot exit $?" >> bot.txt
+  echo stop
+}
+
+# A client on the server, Java's (JOIN=java, the default) or as the trial step built it
+# (JOIN=trial), in join-java or join-trial: a bot joins a new world in offline mode, as a client
+# does (login, configuration, play), answers what a client must, runs a command and leaves; the
+# packets' numbers come from the server's own report (`net.minecraft.data.Main --reports`, run
+# with Java once, into reports/). result.txt has what the bot saw and the server's lines about it.
+join() {
+  local which=${JOIN:-java}
+  local dir=$cache/join-$which
+  local -a command
+  case $which in
+    java) command=("$java" -cp "$(server_jar):$(library_jars | paste -sd:)" "$(cat "$cache/jar/META-INF/main-class")") ;;
+    trial) command=("$(trial_binary)") ;;
+    *) echo "JOIN is java or trial, not $which" >&2; exit 1 ;;
+  esac
+  if [ ! -f "$cache/reports/packets.json" ]; then
+    rm -rf "$cache/reports-run" && mkdir -p "$cache/reports-run"
+    (cd "$cache/reports-run" && "$java" -DbundlerMainClass=net.minecraft.data.Main -jar "$jar" --reports \
+      --output "$cache/reports-run/generated" > log.txt 2>&1)
+    mkdir -p "$cache/reports"
+    cp "$cache/reports-run/generated/reports/packets.json" "$cache/reports/packets.json"
+  fi
+  rm -rf "$dir" && mkdir -p "$dir"
+  echo eula=true > "$dir/eula.txt"
+  printf 'server-port=%s\nonline-mode=false\nwhite-list=false\nenforce-whitelist=false\nlevel-seed=%s\n' \
+    "${JOIN_PORT:-25599}" "${BENCH_SEED:-1}" > "$dir/server.properties"
+  set +e
+  (cd "$dir" && shell=$BASHPID && timeout "${SERVER_SECONDS:-600}" "${command[@]}" --nogui \
+    < <(join_input "$shell") > stdout.txt 2> stderr.txt)
+  local code=$?
+  set -e
+  {
+    echo "$which, exit $code"
+    cat "$dir/bot.txt" 2>/dev/null || echo "no bot run"
+    grep -E 'bot|Done \(' "$dir/stdout.txt" | sed 's/^\[[0-9:]*\] //'
+  } | tee "$dir/result.txt"
+}
+
 # The census split by origin: the server, each library, the JDK (census-by-origin.py), and
 # compared with the previous census, if one is kept (census-compare.py).
 summary() {
@@ -755,9 +810,9 @@ steps=("$@")
 for step in "${steps[@]}"; do
   case $step in
     extract | decompile | best-of | libraries | library-sources | library-best-of | multi-release | repair \
-      | jdk-sources | parse | census | summary | trial-write | trial | java-run | bench) "$step" ;;
+      | jdk-sources | parse | census | summary | trial-write | trial | java-run | bench | join) "$step" ;;
     *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of," \
-      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run, bench)" >&2
+      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run, bench, join)" >&2
       exit 2 ;;
   esac
 done
