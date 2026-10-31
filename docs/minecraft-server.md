@@ -55,7 +55,9 @@ belongs to one program and to a translator whose javac, reach and lowering give 
 program. After a change to those, delete the file so that the next census writes a new one.
 
 A census that writes the trial translation (`TRIAL_CRATES`) also saves it, before it is written,
-to `trial-tree.bin` (`--save-tree`). After a change to how a translation is written or split,
+to `trial-tree.bin` (`--save-tree`), and writes it from there: it runs the translator again with
+`--from-tree` in its own place (`exec`), as the split and the write took 72 s in the process
+that held the whole census and 27 s in a new one. After a change to how a translation is written or split,
 the `trial-write` step writes the trial again from that file (`--from-tree`) in seconds, rather
 than through a census (checked on javac: the workspace written from the saved translation is the
 census's, byte for byte).
