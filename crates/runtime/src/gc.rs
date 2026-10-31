@@ -1034,7 +1034,7 @@ unsafe impl GlobalAlloc for Allocator {
                     }
                 }
             } else {
-                unsafe { ptr::write_bytes(p, 0, size) };
+                unsafe { zero_slot(p, size) };
             }
         }
         p
@@ -1194,9 +1194,24 @@ pub(crate) fn take_slot<T>() -> *mut u8 {
     // Zeroed as `alloc` zeroes a slot that may hold pointers; the size is a constant here, so
     // this is a few stores.
     if scanned && !p.is_null() {
-        unsafe { ptr::write_bytes(p, 0, size) };
+        unsafe { zero_slot(p, size) };
     }
     p
+}
+
+/// Zeroes the `size` bytes at `p`, a slot being handed out, all of them. Inlined where the value
+/// is then stored, the zeroing would otherwise be cut to the bytes that the store leaves alone:
+/// a store of a whole value counts as writing every byte of it, those of an enum's smaller
+/// variant and the padding too, which it leaves as they were, holding the words of the slot's
+/// last object, which then keep what they point to alive (a shared object's `Option<i64>` that is
+/// `None`, over a dead object's pointer). The empty `asm!`, which may read any memory, keeps
+/// every byte's zero.
+#[inline(always)]
+unsafe fn zero_slot(p: *mut u8, size: usize) {
+    unsafe {
+        ptr::write_bytes(p, 0, size);
+        std::arch::asm!("/* {0} */", in(reg) p, options(nostack, preserves_flags));
+    }
 }
 
 /// An allocation on a thread whose free lists are gone (while its thread-local storage is

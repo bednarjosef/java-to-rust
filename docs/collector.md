@@ -76,7 +76,14 @@ without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 
 An object (`java::Arc::new`) takes its slot inline (`take_slot`): its class and size are
 constants of the object's type there, so taking it is the thread-local free list's head or the
 span's lowest bit, and zeroing it a few stores; when both are empty it goes through the global
-allocator, which refills them. Through the global allocator, a call that is not inlined and
+allocator, which refills them. The zeroing ends in an empty `asm!` that may read memory
+(`zero_slot`): without it the compiler drops the zeroes that the object's store overwrites, and a
+store of a whole value counts as overwriting the bytes it leaves undefined, an enum's smaller
+variant's and the padding, so those kept the words of the slot's last object, which kept what
+they pointed to alive (the Minecraft server had about 60 MB more alive, 370 MB against 308, and
+ran slower). The barrier costs BinaryTrees and SmallObjects nothing measurable (1.05 s and
+0.135 s, against 1.04 s and 0.131 s without it, and 1.38 s and 0.188 s through the global
+allocator). Through the global allocator, a call that is not inlined and
 works out the class from the size it is given, BinaryTrees spent about 40% of its main thread in
 that call; inline, it runs 17.0 G cycles against 19.7 G, SmallObjects 2.06 G against 2.23 G, and
 no other benchmark runs more (NodeList, MonitoredObjects, ClassCast and NBody 5-20% fewer). The
@@ -91,7 +98,8 @@ out yet, and the one a thread stopped in `alloc` may be handing out before its a
 register; the others the span handed out live one collection longer. Only the span's own
 slots are kept, not the rest of its word, which from slots of 1 KB is the whole block. A slot that may hold
 pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
-program does not write (the spare capacity of a `Vec`), keeps anything alive; a slot of a
+program does not write (the spare capacity of a `Vec`, an enum's unused bytes, padding), keeps
+anything alive; a slot of a
 pointer-free block is zeroed only for `alloc_zeroed`. Zeroing there rather than when a slot is
 freed touches memory the program is about to write anyway: zeroing dead slots in the sweep took
 0.8 s of the translated javac's 30 s on the Minecraft benchmark, mostly on cache lines nothing
