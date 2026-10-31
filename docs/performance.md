@@ -314,14 +314,18 @@ made on the stack (`java::count_allocation`).
 
 ## Memory
 
-`scripts/benchmark.py` reports each side's peak resident memory beside its time. Six of the
+`scripts/benchmark.py` reports each side's peak resident memory beside its time. Eight of the
 programs measure memory rather than time: `ReflectionTableMemory` (a reflection table of 14,400
 methods, of which three classes' are read), `LargeArrays` (arrays of 64, 128 and 256 KB alive
 together), `MonitoredObjects` (3 million small objects in a program that waits and notifies, of a
 class it locks, so every object keeps its monitor), `UnlockedObjects` (the same, of a class whose
 objects become `Object`s but no monitor site can lock), `SmallObjects` (3 million objects of 24
-and 40 bytes alive together, then 30 million that die young) and `ManyThreadsAllocating` (32
-threads that allocate arrays of 1 to 32 KB and stay alive while the main thread allocates). Peak
+and 40 bytes alive together, then 30 million that die young), `ManyThreadsAllocating` (32
+threads that allocate arrays of 1 to 32 KB and stay alive while the main thread allocates) and
+`DeepThreadStacks` (16 threads that each recurse 6,000 calls deep once and then wait while the main
+thread allocates: the collector's side tables on small pages and the stack pages it gives back,
+docs/collector.md, measured with `JAVA_GC_TIME=0` at a load of about 50; without the stack pages,
+205.8 MB). Peak
 memory in MB, before and after the change that each measures (the median of three runs; of eight
 for `ManyThreadsAllocating`, 0.101 s before and 0.105 s after; of ten for `SmallObjects`, whose
 time is under "Allocation" below):
@@ -334,6 +338,7 @@ time is under "Allocation" below):
 | UnlockedObjects       |  124.5 |  76.5 |  166 |
 | SmallObjects          |  153.2 | 145.6 |  734 |
 | ManyThreadsAllocating |  235.5 | 197.7 |  417 |
+| DeepThreadStacks      |  234.1 | 199.7 |  514 |
 
 ### Where the Minecraft server's memory went
 

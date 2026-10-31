@@ -57,6 +57,19 @@ owned, and that Rust therefore never freed, is found unreachable too.
   program runs much of its code once, at startup: the Minecraft server held 181 MB of its 286 MB
   of code and 47 MB of its 85 MB of constants after its tick sprint, and its peak went from
   1,030–1,089 MB to 953–957 MB, at the same tick speed.
+- **Stack pages.** Each collection, while the threads are stopped, gives back the pages of each
+  thread's stack below where it stopped (less 64 KB that the stop's handler still uses):
+  nothing below a stack pointer is alive, and a page the thread reaches again comes back zeroed.
+  Otherwise a thread keeps every page of stack it ever touched, so one deep call (world
+  generation's recursion, a parser at startup) holds them for the rest of the run. The process's
+  first thread, whose stack the system grows on demand, and the collecting thread keep theirs
+  (`JAVA_GC_STACK_PAGES=0` turns it off).
+- **Side tables on small pages.** The tables beside the heap that are reserved large and
+  touched only at their start (the mark stacks, the list of free runs, the references) ask for
+  pages of 4 KB (`MADV_NOHUGEPAGE`): on a system that gives huge pages to every aligned range,
+  each took a whole 2 MB page at its first write, and the Minecraft server's 17 mark stacks
+  (the collecting thread's, the shared pool's, 15 helpers') held 34 MB. The blocks' table stays
+  on the system's pages: it is as dense as the heap, and marking reads it all over.
 - **Small blocks** hold slots of one size: one of 54 sizes from 16 bytes to 32 KB, in steps of
   8 bytes up to 128, where most objects are, so that an object takes at most 7 bytes more than
   it needs, and then of a quarter of a power of two, with a power of two and 16 bytes beside
