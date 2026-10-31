@@ -360,6 +360,7 @@ fn lower_into<'t>(
     for (index, unit) in units.iter().enumerate() {
         let unit = Node(unit);
         let package = unit.get("packageName").map(dotted).unwrap_or_default();
+        let first = lowering.types.len();
         for decl in unit.list("typeDecls") {
             // An annotation type does nothing when the program runs: annotations are left out,
             // and a value of one is rejected where the code has it (`Lowering::annotation_types`).
@@ -379,6 +380,9 @@ fn lower_into<'t>(
                     lowering.declare_type(nested, Some(&outer)).map_err(|e| (Some(index), e))?;
                 }
             }
+        }
+        if let Some(file) = reach.unit_files.get(index).filter(|f| !f.is_empty()) {
+            lowering.source_files.borrow_mut().extend((first..lowering.types.len()).map(|t| (t, file.as_str())));
         }
         unit_of.resize(lowering.types.len(), index);
         packages.resize(lowering.types.len(), package);

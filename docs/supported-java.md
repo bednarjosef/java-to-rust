@@ -421,8 +421,12 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   and `META-INF/services` declare.
 - A static method that asks for its caller's class (`StackWalker.getCallerClass()`,
   `Reflection.getCallerClass()`) gets it as an extra parameter from each call
-  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected; a walker
-  itself is made with any of `getInstance`'s options. A security manager's `getClassContext()`,
+  (`lower/callers.rs`). Asking anywhere else is rejected; a walker itself is made with any of
+  `getInstance`'s options. `StackWalker.walk` sees only the frame of the method that walks, which
+  the translation knows (class, method name, source file, and the line where the call starts):
+  a walk that reads that frame, or looks past it from `main`, sees what Java sees, and one that
+  looks further finds no frames. In a lambda's body or a field's initializer the stream is empty,
+  and `forEach` sees no frame (`lower/stack_walks.rs`). A security manager's `getClassContext()`,
   the classes on the call stack, throws `UnsupportedOperationException`, which log4j and slf4j
   catch to fall back; a census lists it.
 

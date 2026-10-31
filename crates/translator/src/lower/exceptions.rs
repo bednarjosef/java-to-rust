@@ -797,6 +797,17 @@ impl Uses {
                                 text(symbol, "type"),
                             ));
                         }
+                        // A walk of the stack is `walkFrom` with the walking method's frame
+                        // (`stack_walks`).
+                        if (owner.as_str(), text(symbol, "name").as_str())
+                            == ("java.lang.StackWalker", "walk")
+                        {
+                            let frame = super::stack_walks::KNOWN_FRAME;
+                            let constructor = super::stack_walks::KNOWN_FRAME_CONSTRUCTOR;
+                            self.members.insert((frame.into(), "<init>".into(), constructor.into()));
+                            self.classes.insert(frame.into());
+                            self.instantiated.insert(frame.into());
+                        }
                         // The carrier thread is the current one (`lower.rs`).
                         if (owner.as_str(), text(symbol, "name").as_str())
                             == ("jdk.internal.access.JavaLangAccess", "currentCarrierThread")
@@ -1123,11 +1134,16 @@ impl Standard {
             let members =
                 ["java.lang.reflect.Method", "java.lang.reflect.Field", "java.lang.reflect.Constructor"];
             let made = members.into_iter().filter(|c| uses.instantiated.contains(*c));
-            for printed in ["java.lang.Thread", "java.lang.ThreadGroup", "java.lang.StackTraceElement"]
-                .into_iter()
-                .filter(|c| uses.classes.contains(*c))
-                .chain(made)
-                .collect::<Vec<_>>()
+            for printed in [
+                "java.lang.Thread",
+                "java.lang.ThreadGroup",
+                "java.lang.StackTraceElement",
+                super::stack_walks::KNOWN_FRAME,
+            ]
+            .into_iter()
+            .filter(|c| uses.classes.contains(*c))
+            .chain(made)
+            .collect::<Vec<_>>()
             {
                 if uses.classes.contains(printed) {
                     uses.members.insert((printed.into(), "toString".into(), "()java.lang.String".into()));
