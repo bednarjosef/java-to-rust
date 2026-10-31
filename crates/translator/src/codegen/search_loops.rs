@@ -73,6 +73,16 @@ impl<'a> Gen<'a> {
         if self.facts.raising.contains(&read.id) {
             return false;
         }
+        // So is a dereference whose `NullPointerException` a `catch` may see (`Facts::null_checked`):
+        // the length the condition reads, or the array the test indexes, which the search reads
+        // with no check of its own.
+        let mut checked = false;
+        for e in [read, end.as_ref()] {
+            visit_expr(e, &mut |x| checked |= self.facts.null_checked.contains_key(&x.id));
+        }
+        if checked {
+            return false;
+        }
         let elem = element(array.ty);
         let by_value = matches!(
             elem,
