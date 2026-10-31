@@ -437,18 +437,22 @@ impl Census<'_> {
     }
 
     /// The words of a target, its slot's size (0 for a large allocation), and whether they may
-    /// hold pointers.
+    /// hold pointers (an array of numbers counts as numbers, its header too).
     pub(super) fn words_of(&self, target: &Target) -> (&'static [usize], usize, bool) {
         match *target {
             Target::Slot { block, slot, size } => {
                 let m = self.h.meta(block);
                 let at = self.h.block_address(block) + m.start as usize + slot * size;
-                (unsafe { std::slice::from_raw_parts(at as *const usize, size / 8) }, size, !m.no_scan)
+                (
+                    unsafe { std::slice::from_raw_parts(at as *const usize, size / 8) },
+                    size,
+                    m.scan == SCAN_ALL,
+                )
             }
             Target::Large { block, blocks } => {
                 let at = self.h.block_address(block);
                 let words = unsafe { std::slice::from_raw_parts(at as *const usize, blocks * BLOCK / 8) };
-                (words, 0, !self.h.meta(block).no_scan)
+                (words, 0, self.h.meta(block).scan == SCAN_ALL)
             }
             Target::Inside => (&[], 0, false),
         }
@@ -564,7 +568,7 @@ pub(super) fn census(h: &Heap, level: usize) {
         match (scanned, target) {
             (false, _) => unscanned += words.len() as u64 * 8,
             (true, Target::Slot { block, .. }) => {
-                let counts = &mut by_size[h.meta(block).class as usize / 2];
+                let counts = &mut by_size[h.meta(block).class as usize / SCANS];
                 census.slot(words, size, counts, level >= 2, |_, _| {})
             }
             (true, _) => census.slot(words, size, &mut large, level >= 2, |_, _| {}),
@@ -694,7 +698,7 @@ fn census_types(census: &mut Census) {
         }
         let (words, size, scanned) = census.words_of(&target);
         let counts = match target {
-            Target::Slot { .. } => &mut untyped[h.meta(block).class as usize / 2][!scanned as usize],
+            Target::Slot { .. } => &mut untyped[h.meta(block).class as usize / SCANS][!scanned as usize],
             _ => &mut untyped_large[!scanned as usize],
         };
         match scanned {
@@ -792,7 +796,7 @@ fn report_types(types: &Table<TypeCounts>) {
     }
 }
 
-/// A Rust type's name without its paths: `Arc<ArrayData<RefCell<Vec<i32>>, i32>>`.
+/// A Rust type's name without its paths: `ArrayData<PlainHeader<i32>, i32>`.
 pub(super) struct Short(pub(super) &'static str);
 
 impl std::fmt::Display for Short {

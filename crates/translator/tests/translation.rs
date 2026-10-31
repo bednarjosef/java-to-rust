@@ -981,6 +981,34 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
 }
 
 #[test]
+fn a_dispatcher_over_many_classes_runs_each_call_in_a_function_of_its_own() {
+    // With a profile, LLVM inlines the hot arms of a `match` over thousands of classes into the
+    // dispatcher, whose frame then holds all their stack slots; a function of its own per arm
+    // keeps the dispatcher's frame small.
+    let shapes = |n: usize| {
+        let classes: String = (0..n)
+            .map(|k| format!("class C{k} implements Shape {{ int k; C{k}(int k) {{ this.k = k; }} public int area() {{ return k * {k}; }} }}\n"))
+            .collect();
+        let made: Vec<String> = (0..n).map(|k| format!("new C{k}(a.length + {k})")).collect();
+        translate(&format!(
+            "interface Shape {{ int area(); }}
+            {classes}
+            class A {{
+                public static void main(String[] a) {{
+                    Shape[] shapes = {{ {} }};
+                    int total = 0;
+                    for (Shape s : shapes) total += s.area();
+                    System.out.println(total);
+                }}
+            }}",
+            made.join(", ")
+        ))
+    };
+    assert_contains(&shapes(70), &["#[inline(never)] fn arm(o: &", "arm(o)"]);
+    assert_lacks(&shapes(60), &["fn arm("]);
+}
+
+#[test]
 fn upcasts_wrap_the_handle() {
     let rust = translate(TREE);
     assert_contains(
@@ -5575,7 +5603,7 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
         &rust,
         &[
             "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
-            "Err(java::cold(|| Throwable::Missing(Arc::new(",
+            "Err({ let x = x; java::cold(|| Throwable::Missing(Arc::new(",
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "match find(xs, x) { Ok(v) => v, Err(e) => return Err(e) }",
             "Err(caught) => {",
@@ -5619,10 +5647,11 @@ fn a_thrown_exception_whose_message_can_throw_is_made_out_of_line() {
     assert_contains(
         &rust,
         &[
-            // A message with a quote in a literal, and no call that throws.
-            "Err(java::cold(|| Throwable::Refused(",
+            // A message with a quote in a literal, and no call that throws. The closure borrows a
+            // copy of `code` made where it runs, so `code` itself stays in a register.
+            "Err({ let code = code; java::cold(|| Throwable::Refused(",
             // The call in the message throws out of the closure, as out of the method.
-            "Err(java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(Throwable::Refused(",
+            "Err({ let code = code; java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(Throwable::Refused(",
             "match describe(code) { Ok(v) => v, Err(e) => return Err(e) }",
         ],
     );
@@ -5649,7 +5678,7 @@ fn an_exception_that_nothing_catches_ends_the_program_where_it_is_thrown() {
         &rust,
         &[
             "fn check(x: i32) -> i32 {",
-            "java::throw_uncaught(java::cold(|| Throwable::IllegalArgumentException(",
+            "java::throw_uncaught({ let x = x; java::cold(|| Throwable::IllegalArgumentException(",
         ],
     );
     assert_lacks(&rust, &["Result<", "'attempt"]);

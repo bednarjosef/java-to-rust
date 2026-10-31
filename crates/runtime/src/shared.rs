@@ -11,7 +11,8 @@
 //! stack instead (`Slot::put`): its handle is the same `Arc`, so the code that uses it does not
 //! change.
 //!
-//! There are no weak references, and the value is sized: a handle of a `dyn` type could not be
+//! A handle is always strong (a Java weak reference holds its referent in a `java::WeakField`
+//! instead, `weak.rs`), and the value is sized: a handle of a `dyn` type could not be
 //! made from one of a sized type anyway (that needs the unstable `CoerceUnsized`), so closures of
 //! functional interfaces that threads share stay `std::sync::Arc<dyn Fn ..>`.
 
@@ -67,6 +68,17 @@ impl<T> Arc<T> {
         Arc { ptr, owns: PhantomData }
     }
 
+    /// The handle of a value that the caller made in a slot of the collected heap (an array,
+    /// `array.rs`).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a `T` in a slot of the collected heap.
+    #[inline(always)]
+    pub(crate) unsafe fn from_heap(ptr: *mut T) -> Arc<T> {
+        Arc { ptr: unsafe { NonNull::new_unchecked(ptr) }, owns: PhantomData }
+    }
+
     /// The handle of the object at `address`, which a 4-byte reference named (`compact.rs`).
     ///
     /// # Safety
@@ -97,7 +109,7 @@ impl<T> Arc<T> {
         2
     }
 
-    /// Always 0: there are no weak references (kept for the shape of `std::sync::Arc`'s).
+    /// Always 0: a handle is never weak (kept for the shape of `std::sync::Arc`'s).
     #[inline]
     pub fn weak_count(_: &Arc<T>) -> usize {
         0

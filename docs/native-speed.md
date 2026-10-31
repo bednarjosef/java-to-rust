@@ -72,8 +72,8 @@ A heap managed by a tracing collector, references of 4 bytes, objects without he
   pages"), and its header names the class. An object therefore needs no header of its own: its
   class, size and reference map are read from its block. An object is only its fields. (Built:
   blocks of one slot size, with no header in the object, docs/collector.md.)
-- Planned: an array is one allocation, a header of length and element type followed by its
-  elements.
+- An array is one allocation, a 16-byte header (its length, a borrow flag and one word for its
+  class or monitor) followed by its elements (docs/object-model.md 1.13, `runtime/src/array.rs`).
 - Planned: blocks of a class start small (4 KB) and grow (up to 64 KB), so the thousands of
   classes that have few objects waste little.
 - Allocation takes the next free slot of the current block of its class, kept per thread. That is
@@ -263,11 +263,14 @@ Each part lands on its own and passes the gate (all checks and the 28 targets):
       keep a place: the heap starts at 4 GB, so a 4-byte value below 2^29 is never a reference,
       which leaves 29 bits for a value and its kind; larger values are boxed, which Java allows
       outside the cached range of `valueOf`.
-   4. Planned: arrays as one allocation. An array is now a 32-byte object (its handle's target,
-      the cell of its elements and a `Vec`) and a separate buffer, so reading an element goes
-      from the object to the array, to the `Vec`, to the buffer, one dependent load more than
-      Java. The 514,000 live arrays' objects hold 16 MB; a 16-byte header in front of the
-      elements saves about 8 MB and the load.
+   4. Built: arrays as one allocation, a 16-byte header in front of the elements, so reading an
+      element takes one load after the handle's, as Java's does. In the census above the
+      514,000 live arrays were each a 32-byte object and a separate buffer (16 MB of objects);
+      the header saves about 8 MB of that, which a fresh census is to confirm. On the
+      benchmarks (user instructions, `perf stat`): BlockReads' reads 4% fewer and the building
+      of its chunks 11% fewer, TokenScanner 6.5% fewer, SortMillion and ParticleArray the
+      same. An array whose elements take a power of two gets a slot of that size and 16 bytes
+      (docs/collector.md); one whose elements fill whole 64 KB blocks takes a block more.
    5. Planned: an 8-byte slot size, for the objects that 4-byte references leave at 8 bytes
       (one reference and an `int`, two references): the 848,000 objects in 16-byte slots hold
       13 MB, of which 4-byte references save 0.6 to 5 MB.
@@ -280,8 +283,8 @@ Each part lands on its own and passes the gate (all checks and the 28 targets):
       the switch, StackCaptures keeps 4 of its 8 objects on the stack and StackObjectsInLists 8
       of its 10.
 
-   Of the 107 MB more than Java's, then, about 25 to 50 MB is references at 8 bytes and 8 MB is
-   arrays in two parts. Most of the rest is objects that ours keeps and Java does not, outside
+   Of the 107 MB more than Java's, then, about 25 to 50 MB is references at 8 bytes and 8 MB was
+   arrays in two parts (item 4). Most of the rest is objects that ours keeps and Java does not, outside
    this item: 108,000 `Class` objects against Java's 26,000 (8 MB more), NBT tags (57,000
    `StringTag`s against 5,400, 61,000 `ListTag`s against 218), 271,000 64-byte slots of numbers
    that no object owns (17 MB), `int[]` buffers of 10.9 MB against 2 MB, and 17% more chunk

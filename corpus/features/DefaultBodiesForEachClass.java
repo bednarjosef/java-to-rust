@@ -1,13 +1,15 @@
 // Small default methods called through the dispatcher of an interface above theirs: the arm of
 // each class calls a copy of the body for the class, whose calls on `this` run the class's own
 // methods: an override in a superclass, an enum constant's method, a record's accessor, another
-// default method, a method that throws, and arguments passed on, one of them named `o`.
+// default method, a method that throws, and arguments passed on, one of them named `o`, one a
+// cast to String that may be null (a bridge such as `add(Object)` calling `add(String)`).
 // Four classes run the bodies, as many as are copied for.
 public class DefaultBodiesForEachClass {
     interface Sized {
         int size(int scale);
         String label();
         boolean has(Object o);
+        boolean hasName(Object o);
     }
 
     interface Measured extends Sized {
@@ -18,6 +20,8 @@ public class DefaultBodiesForEachClass {
         String name();
         default boolean has(Object o) { return indexOf(o) >= 0; }
         int indexOf(Object o);
+        default boolean hasName(Object o) { return isName((String) o); }
+        default boolean isName(String s) { return s != null && s.equals(name()); }
     }
 
     static abstract class Shape implements Measured {
@@ -53,6 +57,7 @@ public class DefaultBodiesForEachClass {
         public int size(int scale) { return -scale; }
         public String label() { return "plain"; }
         public boolean has(Object o) { return "plain".equals(o); }
+        public boolean hasName(Object o) { return o == null; }
     }
 
     public static void main(String[] args) {
@@ -66,6 +71,7 @@ public class DefaultBodiesForEachClass {
                 }
             }
             System.out.print(s.has("box") + " " + s.has("square") + " ");
+            System.out.print(s.hasName(null) + " " + s.hasName("box") + " " + s.hasName("METER") + " ");
             try {
                 System.out.println(s.label());
             } catch (IllegalStateException e) {

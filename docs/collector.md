@@ -35,6 +35,16 @@ owned, and that Rust therefore never freed, is found unreachable too.
   measured difference on a system that gives them to every aligned range anyway. A free block
   whose memory stays keeps what it held, so a large allocation zeroes such blocks when it takes
   them.
+- **Giving memory back.** A block that empties, in a sweep or when Rust frees a large
+  allocation, keeps its memory. At the end of each collection, the whole free huge pages beyond
+  the room the program takes before the next collection go back to the system, the highest
+  first: that room is what the next collection waits for, less the untaken slots of small
+  blocks and the free blocks on pages that stay. So the heap keeps what the next cycle fills
+  again, and gives back what a program whose live objects shrank no longer needs. Giving every
+  whole free page back as the sweep found it had the system fault that memory in and zero it
+  again moments later: BinaryTrees, whose trees die between collections, ran 1.53 s instead of
+  1.17 s (median of 7 alternating runs), and spent 0.14 s to 0.43 s in the system, the more
+  where the system was short of huge pages.
 - **Lowest first.** A new block is taken from the free run lowest in the heap, and each slot
   size hands out its partly free blocks lowest first, so the objects that live gather at the
   bottom and whole huge pages above them empty and go back to the system. On the Minecraft
@@ -47,13 +57,19 @@ owned, and that Rust therefore never freed, is found unreachable too.
   program runs much of its code once, at startup: the Minecraft server held 181 MB of its 286 MB
   of code and 47 MB of its 85 MB of constants after its tick sprint, and its peak went from
   1,030–1,089 MB to 953–957 MB, at the same tick speed.
-- **Small blocks** hold slots of one size: one of 47 sizes from 16 bytes to 32 KB, in steps of
+- **Small blocks** hold slots of one size: one of 54 sizes from 16 bytes to 32 KB, in steps of
   8 bytes up to 128, where most objects are, so that an object takes at most 7 bytes more than
-  it needs, and then of a quarter of a power of two. A slot is aligned to 8 bytes, and to 16 when
-  its size is a multiple of 16, which an allocation aligned to 16 takes. Allocations that may
-  hold pointers and those that cannot (an alignment below 8, as in the bytes of a string) use
-  blocks of their own, and the collector does not scan the second kind.
-- **Large allocations** take whole blocks.
+  it needs, and then of a quarter of a power of two, with a power of two and 16 bytes beside
+  each up to 8 KB, for an array whose elements take a power of two and its 16-byte header. A slot is aligned to 8 bytes, and to 16 when
+  its size is a multiple of 16, which an allocation aligned to 16 takes. Three kinds of slots
+  use blocks of their own: those that may hold pointers anywhere, which the collector scans
+  whole; those that cannot (an alignment below 8, as in the bytes of a string), which it does
+  not scan; and arrays of numbers (`gc::alloc_array`), whose 16-byte header may hold a pointer
+  and whose elements cannot, of which it scans the header alone. So the numbers of a `long[]` or
+  a `double[]` never keep an object alive by looking like its address.
+- **Large allocations** take whole blocks. An array whose elements fill whole blocks takes one
+  block more for its 16-byte header, which the heap's huge pages make 64 KB of memory: LargeArrays,
+  700 arrays of 64, 128 and 256 KB of elements, peaks at about 134 MB rather than 88.
 - **Colors.** A small block's first slot is at one of eight cache lines past the block's start,
   chosen by the block's number, and each large allocation starts at one of the 64 cache lines of
   a page, in turn (`gc.rs`, `color`). With every block aligned to 64 KB, the first objects of
@@ -75,22 +91,24 @@ owned, and that Rust therefore never freed, is found unreachable too.
 
 A thread takes a slot of its size from its own free slots, a few instructions: first from the
 list of slots Rust freed (a freed slot goes on the list of the thread that frees it), then from
-its span, untaken slots of one 64-slot word of a block's bitmap, held as a mask of bits, the
-lowest one handed out next. When both are empty, the thread takes the next word with untaken
-slots under the heap's lock: of its span's block, or of a block from its class's list, or of a
-new block. That is one lock per span, and touches no slot. A span takes no more
-slots than fit in 8 KB (`SPAN_BYTES`), one at least: from slots of 1 KB a word covers its whole
-block, and each thread keeps a span in every class it allocates in: with whole words, the
-Minecraft server's 41 threads held 28 MB of slots taken and never handed out, about one 64 KB
-block per thread and class of the larger sizes. The slots of a new span
-are fetched into the cache right away (up to 4 KB), before the program writes them. Linking every
-untaken slot of a block into a list, as the allocator did before, cost 5% of the translated
+its span, a run of neighbouring untaken slots of one block, handed out in order by moving a
+pointer to the next one until it meets the span's end. When both are empty, the thread takes
+the next run of untaken slots under the heap's lock: of its span's block, from where the last
+run ended, or of a block from its class's list, or of a new block. That is one lock per span,
+and touches no slot. A span takes no more slots than fit in 8 KB (`SPAN_BYTES`), one at least:
+each thread keeps a span in every class it allocates in, and spans of whole 64 KB blocks held
+the Minecraft server's 41 threads 28 MB of slots taken and never handed out. In a block of
+young objects that died, the run is the whole 8 KB, 512 slots of 16 bytes, where a span of one
+64-slot word of the bitmap, as before, took 64 and the heap's lock eight times as often:
+BinaryTrees runs 30.5 G instructions instead of 31.9 G. The slots of a new span are fetched into
+the cache right away (up to 4 KB), before the program writes them. Linking every untaken slot of
+a block into a list, as the allocator did before, cost 5% of the translated
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
 An object (`java::Arc::new`) takes its slot inline (`take_slot`): its class and size are
 constants of the object's type there, so taking it is the thread-local free list's head or the
-span's lowest bit, and zeroing it a few stores; when both are empty it goes through the global
+span's next slot, and zeroing it a few stores; when both are empty it goes through the global
 allocator, which refills them. The zeroing ends in an empty `asm!` that may read memory
 (`zero_slot`): without it the compiler drops the zeroes that the object's store overwrites, and a
 store of a whole value counts as overwriting the bytes it leaves undefined, an enum's smaller
@@ -108,10 +126,10 @@ machine). An earlier inline take, when the search of ObjectDispatch's palette wa
 the compiler specialized for the key's class, lost that specialization (4.0 s against 1.8 s);
 the search is now a call of the runtime (`java::search_same`), and the benchmarks lose nothing.
 
-The collector keeps every taken slot of each thread's spans, after marking: the slots not handed
-out yet, and the one a thread stopped in `alloc` may be handing out before its address is in a
-register; the others the span handed out live one collection longer. Only the span's own
-slots are kept, not the rest of its word, which from slots of 1 KB is the whole block. A slot that may hold
+The collector keeps, after marking, the slots of each thread's spans not handed out yet, and the
+last one handed out, which a thread stopped in `alloc` may be handing out before its address is
+in a register; the marks it gives them go once the sweep is done, so that what the thread makes
+in them is young. A slot that may hold
 pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
 program does not write (the spare capacity of a `Vec`, an enum's unused bytes, padding), keeps
 anything alive; a slot of a
@@ -138,9 +156,9 @@ translated javac takes 14.5 s and 1.03 GB collecting after half as much as is al
 2. clears every mark, then marks every slot reachable from the roots, with an explicit stack, so
    a long chain of objects needs no recursion;
 3. sweeps: frees the taken slots left unmarked (clears their bits), lists the blocks with free
-   slots, and frees the blocks with nothing alive, giving their memory back to the system where
-   that empties a whole huge page. The marks stay until the next collection, which is what the
-   young generation (below) builds on; the slots threads hold free lose theirs.
+   slots, and frees the blocks with nothing alive; then gives back the whole free huge pages
+   beyond what the next cycle takes (above). The marks stay until the next collection, which is
+   what the young generation (below) builds on; the slots threads hold free lose theirs.
 
 The roots are scanned conservatively: any aligned word that points into a taken slot keeps that
 slot, which makes interior pointers and pointers held in registers work. The top 16 bits of a
@@ -153,12 +171,24 @@ possible classes (`java::Thin`, docs/object-model.md 1.2). The roots are:
 - each thread's static thread-local storage;
 - the free lists of every thread, whose slots are kept without being scanned.
 
-Slots are scanned whole, word by word, except in blocks that cannot hold pointers. In a program
+Slots are scanned whole, word by word, except in blocks that cannot hold pointers, and but for
+the header in blocks of arrays of numbers (a large array of numbers too: its header, at the
+start the block's table records). Any word that points into a slot keeps the slot, wherever it
+points: a loop's view of an array's elements or a slice of them lent to the runtime, which point
+past the header, keep the whole array. In a program
 with 4-byte references (`java::CompactAllocator`, docs/native-speed.md 1.1), each half of each
 word scanned, in a slot or a root, is also read as one: it keeps a slot only if, times 8, it is
 the slot's start, since such a reference never points inside an object. A number that happens to
 name a slot's start keeps that slot too; in the census of a run of the small-objects benchmark,
 about 234 of every 10 million halves did (`JAVA_GC_CENSUS`, "lookalikes").
+
+Marking is compiled four times over, for whether other markers run (and mark bits are set
+atomically) and whether words are also read as 4-byte references, and picks one per drain of
+its stack, so that neither is tested per word and each slot taken off the stack is scanned
+inline rather than in a call. A word pointing into a small block, by far the most common, is
+tested for that kind first, and the bytes of each slot to scan are kept in the block's table.
+With one marker, BinaryTrees runs 34.6 G instructions instead of 43.8 G and SmallObjects 4.9 G
+instead of 6.5 G, 1.79 s instead of 2.09 s and 0.22 s instead of 0.24 s (fastest of 5).
 
 ## Objects on the stack
 
@@ -251,16 +281,32 @@ slower than alone, the cost of the atomic mark bits.
 
 ## Generations
 
-With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object that
-lives through a collection keeps its mark and is old. A minor collection marks from the roots
-and from the old objects on the pages written since the last collection, stops at marked
+With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object
+that lives through two collections keeps its mark and is old. A minor collection marks from the
+roots and from the old objects on the pages written since the last collection, stops at marked
 objects, and frees the young ones left unmarked. The old objects of a written page are found a
 word of the bitmaps at a time, from the slots both taken and marked: a page of young objects
 only, as most written pages are, costs a few word reads. Testing each slot's bits one by one
 took BinaryTrees' minor collections 10 ms each (at about 850 MHz), for the 64 MB of young
-objects written since the last; they now take under a millisecond. A full collection, as above, runs once a quarter
-more (plus 1 MB) is alive than after the last full one, at once after the minor one that finds
-it, in the same pause.
+objects written since the last; they now take under a millisecond. A full collection, as
+above, runs once a quarter more (plus 1 MB) is alive than after the last full one, at once
+after the minor one that finds it, in the same pause.
+
+- **Ageing.** At the end of each collection (`age` in `gc.rs`), an object that lived through
+  it for the first time loses its mark and is recorded as having lived through one (a bitmap
+  beside the marks, as is one of the old objects); one that had already becomes old. So an
+  object alive at a collection only because the program was in the middle of using it does not
+  become old: BinaryTrees' tree being built at each collection, which made old objects that
+  died at once and a full collection every second time (13 of 77, marking 710 ms in all, at a
+  load average of 17), now 3 of 69 and 206 ms. An object that lives on is marked once more,
+  at the collection after it was made and the next: SmallObjects, whose 91 MB of objects all
+  live to the end, marks them once more.
+- **Pointers to objects not old yet.** An old object may point to one that lived through one
+  collection. That pointer was written after the younger object was made, so in the interval
+  before the last collection or since: on a page written since, or on one the last collection
+  found written and protected. A minor collection scans the old objects of both; the runs of
+  pages each collection protects are kept for the next (up to a million runs, beyond which the
+  next collection is full).
 
 Which pages were written, the kernel says: the heap is registered with a `userfaultfd` in
 asynchronous write-protect mode, each collection protects the pages that now hold old objects

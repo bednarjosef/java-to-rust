@@ -93,9 +93,17 @@ const CUT_ABOVE: usize = 2048;
 /// where it could be the match's last arm, `_`, instead (`tag_match`).
 const LAST_ARM_RUNS: usize = 4;
 
+/// The most runs of class numbers that a test of an interface by the class number (`as_x()`) is a
+/// `match` of; one of more runs is a `java::ClassSet`, a bit per number, one load and a shift.
+const SET_RUNS: usize = 4;
+
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
 const PART_CLASSES: usize = 256;
+
+/// The most classes that a dispatcher's `match` on the class number calls each class's method
+/// from (`tag_match`); the arms of a larger one call it from a function of their own.
+pub(super) const OWN_FRAME_ABOVE: usize = 64;
 
 /// A method that `match_arms_or` writes the `match` of: its name, its parameters after `&self`
 /// (`, f: &mut fmt::Formatter`), their names (`f`) and its return type (` -> fmt::Result`).
@@ -105,6 +113,15 @@ pub(super) struct ArmsMethod {
     params: String,
     args: &'static str,
     ret: String,
+}
+
+/// Whether `text` holds the identifier `word` (not as part of a longer one).
+fn mentions_word(text: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(i, _)| {
+        !text[..i].chars().next_back().is_some_and(ident)
+            && !text[i + word.len()..].chars().next().is_some_and(ident)
+    })
 }
 
 /// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
@@ -406,6 +423,17 @@ impl<'a> Gen<'a> {
     /// (the Minecraft server's some 20 000 classes) are hundreds of groups, and a search of the
     /// group for each class of `among`, once per group, took seconds.
     pub(super) fn tag_patterns(&self, groups: &[&[usize]], among: &[usize]) -> Vec<String> {
+        let range =
+            |(first, last)| if first == last { format!("{first}") } else { format!("{first}..={last}") };
+        self.tag_runs(groups, among)
+            .into_iter()
+            .map(|runs| runs.into_iter().map(range).collect::<Vec<_>>().join(" | "))
+            .collect()
+    }
+
+    /// The runs of class numbers of each of `groups` that `tag_patterns` writes, as
+    /// `(first, last)`.
+    pub(super) fn tag_runs(&self, groups: &[&[usize]], among: &[usize]) -> Vec<Vec<(u16, u16)>> {
         let mut group_of: crate::analysis::FastMap<usize, usize> = Default::default();
         for (g, classes) in groups.iter().enumerate() {
             group_of.extend(classes.iter().map(|&c| (c, g)));
@@ -430,9 +458,7 @@ impl<'a> Gen<'a> {
             }
             open = group;
         }
-        let range =
-            |(first, last)| if first == last { format!("{first}") } else { format!("{first}..={last}") };
-        runs.into_iter().map(|runs| runs.into_iter().map(range).collect::<Vec<_>>().join(" | ")).collect()
+        runs
     }
 
     /// The constructor of each variant (`Shape::Circle(handle)`, an associated function named as
@@ -1745,10 +1771,22 @@ impl<'a> Gen<'a> {
         if self.runtime_of(c) == Some(Type::JavaClass) && self.class_answer(resolved).is_some() {
             return None;
         }
-        let args = self.call_args(resolved, args);
+        let mut args = self.call_args(resolved, args);
         // The arm names the object `o`, which an argument may name too (`indexOf(o)`): the
-        // arguments are computed first, before `o` is bound.
-        let passed = (0..args.len()).map(|k| format!("arguments.{k}")).collect::<Vec<_>>().join(", ");
+        // arguments are computed first, before `o` is bound. A nullable string (`x.as_deref()`)
+        // is held owned in the tuple and borrowed where it is passed: a borrow of a temporary in
+        // the tuple would end with the `let`.
+        let mut passed = Vec::new();
+        for (k, arg) in args.iter_mut().enumerate() {
+            match arg.strip_suffix(".as_deref()") {
+                Some(owned) => {
+                    *arg = format!("{owned}.clone()");
+                    passed.push(format!("arguments.{k}.as_deref()"));
+                }
+                None => passed.push(format!("arguments.{k}")),
+            }
+        }
+        let passed = passed.join(", ");
         let (text, uses) = self.arm_call(t, c, i, &passed);
         let text = self.covariant_ret(i, resolved, text);
         let arguments = match args.is_empty() {
@@ -2285,14 +2323,31 @@ impl<'a> Gen<'a> {
         let mut lines: Vec<Result<String, usize>> = Vec::new();
         let mut alike: Vec<(String, Vec<usize>)> = Vec::new();
         let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        // In a dispatcher over many classes, each arm runs its call in a function of its own that
+        // nothing inlines into the dispatcher: with a profile (`-Cprofile-use`) LLVM inlined the
+        // hot arms of the Minecraft server's `Function.apply` (11 200 classes) into it, and their
+        // stack slots added up to a frame of 122 KB, against 344 bytes without, which overflowed
+        // the stack of a deep recursion. The method may still be inlined into that function, so
+        // the arm costs a jump at most. An arm that reads the dispatcher's receiver is not moved.
+        let frames = self.arm_frames.clone().filter(|_| variants.len() > OWN_FRAME_ABOVE);
         for (c, text, uses) in arms {
             let tag = self.class_tag(c);
             if uses {
                 let payload = self.payload(c);
                 let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
                 // The class number is the one its constructor gives.
+                let call = match &frames {
+                    Some((params, args, ret))
+                        if ![me, "self", "Self"].iter().any(|w| mentions_word(&text, w)) =>
+                    {
+                        format!(
+                            "#[inline(never)] fn arm(o: &{payload}{params}){ret} {{ {text} }} arm(o{args})"
+                        )
+                    }
+                    _ => text,
+                };
                 lines.push(Ok(format!(
-                    "{tag} => {{ let o: &{payload} = unsafe {{ {me}.0.{lend}() }}; {text} }}"
+                    "{tag} => {{ let o: &{payload} = unsafe {{ {me}.0.{lend}() }}; {call} }}"
                 )));
             } else if let Some(&i) = index.get(&text) {
                 alike[i].1.push(c);
@@ -2429,8 +2484,19 @@ impl<'a> Gen<'a> {
         } else if let Some(e) = rep {
             // A value of another enum has the same bits.
             let target = struct_name(&self.class.types[e].name);
+            let runs = self.tag_runs(&[&passing], &variants).pop().unwrap_or_default();
             if passing.len() == variants.len() {
                 self.line(&format!("Some({target}(self.0))"));
+            } else if runs.len() > SET_RUNS {
+                // Bits by class number, where a `match` of the runs would be a tree of compares.
+                let (first, last) = (runs[0].0 >> 6, runs[runs.len() - 1].1 >> 6);
+                let list: Vec<String> = runs.iter().map(|(a, b)| format!("({a}, {b})")).collect();
+                self.line(&format!(
+                    "static CLASSES: java::ClassSet<{}> = java::ClassSet::of(&[{}]);",
+                    last - first + 1,
+                    list.join(", ")
+                ));
+                self.line(&format!("CLASSES.contains(self.0.tag()).then_some({target}(self.0))"));
             } else {
                 self.line("match self.0.tag() {");
                 self.indent += 1;
@@ -2515,7 +2581,14 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}fn {}{generics}(this: {ty}{all}){ret} {{", self.vis(), self.enum_fn(t, &name)));
         self.indent += 1;
         let outer = std::mem::replace(&mut self.thin_this, true);
+        // A nested function cannot name the dispatcher's type parameters.
+        let frames = generics.is_empty().then(|| {
+            let names: String = m.params.iter().map(|p| format!(", {}", self.local(&p.name))).collect();
+            (all.clone(), names, ret.clone())
+        });
+        let outer_frames = std::mem::replace(&mut self.arm_frames, frames);
         self.dispatcher_body(t, r, among, &variants, &args, &general);
+        self.arm_frames = outer_frames;
         self.thin_this = outer;
         self.indent -= 1;
         self.line("}");
