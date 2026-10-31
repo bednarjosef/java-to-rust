@@ -146,6 +146,7 @@ impl<'t> Lowering<'t> {
             object_rows: Default::default(),
             array_tests: Default::default(),
             volatile_elements: Default::default(),
+            volatile_field_names: Default::default(),
             annotation_classes: Default::default(),
             nested_annotation_types: Default::default(),
             body_methods: Default::default(),

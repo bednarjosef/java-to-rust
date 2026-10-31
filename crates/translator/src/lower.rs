@@ -499,6 +499,9 @@ struct Lowering<'t> {
     array_tests: RefCell<std::collections::HashMap<ExprId, Type>>,
     /// The volatile element accesses (`Class::volatile_elements`).
     volatile_elements: RefCell<std::collections::HashSet<ExprId>>,
+    /// The names of the volatile fields of every class, found the first time a method's repeated
+    /// field reads are shared (`element_reads`), which leaves fields of those names alone.
+    volatile_field_names: std::cell::OnceCell<std::collections::HashSet<String>>,
     /// The annotation types whose class literals the code has (`Class::annotation_classes`).
     annotation_classes: RefCell<std::collections::BTreeMap<String, String>>,
     /// The annotation types declared in other classes, with their binary names
