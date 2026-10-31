@@ -32,7 +32,7 @@ mod collapse {
     use super::*;
 
     unsafe extern "C" {
-        fn madvise(addr: *mut std::ffi::c_void, length: usize, advice: i32) -> i32;
+        fn madvise(addr: *mut u8, length: usize, advice: i32) -> i32;
     }
     const MADV_HUGEPAGE: i32 = 14;
     const MADV_COLLAPSE: i32 = 25;
@@ -43,8 +43,8 @@ mod collapse {
     static HOT_TEXT: extern "C" fn() = hot_text;
 
     extern "C" fn hot_text() {
-        let start = j2r_hot_text_start as usize;
-        let end = j2r_hot_text_end as usize;
+        let start = j2r_hot_text_start as *const () as usize;
+        let end = j2r_hot_text_end as *const () as usize;
         if end <= start || end - start < ORDERED_ABOVE {
             return;
         }
@@ -54,7 +54,7 @@ mod collapse {
         // its pages are held, not what they hold. A failure (an older kernel, a file system
         // without large folios) leaves the code on small pages, as it was.
         unsafe {
-            let at = from as *mut std::ffi::c_void;
+            let at = from as *mut u8;
             if madvise(at, to - from, MADV_COLLAPSE) != 0 {
                 madvise(at, to - from, MADV_HUGEPAGE);
             }

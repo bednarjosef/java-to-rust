@@ -763,7 +763,7 @@ bench_input() {
     local server
     server=$(pgrep -P "$shell" -x python3 | head -n 1)
     while [ -n "$(pgrep -P "$server" | head -n 1)" ]; do server=$(pgrep -P "$server" | head -n 1); done
-    perf record -q --no-buildid-cache -e cycles:u -c 1000003 -p "$server" -o "$BENCH_PROFILE" 2> /dev/null &
+    perf record -q --no-buildid-cache -m 32 -e cycles:u -c 1000003 -p "$server" -o "$BENCH_PROFILE" 2> /dev/null &
     perf=$!
   fi
   wait_for 'Sprint completed'
