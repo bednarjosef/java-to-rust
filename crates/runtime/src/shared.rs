@@ -45,7 +45,9 @@ impl<T> Arc<T> {
         // otherwise the global allocator's path, which refills them.
         let slot = crate::gc::take_slot::<T>() as *mut T;
         let Some(ptr) = NonNull::new(slot) else {
-            let ptr = NonNull::from(Box::leak(Box::new(value)));
+            let ptr = crate::gc::alloc_object(std::alloc::Layout::new::<T>()) as *mut T;
+            unsafe { ptr.write(value) };
+            let ptr = unsafe { NonNull::new_unchecked(ptr) };
             crate::gc::note_type::<T>(ptr.as_ptr());
             return Arc { ptr, owns: PhantomData };
         };

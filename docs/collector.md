@@ -129,7 +129,17 @@ the search is now a call of the runtime (`java::search_same`), and the benchmark
 The collector keeps, after marking, the slots of each thread's spans not handed out yet, and the
 last one handed out, which a thread stopped in `alloc` may be handing out before its address is
 in a register; the marks it gives them go once the sweep is done, so that what the thread makes
-in them is young. A slot that may hold
+in them is young. A span that handed out slots to Rust code, through the global allocator's
+`alloc`, keeps all it handed out until the thread takes a new span, and their marks stay until
+the next full collection: some are held only by memory the marking does not read. A thread's std
+name is one: std keeps it in the thread's `Thread`, which it allocates with the C library's
+allocator, and the test harness names each test's thread. A span that handed out only objects and
+arrays keeps only its last slot, so that what weak references refer to dies (WeakReferencesCleared
+waited in vain when every span kept all). A name taken from a free list or an older span is
+still lost, and the thread's end then frees its slot a second time, so the runtime gives its own
+threads no std names; the runtime's tests, whose threads the harness names, rely on the names
+coming from the current span. Reading the C library allocator's memory would close this.
+A slot that may hold
 pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
 program does not write (the spare capacity of a `Vec`, an enum's unused bytes, padding), keeps
 anything alive; a slot of a
