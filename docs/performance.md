@@ -663,8 +663,8 @@ values and the checks after them. Each step's result is taken where the step ran
 round finds the same facts and stops at the same error or panic (a panic carries its place in
 the translator to the thread that takes it), and the result of a step that a check before it
 ends the round without is dropped. The type hierarchy keeps its answers behind locks, and the
-translator allocates from one arena of glibc's, as with one thread: with an arena per thread,
-javac's census took a third more memory. A round that a check ends gains nothing; one that gets
+translator allocates with mimalloc, whose threads neither wait for each other nor keep memory the
+others could reuse (see "Generator threads"). A round that a check ends gains nothing; one that gets
 past the checks no longer waits for these steps, which on the Minecraft server took about 75 s
 of each such round of about 390 s (ranges 16 s, early reads 11 s, nullness 18 s, borrowing
 10 s, objects on the stack 19 s, and the ASCII strings, untimed then). On javac's census from
@@ -706,20 +706,18 @@ and casts written in their checked forms, the classes named as values) is joined
 grows. A panic outside the methods comes out of the first module that panicked, as with one
 thread. javac's census saves the same tree byte for byte on one thread and on eight, and
 `the_generator_writes_the_same_on_several_threads` (`tests/translation.rs`) compares programs of
-several packages and a census on one thread and on three. The generator still writes on one
-thread unless `JAVA_TO_RUST_GENERATOR_THREADS` asks for more, because the translator allocates
-from one arena of glibc's (`main.rs`), and the generator allocates so much that its threads wait
-for each other at the allocator: on javac's census from its checkpoint, eight threads make the
-first round 3.1 s instead of 3.4 s, and each small round 0.3 s slower. With an arena for each
-thread (`M_ARENA_MAX` of 9) the first round takes 1.3 s and the generator 4.4 s instead of 7.4
-s, but the census's peak memory goes from 0.53 to 0.79 GB, 0.14 GB of that the analyses'
-threads. `MALLOC_ARENA_MAX` in the environment, which glibc reads itself, sets the number of
-arenas in place of the one: on javac's census from its checkpoint, four generator threads and
-five arenas take the generator's two passes from 6.0 to 3.5 s and the census from 25.6 to 21.3
-s, at a peak of 0.78 GB instead of 0.63 GB; with mimalloc as the translator's allocator the first round takes 1.1 s, the generator
-3.8 s (6.5 s on one thread) and the analyses 6.3 s instead of 7.9 s, at a peak of 0.64 GB (0.58
-GB on one thread). Plan: pick the allocator by a census of the Minecraft server, whose peak of 16
-GB must stay well under the machine's 24 GB, and then write on several threads by default.
+several packages and a census on one thread and on three. The translator allocates with mimalloc
+(`main.rs`), whose threads take memory from pages of their own and give freed memory back to the
+thread that took it: with glibc's one arena, the generator's threads waited for each other at the
+allocator (eight threads made javac's first round 3.1 s instead of 3.4 s), and with an arena for
+each thread they kept memory the others could not reuse (a census peak of 0.79 GB instead of 0.53
+GB). On javac's whole translation, mimalloc takes the generator from 7.0 s to 4.7 s on one thread
+and 3.7 s on four, at a peak of 2.19 GB instead of 1.90 GB. On the Minecraft server's census,
+four threads with mimalloc take the generator from 97 s to 42 s (its first round from 34 s to
+8 s) at a census peak of 15.3 GB, and the trial's sources are the same, byte for byte, as one
+thread's. The generator writes on four threads, or on as many as the machine has if fewer, unless
+`JAVA_TO_RUST_GENERATOR_THREADS` says how many: past four, the crate root, which one thread
+writes, is most of the first round (5.6 s of 8 s on the Minecraft server).
 
 **Messages kept from round to round.** Pass 3 of a census runs the analyses, the messages of
 `NullPointerException`s and the generator once per round, and the stubs between the rounds change

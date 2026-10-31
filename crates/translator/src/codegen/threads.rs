@@ -7,9 +7,8 @@
 //! methods, which a census does not catch (`catch_panics`), comes out of the first module in
 //! their order that panicked, with its place in the translator, as it would with one thread.
 //!
-//! The generator writes on one thread unless `JAVA_TO_RUST_GENERATOR_THREADS` asks for more:
-//! the translator allocates from one arena of glibc's (`main.rs`), and threads that allocate as
-//! much as the generator does wait for each other's turns at it (see "Generator threads" in
+//! The generator writes on four threads, or as many as the machine has if fewer, unless
+//! `JAVA_TO_RUST_GENERATOR_THREADS` says how many (see "Generator threads" in
 //! docs/performance.md).
 
 use super::*;
@@ -34,12 +33,19 @@ pub fn on_threads<T>(threads: usize, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// How many threads write modules: `JAVA_TO_RUST_GENERATOR_THREADS`, or one.
+/// How many threads write modules: `JAVA_TO_RUST_GENERATOR_THREADS`, or four (`DEFAULT_THREADS`),
+/// or as many as the machine has if fewer.
 fn threads() -> usize {
     THREADS.get().unwrap_or_else(|| {
-        std::env::var("JAVA_TO_RUST_GENERATOR_THREADS").ok().and_then(|n| n.parse().ok()).unwrap_or(1)
+        std::env::var("JAVA_TO_RUST_GENERATOR_THREADS").ok().and_then(|n| n.parse().ok()).unwrap_or_else(
+            || std::thread::available_parallelism().map_or(1, |n| n.get()).min(DEFAULT_THREADS),
+        )
     })
 }
+
+/// The threads that write modules by default: past four, the crate root, written by one thread,
+/// is most of a round on the Minecraft server.
+const DEFAULT_THREADS: usize = 4;
 
 /// A panic while a module was written, with the module's place among those written, where in
 /// the translator it happened, and the method being written then (`WRITING`).
