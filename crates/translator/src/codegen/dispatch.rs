@@ -27,15 +27,29 @@ const IDENTITY: &str = "Arc::ptr_eq(a, b)";
 /// The number of each type in a `java::Thin` (`Gen::class_tag`), by its index in `Class::types`:
 /// the class trees in depth-first preorder, each class before its subclasses, then the types that
 /// no class tree holds (interfaces). The classes at or below a class then have the numbers from
-/// its own to its last subclass's, so a test of "is a `C`" is one range (`Gen::tags`). Numbers
-/// start at 1, as a `Thin` is never 0, and are the same in every pass of the generation.
+/// its own to its last subclass's, so a test of "is a `C`" is one range (`Gen::tags`). The trees
+/// of the enums come together after the other trees, and those of the records after them: an
+/// enum's tree has no superclass in the program (`java.lang.Enum` is an interface of its, `ENUM`),
+/// and numbered among the other trees by index, a test of "is an `Enum`" (the cast of
+/// `EnumMap.get`'s key) was a compare for each of hundreds of runs. Numbers start at 1, as a
+/// `Thin` is never 0, and are the same in every pass of the generation.
 pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
     let h = &class.hierarchy;
     let count = class.types.len();
     let tree = |t: usize| !matches!(class.types[t].kind, TypeKind::Interface | TypeKind::Param);
+    let (enum_type, record_type) = (class.type_index(ENUM), class.type_index(RECORD));
+    let implements = |t: usize, i: Option<usize>| i.is_some_and(|i| class.types[t].implements.contains(&i));
+    let group = |t: usize| match class.types[t].kind {
+        TypeKind::Enum => 1,
+        _ if implements(t, enum_type) => 1,
+        _ if implements(t, record_type) => 2,
+        _ => 0,
+    };
+    let mut roots: Vec<usize> = (0..count).filter(|&t| tree(t) && h.superclass(t).is_none()).collect();
+    roots.sort_by_key(|&t| (group(t), t));
     let mut order = Vec::with_capacity(count);
     let mut stack = Vec::new();
-    for root in (0..count).filter(|&t| tree(t) && h.superclass(t).is_none()) {
+    for root in roots {
         stack.push(root);
         while let Some(t) = stack.pop() {
             order.push(t);

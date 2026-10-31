@@ -266,7 +266,10 @@ Rules:
   a class before its subclasses (`dispatch::class_numbers`; the runtime's strings, boxes, arrays
   and builders are trees of one class, and interfaces, which have no objects, come last), so the
   classes at or below a class have the numbers from its own to its last subclass's: a test of
-  "is a `C`" is `matches!(tag, 4..=9)`, one subtract and one compare. A test spans each run of
+  "is a `C`" is `matches!(tag, 4..=9)`, one subtract and one compare. The trees of the program's
+  enums are numbered together after the other trees, and the records' after them: an enum has no
+  superclass in the program (`java.lang.Enum` is an interface its trees implement), so a test of
+  "is an `Enum`" (the cast of `EnumMap.get`'s key) is one range too. A test spans each run of
   the classes it accepts that no other class of the enum breaks (`Gen::tags`; a `catch` clause
   also spans the classes that earlier clauses took), so an interface whose classes happen to be
   numbered together is one range too, and the others are a few. What is not a program object (a

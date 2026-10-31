@@ -5423,8 +5423,8 @@ fn an_interface_is_an_enum_over_its_implementors() {
     assert_contains(
         &rust,
         &[
-            "enum ShapeView<'a> {\n    Circle(&'a Arc<Circle>) = 1,\n    Rect(&'a Arc<RectFields>) = 2,\n    Square(&'a Arc<Square>) = 3,\n    Color(&'a Color) = 4,\n}",
-            "        3 => { let o: &Arc<Square> = unsafe { this.0.as_pointer() }; o.base.area() }\n        4 => { let o: &Color = unsafe { this.0.as_value() }; (*o).area() }",
+            "enum ShapeView<'a> {\n    Circle(&'a Arc<Circle>) = 1,\n    Rect(&'a Arc<RectFields>) = 2,\n    Square(&'a Arc<Square>) = 3,\n    Color(&'a Color) = 6,\n}",
+            "        3 => { let o: &Arc<Square> = unsafe { this.0.as_pointer() }; o.base.area() }\n        6 => { let o: &Color = unsafe { this.0.as_value() }; (*o).area() }",
             "Shape::Circle(slot_2.put(Circle__new(1.0))), Shape::Rect(r.clone())",
             "&s == &Shape::Rect(r.clone())",
         ],
@@ -5439,7 +5439,7 @@ fn default_methods_live_on_the_interface_enum() {
     assert_contains(
         &rust,
         &[
-            "        1 => { let o: &Arc<Circle> = unsafe { this.0.as_pointer() }; o.kind() }\n        2..=4 => Shape__kind_in_shape(this),",
+            "        1 => { let o: &Arc<Circle> = unsafe { this.0.as_pointer() }; o.kind() }\n        2..=6 => Shape__kind_in_shape(this),",
             "fn Shape__kind_in_shape(this: Shape) -> java::JString {\n    java::JString::from(\"shape\")\n}",
             "fn Shape__describe(this: Shape) -> java::JString {\n    java::concat!(Shape__kind(this), format_args!(\" {}\", java::Double(Shape__area(this))))\n}",
         ],
@@ -5462,7 +5462,7 @@ fn an_enum_constant_implements_an_interface() {
     assert_contains(
         &rust,
         &[
-            "    Color(&'a Color) = 4,",
+            "    Color(&'a Color) = 6,",
             "(ShapeView::Color(a), ShapeView::Color(b)) => a == b,",
             "let c = Shape::Color(Color::Blue);",
             "    fn area(self) -> f64 {",
@@ -6149,7 +6149,7 @@ fn downcasts_are_checked() {
         &[
             "let r = java::cast(&all[1], |o| o.as_rect(), (\"Rect\", java::APP));",
             "java::cast(&s, |o| o.as_unit(), (\"Unit\", java::APP)) as i32",
-            "    fn as_unit(&self) -> Option<Unit> {\n        match self.0.tag() {\n            3 => { let o: &Unit = unsafe { self.0.as_value() }; Some(*o) }",
+            "    fn as_unit(&self) -> Option<Unit> {\n        match self.0.tag() {\n            4 => { let o: &Unit = unsafe { self.0.as_value() }; Some(*o) }",
         ],
     );
 }
