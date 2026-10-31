@@ -27,6 +27,7 @@ mod early_reads;
 mod escape;
 mod exceptions;
 mod fixed_fields;
+mod frozen_fields;
 pub mod hierarchy;
 mod indexing;
 pub mod live_methods;
@@ -228,6 +229,16 @@ pub struct Facts {
     /// measures (`statics::frozen`). Where they are `java::Final`s, they hold a `java::Frozen`,
     /// whose elements a thread reads with no atomic load.
     pub frozen_statics: FastSet<(usize, String)>,
+    /// The instance array fields that only their class's constructors make and write, through
+    /// `this`, and that the program otherwise only indexes to read and measures
+    /// (`frozen_fields`): `java::Frozen`s, whose elements are read with no atomic load.
+    pub frozen_fields: FastSet<(usize, String)>,
+    /// The new arrays that frozen fields are given, made into `java::Frozen`s as they are made:
+    /// with whether the field's arrays have a constant length (`frozen_lengths`).
+    pub frozen_news: FastMap<ExprId, bool>,
+    /// The constant length of every array a frozen static or field is given, where they all have
+    /// the same one: the `java::Frozen`'s `N`.
+    pub frozen_lengths: FastMap<(usize, String), usize>,
     /// The static methods and constructors that run their class's `init` when they start.
     pub entry_init: FastSet<usize>,
     /// The class of `main`, when the program has exactly one, which `main` initializes first.
@@ -588,6 +599,7 @@ fn analyze_with(
         borrowing.take();
         facts.ascii_length = ascii_length.take();
         lent_strings(class, &mut facts);
+        phase("analysis: frozen fields", || frozen_fields::analyze(class, &mut facts));
         phase("analysis: arrays", || arrays::analyze(class, &mut facts));
         phase("analysis: indexing", || indexing::analyze(class, &mut facts));
         phase("analysis: moves", || moves::analyze(class, &mut facts));

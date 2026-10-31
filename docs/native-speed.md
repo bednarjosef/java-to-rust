@@ -86,7 +86,9 @@ is read and written by value, through the object's address, the way Java does it
 - Built for the arrays that threads share, which are nearly all of javac's: a
   `java::SharedArray` keeps each element in a `java::SharedField` cell, so `a[i]` is a bounds
   check and one load, with no lock taken (docs/multi-threading.md, 2.2). Arrays of one thread
-  keep their `RefCell`.
+  keep their `RefCell`. An array that only a constructor or a class's initialization writes, and
+  that the program then only indexes and measures, is a `java::Frozen`, read with plain loads,
+  with a constant length where its arrays all have one (docs/multi-threading.md, 2.3).
 - Built for the classes whose objects no monitor site can lock: they carry no lock word
   (docs/multi-threading.md, 3.1). Planned: `synchronized` and `wait`/`notify` use monitors kept
   in a side table, only for the objects that are locked, so that no object carries one.

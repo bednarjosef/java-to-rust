@@ -247,7 +247,15 @@ impl<T: Primitive> Atomic<T> {
 /// value moves or changes once `current` points at it, so a lent value stays valid. A thread that
 /// reads the static during another thread's initialization (code of the class itself, which waits
 /// for no initialization) sees one of the two values.
+///
+/// An assignment made before the program starts its first thread also writes the value's address
+/// to `settled`, a plain field, and a read tries `settled` first. Every later thread starts after
+/// that write, so it sees it with no ordering of its own, and once a thread has started nothing
+/// writes `settled` again, so its plain reads race with nothing. A plain read is one the compiler
+/// may keep from one use to the next, which it does not do with the acquire load of `current`:
+/// a loop that reads the static on each pass then reads it once.
 pub struct Final<T> {
+    settled: UnsafeCell<*const T>,
     current: AtomicPtr<T>,
     value: UnsafeCell<MaybeUninit<T>>,
     assigned: AtomicBool,
@@ -276,6 +284,7 @@ impl<T> Final<T> {
 
     const fn starting(start: Start<T>) -> Final<T> {
         Final {
+            settled: UnsafeCell::new(std::ptr::null()),
             current: AtomicPtr::new(std::ptr::null_mut()),
             value: UnsafeCell::new(MaybeUninit::uninit()),
             assigned: AtomicBool::new(false),
@@ -287,6 +296,21 @@ impl<T> Final<T> {
     /// The value: the one assigned, or the one it starts with.
     #[inline(always)]
     pub fn get(&self) -> &T {
+        // Written only before the first thread starts (see `set`).
+        let settled = unsafe { *self.settled.get() };
+        if !settled.is_null() {
+            // As in `unsettled`: `settled` points at `value`.
+            return unsafe { &*settled };
+        }
+        self.unsettled()
+    }
+
+    /// A read that finds `settled` unset: one out-of-line call, so that a function that reads the
+    /// static several times reaches each later read along two paths, of which the call is the
+    /// only one that has not read `settled` already, and the compiler can then read it once.
+    #[cold]
+    #[inline(never)]
+    fn unsettled(&self) -> &T {
         let p = self.current.load(Ordering::Acquire);
         if p.is_null() {
             return self.first_read();
@@ -324,6 +348,10 @@ impl<T> Final<T> {
         // Only this call writes `value`, and no reader reaches it until `current` points at it.
         unsafe { (*self.value.get()).write(value) };
         self.current.store(self.value.get() as *mut T, Ordering::Release);
+        // No other thread runs yet: every thread that reads `settled` starts after this write.
+        if !crate::thread::threads_started() {
+            unsafe { *self.settled.get() = self.value.get() as *const T };
+        }
     }
 
     /// Runs `f` on the value, as a `java::Locked` static's read but with no lock.

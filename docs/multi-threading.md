@@ -229,7 +229,7 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
 | object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())`; `X.set(v)` |
-| array that only its class's initialization makes, and that the program only indexes to read and measures | `java::Final<java::Frozen<T>>` | `java::get(&(*X.get()), i)`, `java::len(&(*X.get()))`; `X.set(java::freeze(a))` |
+| array that only its class's initialization makes, and that the program only indexes to read and measures | `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` when every array it is given has the constant length `N` | `java::get(&(*X.get()), i)`, `java::len(&(*X.get()))`; `X.set(java::freeze(a))`, `X.set(java::freeze_fixed(a))` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
 
 A `static final` of object, array or string type that no code but its class's static
@@ -240,7 +240,14 @@ constant), and a pointer to whichever is current, which the assignment sets with
 value never changes once the class is initialized, so a read takes no lock: `get()` loads the
 pointer, tests that it is set and lends what it points at, the value set or the starting value
 before that, which is what a read during the initializer sees (null for a static not yet
-assigned, as in Java). There is no `LazyLock` around it, whose own test each read would pay. Where the read is only borrowed (the object of a call or a field access,
+assigned, as in Java). There is no `LazyLock` around it, whose own test each read would pay. An
+assignment made before the program starts its first thread also writes the value's address to
+`settled`, a plain field that a read tries first: every thread starts after that write, and
+nothing writes it once one has, so the plain read races with nothing, and the compiler may keep
+it from one read to the next, which it does not do with an acquire load. The slower path, an
+acquire load of the pointer, is a call out of line, so that a function reading the static several
+times reaches each later read only from the first read or from that call, and the compiler reads
+`settled` once (the `GRADIENT` of NoiseTree's noise, read 8 times a call). Where the read is only borrowed (the object of a call or a field access,
 an array that is indexed or measured, a string that is lent, a null test), the generator writes
 the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clone; a static that
 starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is
@@ -255,11 +262,26 @@ Such a `static final` that is a one-dimensional array, which every assignment gi
 read an element or measures (`S[i]`, `S.length`, never `S` alone, `S[i] = v` or `S[i]++`), is a
 frozen array (`Facts::frozen_statics`, `statics::frozen`): no name but the static reaches it, so
 nothing writes its elements once the initializer has made it. Its `java::Final` holds a
-`java::Frozen<T>`, the elements in a boxed slice, which the initializer's assignment makes from
+`java::Frozen<T>`, the elements in a slice of cells, which the initializer's assignment makes from
 the new array (`java::freeze`) and publishes with the `java::Final`'s release. A read is a plain
 load from the slice, with no atomic load: an acquire load of a `SharedArray`'s element would keep
-the compiler from reusing the array's address and length across reads. A static that may be read
-before it is assigned (null then) keeps its `SharedArray`.
+the compiler from reusing the array's address and length across reads. Where every array the
+static is given has the same constant length (`new T[16]`, a literal of 16; `Facts::frozen_lengths`,
+`frozen_fields::static_lengths`), it is a `java::Frozen<T, 16>` (`java::freeze_fixed`), whose
+length is a constant: an index the compiler can bound below it, as `h & 15`, needs no check, as
+the JIT, which takes the array for a constant, checks none. A static that may be read before it
+is assigned (null then) keeps its `SharedArray`.
+
+An instance field that is a one-dimensional array, which only its class's constructors give
+arrays, each a new one, and write elements of, through `this`, and which the rest of the program
+only indexes to read and measures, is frozen too (`Facts::frozen_fields`,
+`analysis/frozen_fields.rs`): a `java::Frozen<T>` or `java::Frozen<T, N>` field, which the
+constructor writes in place while the object is a value it holds (a class whose constructors
+build a plain value, not celled; the field never null). Once the object is built nothing writes
+the array, and the object is published to other threads with the array in it, so its elements
+are read with no atomic load, as the JIT reads a `final` field's array. A store `this.f[i] = v`
+whose value may have an effect holds the array in a local first (`lower::argument_order`), a
+copy of the `java::Frozen` handle that shares its elements.
 
 `java::ClassInit` is the JLS 12.4.2 procedure: the thread that finds the class not started runs
 the initializer, another thread finding it in progress waits, and the same thread finding its

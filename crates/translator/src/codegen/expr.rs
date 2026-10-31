@@ -462,7 +462,10 @@ impl<'a> Gen<'a> {
             } => self.update(target, e.ty, Update::Step(*increment), e.id, *prefix),
             ExprKind::Index(array, index) => self.index(e.id, array, index),
             ExprKind::Length(array) => self.length(array),
-            ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
+            ExprKind::NewArray(sizes) => {
+                let code = self.new_array(e.ty, sizes);
+                self.frozen_new(e, code)
+            }
             // `new int[n][m]` where `int[][]` is an `Object[]` (see `lower::arrays::sized_array`).
             ExprKind::Cast(to @ Type::Array(_), value)
                 if let ExprKind::NewArray(sizes) = &value.kind
@@ -478,7 +481,10 @@ impl<'a> Gen<'a> {
                 }
                 self.new_object_rows(*to, value, sizes)
             }
-            ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
+            ExprKind::ArrayLit(items) => {
+                let code = self.array_lit(e.ty, items);
+                self.frozen_new(e, code)
+            }
             // An upcast or a downcast between the program's types, or a string, a box or a
             // primitive becoming an `Object`.
             ExprKind::Cast(to @ Type::Class(..), value)
