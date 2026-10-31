@@ -25,7 +25,8 @@ milliseconds), at a load average of 1.6 at its start and about 4 during it, on 1
 clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (five runs a side,
 at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
 Interpreter's from one at a load average of 6.3, SortMillion's from five runs a side at a load
-average of 4, ReflectionLookups' from one of it alone (five runs a side), and BinaryTrees',
+average of 4, ReflectionLookups' from one of it alone (five runs a side), OwnerThreadChecks' from one of it
+alone at a load average of 12.7, and BinaryTrees',
 SmallObjects' and ManyThreadsAllocating's from five runs a side, alternating, at a load average
 of about 3.
 
@@ -52,6 +53,7 @@ of about 3.
 | NoiseTree             |     364 |     425 |      1.17 |         282 |         384 |         1.36 |
 | ObjectDispatch        |     249 |     135 |      0.54 |         169 |         111 |         0.66 |
 | ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
+| OwnerThreadChecks     |     148 |     167 |      1.13 |         111 |         163 |         1.47 |
 | ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
 | ReflectionLookups     |     207 |     210 |      1.01 |         146 |         189 |         1.29 |
 | ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
