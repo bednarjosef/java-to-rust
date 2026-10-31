@@ -604,6 +604,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     if crate::timings::enabled() {
         eprintln!("timing: exceptions: observed: {:.3} s", started.elapsed().as_secs_f64());
     }
+    // The timings of the steps that follow, each since the one before.
+    let mut step = std::time::Instant::now();
+    let mut timed = |what: &str| {
+        if crate::timings::enabled() {
+            eprintln!("timing: exceptions: {what}: {:.3} s", step.elapsed().as_secs_f64());
+        }
+        step = std::time::Instant::now();
+    };
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|t| matches(k, t));
 
     // An object's text whose `toString`, one the program wrote, may throw what a `catch` around
@@ -623,6 +631,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         .collect();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
+    timed("texts and throwing methods");
 
     // The failures of the runtime that something would see, the `try`s that catch something,
     // and those that an exception of the program leaves.
@@ -737,6 +746,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             );
         }
     }
+    timed("what each point raises");
 
     // Java's message of a `NullPointerException` that the runtime raises describes the
     // dereference ("Cannot invoke ..."); the message of one that code creates is its own. Where
@@ -870,6 +880,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         })
         .map(|&(id, ..)| id)
         .collect();
+    timed("messages that catches read");
 
     // A static initializer's exception reaches the program as `ExceptionInInitializerError`, and
     // a later use of the class as `NoClassDefFoundError`: a `try` that may see either (a `catch`
@@ -885,6 +896,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
+    timed("static initializers in trys");
     // The initializers of instance fields run in each constructor, outside its `try`s: what they
     // raise escapes the constructor (see `field_inits`).
     let init_throwing =
