@@ -288,6 +288,15 @@ struct Heap {
     next_full: usize,
     /// Whether the last collection was minor.
     minor: bool,
+    /// Seconds between the times a collection gives the program's code pages back to the system
+    /// (`JAVA_GC_CODE_PAGES`; 0 never), and the monotonic second it last did.
+    code_pages: u64,
+    code_pages_at: u64,
+    /// Whether small slots and free blocks are taken lowest address first (`JAVA_GC_LOW_FIRST`).
+    low_first: bool,
+    /// Whether each full collection also reports the bytes alive per slot size
+    /// (`JAVA_GC_LOG=2`).
+    log_sizes: bool,
 }
 
 struct Shared(UnsafeCell<Heap>);
@@ -317,6 +326,10 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     regions: ptr::null_mut(),
     next_full: 0,
     minor: false,
+    code_pages: 0,
+    code_pages_at: 0,
+    low_first: false,
+    log_sizes: false,
 }));
 
 /// The heap's lock: a spin lock that yields, since it is taken rarely and briefly, and must not
@@ -408,6 +421,13 @@ unsafe extern "C" {
     fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn clock_gettime(clock: i32, time: *mut [i64; 2]) -> i32;
+}
+
+/// The seconds since some fixed time (`CLOCK_MONOTONIC`).
+fn monotonic_seconds() -> u64 {
+    let mut t = [0i64; 2];
+    unsafe { clock_gettime(1, &mut t) };
+    t[0] as u64
 }
 
 /// The processor time the process has used, every thread's, in nanoseconds.
@@ -525,6 +545,7 @@ fn start(h: &mut Heap) {
     END.store(h.base, Ordering::Release);
     install_signal();
     h.log = !unsafe { getenv(c"JAVA_GC_LOG".as_ptr()) }.is_null();
+    h.log_sizes = number_from(c"JAVA_GC_LOG") == Some(2);
     h.threads_set = number_from(c"JAVA_GC_THREADS").is_some_and(|n| n > 1);
     if let Some(n) = number_from(c"JAVA_GC_GROWTH") {
         h.growth = n.max(1);
@@ -539,6 +560,9 @@ fn start(h: &mut Heap) {
     if number_from(c"JAVA_GC_GENERATIONS") == Some(1) {
         track_writes(h);
     }
+    h.code_pages = number_from(c"JAVA_GC_CODE_PAGES").unwrap_or(0) as u64;
+    h.code_pages_at = monotonic_seconds();
+    h.low_first = number_from(c"JAVA_GC_LOW_FIRST") == Some(1);
 }
 
 /// Has the system track the writes into the heap's reservation: registers it with a
@@ -626,6 +650,23 @@ impl Heap {
 
     /// `n` free blocks in a row: from a run of free ones, or new ones at the top.
     fn take_blocks(&mut self, n: usize) -> usize {
+        if self.low_first {
+            let lowest = (0..self.run_count)
+                .filter(|&i| unsafe { (*self.runs.add(i)).1 } as usize >= n)
+                .min_by_key(|&i| unsafe { (*self.runs.add(i)).0 });
+            if let Some(i) = lowest {
+                let (start, len) = unsafe { *self.runs.add(i) };
+                unsafe {
+                    if len as usize == n {
+                        self.run_count -= 1;
+                        *self.runs.add(i) = *self.runs.add(self.run_count);
+                    } else {
+                        *self.runs.add(i) = (start + n as u32, len - n as u32);
+                    }
+                }
+                return start as usize;
+            }
+        }
         for i in 0..self.run_count {
             let (start, len) = unsafe { *self.runs.add(i) };
             if len as usize >= n {
@@ -1868,6 +1909,34 @@ fn collect(g: &Guard) {
         t.thread_pointer.set(0);
     }
     resume_others(stopped);
+    let h = heap(g);
+    if h.code_pages > 0 && monotonic_seconds() >= h.code_pages_at + h.code_pages {
+        h.code_pages_at = monotonic_seconds();
+        give_code_pages_back();
+    }
+}
+
+/// Gives the pages of the program's code and constants back to the system: they are the
+/// executable's own file, unchanged (the loader writes only its writable segments), so a page
+/// used again comes back from the file's cached pages. Startup runs code once that the program
+/// never needs again, and those pages would otherwise stay resident.
+fn give_code_pages_back() {
+    extern "C" fn each(info: *const DlPhdrInfo, _size: usize, _data: *mut u8) -> i32 {
+        let info = unsafe { &*info };
+        for i in 0..info.phnum as usize {
+            let ph = unsafe { &*info.phdr.add(i) };
+            if ph.kind == PT_LOAD && ph.flags & PF_W == 0 {
+                let from = (info.addr + ph.vaddr as usize).next_multiple_of(PAGE);
+                let to = (info.addr + ph.vaddr as usize + ph.memsz as usize) & !(PAGE - 1);
+                if from < to {
+                    unsafe { madvise(from as *mut u8, to - from, MADV_DONTNEED) };
+                }
+            }
+        }
+        // The executable only: it is the first object.
+        1
+    }
+    unsafe { dl_iterate_phdr(each, ptr::null_mut()) };
 }
 
 /// Scales the bytes taken before the next collection by the share of the processor time
@@ -1987,6 +2056,9 @@ fn mark_and_sweep(
     h.collections += 1;
     if h.log {
         report(h, taken, marked, started.elapsed());
+        if h.log_sizes && !minor {
+            report_sizes(h);
+        }
     }
     minor
 }
@@ -2186,6 +2258,56 @@ fn report(h: &Heap, taken: usize, marked: std::time::Duration, total: std::time:
     unsafe { write(2, buffer.as_ptr().cast(), len) };
 }
 
+/// Writes the bytes alive in each slot size, and in large allocations, after a full collection,
+/// with the blocks each takes, to standard error, without allocating.
+fn report_sizes(h: &Heap) {
+    use std::io::Write;
+    let (mut alive, mut blocks) = ([0usize; CLASSES], [0usize; CLASSES]);
+    let (mut large, mut large_blocks) = (0usize, 0usize);
+    let mut b = 0;
+    while b < h.top {
+        let m = h.meta(b);
+        match m.kind {
+            SMALL => {
+                alive[m.class as usize] += m.live as usize * m.size as usize;
+                blocks[m.class as usize] += 1;
+                b += 1;
+            }
+            LARGE => {
+                let n = m.size as usize;
+                if m.live > 0 {
+                    large += n << BLOCK_SHIFT;
+                    large_blocks += n;
+                }
+                b += n;
+            }
+            _ => b += 1,
+        }
+    }
+    for class in 0..CLASSES {
+        if blocks[class] == 0 {
+            continue;
+        }
+        let mut buffer = [0u8; 128];
+        let mut out = &mut buffer[..];
+        let _ = writeln!(
+            out,
+            "[gc sizes {} bytes{}: {} KB alive in {} blocks]",
+            SIZES[class / 2],
+            if class % 2 == 1 { " no pointers" } else { "" },
+            alive[class] >> 10,
+            blocks[class]
+        );
+        let len = 128 - out.len();
+        unsafe { write(2, buffer.as_ptr().cast(), len) };
+    }
+    let mut buffer = [0u8; 128];
+    let mut out = &mut buffer[..];
+    let _ = writeln!(out, "[gc sizes large: {} KB alive in {} blocks]", large >> 10, large_blocks);
+    let len = 128 - out.len();
+    unsafe { write(2, buffer.as_ptr().cast(), len) };
+}
+
 /// Frees every taken slot left unmarked, and lists the blocks with untaken slots. The blocks are
 /// swept in chunks by the collecting thread and the `helpers` together; then this thread lists
 /// the blocks and frees the empty ones.
@@ -2246,6 +2368,17 @@ fn sweep(h: &mut Heap, helpers: usize) {
     }
     if let Some((start, len)) = empty {
         h.free_blocks(start, len);
+    }
+    // Listed from the top down, a class's list hands out its lowest block first.
+    if h.low_first {
+        h.lists = [NONE; CLASSES];
+        for b in (0..h.top).rev() {
+            let m = h.meta(b);
+            if m.kind == SMALL && m.live > 0 && m.untaken {
+                m.listed = false;
+                h.list(b);
+            }
+        }
     }
     merge_runs(h);
     h.alive = alive;
