@@ -97,7 +97,7 @@ impl Workspace {
             &dir.join("Cargo.toml"),
             &format!(
                 "[workspace]\nmembers = [{}]\nresolver = \"3\"\n\n\
-                 [profile.dev]\ndebug = \"line-tables-only\"\nincremental = false\n\n[profile.release]\nlto = \"fat\"\n",
+                 [profile.dev]\ndebug = \"line-tables-only\"\nincremental = false\n\n[profile.release]\nlto = \"thin\"\n",
                 members.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>().join(", ")
             ),
         )?;
