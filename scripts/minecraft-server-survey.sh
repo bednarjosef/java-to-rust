@@ -6,7 +6,7 @@
 #
 # Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, multi-release,
 # repair, jdk-sources, parse, census, summary, and on their own (not run by default) trial-write,
-# trial, java-run, bench and join.
+# trial, java-run, bench, join and commands.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -53,6 +53,8 @@
 #                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input)
 # JOIN               which server a bot joins in the join step: java (default) or trial; JOIN_PORT
 #                    (default 25599) and JOIN_SECONDS (default 15, how long the bot plays)
+# COMMANDS           which server the commands step runs an operator's sessions on: java (default)
+#                    or trial; COMMANDS_BOT_SECONDS (default 120) is the longest the bot stays
 # PREVIOUS_CENSUS    the census that the summary compares the latest with, a directory with a
 #                    census.json (default $MINECRAFT_CACHE/census-previous, where the census step
 #                    moves the census before it, if it has one)
@@ -794,6 +796,141 @@ join() {
   } | tee "$dir/result.txt"
 }
 
+# The console commands of an operator's first session (commands_input), one a line, on a new
+# world with the bot on it.
+first_session_commands() {
+  cat <<'EOF'
+list
+op bot
+deop bot
+op bot
+gamemode creative bot
+gamemode survival bot
+give bot minecraft:diamond 5
+clear bot minecraft:diamond 2
+setblock 100 100 100 minecraft:gold_block
+tp bot 100 101 100
+data get entity bot Pos
+time set 1000
+weather rain
+weather thunder 600
+weather clear
+difficulty hard
+difficulty
+gamerule keep_inventory true
+gamerule keep_inventory
+seed
+fill 101 100 100 103 102 102 minecraft:stone
+execute if block 100 100 100 minecraft:gold_block
+summon minecraft:pig 100 101 100
+kill @e[type=minecraft:pig,x=100,y=101,z=100,distance=..2]
+effect give bot minecraft:speed 30 1
+xp add bot 15 levels
+experience query bot levels
+scoreboard objectives add deaths deathCount
+scoreboard players set bot deaths 3
+scoreboard players get bot deaths
+tag bot add tester
+tag bot list
+say done
+msg bot hello
+banlist
+locate biome minecraft:plains
+locate structure minecraft:village_plains
+spawnpoint bot 100 101 100
+worldborder set 1000
+worldborder get
+save-all
+kick bot Goodbye
+EOF
+}
+
+# The commands of the second session, on the world that the first saved.
+second_session_commands() {
+  cat <<'EOF'
+execute if block 100 100 100 minecraft:gold_block
+execute if block 102 101 101 minecraft:stone
+scoreboard players get bot deaths
+worldborder get
+gamerule keep_inventory
+difficulty
+seed
+data get entity bot Pos
+experience query bot levels
+tag bot list
+EOF
+}
+
+# Gives the server of session $3, run by shell $1 and logging to stdout-$3.txt, the commands that
+# $2 (a function) prints, once it has started and a bot (minecraft-join-bot.py, writing what it
+# saw to bot-$3.txt) has joined; waits a second after each, then for the bot to leave, then stops
+# the server.
+commands_input() {
+  local shell=$1 commands=$2 session=$3 waited=0 command
+  wait_for() {
+    until grep -q "$1" "stdout-$session.txt" 2>/dev/null; do
+      kill -0 "$shell" 2>/dev/null || exit 0
+      [ $waited -ge "${SERVER_SECONDS:-600}" ] && { echo stop; exit 0; }
+      sleep 1
+      waited=$((waited + 1))
+    done
+  }
+  wait_for 'Done ('
+  python3 -I "$root/scripts/minecraft-join-bot.py" "$cache/reports/packets.json" "${JOIN_PORT:-25599}" \
+    "${COMMANDS_BOT_SECONDS:-120}" > "bot-$session.txt" 2>&1 &
+  local bot=$!
+  wait_for 'bot joined the game'
+  sleep 2
+  while IFS= read -r command; do
+    echo "$command"
+    sleep 1
+  done < <("$commands")
+  # The first session kicks the bot; the second lets it leave by itself, after the commands.
+  [ "$session" = 2 ] && kill "$bot" 2>/dev/null
+  wait "$bot"
+  echo "bot exit $?" >> "bot-$session.txt"
+  echo stop
+}
+
+# An operator's two sessions on the server, Java's (COMMANDS=java, the default) or as the trial
+# step built it (COMMANDS=trial), in commands-java or commands-trial: a new world of seed BENCH_SEED
+# (default 1) with a bot on it, the commands of first_session_commands, a save and a stop; then
+# the server started again on the saved world, the bot back, the commands of
+# second_session_commands and a stop. log.txt has the console's lines of both sessions without
+# their times; compare it between java and trial.
+commands() {
+  local which=${COMMANDS:-java}
+  local dir=$cache/commands-$which
+  local -a command
+  case $which in
+    java) command=("$java" -cp "$(server_jar):$(library_jars | paste -sd:)" "$(cat "$cache/jar/META-INF/main-class")") ;;
+    trial) command=("$(trial_binary)") ;;
+    *) echo "COMMANDS is java or trial, not $which" >&2; exit 1 ;;
+  esac
+  [ -f "$cache/reports/packets.json" ] || { echo "no packets report (run the join step once)" >&2; exit 1; }
+  rm -rf "$dir" && mkdir -p "$dir"
+  echo eula=true > "$dir/eula.txt"
+  printf 'server-port=%s\nonline-mode=false\nwhite-list=false\nenforce-whitelist=false\nlevel-seed=%s\n' \
+    "${JOIN_PORT:-25599}" "${BENCH_SEED:-1}" > "$dir/server.properties"
+  local session functions=(first_session_commands second_session_commands)
+  for session in 1 2; do
+    set +e
+    (cd "$dir" && shell=$BASHPID && timeout "${SERVER_SECONDS:-600}" "${command[@]}" --nogui \
+      < <(commands_input "$shell" "${functions[session - 1]}" "$session") > "stdout-$session.txt" 2> "stderr-$session.txt")
+    echo "session $session exit $?" >> "$dir/exits.txt"
+    set -e
+  done
+  {
+    cat "$dir/exits.txt"
+    for session in 1 2; do
+      echo "== session $session"
+      sed -E 's/^\[[0-9:]+\] \[[^]]*\/([A-Z]+)\]: /\1 /' "$dir/stdout-$session.txt"
+      grep -E '^(chunks|kicked|bot exit)' "$dir/bot-$session.txt" || true
+    done
+  } > "$dir/log.txt"
+  cat "$dir/log.txt"
+}
+
 # The census split by origin: the server, each library, the JDK (census-by-origin.py), and
 # compared with the previous census, if one is kept (census-compare.py).
 summary() {
@@ -822,9 +959,9 @@ steps=("$@")
 for step in "${steps[@]}"; do
   case $step in
     extract | decompile | best-of | libraries | library-sources | library-best-of | multi-release | repair \
-      | jdk-sources | parse | census | summary | trial-write | trial | java-run | bench | join) "$step" ;;
+      | jdk-sources | parse | census | summary | trial-write | trial | java-run | bench | join | commands) "$step" ;;
     *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of," \
-      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run, bench, join)" >&2
+      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run, bench, join, commands)" >&2
       exit 2 ;;
   esac
 done
