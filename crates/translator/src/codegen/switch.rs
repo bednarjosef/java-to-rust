@@ -52,7 +52,7 @@ pub(super) struct Frame<'a> {
 }
 
 /// Whether a case's statements always leave the switch (so they do not fall into the next case).
-fn leaves(body: &[Stmt]) -> bool {
+pub(super) fn leaves(body: &[Stmt]) -> bool {
     match body.last() {
         Some(Stmt::Block(inner)) => leaves(inner),
         last => matches!(
@@ -71,7 +71,7 @@ fn leaves(body: &[Stmt]) -> bool {
 }
 
 /// A case's statements without the `break` that ends an arrow case or a case that leaves anyway.
-fn strip(body: &[Stmt]) -> &[Stmt] {
+pub(super) fn strip(body: &[Stmt]) -> &[Stmt] {
     match body.split_last() {
         Some((Stmt::Break, rest)) => rest,
         // `case x: { ...; break; }` is the statements of its braces.
@@ -82,7 +82,7 @@ fn strip(body: &[Stmt]) -> &[Stmt] {
 
 /// Whether a statement has a `break` that leaves the switch around it (not one inside a loop or a
 /// nested switch, and not one with a label).
-fn breaks_out(stmt: &Stmt) -> bool {
+pub(super) fn breaks_out(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Break => true,
         Stmt::Block(stmts) => stmts.iter().any(breaks_out),
@@ -109,7 +109,7 @@ fn is_breakable(stmt: &Stmt) -> bool {
     )
 }
 
-fn is_default(case: &Case) -> bool {
+pub(super) fn is_default(case: &Case) -> bool {
     case.labels.iter().any(|l| matches!(l, CaseLabel::Default))
 }
 

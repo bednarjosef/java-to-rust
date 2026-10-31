@@ -3317,7 +3317,7 @@ fn a_census_stubs_only_the_code_of_the_file_with_the_rejection() {
             ),
             (
                 "p/A.java",
-                "package p;\nclass A {\n    static Object drain(boolean fail) {\n        Object tasks;\n        try {\n            switch (fail ? 1 : 0) {\n                case 0: tasks = new Object(); break;\n                default:\n                    throw new IllegalStateException(\"no\");\n            }\n        } catch (IllegalStateException e) {\n            tasks = e;\n        }\n        return tasks;\n    }\n}\n",
+                "package p;\nclass A {\n    static Object drain(boolean fail) {\n        Object tasks;\n        try {\n            switch (fail ? 1 : 0) {\n                case 0: if (fail) { tasks = \"early\"; break; } tasks = new Object(); break;\n                default:\n                    throw new IllegalStateException(\"no\");\n            }\n        } catch (IllegalStateException e) {\n            tasks = e;\n        }\n        return tasks;\n    }\n}\n",
             ),
             (
                 "p/B.java",
@@ -4023,14 +4023,18 @@ enum Level {
 }
 "#;
 
-/// A method whose local the generator rejects (an `Object` declared without a value).
+/// A method whose local the generator rejects (an `Object` declared without a value, which a case
+/// of a switch in a `try` sets before a `break` in the middle of the case).
 const DRAIN: &str = r#"
 class Drain {
     static Object drain(boolean fail) {
         Object tasks;
         try {
             switch (fail ? 1 : 0) {
-                case 0: tasks = new Object(); break;
+                case 0:
+                    if (fail) { tasks = "early"; break; }
+                    tasks = new Object();
+                    break;
                 default:
                     throw new IllegalStateException("no");
             }
