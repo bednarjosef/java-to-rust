@@ -48,6 +48,37 @@ impl<C> Deref for Global<C> {
     }
 }
 
+/// The object that a lambda or method reference capturing nothing is: one per place it is
+/// written, made the first time the place runs, in a `static` at that place. The translation
+/// puts one there only where every thread may use the object, which has no fields: in a program
+/// that starts no thread, or where the object is not a `RefCell`, whose borrow flag is not atomic;
+/// elsewhere the place keeps a thread-local `OnceCell`. A thread-local takes its 8 bytes
+/// in every thread's static thread-local storage, which the C library zeroes for each thread it
+/// starts and the collector scans at each collection: the Minecraft server's 14,300 places took
+/// 114 KB of each of its 60 threads' 120 KB.
+pub struct PlaceObject<T>(OnceLock<T>);
+
+// Only where the translation found the object safe to share, as above.
+unsafe impl<T> Sync for PlaceObject<T> {}
+
+impl<T: Clone> PlaceObject<T> {
+    pub const fn new() -> PlaceObject<T> {
+        PlaceObject(OnceLock::new())
+    }
+
+    /// The place's object, made by `make` the first time.
+    #[inline(always)]
+    pub fn get(&self, make: impl FnOnce() -> T) -> T {
+        self.0.get_or_init(make).clone()
+    }
+}
+
+impl<T: Clone> Default for PlaceObject<T> {
+    fn default() -> PlaceObject<T> {
+        PlaceObject::new()
+    }
+}
+
 /// A `Global` whose value is computed on first use, by `init`.
 pub struct LazyGlobal<C> {
     cell: OnceCell<C>,

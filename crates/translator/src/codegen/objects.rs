@@ -1785,12 +1785,22 @@ impl<'a> Gen<'a> {
         };
         let object = if self.captures_nothing(ctor) {
             // A lambda that captures nothing is one object per place it is written, made the
-            // first time that place runs (per thread), as Java's runtime hands out one instance.
+            // first time that place runs, as Java's runtime hands out one instance: in a static
+            // where every thread may use it (`java::PlaceObject`), else one per thread. Such an
+            // object has no fields, so only a `RefCell` around them, whose borrow flag is not
+            // atomic, keeps it to one thread in a program that starts threads.
             let ty = self.object_type(name);
-            format!(
-                "{{ thread_local! {{ static LAMBDA: std::cell::OnceCell<{ty}> = const {{ std::cell::OnceCell::new() }}; }} \
-                 LAMBDA.with(|lambda| lambda.get_or_init(|| {object}).clone()) }}"
-            )
+            let shareable = !self.facts.threaded || !ty.contains("RefCell<");
+            if shareable {
+                format!(
+                    "{{ static LAMBDA: java::PlaceObject<{ty}> = java::PlaceObject::new(); LAMBDA.get(|| {object}) }}"
+                )
+            } else {
+                format!(
+                    "{{ thread_local! {{ static LAMBDA: std::cell::OnceCell<{ty}> = const {{ std::cell::OnceCell::new() }}; }} \
+                     LAMBDA.with(|lambda| lambda.get_or_init(|| {object}).clone()) }}"
+                )
+            }
         } else {
             object
         };
