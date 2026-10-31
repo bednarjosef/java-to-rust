@@ -178,7 +178,10 @@ fn run_program(args: &[String]) -> Result<(), String> {
             return Err(format!("--from-tree needs -o or --crate\n{USAGE}"));
         };
         let tree = java_to_rust::timings::phase("tree read", || read_tree(&path))?;
-        return write_translation(tree, crate_name(&program.main), crates, flag, out);
+        let name = crate_name(&program.main);
+        return java_to_rust::timings::phase("tree written", || {
+            write_translation(tree, name, crates, flag, out)
+        });
     }
     if census {
         program.ends_rejected = output.is_some();
@@ -202,6 +205,21 @@ fn run_program(args: &[String]) -> Result<(), String> {
             release_free_memory();
             if let Some(file) = &save_tree {
                 java_to_rust::timings::phase("census: tree saved", || save_tree_to(&tree, file))?;
+                // The saved translation is written by a new run of the translator that reads it
+                // (`--from-tree`): this one's allocator holds the memory of the whole census, in
+                // which the split and the write of the Minecraft server took 72 s, against 27 s
+                // in a new process.
+                #[cfg(unix)]
+                if let Some(crates) = crates {
+                    use std::os::unix::process::CommandExt;
+                    let exe = std::env::current_exe().map_err(|e| format!("the translator's path: {e}"))?;
+                    let crates = crates.to_string();
+                    let args =
+                        ["--main", &program.main, "--from-tree", file, flag, path, "--crates", &crates];
+                    std::io::Write::flush(&mut std::io::stdout()).map_err(|e| format!("the report: {e}"))?;
+                    let error = std::process::Command::new(exe).args(args).exec();
+                    return Err(format!("writing the translation from {file}: {error}"));
+                }
             }
             let name = crate_name(&program.main);
             return phase("census: write", || write_translation(tree, name, crates, flag, path));
