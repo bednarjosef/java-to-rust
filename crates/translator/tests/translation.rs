@@ -3364,7 +3364,7 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
 
 #[test]
 fn a_census_stubs_a_rejected_statement_and_the_rest_of_its_block_not_the_whole_method() {
-    // `zone` is rejected for `StackWalker.walk`, behind a test that is false in this run, as
+    // `zone` is rejected for the `Optional` that its `StackWalker.walk` returns, behind a test that is false in this run, as
     // jtracy's `TracyClient.beginZone` is when the profiler is not loaded: the rest of `zone`
     // runs. `twice` is rejected for two statements, each cut with the rest of its block, and the
     // static initializer for one, after which `ready` is still incremented.
@@ -3393,7 +3393,7 @@ fn a_census_stubs_a_rejected_statement_and_the_rest_of_its_block_not_the_whole_m
     assert_contains(
         &rust,
         &[
-            "java::not_translated(\"p.Main.zone: `StackWalker.walk` not supported yet (line 16)\")",
+            "java::not_translated(\"p.Main.zone: type `java.util.Optional` not supported yet (line 16)\")",
             "java::println!(\"walking\");\n            java::not_translated(\"p.Main.zone",
             "java::println!(\"after {name}\")",
             "java::not_translated(\"p.Main.twice: type `java.lang.ProcessBuilder` not supported yet (line 23)\")",
@@ -4169,20 +4169,12 @@ fn a_census_stubs_what_each_check_of_the_analyses_rejects() {
 
 #[test]
 fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
-    // A pattern variable read after the loop that tests it and `synchronized` on a string, in a
-    // program that starts a thread, are rejected by checks that read the code alone: the census
-    // stubs them before the analyses first run, which then run once.
+    // `synchronized` on a string, in a program that starts a thread, is rejected by a check that
+    // reads the code alone: the census stubs it before the analyses first run, which then run
+    // once.
     let main = r#"public class Main {
     static final String LOCK = "lock";
     static int n;
-
-    static String first(Object[] items) {
-        int i = 0;
-        while (!(items[i] instanceof String s)) {
-            i++;
-        }
-        return s;
-    }
 
     static void count() {
         synchronized (LOCK) {
@@ -4191,7 +4183,6 @@ fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
     }
 
     public static void main(String[] args) throws InterruptedException {
-        System.out.println(first(new Object[] {1, "two"}));
         Thread t = new Thread(Main::count);
         t.start();
         t.join();
@@ -4202,13 +4193,7 @@ fn a_census_stubs_what_the_checks_of_the_code_reject_before_the_analyses_run() {
     let dir = write_sources("census_code_checks", &[("Main.java", main)]);
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
     let (census, rounds) = java_to_rust::program::rounds_of_analyses(|| census(&program));
-    assert_contains(
-        &census.report,
-        &[
-            "`synchronized` on a string not supported yet\n          at Main.java:14:9\n",
-            "a pattern variable used here not supported yet\n          at Main.java:7:18\n",
-        ],
-    );
+    assert_contains(&census.report, &["`synchronized` on a string not supported yet\n          at Main.java:6:9\n"]);
     assert_eq!(rounds, 1, "{}", census.report);
 }
 
@@ -7053,13 +7038,14 @@ fn a_static_method_asking_for_its_caller_gets_the_calling_class() {
         instance.contains("asking for the caller (`getCallerClass`) in a method that is not static"),
         "{instance}"
     );
+    // A walk's frames are a `Stream`, which a program without the JDK's sources does not have.
     let walked = reject(
         "class A {
             static long depth() { return StackWalker.getInstance().walk(frames -> frames.count()); }
             public static void main(String[] a) { System.out.println(depth()); }
         }",
     );
-    assert!(walked.contains("StackWalker.walk"), "{walked}");
+    assert!(walked.contains("type `java.util.stream.Stream` not supported yet"), "{walked}");
 }
 
 #[test]
