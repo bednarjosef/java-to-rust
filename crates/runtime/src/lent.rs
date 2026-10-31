@@ -4,7 +4,7 @@
 //!
 //! The generated code lends an array to such a function as it lends it to any function that takes
 //! a slice: a plain array as `&v` or `&mut v`, an `Array` as `&a.borrow()` or `&mut
-//! a.borrow_mut()`, which lend its `Vec` for the call. A `SharedArray`'s elements are cells that
+//! a.borrow_mut()`, which lend its elements for the call (`Borrowed`, `BorrowedMut`). A `SharedArray`'s elements are cells that
 //! other threads read and write while the call runs, which no slice may point into: its
 //! `borrow()` and `borrow_mut()` give a `Lent` and a `LentMut` instead, which read and write the
 //! cells one element at a time, each element one atomic action (`java::SharedField`). A function
@@ -126,6 +126,37 @@ impl<T: Clone> Target<T> for std::cell::RefMut<'_, Vec<T>> {
     #[inline]
     fn store(&mut self, at: usize, values: &[T]) {
         self.as_mut_slice().store(at, values)
+    }
+}
+
+impl<T: Clone> Source<T> for crate::Borrowed<'_, T> {
+    #[inline]
+    fn length(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn range(&self, range: Range<usize>) -> Cow<'_, [T]> {
+        Cow::Borrowed(&self[range])
+    }
+}
+
+impl<T: Clone> Source<T> for crate::BorrowedMut<'_, T> {
+    #[inline]
+    fn length(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn range(&self, range: Range<usize>) -> Cow<'_, [T]> {
+        Cow::Borrowed(&self[range])
+    }
+}
+
+impl<T: Clone> Target<T> for crate::BorrowedMut<'_, T> {
+    #[inline]
+    fn store(&mut self, at: usize, values: &[T]) {
+        self[at..at + values.len()].clone_from_slice(values)
     }
 }
 

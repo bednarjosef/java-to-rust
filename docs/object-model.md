@@ -1053,6 +1053,16 @@ that takes a slot after its receiver, `List__iterator_on_stack(this, &slot_2)`, 
 that keeps the object uses (`corpus/features/StackObjects.java`, `StackFactories.java`,
 `StackObjectsInLists.java`).
 
+An array is one slot too: a header of 16 bytes, its length (a Java array has at most 2^31 − 1
+elements, so 4 bytes), the flag of a borrow of the elements lent whole to the runtime, and one
+word (the class of a covariant array, or a shared array's monitor and class, made the first time
+it is locked), and then the elements (`java::Array`, `java::SharedArray`, `runtime/src/array.rs`).
+An element is at a fixed offset from the handle, so reading one waits only for the handle, as on
+a JVM, and the header and the first elements of a small array share a cache line. The elements
+never move while a handle lives, which a counting loop's view of them rests on. A `java::Frozen`
+array (a `static final` array that is only read) is a `std::sync::Arc` of its elements, one
+allocation already.
+
 ### 1.14 `Object.clone`
 
 `super.clone()` of `Object` is a copy of the object's runtime class, as Java's is

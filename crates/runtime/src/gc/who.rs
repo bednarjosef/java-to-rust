@@ -112,7 +112,7 @@ impl Who<'_, '_> {
             return MAX_TYPES + self.census.type_of(&owner);
         }
         match *target {
-            Target::Slot { block, .. } => 2 * MAX_TYPES + self.census.h.meta(block).class as usize / 2,
+            Target::Slot { block, .. } => 2 * MAX_TYPES + self.census.h.meta(block).class as usize / SCANS,
             _ => KEYS - 1,
         }
     }

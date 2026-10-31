@@ -47,13 +47,19 @@ owned, and that Rust therefore never freed, is found unreachable too.
   program runs much of its code once, at startup: the Minecraft server held 181 MB of its 286 MB
   of code and 47 MB of its 85 MB of constants after its tick sprint, and its peak went from
   1,030–1,089 MB to 953–957 MB, at the same tick speed.
-- **Small blocks** hold slots of one size: one of 47 sizes from 16 bytes to 32 KB, in steps of
+- **Small blocks** hold slots of one size: one of 54 sizes from 16 bytes to 32 KB, in steps of
   8 bytes up to 128, where most objects are, so that an object takes at most 7 bytes more than
-  it needs, and then of a quarter of a power of two. A slot is aligned to 8 bytes, and to 16 when
-  its size is a multiple of 16, which an allocation aligned to 16 takes. Allocations that may
-  hold pointers and those that cannot (an alignment below 8, as in the bytes of a string) use
-  blocks of their own, and the collector does not scan the second kind.
-- **Large allocations** take whole blocks.
+  it needs, and then of a quarter of a power of two, with a power of two and 16 bytes beside
+  each up to 8 KB, for an array whose elements take a power of two and its 16-byte header. A slot is aligned to 8 bytes, and to 16 when
+  its size is a multiple of 16, which an allocation aligned to 16 takes. Three kinds of slots
+  use blocks of their own: those that may hold pointers anywhere, which the collector scans
+  whole; those that cannot (an alignment below 8, as in the bytes of a string), which it does
+  not scan; and arrays of numbers (`gc::alloc_array`), whose 16-byte header may hold a pointer
+  and whose elements cannot, of which it scans the header alone. So the numbers of a `long[]` or
+  a `double[]` never keep an object alive by looking like its address.
+- **Large allocations** take whole blocks. An array whose elements fill whole blocks takes one
+  block more for its 16-byte header, which the heap's huge pages make 64 KB of memory: LargeArrays,
+  700 arrays of 64, 128 and 256 KB of elements, peaks at about 134 MB rather than 88.
 - **Colors.** A small block's first slot is at one of eight cache lines past the block's start,
   chosen by the block's number, and each large allocation starts at one of the 64 cache lines of
   a page, in turn (`gc.rs`, `color`). With every block aligned to 64 KB, the first objects of
@@ -153,7 +159,11 @@ possible classes (`java::Thin`, docs/object-model.md 1.2). The roots are:
 - each thread's static thread-local storage;
 - the free lists of every thread, whose slots are kept without being scanned.
 
-Slots are scanned whole, word by word, except in blocks that cannot hold pointers. In a program
+Slots are scanned whole, word by word, except in blocks that cannot hold pointers, and but for
+the header in blocks of arrays of numbers (a large array of numbers too: its header, at the
+start the block's table records). Any word that points into a slot keeps the slot, wherever it
+points: a loop's view of an array's elements or a slice of them lent to the runtime, which point
+past the header, keep the whole array. In a program
 with 4-byte references (`java::CompactAllocator`, docs/native-speed.md 1.1), each half of each
 word scanned, in a slot or a root, is also read as one: it keeps a slot only if, times 8, it is
 the slot's start, since such a reference never points inside an object. A number that happens to

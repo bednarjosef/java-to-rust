@@ -1,13 +1,15 @@
 //! Java arrays. An array is a shared handle to its elements: copying the handle gives a second
 //! name for the same array, as in Java, and every access is bounds-checked the way Java checks it.
 //!
-//! An array of a program without threads, or of a family that no two threads reach (`Array`),
-//! keeps its elements in a `RefCell<Vec<T>>`. A bulk access (a sort, a copy, a runtime function
-//! lent the elements) borrows it. A single element's read or write, and the length, go around the
-//! borrow flag (`ArrayData::raw`): they hold nothing while other code runs, and a Java array's
-//! length never changes, so the flag would only cost a store and a reload on every access, which
-//! in a loop over an array chain one iteration to the next through memory. An array that threads
-//! share (`SharedArray`) keeps each element in a cell of its own (`SharedElements`, a slice of
+//! An array is one slot of the collected heap: a header of 16 bytes (its length, a borrow flag
+//! and one word of its kind's own), then its elements (`ArrayData`). An array of a program
+//! without threads, or of a family that no two threads reach (`Array`), lends its elements whole
+//! to a bulk access (a sort, a copy, a runtime function lent the elements) through the borrow
+//! flag (`borrow`, `borrow_mut`). A single element's read or write, and the length, go around the
+//! flag (`ArrayData::raw`): they hold nothing while other code runs, and a Java array's length
+//! never changes, so the flag would only cost a store and a reload on every access, which in a
+//! loop over an array chain one iteration to the next through memory. An array that threads share
+//! (`SharedArray`) reads and writes each element as a cell of its own (`cells`, a slice of
 //! `java::SharedField`s), as a thread-shared object keeps its fields: a read or write of an
 //! element is one atomic action, which takes no lock and checks no borrow flag. An element of
 //! 1, 2, 4 or 8 bytes without drop glue (a primitive, a reference) is an atomic word, loaded with
@@ -29,59 +31,244 @@
 use crate::Arc;
 use crate::lent::{Lent, LentMut};
 use crate::{Class, Exception, SharedField, throw};
-use std::cell::{RefCell, UnsafeCell};
-use std::ops::{Deref, Range};
+use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut, Range};
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
-pub type Array<T> = Arc<ArrayData<RefCell<Vec<T>>, T>>;
+pub type Array<T> = Arc<ArrayData<PlainHeader<T>, T>>;
 
 /// An array of a program with threads, whose arrays of its family two threads may reach.
-pub type SharedArray<T> = Arc<ArrayData<SharedElements<T>, T>>;
+pub type SharedArray<T> = Arc<ArrayData<SharedHeader<T>, T>>;
 
-/// What an array handle points to: the elements, in a `RefCell` or as `SharedElements` (`C`),
-/// which the handle reaches through `Deref` (the generated code lends them to a runtime function
-/// as `&a.borrow()`), and the class of a covariant array.
+/// What an array handle points to: a header of 16 bytes, followed in the same slot of the
+/// collected heap by the elements (docs/object-model.md, "Arrays"). The header holds the length,
+/// the borrow of the elements lent whole (an `Array`'s, `borrow`), and a word of the kind's own
+/// (`C`): the class of a covariant `Array`, or a `SharedArray`'s monitor and class. An element is
+/// at a constant offset from the handle, so reading one waits for no other load than the
+/// handle's; and the elements never move while a handle lives, which views of them rest on. An
+/// array of numbers is scanned by the collector in its header alone (`gc::alloc_array`).
+#[repr(C)]
 pub struct ArrayData<C, T> {
-    items: C,
-    class: Option<Box<ElementClass<T>>>,
+    len: u32,
+    /// The borrow of an `Array`'s elements lent whole: 0 for none, the number of readers, or -1
+    /// for a writer. A `SharedArray` lends copies (`Lent`), and leaves it 0.
+    flag: AtomicI32,
+    header: C,
+    /// Where the elements start, aligned for them.
+    items: [T; 0],
 }
 
-impl<C, T> Deref for ArrayData<C, T> {
-    type Target = C;
+/// The word of an `Array`'s header: the class of a covariant array.
+pub struct PlainHeader<T>(Option<Box<ElementClass<T>>>);
+
+/// The word of a `SharedArray`'s header: what few arrays have, made when the array is made with
+/// a class, or the first time a thread locks it (`synchronized (a)`).
+pub struct SharedHeader<T>(AtomicPtr<SharedExtra<T>>);
+
+/// A `SharedArray`'s monitor and class (`SharedHeader`).
+pub(crate) struct SharedExtra<T> {
+    pub(crate) monitor: crate::monitor::LazyMonitor,
+    class: Option<ElementClass<T>>,
+}
+
+impl<T> SharedHeader<T> {
+    /// The monitor and the class, made once.
+    pub(crate) fn extra(&self) -> &SharedExtra<T> {
+        let extra = self.0.load(Ordering::Acquire);
+        if !extra.is_null() {
+            return unsafe { &*extra };
+        }
+        self.make(None)
+    }
+
+    #[cold]
+    fn make(&self, class: Option<ElementClass<T>>) -> &SharedExtra<T> {
+        let made =
+            Box::into_raw(Box::new(SharedExtra { monitor: crate::monitor::LazyMonitor::new(), class }));
+        match self.0.compare_exchange(std::ptr::null_mut(), made, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => unsafe { &*made },
+            Err(theirs) => unsafe { &*theirs },
+        }
+    }
 
     #[inline]
-    fn deref(&self) -> &C {
-        &self.items
+    fn class(&self) -> Option<&ElementClass<T>> {
+        let extra = self.0.load(Ordering::Acquire);
+        if extra.is_null() { None } else { unsafe { (*extra).class.as_ref() } }
     }
 }
 
-impl<C: std::fmt::Debug, T> std::fmt::Debug for ArrayData<C, T> {
+/// The offset of the elements from the start of an array's slot: the header's size.
+const fn items_offset<C, T>() -> usize {
+    std::mem::size_of::<ArrayData<C, T>>()
+}
+
+/// Whether the elements of type `T` may hold pointers: anything but numbers, which only `long`
+/// and `double` are among the types of 8-byte alignment (a narrower one cannot hold a pointer).
+#[inline(always)]
+fn may_hold_pointers<T>() -> bool {
+    std::mem::align_of::<T>() >= 8 && {
+        let name = std::any::type_name::<T>();
+        name != "i64" && name != "f64"
+    }
+}
+
+impl<C, T> ArrayData<C, T> {
+    /// The start of the elements.
+    #[inline(always)]
+    fn start(&self) -> *mut T {
+        // The elements follow the header in the slot that the handle points to (`make`).
+        (self as *const Self as *const u8).wrapping_add(items_offset::<C, T>()) as *mut T
+    }
+
+    /// The length.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// A new array of `len` elements and the header word `header`, whose element `k` is
+    /// `make(k)`. `make` runs before the array exists, so no other code sees it half made.
+    fn make(len: usize, header: C, mut make: impl FnMut(usize) -> T) -> Arc<ArrayData<C, T>> {
+        const { assert!(std::mem::align_of::<T>() <= 8, "an element is aligned to 8 bytes at most") };
+        assert!(len <= i32::MAX as usize, "an array of more than 2^31 - 1 elements");
+        let size = items_offset::<C, T>() + len * std::mem::size_of::<T>();
+        let p =
+            crate::gc::alloc_array(size, std::mem::align_of::<Self>(), may_hold_pointers::<T>()) as *mut Self;
+        unsafe {
+            p.write(ArrayData { len: len as u32, flag: AtomicI32::new(0), header, items: [] });
+            let start = (*p).start();
+            for k in 0..len {
+                start.add(k).write(make(k));
+            }
+            crate::gc::note_type::<Self>(p);
+            Arc::from_heap(p)
+        }
+    }
+
+    /// A new array of the elements of `items`, moved in.
+    fn from_items(mut items: Vec<T>, header: C) -> Arc<ArrayData<C, T>> {
+        let len = items.len();
+        // The elements are moved, one copy of their bytes, and the `Vec` left empty.
+        let from = items.as_ptr();
+        unsafe { items.set_len(0) };
+        Self::make(len, header, |k| unsafe { from.add(k).read() })
+    }
+}
+
+impl<C, T> std::fmt::Debug for ArrayData<C, T>
+where
+    T: std::fmt::Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.items.fmt(f)
+        let items = unsafe { std::slice::from_raw_parts(self.start(), self.len()) };
+        f.debug_list().entries(items).finish()
     }
 }
 
-/// The elements of a `SharedArray`: a cell per element, each read and written as one atomic action
-/// (`java::SharedField`). The length never changes.
-///
-/// The array's monitor is made the first time a thread locks it (`synchronized (a)`), as few
-/// arrays are ever locked.
-pub struct SharedElements<T>(Box<[SharedField<T>]>, pub(crate) crate::monitor::LazyMonitor);
+/// The elements of an `Array` lent whole to a runtime function that reads them (`borrow`).
+pub struct Borrowed<'a, T> {
+    items: &'a [T],
+    flag: &'a AtomicI32,
+}
 
-impl<T> SharedElements<T> {
-    fn new(items: Vec<T>) -> SharedElements<T> {
-        let items: Box<[T]> = items.into_boxed_slice();
+impl<T> Deref for Borrowed<'_, T> {
+    type Target = [T];
+
+    #[inline(always)]
+    fn deref(&self) -> &[T] {
+        self.items
+    }
+}
+
+impl<T> Drop for Borrowed<'_, T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.flag.store(self.flag.load(Ordering::Relaxed) - 1, Ordering::Relaxed);
+    }
+}
+
+/// The elements of an `Array` lent whole to a runtime function that writes them (`borrow_mut`).
+pub struct BorrowedMut<'a, T> {
+    items: &'a mut [T],
+    flag: &'a AtomicI32,
+}
+
+impl<T> Deref for BorrowedMut<'_, T> {
+    type Target = [T];
+
+    #[inline(always)]
+    fn deref(&self) -> &[T] {
+        self.items
+    }
+}
+
+impl<T> DerefMut for BorrowedMut<'_, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [T] {
+        self.items
+    }
+}
+
+impl<T> Drop for BorrowedMut<'_, T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.flag.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn already_borrowed() -> ! {
+    panic!("an array lent while it is lent to be written")
+}
+
+impl<T> ArrayData<PlainHeader<T>, T> {
+    /// The start and the number of the elements, reached without the borrow flag, for an access
+    /// of one element that holds nothing while other code runs (see the module's documentation).
+    #[inline(always)]
+    fn raw(&self) -> (*mut T, usize) {
+        (self.start(), self.len())
+    }
+
+    /// The elements lent whole to a runtime function that reads them (`&a.borrow()`).
+    #[inline]
+    pub fn borrow(&self) -> Borrowed<'_, T> {
+        let n = self.flag.load(Ordering::Relaxed);
+        if n < 0 {
+            already_borrowed();
+        }
+        self.flag.store(n + 1, Ordering::Relaxed);
+        Borrowed { items: unsafe { std::slice::from_raw_parts(self.start(), self.len()) }, flag: &self.flag }
+    }
+
+    /// The elements lent whole to a runtime function that writes them (`&mut a.borrow_mut()`).
+    #[inline]
+    pub fn borrow_mut(&self) -> BorrowedMut<'_, T> {
+        if self.flag.load(Ordering::Relaxed) != 0 {
+            already_borrowed();
+        }
+        self.flag.store(-1, Ordering::Relaxed);
+        BorrowedMut {
+            items: unsafe { std::slice::from_raw_parts_mut(self.start(), self.len()) },
+            flag: &self.flag,
+        }
+    }
+}
+
+impl<T> ArrayData<SharedHeader<T>, T> {
+    /// The cells of the elements.
+    #[inline(always)]
+    fn cells(&self) -> &[SharedField<T>] {
         // A `SharedField<T>` is a transparent `UnsafeCell<T>`, which has the layout of a `T`.
-        SharedElements(
-            unsafe { Box::from_raw(Box::into_raw(items) as *mut [SharedField<T>]) },
-            crate::monitor::LazyMonitor::new(),
-        )
+        unsafe { std::slice::from_raw_parts(self.start() as *const SharedField<T>, self.len()) }
     }
 
     /// The elements lent to a runtime function that reads them (`lent.rs`): read from their cells
     /// as the function asks for them, never borrowed in place.
     #[inline]
     pub fn borrow(&self) -> Lent<'_, T> {
-        Lent::new(&self.0)
+        Lent::new(self.cells())
     }
 
     /// The elements lent to a runtime function that writes them (`lent.rs`).
@@ -90,13 +277,12 @@ impl<T> SharedElements<T> {
     where
         T: Clone,
     {
-        LentMut::new(&self.0)
+        LentMut::new(self.cells())
     }
-}
 
-impl<T: Clone + std::fmt::Debug> std::fmt::Debug for SharedElements<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.0.iter()).finish()
+    /// The array's monitor and class.
+    pub(crate) fn extra(&self) -> &SharedExtra<T> {
+        self.header.extra()
     }
 }
 
@@ -266,6 +452,9 @@ pub trait MadeElements<T>: Elements<T> {
     /// A new array of the same kind, of class `class` where it is a covariant array.
     fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> Self;
 
+    /// `made_as` of the `len` elements `make` gives, made where they are.
+    fn made_with(len: usize, class: Option<ElementClass<T>>, make: impl FnMut(usize) -> T) -> Self;
+
     /// A new array of the same kind, such as a copy.
     fn made(items: Vec<T>) -> Self
     where
@@ -433,16 +622,6 @@ impl<T, A: Elements<T>> Elements<T> for &A {
     }
 }
 
-impl<T> ArrayData<RefCell<Vec<T>>, T> {
-    /// The start and the number of the elements, reached without the borrow flag, for an access
-    /// of one element that holds nothing while other code runs (see the module's documentation).
-    #[inline(always)]
-    fn raw(&self) -> (*mut T, usize) {
-        let items = self.items.as_ptr();
-        unsafe { ((*items).as_mut_ptr(), (*items).len()) }
-    }
-}
-
 impl<T> Elements<T> for Array<T> {
     #[inline(always)]
     fn length(&self) -> usize {
@@ -509,10 +688,11 @@ impl<T> Elements<T> for Array<T> {
 
     #[inline(always)]
     fn view(&self) -> ArrayView<'_, T> {
-        // The start and the length stay right while the handle lives: the `Vec` of an `Array` is
-        // never grown, shrunk or replaced, but by `take_items` of an array no other handle holds
-        // yet, and the collected heap never moves a slot (`gc.rs`). Each access is still checked
-        // against the length, so that a wrong proof stops the program and never reaches past it.
+        // The start and the length stay right while the handle lives: an array's elements follow
+        // its header in the one slot, whose length never changes, and the collected heap never
+        // moves a slot (`gc.rs`); a view's pointer into the elements keeps the slot. Each access
+        // is still checked against the length, so that a wrong proof stops the program and never
+        // reaches past it.
         let (items, len) = self.raw();
         ArrayView { items, len, array: std::marker::PhantomData }
     }
@@ -605,27 +785,31 @@ impl<T> Elements<T> for Array<T> {
 
     #[inline]
     fn element_class(&self) -> Option<&ElementClass<T>> {
-        self.class.as_deref()
+        self.header.0.as_deref()
     }
 
     fn take_items(&self) -> Vec<T>
     where
         T: Clone,
     {
-        std::mem::take(&mut *self.borrow_mut())
+        self.borrow().to_vec()
     }
 }
 
 impl<T> MadeElements<T> for Array<T> {
     fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> Array<T> {
-        Arc::new(ArrayData { items: RefCell::new(items), class: class.map(Box::new) })
+        ArrayData::from_items(items, PlainHeader(class.map(Box::new)))
+    }
+
+    fn made_with(len: usize, class: Option<ElementClass<T>>, make: impl FnMut(usize) -> T) -> Array<T> {
+        ArrayData::make(len, PlainHeader(class.map(Box::new)), make)
     }
 }
 
 impl<T> Elements<T> for SharedArray<T> {
     #[inline(always)]
     fn length(&self) -> usize {
-        self.items.0.len()
+        self.len()
     }
 
     #[inline(always)]
@@ -633,7 +817,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let cells = &self.items.0;
+        let cells = self.cells();
         cells[position(cells.len(), i)].get()
     }
 
@@ -642,13 +826,13 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let cells = &self.items.0;
+        let cells = self.cells();
         Ok(cells[try_position(cells.len(), i)?].get())
     }
 
     #[inline(always)]
     fn put(&self, i: i32, v: T) {
-        let cells = &self.items.0;
+        let cells = self.cells();
         cells[position(cells.len(), i)].set(v)
     }
 
@@ -657,7 +841,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let cells = &self.items.0;
+        let cells = self.cells();
         match cells.get(i as usize) {
             Some(cell) => cell.get(),
             None => wrong_bound(cells.len(), i),
@@ -666,7 +850,7 @@ impl<T> Elements<T> for SharedArray<T> {
 
     #[inline(always)]
     fn put_in_bounds(&self, i: i32, v: T) {
-        let cells = &self.items.0;
+        let cells = self.cells();
         match cells.get(i as usize) {
             Some(cell) => cell.set(v),
             None => wrong_bound(cells.len(), i),
@@ -682,12 +866,12 @@ impl<T> Elements<T> for SharedArray<T> {
     /// cell, as one atomic action.
     #[inline(always)]
     fn view(&self) -> SharedView<'_, T> {
-        SharedView(&self.items.0)
+        SharedView(self.cells())
     }
 
     #[inline(always)]
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
-        let cells = &self.items.0;
+        let cells = self.cells();
         cells[try_position(cells.len(), i)?].set(v);
         Ok(())
     }
@@ -697,19 +881,19 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let cells = &self.items.0;
+        let cells = self.cells();
         Ok(cells[try_position(cells.len(), i)?].get_volatile())
     }
 
     #[inline]
     fn try_put_volatile(&self, i: i32, v: T) -> Result<(), Exception> {
-        let cells = &self.items.0;
+        let cells = self.cells();
         cells[try_position(cells.len(), i)?].set_volatile(v);
         Ok(())
     }
 
     fn try_swap(&self, i: i32, v: T) -> Result<T, Exception> {
-        let cells = &self.items.0;
+        let cells = self.cells();
         Ok(cells[try_position(cells.len(), i)?].replace(v))
     }
 
@@ -724,7 +908,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let cells = &self.items.0;
+        let cells = self.cells();
         Ok(cells[try_position(cells.len(), i)?].compare_exchange_by(expected, value, same))
     }
 
@@ -732,7 +916,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let cells = &self.items.0;
+        let cells = self.cells();
         Ok(cells[try_position(cells.len(), i)?].get_and_update(f))
     }
 
@@ -740,7 +924,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let copy: Vec<T> = self.items.0[range].iter().map(SharedField::get).collect();
+        let copy: Vec<T> = self.cells()[range].iter().map(SharedField::get).collect();
         f(&copy)
     }
 
@@ -748,7 +932,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let cells = &self.items.0[range];
+        let cells = &self.cells()[range];
         let mut copy: Vec<T> = cells.iter().map(SharedField::get).collect();
         let result = f(&mut copy);
         for (cell, v) in cells.iter().zip(copy) {
@@ -761,7 +945,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        for (cell, v) in self.items.0[at..at + values.len()].iter().zip(values) {
+        for (cell, v) in self.cells()[at..at + values.len()].iter().zip(values) {
             cell.set(v.clone());
         }
     }
@@ -770,7 +954,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        for cell in &self.items.0[range] {
+        for cell in &self.cells()[range] {
             cell.set(v.clone());
         }
     }
@@ -779,7 +963,7 @@ impl<T> Elements<T> for SharedArray<T> {
     where
         T: Clone,
     {
-        let (src, dest) = (&self.items.0[from..from + n], &self.items.0[to..to + n]);
+        let (src, dest) = (&self.cells()[from..from + n], &self.cells()[to..to + n]);
         if from < to {
             for (d, s) in dest.iter().zip(src).rev() {
                 d.set(s.get());
@@ -797,14 +981,14 @@ impl<T> Elements<T> for SharedArray<T> {
 
     #[inline]
     fn element_class(&self) -> Option<&ElementClass<T>> {
-        self.class.as_deref()
+        self.header.class()
     }
 
     fn take_items(&self) -> Vec<T>
     where
         T: Clone,
     {
-        self.items.0.iter().map(SharedField::get).collect()
+        self.cells().iter().map(SharedField::get).collect()
     }
 }
 
@@ -1031,7 +1215,19 @@ impl<T, const N: usize> Elements<T> for Frozen<T, N> {
 
 impl<T> MadeElements<T> for SharedArray<T> {
     fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> SharedArray<T> {
-        Arc::new(ArrayData { items: SharedElements::new(items), class: class.map(Box::new) })
+        let a = ArrayData::from_items(items, SharedHeader(AtomicPtr::new(std::ptr::null_mut())));
+        if class.is_some() {
+            a.header.make(class);
+        }
+        a
+    }
+
+    fn made_with(len: usize, class: Option<ElementClass<T>>, make: impl FnMut(usize) -> T) -> SharedArray<T> {
+        let a = ArrayData::make(len, SharedHeader(AtomicPtr::new(std::ptr::null_mut())), make);
+        if class.is_some() {
+            a.header.make(class);
+        }
+        a
     }
 }
 
@@ -1172,25 +1368,25 @@ pub fn try_checked_store_some<T: Clone>(a: &impl Elements<Option<T>>, i: i32, v:
 /// `new T[len]` with every element `zero`, the default value of `T`.
 pub fn filled<T: Clone>(len: i32, zero: T) -> Array<T> {
     let len = size(len);
-    from_vec(vec![zero; len])
+    Array::made_with(len, None, |_| zero.clone())
 }
 
 /// `new T[len]` whose element `i` is `make(i)`, so that each row of `new T[n][m]` is a new array.
 pub fn tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Array<T> {
     let len = size(len);
-    from_vec((0..len).map(make).collect())
+    Array::made_with(len, None, make)
 }
 
 /// `filled` in a program with threads.
 pub fn shared_filled<T: Clone>(len: i32, zero: T) -> SharedArray<T> {
     let len = size(len);
-    shared_from_vec(vec![zero; len])
+    SharedArray::made_with(len, None, |_| zero.clone())
 }
 
 /// `tabulate` in a program with threads.
 pub fn shared_tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> SharedArray<T> {
     let len = size(len);
-    shared_from_vec((0..len).map(make).collect())
+    SharedArray::made_with(len, None, make)
 }
 
 /// The length of an array being created; Java throws for a negative length.
