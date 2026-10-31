@@ -786,6 +786,9 @@ pub struct TypeDecl {
     /// its source names them, as `Class.getInterfaces()` gives them.
     #[serde(default)]
     pub interfaces: Vec<Interface>,
+    /// A record, whose superclass is `java.lang.Record`.
+    #[serde(default)]
+    pub record: bool,
 }
 
 /// A local variable that a local or anonymous class captures.

@@ -671,7 +671,7 @@ the program's classes implement:
   infers over two records of an interface and erases to `Record`): the program's records. It
   has no methods of its own: `equals`, `hashCode` and `toString`, which `Record` declares again,
   are `Object`'s, which each record overrides. A record's class names `java.lang.Record` as its
-  superclass where the type exists.
+  superclass (`TypeDecl::record`).
 - The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it.
 - The strings and boxes implement `Serializable`, and the string and the boxes of `int`, `long`,
   `float` and `double` `java.lang.constant`'s `Constable` and `ConstantDesc`, where the program

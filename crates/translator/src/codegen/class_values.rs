@@ -321,7 +321,7 @@ impl<'a> Gen<'a> {
         let (kind, extends) = (decl.kind, decl.extends);
         // A record's superclass is `Record`, which the program's records implement where it is a
         // type. `Object` has none.
-        let record = decl.implements.iter().any(|&i| self.class.types[i].name == RECORD);
+        let record = decl.record || decl.implements.iter().any(|&i| self.class.types[i].name == RECORD);
         let name = rust_string(&self.java_class_name(c, false));
         let object = self.java_class_name(c, false) == "java.lang.Object";
         let simple = rust_string(&self.java_class_name(c, true));

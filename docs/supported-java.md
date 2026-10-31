@@ -357,7 +357,7 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   `getDeclaringClass` answer from what the class value carries in a program that asks for them:
   the modifiers javac gives the class, implicit ones included, and where it is declared
   (`TypeDecl::modifiers` and `enclosing`). An enum constant with a body has its enum's class, so
-  it answers as the enum. `Object` has no superclass. `getInterfaces()` of a class that is no class literal is a new array
+  it answers as the enum. A record's superclass is `java.lang.Record`, and `Object` has none. `getInterfaces()` of a class that is no class literal is a new array
   filled from the interfaces that the class value carries in such a program, in the order the
   source names them (`TypeDecl::interfaces`), the runtime's classes with the JDK's lists and an
   array with `Cloneable` and `Serializable`; an interface that the translation has no type of
