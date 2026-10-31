@@ -12,7 +12,7 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 /// The text of a string literal.
 pub const fn wtf8(s: &str) -> &Wtf8 {
@@ -479,8 +479,9 @@ impl ToOwned for Wtf8 {
 /// An owned string of WTF-8 bytes, and whether they are all ASCII once something has asked
 /// (`is_ascii_text`), as Java's `String` keeps its coder: on an ASCII string a code unit index
 /// is a byte offset, so the `String` methods that take an index need no walk of the text
-/// (`java::Text`). Any change to the text forgets it.
-pub struct JString(Vec<u8>, AtomicU8);
+/// (`java::Text`). It also keeps its `hashCode()` once computed (0 until then), as Java's
+/// `String` does, in what would otherwise be padding. Any change to the text forgets both.
+pub struct JString(Vec<u8>, AtomicU8, AtomicI32);
 
 /// What a `JString` knows of its bytes: nothing yet, all ASCII, or not.
 const UNKNOWN: u8 = 0;
@@ -489,17 +490,17 @@ const NOT_ASCII: u8 = 2;
 
 impl JString {
     pub const fn new() -> JString {
-        JString(Vec::new(), AtomicU8::new(UNKNOWN))
+        JString(Vec::new(), AtomicU8::new(UNKNOWN), AtomicI32::new(0))
     }
 
     const fn of(bytes: Vec<u8>) -> JString {
-        JString(bytes, AtomicU8::new(UNKNOWN))
+        JString(bytes, AtomicU8::new(UNKNOWN), AtomicI32::new(0))
     }
 
     /// The text `bytes`, which the caller knows are ASCII.
     pub(crate) fn from_ascii(bytes: Vec<u8>) -> JString {
         debug_assert!(bytes.is_ascii());
-        JString(bytes, AtomicU8::new(ASCII))
+        JString(bytes, AtomicU8::new(ASCII), AtomicI32::new(0))
     }
 
     pub fn with_capacity(capacity: usize) -> JString {
@@ -527,9 +528,23 @@ impl JString {
         self.1.store(if ascii { ASCII } else { NOT_ASCII }, Ordering::Relaxed);
     }
 
-    /// Forgets whether the text is ASCII, before it changes.
+    /// `hashCode()`: computed the first time, then kept until the text changes. Threads that
+    /// compute it at once store the same value.
+    #[inline]
+    pub fn hash_code(&self) -> i32 {
+        let hash = self.2.load(Ordering::Relaxed);
+        if hash != 0 {
+            return hash;
+        }
+        let hash = crate::string::text_hash(self);
+        self.2.store(hash, Ordering::Relaxed);
+        hash
+    }
+
+    /// Forgets whether the text is ASCII, and its hash, before it changes.
     fn changing(&mut self) {
         *self.1.get_mut() = UNKNOWN;
+        *self.2.get_mut() = 0;
     }
 
     /// The string of UTF-16 code units `units`, exactly: a pair is its character, a lone
@@ -613,7 +628,11 @@ impl JString {
 
 impl Clone for JString {
     fn clone(&self) -> JString {
-        JString(self.0.clone(), AtomicU8::new(self.1.load(Ordering::Relaxed)))
+        JString(
+            self.0.clone(),
+            AtomicU8::new(self.1.load(Ordering::Relaxed)),
+            AtomicI32::new(self.2.load(Ordering::Relaxed)),
+        )
     }
 }
 
@@ -843,6 +862,20 @@ mod tests {
 
     fn units(s: &Wtf8) -> Vec<u16> {
         s.units().collect()
+    }
+
+    #[test]
+    fn a_string_keeps_its_hash_until_it_changes() {
+        let mut s = JString::from("minecraft");
+        assert_eq!(std::mem::size_of::<JString>(), 32);
+        assert_eq!(s.hash_code(), crate::string::text_hash(&s));
+        assert_eq!(s.2.load(Ordering::Relaxed), s.hash_code());
+        assert_eq!(s.clone().2.load(Ordering::Relaxed), s.hash_code());
+        s.push_str(":stone");
+        assert_eq!(s.2.load(Ordering::Relaxed), 0);
+        assert_eq!(s.hash_code(), crate::string::text_hash(Wtf8::new("minecraft:stone")));
+        // Java's hash of "f5a5a608" is 0, which is computed each time.
+        assert_eq!(JString::from("f5a5a608").hash_code(), 0);
     }
 
     #[test]

@@ -25,8 +25,8 @@ milliseconds), at a load average of 1.6 at its start and about 4 during it, on 1
 clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (five runs a side,
 at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
 Interpreter's from one at a load average of 6.3, SortMillion's from five runs a side at a load
-average of 4, ReflectionLookups' from one of it alone (five runs a side), OwnerThreadChecks' from one of it
-alone at a load average of 12.7, and BinaryTrees',
+average of 4, ReflectionLookups' from one of it alone (five runs a side), OwnerThreadChecks' and StringKeyHash's
+from one of each alone at a load average of 12.7, and BinaryTrees',
 SmallObjects' and ManyThreadsAllocating's from five runs a side, alternating, at a load average
 of about 3.
 
@@ -62,6 +62,7 @@ of about 3.
 | SortMillion           |    1691 |    1439 |      0.85 |         520 |         479 |         0.92 |
 | Statics               |    1286 |    1266 |      0.98 |           - |           - |            - |
 | StringBuild           |      28 |       1 |      0.04 |           - |           - |            - |
+| StringKeyHash         |      40 |      22 |      0.54 |          15 |          19 |         1.27 |
 | TokenScanner          |     994 |     775 |      0.78 |           - |           - |            - |
 | UnlockedObjects       |      69 |      34 |      0.49 |           - |           - |            - |
 
@@ -232,6 +233,13 @@ made on the stack (`java::count_allocation`).
   kernel takes 70 ms in release against 192 ms, and 870 ms at `opt-level = 0` (the runtime at 2)
   against 1800 ms; at `opt-level = 1` both take about 140 ms (medians of five to nine, at a load of
   7 to 9; Java's kernel is about 94 ms).
+- **Keys made of strings (StringKeyHash 0.54x, kernel 1.3x).** A set of keys of two
+  identifiers of two strings each, probed with equal keys made apart, as the Minecraft server's
+  block tags are on every `state.is(tag)`. A `java::JString` keeps its `hashCode()` once computed,
+  as Java's `String` does, in four bytes that were padding (any change to the text forgets it),
+  and a string that is a fixed field of a shared object is hashed where it is rather than copied
+  first: the kernel takes 19-29 ms against 66-103 ms when every probe hashed copies of the text
+  (five alternating runs at a load of 12; Java's kernel is 15 ms).
 - **Fields read through a type of several classes, split into crates (BaseFields 0.4x).** Two final
   fields of an abstract class read from an array of four subclasses, in a translation split into
   three body crates (`--crates 3`), as the Minecraft server's noise chunk reads its density

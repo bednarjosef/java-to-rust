@@ -549,3 +549,29 @@ fn sleep_and_join_throw_only_in_a_program_that_interrupts() {
         ],
     );
 }
+
+#[test]
+fn a_string_field_of_a_shared_object_is_hashed_where_it_is() {
+    let rust = translate(
+        "class A {
+    static class Id {
+        final String name;
+        String alias;
+        Id(String name) { this.name = name; }
+        public int hashCode() { return 31 * name.hashCode() + alias.hashCode(); }
+        public boolean equals(Object o) { return o instanceof Id id && name.equals(id.name); }
+    }
+    public static void main(String[] args) throws InterruptedException {
+        Id id = new Id(args.length > 0 ? args[0] : \"stone\");
+        Thread t = new Thread(() -> { id.alias = \"rock\"; System.out.println(id.hashCode()); });
+        t.start();
+        t.join();
+        System.out.println(id.equals(new Id(\"stone\")));
+    }
+}",
+    );
+    // A fixed field is borrowed where it is, not copied; a field that may change is read by value,
+    // and both are hashed as the string itself, which keeps its hash, not as its text.
+    assert_contains(&rust, &["java::string_hash(&(*self.name.fixed()))", "self.alias.get().as_ref()"]);
+    assert_lacks(&rust, &["(*self.name.fixed()).clone()", "self.alias.get().as_deref()"]);
+}

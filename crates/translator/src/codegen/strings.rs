@@ -167,15 +167,17 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the string field `field` of `object` can be borrowed where it is for as long as
-    /// the statement runs: an immutable object never changes, and a shared object's borrow is
+    /// the statement runs: an immutable object never changes, nor does a fixed field of a shared
+    /// object, and a shared object's borrow is
     /// scoped where the statement may change it (see `conflicts`). An owned object, or `this`
     /// borrowed by a method, may be changed by a call in the same statement, which the borrow
     /// would forbid: it is borrowed in place only where the statement being written leaves the
     /// object and the field alone (`Steady`).
     pub(super) fn field_in_place(&self, object: &Expr, field: &str) -> bool {
         match object.ty {
-            // A cell is read by value.
-            Type::Class(..) if self.celled_object(object) => false,
+            // A cell is read by value, unless it is a fixed field's, which nothing writes once its
+            // object is built (`fixed_cell`).
+            Type::Class(..) if self.celled_object(object) => self.fixed_cell(object, field, Type::String),
             Type::Class(name, _) if self.facts.immutable.contains(name) => true,
             Type::Class(..) if self.is_plain(object) => {
                 let key = match &object.kind {
