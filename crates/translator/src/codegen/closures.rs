@@ -431,6 +431,15 @@ impl<'a> Gen<'a> {
             .collect();
         let mut values = values.to_vec();
         for (i, value) in values.iter_mut().enumerate() {
+            // A `java::Str` of a temporary string borrows it: the string is bound first, so that
+            // it lives as long as the parameter.
+            if let Some(text) = value.strip_prefix("java::Str::of(&").and_then(|v| v.strip_suffix(')'))
+                && !text.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                let temp = self.temp(&format!("{}_text", names[i].trim_start_matches('_')));
+                self.line(&format!("let {temp} = &{text};"));
+                *value = format!("java::Str::of({temp})");
+            }
             if names[..i.min(names.len())].iter().any(|name| names_variable(value, name)) {
                 let temp = self.temp(&format!("{}_value", names[i].trim_start_matches('_')));
                 self.line(&format!("let {temp} = {value};"));
@@ -442,14 +451,18 @@ impl<'a> Gen<'a> {
             if name == value {
                 continue;
             }
-            // `x.as_deref()` borrows `x`, which must outlive the statement when it is a value.
-            if let Some(owned) = value.strip_suffix(".as_deref()")
+            // `x.as_deref()` borrows `x`, which must outlive the statement when it is a value, and
+            // so does `x.as_ref().map(java::Str::of)`.
+            let borrow = [".as_deref()", ".as_ref().map(java::Str::of)"]
+                .into_iter()
+                .find_map(|suffix| value.strip_suffix(suffix).map(|owned| (owned, suffix)));
+            if let Some((owned, suffix)) = borrow
                 && captured_local(owned).is_none()
             {
                 let base = name.trim_start_matches("mut ").trim_start_matches('_');
                 let temp = self.temp(&format!("{base}_value"));
                 self.line(&format!("let {temp} = {owned};"));
-                self.line(&format!("let {param} = {temp}.as_deref();"));
+                self.line(&format!("let {param} = {temp}{suffix};"));
                 continue;
             }
             self.line(&format!("let {param} = {value};"));

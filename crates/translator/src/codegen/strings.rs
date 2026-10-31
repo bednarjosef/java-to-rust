@@ -45,6 +45,12 @@ impl<'a> Gen<'a> {
         if let Some(base) = text.strip_suffix(".as_wtf8()") {
             return format!("{base}.as_text()");
         }
+        if let Some(inner) = text.strip_prefix("java::non_null(")
+            && let Some(option) = inner.strip_suffix(".map(java::Str::as_wtf8))")
+            && balanced(option)
+        {
+            return format!("&java::non_null({option})");
+        }
         if !self.facts.threaded
             && let Some(inner) = text.strip_prefix("java::non_null(")
             && let Some(place) = inner.strip_suffix(".as_deref())")
@@ -54,6 +60,71 @@ impl<'a> Gen<'a> {
             return format!("java::non_null({place}.as_ref())");
         }
         text
+    }
+
+    /// Whether the variable `name` is a string parameter that the method being written takes as a
+    /// `java::Str` (`Facts::lent_strings`).
+    pub(super) fn lent_string(&self, name: &str) -> bool {
+        let m = &self.class.methods[self.method];
+        self.borrowed.contains(name)
+            && m.params
+                .iter()
+                .position(|p| p.name == name)
+                .is_some_and(|i| self.facts.lent_strings.contains(&(self.method, i)))
+    }
+
+    /// Whether the variable `name` is a string parameter that may be null that the method being
+    /// written takes as an `Option<java::Str>`, where no null test has bound it.
+    pub(super) fn lent_optional(&self, name: &str) -> bool {
+        let m = &self.class.methods[self.method];
+        self.borrowed_optional.contains(name)
+            && !self.borrowed.contains(name)
+            && m.params
+                .iter()
+                .position(|p| p.name == name)
+                .is_some_and(|i| self.facts.lent_strings.contains(&(self.method, i)))
+    }
+
+    /// `str_arg` for a parameter that may be null, an `Option<java::Str>`.
+    pub(super) fn optional_str_arg(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Null => "None".to_string(),
+            ExprKind::Var(name) if self.lent_optional(name) => self.local(name),
+            _ if self.nullable(e) => {
+                let option = self.option_ref(e);
+                if let Some(text) = option.strip_suffix(".map(java::Str::as_wtf8)") {
+                    text.to_string()
+                } else if let Some(place) = option.strip_suffix(".as_deref()") {
+                    format!("{place}.as_ref().map(java::Str::of)")
+                } else {
+                    format!("{option}.map(java::Str::of)")
+                }
+            }
+            _ => format!("Some({})", self.str_arg(e)),
+        }
+    }
+
+    /// A string argument of a parameter that the method takes as a `java::Str`: the caller's own
+    /// such parameter as it is, a literal with whether it is ASCII, and any other string as what
+    /// `str_ref` gives, as a `JString` where it is one, whose kept flag the `Str` takes.
+    pub(super) fn str_arg(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Var(name) if self.lent_string(name) => self.local(name),
+            ExprKind::Str(s) => {
+                let text = self.wtf8_literal(s);
+                format!("{}({text}, {})", self.runtime("Str::known"), s.is_ascii())
+            }
+            // Text with a lone surrogate is not ASCII.
+            ExprKind::Units(units) => {
+                let text = self.units_literal(units);
+                format!("{}({text}, false)", self.runtime("Str::known"))
+            }
+            _ => {
+                let text = self.str_ref(e);
+                let text = self.text_owner(text);
+                format!("{}({text})", self.runtime("Str::of"))
+            }
+        }
     }
 
     /// A string expression as a `&java::Wtf8`.
@@ -79,6 +150,7 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::Str(s) => self.wtf8_literal(s),
             ExprKind::Units(units) => self.units_literal(units),
+            ExprKind::Var(name) if self.lent_string(name) => format!("{}.as_wtf8()", self.local(name)),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             ExprKind::Var(name) => format!("&{}", self.local(name)),
             ExprKind::Field { object, name } if self.field_in_place(object, name) => {

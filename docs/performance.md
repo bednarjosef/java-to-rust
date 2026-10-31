@@ -115,6 +115,12 @@ made on the stack (`java::count_allocation`).
     `lent_static`). A static that may be null is unwrapped as the `&JString` (`as_ref`), so the
     runtime functions see its ASCII flag. A walk of a 3.4 MB static with `indexOf` and
     `substring` copied it at each read: 556 s, now 41-57 ms against Java's 41-53.
+  - A string parameter that a method reads by code unit index is a `java::Str`, which carries
+    whether the caller's string is ASCII (see object-model.md, "Code units"). As a `&Wtf8` each
+    `charAt`, `indexOf` or `substring` of it scanned the whole text: a walk of a 3.4 MB string by
+    helpers called for each word (`nextSpace(s, from)`, `word(s, from, to)`, `unitAt(s, i)`)
+    took 153 s, and the same walk inside one method 128 s; now 49-71 and 44-69 ms, against
+    Java's 63-84 and 60-63.
   - The ASCII analysis follows `String` fields (instance and static, by name, only where every
     field of that name is a `String`), the overrides of a method, enum constants, and the
     exceptions the runtime raises. On a string proved ASCII, `length()` is the byte length and

@@ -88,7 +88,8 @@ impl<'a> Gen<'a> {
             && self.borrowed_optional.contains(name)
             && self.nullable(plain)
         {
-            return Code::atom(format!("{}.map(ToOwned::to_owned)", self.local(name)));
+            let own = if self.lent_optional(name) { "java::Str::to_owned" } else { "ToOwned::to_owned" };
+            return Code::atom(format!("{}.map({own})", self.local(name)));
         }
         if self.nullable(e) {
             return self.expr(e);
@@ -155,6 +156,10 @@ impl<'a> Gen<'a> {
         // An `Option<i32>` is `Copy` and matches as it is, and so does an `Option` of a class; a
         // faithful box is `as_deref`'d.
         let plain_box = self.boxed.get(name).is_some_and(|&ty| !self.faithful_box(ty));
+        // A `java::Str` parameter as its text.
+        if self.lent_optional(name) {
+            return format!("{rust}.map(java::Str::as_wtf8)");
+        }
         if self.borrowed_optional.contains(name) || plain_box || ty == Type::JavaClass {
             rust
         } else {
@@ -168,6 +173,8 @@ impl<'a> Gen<'a> {
     fn narrowed_source(&self, name: &str, ty: Type) -> String {
         match ty {
             Type::Array(_) => format!("{}.clone()", self.local(name)),
+            // A `java::Str` parameter is bound as itself, which `lent_string` then names.
+            Type::String if self.lent_optional(name) => self.local(name),
             // A shared string is bound as the object, a `&java::JStr`.
             Type::String if super::shared_strings() && !self.borrowed_optional.contains(name) => {
                 format!("{}.as_ref()", self.local(name))

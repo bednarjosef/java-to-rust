@@ -7349,3 +7349,38 @@ fn a_string_static_is_read_in_place_where_the_statement_cannot_change_it() {
         ],
     );
 }
+
+#[test]
+fn a_string_parameter_read_by_index_is_given_with_whether_it_is_ascii() {
+    let rust = translate(
+        "class A {
+            static int next(String s, int from) { return s.indexOf(' ', from); }
+            static int first(String s) { return s == null ? -1 : s.charAt(0); }
+            static int walk(String s) {
+                int n = 0;
+                for (int i = next(s, 0); i >= 0; i = next(s, i + 1)) {
+                    n += s.charAt(i) + first(s);
+                }
+                return n;
+            }
+            public static void main(String[] a) {
+                String built = a.length > 0 ? a[0] : \"x y z\";
+                System.out.println(walk(built) + walk(\"a b\") + walk(\"é f\") + first(a.length > 1 ? a[1] : null));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn next(s: java::Str<'_>, from: i32) -> i32",
+            "java::index_of_char(s.as_text(), ' ' as i32, from)",
+            "fn first(s: Option<java::Str<'_>>) -> i32",
+            "fn walk(s: java::Str<'_>) -> i32",
+            "next(s, 0)",
+            "first(Some(s))",
+            "walk(java::Str::of(&built))",
+            "walk(java::Str::known(java::wtf8(\"a b\"), true))",
+            "walk(java::Str::known(java::wtf8(\"é f\"), false))",
+        ],
+    );
+}
