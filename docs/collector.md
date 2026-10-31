@@ -157,8 +157,8 @@ translated javac takes 14.5 s and 1.03 GB collecting after half as much as is al
    a long chain of objects needs no recursion;
 3. sweeps: frees the taken slots left unmarked (clears their bits), lists the blocks with free
    slots, and frees the blocks with nothing alive; then gives back the whole free huge pages
-   beyond what the next cycle takes (above). The marks stay until the next collection, which is what the
-   young generation (below) builds on; the slots threads hold free lose theirs.
+   beyond what the next cycle takes (above). The marks stay until the next collection, which is
+   what the young generation (below) builds on; the slots threads hold free lose theirs.
 
 The roots are scanned conservatively: any aligned word that points into a taken slot keeps that
 slot, which makes interior pointers and pointers held in registers work. The top 16 bits of a
@@ -181,6 +181,14 @@ word scanned, in a slot or a root, is also read as one: it keeps a slot only if,
 the slot's start, since such a reference never points inside an object. A number that happens to
 name a slot's start keeps that slot too; in the census of a run of the small-objects benchmark,
 about 234 of every 10 million halves did (`JAVA_GC_CENSUS`, "lookalikes").
+
+Marking is compiled four times over, for whether other markers run (and mark bits are set
+atomically) and whether words are also read as 4-byte references, and picks one per drain of
+its stack, so that neither is tested per word and each slot taken off the stack is scanned
+inline rather than in a call. A word pointing into a small block, by far the most common, is
+tested for that kind first, and the bytes of each slot to scan are kept in the block's table.
+With one marker, BinaryTrees runs 34.6 G instructions instead of 43.8 G and SmallObjects 4.9 G
+instead of 6.5 G, 1.79 s instead of 2.09 s and 0.22 s instead of 0.24 s (fastest of 5).
 
 ## Objects on the stack
 

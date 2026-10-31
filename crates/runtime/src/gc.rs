@@ -264,6 +264,8 @@ struct Meta {
     slots: u32,
     /// Where a small block's first slot is, past the block's address (see `color`).
     start: u32,
+    /// The bytes of each slot of a small block that marking scans (`scanned_bytes`).
+    scanned: u32,
     /// Whether a free block's memory holds what it last held rather than zeros (`free_blocks`).
     dirty: bool,
     /// The next block on its class's list.
@@ -788,6 +790,7 @@ impl Heap {
         m.listed = false;
         m.size = size;
         m.start = color(b, size as usize) as u32;
+        m.scanned = scanned_bytes(m.scan, size as usize) as u32;
         m.slots = (BLOCK as u32 - m.start) / size;
         m.next = NONE;
         m.magic = (1u64 << 32) / size as u64 + 1;
@@ -1783,21 +1786,15 @@ struct Marker {
 
 impl Marker {
     /// Marks the slot that `word` points into, if it is a taken slot.
-    #[inline(always)]
     fn candidate(&mut self, word: usize) {
-        self.mark::<false>(word)
+        if self.shares { self.mark::<false, true>(word) } else { self.mark::<false, false>(word) }
     }
 
-    /// Marks the slot that the 4-byte reference `bits` names (`java::RefField`), if it is the start of
-    /// a taken slot: a reference is never to the inside of one.
+    /// Marks the slot that `word` points into, or with `EXACT` starts at, if it is a taken slot;
+    /// with `SHARES`, setting its mark atomically, as other markers run. With `EXACT`, `word` is
+    /// a 4-byte reference (`java::RefField`) times 8, which never points inside a slot.
     #[inline(always)]
-    fn reference(&mut self, bits: u32) {
-        self.mark::<true>((bits as usize) << 3)
-    }
-
-    /// Marks the slot that `word` points into, or with `EXACT` starts at, if it is a taken slot.
-    #[inline(always)]
-    fn mark<const EXACT: bool>(&mut self, word: usize) {
+    fn mark<const EXACT: bool, const SHARES: bool>(&mut self, word: usize) {
         // A `java::Thin` keeps its class number in the top bits of a handle.
         let word = word & crate::thin::ADDRESS;
         if word.wrapping_sub(self.base) >= self.end - self.base {
@@ -1806,53 +1803,48 @@ impl Marker {
         let mut b = (word - self.base) >> BLOCK_SHIFT;
         let mut m = unsafe { self.meta.add(b) };
         // The table is read through raw places: other markers set mark bits beside these fields.
-        match unsafe { (*m).kind } {
-            SMALL => {
-                let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
-                if word < start {
-                    return;
-                }
-                let slot = (((word - start) as u64 * unsafe { (*m).magic }) >> 32) as usize;
-                if slot >= unsafe { (*m).slots } as usize
-                    || EXACT && start + slot * unsafe { (*m).size } as usize != word
-                {
-                    return;
-                }
-                let (w, bit) = (slot / 64, 1u64 << (slot % 64));
-                if unsafe { (*m).taken[w] } & bit == 0
-                    || !set_mark(unsafe { &raw mut (*m).marks[w] }, bit, self.shares)
-                {
-                    return;
-                }
-                let size = scanned_bytes(unsafe { (*m).scan }, unsafe { (*m).size } as usize);
-                if size > 0 {
-                    let size_ = unsafe { (*m).size } as usize;
-                    self.stack.push((start + slot * size_, size));
-                }
+        let kind = unsafe { (*m).kind };
+        if kind == SMALL {
+            let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
+            if word < start {
+                return;
             }
-            LARGE | LARGE_REST => {
-                // A large allocation starts within its first page (`allocate_large`).
-                if EXACT && (unsafe { (*m).kind } == LARGE_REST || word & (BLOCK - 1) >= PAGE) {
-                    return;
-                }
-                if unsafe { (*m).kind } == LARGE_REST {
-                    b = unsafe { (*m).size } as usize;
-                    m = unsafe { self.meta.add(b) };
-                }
-                if unsafe { (*m).taken[0] } & 1 == 0
-                    || !set_mark(unsafe { &raw mut (*m).marks[0] }, 1, self.shares)
-                {
-                    return;
-                }
-                let size =
-                    scanned_bytes(unsafe { (*m).scan }, (unsafe { (*m).size } as usize) << BLOCK_SHIFT);
-                if unsafe { (*m).scan } == SCAN_HEAD {
-                    self.stack.push((self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize, size));
-                } else if size > 0 {
-                    self.stack.push((self.base + (b << BLOCK_SHIFT), size));
-                }
+            let slot = (((word - start) as u64 * unsafe { (*m).magic }) >> 32) as usize;
+            let size = unsafe { (*m).size } as usize;
+            if slot >= unsafe { (*m).slots } as usize || EXACT && start + slot * size != word {
+                return;
             }
-            _ => {}
+            // `slot` is below `slots`, so its word is within the bitmaps.
+            let (w, bit) = (slot / 64, 1u64 << (slot % 64));
+            if unsafe { *(&raw const (*m).taken).cast::<u64>().add(w) } & bit == 0
+                || !set_mark(unsafe { (&raw mut (*m).marks).cast::<u64>().add(w) }, bit, SHARES)
+            {
+                return;
+            }
+            let scanned = unsafe { (*m).scanned } as usize;
+            if scanned > 0 {
+                self.stack.push((start + slot * size, scanned));
+            }
+            return;
+        }
+        if kind == LARGE || kind == LARGE_REST {
+            // A large allocation starts within its first page (`allocate_large`).
+            if EXACT && (unsafe { (*m).kind } == LARGE_REST || word & (BLOCK - 1) >= PAGE) {
+                return;
+            }
+            if unsafe { (*m).kind } == LARGE_REST {
+                b = unsafe { (*m).size } as usize;
+                m = unsafe { self.meta.add(b) };
+            }
+            if unsafe { (*m).taken[0] } & 1 == 0 || !set_mark(unsafe { &raw mut (*m).marks[0] }, 1, SHARES) {
+                return;
+            }
+            let size = scanned_bytes(unsafe { (*m).scan }, (unsafe { (*m).size } as usize) << BLOCK_SHIFT);
+            if unsafe { (*m).scan } == SCAN_HEAD {
+                self.stack.push((self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize, size));
+            } else if size > 0 {
+                self.stack.push((self.base + (b << BLOCK_SHIFT), size));
+            }
         }
     }
 
@@ -1907,13 +1899,25 @@ impl Marker {
 
     /// Scans the words of `[from, to)`.
     fn range(&mut self, from: usize, to: usize) {
+        match (self.shares, self.compact) {
+            (false, false) => self.scan::<false, false>(from, to),
+            (false, true) => self.scan::<false, true>(from, to),
+            (true, false) => self.scan::<true, false>(from, to),
+            (true, true) => self.scan::<true, true>(from, to),
+        }
+    }
+
+    /// Scans the words of `[from, to)`, with `SHARES` as `self.shares` and `COMPACT` as
+    /// `self.compact`: also each half of each word as a 4-byte reference.
+    #[inline(always)]
+    fn scan<const SHARES: bool, const COMPACT: bool>(&mut self, from: usize, to: usize) {
         let mut p = (from + 7) & !7;
         while p + 8 <= to {
             let word = unsafe { (p as *const usize).read() };
-            self.candidate(word);
-            if self.compact {
-                self.reference(word as u32);
-                self.reference((word >> 32) as u32);
+            self.mark::<false, SHARES>(word);
+            if COMPACT {
+                self.mark::<true, SHARES>((word as u32 as usize) << 3);
+                self.mark::<true, SHARES>((word >> 32) << 3);
             }
             p += 8;
         }
@@ -1925,6 +1929,17 @@ impl Marker {
     /// (a prefetch as it goes in), and is scanned as it comes out: the misses of reading many
     /// slots overlap instead of following one another.
     fn drain(&mut self) {
+        match (self.shares, self.compact) {
+            (false, false) => self.drain_as::<false, false>(),
+            (false, true) => self.drain_as::<false, true>(),
+            (true, false) => self.drain_as::<true, false>(),
+            (true, true) => self.drain_as::<true, true>(),
+        }
+    }
+
+    /// `drain`, with `SHARES` as `self.shares` and `COMPACT` as `self.compact`, so that each slot
+    /// is scanned inline, with neither tested per word.
+    fn drain_as<const SHARES: bool, const COMPACT: bool>(&mut self) {
         let mut scanned = 0u32;
         let mut ring = [(0usize, 0usize); PREFETCH];
         let (mut first, mut held) = (0usize, 0usize);
@@ -1937,7 +1952,7 @@ impl Marker {
                 let (start, len) = ring[first];
                 first = (first + 1) % PREFETCH;
                 held -= 1;
-                self.range(start, start + len);
+                self.scan::<SHARES, COMPACT>(start, start + len);
                 continue;
             };
             if len > SCAN_CHUNK {
@@ -1956,12 +1971,12 @@ impl Marker {
                 let (start, len) = ring[first];
                 first = (first + 1) % PREFETCH;
                 held -= 1;
-                self.range(start, start + len);
+                self.scan::<SHARES, COMPACT>(start, start + len);
             }
             ring[(first + held) % PREFETCH] = (start, len);
             held += 1;
             scanned += 1;
-            if self.shares && scanned.is_multiple_of(64) {
+            if SHARES && scanned.is_multiple_of(64) {
                 self.offer();
             }
         }
