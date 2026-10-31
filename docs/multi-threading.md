@@ -228,7 +228,7 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | compile-time constant | `const` | `X` |
 | primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
-| object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())` (`get_prepared` for an eager class's, which `main` prepares); `X.set(v)` |
+| object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())` (`get_prepared` for an eager class's, which `main` prepares, `get_settled` for one that `main` initializes first); `X.set(v)` |
 | array that only its class's initialization makes, and that the program only indexes to read and measures | `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` when every array it is given has the constant length `N` | `java::get(&(*X.get()), i)`, `java::len(&(*X.get()))`; `X.set(java::freeze(a))`, `X.set(java::freeze_fixed(a))` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
 
@@ -258,7 +258,33 @@ each, which points the pointer at the starting value, before any thread exists, 
 `X.get_prepared()`, the acquire load alone, with no test, since nothing unsets the pointer. The
 starting value of an eager class's static is Java's default, cheap to make; a frozen array of a
 constant length `N` starts with `N` default elements. One whose elements are objects that are
-never null has no default to fill it with, and is read with `get()`. Where the read is only borrowed (the object of a call or a field access,
+never null has no default to fill it with, and is read with `get()`.
+
+A class whose static initialization Java could not tell from an earlier one is initialized by
+`main` before anything else, before any thread exists (`Facts::early_init`, `statics::early`), so
+that its statics are settled, and a read is `X.get_settled()`: the plain load of `settled`, with
+no test, which the compiler keeps from one read to the next. After running these
+initializations, `main` checks that each such static is settled (`check_settled`) and panics
+otherwise, so that no read without a test ever finds it unset; the class's own `<clinit>`, which
+runs before that check, reads its statics with `get()`. NoiseTree's gradient table, read 8 times
+a noise call, is such a static: its run took 6.81 G instructions with the test of each read and
+5.64 G without. The test of a class is conservative, a program in which nothing of the
+initialization is observable:
+
+- its `<clinit>` (the code inside the `try` of a rewritten one, `lower::clinit_errors`) is only
+  assignments to statics of its class;
+- each assigned value reads only literals, constants and statics of its class assigned before,
+  with operators that cannot throw (no integer division or remainder), new arrays of a literal
+  size or of literal elements, and `new` of objects whose constructor (`plain_constructor`)
+  only assigns fields of the new object its parameters or literals, of a class that has no
+  superclass in the program, no field initializer but a literal, and no static initialization
+  that runs eagerly: no call, no lambda, no other class's static, nothing that throws but
+  `OutOfMemoryError`;
+- the class is not an enum, and no superclass or superinterface of it initializes eagerly.
+
+A class that prints, reads a static another class changes, or may throw keeps its initialization
+at its first use (corpus `threads/EarlyStaticInitializers`). Only a program that starts threads
+does this, as only its statics are `java::Final`s. Where the read is only borrowed (the object of a call or a field access,
 an array that is indexed or measured, a string that is lent, a null test), the generator writes
 the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clone; a static that
 starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is

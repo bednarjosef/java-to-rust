@@ -324,6 +324,29 @@ impl<T> Final<T> {
         unsafe { &*p }
     }
 
+    /// The value of a static whose class `main` initializes before any other code runs: the
+    /// address in `settled`, a plain load with no test, which the compiler may keep from one read
+    /// to the next. `main` checks that it is set (`check_settled`) before any code that reads it
+    /// this way runs, and nothing writes it once a thread has started.
+    #[inline(always)]
+    pub fn get_settled(&self) -> &T {
+        // Written only before the first thread starts (see `set`).
+        let settled = unsafe { *self.settled.get() };
+        debug_assert!(!settled.is_null(), "a static final read before it was settled");
+        // `check_settled` found it set, and it points at `value`, as in `get`.
+        unsafe { &*settled }
+    }
+
+    /// Panics unless `settled` is set: `main` calls it for each static read with `get_settled`,
+    /// once the class's initialization has run.
+    #[cold]
+    #[inline(never)]
+    pub fn check_settled(&self) {
+        if unsafe { *self.settled.get() }.is_null() {
+            panic!("a static final that main initializes was not settled");
+        }
+    }
+
     /// Points `current` at the starting value, unless it is set: `main` calls it for each static
     /// read with `get_prepared`, before any other code runs.
     #[cold]

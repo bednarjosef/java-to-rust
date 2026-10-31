@@ -25,7 +25,8 @@
 //! `X.get().clone()` as a value, and `(*X.get())`, a place, where the read is only borrowed (the
 //! object of a call or a field access, an array that is indexed, a string that is lent). An eager
 //! class's is read with `get_prepared` instead, with no test that it has a value: `main` prepares
-//! it first (`prepared_static`). Such an
+//! it first (`prepared_static`); one of a class whose initialization nothing can observe, which
+//! `main` runs first (`Facts::early_init`), with `get_settled`, a plain load. Such an
 //! array that the program only indexes to read and measures (`Facts::frozen_statics`) is a
 //! `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` where every array it is given has the
 //! constant length `N`: the new array is frozen as it is stored (`java::freeze`,
@@ -341,12 +342,15 @@ impl<'a> Gen<'a> {
     /// Whether static `name` of class `class` is a `java::Final` that `main` prepares before any
     /// other code runs (`prepare_finals`), which a read reaches with no test (`get_prepared`):
     /// one of an eager class, whose starting value is Java's default, cheap to make. Any other
-    /// starts with its initializer's value, which its first read makes (`get`).
+    /// starts with its initializer's value, which its first read makes (`get`), and one of a
+    /// class that `main` initializes first (`Facts::early_init`) is settled, which `get` reads
+    /// first.
     /// A frozen array of a constant length is the exception: its starting value needs that many
     /// elements, and an object that may not be null has no default to fill it with.
     pub(super) fn prepared_static(&self, class: usize, name: &str) -> bool {
         self.final_static(class, name)
             && self.facts.eager_init.contains(&class)
+            && !self.facts.early_init.contains(&class)
             && (!self.frozen_static(class, name)
                 || !self.facts.frozen_lengths.contains_key(&(class, name.to_string()))
                 || self.frozen_filler(class, name).is_some())
@@ -363,13 +367,31 @@ impl<'a> Gen<'a> {
         exceptions::default_value(elem)
     }
 
-    /// The method of `java::Final` that reads static `name` of class `class`.
+    /// The method of `java::Final` that reads static `name` of class `class`: `get_settled` for
+    /// one of a class that `main` initializes first (`settled_static`), but in that class's own
+    /// initialization, which runs before `main` checks it is settled.
     pub(super) fn final_get(&self, class: usize, name: &str) -> &'static str {
-        if self.prepared_static(class, name) { "get_prepared" } else { "get" }
+        let m = &self.class.methods[self.method];
+        if self.settled_static(class, name) && !(m.class == class && m.name == "<clinit>") {
+            "get_settled"
+        } else if self.prepared_static(class, name) {
+            "get_prepared"
+        } else {
+            "get"
+        }
+    }
+
+    /// Whether static `name` of class `class` is a `java::Final` of a class whose static
+    /// initialization `main` runs before anything else (`Facts::early_init`): its assignment
+    /// settles it before any thread starts.
+    fn settled_static(&self, class: usize, name: &str) -> bool {
+        self.final_static(class, name) && self.facts.early_init.contains(&class)
     }
 
     /// At the start of `main`: prepares every `java::Final` that is read with no test
-    /// (`prepared_static`), before any thread starts.
+    /// (`prepared_static`), before any thread starts, then runs the static initialization of
+    /// the classes whose initialization has no observable effect (`Facts::early_init`), which
+    /// settles their statics before any thread starts too.
     pub(super) fn prepare_finals(&mut self) {
         let class = self.class;
         for (t, decl) in class.types.iter().enumerate() {
@@ -377,6 +399,20 @@ impl<'a> Gen<'a> {
                 if !f.constant && self.prepared_static(t, &f.name) {
                     let cell = self.cell_name(t, &f.name);
                     self.line(&format!("{cell}.prepare();"));
+                }
+            }
+        }
+        let mut early: Vec<usize> = self.facts.early_init.iter().copied().collect();
+        early.sort_unstable();
+        for &t in &early {
+            let call = self.init_run(t);
+            self.line(&format!("{call};"));
+        }
+        for t in early {
+            for f in &class.types[t].statics {
+                if !f.constant && self.settled_static(t, &f.name) {
+                    let cell = self.cell_name(t, &f.name);
+                    self.line(&format!("{cell}.check_settled();"));
                 }
             }
         }
