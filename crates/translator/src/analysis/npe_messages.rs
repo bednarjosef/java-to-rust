@@ -2167,6 +2167,7 @@ pub(crate) fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'stati
         (StringOp::StripLeading, []) => fixed("stripLeading", ""),
         (StringOp::StripTrailing, []) => fixed("stripTrailing", ""),
         (StringOp::StripIndent, []) => fixed("stripIndent", ""),
+        (StringOp::Indent, [_]) => fixed("indent", "int"),
         (StringOp::ToUpperCase, []) => fixed("toUpperCase", ""),
         (StringOp::ToLowerCase, []) => fixed("toLowerCase", ""),
         // With a locale, which lowering gives as its language (`case_in_locale`).

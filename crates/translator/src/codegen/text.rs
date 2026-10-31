@@ -245,12 +245,14 @@ impl<'a> Gen<'a> {
             | StringOp::CodePointBefore
             | StringOp::CodePointCount
             | StringOp::OffsetByCodePoints
-            | StringOp::StripIndent => {
+            | StringOp::StripIndent
+            | StringOp::Indent => {
                 let f = match op {
                     StringOp::CodePointAt => "code_point_at",
                     StringOp::CodePointBefore => "code_point_before",
                     StringOp::CodePointCount => "code_point_count",
                     StringOp::OffsetByCodePoints => "offset_by_code_points",
+                    StringOp::Indent => "indent",
                     _ => "strip_indent",
                 };
                 let mut parts = vec![self.text_ref(&args[0])];
@@ -326,7 +328,11 @@ impl<'a> Gen<'a> {
             StringOp::FromCodePoints | StringOp::FromHighByte => {
                 let mut texts = vec![String::new()];
                 texts.extend(args[1..].iter().map(|x| self.int_arg(x)));
-                let name = if op == StringOp::FromCodePoints { "from_code_points" } else { "from_high_byte" };
+                let name = match op {
+                    StringOp::FromCodePoints => "from_code_points",
+                    _ if args.len() == 2 => "from_high_byte_all",
+                    _ => "from_high_byte",
+                };
                 self.array_call(args, 0, texts, |g, t| call(g, name, t.to_vec()))
             }
             StringOp::GetBytes => {

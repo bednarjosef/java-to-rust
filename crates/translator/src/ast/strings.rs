@@ -92,6 +92,8 @@ pub enum StringOp {
     /// `s.regionMatches(toffset, other, ooffset, len)` and the form with `ignoreCase` first.
     RegionMatches,
     StripIndent,
+    /// `s.indent(n)`.
+    Indent,
     /// `s.translateEscapes()`: the escape sequences of `s` as the characters they stand for,
     /// which throws `IllegalArgumentException` for a malformed one.
     TranslateEscapes,

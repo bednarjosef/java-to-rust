@@ -103,7 +103,7 @@ impl<'a> Gen<'a> {
                 let regex = self.text_ref(&rest[0]);
                 format!("{}({receiver}, text_, {regex})", self.runtime("kept_regex"))
             }
-            StringOp::StripIndent | StringOp::TranslateEscapes => {
+            StringOp::StripIndent | StringOp::Indent | StringOp::TranslateEscapes => {
                 format!("{}({receiver}, text_)", self.runtime("empty_or_new"))
             }
             _ => format!("{}({receiver}, text_)", self.runtime("kept")),

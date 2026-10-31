@@ -605,6 +605,7 @@ pub(crate) fn made(builtin: Builtin) -> Made {
             | StringOp::Concat
             | StringOp::Repeat
             | StringOp::StripIndent
+            | StringOp::Indent
             | StringOp::TranslateEscapes,
         ) => Made::Kept,
         Builtin::String(StringOp::ToString) | Builtin::NullChecked(_) | Builtin::Kept(_) => Made::Itself,

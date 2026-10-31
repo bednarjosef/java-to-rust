@@ -197,6 +197,7 @@ impl<'t> Lowering<'t> {
             "offsetByCodePoints" => StringOp::OffsetByCodePoints,
             "regionMatches" => StringOp::RegionMatches,
             "stripIndent" => StringOp::StripIndent,
+            "indent" => StringOp::Indent,
             "translateEscapes" => StringOp::TranslateEscapes,
             // A `CharSequence` is compared by its text, which its `toString()` gives.
             "contentEquals" if matches!(args[0].ty, Type::Class(..)) => {
@@ -579,6 +580,21 @@ impl<'t> Lowering<'t> {
             let sequence = args.into_iter().next().expect("one argument");
             return Ok(Some(self.sequence_builder(node.pos(), sequence, negative)));
         }
+        // A `byte`, `short` or `char` passed for an `int` parameter (an offset read from a
+        // `short[]`, `new StringBuilder('x')`'s capacity) is matched as the `int` it widens to.
+        let params = symbol.ty.strip_prefix('(').and_then(|t| t.split_once(')')).map_or("", |(p, _)| p);
+        let params = super::generics::split_args(params);
+        let args: Vec<Expr> = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, a)| match a.ty {
+                Type::Byte | Type::Short | Type::Char if params.get(i) == Some(&"int") => {
+                    let pos = a.pos;
+                    self.synth(ExprKind::Cast(Type::Int, Box::new(a)), pos, Type::Int)
+                }
+                _ => a,
+            })
+            .collect();
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
         let bytes = Type::array(Type::Byte);
@@ -602,7 +618,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.String", [a, Type::Int, Type::Int]) if *a == Type::array(Type::Int) => {
                 ExprKind::Builtin(Builtin::String(StringOp::FromCodePoints), args)
             }
-            ("java.lang.String", [a, Type::Int, Type::Int, Type::Int]) if *a == bytes => {
+            ("java.lang.String", [a, Type::Int] | [a, Type::Int, Type::Int, Type::Int]) if *a == bytes => {
                 ExprKind::Builtin(Builtin::String(StringOp::FromHighByte), args)
             }
             (
