@@ -375,27 +375,41 @@ impl<'a> Gen<'a> {
     /// those of an interface that happen to be numbered together: a range is one subtract and one
     /// compare, where a list is a compare per number or a table.
     pub(super) fn tags(&self, classes: &[usize], among: &[usize]) -> String {
-        let mut numbers: Vec<(u16, bool)> =
-            among.iter().map(|&c| (self.class_tag(c), classes.contains(&c))).collect();
-        numbers.extend(classes.iter().map(|&c| (self.class_tag(c), true)));
+        self.tag_patterns(&[classes], among).pop().unwrap_or_default()
+    }
+
+    /// `tags` of each of `groups`, which share no class and, if there are several, are part of
+    /// `among`, in one pass over the class numbers: the arms of a `match` over `Object`'s enum
+    /// (the Minecraft server's some 20 000 classes) are hundreds of groups, and a search of the
+    /// group for each class of `among`, once per group, took seconds.
+    pub(super) fn tag_patterns(&self, groups: &[&[usize]], among: &[usize]) -> Vec<String> {
+        let mut group_of: crate::analysis::FastMap<usize, usize> = Default::default();
+        for (g, classes) in groups.iter().enumerate() {
+            group_of.extend(classes.iter().map(|&c| (c, g)));
+        }
+        let mut numbers: Vec<(u16, Option<usize>)> =
+            among.iter().map(|&c| (self.class_tag(c), group_of.get(&c).copied())).collect();
+        for (g, classes) in groups.iter().enumerate() {
+            numbers.extend(classes.iter().map(|&c| (self.class_tag(c), Some(g))));
+        }
         // A class of both lists has the same entry in each.
         numbers.sort_unstable();
         numbers.dedup();
-        let mut runs: Vec<(u16, u16)> = Vec::new();
-        let mut open = false;
-        for (tag, passes) in numbers {
-            match runs.last_mut() {
-                Some(run) if open && passes => run.1 = tag,
-                _ if passes => runs.push((tag, tag)),
-                _ => {}
+        // A group's run goes on while the numbers after its last are its own.
+        let mut runs: Vec<Vec<(u16, u16)>> = vec![Vec::new(); groups.len()];
+        let mut open = None;
+        for (tag, group) in numbers {
+            if let Some(g) = group {
+                match runs[g].last_mut() {
+                    Some(run) if open == Some(g) => run.1 = tag,
+                    _ => runs[g].push((tag, tag)),
+                }
             }
-            open = passes;
+            open = group;
         }
-        let patterns: Vec<String> = runs
-            .into_iter()
-            .map(|(first, last)| if first == last { first.to_string() } else { format!("{first}..={last}") })
-            .collect();
-        patterns.join(" | ")
+        let range =
+            |(first, last)| if first == last { format!("{first}") } else { format!("{first}..={last}") };
+        runs.into_iter().map(|runs| runs.into_iter().map(range).collect::<Vec<_>>().join(" | ")).collect()
     }
 
     /// The constructor of each variant (`Shape::Circle(handle)`, an associated function named as
@@ -2145,7 +2159,8 @@ impl<'a> Gen<'a> {
                 alike.push((text, vec![c]));
             }
         }
-        let patterns: Vec<String> = alike.iter().map(|(_, classes)| self.tags(classes, variants)).collect();
+        let groups: Vec<&[usize]> = alike.iter().map(|(_, classes)| classes.as_slice()).collect();
+        let patterns = self.tag_patterns(&groups, variants);
         // The arm of the most runs of class numbers, where the match has no other: rustc tests a
         // pattern's runs one by one before the `match` on the numbers of the other arms, and the
         // Minecraft server's `Object::hash_code` spent its time in the 3 750 runs of the classes
