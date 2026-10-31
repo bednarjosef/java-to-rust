@@ -23,7 +23,9 @@
 //! builds a starting value that is not a constant itself, on its first read), which a read reaches
 //! with no lock:
 //! `X.get().clone()` as a value, and `(*X.get())`, a place, where the read is only borrowed (the
-//! object of a call or a field access, an array that is indexed, a string that is lent). Such an
+//! object of a call or a field access, an array that is indexed, a string that is lent). An eager
+//! class's is read with `get_prepared` instead, with no test that it has a value: `main` prepares
+//! it first (`prepared_static`). Such an
 //! array that the program only indexes to read and measures (`Facts::frozen_statics`) is a
 //! `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` where every array it is given has the
 //! constant length `N`: the new array is frozen as it is stored (`java::freeze`,
@@ -197,6 +199,14 @@ impl<'a> Gen<'a> {
         for (t, f) in cells {
             let (cell, ty, init, constant) = self.static_cell(t, f);
             let fixed = !is_cell(f.ty) && self.final_static(t, &f.name);
+            // An eager class's frozen array of a constant length starts with that many elements.
+            let filled = match self.facts.frozen_lengths.get(&(t, f.name.clone())) {
+                Some(n) if self.facts.eager_init.contains(&t) && self.frozen_static(t, &f.name) => self
+                    .frozen_filler(t, &f.name)
+                    .map(|zero| format!("{}({n}, {zero})", self.runtime("shared_filled"))),
+                _ => None,
+            };
+            let init = filled.unwrap_or(init);
             let (ty, init) = match self.frozen_static(t, &f.name) {
                 true => (self.frozen_ty(t, &f.name, f.ty), format!("{}({init})", self.freezer(t, &f.name))),
                 false => (ty, init),
@@ -328,6 +338,50 @@ impl<'a> Gen<'a> {
             && self.class.types[class].statics.iter().any(|f| f.name == name && !is_cell(f.ty))
     }
 
+    /// Whether static `name` of class `class` is a `java::Final` that `main` prepares before any
+    /// other code runs (`prepare_finals`), which a read reaches with no test (`get_prepared`):
+    /// one of an eager class, whose starting value is Java's default, cheap to make. Any other
+    /// starts with its initializer's value, which its first read makes (`get`).
+    /// A frozen array of a constant length is the exception: its starting value needs that many
+    /// elements, and an object that may not be null has no default to fill it with.
+    pub(super) fn prepared_static(&self, class: usize, name: &str) -> bool {
+        self.final_static(class, name)
+            && self.facts.eager_init.contains(&class)
+            && (!self.frozen_static(class, name)
+                || !self.facts.frozen_lengths.contains_key(&(class, name.to_string()))
+                || self.frozen_filler(class, name).is_some())
+    }
+
+    /// The default element that fills the starting value of a frozen static array of a constant
+    /// length: Java's default of a primitive or string, or `None` where the elements may be null.
+    fn frozen_filler(&self, class: usize, name: &str) -> Option<&'static str> {
+        let f = self.class.types[class].statics.iter().find(|f| f.name == name)?;
+        let elem = f.ty.element();
+        if self.nullable_element(elem) {
+            return Some("None");
+        }
+        exceptions::default_value(elem)
+    }
+
+    /// The method of `java::Final` that reads static `name` of class `class`.
+    pub(super) fn final_get(&self, class: usize, name: &str) -> &'static str {
+        if self.prepared_static(class, name) { "get_prepared" } else { "get" }
+    }
+
+    /// At the start of `main`: prepares every `java::Final` that is read with no test
+    /// (`prepared_static`), before any thread starts.
+    pub(super) fn prepare_finals(&mut self) {
+        let class = self.class;
+        for (t, decl) in class.types.iter().enumerate() {
+            for f in &decl.statics {
+                if !f.constant && self.prepared_static(t, &f.name) {
+                    let cell = self.cell_name(t, &f.name);
+                    self.line(&format!("{cell}.prepare();"));
+                }
+            }
+        }
+    }
+
     /// Whether static `name` of class `class` is a `java::Final` that holds a `java::Frozen`: a
     /// frozen array (`Facts::frozen_statics`) that is never null, whose reads see it made.
     pub(super) fn frozen_static(&self, class: usize, name: &str) -> bool {
@@ -373,8 +427,9 @@ impl<'a> Gen<'a> {
 
     /// A read of a `java::Final` static (`e`) as the place that holds the value that the read
     /// would clone, after its class's initialization, for code that only borrows it:
-    /// `(*X.get())`, or for a static that starts empty (`Facts::placeholder_statics`), read where
-    /// it is set, `(*java::non_null(X.get().as_ref()))`. `None` for any other expression.
+    /// `(*X.get())` (or `get_prepared`, see `final_get`), or for a static that starts empty
+    /// (`Facts::placeholder_statics`), read where it is set, `(*java::non_null(X.get().as_ref()))`.
+    /// `None` for any other expression.
     pub(super) fn final_place(&mut self, e: &Expr) -> Option<String> {
         let ExprKind::Static { class, name } = &e.kind else { return None };
         if !self.final_static(*class, name) {
@@ -383,9 +438,10 @@ impl<'a> Gen<'a> {
         let cell = self.cell_name(*class, name);
         let placeholder = self.facts.placeholder_statics.contains(&(*class, name.clone()))
             && !self.facts.early_static_reads.contains(&e.id);
+        let get = self.final_get(*class, name);
         let value = match placeholder {
-            true => format!("{}({cell}.get().as_ref())", self.runtime("non_null")),
-            false => format!("{cell}.get()"),
+            true => format!("{}({cell}.{get}().as_ref())", self.runtime("non_null")),
+            false => format!("{cell}.{get}()"),
         };
         Some(match self.init_call(*class) {
             Some(init) => format!("(*{{ {init} {value} }})"),

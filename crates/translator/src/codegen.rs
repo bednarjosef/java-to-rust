@@ -1425,6 +1425,9 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")));
         self.indent += 1;
         self.declare_slots(&sites);
+        if m.is_main {
+            self.prepare_finals();
+        }
         if m.name == "<clinit>" {
             self.init_guard(m.class);
             // Java initializes the superclass first, then the superinterfaces that declare

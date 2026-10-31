@@ -94,7 +94,8 @@ fn statics_that_a_started_thread_touches_are_process_wide() {
 #[test]
 fn a_static_final_that_threads_read_is_read_without_a_lock() {
     // `TABLE` and `NAME` are assigned once, by `A`'s static initialization: `java::Final`s, which a
-    // thread lends in place. `log` is assigned again, so it keeps its lock.
+    // thread lends in place, with no test, since `main` prepares them first. `log` is assigned
+    // again, so it keeps its lock.
     let rust = translate(
         "class A {
             static final int[] TABLE;
@@ -119,8 +120,10 @@ fn a_static_final_that_threads_read_is_read_without_a_lock() {
             "static A_TABLE: java::Final<Option<java::SharedArray<i32>>> = java::Final::new(None);",
             "static A_DESCRIBED: java::Final<java::JString> = java::Final::new(java::JString::new());",
             "static A_LOG: java::Locked<Option<java::JString>>",
-            "java::len(java::non_null((*{ init_a(); A_TABLE.get() }).as_ref()))",
-            "{ init_a(); A_DESCRIBED.get().clone() }",
+            "java::len(java::non_null((*{ init_a(); A_TABLE.get_prepared() }).as_ref()))",
+            "{ init_a(); A_DESCRIBED.get_prepared().clone() }",
+            "A_TABLE.prepare();",
+            "A_DESCRIBED.prepare();",
             "A_TABLE.set(Some(java::shared_from_vec(vec![1, 2, 3])));",
         ],
     );
