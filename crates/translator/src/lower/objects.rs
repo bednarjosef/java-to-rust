@@ -343,6 +343,7 @@ impl<'t> Lowering<'t> {
             modifiers: self.class_modifiers(index),
             enclosing: self.reflected_enclosing(index),
             interfaces: self.named_interfaces(index),
+            record: node.kind() == "RECORD",
         })
     }
 

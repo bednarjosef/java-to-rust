@@ -786,6 +786,9 @@ pub struct TypeDecl {
     /// its source names them, as `Class.getInterfaces()` gives them.
     #[serde(default)]
     pub interfaces: Vec<Interface>,
+    /// A record, whose superclass is `java.lang.Record`.
+    #[serde(default)]
+    pub record: bool,
 }
 
 /// A local variable that a local or anonymous class captures.
@@ -844,6 +847,10 @@ pub struct EnumConstant {
     /// The value of each instance field, in declaration order: the constructor's assignment with
     /// its parameters replaced by the constant's arguments (see `lower/enums.rs`).
     pub values: Vec<Expr>,
+    /// The binary name of the anonymous class of the constant's body (`Op$1`), which is its
+    /// class (`getClass()`); `None` for a constant without a body, whose class is its enum.
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1402,6 +1409,9 @@ pub enum ClassOp {
     /// `index`th of them, which a loop lowered from the call reads (`TypeDecl::interfaces`).
     InterfaceCount,
     InterfaceAt,
+    /// `Enum.getDeclaringClass()` of the constant whose class it is: the enum, which is the
+    /// superclass of the class of a constant's body.
+    EnumDeclaringClass,
 }
 
 impl ClassOp {

@@ -375,6 +375,15 @@ impl Class {
         self.enclosing.filter(|_| self.nest == Nest::Member).copied()
     }
 
+    /// `Enum.getDeclaringClass()` of a constant of this class: the enum, which is the superclass
+    /// of the class of a constant's body.
+    pub fn enum_declaring_class(&self) -> Class {
+        match self.superclass {
+            Some(s) if s.kind == Kind::Enum => *s,
+            _ => *self,
+        }
+    }
+
     /// `getName()`.
     pub fn get_name(&self) -> crate::JString {
         self.shown().into()

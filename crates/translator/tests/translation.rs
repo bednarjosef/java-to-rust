@@ -7431,3 +7431,60 @@ fn a_string_parameter_read_by_index_is_given_with_whether_it_is_ascii() {
         ],
     );
 }
+
+#[test]
+fn a_small_default_body_is_copied_for_each_class_whose_arm_calls_it() {
+    // The dispatcher's arm for each class that runs `Reader.minY()` calls a copy of it for the
+    // class, where `dimension()` is the class's own method rather than a dispatch.
+    let rust = translate(
+        r#"
+        public class Heights {
+            record Dimension(int minY) { }
+
+            interface Accessor { int minY(); }
+
+            interface Reader extends Accessor {
+                Dimension dimension();
+                default int minY() { return dimension().minY(); }
+            }
+
+            static class Level implements Reader {
+                final Dimension d;
+                Level(Dimension d) { this.d = d; }
+                public Dimension dimension() { return d; }
+            }
+
+            static class Other implements Reader {
+                public Dimension dimension() { return new Dimension(1); }
+            }
+
+            static class Region implements Reader {
+                public Dimension dimension() { return new Dimension(2); }
+                public int minY() { return 7; }
+            }
+
+            static class Fixed implements Accessor {
+                public int minY() { return 3; }
+            }
+
+            public static void main(String[] args) {
+                Accessor[] all = { new Level(new Dimension(-64)), new Other(), new Region(), new Fixed() };
+                int sum = 0;
+                for (Accessor a : all) {
+                    sum += a.minY();
+                }
+                System.out.println(sum);
+            }
+        }
+    "#,
+    );
+    assert_contains(
+        &rust,
+        &[
+            "HeightsReader__min_y_in_reader__on_heights_level(HeightsReader::Level(o.clone()))",
+            "fn HeightsReader__min_y_in_reader__on_heights_level(this: HeightsReader) -> i32 {\n    ({ let o: &Arc<HeightsLevel> = unsafe { this.0.as_pointer() }; o.dimension() }).min_y()",
+            "fn HeightsReader__min_y_in_reader__on_heights_other(",
+        ],
+    );
+    assert_lacks(&rust, &["__on_heights_region", "__on_heights_fixed"]);
+}

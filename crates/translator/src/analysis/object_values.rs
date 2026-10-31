@@ -914,6 +914,10 @@ impl ObjectValues {
                 let of = self.eval(class, m, ctx, &args[0]);
                 Flow { any_class: of.any, class_values: of.classes, ..Flow::default() }
             }
+            // An enum's class is a type of the program, a constant's body's class not.
+            ExprKind::Builtin(Builtin::ClassMethod(ClassOp::EnumDeclaringClass), args) => {
+                self.eval(class, m, ctx, &args[0])
+            }
             ExprKind::Builtin(
                 Builtin::ClassMethod(
                     op @ (ClassOp::GetSuperclass | ClassOp::GetEnclosingClass | ClassOp::GetDeclaringClass),

@@ -76,6 +76,12 @@ const CONSTABLE: &str = "java.lang.constant.Constable";
 const CONSTANT_DESC: &str = "java.lang.constant.ConstantDesc";
 const OPTIONAL: &str = "java.util.Optional";
 
+/// The most expressions in a body that is copied for each class (`Gen::body_for`).
+const BODY_FOR_NODES: usize = 12;
+
+/// The most classes that run a body that is copied for each of them (`Gen::body_for`).
+const BODY_FOR_CLASSES: usize = 4;
+
 /// The most classes a call's receiver may be of for the call to dispatch among them alone
 /// (`Need::Among`).
 const AMONG_MOST: usize = 4;
@@ -127,6 +133,9 @@ pub(super) enum Need {
     Among(usize, usize, u64),
     /// A method whose body is emitted on the enum of its type.
     Body(usize),
+    /// A copy of such a body for one class of the enum, as `(method, class)`, which the
+    /// dispatchers' arms for the class call (`Gen::body_for`).
+    BodyFor(usize, usize),
     /// `to_<t>()` on the enum of a subtype `s`: the same object as a value of `t`, as `(s, t)`.
     Convert(usize, usize),
     /// The enum's `Display`.
@@ -168,7 +177,7 @@ pub(super) fn impl_needs(wanted: &Needs, homes: &[Home]) -> HashMap<usize, Vec<N
             | Need::Narrow(s, _)
             | Need::Dispatch(s, _)
             | Need::Among(s, _, _) => s,
-            Need::Body(i) => match homes[i] {
+            Need::Body(i) | Need::BodyFor(i, _) => match homes[i] {
                 Home::Enum(t) => t,
                 _ => continue,
             },
@@ -184,7 +193,7 @@ pub(super) fn impl_needs(wanted: &Needs, homes: &[Home]) -> HashMap<usize, Vec<N
 /// type, whose trait has it.
 pub(super) fn need_types(class: &Class, homes: &[Home], need: Need) -> Vec<usize> {
     match need {
-        Need::Body(i) => {
+        Need::Body(i) | Need::BodyFor(i, _) => {
             let mut types = vec![class.methods[i].class];
             if let Home::Enum(t) = homes[i] {
                 types.push(t);
@@ -264,7 +273,7 @@ impl<'a> Gen<'a> {
                 needs.insert(Need::Enum(t));
                 needs.insert(Need::Dispatch(t, group));
             }
-            Need::Body(i) => {
+            Need::Body(i) | Need::BodyFor(i, _) => {
                 if let Home::Enum(t) = self.homes[i] {
                     needs.insert(Need::Enum(t));
                 }
@@ -1688,6 +1697,9 @@ impl<'a> Gen<'a> {
                 }
             });
         }
+        if let Some(call) = self.call_on_known_this(t, receiver, resolved, args) {
+            return call;
+        }
         let name = match self.among(t, receiver) {
             Some(key) if self.enum_body(t, resolved).is_none() => {
                 let group = self.class.hierarchy.group_id(resolved);
@@ -1711,6 +1723,110 @@ impl<'a> Gen<'a> {
         let among = set.iter().filter(|&&c| self.is_enum_variant(t, c)).count();
         (among > 0 && among <= AMONG_MOST && among < self.shared_enum_variants(t).len())
             .then(|| receiver_key(set))
+    }
+
+    /// A call of `resolved` on `this` in a copy of a body written for one class (`body_for`):
+    /// what the dispatcher's arm for the class runs, without the dispatcher.
+    fn call_on_known_this(
+        &mut self,
+        t: usize,
+        receiver: &'a Expr,
+        resolved: usize,
+        args: &'a [Expr],
+    ) -> Option<Code> {
+        let c = self.this_class?;
+        if !matches!(self.peel(receiver).kind, ExprKind::This)
+            || t != self.this_struct
+            || !self.is_enum_variant(t, c)
+        {
+            return None;
+        }
+        let i = self.class.hierarchy.implementation(resolved, c)?;
+        if self.runtime_of(c) == Some(Type::JavaClass) && self.class_answer(resolved).is_some() {
+            return None;
+        }
+        let args = self.call_args(resolved, args).join(", ");
+        let (text, uses) = self.arm_call(t, c, i, &args);
+        let text = self.covariant_ret(i, resolved, text);
+        if !uses {
+            return Some(Code::atom(text));
+        }
+        let payload = self.payload(c);
+        let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
+        Some(Code::atom(format!("{{ let o: &{payload} = unsafe {{ this.0.{lend}() }}; {text} }}")))
+    }
+
+    /// Whether a dispatcher's arm for class `c` calls a copy of body `i` written for `c`
+    /// (`Need::BodyFor`) rather than the body: a body of one small expression with a call on
+    /// `this`, such as the Minecraft server's `LevelReader.getMinY()`,
+    /// `dimensionType().minY()`. In the copy the call runs the class's method directly, where the
+    /// body dispatches on the class again: with its arms the body was too large for the
+    /// compiler to inline into the dispatcher, which knows the class. Only small bodies that a
+    /// few classes run are copied, each once for each class whose arm calls it: javac's
+    /// `TreeScanner` has some 40 subclasses that each run its small visits.
+    pub(super) fn body_for(&self, i: usize, c: usize) -> bool {
+        let m = &self.class.methods[i];
+        let Home::Enum(d) = self.homes[i] else { return false };
+        if m.is_static
+            || m.is_ctor
+            || !m.type_params.is_empty()
+            || !self.thin_fn(i)
+            || self.stack_forms.contains(&i)
+            || !self.is_enum_variant(d, c)
+        {
+            return false;
+        }
+        let e = match &m.body[..] {
+            [Stmt::Return(Some(e), _)] | [Stmt::Expr(e)] => e,
+            _ => return false,
+        };
+        let (mut nodes, mut plain, mut on_this) = (0, true, false);
+        visit_expr(e, &mut |x| {
+            nodes += 1;
+            match &x.kind {
+                ExprKind::MethodCall { receiver, is_super: false, .. } => {
+                    on_this |= matches!(receiver.kind, ExprKind::This);
+                }
+                ExprKind::Int(_)
+                | ExprKind::Long(_)
+                | ExprKind::Double(_)
+                | ExprKind::Char(_)
+                | ExprKind::Float(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Null
+                | ExprKind::Var(_)
+                | ExprKind::Unary(..)
+                | ExprKind::Binary(..)
+                | ExprKind::Cast(..)
+                | ExprKind::Length(_)
+                | ExprKind::Conditional(..)
+                | ExprKind::This
+                | ExprKind::Field { .. } => {}
+                _ => plain = false,
+            }
+        });
+        if !plain || !on_this || nodes > BODY_FOR_NODES {
+            return false;
+        }
+        let h = &self.class.hierarchy;
+        let runners =
+            self.enum_variants(d).into_iter().filter(|&v| h.implementation(i, v) == Some(i)).count();
+        runners <= BODY_FOR_CLASSES
+    }
+
+    /// The name of the copy of body `i` for class `c` (`body_for`): the body's, then `on_` and
+    /// the class's name, with its number where another class of the enum has the same name.
+    pub(super) fn body_for_name(&self, i: usize, c: usize) -> String {
+        let short = |c: usize| {
+            let name = struct_name(&self.class.types[c].name);
+            snake_case(name.rsplit("::").next().unwrap_or_default())
+        };
+        let Home::Enum(d) = self.homes[i] else { unreachable!("a copied body is on an enum") };
+        let mut name = format!("{}__on_{}", self.fn_names[i], short(c));
+        if self.enum_variants(d).into_iter().any(|v| v != c && short(v) == short(c)) {
+            name = format!("{name}_{}", self.class_tag(c));
+        }
+        name
     }
 
     /// The implementations that the variants of the enum of `t` run for a call of `resolved`.
@@ -1983,6 +2099,12 @@ impl<'a> Gen<'a> {
                 Need::Body(i) => {
                     self.gap();
                     self.method(i);
+                }
+                Need::BodyFor(i, c) => {
+                    self.gap();
+                    let outer = self.this_class.replace(c);
+                    self.method_form(i);
+                    self.this_class = outer;
                 }
                 _ => {}
             }
@@ -3130,7 +3252,18 @@ impl<'a> Gen<'a> {
                 (format!("o{borrow}.{path}{name}({args})"), true)
             }
             Home::Enum(d) => {
-                self.need(Need::Body(i));
+                // A small body whose calls on `this` dispatch runs as its copy for the class,
+                // where they are direct.
+                let name = match self.body_for(i, c) {
+                    true => {
+                        self.need(Need::BodyFor(i, c));
+                        self.body_for_name(i, c)
+                    }
+                    false => {
+                        self.need(Need::Body(i));
+                        name
+                    }
+                };
                 if d == t {
                     (self.enum_fn_call(d, &name, self.this_value(), args), false)
                 } else if !self.class.hierarchy.is_subtype(t, d) {
@@ -3696,14 +3829,16 @@ impl<'a> Gen<'a> {
             if let Need::RuntimeClass(_) = need {
                 // Read from the table by class number (`classes_table`), but for an `Object[]`
                 // that may be a covariant array, which carries its class.
-                let carried: Vec<usize> =
-                    variants.iter().copied().filter(|&c| self.class_carried(c)).collect();
+                let by_value: Vec<usize> =
+                    variants.iter().copied().filter(|&c| self.class_by_value(c)).collect();
                 let table = format!("*crate::{}[self.0.tag() as usize]", super::class_values::CLASSES);
-                if carried.is_empty() {
+                if by_value.is_empty() {
                     self.line(&table);
                 } else {
-                    self.match_arms_or(&carried, Some(table), &|g: &mut Self, c| {
-                        (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
+                    self.match_arms_or(&by_value, Some(table), &|g: &mut Self, c| match g.class_carried(c) {
+                        true => (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true),
+                        // An enum's constant, whose body may be its class.
+                        false => (g.constant_class(c, "*o"), true),
                     });
                 }
                 self.indent -= 1;
@@ -3712,6 +3847,7 @@ impl<'a> Gen<'a> {
             }
             let ret = format!(" -> {ret}");
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
+                Need::RuntimeClassName(_) if g.has_bodies(c) => (g.constant_class_name(c, "*o", false), true),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
                 // Read from the value's bits, the same text for every such class, whose arms

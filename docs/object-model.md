@@ -158,6 +158,14 @@ Naming:
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.
+- A body on an enum that is one small expression (at most 12, of plain kinds) with a call on
+  `this`, which at most four classes run, such as the Minecraft server's `LevelReader.getMinY()`, `dimensionType().minY()`, has
+  a copy for each class whose dispatcher arm calls it: `<body>__on_<class>`
+  (`Reader__min_y_in_reader__on_level`, with the class number where two classes of the enum
+  share a name), which the arm calls instead (`Need::BodyFor`, `Gen::body_for`). In the copy a
+  call on `this` is what the dispatcher's arm for the class runs, not a dispatch. With the
+  dispatch inside, the server's body was 96 instructions with 7 calls, past what LLVM inlines
+  into the dispatcher, which knew the class all along.
 - Instance methods are named once per override group within the class trees the group reaches,
   so every implementation has the name its callers use; overload suffixes count the groups of a
   name (`codegen/names.rs`). A type also has its interfaces' methods, whose trees are their
@@ -663,7 +671,7 @@ the program's classes implement:
   infers over two records of an interface and erases to `Record`): the program's records. It
   has no methods of its own: `equals`, `hashCode` and `toString`, which `Record` declares again,
   are `Object`'s, which each record overrides. A record's class names `java.lang.Record` as its
-  superclass where the type exists.
+  superclass (`TypeDecl::record`).
 - The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it.
 - The strings and boxes implement `Serializable`, and the string and the boxes of `int`, `long`,
   `float` and `double` `java.lang.constant`'s `Constable` and `ConstantDesc`, where the program

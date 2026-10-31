@@ -357,6 +357,7 @@ impl<'t> Lowering<'t> {
                 modifiers: 0,
                 enclosing: None,
                 interfaces: Vec::new(),
+                record: false,
             });
         }
     }
