@@ -124,6 +124,8 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
         "runtime_class_name",
         "runtime_type_names",
         "object_identity_hash",
+        "same_object_slow",
+        "eq_by_value",
     ]
     .map(String::from);
     let mut used = vec![HashSet::from(taken); class.types.len()];

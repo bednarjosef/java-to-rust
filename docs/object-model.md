@@ -446,7 +446,11 @@ constant (constants are singletons), `false` across variants. Two values with th
 (class number and address, or a value held in the low bits) are always equal, and a variant
 compared by identity is equal only then, so the `eq` of an enum whose variants are all compared
 by identity is `self.0 == other.0`; one with variants compared by value (a string or a box held
-as a value) compares the bits first and looks through the view only for those. `==` on enum
+as a value) compares the bits first and looks through the view only for those. That `eq` is
+inlined where `==` is: equal bits are equal and two classes are not, and only two values of one
+class with different bits call `eq_by_value`, which tests the class among those compared by value
+(900 on the Minecraft server) and compares them, in a body crate of a split program
+(docs/several-crates.md), where the whole test was too large for the link's inlining. `==` on enum
 values is `&a == &b`, and with a value that may be null `a.as_ref() == Some(&b)`. Plain handles
 keep `Arc::ptr_eq` and `java::same`.
 
@@ -457,7 +461,9 @@ equal ones end the program (`java::unkept_identity`), as Java may or may not see
 them. `same_object` compares the bits first, which hold the class number: equal bits are the
 same object, and different bits are different objects, but for the few classes that are such
 values, which it tests by number and compares through the view: a Java enum's constant, a
-`Boolean` and a `Byte` are equal exactly when their bits are, as are handles.
+`Boolean` and a `Byte` are equal exactly when their bits are, as are handles. The test of the
+first value's class and the compare of the bits are inlined; a first value of those few classes
+goes on to `same_object_slow`.
 Never compare by value where Java compares references. Whether a side may be one is a points-to
 analysis (`analysis/object_values.rs`): it follows, until nothing changes, whether each
 variable, parameter, return value, field, static and array element type may hold a string or a
