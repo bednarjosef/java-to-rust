@@ -81,12 +81,103 @@ fn changed_later(class: &Class) -> FastMap<usize, FastSet<String>> {
     changed
 }
 
+/// The eager classes, by index, whose static initialization `main` runs before anything else, in
+/// a program that starts threads: those whose `<clinit>` has no effect Java could observe, so
+/// that it may run at any time before the class's first use. Run before any thread starts, it
+/// assigns the class's `java::Final` statics where every thread reads them with no test (see the
+/// runtime's `Final`). Such a `<clinit>` only assigns statics of its class values that `inert`
+/// accepts, the class is not an enum, and no superclass or superinterface of it is eager.
+pub fn early(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
+    let changed = changed_later(class);
+    let none = FastSet::default();
+    eager
+        .iter()
+        .copied()
+        .filter(|&t| {
+            let decl = &class.types[t];
+            decl.enum_constants.is_none()
+                && !class.hierarchy.ancestors(t).iter().any(|a| eager.contains(a))
+                && class.methods.iter().filter(|m| m.class == t && m.name == "<clinit>").all(|clinit| {
+                    let changed = changed.get(&t).unwrap_or(&none);
+                    let mut assigned: FastSet<&str> = FastSet::default();
+                    let body = match crate::lower::rewritten_clinit(decl) {
+                        true => clinit_code(&clinit.body),
+                        false => Some(&clinit.body[..]),
+                    };
+                    body.is_some_and(|body| body.iter().all(|stmt| {
+                        let Stmt::Expr(Expr {
+                            kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, value },
+                            ..
+                        }) = stmt
+                        else {
+                            return false;
+                        };
+                        let ok = *c == t && inert(value, t, &assigned, decl, &|k| plain_constructor(class, eager, k));
+                        if !changed.contains(name) {
+                            assigned.insert(name.as_str());
+                        }
+                        ok
+                    }))
+                })
+        })
+        .collect()
+}
+
+/// The code of a rewritten `<clinit>` (`lower::clinit_errors`), which runs inside the `try` that
+/// records its failure: the class's own static initialization.
+fn clinit_code(body: &[Stmt]) -> Option<&[Stmt]> {
+    match body.last() {
+        Some(Stmt::Try { body, .. }) => Some(body),
+        _ => None,
+    }
+}
+
+/// Whether constructor `k` only assigns fields of the new object its parameters or literals,
+/// so that `new` of it has no effect but the allocation and cannot throw: a class that is not
+/// eager, not an enum, has no superclass in the program and no field initializer but a literal.
+fn plain_constructor(class: &Class, eager: &FastSet<usize>, k: usize) -> bool {
+    let m = &class.methods[k];
+    let decl = &class.types[m.class];
+    let literal = |e: &Expr| pure(e, usize::MAX, &FastSet::default(), decl);
+    m.is_ctor
+        && !eager.contains(&m.class)
+        && decl.enum_constants.is_none()
+        && class.hierarchy.superclass(m.class).is_none()
+        && decl.fields.iter().all(|f| f.init.as_ref().is_none_or(literal))
+        && m.body.iter().all(|stmt| match stmt {
+            Stmt::Expr(Expr {
+                kind: ExprKind::Assign { op: None, target: Place::Field { object, .. }, value },
+                ..
+            }) => {
+                matches!(object.kind, ExprKind::This)
+                    && match &value.kind {
+                        ExprKind::Var(v) => m.params.iter().any(|p| p.name == *v),
+                        _ => literal(value),
+                    }
+            }
+            _ => false,
+        })
+}
+
 /// Whether evaluating `e` has no effect and cannot throw. A static of class `index` may be read
 /// only if it is a constant or was assigned before, so that a lazy cell never needs another one
 /// that is still being computed.
 fn pure(e: &Expr, index: usize, assigned: &FastSet<&str>, decl: &TypeDecl) -> bool {
-    let recur = |x: &Expr| pure(x, index, assigned, decl);
+    inert(e, index, assigned, decl, &|_| false)
+}
+
+/// `pure`, where `e` may also make objects with the constructors `new` accepts, which has no
+/// effect but the allocation either.
+fn inert(
+    e: &Expr,
+    index: usize,
+    assigned: &FastSet<&str>,
+    decl: &TypeDecl,
+    new: &dyn Fn(usize) -> bool,
+) -> bool {
+    let recur = |x: &Expr| inert(x, index, assigned, decl, new);
     match &e.kind {
+        ExprKind::New { ctor: Some(k), args, .. } => new(*k) && args.iter().all(recur),
         ExprKind::Int(_)
         | ExprKind::Long(_)
         | ExprKind::Double(_)

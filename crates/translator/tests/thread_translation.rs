@@ -578,3 +578,41 @@ fn a_string_field_of_a_shared_object_is_hashed_where_it_is() {
     assert_contains(&rust, &["java::string_hash(&(*self.name.fixed()))", "self.alias.get().as_ref()"]);
     assert_lacks(&rust, &["(*self.name.fixed()).clone()", "self.alias.get().as_deref()"]);
 }
+
+#[test]
+fn a_static_initializer_that_nothing_observes_runs_first_in_main() {
+    // `Table`'s initialization only makes objects whose constructor assigns a field: `main` runs it
+    // before anything else, and its static is then read with no test. `Loud`'s prints, so it runs
+    // at its first use, and its static keeps the test.
+    let rust = translate(
+        "class A {
+            static final class P {
+                final int x;
+                P(int x) { this.x = x; }
+            }
+            static final class Table {
+                static final P[] POINTS = {new P(1), new P(2)};
+            }
+            static final class Loud {
+                static final P[] POINTS = {new P(3)};
+                static { System.out.println(\"loud\"); }
+            }
+            static int sum;
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> sum = Table.POINTS[1].x + Loud.POINTS[0].x);
+                t.start();
+                t.join();
+                System.out.println(sum);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn main() {\n    init_a_table();\n    A_TABLE_POINTS.check_settled();\n    let _main = java::main_thread();",
+            "A_TABLE_POINTS.get_settled()",
+            "A_LOUD_POINTS.get()",
+        ],
+    );
+    assert_lacks(&rust, &["init_a_loud();\n    A_LOUD"]);
+}

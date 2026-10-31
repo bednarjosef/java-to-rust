@@ -219,6 +219,9 @@ pub struct Facts {
     /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
     /// an `init` function; the other classes initialize each static lazily on first access.
     pub eager_init: FastSet<usize>,
+    /// The eager classes whose static initialization `main` runs first, before any thread starts
+    /// (`statics::early`).
+    pub early_init: FastSet<usize>,
     /// The statics, as (class index, name), that Java assigns once and only in their class's
     /// static initialization: declared `final`, not constants, and assigned by no other method.
     /// Where they are the process's, those of object, array or string type are `java::Final`
@@ -401,6 +404,7 @@ struct FromCode<'scope> {
     ranges: Facts,
     fixed_fields: FastSet<(usize, String)>,
     eager_init: FastSet<usize>,
+    early_init: FastSet<usize>,
     final_statics: FastSet<(usize, String)>,
     frozen_statics: FastSet<(usize, String)>,
     entry_init: FastSet<usize>,
@@ -507,12 +511,14 @@ fn analyze_with(
             let threaded = threads::threaded(class);
             let fixed_fields =
                 phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, threaded));
-            let (eager_init, final_statics, frozen_statics, entry_init) = phase("analysis: statics", || {
-                let (eager, finals) = statics::eager_and_final(class);
-                let frozen = statics::frozen(class, &finals);
-                let entry = statics::entry_inits(class, &eager);
-                (eager, finals, frozen, entry)
-            });
+            let (eager_init, early_init, final_statics, frozen_statics, entry_init) =
+                phase("analysis: statics", || {
+                    let (eager, finals) = statics::eager_and_final(class);
+                    let early = if threaded { statics::early(class, &eager) } else { FastSet::default() };
+                    let frozen = statics::frozen(class, &finals);
+                    let entry = statics::entry_inits(class, &eager);
+                    (eager, early, finals, frozen, entry)
+                });
             let ascii_chars = ranges.ascii_chars.clone();
             let ascii_length = Alongside::start(scope, move || {
                 let mut facts = Facts { ascii_chars, ..Facts::default() };
@@ -525,6 +531,7 @@ fn analyze_with(
                 ranges,
                 fixed_fields,
                 eager_init,
+                early_init,
                 final_statics,
                 frozen_statics,
                 entry_init,
@@ -547,6 +554,7 @@ fn analyze_with(
                 ranges,
                 fixed_fields,
                 eager_init,
+                early_init,
                 final_statics,
                 frozen_statics,
                 entry_init,
@@ -559,6 +567,7 @@ fn analyze_with(
             facts.index_ranges = ranges.index_ranges.clone();
             facts.fixed_fields = fixed_fields;
             facts.eager_init = eager_init;
+            facts.early_init = early_init;
             facts.final_statics = final_statics;
             facts.frozen_statics = frozen_statics;
             facts.entry_init = entry_init;
