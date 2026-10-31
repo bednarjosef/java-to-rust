@@ -91,22 +91,24 @@ owned, and that Rust therefore never freed, is found unreachable too.
 
 A thread takes a slot of its size from its own free slots, a few instructions: first from the
 list of slots Rust freed (a freed slot goes on the list of the thread that frees it), then from
-its span, untaken slots of one 64-slot word of a block's bitmap, held as a mask of bits, the
-lowest one handed out next. When both are empty, the thread takes the next word with untaken
-slots under the heap's lock: of its span's block, or of a block from its class's list, or of a
-new block. That is one lock per span, and touches no slot. A span takes no more
-slots than fit in 8 KB (`SPAN_BYTES`), one at least: from slots of 1 KB a word covers its whole
-block, and each thread keeps a span in every class it allocates in: with whole words, the
-Minecraft server's 41 threads held 28 MB of slots taken and never handed out, about one 64 KB
-block per thread and class of the larger sizes. The slots of a new span
-are fetched into the cache right away (up to 4 KB), before the program writes them. Linking every
-untaken slot of a block into a list, as the allocator did before, cost 5% of the translated
+its span, a run of neighbouring untaken slots of one block, handed out in order by moving a
+pointer to the next one until it meets the span's end. When both are empty, the thread takes
+the next run of untaken slots under the heap's lock: of its span's block, from where the last
+run ended, or of a block from its class's list, or of a new block. That is one lock per span,
+and touches no slot. A span takes no more slots than fit in 8 KB (`SPAN_BYTES`), one at least:
+each thread keeps a span in every class it allocates in, and spans of whole 64 KB blocks held
+the Minecraft server's 41 threads 28 MB of slots taken and never handed out. In a block of
+young objects that died, the run is the whole 8 KB, 512 slots of 16 bytes, where a span of one
+64-slot word of the bitmap, as before, took 64 and the heap's lock eight times as often:
+BinaryTrees runs 30.5 G instructions instead of 31.9 G. The slots of a new span are fetched into
+the cache right away (up to 4 KB), before the program writes them. Linking every untaken slot of
+a block into a list, as the allocator did before, cost 5% of the translated
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
 An object (`java::Arc::new`) takes its slot inline (`take_slot`): its class and size are
 constants of the object's type there, so taking it is the thread-local free list's head or the
-span's lowest bit, and zeroing it a few stores; when both are empty it goes through the global
+span's next slot, and zeroing it a few stores; when both are empty it goes through the global
 allocator, which refills them. The zeroing ends in an empty `asm!` that may read memory
 (`zero_slot`): without it the compiler drops the zeroes that the object's store overwrites, and a
 store of a whole value counts as overwriting the bytes it leaves undefined, an enum's smaller
@@ -124,10 +126,10 @@ machine). An earlier inline take, when the search of ObjectDispatch's palette wa
 the compiler specialized for the key's class, lost that specialization (4.0 s against 1.8 s);
 the search is now a call of the runtime (`java::search_same`), and the benchmarks lose nothing.
 
-The collector keeps every taken slot of each thread's spans, after marking: the slots not handed
-out yet, and the one a thread stopped in `alloc` may be handing out before its address is in a
-register; the others the span handed out live one collection longer. Only the span's own
-slots are kept, not the rest of its word, which from slots of 1 KB is the whole block. A slot that may hold
+The collector keeps, after marking, the slots of each thread's spans not handed out yet, and the
+last one handed out, which a thread stopped in `alloc` may be handing out before its address is
+in a register; the marks it gives them go once the sweep is done, so that what the thread makes
+in them is young. A slot that may hold
 pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
 program does not write (the spare capacity of a `Vec`, an enum's unused bytes, padding), keeps
 anything alive; a slot of a

@@ -16,9 +16,9 @@
 //! (an object, or a free slot that a thread holds) and a bit per slot for marking.
 //!
 //! **Allocation** takes a slot of its size from the calling thread's own free slots, a few
-//! instructions: from the list of slots it freed, or from its span, untaken slots of one word of a
-//! block's bitmap that it took under the heap's lock (64 slots at most, and no more than fit in
-//! `SPAN_BYTES`, one at least). A slot that may hold pointers is zeroed as it is handed out, so
+//! instructions: from the list of slots it freed, or from its span, a run of neighbouring untaken
+//! slots of a block that it took under the heap's lock (no more than fit in `SPAN_BYTES`, one at
+//! least), handed out in order by moving a pointer. A slot that may hold pointers is zeroed as it is handed out, so
 //! that no old word in it keeps an object alive; a pointer-free one only for `alloc_zeroed`.
 //!
 //! **Collection** runs when the program has taken as many bytes as were alive after the last one
@@ -34,7 +34,8 @@
 //! - the program's static data, the writable segments of every loaded object;
 //! - each thread's static thread-local storage, where the slots its free lists start from are;
 //! - the free lists of every thread, whose slots are marked without being scanned, and the slots
-//!   of their spans, every taken one of which is marked once marking is done (`keep_spans`).
+//!   of their spans not handed out yet, and the last one that was, which are marked once marking
+//!   is done (`keep_spans`).
 //!
 //! Slots are scanned whole, word by word, except in blocks that cannot hold pointers.
 //!
@@ -154,10 +155,9 @@ const LIST_MAX_BYTES: usize = 1 << 20;
 /// The most bytes of a new span fetched into the cache ahead of the program's writes.
 const PREFETCH_SPAN: usize = 4096;
 
-/// The most bytes of slots a span takes, one slot at least. A word of a block's bitmap covers the
-/// whole block from slots of 1 KB, and each thread keeps a span in every class it allocates in:
-/// with whole words, the Minecraft server's 41 threads held 28 MB of slots taken and never handed
-/// out, about a 64 KB block per thread and class of the larger sizes.
+/// The most bytes of slots a span takes, one slot at least. Each thread keeps a span in every
+/// class it allocates in: with spans of whole 64 KB blocks, the Minecraft server's 41 threads held
+/// 28 MB of slots taken and never handed out.
 const SPAN_BYTES: usize = 8192;
 
 /// The size index of a size up to 1024 bytes, by `(size + 7) / 8`.
@@ -812,31 +812,48 @@ impl Heap {
         }
     }
 
-    /// Takes the untaken slots of the first word of block `b`'s bitmap, from word `from`, that
-    /// has any, as many as `SPAN_BYTES` holds (one at least), lowest first: the word's index and
-    /// the bits of the slots taken.
-    fn take_word(&mut self, b: usize, from: usize) -> Option<(usize, u64)> {
+    /// Takes the first run of untaken slots of block `b` from slot `from`, at most `most` of
+    /// them: its first slot and its length.
+    fn take_run(&mut self, b: usize, from: usize, most: usize) -> Option<(usize, usize)> {
         let m = self.meta(b);
         let slots = m.slots as usize;
-        let most = (SPAN_BYTES / m.size as usize).max(1) as u32;
-        for w in from..slots.div_ceil(64) {
-            let valid = if (w + 1) * 64 <= slots { u64::MAX } else { (1u64 << (slots % 64)) - 1 };
-            let mut free = valid & !m.taken[w];
-            if free.count_ones() > most {
-                // The lowest `most` bits: the bits below the (most + 1)th lowest.
-                let mut rest = free;
-                for _ in 0..most {
-                    rest &= rest - 1;
-                }
-                free &= !rest;
+        let valid = |w: usize| if (w + 1) * 64 <= slots { u64::MAX } else { (1u64 << (slots % 64)) - 1 };
+        let mut w = from / 64;
+        let mut free = 0;
+        while w < slots.div_ceil(64) {
+            free = valid(w) & !m.taken[w];
+            if w == from / 64 {
+                free &= u64::MAX << (from % 64);
             }
             if free != 0 {
-                m.taken[w] |= free;
-                self.taken += free.count_ones() as usize * m.size as usize;
-                return Some((w, free));
+                break;
+            }
+            w += 1;
+        }
+        if free == 0 {
+            return None;
+        }
+        let first = w * 64 + free.trailing_zeros() as usize;
+        // The run goes on while the slots are untaken, word by word.
+        let mut n = 0;
+        let mut at = first;
+        while n < most && at < slots {
+            let w = at / 64;
+            let rest = (valid(w) & !m.taken[w]) >> (at % 64);
+            let len = (rest.trailing_ones() as usize).min(64 - at % 64).min(most - n);
+            if len == 0 {
+                break;
+            }
+            let bits = if len == 64 { u64::MAX } else { ((1u64 << len) - 1) << (at % 64) };
+            m.taken[w] |= bits;
+            n += len;
+            at += len;
+            if !at.is_multiple_of(64) {
+                break;
             }
         }
-        None
+        self.taken += n * m.size as usize;
+        Some((first, n))
     }
 
     /// Puts a block with untaken slots on its class's list, unless it is there.
@@ -866,22 +883,23 @@ fn fail(message: &[u8]) -> ! {
 }
 
 /// A thread's free slots, per class: those Rust freed, in a list linked through the slots' first
-/// words, and a span, untaken slots of one word of a block's bitmap that the thread took.
+/// words, and a span, a run of neighbouring untaken slots of a block that the thread took, handed
+/// out in order by moving a pointer.
 struct Lists {
     heads: [Cell<*mut u8>; CLASSES],
     bytes: [Cell<usize>; CLASSES],
-    /// The address of the first slot of the span's word, and the bits of the slots not handed out
-    /// yet.
-    span_base: [Cell<usize>; CLASSES],
-    span_bits: [Cell<u64>; CLASSES],
-    /// The bits of all the span's slots, handed out or not, which the collector keeps (see
-    /// `keep_spans`).
-    span_all: [Cell<u64>; CLASSES],
-    /// The span's slots that `keep_spans` marked, whose marks go once the sweep is done.
-    span_kept: [Cell<u64>; CLASSES],
-    /// The block the span is in, and the next word of its bitmap to take slots from.
+    /// The address of the span's next slot, and the end of its last: the span is empty when they
+    /// are equal.
+    span_next: [Cell<usize>; CLASSES],
+    span_end: [Cell<usize>; CLASSES],
+    /// The address of the span's first slot (0 before the first span).
+    span_start: [Cell<usize>; CLASSES],
+    /// Whether `keep_spans` marked the slot before `span_next`, whose mark goes once the sweep is
+    /// done, as do those of the slots not handed out.
+    span_kept: [Cell<bool>; CLASSES],
+    /// The block the span is in, and the slot of it to look for the next run from.
     span_block: [Cell<u32>; CLASSES],
-    span_next: [Cell<u32>; CLASSES],
+    span_from: [Cell<u32>; CLASSES],
     /// This thread's entry in `THREADS`, once registered.
     entry: Cell<usize>,
     /// Set when the thread has unregistered at its end: it allocates without lists from then on.
@@ -893,12 +911,12 @@ thread_local! {
         Lists {
             heads: [const { Cell::new(ptr::null_mut()) }; CLASSES],
             bytes: [const { Cell::new(0) }; CLASSES],
-            span_base: [const { Cell::new(0) }; CLASSES],
-            span_bits: [const { Cell::new(0) }; CLASSES],
-            span_all: [const { Cell::new(0) }; CLASSES],
-            span_kept: [const { Cell::new(0) }; CLASSES],
-            span_block: [const { Cell::new(NONE) }; CLASSES],
             span_next: [const { Cell::new(0) }; CLASSES],
+            span_end: [const { Cell::new(0) }; CLASSES],
+            span_start: [const { Cell::new(0) }; CLASSES],
+            span_kept: [const { Cell::new(false) }; CLASSES],
+            span_block: [const { Cell::new(NONE) }; CLASSES],
+            span_from: [const { Cell::new(0) }; CLASSES],
             entry: Cell::new(NO_ENTRY),
             ended: Cell::new(false),
         }
@@ -1008,15 +1026,16 @@ fn unregister(lists: &Lists) {
         }
         lists.heads[class].set(ptr::null_mut());
         lists.bytes[class].set(0);
-        let mut bits = lists.span_bits[class].get();
-        while bits != 0 {
-            let slot = bits.trailing_zeros() as usize;
-            untake(h, lists.span_base[class].get() + slot * SIZES[class / SCANS] as usize);
-            bits &= bits - 1;
+        let size = SIZES[class / SCANS] as usize;
+        let mut p = lists.span_next[class].get();
+        while p < lists.span_end[class].get() {
+            untake(h, p);
+            p += size;
         }
-        lists.span_bits[class].set(0);
-        lists.span_all[class].set(0);
-        lists.span_kept[class].set(0);
+        lists.span_next[class].set(0);
+        lists.span_end[class].set(0);
+        lists.span_start[class].set(0);
+        lists.span_kept[class].set(false);
         lists.span_block[class].set(NONE);
     }
     THREADS[i].used.store(false, Ordering::Release);
@@ -1115,11 +1134,10 @@ fn allocate(layout: Layout, scan: Scan) -> *mut u8 {
                 lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
                 return head;
             }
-            let bits = lists.span_bits[class].get();
-            if bits != 0 {
-                lists.span_bits[class].set(bits & (bits - 1));
-                let slot = bits.trailing_zeros() as usize;
-                return (lists.span_base[class].get() + slot * SIZES[index] as usize) as *mut u8;
+            let next = lists.span_next[class].get();
+            if next != lists.span_end[class].get() {
+                lists.span_next[class].set(next + SIZES[index] as usize);
+                return next as *mut u8;
             }
             if lists.ended.get() { allocate_without_lists(class) } else { refill(lists, class) }
         })
@@ -1291,38 +1309,37 @@ fn prepare() -> Guard {
     g
 }
 
-/// Starts a new span of `class` when the free list and the span are empty: the untaken slots of
-/// the next word of the span's block that has any, or of a block from the heap. Collects first
-/// when enough has been taken. Returns the first slot of the span.
+/// Starts a new span of `class` when the free list and the span are empty: the next run of
+/// untaken slots of the span's block, or of a block from the heap. Collects first when enough
+/// has been taken. Returns the first slot of the span, handed out.
 #[cold]
 #[inline(never)]
 fn refill(lists: &Lists, class: usize) -> *mut u8 {
     let g = prepare();
     let h = heap(&g);
+    let size = SIZES[class / SCANS] as usize;
     loop {
         let b = lists.span_block[class].get();
         if b != NONE
-            && let Some((w, bits)) = h.take_word(b as usize, lists.span_next[class].get() as usize)
+            && let Some((first, n)) =
+                h.take_run(b as usize, lists.span_from[class].get() as usize, (SPAN_BYTES / size).max(1))
         {
-            let size = SIZES[class / SCANS] as usize;
-            let base = h.block_address(b as usize) + h.meta(b as usize).start as usize + w * 64 * size;
-            // The same word again next: `take_word` may have left slots of it untaken.
-            lists.span_next[class].set(w as u32);
-            lists.span_base[class].set(base);
-            lists.span_bits[class].set(bits & (bits - 1));
-            lists.span_all[class].set(bits);
+            let start = h.block_address(b as usize) + h.meta(b as usize).start as usize + first * size;
+            let end = start + n * size;
+            lists.span_from[class].set((first + n) as u32);
+            lists.span_start[class].set(start);
+            lists.span_next[class].set(start + size);
+            lists.span_end[class].set(end);
             // The span's slots are fetched into the cache now, before the program writes them.
-            let from = base + bits.trailing_zeros() as usize * size;
-            let to = (base + (64 - bits.leading_zeros() as usize) * size).min(from + PREFETCH_SPAN);
-            for line in (from..to).step_by(64) {
+            for line in (start..end.min(start + PREFETCH_SPAN)).step_by(64) {
                 unsafe {
                     std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(line as *const i8)
                 };
             }
-            return from as *mut u8;
+            return start as *mut u8;
         }
         lists.span_block[class].set(h.next_block(class) as u32);
-        lists.span_next[class].set(0);
+        lists.span_from[class].set(0);
     }
 }
 
@@ -1348,11 +1365,10 @@ pub(crate) fn take_slot<T>() -> *mut u8 {
                 lists.bytes[class].set(lists.bytes[class].get() - size);
                 return head;
             }
-            let bits = lists.span_bits[class].get();
-            if bits != 0 {
-                lists.span_bits[class].set(bits & (bits - 1));
-                let slot = bits.trailing_zeros() as usize;
-                return (lists.span_base[class].get() + slot * size) as *mut u8;
+            let next = lists.span_next[class].get();
+            if next != lists.span_end[class].get() {
+                lists.span_next[class].set(next + size);
+                return next as *mut u8;
             }
             ptr::null_mut()
         })
@@ -1408,14 +1424,10 @@ fn allocate_without_lists(class: usize) -> *mut u8 {
     }
     loop {
         let b = h.next_block(class);
-        if let Some((w, bits)) = h.take_word(b, 0) {
-            // Gives back all the slots but the first, and lists the block for them.
-            let first = bits.isolate_lowest_one();
-            let m = h.meta(b);
-            m.taken[w] &= !(bits & !first);
-            h.taken -= (bits & !first).count_ones() as usize * m.size as usize;
+        if let Some((slot, _)) = h.take_run(b, 0, 1) {
+            // The block may have more untaken slots.
             h.list(b);
-            let slot = w * 64 + first.trailing_zeros() as usize;
+            let m = h.meta(b);
             return (h.block_address(b) + m.start as usize + slot * m.size as usize) as *mut u8;
         }
     }
@@ -2370,11 +2382,10 @@ fn mark_and_sweep(
     minor
 }
 
-/// Keeps every taken slot of each thread's spans, once marking is done. Those are the slots of
-/// the span not handed out yet, and the slot a thread stopped in `alloc` was handing out before
-/// its address was anywhere the marking looks; the others the span handed out are kept one
-/// collection longer. Marking scans each slot that something reaches the first time it marks it,
-/// which a mark set here before would prevent.
+/// Keeps the slots of each thread's spans not handed out yet, once marking is done, and the last
+/// one handed out, which a thread stopped in `alloc` may have been handing out before its address
+/// was anywhere the marking looks. Marking scans each slot that something reaches the first time
+/// it marks it, which a mark set here before would prevent.
 fn keep_spans(h: &mut Heap) {
     for t in &THREADS {
         if !t.used.load(Ordering::Acquire) {
@@ -2382,17 +2393,52 @@ fn keep_spans(h: &mut Heap) {
         }
         let lists = unsafe { &*t.lists.get() };
         for class in 0..CLASSES {
-            let base = lists.span_base[class].get();
-            if base == 0 {
+            let start = lists.span_start[class].get();
+            if start == 0 {
                 continue;
             }
-            let b = (base - h.base) >> BLOCK_SHIFT;
-            let m = h.meta(b);
-            let w = (base - h.block_address(b) - m.start as usize) / (64 * m.size as usize);
-            let kept = m.taken[w] & lists.span_all[class].get() & !m.marks[w];
-            lists.span_kept[class].set(kept);
-            m.marks[w] |= kept;
+            let (next, end) = (lists.span_next[class].get(), lists.span_end[class].get());
+            let size = SIZES[class / SCANS] as usize;
+            let Some((m, first)) = span_slots(h, class, start) else {
+                continue;
+            };
+            if next > start {
+                let last = first + (next - start) / size - 1;
+                let (w, bit) = (last / 64, 1u64 << (last % 64));
+                let kept = m.taken[w] & bit != 0 && m.marks[w] & bit == 0;
+                lists.span_kept[class].set(kept);
+                m.marks[w] |= if kept { bit } else { 0 };
+            }
+            set_bits(&mut m.marks, first + (next - start) / size, (end - next) / size, true);
         }
+    }
+}
+
+/// The description of the block of a span of `class` that starts at `start`, and the span's
+/// first slot; `None` once the block holds other slots: a span all handed out whose objects all
+/// died leaves its block free, to be used again.
+fn span_slots<'m>(h: &Heap, class: usize, start: usize) -> Option<(&'m mut Meta, usize)> {
+    let b = (start - h.base) >> BLOCK_SHIFT;
+    let m = h.meta(b);
+    if m.kind != SMALL || m.class as usize != class {
+        return None;
+    }
+    let first = (start - h.block_address(b) - m.start as usize) / m.size as usize;
+    Some((m, first))
+}
+
+/// Sets or clears `n` bits of a bitmap from bit `from`.
+fn set_bits(bits: &mut [u64; BITMAP_WORDS], from: usize, n: usize, set: bool) {
+    let mut at = from;
+    while at < from + n {
+        let len = (64 - at % 64).min(from + n - at);
+        let mask = if len == 64 { u64::MAX } else { ((1u64 << len) - 1) << (at % 64) };
+        if set {
+            bits[at / 64] |= mask;
+        } else {
+            bits[at / 64] &= !mask;
+        }
+        at += len;
     }
 }
 
@@ -2468,13 +2514,15 @@ fn release_kept(h: &mut Heap) {
                 m.marks[slot / 64] &= !(1u64 << (slot % 64));
                 p = unsafe { (p as *const usize).read() };
             }
-            let kept = lists.span_kept[class].replace(0);
-            let base = lists.span_base[class].get();
-            if kept != 0 && base != 0 {
-                let b = (base - h.base) >> BLOCK_SHIFT;
-                let m = h.meta(b);
-                let w = (base - h.block_address(b) - m.start as usize) / (64 * m.size as usize);
-                m.marks[w] &= !kept;
+            let start = lists.span_start[class].get();
+            if start != 0
+                && let Some((m, first)) = span_slots(h, class, start)
+            {
+                let (next, end) = (lists.span_next[class].get(), lists.span_end[class].get());
+                let size = SIZES[class / SCANS] as usize;
+                let unused = first + (next - start) / size;
+                let kept = lists.span_kept[class].replace(false) as usize;
+                set_bits(&mut m.marks, unused - kept, (end - next) / size + kept, false);
             }
         }
     }
