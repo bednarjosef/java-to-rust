@@ -5,7 +5,7 @@
 //! with javac, code generation included, and prints them; that costs a second compile, so the
 //! translation asks for them only when the program reads such a message.
 
-use super::{fail, java};
+use super::{Run, fail, java};
 use crate::ast::{Error, Pos};
 use crate::value::Value;
 use std::collections::{HashMap, HashSet};
@@ -110,7 +110,7 @@ impl BytecodeNames {
 
 /// The names of the code of one source file.
 pub fn source_names(source: &str) -> Result<BytecodeNames, Error> {
-    names(Vec::new(), Some(source), "")
+    names(Vec::new(), Some(source), "", Run::Short)
 }
 
 /// What else decides the names of a program's code (`program_names`).
@@ -163,15 +163,21 @@ pub fn program_names(
         list.push('\n');
         list
     });
-    names(args, None, &reached)
+    names(args, None, &reached, Run::Long)
 }
 
 /// The names of the code of `files` (with their options), or of `source` on standard input when
-/// there are none; `input` is what standard input gives a program's run (`--reached`).
-fn names(files: Vec<std::ffi::OsString>, source: Option<&str>, input: &str) -> Result<BytecodeNames, Error> {
+/// there are none; `input` is what standard input gives a program's run (`--reached`), and `run`
+/// how long the JVM runs.
+fn names(
+    files: Vec<std::ffi::OsString>,
+    source: Option<&str>,
+    input: &str,
+    run: Run,
+) -> Result<BytecodeNames, Error> {
     // The code generator's `binaryQualifier`, which names a member's class as a class file does.
     let mut command =
-        java("BytecodeNames", &["--add-opens", "jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED"]);
+        java("BytecodeNames", &["--add-opens", "jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED"], run);
     let cannot_run = |e: std::io::Error| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")).1;
     let failed = |stderr: &[u8]| {
         // Without the JVM's notes of the options it picked up (`JAVA_TOOL_OPTIONS`).

@@ -429,6 +429,14 @@ javac's attribution and the reachability rounds.
 `-Xmx512m` halves the java process's peak (to about 0.5 GB) at no visible cost for the small
 programs, and 256 MB makes it three times slower; it is not set, as the large ones need more.
 
+The JVM that runs javac on a single source skips its optimizing compiler
+(`-XX:TieredStopAtLevel=1`), as it runs for a second or two; on a whole program it does not
+(`javac::Run`): javac's census (369 files of its own) takes 13.6-16.7 s in its javac step with it,
+against 19-21 s without, and its java process peaks at 0.95 GB instead of 0.71 GB; the Minecraft
+server's took 103 s without it. A small whole program (`AccessFlagValues`, 11-12 s to translate)
+is no slower with it. The class files' names (`BytecodeNames`) of a whole program follow the same
+rule.
+
 **Reachability rounds that walk only what is new.** Each round used to walk every unit again
 from `main`: declare them all, survey them all for the records' members, walk, and index the
 reached code for the check that streams stay sequential. A round now does that for its new units
