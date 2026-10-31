@@ -251,6 +251,14 @@ const SMALL: u8 = 1;
 /// The first block of a large allocation, and the ones after it.
 const LARGE: u8 = 2;
 const LARGE_REST: u8 = 3;
+/// The last block of a large allocation whose end leaves room in it (`allocate_large`): until a
+/// small block or the next large allocation takes that room, which starts at `start`.
+const TAIL: u8 = 4;
+
+/// The least room a large allocation's last block must leave for the allocation to share it.
+const TAIL_ROOM: usize = 1024;
+/// How many of the latest tails a large allocation tries to start in.
+const TAILS_TRIED: usize = 8;
 
 /// A block's description, in a table beside the heap.
 #[repr(C)]
@@ -262,14 +270,26 @@ struct Meta {
     scan: Scan,
     /// Whether the block is on its class's list of blocks with untaken slots.
     listed: bool,
-    /// The slot size of a small block; the number of blocks of a large allocation (on its first
-    /// block), or the index of that first block (on the others).
+    /// The slot size of a small block; the number of blocks a large allocation spans (on its
+    /// first block), or the index of that first block (on the others).
     size: u32,
     slots: u32,
-    /// Where a small block's first slot is, past the block's address (see `color`).
+    /// Where a small block's first slot is, past the block's address (see `color`); where a
+    /// large allocation starts in its first block; where a tail's room starts.
     start: u32,
-    /// The bytes of each slot of a small block that marking scans (`scanned_bytes`).
+    /// The bytes of each slot of a small block that marking scans (`scanned_bytes`); the bytes
+    /// of a large allocation (0 for one of 4 GB or more, which shares no block).
     scanned: u32,
+    /// With blocks shared by large allocations (`allocate_large`): one more than the first block
+    /// of the large allocation whose end is in this block, below `start`, or 0. The block is
+    /// then a tail, a small block or the first block of another large allocation.
+    tail_of: u32,
+    /// Whether a large allocation's last block is shared: a tail, a small block or another large
+    /// allocation's first block, whose `tail_of` names this one.
+    shared_end: bool,
+    /// Whether the block is on the heap's list of tails (`Heap::tails`), and the next one there.
+    in_tails: bool,
+    next_tail: u32,
     /// Whether a free block's memory holds what it last held rather than zeros (`free_blocks`).
     dirty: bool,
     /// The next block on its class's list.
@@ -308,6 +328,9 @@ struct Heap {
     top: usize,
     /// Per class, the blocks with untaken slots.
     lists: [u32; CLASSES],
+    /// The tails (`TAIL`), latest first, through `Meta::next_tail`. A block that stopped being a
+    /// tail may stay on the list until it is next walked (`Meta::in_tails`).
+    tails: u32,
     /// Free blocks below `top`, as runs (start, length), in an array of `MAX_BLOCKS` entries.
     runs: *mut (u32, u32),
     run_count: usize,
@@ -385,6 +408,7 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     ages: ptr::null_mut(),
     top: 0,
     lists: [NONE; CLASSES],
+    tails: NONE,
     runs: ptr::null_mut(),
     run_count: 0,
     taken: 0,
@@ -829,6 +853,91 @@ impl Heap {
         start
     }
 
+    /// Takes the `n` blocks from `start` if they are free: in a run of free blocks, or at the top.
+    fn take_blocks_at(&mut self, start: usize, n: usize) -> bool {
+        if start == self.top {
+            if self.top + n > MAX_BLOCKS {
+                return false;
+            }
+            self.top += n;
+            END.store(self.block_address(self.top), Ordering::Release);
+            return true;
+        }
+        for i in 0..self.run_count {
+            let (from, len) = unsafe { *self.runs.add(i) };
+            let (from, len) = (from as usize, len as usize);
+            if from <= start && start + n <= from + len {
+                let (before, after) = (start - from, from + len - start - n);
+                unsafe {
+                    if before > 0 {
+                        *self.runs.add(i) = (from as u32, before as u32);
+                    } else {
+                        self.run_count -= 1;
+                        *self.runs.add(i) = *self.runs.add(self.run_count);
+                    }
+                    if after > 0 {
+                        *self.runs.add(self.run_count) = ((start + n) as u32, after as u32);
+                        self.run_count += 1;
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Puts block `b`, a tail, on the list of tails, unless it is there.
+    fn push_tail(&mut self, b: usize) {
+        let m = self.meta(b);
+        if !m.in_tails {
+            m.in_tails = true;
+            m.next_tail = self.tails;
+            self.tails = b as u32;
+        }
+    }
+
+    /// Takes the latest tail with `TAIL_ROOM` at least off the list of tails. Those with less, the
+    /// first blocks of large allocations that started late in a tail, leave the list too.
+    fn pop_tail(&mut self) -> Option<usize> {
+        while self.tails != NONE {
+            let b = self.tails as usize;
+            let m = self.meta(b);
+            self.tails = m.next_tail;
+            m.in_tails = false;
+            if m.kind == TAIL && m.start as usize + TAIL_ROOM <= BLOCK {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// Frees the large allocation that starts in block `b`, and the blocks it shares: its first
+    /// block becomes a tail again if an allocation still ends in it, and its last block is
+    /// freed if it is a tail, which only this allocation used.
+    fn release_large(&mut self, b: usize) {
+        let m = self.meta(b);
+        let n = m.size as usize;
+        let (owner, shared_end) = (m.tail_of, m.shared_end);
+        let mut from = b;
+        if owner != 0 {
+            m.kind = TAIL;
+            m.shared_end = false;
+            self.push_tail(b);
+            from = b + 1;
+        }
+        let mut to = b + n;
+        if shared_end {
+            let last = self.meta(b + n - 1);
+            if last.kind != TAIL {
+                last.tail_of = 0;
+                to -= 1;
+            }
+        }
+        if from < to {
+            self.free_blocks(from, to - from);
+        }
+    }
+
     /// Gives `n` blocks from `start` back to the heap. Their memory stays and keeps what it held
     /// (`dirty`): it goes back to the system only at a collection, beyond what the program takes
     /// before the next one (`give_back`).
@@ -838,6 +947,8 @@ impl Heap {
             m.kind = FREE;
             m.listed = false;
             m.dirty = true;
+            m.tail_of = 0;
+            m.shared_end = false;
         }
         unsafe { *self.runs.add(self.run_count) = (start as u32, n as u32) };
         self.run_count += 1;
@@ -845,15 +956,31 @@ impl Heap {
 
     /// A new small block of class `class`, all its slots untaken.
     fn new_block(&mut self, class: usize) -> usize {
-        let b = self.take_blocks(1);
         let size = SIZES[class / SCANS];
+        // Slots below 1 KB go in a tail's room first, from its start rounded up to their alignment
+        // (see `color`): a tail leaves `TAIL_ROOM` at least.
+        let tail = if (size as usize) < TAIL_ROOM { self.pop_tail() } else { None };
+        let (b, start) = match tail {
+            Some(b) => {
+                let align = match size as usize {
+                    s if s.is_power_of_two() => s,
+                    s if s.is_multiple_of(16) => 16,
+                    _ => 8,
+                };
+                (b, (self.meta(b).start as usize).next_multiple_of(align))
+            }
+            None => {
+                let b = self.take_blocks(1);
+                (b, color(b, size as usize))
+            }
+        };
         let m = self.meta(b);
         m.kind = SMALL;
         m.class = class as u8;
         m.scan = (class % SCANS) as Scan;
         m.listed = false;
         m.size = size;
-        m.start = color(b, size as usize) as u32;
+        m.start = start as u32;
         m.scanned = scanned_bytes(m.scan, size as usize) as u32;
         m.slots = (BLOCK as u32 - m.start) / size;
         m.next = NONE;
@@ -1370,6 +1497,7 @@ unsafe impl GlobalAlloc for Allocator {
             (None, None) => {
                 let color = p as usize & (BLOCK - 1);
                 (color + layout.size()).div_ceil(BLOCK) == (color + new_size).div_ceil(BLOCK)
+                    && resize_large(p, layout.size(), new_size)
             }
             _ => false,
         };
@@ -1631,27 +1759,85 @@ fn allocate_large(layout: Layout, scan: Scan) -> *mut u8 {
     }
     let g = prepare();
     let h = heap(&g);
-    // Each starts at another of the 64 cache lines of a page (see `color`), within the room that
-    // the blocks its size needs leave: a size of whole blocks, as a `Vec` that doubled to 128 KB
-    // asks for, starts at its first block rather than taking one more block for its color.
-    let n = layout.size().div_ceil(BLOCK).max(1);
-    let lines = (n * BLOCK - layout.size()) / 64 + 1;
-    let color = if layout.align() <= 64 { (h.larges * 23 % 64 % lines) * 64 } else { 0 };
-    h.larges += 1;
-    let b = h.take_blocks(n);
+    let size = layout.size();
+    // Blocks are shared where a large allocation ends short of a block's end, as an array whose
+    // elements fill whole blocks does by its 16-byte header: the rest of its last block, a tail,
+    // goes to the next large allocation or to small slots (`new_block`). Not with generations,
+    // whose minor collections find old objects by the blocks of written pages (`push_old`).
+    let shares = h.ages.is_null() && layout.align() <= 64 && size <= u32::MAX as usize;
+    // Where it starts: in the room of one of the latest tails, when the blocks after it are free.
+    let mut placed = None;
+    if shares {
+        let (mut prev, mut t, mut tried) = (NONE, h.tails, 0);
+        while t != NONE && tried < TAILS_TRIED {
+            let m = h.meta(t as usize);
+            let next = m.next_tail;
+            if m.kind != TAIL {
+                // No longer a tail: off the list.
+                m.in_tails = false;
+                if prev == NONE {
+                    h.tails = next
+                } else {
+                    h.meta(prev as usize).next_tail = next
+                }
+                t = next;
+                continue;
+            }
+            tried += 1;
+            let at = (m.start as usize).next_multiple_of(64);
+            if at < BLOCK
+                && at + size > BLOCK
+                && h.take_blocks_at(t as usize + 1, (at + size - BLOCK).div_ceil(BLOCK))
+            {
+                m.in_tails = false;
+                if prev == NONE {
+                    h.tails = next
+                } else {
+                    h.meta(prev as usize).next_tail = next
+                }
+                // The room was free, maybe dirty: handed out zeroed.
+                unsafe { ptr::write_bytes((h.block_address(t as usize) + at) as *mut u8, 0, BLOCK - at) };
+                placed = Some((t as usize, at, 1 + (at + size - BLOCK).div_ceil(BLOCK)));
+                break;
+            }
+            prev = t;
+            t = next;
+        }
+    }
+    // Else in blocks of its own, at another of the 64 cache lines of a page (see `color`), within
+    // the room that the blocks its size needs leave: a size of whole blocks, as a `Vec` that
+    // doubled to 128 KB asks for, starts at its first block rather than taking one more block for
+    // its color.
+    let (b, at, n, fresh) = match placed {
+        Some((b, at, n)) => (b, at, n, b + 1),
+        None => {
+            let n = size.div_ceil(BLOCK).max(1);
+            let lines = (n * BLOCK - size) / 64 + 1;
+            let color = if layout.align() <= 64 { (h.larges * 23 % 64 % lines) * 64 } else { 0 };
+            h.larges += 1;
+            let b = h.take_blocks(n);
+            h.meta(b).tail_of = 0;
+            (b, color, n, b)
+        }
+    };
     // A large allocation is handed out zeroed.
-    for k in b..b + n {
+    for k in fresh..b + n {
         if h.meta(k).dirty {
             unsafe { ptr::write_bytes(h.block_address(k) as *mut u8, 0, BLOCK) };
             h.meta(k).dirty = false;
         }
     }
+    // Its last block is shared when it leaves room enough, and is not its first.
+    let end = at + size - (n - 1) * BLOCK;
+    let shared_end = shares && n > 1 && end + TAIL_ROOM <= BLOCK;
     let m = h.meta(b);
     m.kind = LARGE;
     m.scan = scan;
     m.size = n as u32;
     // Where the allocation starts, for marking an array of numbers' header only.
-    m.start = color as u32;
+    m.start = at as u32;
+    m.scanned = if size <= u32::MAX as usize { size as u32 } else { 0 };
+    m.shared_end = shared_end;
     m.taken[0] = 1;
     m.marks[0] = 0;
     if let Some(a) = h.ages(b) {
@@ -1662,9 +1848,32 @@ fn allocate_large(layout: Layout, scan: Scan) -> *mut u8 {
         let m = h.meta(rest);
         m.kind = LARGE_REST;
         m.size = b as u32;
+        m.tail_of = 0;
+    }
+    if shared_end {
+        let last = b + n - 1;
+        let m = h.meta(last);
+        m.kind = TAIL;
+        m.tail_of = b as u32 + 1;
+        m.start = end.next_multiple_of(64) as u32;
+        h.push_tail(last);
     }
     h.taken += n << BLOCK_SHIFT;
-    (h.block_address(b) + color) as *mut u8
+    (h.block_address(b) + at) as *mut u8
+}
+
+/// Records that the large allocation at `p` now takes `new_size` bytes in the blocks it has,
+/// for marking (`Meta::scanned`), unless it would grow into a last block that it shares
+/// (`allocate_large`): false then.
+fn resize_large(p: *mut u8, size: usize, new_size: usize) -> bool {
+    let g = lock();
+    let h = heap(&g);
+    let m = h.meta((p as usize - h.base) >> BLOCK_SHIFT);
+    if new_size > size && m.shared_end {
+        return false;
+    }
+    m.scanned = if new_size <= u32::MAX as usize { new_size as u32 } else { 0 };
+    true
 }
 
 #[cold]
@@ -1672,8 +1881,7 @@ fn free_large(p: *mut u8, _layout: Layout) {
     let g = lock();
     let h = heap(&g);
     let b = (p as usize - h.base) >> BLOCK_SHIFT;
-    let n = h.meta(b).size as usize;
-    h.free_blocks(b, n);
+    h.release_large(b);
 }
 
 // ---- Stopping the world ----
@@ -1992,13 +2200,18 @@ impl Marker {
         if word.wrapping_sub(self.base) >= self.end - self.base {
             return;
         }
-        let mut b = (word - self.base) >> BLOCK_SHIFT;
-        let mut m = unsafe { self.meta.add(b) };
+        let b = (word - self.base) >> BLOCK_SHIFT;
+        let m = unsafe { self.meta.add(b) };
         // The table is read through raw places: other markers set mark bits beside these fields.
         let kind = unsafe { (*m).kind };
         if kind == SMALL {
             let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
             if word < start {
+                // Below the first slot may be the end of a large allocation (`Meta::tail_of`).
+                let owner = unsafe { (*m).tail_of } as usize;
+                if !EXACT && owner != 0 {
+                    self.mark_large::<SHARES>(owner - 1);
+                }
                 return;
             }
             let slot = (((word - start) as u64 * unsafe { (*m).magic }) >> 32) as usize;
@@ -2019,24 +2232,53 @@ impl Marker {
             }
             return;
         }
-        if kind == LARGE || kind == LARGE_REST {
-            // A large allocation starts within its first page (`allocate_large`).
-            if EXACT && (unsafe { (*m).kind } == LARGE_REST || word & (BLOCK - 1) >= PAGE) {
+        if let Some(head) = self.large_head(word, b, kind) {
+            // A 4-byte reference is to a large allocation's start (`allocate_large`).
+            if EXACT
+                && word
+                    != self.base + (head << BLOCK_SHIFT) + unsafe { (*self.meta.add(head)).start } as usize
+            {
                 return;
             }
-            if unsafe { (*m).kind } == LARGE_REST {
-                b = unsafe { (*m).size } as usize;
-                m = unsafe { self.meta.add(b) };
+            self.mark_large::<SHARES>(head);
+        }
+    }
+
+    /// The first block of the large allocation that `word`, in block `b` of kind `kind`, points
+    /// into: below the start of a block's own allocation or room is the end of the large
+    /// allocation that shares it (`Meta::tail_of`).
+    #[inline(always)]
+    fn large_head(&self, word: usize, b: usize, kind: u8) -> Option<usize> {
+        let m = unsafe { self.meta.add(b) };
+        let below = || word < self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
+        match kind {
+            LARGE_REST => Some(unsafe { (*m).size } as usize),
+            LARGE | TAIL | SMALL if unsafe { (*m).tail_of } != 0 && below() => {
+                Some(unsafe { (*m).tail_of } as usize - 1)
             }
-            if unsafe { (*m).taken[0] } & 1 == 0 || !set_mark(unsafe { &raw mut (*m).marks[0] }, 1, SHARES) {
-                return;
-            }
-            let size = scanned_bytes(unsafe { (*m).scan }, (unsafe { (*m).size } as usize) << BLOCK_SHIFT);
-            if unsafe { (*m).scan } == SCAN_HEAD {
-                self.stack.push((self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize, size));
-            } else if size > 0 {
-                self.stack.push((self.base + (b << BLOCK_SHIFT), size));
-            }
+            LARGE => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Marks the large allocation that starts in block `b`, if it is taken and not marked yet,
+    /// and puts what to scan of it on the stack.
+    #[inline(always)]
+    fn mark_large<const SHARES: bool>(&mut self, b: usize) {
+        let m = unsafe { self.meta.add(b) };
+        if unsafe { (*m).taken[0] } & 1 == 0 || !set_mark(unsafe { &raw mut (*m).marks[0] }, 1, SHARES) {
+            return;
+        }
+        let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
+        match unsafe { (*m).scan } {
+            SCAN_HEAD => self.stack.push((start, HEAD_BYTES)),
+            SCAN_ALL => match unsafe { (*m).scanned } as usize {
+                0 => self
+                    .stack
+                    .push((self.base + (b << BLOCK_SHIFT), (unsafe { (*m).size } as usize) << BLOCK_SHIFT)),
+                bytes => self.stack.push((start, bytes)),
+            },
+            _ => {}
         }
     }
 
@@ -2049,7 +2291,10 @@ impl Marker {
         let mut b = (word - self.base) >> BLOCK_SHIFT;
         let mut m = unsafe { self.meta.add(b) };
         let (w, bit) = match unsafe { (*m).kind } {
-            SMALL => {
+            SMALL
+                if unsafe { (*m).tail_of } == 0
+                    || word >= self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize =>
+            {
                 let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
                 if word < start {
                     return None;
@@ -2060,14 +2305,11 @@ impl Marker {
                 }
                 (slot / 64, 1u64 << (slot % 64))
             }
-            LARGE | LARGE_REST => {
-                if unsafe { (*m).kind } == LARGE_REST {
-                    b = unsafe { (*m).size } as usize;
-                    m = unsafe { self.meta.add(b) };
-                }
+            kind => {
+                b = self.large_head(word, b, kind)?;
+                m = unsafe { self.meta.add(b) };
                 (0, 1)
             }
-            _ => return None,
         };
         if unsafe { (*m).taken[w] } & bit == 0 {
             return None;
@@ -2429,6 +2671,7 @@ fn give_back(h: &mut Heap) {
                     dirty += m.dirty as usize;
                 }
                 SMALL => room += (m.slots - m.live) as usize * m.size as usize,
+                TAIL => room += BLOCK - m.start as usize,
                 _ => {}
             }
         }
@@ -2987,7 +3230,8 @@ fn report_sizes(h: &Heap) {
                     large += n << BLOCK_SHIFT;
                     large_blocks += n;
                 }
-                b += n;
+                // A shared last block is looked at on its own.
+                b += n - m.shared_end as usize;
             }
             _ => b += 1,
         }
@@ -3055,14 +3299,28 @@ fn sweep(h: &mut Heap, helpers: usize) {
                 if m.live > 0 && m.untaken {
                     h.list(b);
                 }
-                (1, m.live == 0)
+                if m.live == 0 && m.tail_of != 0 {
+                    // The end of a large allocation that lives is in it: a tail again.
+                    m.kind = TAIL;
+                    (1, false)
+                } else {
+                    (1, m.live == 0)
+                }
             }
             LARGE => {
                 let n = m.size as usize;
                 if m.live > 0 {
                     alive += n << BLOCK_SHIFT;
                 }
-                (n, m.live == 0)
+                if m.live == 0 && (m.tail_of != 0 || m.shared_end) {
+                    // Shares a block: freed on its own (`release_large`); its last block, if
+                    // shared, is looked at next.
+                    let next = b + n - m.shared_end as usize;
+                    h.release_large(b);
+                    b = next;
+                    continue;
+                }
+                (n - m.shared_end as usize, m.live == 0 && !m.shared_end)
             }
             _ => (1, false),
         };
@@ -3080,6 +3338,14 @@ fn sweep(h: &mut Heap, helpers: usize) {
     }
     if let Some((start, len)) = empty {
         h.free_blocks(start, len);
+    }
+    // The list of tails, rebuilt: the lowest first.
+    h.tails = NONE;
+    for b in (0..h.top).rev() {
+        h.meta(b).in_tails = false;
+        if h.meta(b).kind == TAIL {
+            h.push_tail(b);
+        }
     }
     // Listed from the top down, a class's list hands out its lowest block first.
     if h.low_first {
