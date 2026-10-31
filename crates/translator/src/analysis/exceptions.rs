@@ -100,17 +100,33 @@ struct Point {
     known: Vec<Vec<Option<guards::Value>>>,
 }
 
-/// What escapes each method (`escapes_of`): the kinds, and the same as sets of their numbers,
-/// with what of them the program's code throws, and how many kinds are numbered.
+/// What escapes each method (`escapes_of`), as sets of the numbers of the kinds in `kinds`, with
+/// what of them the program's code throws. A set of kinds for each method would hold a node for
+/// every few kinds: gigabytes on the Minecraft server, whose virtual calls let hundreds of kinds
+/// out of most methods.
 #[derive(Default)]
 struct Escaped {
-    kinds: Vec<BTreeSet<Kind>>,
+    kinds: Vec<Kind>,
     bits: Vec<Bits>,
     program: Vec<Bits>,
-    numbered: usize,
 }
 
-/// What the callers of a method observe: the exceptions under these types, or all of them.
+impl Escaped {
+    /// The kinds that escape method `m`.
+    fn of(&self, m: usize) -> impl Iterator<Item = &Kind> {
+        self.bits[m].iter().map(|k| &self.kinds[k])
+    }
+
+    /// Whether nothing escapes method `m`.
+    fn none(&self, m: usize) -> bool {
+        self.bits[m].is_empty()
+    }
+}
+
+/// What the callers of a method observe: the exceptions under these types, or all of them. The
+/// types are those that some `catch` names, numbered among them (`catch_types` in `analyze`): a
+/// set of them by their indexes among all types would take a word for every 64 types below the
+/// highest, thousands of bytes for each method on the Minecraft server.
 #[derive(Clone, Default, PartialEq)]
 struct Seen {
     types: Bits,
@@ -199,18 +215,18 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let thrown = |t: usize| -> Vec<usize> {
         h.concretes(t).into_iter().filter(|&c| throwable.is_some_and(|w| h.is_subtype(c, w))).collect()
     };
-    let raised = |p: &Point, escapes: &[BTreeSet<Kind>]| -> BTreeSet<Kind> {
+    let raised = |p: &Point, escapes: &Escaped| -> BTreeSet<Kind> {
         match &p.raise {
             Raise::Throw(t) => thrown(*t).into_iter().map(Kind::Class).collect(),
-            Raise::Call(callees) => callees.iter().flat_map(|&c| escapes[c].iter().cloned()).collect(),
+            Raise::Call(callees) => callees.iter().flat_map(|&c| escapes.of(c).cloned()).collect(),
             Raise::Runtime { class, .. } => BTreeSet::from([Kind::Runtime(class)]),
             Raise::Text(_) => BTreeSet::new(),
         }
     };
     // Whether every kind that `raised` gives holds `test`, without gathering them.
-    let raised_all = |p: &Point, escapes: &[BTreeSet<Kind>], test: &dyn Fn(&Kind) -> bool| match &p.raise {
+    let raised_all = |p: &Point, escapes: &Escaped, test: &dyn Fn(&Kind) -> bool| match &p.raise {
         Raise::Throw(t) => thrown(*t).into_iter().all(|c| test(&Kind::Class(c))),
-        Raise::Call(callees) => callees.iter().all(|&c| escapes[c].iter().all(test)),
+        Raise::Call(callees) => callees.iter().all(|&c| escapes.of(c).all(test)),
         Raise::Runtime { class, .. } => test(&Kind::Runtime(class)),
         Raise::Text(_) => true,
     };
@@ -339,15 +355,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 affected
             }
         };
-        let (mut escapes, mut from_program, mut before_kinds) = match previous {
-            None => (vec![Bits::default(); n], vec![Bits::default(); n], Vec::new()),
+        let (mut escapes, mut from_program) = match previous {
+            None => (vec![Bits::default(); n], vec![Bits::default(); n]),
             Some((mut before, _)) => {
-                debug_assert_eq!(before.numbered, kinds.len(), "the kinds are numbered as before");
+                debug_assert!(before.kinds == kinds, "the kinds are numbered as before");
                 for m in (0..n).filter(|&m| affected[m]) {
                     before.bits[m] = Bits::default();
                     before.program[m] = Bits::default();
                 }
-                (before.bits, before.program, before.kinds)
+                (before.bits, before.program)
             }
         };
         let mut set_escapes: Vec<Bits> = vec![Bits::default(); set_callers.len()];
@@ -443,16 +459,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
             }
         }
-        let kinds_of = (0..n)
-            .map(|m| match affected[m] {
-                true => escapes[m].iter().map(|k| kinds[k].clone()).collect(),
-                false => std::mem::take(&mut before_kinds[m]),
-            })
-            .collect();
-        Escaped { kinds: kinds_of, bits: escapes, program: from_program, numbered: kinds.len() }
+        Escaped { kinds, bits: escapes, program: from_program }
     };
-    let mut escaped = phase("exceptions: escapes", || escapes_of(&points, None));
-    let mut escapes = std::mem::take(&mut escaped.kinds);
+    let mut escapes = phase("exceptions: escapes", || escapes_of(&points, None));
     // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
     // one out only shrinks what escapes, so the calls are looked at again until none is left.
     phase("exceptions: quiet calls", || {
@@ -487,10 +496,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             }
             let mut changed: Vec<usize> = dropped.iter().map(|&(m, _)| m).collect();
             changed.dedup();
-            escaped.kinds = std::mem::take(&mut escapes);
-            let before = std::mem::take(&mut escaped);
-            escaped = phase("exceptions: escapes", || escapes_of(&points, Some((before, &changed))));
-            escapes = std::mem::take(&mut escaped.kinds);
+            let before = std::mem::take(&mut escapes);
+            escapes = phase("exceptions: escapes", || escapes_of(&points, Some((before, &changed))));
         }
     });
 
@@ -502,6 +509,17 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let started = std::time::Instant::now();
     let at: Vec<usize> =
         (0..class.methods.len()).map(|m| h.group_members(m).first().copied().unwrap_or(m)).collect();
+    // The types that some `catch` names, numbered in the order they are met (`Seen`).
+    let mut catch_types: Vec<usize> = Vec::new();
+    let mut catch_number: FastMap<usize, usize> = FastMap::default();
+    for f in points.iter().flatten().flat_map(|p| &p.frames) {
+        for &t in &f.catches {
+            catch_number.entry(t).or_insert_with(|| {
+                catch_types.push(t);
+                catch_types.len() - 1
+            });
+        }
+    }
     let mut seen: Vec<Seen> = vec![Seen::default(); class.methods.len()];
     let mut queued = vec![true; class.methods.len()];
     // Callers first, as what is observed goes from callers to callees: the components of the
@@ -565,8 +583,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     visit += 1;
                     let mut here = now.clone();
                     for f in &p.frames {
-                        for &t in &f.catches {
-                            here.types.insert(t);
+                        for t in &f.catches {
+                            here.types.insert(catch_number[t]);
                         }
                         here.all |= f.finally;
                     }
@@ -618,7 +636,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         }
         step = std::time::Instant::now();
     };
-    let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|t| matches(k, t));
+    let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|t| matches(k, catch_types[t]));
 
     // An object's text whose `toString`, one the program wrote, may throw what a `catch` around
     // the text, or around a call on the way to it, would catch. The JDK's own `toString`s throw
@@ -626,14 +644,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     for (m, p) in points.iter().enumerate().flat_map(|(m, ps)| ps.iter().map(move |p| (m, p))) {
         let Raise::Text(shown) = &p.raise else { continue };
         let program = shown.iter().filter(|&&c| !from_jdk(class, &class.types[class.methods[c].class]));
-        if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[at[m]])) {
+        if program.flat_map(|&c| escapes.of(c)).any(|k| caught(k, &p.frames) || observed(k, &seen[at[m]])) {
             reject(p.pos, "catching an exception that this toString may throw not supported yet");
         }
     }
 
     // A static initializer never returns a `Result`: what it raises ends the program (see `seen`).
     let mut throwing: FastSet<usize> = (0..class.methods.len())
-        .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[at[m]]))))
+        .filter(|&m| guarded[m] || (!initializer[m] && escapes.of(m).any(|k| observed(k, &seen[at[m]]))))
         .collect();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
@@ -901,7 +919,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     for (m, method) in class.methods.iter().enumerate() {
         if initializer[m]
             && !guarded[m]
-            && !escapes[m].is_empty()
+            && !escapes.none(m)
             && linkage.iter().any(|k| observed(k, &seen[at[m]]))
         {
             reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
