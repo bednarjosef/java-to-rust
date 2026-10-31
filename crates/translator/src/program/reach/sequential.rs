@@ -25,8 +25,8 @@
 //! that overrides `Node.getChildCount()`, whose default is 0, has objects.
 
 use super::{CLASS_KINDS, FieldKey, MethodKey, Walk, class_name, has_flag, members, never_true, text};
+use super::{HashMap, HashSet};
 use crate::value::Value;
-use std::collections::{HashMap, HashSet};
 
 /// The classes of a walk, with their declarations and outer classes.
 type Classes<'t> = HashMap<String, (&'t Value, Option<String>)>;
@@ -119,7 +119,7 @@ impl<'t> Index<'t> {
                 || key.0 == PIPELINE
                 || walk.methods.get(key).is_none_or(|m| m["body"].is_null())
         });
-        let mut check = Check { index: self, only_pipelines, never_true: HashSet::new() };
+        let mut check = Check { index: self, only_pipelines, never_true: HashSet::default() };
         check.solve(walk);
         let contexts = &check.index.contexts;
         self.writes

@@ -14,7 +14,11 @@
 //! `JAVA_TO_RUST_REACH_CHECK` checks every round against a walk from scratch (`program.rs`).
 
 use crate::value::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
+// Names hash with the analyses' hasher: reachability hashes class and member names throughout,
+// and what it finds does not depend on the order of a map.
+pub(crate) type HashMap<K, V> = crate::analysis::FastMap<K, V>;
+pub(crate) type HashSet<T> = crate::analysis::FastSet<T>;
 use std::path::PathBuf;
 
 mod by_name;
@@ -149,7 +153,7 @@ impl Reach {
     /// would have it (`moduleOf0`).
     pub fn module_of(&self, package: &str) -> Option<&super::modules::Contents> {
         let packages = self.module_of_package.get_or_init(|| {
-            let mut packages = HashMap::new();
+            let mut packages = HashMap::default();
             for (i, m) in self.modules.iter().enumerate() {
                 for p in &m.packages {
                     packages.entry(p.clone()).or_insert(i);
@@ -2604,7 +2608,7 @@ impl<'t> Rounds<'t> {
     /// (`asked`): a method of a class that no unit declares waits for javac's answer before it is
     /// taken for an external one (`Walk::asked`).
     pub fn asking(mut self) -> Rounds<'t> {
-        self.asked = Some(HashSet::new());
+        self.asked = Some(HashSet::default());
         self
     }
 
@@ -3030,7 +3034,7 @@ impl<'t> Walk<'t> {
             };
             eprintln!("why {want}: {} matches", targets.len());
             let mut item = Item::Method((*target).clone());
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             while seen.insert(item.clone()) {
                 let line = match &item {
                     Item::Class(c) => format!("class {c}"),
@@ -3075,7 +3079,7 @@ impl<'t> Walk<'t> {
         let mut walk = Walk {
             sequential,
             asked,
-            why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::new()),
+            why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::default()),
             locale_data: locale_data.to_vec(),
             class_roots: class_roots.to_vec(),
             providers: providers.to_vec(),
@@ -3128,7 +3132,7 @@ impl<'t> Walk<'t> {
             reflect_config: std::mem::take(&mut self.reflect_config),
             flow_classes: std::mem::take(&mut self.flow_classes),
             asked: self.asked.take(),
-            why: self.why.as_ref().map(|_| HashMap::new()),
+            why: self.why.as_ref().map(|_| HashMap::default()),
             ..Walk::default()
         };
         self.reach.sequential = sequential;
@@ -4907,7 +4911,7 @@ mod tests {
         let without = reach(&[&program("CLASS", false)], "Main").unwrap();
         assert!(!without.methods.contains(&inside), "{without:?}");
         assert!(without.classes.contains("Target"), "{without:?}");
-        assert_eq!(without.without_objects, HashSet::from(["Target".to_string()]));
+        assert_eq!(without.without_objects, HashSet::from_iter(["Target".to_string()]));
         let with = reach(&[&program("CLASS", true)], "Main").unwrap();
         assert!(with.methods.contains(&inside), "{with:?}");
         assert!(with.without_objects.is_empty(), "{with:?}");

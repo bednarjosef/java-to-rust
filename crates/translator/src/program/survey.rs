@@ -176,7 +176,7 @@ struct Scan<'a> {
     /// Whether the program's streams stay sequential (`Reach::sequential`).
     sequential: bool,
     /// The classes without objects that `instanceof`s test for (`Reach::without_objects`).
-    without_objects: &'a HashSet<String>,
+    without_objects: &'a crate::program::reach::HashSet<String>,
 }
 
 impl Scan<'_> {
