@@ -312,6 +312,47 @@ made on the stack (`java::count_allocation`).
   from the object model. StringBuild's `charAt` and `length()` on a string made only of `(char)`
   casts proven in `0..=0x7f` (`analysis/ranges.rs`) are a byte read and the byte length.
 
+## Hot code together
+
+The compiler and the linker lay out a translated program's code by crate, module and function, so
+the few hundred functions that a Minecraft server tick runs lie spread over most of its 400 MB of
+code. On the same sprint as Java's server, the translated server's thread missed the instruction
+cache 74,700 times a tick against Java's 15,500, and the instruction TLB's first level 5,400 times
+against 600 (`perf stat` on the server thread), and a quarter of its dispatch slots went without
+instructions from the front end.
+
+A symbol ordering file puts the hot functions first and together, on huge pages:
+
+1. A profile of the program's usual work, `perf record -e cycles:u -c 1000003` (for the server, the
+   survey's bench step with `BENCH_PROFILE` set to a file, which records the sprint).
+2. `scripts/hot-text-order.py PROFILE > order.txt`: the program's sampled functions by their
+   symbols, the most sampled first, between the runtime's markers `j2r_hot_text_start` and
+   `j2r_hot_text_end`. The names are the linker's, as `perf script --no-demangle` gives them, with
+   ThinLTO's `.llvm.` suffixes, which stay the same as long as the code does; the linker skips a
+   name it does not find, so a file goes stale only slowly as the program changes.
+3. The binary's crate linked with it, and with its segments aligned to 2 MB:
+   `cargo rustc --release -- -C link-arg=-Wl,--symbol-ordering-file=order.txt
+   -C link-arg=-Wl,--no-warn-symbol-ordering -C link-arg=-Wl,-z,max-page-size=0x200000
+   -C link-arg=-Wl,-z,separate-loadable-segments` (the survey's trial step with `TRIAL_HOT_TEXT`).
+   The other crates keep their flags and are not built again; with LTO, the binary's crate
+   generates the program's code again.
+4. Before `main`, the runtime (`crates/runtime/src/hot_text.rs`, from `.init_array`) asks the
+   kernel to make the 2 MB blocks of the code between the markers into huge pages
+   (`MADV_COLLAPSE`); the 2 MB alignment makes those blocks blocks of the file as well, which a
+   huge page of a file's contents needs. Without an ordering file the markers lie next to each
+   other and nothing is done.
+
+On `benchmarks/ManyLibraryPaths.java` (formatting, regular expressions, maps, big numbers and
+sorting, a 5 MB binary), ten runs of each build at a load of 13 to 23, medians: the hot 220 KB of
+code lie on one huge page (`FilePmdMapped: 2048 kB` in the process's `smaps`), and misses of the
+instruction TLB's first level fall from 33.4 million to 0.26 million (8.7 million with the ordering
+alone, on 4 KB pages), misses of the instruction cache from 671 million to 640 million (634
+million), at the same 5.70 billion instructions. The cycles do not change beyond the noise (the
+fastest run of each: 1.76, 1.83 and 1.77 billion): on a binary that small, the TLB's second level
+holds every page the program runs, and a first-level miss costs a few cycles. The server's 121 MB
+of code in memory does not fit there; a server trial with `TRIAL_HOT_TEXT` is the test of the
+mechanism that matters.
+
 ## Memory
 
 `scripts/benchmark.py` reports each side's peak resident memory beside its time. Eight of the
