@@ -877,7 +877,7 @@ impl<'t> Lowering<'t> {
             }
             self.block_stmt(node, stmt, &unset, &mut out).inspect_err(|e| self.note_failed_stmt(stmt, e))?;
         }
-        Ok(self.exits_into_rest(out))
+        Ok(self.exits_into_rest(self.while_into_rest(out)))
     }
 
     /// Statement `stmt` of block `node` into `out`; `unset` are the block's `if`s that run only
