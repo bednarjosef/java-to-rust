@@ -237,7 +237,8 @@ Design: [object-model.md](object-model.md).
 - A **record** is a class with the members Java gives it (written into javac's tree by
   `javac/records.rs`): canonical or compact constructor, accessors, `toString`, `equals` and
   `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case byte[] b`, `case null`,
-  record patterns, nested records) is an `if let` chain, exhaustive over a sealed hierarchy or
+  record patterns, nested records, unnamed `_` patterns, several of which may share a case:
+  `case A _, B _ ->`) is an `if let` chain, exhaustive over a sealed hierarchy or
   enum without `default`. The components of a generic record's pattern have the erasures its
   fields hold; rejected: a record pattern of a record that is a Rust generic. An accessor written
   in the record runs at each use of a pattern variable, not once. `java.lang.Record` is a type like `Object`: a
