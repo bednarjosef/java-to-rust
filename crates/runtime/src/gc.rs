@@ -21,7 +21,9 @@
 //! that no old word in it keeps an object alive; a pointer-free one only for `alloc_zeroed`.
 //!
 //! **Collection** runs when the program has taken as many bytes as were alive after the last one
-//! (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share). It stops every other thread
+//! (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share), times a scale that grows, up to
+//! twice, while each collection takes more than half as much processor time as the program used
+//! since the last (`TIME_SHARE`; `JAVA_GC_TIME` sets the share, 0 turns the scale off). It stops every other thread
 //! (with `SIGPWR`; each records where its stack is and waits), marks every slot reachable from the
 //! roots, and frees the taken slots left unmarked. With a large heap, helper threads
 //! mark and sweep alongside (see "Marking"). The roots are scanned conservatively: any aligned word that points into a
@@ -85,6 +87,21 @@ const CLASSES: usize = SIZE_COUNT * 2;
 
 /// The fewest bytes taken between collections.
 const MIN_COLLECT: usize = 64 << 20;
+
+/// While a collection takes more processor time than this percentage of what the program used
+/// since the last one, the bytes taken between collections grow (`scale_by_time`), by at most `SCALE_STEP` a collection and to
+/// `MAX_SCALE` percent at most; while they take less, the growth shrinks back, by half at most.
+/// Processor time rather than time on the clock, so that threads taking memory side by side do
+/// not count as collecting more. The small step keeps a short phase of costly collections from
+/// growing the heap: the share must stay high for several collections in a row. BinaryTrees and
+/// SmallObjects, whose marking on every processor takes several times the program's own time
+/// between collections, grow to twice; ManyThreadsAllocating, whose costly collections are the
+/// last two, stays at its peak memory. Twice at most, since a large program that collects as
+/// often (the translated javac) then holds about as much as with `JAVA_GC_GROWTH=200`, 2.0 GB
+/// against the Java VM's 4.1 GB (docs/collector.md).
+const TIME_SHARE: usize = 50;
+const SCALE_STEP: f64 = 1.1;
+const MAX_SCALE: usize = 200;
 
 /// How many slots of one class a thread's list keeps before freed ones go back to their blocks.
 const LIST_MAX_BYTES: usize = 1 << 20;
@@ -246,6 +263,15 @@ struct Heap {
     /// The bytes taken between collections, in percent of the bytes alive after the last
     /// (`JAVA_GC_GROWTH`).
     growth: usize,
+    /// How much more than that the program takes between collections, in percent, from 100 to
+    /// `MAX_SCALE` (`scale_by_time`).
+    scale: usize,
+    /// A collection's processor time, in percent of the program's since the last one, above
+    /// which `scale` grows: `TIME_SHARE`, or what `JAVA_GC_TIME` sets (0 keeps `scale` at 100).
+    time_share: usize,
+    /// The process's processor time when the last collection ended (`process_time`), 0 before
+    /// the first.
+    last_end: u64,
     /// Whether `JAVA_GC_THREADS` sets the markers, which then mark every collection, however
     /// small (to test marking with helpers).
     threads_set: bool,
@@ -281,6 +307,9 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     every: MIN_COLLECT,
     log: false,
     growth: 100,
+    scale: 100,
+    time_share: TIME_SHARE,
+    last_end: 0,
     threads_set: false,
     larges: 0,
     pagemap: -1,
@@ -378,6 +407,15 @@ unsafe extern "C" {
     fn sched_getaffinity(pid: i32, size: usize, mask: *mut u64) -> i32;
     fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
     fn ioctl(fd: i32, request: u64, ...) -> i32;
+    fn clock_gettime(clock: i32, time: *mut [i64; 2]) -> i32;
+}
+
+/// The processor time the process has used, every thread's, in nanoseconds.
+fn process_time() -> u64 {
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+    let mut t = [0i64; 2];
+    unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut t) };
+    t[0] as u64 * 1_000_000_000 + t[1] as u64
 }
 
 const PROT_READ_WRITE: i32 = 3;
@@ -490,6 +528,9 @@ fn start(h: &mut Heap) {
     h.threads_set = number_from(c"JAVA_GC_THREADS").is_some_and(|n| n > 1);
     if let Some(n) = number_from(c"JAVA_GC_GROWTH") {
         h.growth = n.max(1);
+    }
+    if let Some(n) = number_from(c"JAVA_GC_TIME") {
+        h.time_share = n;
     }
     if let Some(n) = number_from(c"JAVA_GC_EVERY") {
         h.every = n.max(1);
@@ -1782,6 +1823,7 @@ fn collect(g: &Guard) {
     }
     let me = ENTRY.try_with(|e| e.get()).unwrap_or(NO_ENTRY);
     let started = std::time::Instant::now();
+    let started_time = process_time();
     let taken = heap(g).taken;
     // The helpers mark too once the heap is large enough to be worth waking them. They start
     // before the program's threads stop, since a stopped thread may hold a lock of the C
@@ -1805,11 +1847,32 @@ fn collect(g: &Guard) {
     if mark_and_sweep(g, me, shares, minor, taken, started) && heap(g).alive >= heap(g).next_full {
         mark_and_sweep(g, me, shares, false, taken, started);
     }
+    scale_by_time(heap(g), started_time);
     for t in &THREADS {
         t.stopped_sp.set(0);
         t.thread_pointer.set(0);
     }
     resume_others(stopped);
+}
+
+/// Scales the bytes taken before the next collection by the share of the processor time
+/// collections take: the time this one took against the time the program's threads used since
+/// the last one ended (`started`, `last_end`: `process_time`). Processor time rather than time
+/// on the clock, so that a program whose threads take memory side by side is not counted as
+/// collecting more often than it does per thread.
+fn scale_by_time(h: &mut Heap, started: u64) {
+    let end = process_time();
+    let last = std::mem::replace(&mut h.last_end, end);
+    if h.time_share == 0 || h.every < MIN_COLLECT {
+        return;
+    }
+    if last != 0 {
+        let pause = end.saturating_sub(started) as f64;
+        let between = started.saturating_sub(last).max(1000) as f64;
+        let ratio = (pause / between * 100.0 / h.time_share as f64).clamp(0.5, SCALE_STEP);
+        h.scale = ((h.scale as f64 * ratio) as usize).clamp(100, MAX_SCALE);
+    }
+    h.next_collection = h.next_collection / 100 * h.scale;
 }
 
 /// Marks and sweeps, with the other threads stopped: a minor collection or a full one. Returns
@@ -2094,14 +2157,15 @@ fn report(h: &Heap, taken: usize, marked: std::time::Duration, total: std::time:
     let mut out = &mut buffer[..];
     let _ = writeln!(
         out,
-        "[gc {} {}: took {} MB, {} MB alive, heap {} MB, mark {} ms, sweep {} ms]",
+        "[gc {} {}: took {} MB, {} MB alive, heap {} MB, mark {} ms, sweep {} ms, scale {}%]",
         h.collections,
         if h.minor { "minor" } else { "full" },
         taken >> 20,
         h.alive >> 20,
         (h.top << BLOCK_SHIFT) >> 20,
         marked.as_millis(),
-        (total - marked).as_millis()
+        (total - marked).as_millis(),
+        h.scale
     );
     let len = 256 - out.len();
     unsafe { write(2, buffer.as_ptr().cast(), len) };
