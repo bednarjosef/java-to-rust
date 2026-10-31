@@ -59,7 +59,9 @@ type Walked<'c> = (usize, usize, FastSet<&'c str>);
 
 /// Walks the initializer of each class of `walked`, statement by statement, through what it runs
 /// (see `early_reads`). A group of methods that run each other (`Groups`) is entered whole: what
-/// runs one of them runs them all.
+/// runs one of them runs them all. The statements are summarized here, and the initializers
+/// walked on several threads, each taking the next one not walked yet: they are independent, and
+/// the Minecraft server's 5000 enter about 140 million groups.
 fn walk(
     class: &Class,
     uses: &Uses,
@@ -67,29 +69,109 @@ fn walk(
     groups: &Groups,
     reaching: &Reaching,
 ) -> FastSet<ExprId> {
+    // Each initializer's statements: what each runs, and the static of its class it assigns.
+    let statements: Vec<Vec<(Summary, Option<&str>)>> = (walked.iter())
+        .map(|(t, clinit, _)| {
+            let mut statements = Vec::new();
+            flatten(&class.methods[*clinit].body, &mut statements);
+            (statements.into_iter())
+                .map(|s| {
+                    let mut first = Summary::default();
+                    visit_stmt(s, &mut |e| uses.summarize(e, &mut first), &mut |_| {});
+                    let assigned = match s {
+                        Stmt::Expr(Expr {
+                            kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, .. },
+                            ..
+                        }) if c == t => Some(name.as_str()),
+                        _ => None,
+                    };
+                    (first, assigned)
+                })
+                .collect()
+        })
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8).min(walked.len());
+    let found: Vec<(FastSet<ExprId>, usize, usize)> = std::thread::scope(|scope| {
+        let walkers: Vec<_> = (0..threads.max(1))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut walker = Walker {
+                        early: FastSet::default(),
+                        seen_in: vec![0; groups.next.len()],
+                        turn: 0,
+                        entered: 0,
+                        looked: 0,
+                    };
+                    loop {
+                        let w = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((t, clinit, unset)) = walked.get(w) else { break };
+                        walker.initializer(w, *t, *clinit, unset, &statements[w], groups, reaching);
+                    }
+                    (walker.early, walker.entered, walker.looked)
+                })
+            })
+            .collect();
+        walkers.into_iter().map(|w| w.join().expect("an early-reads walker panicked")).collect()
+    });
     let mut early = FastSet::default();
-    // The groups seen for the initializer of each class, as the number of that class's turn: a
-    // set for each class without clearing one.
-    let mut seen_in: Vec<u32> = vec![0; groups.next.len()];
-    let mut turn = 0;
-    // How much the walks take: the groups entered and the edges looked at.
     let (mut entered, mut looked) = (0usize, 0usize);
-    for (w, (t, clinit, unset)) in walked.iter().enumerate() {
+    for (reads, e, l) in found {
+        early.extend(reads);
+        entered += e;
+        looked += l;
+    }
+    if crate::timings::enabled() {
+        let edges: usize = groups.next.iter().map(Vec::len).sum();
+        eprintln!(
+            "timing: early static reads: {} initializers walked on {threads} threads, {} groups with {edges} \
+             edges, {entered} groups entered, {looked} sets of next groups looked at, {} sets of initializers",
+            walked.len(),
+            groups.next.len(),
+            reaching.sets.len()
+        );
+    }
+    early
+}
+
+/// What one thread of `walk` keeps: the early reads it found, and the groups seen for the
+/// initializer it walks, as the number of that initializer's turn: a set for each initializer
+/// without clearing one. Also how much its walks took: the groups entered and the sets of next
+/// groups looked at.
+struct Walker {
+    early: FastSet<ExprId>,
+    seen_in: Vec<u32>,
+    turn: u32,
+    entered: usize,
+    looked: usize,
+}
+
+impl Walker {
+    /// Walks initializer `w`, the `<clinit>` of class `t`, whose statics `unset` start unset,
+    /// through its `statements` (`walk`).
+    #[allow(clippy::too_many_arguments)]
+    fn initializer(
+        &mut self,
+        w: usize,
+        t: usize,
+        clinit: usize,
+        unset: &FastSet<&str>,
+        statements: &[(Summary, Option<&str>)],
+        groups: &Groups,
+        reaching: &Reaching,
+    ) {
         let mut unset = unset.clone();
-        let mut statements = Vec::new();
-        flatten(&class.methods[*clinit].body, &mut statements);
         // The initializer under way returns at once when code it runs uses its class again.
-        turn += 1;
-        seen_in[groups.group[*clinit]] = turn;
-        for s in statements {
+        self.turn += 1;
+        let turn = self.turn;
+        self.seen_in[groups.group[clinit]] = turn;
+        for (first, assigned) in statements {
             if unset.is_empty() {
                 break;
             }
-            let mut first = Summary::default();
-            visit_stmt(s, &mut |e| uses.summarize(e, &mut first), &mut |_| {});
             for (c, name, id) in &first.reads {
-                if c == t && unset.contains(name.as_str()) {
-                    early.insert(*id);
+                if *c == t && unset.contains(name.as_str()) {
+                    self.early.insert(*id);
                 }
             }
             // A group from which no read of the class's statics can run is not walked: what it
@@ -103,46 +185,30 @@ fn walk(
                 .filter(|&g| reaching.reads(g, w))
                 .collect();
             while let Some(g) = work.pop() {
-                if seen_in[g] == turn {
+                if self.seen_in[g] == turn {
                     continue;
                 }
-                seen_in[g] = turn;
-                entered += 1;
+                self.seen_in[g] = turn;
+                self.entered += 1;
                 let of_group = &groups.reads[g];
                 let from = of_group.partition_point(|r| r.0 < w);
                 for (_, name, id) in of_group[from..].iter().take_while(|r| r.0 == w) {
                     if unset.contains(name) {
-                        early.insert(*id);
+                        self.early.insert(*id);
                     }
                 }
                 for (set, next) in &reaching.next[g] {
-                    looked += 1;
+                    self.looked += 1;
                     if reaching.sets[*set].contains(w) {
-                        work.extend(next.iter().filter(|&&h| seen_in[h] != turn));
+                        work.extend(next.iter().filter(|&&h| self.seen_in[h] != turn));
                     }
                 }
             }
-            if let Stmt::Expr(Expr {
-                kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, .. },
-                ..
-            }) = s
-                && c == t
-            {
-                unset.remove(name.as_str());
+            if let Some(name) = assigned {
+                unset.remove(name);
             }
         }
     }
-    if crate::timings::enabled() {
-        let edges: usize = groups.next.iter().map(Vec::len).sum();
-        eprintln!(
-            "timing: early static reads: {} initializers walked, {} groups with {edges} edges, {entered} \
-             groups entered, {looked} sets of next groups looked at, {} sets of initializers",
-            walked.len(),
-            groups.next.len(),
-            reaching.sets.len()
-        );
-    }
-    early
 }
 
 /// `walk` method by method, without leaving out any, for `JAVA_TO_RUST_EARLY_CHECK`.

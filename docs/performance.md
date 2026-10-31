@@ -550,8 +550,11 @@ from which no read of the class's statics can run is worked out over the groups.
 A group that runs thousands of others (one that holds a virtual call on a wide type) has them by
 the set of initializers whose statics they may read: the sets are kept once each (javac's 34,800
 groups have 158), so a class's walk tests a set once rather than every group that has it, and
-the groups that read nothing are left out for good. With `JAVA_TO_RUST_TIMINGS` the step prints
-how many groups and sets each walk enters and looks at.
+the groups that read nothing are left out for good. The classes' walks are independent, so they
+run on up to eight threads, each taking the next class not walked yet, after the statements of
+every initializer are summarized on the step's own thread: the Minecraft server's 5,300 walks
+enter about 144 million groups, 25 s on one thread. With `JAVA_TO_RUST_TIMINGS` the step prints
+how many groups and sets the walks enter and look at.
 `JAVA_TO_RUST_EARLY_CHECK=1` also walks every method one by one, leaving none out, and panics
 unless both find the same reads. On javac the step goes from 0.25 to 0.11 s, and its census
 report and the 28 targets' translations are byte for byte the same.
