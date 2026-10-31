@@ -958,7 +958,22 @@ unsafe impl GlobalAlloc for Allocator {
         // A slot that may hold pointers is zeroed whole as it is handed out, so that no old word
         // in a part the program does not write keeps an object alive.
         if layout.align() >= 8 {
-            unsafe { ptr::write_bytes(p, 0, SIZES[index] as usize) };
+            let size = SIZES[index] as usize;
+            if size <= 128 {
+                // Word by word, rather than with a call of `memset`: a slot of these sizes is a
+                // whole number of words. The stores are volatile, so that the loop does not
+                // become that call again.
+                let mut q = p as *mut u64;
+                let end = unsafe { p.add(size) } as *mut u64;
+                while q < end {
+                    unsafe {
+                        q.write_volatile(0);
+                        q = q.add(1);
+                    }
+                }
+            } else {
+                unsafe { ptr::write_bytes(p, 0, size) };
+            }
         }
         p
     }
@@ -1975,9 +1990,19 @@ fn push_old(h: &Heap, marker: &mut Marker, from: usize, to: usize) {
                 if low < high {
                     let first = (low - start) / size;
                     let last = ((high - 1 - start) / size).min(m.slots as usize - 1);
-                    for slot in first..=last {
-                        let (w, bit) = (slot / 64, 1u64 << (slot % 64));
-                        if m.taken[w] & m.marks[w] & bit != 0 {
+                    // A word of the bitmaps at a time, and only its old slots: the pages written
+                    // since the last collection are mostly young objects, whose marks are clear.
+                    for w in first / 64..=last / 64 {
+                        let mut old = m.taken[w] & m.marks[w];
+                        if w == first / 64 {
+                            old &= u64::MAX << (first % 64);
+                        }
+                        if w == last / 64 && last % 64 < 63 {
+                            old &= (1u64 << (last % 64 + 1)) - 1;
+                        }
+                        while old != 0 {
+                            let slot = w * 64 + old.trailing_zeros() as usize;
+                            old &= old - 1;
                             marker.stack.push((start + slot * size, size));
                         }
                     }

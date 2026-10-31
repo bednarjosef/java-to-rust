@@ -276,28 +276,34 @@ fn analysed(
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     if let Some(mut class) = class {
         fatal = phase("analyze", || {
-            let names = Names {
-                program,
-                files: &files,
-                jdk_temps: RefCell::new(jdk_temps),
-                found: RefCell::new(None),
-                approximated: RefCell::new(Vec::new()),
-                kept: RefCell::new(match MESSAGES_ANEW.get() {
-                    true => analysis::KeptMessages::default(),
-                    false => analysis::KeptMessages::new(),
-                }),
-            };
-            let fatal = analyse(
-                &mut class,
-                &units,
-                &files,
-                &mut rejections,
-                &mut modules,
-                &names,
-                program.ends_rejected,
-            );
-            approximated = approximated_messages(names.approximated.into_inner());
-            fatal
+            std::thread::scope(|scope| {
+                // The class files' names, which the messages need once the analyses are done, compile
+                // (javac, a process of its own) while the analyses run.
+                let early = scope.spawn(|| class_file_names(program, &files));
+                let names = Names {
+                    program,
+                    files: &files,
+                    jdk_temps: RefCell::new(jdk_temps),
+                    early: RefCell::new(Some(early)),
+                    found: RefCell::new(None),
+                    approximated: RefCell::new(Vec::new()),
+                    kept: RefCell::new(match MESSAGES_ANEW.get() {
+                        true => analysis::KeptMessages::default(),
+                        false => analysis::KeptMessages::new(),
+                    }),
+                };
+                let fatal = analyse(
+                    &mut class,
+                    &units,
+                    &files,
+                    &mut rejections,
+                    &mut modules,
+                    &names,
+                    program.ends_rejected,
+                );
+                approximated = approximated_messages(names.approximated.into_inner());
+                fatal
+            })
         });
         unfollowed = thrown_unsupported(&class, lower::UNFOLLOWED_MESSAGE);
         charset_names = computed_charset_names(&class);
@@ -408,6 +414,9 @@ struct Names<'a> {
     files: &'a [String],
     /// The temps of the JDK's code (`javac::jdk_temps`), until they are added to `found`.
     jdk_temps: RefCell<javac::JdkTemps>,
+    /// The class files' names (`class_file_names`) being found on a thread of their own since the
+    /// analyses started, until `found` takes them.
+    early: RefCell<Option<std::thread::ScopedJoinHandle<'a, Result<javac::BytecodeNames, ProgramError>>>>,
     /// The names, or why the class files could not be compiled for them, once looked for.
     found: RefCell<Option<Found>>,
     /// The dereferences whose message the last pass approximated (`Facts::npe_approximated`).
@@ -435,8 +444,10 @@ impl Names<'_> {
         }
         let mut found = self.found.borrow_mut();
         if found.is_none() {
-            let names =
-                crate::timings::phase("census: class files", || class_file_names(self.program, self.files));
+            let names = crate::timings::phase("census: class files", || match self.early.take() {
+                Some(early) => early.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                None => class_file_names(self.program, self.files),
+            });
             // Without the class files (the program does not compile, as decompiled code may
             // not), the messages are found with the names of the JDK's code alone, which do not
             // come from them: each that needs a name of the program's class files is not

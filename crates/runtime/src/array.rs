@@ -898,7 +898,17 @@ pub fn try_shared_tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Result<
 /// `a.length`.
 #[inline]
 pub fn len<T>(a: &impl Elements<T>) -> i32 {
-    a.length() as i32
+    let n = a.length();
+    if n > i32::MAX as usize {
+        too_long(n)
+    }
+    n as i32
+}
+
+#[cold]
+#[inline(never)]
+fn too_long(n: usize) -> ! {
+    panic!("an array of {n} elements, more than Java's arrays hold")
 }
 
 /// `a[i]`.

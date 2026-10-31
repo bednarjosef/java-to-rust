@@ -413,6 +413,21 @@ fn sets(s: &Stmt, name: &str) -> bool {
             !declares(init, name)
                 && (init.iter().any(|s| sets(s, name)) || cond.as_ref().is_some_and(|c| always_sets(c, name)))
         }
+        // A switch with a `default` that becomes a `match` whose every arm sets the local or never
+        // completes normally: no case falls into the next, and a `break` leaves a case only as
+        // its last statement (`SearchFilter.createNextFilter` makes its filter so, in a `try`).
+        Stmt::Switch { selector, cases } => {
+            use super::switch::{breaks_out, is_default, leaves, strip};
+            always_sets(selector, name)
+                || cases.iter().any(is_default)
+                    && cases.split_last().is_some_and(|(_, init)| init.iter().all(|c| leaves(&c.body)))
+                    && cases.iter().all(|c| {
+                        let body = strip(&c.body);
+                        !declares(body, name)
+                            && !body.iter().any(breaks_out)
+                            && (body.iter().any(|s| sets(s, name)) || !completes_all(body))
+                    })
+        }
         // A `try` without `finally`, whose block carries the local out in its `Ok` value
         // (`carried_out`) and whose `catch` clauses run in the arms of the `match` on it: where
         // the block and each clause set it or never complete normally (the inner `try` of a

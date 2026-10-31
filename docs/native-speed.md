@@ -180,8 +180,9 @@ at each collection, and marking in parallel. Planned beyond it:
     split into 4 KB pages (the protection is per page). Measured (median of alternating runs,
     off against on): `SmallObjects` 0.43 s and 1.2 s of processor time against 0.34 s and 0.49
     s, but 170 MB against 200 MB at its peak, since the dead old nodes wait for a full
-    collection; `BinaryTrees` the same wall time with a third less processor time (4.9 s against
-    3.2 s); `ManyThreadsAllocating` 0.10 s against 0.13 s and 196 MB against 201 MB, from the
+    collection; `BinaryTrees` 8% less wall time and a third less processor time (5.37 s and
+    13.2 s against 5.86 s and 20.4 s, on a machine whose cores ran at about 850 MHz);
+    `ManyThreadsAllocating` 0.10 s against 0.13 s and 196 MB against 201 MB, from the
     full collections that follow minor ones; `SortMillion` 47 MB against 56 MB at the same
     speed. The others are unchanged. That mix is why it is opt-in: it is to be tried on the
     Minecraft server before it becomes the default.

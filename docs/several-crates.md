@@ -168,8 +168,9 @@ What cannot move stays in the header with its code: generic functions and the me
 call them), functions with an `impl Trait` in their signature, methods of a trait `impl` whose
 signature names `Self::..`, and the initializers of statics. Small functions stay too: one whose
 code is at most 48 tokens (`split.rs`, `small`; a `match` that passes a failure on counts as the
-`?` it stands for) and that is neither `#[cold]` nor `#[inline(never)]`, such as a getter, a
-buffer's `get` or `Mth.lerp`, keeps its code in the header, and so does one that the generator
+`?` it stands for, and a path as one name however deep its package) and that is neither `#[cold]`
+nor `#[inline(never)]`, such as a getter, a buffer's `get`, `Mth.lerp` or a cast of an `Object`
+to a class (`Object::as_x`), keeps its code in the header, and so does one that the generator
 marked `#[inline]` itself: the check that a class is initialized (`init_x`, whose `init_x_slow`
 moves), a variant's constructor, the view of a type's enum. Both those the generator did not mark
 and the header's wrapper of each moved method are `#[cfg_attr(not(debug_assertions), inline)]`, so

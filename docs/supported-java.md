@@ -344,7 +344,11 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   `isArray`, `isInstance`, `cast`, `isAssignableFrom` and their relatives. Each class value
   carries the binary names of the classes and interfaces above it, which `isAssignableFrom` tests;
   `isInstance` and `cast` test the names above the value's class, each name compared by its
-  length and last eight bytes before it is compared whole (`java::Class::is_instance`).
+  length and last eight bytes before it is compared whole (`java::Class::is_instance`). A class
+  that nothing below it can have instances of (a final class of the runtime, or a class or enum
+  of the program that no class of the program extends, other than a `Throwable`, which the
+  runtime makes by name) is marked a leaf, and they test only the first name, the value's own
+  class.
   `getModifiers`, `isMemberClass`, `isLocalClass`, `isAnonymousClass`, `getEnclosingClass` and
   `getDeclaringClass` answer from what the class value carries in a program that asks for them:
   the modifiers javac gives the class, implicit ones included, and where it is declared

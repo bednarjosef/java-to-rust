@@ -16,16 +16,17 @@
 //!   once for the whole process, as JLS 12.4.2 describes.
 
 use std::cell::{OnceCell, RefCell, UnsafeCell};
+use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::{
-    AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize,
-    Ordering,
+    AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicPtr, AtomicU16, AtomicU32, AtomicU64,
+    AtomicUsize, Ordering,
 };
 use std::sync::{Condvar, Mutex, OnceLock};
 
 /// A static field of a program that starts no thread: a `Cell` or a `RefCell` (`C`), which
 /// `Deref` reaches. `with_borrow`, `with_borrow_mut` and `set` of a `RefCell` are those of a
-/// thread-local one.
+/// thread-local one; `cloned` reads a `RefCell`'s value without writing its borrow flag.
 pub struct Global<C>(C);
 
 // Only the program's one thread runs Java code. The collector reads statics while that thread
@@ -84,6 +85,23 @@ macro_rules! like_thread_local {
                 f(&mut (**self).borrow_mut())
             }
 
+            /// A copy of the value, as `with_borrow(|v| v.clone())` makes it, but with the
+            /// borrow flag tested and not written: a `borrow` adds to the flag and takes away
+            /// from it again, stores to a static that the compiler cannot tell apart from the
+            /// objects a loop reads, so a loop that reads the static kept reloading what it read
+            /// through the value and was not unrolled. A clone of the translation's values runs
+            /// no Java code, so nothing writes the static while it is lent.
+            #[inline(always)]
+            pub fn cloned(&self) -> T
+            where
+                T: Clone,
+            {
+                match unsafe { (**self).try_borrow_unguarded() } {
+                    Ok(value) => value.clone(),
+                    Err(_) => already_borrowed(),
+                }
+            }
+
             #[inline(always)]
             pub fn set(&self, value: T) {
                 drop((**self).replace(value));
@@ -93,6 +111,13 @@ macro_rules! like_thread_local {
 }
 
 like_thread_local!(Global, LazyGlobal);
+
+/// A static read while it is being written, which `RefCell::borrow` refuses with this panic.
+#[cold]
+#[inline(never)]
+fn already_borrowed() -> ! {
+    panic!("already mutably borrowed")
+}
 
 /// A primitive static field shared by threads: every read acquires and every write releases, so
 /// a thread that sees a value sees everything the writing thread did before it. The value is
@@ -212,37 +237,108 @@ impl<T: Primitive> Atomic<T> {
 /// initialization assigns, once (`set`). Until then it holds the value it starts with, Java's
 /// default (or, for a class initialized lazily, its initializer's value, which nothing replaces),
 /// as the initializer's own reads before the assignment see it. A reader lends the value with no
-/// lock (`get`): once the class is initialized it never changes, and the `OnceLock` publishes it
-/// to every thread that sees it set. A thread that reads it during another thread's initialization
-/// (code of the class itself, which waits for no initialization) sees one of the two values.
+/// lock (`get`): once the class is initialized it never changes.
+///
+/// A read is one load of `current`, the address of the value it lends, and a test that it is set:
+/// the static needs no `LazyLock` around it, though the value it starts with may be built at run
+/// time (`lazy`), since that value is built on the first read that finds `current` unset, out of
+/// line, and kept in `default`. `set` writes the assigned value into `value` and then points
+/// `current` at it with release, which publishes it to every thread that reads `current`. Neither
+/// value moves or changes once `current` points at it, so a lent value stays valid. A thread that
+/// reads the static during another thread's initialization (code of the class itself, which waits
+/// for no initialization) sees one of the two values.
 pub struct Final<T> {
-    value: OnceLock<T>,
-    default: T,
+    current: AtomicPtr<T>,
+    value: UnsafeCell<MaybeUninit<T>>,
+    assigned: AtomicBool,
+    default: OnceLock<T>,
+    start: Start<T>,
 }
+
+/// The value a `Final` starts with: a constant, or a function that builds it.
+enum Start<T> {
+    Value(T),
+    Built(fn() -> T),
+}
+
+// `value` is written once, before `current` publishes it, and only read after; the rest is `Sync`.
+unsafe impl<T: Send + Sync> Sync for Final<T> {}
 
 impl<T> Final<T> {
     pub const fn new(default: T) -> Final<T> {
-        Final { value: OnceLock::new(), default }
+        Final::starting(Start::Value(default))
+    }
+
+    /// A `Final` that starts with the value `make` builds, on its first read.
+    pub const fn lazy(make: fn() -> T) -> Final<T> {
+        Final::starting(Start::Built(make))
+    }
+
+    const fn starting(start: Start<T>) -> Final<T> {
+        Final {
+            current: AtomicPtr::new(std::ptr::null_mut()),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+            assigned: AtomicBool::new(false),
+            default: OnceLock::new(),
+            start,
+        }
     }
 
     /// The value: the one assigned, or the one it starts with.
     #[inline(always)]
     pub fn get(&self) -> &T {
-        self.value.get().unwrap_or(&self.default)
+        let p = self.current.load(Ordering::Acquire);
+        if p.is_null() {
+            return self.first_read();
+        }
+        // `current` points at `value` or a starting value, neither of which moves or changes
+        // while the `Final` lives.
+        unsafe { &*p }
+    }
+
+    /// A read before `current` is set: points it at the starting value, unless `set` has pointed
+    /// it at the assigned one meanwhile.
+    #[cold]
+    #[inline(never)]
+    fn first_read(&self) -> &T {
+        let start: *const T = match &self.start {
+            Start::Value(v) => v,
+            Start::Built(make) => self.default.get_or_init(*make),
+        };
+        let _ = self.current.compare_exchange(
+            std::ptr::null_mut(),
+            start as *mut T,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        // As in `get`.
+        unsafe { &*self.current.load(Ordering::Acquire) }
     }
 
     /// The assignment of the class's static initialization. Java assigns a `final` once, so a
     /// second assignment is a translation bug.
     pub fn set(&self, value: T) {
-        if self.value.set(value).is_err() {
+        if self.assigned.swap(true, Ordering::AcqRel) {
             panic!("a static final assigned twice");
         }
+        // Only this call writes `value`, and no reader reaches it until `current` points at it.
+        unsafe { (*self.value.get()).write(value) };
+        self.current.store(self.value.get() as *mut T, Ordering::Release);
     }
 
     /// Runs `f` on the value, as a `java::Locked` static's read but with no lock.
     #[inline(always)]
     pub fn with_borrow<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         f(self.get())
+    }
+}
+
+impl<T> Drop for Final<T> {
+    fn drop(&mut self) {
+        if *self.assigned.get_mut() {
+            // `set` wrote it, and nothing lends it once the `Final` is dropped.
+            unsafe { self.value.get_mut().assume_init_drop() };
+        }
     }
 }
 

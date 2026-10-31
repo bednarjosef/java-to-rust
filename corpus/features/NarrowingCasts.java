@@ -50,5 +50,16 @@ public class NarrowingCasts {
         System.out.println((long) -f);
         System.out.println((int) (f * 1e10f));
         System.out.println((long) 1e30f);
+        // Values next to the bounds, where the conversion gives the type's least value.
+        double[] edges = { -2147483648.0, -2147483648.9, -2147483649.0, 2147483647.9, 2147483648.0,
+            -9.223372036854775808E18, -9.3E18, 9.3E18, -0.0, nan, -inf };
+        for (double e : edges) {
+            System.out.println((int) e + " " + (long) e + " " + (short) e + " "
+                + (int) (char) e + " " + (int) (float) e + " " + (long) (float) e);
+        }
+        float fnan = (float) nan;
+        float finf = (float) inf;
+        System.out.println((int) fnan + " " + (long) fnan + " " + (int) -finf + " "
+            + (long) -finf + " " + (byte) finf);
     }
 }

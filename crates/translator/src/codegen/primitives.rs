@@ -133,8 +133,29 @@ impl<'a> Gen<'a> {
         }
         // Java narrows a floating value to `int` (saturating, NaN to 0) and then to the small
         // type; Rust's `as` saturates to the small type directly.
-        let via_int = if from.is_floating() && to.is_small() { " as i32" } else { "" };
-        Code::new(format!("{}{via_int} as {}", code.cast_operand(), rust_type(to)), AS)
+        if from.is_floating() && to.is_small() {
+            let int =
+                self.float_to_integer(&code, from, Type::Int).expect("a floating value converts to int");
+            return Code::new(format!("{} as {}", int.text, rust_type(to)), AS);
+        }
+        if let Some(integer) = self.float_to_integer(&code, from, to) {
+            return integer;
+        }
+        Code::new(format!("{} as {}", code.cast_operand(), rust_type(to)), AS)
+    }
+
+    /// `(int)` or `(long)` of a `double` or `float` value, as a call of the runtime's conversion
+    /// (`java::double_to_int` and the like), which converts with one instruction where Rust's
+    /// `as` clamps the value first.
+    pub(super) fn float_to_integer(&mut self, code: &Code, from: Type, to: Type) -> Option<Code> {
+        let name = match (from, to) {
+            (Type::Double, Type::Int) => "double_to_int",
+            (Type::Double, Type::Long) => "double_to_long",
+            (Type::Float, Type::Int) => "float_to_int",
+            (Type::Float, Type::Long) => "float_to_long",
+            _ => return None,
+        };
+        Some(Code::atom(format!("{}({})", self.runtime(name), code.typed())))
     }
 
     /// `(ty) value` where `ty` is a small type. Addition, subtraction and multiplication of

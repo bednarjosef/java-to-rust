@@ -73,6 +73,17 @@ untaken slot of a block into a list, as the allocator did before, cost 5% of the
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
+An object (`java::Arc::new`) takes its slot through the global allocator, a call that is not
+inlined: it works out the slot's size class from the size it is given, and zeroes a slot of up
+to 128 bytes word by word rather than with a call of `memset` (BinaryTrees 7.8 s against 9.4 s
+with the call, alternating runs on a throttled machine). The compiler knows that call for an
+allocation, which touches no memory of the program, and optimizes the loops around it as such.
+Taking the slot inside `Arc::new` instead, inlined at every `new` where the size and the zeroing
+are constants, made BinaryTrees take 5.8 s, but other loops lost optimizations, even ones that
+allocate nothing: ObjectDispatch's palette search by identity, which the compiler otherwise
+specializes for the key's class, took 4.0 s against 1.8 s, and Interpreter's kernel 2.2 s
+against 1.5 s; a direct call that is not inlined lost them all the same.
+
 The collector keeps every taken slot of each thread's spans, after marking: the slots not handed
 out yet, and the one a thread stopped in `alloc` may be handing out before its address is in a
 register; the others the span handed out live one collection longer. Only the span's own
@@ -141,6 +152,9 @@ The collector needs nothing for them:
   the body of the innermost loop around the `new`, which makes it a new variable on each
   iteration that Java does not let the next iteration read before assigning it, and every
   object of the frame that holds it must be made in that loop and follow the same rule. A
+  variable is one declaration, by Java's scopes: another variable of the same name declared
+  outside the loop (`for (Node n = head; ..)` before a loop's `Node n = new Node(..)`) is
+  another variable, which neither holds the object nor counts against it. A
   factory's object is made outside every loop of the factory, once per call, and the caller's
   slot then follows the caller's loops by the same rule.
 - **Identity.** The identity hash is the address, unique while the object lives; two objects of
@@ -201,7 +215,11 @@ slower than alone, the cost of the atomic mark bits.
 With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object that
 lives through a collection keeps its mark and is old. A minor collection marks from the roots
 and from the old objects on the pages written since the last collection, stops at marked
-objects, and frees the young ones left unmarked. A full collection, as above, runs once a quarter
+objects, and frees the young ones left unmarked. The old objects of a written page are found a
+word of the bitmaps at a time, from the slots both taken and marked: a page of young objects
+only, as most written pages are, costs a few word reads. Testing each slot's bits one by one
+took BinaryTrees' minor collections 10 ms each (at about 850 MHz), for the 64 MB of young
+objects written since the last; they now take under a millisecond. A full collection, as above, runs once a quarter
 more (plus 1 MB) is alive than after the last full one, at once after the minor one that finds
 it, in the same pause.
 

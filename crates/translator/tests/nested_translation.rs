@@ -269,7 +269,9 @@ fn for_each_over_an_iterable_is_the_iterator_loop() {
     assert_contains(
         &rust,
         &[
-            "let it = A__iterator(&a);",
+            // The iterators of the two loops are two variables, each made on the stack.
+            "let it = A__iterator_on_stack(&a, &slot_1);",
+            "let it = A__iterator_on_stack(&a, &slot_2);",
             "'outer: while it.has_next() {",
             "let s = java::cast(&it.next(), |o| o.as_string(), (\"java.lang.String\", java::BASE));",
             "continue 'outer;",

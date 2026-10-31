@@ -228,16 +228,18 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | compile-time constant | `const` | `X` |
 | primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
-| object or string that only its class's initialization assigns | `java::Final<T>`, behind a `LazyLock` likewise | `X.get().clone()`, or the place `(*X.get())`; `X.set(v)` |
+| object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())`; `X.set(v)` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
 
 A `static final` of object, array or string type that no code but its class's static
 initialization assigns (`Facts::final_statics`, from `analysis/statics.rs`) is a `java::Final`:
-a `OnceLock` that the initializer's one assignment sets, next to the value it starts with (Java's
-default, or the initializer's value for a class initialized lazily). Its value never changes once
-the class is initialized, so a read takes no lock: `get()` lends the value set, or the starting
-value before that, which is what a read during the initializer sees (null for a static not yet
-assigned, as in Java). Where the read is only borrowed (the object of a call or a field access,
+the value the initializer's one assignment sets, the value it starts with (Java's default, or the
+initializer's value for a class initialized lazily, built on the first read when it is not a
+constant), and a pointer to whichever is current, which the assignment sets with release. Its
+value never changes once the class is initialized, so a read takes no lock: `get()` loads the
+pointer, tests that it is set and lends what it points at, the value set or the starting value
+before that, which is what a read during the initializer sees (null for a static not yet
+assigned, as in Java). There is no `LazyLock` around it, whose own test each read would pay. Where the read is only borrowed (the object of a call or a field access,
 an array that is indexed or measured, a string that is lent, a null test), the generator writes
 the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clone; a static that
 starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is

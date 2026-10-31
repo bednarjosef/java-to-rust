@@ -56,7 +56,63 @@ public class AssignedInTryOrThrown {
         return key;
     }
 
+    interface Filter {
+        String parse();
+    }
+
+    record And(String text) implements Filter {
+        public String parse() {
+            return "and " + text;
+        }
+    }
+
+    record Not(String text) implements Filter {
+        public String parse() {
+            if (text.isEmpty()) {
+                throw new IllegalStateException("nothing to negate");
+            }
+            return "not " + text;
+        }
+    }
+
+    // A local that a switch in a `try` sets in every case, read after the `try`, whose clauses
+    // all throw, as `SearchFilter.createNextFilter` makes its filter.
+    static Filter next(char token, String text) throws Exception {
+        Filter filter;
+        String parsed;
+        try {
+            switch (token) {
+                case '&':
+                    filter = new And(text);
+                    parsed = filter.parse();
+                    break;
+                case '!':
+                    filter = new Not(text);
+                    parsed = filter.parse();
+                    break;
+                default:
+                    throw new IllegalArgumentException("unknown " + token);
+            }
+            parsed = parsed + "!";
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new Exception("unable to parse " + text + ": " + e.getMessage());
+        }
+        System.out.println(parsed);
+        return filter;
+    }
+
     public static void main(String[] args) throws Exception {
+        System.out.println(next('&', "a"));
+        System.out.println(next('!', "b"));
+        for (char token : new char[] {'!', '?'}) {
+            try {
+                next(token, "");
+            } catch (Exception e) {
+                System.out.println(e.getMessage());
+            }
+        }
         System.out.println(derive(1, false));
         System.out.println(derive(2, true));
         System.out.println(derive(1, true));

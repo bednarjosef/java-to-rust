@@ -13,6 +13,13 @@ public class ClassCastAndIsInstance {
         public double area() { return 4.0; }
     }
     enum Color { RED, GREEN }
+    // An enum whose constants have bodies, each a class below the enum.
+    enum Op {
+        PLUS { int apply(int a, int b) { return a + b; } },
+        TIMES { int apply(int a, int b) { return a * b; } };
+        abstract int apply(int a, int b);
+    }
+    static final class Point { }
 
     static <T> T as(Class<T> type, Object o) {
         if (!type.isInstance(o)) {
@@ -56,6 +63,28 @@ public class ClassCastAndIsInstance {
         Class<? extends Shape> k = Square.class;
         Shape sq = k.cast(values[1]);
         System.out.println(sq.area());
+        // Classes that nothing extends, and an enum whose constants are classes below it.
+        Object[] more = { Op.PLUS, Op.TIMES, new Point(), Color.GREEN, true, 'c', new ArithmeticException("x") };
+        Class<?>[] leaves = { Op.class, Point.class, Color.class, Boolean.class, Character.class, Square.class,
+            ArithmeticException.class, RuntimeException.class };
+        for (Class<?> type : leaves) {
+            StringBuilder line = new StringBuilder(type.getSimpleName() + ":");
+            for (Object value : more) {
+                line.append(' ').append(type.isInstance(value) ? 1 : 0);
+            }
+            System.out.println(line);
+        }
+        System.out.println(Op.class.cast(more[1]).apply(6, 7) + " " + Color.class.cast(more[3]));
+        try {
+            System.out.println(1 / (args.length));
+        } catch (RuntimeException e) {
+            System.out.println(ArithmeticException.class.isInstance(e) + " " + RuntimeException.class.isInstance(e));
+        }
+        try {
+            System.out.println(Point.class.cast(more[3]));
+        } catch (ClassCastException e) {
+            System.out.println("caught: " + e.getMessage());
+        }
         Object wrong = values[2];
         try {
             Square square = Square.class.cast(values[0]);

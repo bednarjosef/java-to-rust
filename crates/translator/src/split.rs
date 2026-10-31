@@ -226,8 +226,11 @@ pub fn split(mut tree: ModuleTree, crates: usize) -> Result<Workspace, String> {
     }
     let splits = std::cell::RefCell::new(splits);
     let tree = &tree;
+    // No warnings, as in the body crates: the Minecraft server's header had thousands
+    // (parentheses, unreachable code after a call that throws, enum variants' names), which rustc
+    // renders and Cargo keeps with the crate's build.
     let header = format!(
-        "{}#![allow(dead_code, unused_imports, unused_mut, unused_variables, non_snake_case)]\n\n{}",
+        "{}#![allow(warnings)]\n\n{}",
         tree.header,
         nest(tree, &|_| true, &|m| {
             let uses = uses_text(&tree.modules[m].uses);
@@ -405,6 +408,9 @@ const SMALL_TOKENS: usize = 48;
 /// The arms of a `match` that passes a failure on (`match x { Ok(v) => v, Err(e) => return
 /// Err(..) }`, `Some(v) => v, None => ..`, which `codegen::exceptions` writes for rustc's sake
 /// where Java code calls a method that throws) count as one token, as the `?` they stand for did.
+/// So does a path (`crate::net::minecraft::world::level::biome::ClimateParameter`), one name
+/// however deep its package: a cast of an `Object` to a class (`Object::as_x`, a compare of the
+/// class number) is as small in a program of many packages as in one of none.
 fn small(code: &str) -> bool {
     fn passes_on(stream: &proc_macro2::TokenStream) -> bool {
         let first: String = stream.clone().into_iter().take(6).map(|t| t.to_string()).collect();
@@ -412,7 +418,20 @@ fn small(code: &str) -> bool {
     }
     fn count(stream: proc_macro2::TokenStream, limit: usize) -> usize {
         let mut n = 0;
-        for token in stream {
+        let mut tokens = stream.into_iter().peekable();
+        while let Some(token) = tokens.next() {
+            // `::` and the name after it continue the path before them.
+            if let proc_macro2::TokenTree::Punct(p) = &token
+                && p.as_char() == ':'
+                && p.spacing() == proc_macro2::Spacing::Joint
+                && matches!(tokens.peek(), Some(proc_macro2::TokenTree::Punct(q)) if q.as_char() == ':')
+            {
+                tokens.next();
+                if matches!(tokens.peek(), Some(proc_macro2::TokenTree::Ident(_))) {
+                    tokens.next();
+                }
+                continue;
+            }
             n += 1;
             if let proc_macro2::TokenTree::Group(g) = token
                 && !(g.delimiter() == proc_macro2::Delimiter::Brace && passes_on(&g.stream()))
@@ -978,6 +997,7 @@ mod tests {
             "fn get(x: i32) -> i32 {{ x + 1 }}\n\nfn sum(x: i32) -> i32 {{\n{large}    x\n}}\n\n\
              #[cold]\n#[inline(never)]\nfn slow() {{}}\n\n\
              #[inline]\nfn init_a() {{ if A.get() {{ return; }} slow() }}\n\n\
+             fn deep(o: &O) -> Option<a::b::c::d::e::f::g::h::i::j::K> {{ match o.tag() {{ 7 => {{ let k: &a::b::c::d::e::f::g::h::i::j::K = o.get(); Some(k.clone()) }} _ => None, }} }}\n\n\
              pub struct S;\n\nimpl S {{\n    fn size(&self) -> i32 {{ 3 }}\n    fn total(&self, x: i32) -> i32 {{\n{large}        x\n    }}\n}}\n"
         );
         let part = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
@@ -990,6 +1010,8 @@ mod tests {
         // So does one that the generator marked `#[inline]` itself, a class's initialization check.
         assert!(header.contains("#[inline]\npub fn init_a() { if A.get() { return; } slow() }"), "{header}");
         assert!(header.contains(&format!("{inline}pub fn size(&self) -> i32 {{ 3 }}")), "{header}");
+        // A path is one token, however long.
+        assert!(header.contains(&format!("{inline}pub fn deep(")), "{header}");
         assert!(header.contains(&format!("{inline}pub fn total(&self, p0: i32)")), "{header}");
         // A moved function is its declaration, which keeps its attributes but `#[inline]`.
         let externs = &part.externs;
