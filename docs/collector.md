@@ -281,16 +281,32 @@ slower than alone, the cost of the atomic mark bits.
 
 ## Generations
 
-With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object that
-lives through a collection keeps its mark and is old. A minor collection marks from the roots
-and from the old objects on the pages written since the last collection, stops at marked
+With `JAVA_GC_GENERATIONS=1`, collections are minor where the system allows it. An object
+that lives through two collections keeps its mark and is old. A minor collection marks from the
+roots and from the old objects on the pages written since the last collection, stops at marked
 objects, and frees the young ones left unmarked. The old objects of a written page are found a
 word of the bitmaps at a time, from the slots both taken and marked: a page of young objects
 only, as most written pages are, costs a few word reads. Testing each slot's bits one by one
 took BinaryTrees' minor collections 10 ms each (at about 850 MHz), for the 64 MB of young
-objects written since the last; they now take under a millisecond. A full collection, as above, runs once a quarter
-more (plus 1 MB) is alive than after the last full one, at once after the minor one that finds
-it, in the same pause.
+objects written since the last; they now take under a millisecond. A full collection, as
+above, runs once a quarter more (plus 1 MB) is alive than after the last full one, at once
+after the minor one that finds it, in the same pause.
+
+- **Ageing.** At the end of each collection (`age` in `gc.rs`), an object that lived through
+  it for the first time loses its mark and is recorded as having lived through one (a bitmap
+  beside the marks, as is one of the old objects); one that had already becomes old. So an
+  object alive at a collection only because the program was in the middle of using it does not
+  become old: BinaryTrees' tree being built at each collection, which made old objects that
+  died at once and a full collection every second time (13 of 77, marking 710 ms in all, at a
+  load average of 17), now 3 of 69 and 206 ms. An object that lives on is marked once more,
+  at the collection after it was made and the next: SmallObjects, whose 91 MB of objects all
+  live to the end, marks them once more.
+- **Pointers to objects not old yet.** An old object may point to one that lived through one
+  collection. That pointer was written after the younger object was made, so in the interval
+  before the last collection or since: on a page written since, or on one the last collection
+  found written and protected. A minor collection scans the old objects of both; the runs of
+  pages each collection protects are kept for the next (up to a million runs, beyond which the
+  next collection is full).
 
 Which pages were written, the kernel says: the heap is registered with a `userfaultfd` in
 asynchronous write-protect mode, each collection protects the pages that now hold old objects

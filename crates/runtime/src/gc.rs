@@ -39,10 +39,10 @@
 //!
 //! Slots are scanned whole, word by word, except in blocks that cannot hold pointers.
 //!
-//! **Generations**, with `JAVA_GC_GENERATIONS=1`: an object that lives through a collection keeps
-//! its mark and is old. A minor collection marks from the roots and from the old objects on the
-//! pages written since the last collection, stops at marked objects, and frees the young ones
-//! left unmarked; a full one clears the marks first, and runs once a quarter more (plus 1 MB) is
+//! **Generations**, with `JAVA_GC_GENERATIONS=1`: an object that lives through two collections
+//! keeps its mark and is old (`age`). A minor collection marks from the roots and from the old
+//! objects on the pages written since the last collection or protected by it, stops at marked
+//! objects, and frees the young ones left unmarked; a full one clears the marks first, and runs once a quarter more (plus 1 MB) is
 //! alive than after the last full one, at once after the minor one that finds it. Which pages
 //! were written the kernel says: the heap is registered with a `userfaultfd` in asynchronous
 //! write-protect mode, each collection protects the pages that hold old objects, and
@@ -274,6 +274,10 @@ struct Meta {
     magic: u64,
     taken: [u64; BITMAP_WORDS],
     marks: [u64; BITMAP_WORDS],
+    /// With generations: the slots old after the last collection, and those that lived through
+    /// one collection and are not old yet (`age`).
+    old: [u64; BITMAP_WORDS],
+    once: [u64; BITMAP_WORDS],
     /// What the sweep found: the slots alive in a small block (1 for a large allocation that
     /// lives), and whether a small block has untaken slots.
     live: u32,
@@ -331,6 +335,14 @@ struct Heap {
     pagemap: i32,
     uffd: i32,
     regions: *mut PageRegion,
+    /// The runs of pages the last collection protected, which the next minor one scans as if
+    /// written (an old object there may point to one that lived through one collection, see
+    /// `age`), and room for those this collection protects; `PROTECTED_RUNS` of each at most. When they
+    /// do not fit (`protected_lost`), the next collection is full.
+    previous: *mut (usize, usize),
+    previous_count: usize,
+    protected: *mut (usize, usize),
+    protected_lost: bool,
     /// The next collection is a full one once this many bytes are alive.
     next_full: usize,
     /// Whether the last collection was minor.
@@ -373,6 +385,10 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     pagemap: -1,
     uffd: -1,
     regions: ptr::null_mut(),
+    previous: ptr::null_mut(),
+    previous_count: 0,
+    protected: ptr::null_mut(),
+    protected_lost: false,
     next_full: 0,
     minor: false,
     code_pages: 0,
@@ -544,6 +560,8 @@ struct PmScanArg {
 
 /// The ranges one call of `PAGEMAP_SCAN` reports at most.
 const REGIONS: usize = 1 << 14;
+/// The most runs of protected pages a collection records for the next one (`Heap::protected`).
+const PROTECTED_RUNS: usize = 1 << 20;
 
 fn futex_wait(word: &AtomicU32, value: u32) {
     unsafe { syscall(SYS_FUTEX, word as *const AtomicU32, FUTEX_WAIT_PRIVATE, value, ptr::null::<u8>()) };
@@ -667,6 +685,8 @@ fn track_writes(h: &mut Heap) {
     h.pagemap = pagemap;
     h.uffd = uffd;
     h.regions = reserve(REGIONS * std::mem::size_of::<PageRegion>()) as *mut PageRegion;
+    h.previous = reserve(PROTECTED_RUNS * std::mem::size_of::<(usize, usize)>()) as *mut (usize, usize);
+    h.protected = reserve(PROTECTED_RUNS * std::mem::size_of::<(usize, usize)>()) as *mut (usize, usize);
     // A first scan, of no pages yet, finds whether the system answers it.
     if !written(h, |_, _| {}) {
         h.pagemap = -1;
@@ -796,6 +816,8 @@ impl Heap {
         m.magic = (1u64 << 32) / size as u64 + 1;
         m.taken = [0; BITMAP_WORDS];
         m.marks = [0; BITMAP_WORDS];
+        m.old = [0; BITMAP_WORDS];
+        m.once = [0; BITMAP_WORDS];
         b
     }
 
@@ -1055,6 +1077,8 @@ fn untake(h: &mut Heap, p: usize) {
     let slot = (((p - start) as u64 * m.magic) >> 32) as usize;
     m.taken[slot / 64] &= !(1u64 << (slot % 64));
     m.marks[slot / 64] &= !(1u64 << (slot % 64));
+    m.old[slot / 64] &= !(1u64 << (slot % 64));
+    m.once[slot / 64] &= !(1u64 << (slot % 64));
     h.list(b);
 }
 
@@ -1466,6 +1490,8 @@ fn allocate_large(layout: Layout, scan: Scan) -> *mut u8 {
     m.start = color as u32;
     m.taken[0] = 1;
     m.marks[0] = 0;
+    m.old[0] = 0;
+    m.once[0] = 0;
     for rest in b + 1..b + n {
         let m = h.meta(rest);
         m.kind = LARGE_REST;
@@ -2165,9 +2191,16 @@ fn collect(g: &Guard) {
     // starts a full one, the full one follows in the same pause, so that the old objects that
     // died do not decide when the next collection runs.
     let h = heap(g);
-    let minor = h.pagemap >= 0 && h.alive < h.next_full;
+    let minor = h.pagemap >= 0 && h.alive < h.next_full && !h.protected_lost;
     if mark_and_sweep(g, me, shares, minor, taken, started) && heap(g).alive >= heap(g).next_full {
         mark_and_sweep(g, me, shares, false, taken, started);
+    }
+    let h = heap(g);
+    if h.pagemap >= 0 {
+        age(h);
+        if !protect_old(h) {
+            h.pagemap = -1;
+        }
     }
     scale_by_time(heap(g), started_time);
     give_back(heap(g));
@@ -2321,6 +2354,11 @@ fn mark_and_sweep(
         let complete = {
             let h = &*h;
             written(h, |from, to| push_old(h, &mut marker, from, to))
+                && (0..h.previous_count).all(|i| {
+                    let (from, to) = unsafe { *h.previous.add(i) };
+                    push_old(h, &mut marker, from, to);
+                    true
+                })
         };
         if !complete {
             h.pagemap = -1;
@@ -2379,9 +2417,6 @@ fn mark_and_sweep(
     let census = census::LEVEL.load(Ordering::Relaxed);
     if census > 0 && !minor {
         census::census(h, census);
-    }
-    if h.pagemap >= 0 && !protect_old(h) {
-        h.pagemap = -1;
     }
     h.minor = minor;
     if !minor {
@@ -2480,33 +2515,76 @@ fn old_on(h: &Heap, page: usize) -> bool {
     }
 }
 
+/// Ages the objects that lived through this collection, with generations: one that was neither
+/// old nor had lived through a collection before has now (`once`) and loses its mark, so that
+/// it stays young until the next collection; one that had becomes old and keeps its mark, as
+/// does an old one. Objects that die young therefore do not become old by being alive at one
+/// collection: in BinaryTrees, the tree being built.
+///
+/// An old object may then point to one that lived through one collection. The pointer was
+/// written after that object was made, so on a page written in the interval before the last
+/// collection or since: the next minor collection scans, besides the pages written since, those
+/// the last one protected (`Heap::previous`).
+fn age(h: &mut Heap) {
+    for b in 0..h.top {
+        let m = h.meta(b);
+        let words = match m.kind {
+            SMALL => (m.slots as usize).div_ceil(64),
+            LARGE => 1,
+            _ => 0,
+        };
+        for w in 0..words {
+            let reached = m.taken[w] & m.marks[w];
+            let fresh = reached & !m.old[w] & !m.once[w];
+            m.once[w] = fresh;
+            m.marks[w] = reached & !fresh;
+            m.old[w] = m.marks[w];
+        }
+    }
+}
+
 /// Protects the pages not protected that now hold old objects, in runs, so that a write to one
 /// is reported at the next collection. Pages of young objects only stay writable, so that
 /// allocation does not fault. False when the system refuses.
-fn protect_old(h: &Heap) -> bool {
+fn protect_old(h: &mut Heap) -> bool {
     let mut run: Option<(usize, usize)> = None;
     let mut refused = false;
-    let mut protect = |from: usize, to: usize| {
-        let mut range = [from as u64, (to - from) as u64, UFFDIO_WRITEPROTECT_MODE_WP];
-        refused |= unsafe { ioctl(h.uffd, UFFDIO_WRITEPROTECT, range.as_mut_ptr()) } != 0;
-    };
-    let complete = written(h, |from, to| {
-        for page in (from..to).step_by(PAGE) {
-            if old_on(h, page) {
-                run = match run {
-                    Some((start, end)) if end == page => Some((start, page + PAGE)),
-                    Some((start, end)) => {
-                        protect(start, end);
-                        Some((page, page + PAGE))
-                    }
-                    None => Some((page, page + PAGE)),
-                };
+    let (protected, mut count, mut lost) = (h.protected, 0, false);
+    let complete = {
+        let h = &*h;
+        let mut protect = |from: usize, to: usize| {
+            let mut range = [from as u64, (to - from) as u64, UFFDIO_WRITEPROTECT_MODE_WP];
+            refused |= unsafe { ioctl(h.uffd, UFFDIO_WRITEPROTECT, range.as_mut_ptr()) } != 0;
+            if count < PROTECTED_RUNS {
+                unsafe { *protected.add(count) = (from, to) };
+                count += 1;
+            } else {
+                lost = true;
             }
+        };
+        let complete = written(h, |from, to| {
+            for page in (from..to).step_by(PAGE) {
+                if old_on(h, page) {
+                    run = match run {
+                        Some((start, end)) if end == page => Some((start, page + PAGE)),
+                        Some((start, end)) => {
+                            protect(start, end);
+                            Some((page, page + PAGE))
+                        }
+                        None => Some((page, page + PAGE)),
+                    };
+                }
+            }
+        });
+        if let Some((start, end)) = run {
+            protect(start, end);
         }
-    });
-    if let Some((start, end)) = run {
-        protect(start, end);
-    }
+        complete
+    };
+    // What this collection protected, the next one scans as well as the pages written since.
+    std::mem::swap(&mut h.previous, &mut h.protected);
+    h.previous_count = count;
+    h.protected_lost = lost;
     complete && !refused
 }
 
