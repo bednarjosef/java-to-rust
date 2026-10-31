@@ -411,6 +411,58 @@ impl<'a> Gen<'a> {
         format!("match {value} {{ {} }}", arms.join(", "))
     }
 
+    /// The largest class number among class `c` and the classes below it, which are numbered
+    /// after it and before any other (`dispatch::class_numbers`).
+    fn last_class_tag(&self, c: usize) -> u16 {
+        let h = &self.class.hierarchy;
+        let (mut last, mut below, mut stack) = (self.class_tag(c), 0, vec![c]);
+        while let Some(t) = stack.pop() {
+            for &s in &h.subtypes[t] {
+                if h.superclass(s) == Some(t) {
+                    last = last.max(self.class_tag(s));
+                    below += 1;
+                    stack.push(s);
+                }
+            }
+        }
+        // The range holds no number but theirs.
+        debug_assert_eq!(usize::from(last - self.class_tag(c)), below, "the classes below {c} are one range");
+        last
+    }
+
+    /// The `java::ClassSet` of the numbers of the classes that implement interface `c`, which
+    /// `isInstance` and `cast` test a value's number against; `None` for a class, and for an
+    /// interface that a `Throwable` implements, whose values the runtime may make by name.
+    fn interface_members(&self, c: usize) -> Option<String> {
+        if self.class.types[c].kind != TypeKind::Interface {
+            return None;
+        }
+        let h = &self.class.hierarchy;
+        let throwable = self.class.type_index("java.lang.Throwable");
+        let classes: Vec<usize> = (0..self.class.types.len())
+            .filter(|&t| !matches!(self.class.types[t].kind, TypeKind::Interface | TypeKind::Param))
+            .collect();
+        let members: Vec<usize> = classes.iter().copied().filter(|&t| t != c && h.is_subtype(t, c)).collect();
+        if throwable.is_some_and(|e| members.iter().any(|&t| h.is_subtype(t, e))) {
+            return None;
+        }
+        let mut tags: Vec<u16> = members.iter().map(|&t| self.class_tag(t)).collect();
+        tags.sort_unstable();
+        let mut runs: Vec<(u16, u16)> = Vec::new();
+        for tag in tags {
+            match runs.last_mut() {
+                Some(run) if run.1 + 1 == tag => run.1 = tag,
+                _ => runs.push((tag, tag)),
+            }
+        }
+        let words = match (runs.first(), runs.last()) {
+            (Some(first), Some(last)) => usize::from(last.1 / 64 - first.0 / 64) + 1,
+            _ => 1,
+        };
+        let list: Vec<String> = runs.iter().map(|(a, b)| format!("({a}, {b})")).collect();
+        Some(format!("java::ClassSet::<{words}>::of(&[{}])", list.join(", ")))
+    }
+
     /// The `java::Class` of class `c` of the program, written out.
     fn class_value(&mut self, c: usize) -> String {
         let decl = &self.class.types[c];
@@ -446,9 +498,17 @@ impl<'a> Gen<'a> {
         let leaf = matches!(kind, TypeKind::Class | TypeKind::Enum)
             && !self.class.hierarchy.has_subtypes(c)
             && throwable.is_none_or(|t| t != c && !self.class.hierarchy.ancestors(c).contains(&t));
-        let value = match leaf {
-            true => format!("{value}.numbered({})", self.class_tag(c)),
-            false => value,
+        // Any other class of a tree has the numbers from its own to its last subclass's
+        // (`dispatch::class_numbers`), which `isInstance` and `cast` test as a range.
+        let tree = matches!(kind, TypeKind::Class | TypeKind::Enum)
+            && throwable.is_none_or(|t| t != c && !self.class.hierarchy.ancestors(c).contains(&t));
+        let value = match (leaf, tree) {
+            (true, _) => format!("{value}.numbered({})", self.class_tag(c)),
+            (false, true) => format!("{value}.numbers({}, {})", self.class_tag(c), self.last_class_tag(c)),
+            (false, false) => match self.interface_members(c) {
+                Some(set) => format!("{value}.members(&const {{ {set} }})"),
+                None => value,
+            },
         };
         if !self.class_details {
             return value;

@@ -26,7 +26,8 @@ clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (fiv
 at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
 Interpreter's from one at a load average of 6.3, SortMillion's from five runs a side at a load
 average of 4, ReflectionLookups', OwnerThreadChecks' and StringKeyHash's from one run of the
-three alone (five runs a side) at a load average of 4.1, EnumKeyLookups' from five runs a side at a
+three alone (five runs a side) at a load average of 4.1, TypeTests' from one with EnumKeyLookups
+(five runs a side) at a load average of about 9, EnumKeyLookups' from five runs a side at a
 load average of 12, and BinaryTrees',
 SmallObjects' and ManyThreadsAllocating's from five runs a side, alternating, at a load average
 of about 3.
@@ -66,6 +67,7 @@ of about 3.
 | StringBuild           |      28 |       1 |      0.04 |           - |           - |            - |
 | StringKeyHash         |      38 |      14 |      0.37 |          14 |          12 |         0.86 |
 | TokenScanner          |     994 |     775 |      0.78 |           - |           - |            - |
+| TypeTests             |     168 |      46 |      0.27 |         107 |          39 |         0.36 |
 | UnlockedObjects       |      69 |      34 |      0.49 |           - |           - |            - |
 
 Differences of 20% or less between two runs are often noise or the placement of code and data
@@ -218,6 +220,16 @@ made on the stack (`java::count_allocation`).
   not tell apart from an array the loop reads, so it reloaded the array's element pointer at each
   element. `java::len` stops the program for an array longer than `i32::MAX` elements, which
   Java's arrays never are, and so tells the compiler that `i < a.length` keeps `i` in bounds.
+- **Type tests of many classes (TypeTests 0.27x, kernel 0.36x).** `instanceof` an interface
+  whose 40 classes are 40 runs of class numbers (each shares a base class with one that does not
+  implement it), and `Class.isInstance` of an abstract class with 80 subclasses and of the
+  interface, of objects of 120 classes held as `Object`, as the Minecraft server's casts to
+  `List` and its entity lookups by class ask them. The interface's test is a bit per class
+  number (`java::ClassSet`), and the classes' values carry their range of numbers and the
+  interface's its set, so `isInstance` tests the value's number instead of the names above its
+  class: 1.43 billion instructions and a 39 ms kernel, against 4.81 billion and 186 ms when
+  `isInstance` compared names and the `instanceof` was a tree of 40 compares (five alternating
+  runs at a load of 8; Java takes 3.82 billion instructions and a 101-131 ms kernel).
 - **Classes known only at run time (ClassCast 1.0x, kernel 1.9x).** `Class.cast` and
   `Class.isInstance` of values of 258 classes behind `Comparable` with their own class and another,
   as the Minecraft server's `StateHolder.getValue` casts each property's value. Each asks the value

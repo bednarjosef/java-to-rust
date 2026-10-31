@@ -80,7 +80,15 @@ holds one function whole while it compiles it, and the server's `Display` alone 
 past 20 GB to compile; LLVM's time grows faster than a function's size, so the parts are small;
 they are items of their own, which the split into crates spreads over the body crates
 (docs/several-crates.md). A `match` over 2048 classes or fewer stays whole, so that its call is
-one jump, not two. `runtime_type_names()`, which `isInstance`, `cast` and array stores ask on
+one jump, not two. A dispatcher's `match` over more than 64 classes runs each arm's call in a
+function of its own (`#[inline(never)] fn arm(o: &C0, ..) { o.area() }` in the arm), which the
+called method may still be inlined into but which is never inlined into the dispatcher: built
+with a profile (`-Cprofile-use`), LLVM inlined the hot arms of the Minecraft server's
+`Function.apply`, a `match` over 11 200 classes, into it, and their stack slots added up to a
+frame of 122 KB against 344 bytes without, which a deep recursion of the server's codecs
+overflowed. An arm costs the same instructions either way (a jump to the method or to its arm).
+An arm that reads the receiver itself, and a dispatcher with type parameters, which a nested
+function cannot name, keep the call in place. `runtime_type_names()`, which `isInstance`, `cast` and array stores ask on
 every call, has no `match`: it reads a static at the crate root that holds each class's names by
 class number (`TYPE_NAMES_BY_CLASS_NUMBER`, `class_values::type_names_table`), one load at any
 optimization level, where a `match` over the thousand classes that implement `Comparable` is a
@@ -284,7 +292,10 @@ Rules:
   "is an `Enum`" (the cast of `EnumMap.get`'s key) is one range too. A test spans each run of
   the classes it accepts that no other class of the enum breaks (`Gen::tags`; a `catch` clause
   also spans the classes that earlier clauses took), so an interface whose classes happen to be
-  numbered together is one range too, and the others are a few. What is not a program object (a
+  numbered together is one range too, and the others are a few. An `as_x()` of an interface
+  whose classes are more than four runs tests a bit per number instead (`java::ClassSet`, a
+  static in the function, one load and a shift), where a `match` of the runs is a tree of
+  compares: the Minecraft server's `as_java_util_list` was 28 runs. What is not a program object (a
   string, a box, a Java enum constant, an array, a builder) is held in the low six bytes when it
   fits there and in a box otherwise; an array, a builder, a box with identity and a string with
   identity (`java::JStr`) are their own handles. A number that no class of the type has is a bug

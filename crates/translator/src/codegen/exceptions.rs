@@ -1093,15 +1093,49 @@ impl<'a> Gen<'a> {
         if !call || exits.jumps || exits.other_returns {
             return text;
         }
+        let copies = self.cold_copies(value);
+        let wrap = |out: String| if copies.is_empty() { out } else { format!("{{ {copies}{out} }}") };
         if !exits.raises {
-            return format!("{}(|| {text})", self.runtime("cold"));
+            return wrap(format!("{}(|| {text})", self.runtime("cold")));
         }
         if !self.throwing || !self.attempts.is_empty() {
             return text;
         }
         let throwable = self.throwable_type();
         // A closure that returns a `Result` may pass a failure on (`check_closures`).
-        format!("{}(|| -> Result<{throwable}, {throwable}> {{ Ok({text}) }})", self.runtime("cold_or_raised"))
+        wrap(format!(
+            "{}(|| -> Result<{throwable}, {throwable}> {{ Ok({text}) }})",
+            self.runtime("cold_or_raised")
+        ))
+    }
+
+    /// `let x = x;` for each local of primitive type that `value` reads, which the closure of
+    /// `cold_thrown` then borrows in place of the method's own: a local whose address a closure
+    /// takes lives in memory, stored where it is set on every run, though the closure only runs
+    /// where the method throws (`Validate.inclusiveBetween(0, size - 1, index)` stored its three
+    /// longs at every call), and the copies are stored only there. None in a `switch` or an
+    /// `instanceof`, which can declare locals of their own.
+    fn cold_copies(&self, value: &Expr) -> String {
+        let mut names = Vec::new();
+        let mut own_locals = false;
+        visit_expr(value, &mut |e| match &e.kind {
+            ExprKind::Switch { .. } | ExprKind::InstanceOf { .. } => own_locals = true,
+            ExprKind::Var(name) if e.ty.is_numeric() || matches!(e.ty, Type::Boolean) => {
+                let rust = self.local(name);
+                if !names.contains(&rust) {
+                    names.push(rust);
+                }
+            }
+            _ => {}
+        });
+        if own_locals {
+            return String::new();
+        }
+        names
+            .iter()
+            .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .map(|n| format!("let {n} = {n}; "))
+            .collect()
     }
 
     /// The `Throwable` that `throw value` throws. A value that may be null throws a
