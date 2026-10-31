@@ -43,6 +43,9 @@
 # TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G)
 # TRIAL_BODY_MB      how many megabytes of the body crates' Rust the trial step builds at once
 #                    (default 64), with CARGO_BUILD_JOBS threads among them (default: the cores)
+# TRIAL_LINK_JOBS    the threads of the last build, the binary's crate alone once the bodies are
+#                    built: with the release profile's thin LTO it generates the code of every
+#                    crate (default: the cores)
 # TRIAL_PROFILE      the Cargo profile the trial step builds with (default dev, which takes the least
 #                    memory and time to build; its runtime crate is built optimized all the same)
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
@@ -612,7 +615,9 @@ trial() {
   # crates then build in groups of at most TRIAL_BODY_MB of Rust, the largest first: a crate's
   # memory grows with its size, and the CARGO_BUILD_JOBS threads go to the code generation of the
   # few crates of a group (one alone builds 16 MB of Rust in 40 s on 16 threads at opt-level 1,
-  # and in minutes on one). When a group passes the memory cap and the build is killed without a
+  # and in minutes on one). The binary's crate comes last, alone with TRIAL_LINK_JOBS threads:
+  # with thin LTO, the bodies' rustc only optimizes their code and the binary's generates all of
+  # it, the longest step of a release build. When a group passes the memory cap and the build is killed without a
   # compile error, the rest build one crate at a time, past the crates already built.
   local -a build=(cargo build -q --keep-going --profile "${TRIAL_PROFILE:-dev}"
     --config 'profile.dev.package.java-runtime.opt-level=2')
@@ -634,7 +639,7 @@ trial() {
       # shellcheck disable=SC2086 # each group is its `-p` arguments
       CARGO_BUILD_JOBS=$jobs "${slot[@]}" "${cap[@]}" "${build[@]}" $g || return
     done
-    CARGO_BUILD_JOBS=$jobs "${slot[@]}" "${cap[@]}" "${build[@]}"
+    CARGO_BUILD_JOBS=${TRIAL_LINK_JOBS:-$(nproc)} "${slot[@]}" "${cap[@]}" "${build[@]}"
   }
   (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
     && CARGO_BUILD_JOBS=${TRIAL_HEADER_JOBS:-1} "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
