@@ -5575,7 +5575,7 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
         &rust,
         &[
             "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
-            "Err(java::cold(|| Throwable::Missing(Arc::new(",
+            "Err({ let x = x; java::cold(|| Throwable::Missing(Arc::new(",
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "match find(xs, x) { Ok(v) => v, Err(e) => return Err(e) }",
             "Err(caught) => {",
@@ -5619,10 +5619,11 @@ fn a_thrown_exception_whose_message_can_throw_is_made_out_of_line() {
     assert_contains(
         &rust,
         &[
-            // A message with a quote in a literal, and no call that throws.
-            "Err(java::cold(|| Throwable::Refused(",
+            // A message with a quote in a literal, and no call that throws. The closure borrows a
+            // copy of `code` made where it runs, so `code` itself stays in a register.
+            "Err({ let code = code; java::cold(|| Throwable::Refused(",
             // The call in the message throws out of the closure, as out of the method.
-            "Err(java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(Throwable::Refused(",
+            "Err({ let code = code; java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(Throwable::Refused(",
             "match describe(code) { Ok(v) => v, Err(e) => return Err(e) }",
         ],
     );
@@ -5649,7 +5650,7 @@ fn an_exception_that_nothing_catches_ends_the_program_where_it_is_thrown() {
         &rust,
         &[
             "fn check(x: i32) -> i32 {",
-            "java::throw_uncaught(java::cold(|| Throwable::IllegalArgumentException(",
+            "java::throw_uncaught({ let x = x; java::cold(|| Throwable::IllegalArgumentException(",
         ],
     );
     assert_lacks(&rust, &["Result<", "'attempt"]);

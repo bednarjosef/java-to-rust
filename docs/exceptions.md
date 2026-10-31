@@ -117,7 +117,13 @@ would in a method that throws, outside any `try`: there the closure returns a `R
 `java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(..) })` gives either exception to
 the `throw`. Inside a `try`, or in a method whose `throw` ends the program, such a message stays
 in place. The test for these words skips string and character literals, so a message with a `'`
-in it is made out of line too.
+in it is made out of line too. The closure borrows what it reads, and a local whose address is
+taken lives in memory, stored wherever it is set, though the closure runs only when the method
+throws: so the locals of primitive type that the message reads are copied first, where the
+exception is made (`{ let value = value; java::cold(|| ..) }`), and the closure borrows the
+copies. `Validate.inclusiveBetween(0, size - 1, index)` stored its three longs on every call
+before. A message with a `switch` or an `instanceof` in it, which can declare locals of their
+own, copies none.
 
 The `match` is written out, rather than a `?` or a macro, for the time rustc takes: a `?` leaves
 the `Try` trait and the `From` conversion to be worked out at each one, and a macro is expanded
