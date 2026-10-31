@@ -11,11 +11,7 @@ const STACK: usize = 256 << 20;
 /// threads get a large stack, as the translator's own thread does, since translating recurses as
 /// deep as a program's expressions and statements nest.
 pub fn parallel<R: Send>(n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let threads = std::env::var("CORPUS_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n: &usize| n > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let threads = threads();
     let next = AtomicUsize::new(0);
     let results: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
@@ -35,4 +31,14 @@ pub fn parallel<R: Send>(n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
         }
     });
     results.into_iter().map(|r| r.into_inner().unwrap().expect("every index is run")).collect()
+}
+
+/// The number of worker threads: `CORPUS_THREADS`, or one per CPU.
+#[allow(dead_code, reason = "the whole-program test uses it; the corpus test includes this file too")]
+pub fn threads() -> usize {
+    std::env::var("CORPUS_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }

@@ -259,7 +259,29 @@ fn run_rust(
     if let Some(stored) = stored {
         return (Ok(stored), None);
     }
-    let target = work.join("cargo");
+    // The translator names the crate after the main class.
+    let crate_name = p.main.rsplit('.').next().unwrap_or_default().to_lowercase();
+    let binary = match build_crate(work, &p.name, &dir, &crate_name) {
+        Ok(binary) => binary,
+        Err(stderr) => return (Err(format!("does not compile: {stderr}")), None),
+    };
+    (Ok(run(Command::new(binary).env_remove("LD_LIBRARY_PATH").stdin(stdin_of(p)).output().unwrap())), key)
+}
+
+/// Builds the crate in `dir` and returns its binary, a link under `dir` of the one cargo wrote, or
+/// cargo's standard error. The programs build in one of `build_directories()` target directories
+/// under `work`, picked by the program's `name`, so that builds run side by side (cargo builds one
+/// at a time in a target directory) and each directory compiles the runtime once. A lock per
+/// directory keeps a build and the link of its binary together: programs whose main classes share
+/// a name write the same file there.
+fn build_crate(work: &Path, name: &str, dir: &Path, crate_name: &str) -> Result<PathBuf, String> {
+    static LOCKS: std::sync::OnceLock<Vec<std::sync::Mutex<()>>> = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(|| (0..build_directories()).map(|_| std::sync::Mutex::new(())).collect());
+    let mut fingerprint = Fingerprint::new();
+    fingerprint.field(name.as_bytes());
+    let index = usize::from_str_radix(&fingerprint.key()[..8], 16).unwrap() % locks.len();
+    let target = work.join(format!("cargo-{index}"));
+    let _alone = locks[index].lock().unwrap_or_else(|e| e.into_inner());
     let built = Command::new("cargo")
         .args(["build", "-q", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))
@@ -267,12 +289,24 @@ fn run_rust(
         .output()
         .unwrap();
     if !built.status.success() {
-        return (Err(format!("does not compile: {}", String::from_utf8_lossy(&built.stderr))), None);
+        return Err(String::from_utf8_lossy(&built.stderr).into_owned());
     }
-    // The translator names the crate after the main class.
-    let crate_name = p.main.rsplit('.').next().unwrap_or_default().to_lowercase();
-    let binary = target.join("debug").join(crate_name);
-    (Ok(run(Command::new(binary).env_remove("LD_LIBRARY_PATH").stdin(stdin_of(p)).output().unwrap())), key)
+    let binary = dir.join(crate_name);
+    let _ = std::fs::remove_file(&binary);
+    let built = target.join("debug").join(crate_name);
+    std::fs::hard_link(&built, &binary).or_else(|_| std::fs::copy(&built, &binary).map(drop)).unwrap();
+    Ok(binary)
+}
+
+/// How many builds of the programs may run at once: `WHOLE_PROGRAM_BUILDS`, or one for every four
+/// worker threads. Each thread also runs a translator and a javac at the same time; one build per
+/// thread, with 8 threads, passed the gate's 12 GB.
+fn build_directories() -> usize {
+    std::env::var("WHOLE_PROGRAM_BUILDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or_else(|| parallel::threads().div_ceil(4))
 }
 
 /// The key of a translated program's run: `build`, the crate the translator wrote in `dir` (its
@@ -1594,16 +1628,11 @@ fn sun_misc_raw_memory_matches_java() {
         .output()
         .unwrap();
     assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
-    // The target directory of the corpus's programs, which has the runtime built.
-    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program").join("cargo");
-    let built = Command::new("cargo")
-        .args(["build", "-q", "--manifest-path"])
-        .arg(dir.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", &target)
-        .output()
-        .unwrap();
-    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
-    let rust = Command::new(target.join("debug").join("rawmemory")).current_dir(&classes).output().unwrap();
+    // In a target directory of the corpus's programs, which has the runtime built.
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program");
+    let binary =
+        build_crate(&target, "rawmemory", &dir, "rawmemory").unwrap_or_else(|stderr| panic!("{stderr}"));
+    let rust = Command::new(binary).current_dir(&classes).output().unwrap();
     for (stream, java, rust) in
         [("output", &java.stdout, &rust.stdout), ("error", &java.stderr, &rust.stderr)]
     {
