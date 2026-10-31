@@ -284,7 +284,10 @@ Rules:
   "is an `Enum`" (the cast of `EnumMap.get`'s key) is one range too. A test spans each run of
   the classes it accepts that no other class of the enum breaks (`Gen::tags`; a `catch` clause
   also spans the classes that earlier clauses took), so an interface whose classes happen to be
-  numbered together is one range too, and the others are a few. What is not a program object (a
+  numbered together is one range too, and the others are a few. An `as_x()` of an interface
+  whose classes are more than four runs tests a bit per number instead (`java::ClassSet`, a
+  static in the function, one load and a shift), where a `match` of the runs is a tree of
+  compares: the Minecraft server's `as_java_util_list` was 28 runs. What is not a program object (a
   string, a box, a Java enum constant, an array, a builder) is held in the low six bytes when it
   fits there and in a box otherwise; an array, a builder, a box with identity and a string with
   identity (`java::JStr`) are their own handles. A number that no class of the type has is a bug

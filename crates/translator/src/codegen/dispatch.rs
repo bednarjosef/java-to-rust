@@ -93,6 +93,10 @@ const CUT_ABOVE: usize = 2048;
 /// where it could be the match's last arm, `_`, instead (`tag_match`).
 const LAST_ARM_RUNS: usize = 4;
 
+/// The most runs of class numbers that a test of an interface by the class number (`as_x()`) is a
+/// `match` of; one of more runs is a `java::ClassSet`, a bit per number, one load and a shift.
+const SET_RUNS: usize = 4;
+
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
 const PART_CLASSES: usize = 256;
@@ -406,6 +410,17 @@ impl<'a> Gen<'a> {
     /// (the Minecraft server's some 20 000 classes) are hundreds of groups, and a search of the
     /// group for each class of `among`, once per group, took seconds.
     pub(super) fn tag_patterns(&self, groups: &[&[usize]], among: &[usize]) -> Vec<String> {
+        let range =
+            |(first, last)| if first == last { format!("{first}") } else { format!("{first}..={last}") };
+        self.tag_runs(groups, among)
+            .into_iter()
+            .map(|runs| runs.into_iter().map(range).collect::<Vec<_>>().join(" | "))
+            .collect()
+    }
+
+    /// The runs of class numbers of each of `groups` that `tag_patterns` writes, as
+    /// `(first, last)`.
+    pub(super) fn tag_runs(&self, groups: &[&[usize]], among: &[usize]) -> Vec<Vec<(u16, u16)>> {
         let mut group_of: crate::analysis::FastMap<usize, usize> = Default::default();
         for (g, classes) in groups.iter().enumerate() {
             group_of.extend(classes.iter().map(|&c| (c, g)));
@@ -430,9 +445,7 @@ impl<'a> Gen<'a> {
             }
             open = group;
         }
-        let range =
-            |(first, last)| if first == last { format!("{first}") } else { format!("{first}..={last}") };
-        runs.into_iter().map(|runs| runs.into_iter().map(range).collect::<Vec<_>>().join(" | ")).collect()
+        runs
     }
 
     /// The constructor of each variant (`Shape::Circle(handle)`, an associated function named as
@@ -2429,8 +2442,19 @@ impl<'a> Gen<'a> {
         } else if let Some(e) = rep {
             // A value of another enum has the same bits.
             let target = struct_name(&self.class.types[e].name);
+            let runs = self.tag_runs(&[&passing], &variants).pop().unwrap_or_default();
             if passing.len() == variants.len() {
                 self.line(&format!("Some({target}(self.0))"));
+            } else if runs.len() > SET_RUNS {
+                // Bits by class number, where a `match` of the runs would be a tree of compares.
+                let (first, last) = (runs[0].0 >> 6, runs[runs.len() - 1].1 >> 6);
+                let list: Vec<String> = runs.iter().map(|(a, b)| format!("({a}, {b})")).collect();
+                self.line(&format!(
+                    "static CLASSES: java::ClassSet<{}> = java::ClassSet::of(&[{}]);",
+                    last - first + 1,
+                    list.join(", ")
+                ));
+                self.line(&format!("CLASSES.contains(self.0.tag()).then_some({target}(self.0))"));
             } else {
                 self.line("match self.0.tag() {");
                 self.indent += 1;

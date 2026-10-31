@@ -39,6 +39,40 @@ fn tail(name: &str) -> u64 {
     }
 }
 
+/// A set of class numbers, a bit for each from the word of the first to that of the last: the
+/// test of a type whose classes are many runs of numbers (`as_x()` of an interface), which a
+/// `match` makes a tree of compares.
+pub struct ClassSet<const N: usize> {
+    /// The word of the first number, the number divided by 64.
+    first: usize,
+    words: [u64; N],
+}
+
+impl<const N: usize> ClassSet<N> {
+    /// The set of the numbers of `runs`, `(first, last)` in order, in `N` words.
+    pub const fn of(runs: &[(u16, u16)]) -> ClassSet<N> {
+        let first = if runs.is_empty() { 0 } else { runs[0].0 as usize / 64 };
+        let mut words = [0u64; N];
+        let mut r = 0;
+        while r < runs.len() {
+            let mut n = runs[r].0 as usize;
+            while n <= runs[r].1 as usize {
+                words[n / 64 - first] |= 1 << (n % 64);
+                n += 1;
+            }
+            r += 1;
+        }
+        ClassSet { first, words }
+    }
+
+    /// Whether class number `n` is in the set.
+    #[inline(always)]
+    pub fn contains(&self, n: u16) -> bool {
+        let w = (n as usize / 64).wrapping_sub(self.first);
+        w < N && self.words[w] >> (n % 64) & 1 != 0
+    }
+}
+
 /// What a class is, which its `toString` shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -94,9 +128,15 @@ pub struct Class {
     /// no other class of the program extends: an instance is then exactly of this class, which
     /// `is_instance` and `check_cast` test by the first of its names alone.
     leaf: bool,
-    /// The class number of a `leaf` of the program (`numbered`), which its values carry: a test
-    /// of a value whose number the translation has compares the numbers; 0 when unknown.
+    /// The class numbers of the program's classes at or below this one (`numbered`, `numbers`),
+    /// from its own to its last subclass's, which their values carry: a test of a value whose
+    /// number the translation has is one subtract and one compare; 0 when unknown.
     number: u16,
+    last: u16,
+    /// The class numbers of the program's classes below an interface (`members`), as the words
+    /// of a `ClassSet` from the word of the first: a test of a value whose number the translation
+    /// has is a load and a shift. Empty when unknown.
+    members: (usize, &'static [u64]),
     /// The hash of the name as a string's (`hash_code`), computed when the class value is made.
     hash: i32,
 }
@@ -177,6 +217,8 @@ impl Class {
             interfaces: &[],
             leaf: false,
             number: 0,
+            last: 0,
+            members: (0, &[]),
             hash: name_hash(name),
         }
     }
@@ -188,7 +230,41 @@ impl Class {
 
     /// The `leaf` of the program whose values carry class number `number`.
     pub const fn numbered(self, number: u16) -> Class {
-        Class { leaf: true, number, ..self }
+        Class { leaf: true, number, last: number, ..self }
+    }
+
+    /// The class of the program whose values, and those of its subclasses, carry the class
+    /// numbers `number..=last`: the classes are numbered each before its subclasses, so those at
+    /// or below a class are one range.
+    pub const fn numbers(self, number: u16, last: u16) -> Class {
+        Class { number, last, ..self }
+    }
+
+    /// The interface of the program whose values' classes have the numbers of `set`.
+    pub const fn members<const N: usize>(self, set: &'static ClassSet<N>) -> Class {
+        Class { members: (set.first, &set.words), ..self }
+    }
+
+    /// Whether class number `n` is at or below the class, by its numbers or its members, or
+    /// `None` where it has neither.
+    #[inline(always)]
+    fn holds(&self, n: u16) -> Option<bool> {
+        if self.number != 0 {
+            return Some(self.holds_number(n));
+        }
+        let (first, words) = self.members;
+        if words.is_empty() {
+            return None;
+        }
+        let w = (n as usize / 64).wrapping_sub(first);
+        Some(w < words.len() && words[w] >> (n % 64) & 1 != 0)
+    }
+
+    /// Whether a value of class number `n` is at or below the class; only for a class with
+    /// numbers.
+    #[inline(always)]
+    fn holds_number(&self, n: u16) -> bool {
+        n.wrapping_sub(self.number) <= self.last.wrapping_sub(self.number)
     }
 
     /// The class as the program declares it: what `getModifiers` gives, where it is declared and
@@ -529,17 +605,17 @@ impl Class {
     }
 
     /// `is_instance`, given the class number of `x` where the translation has it (`None` for a
-    /// null `x` or one of unknown class) and the names as a function: for a `numbered` class, a
-    /// compare of the numbers, without asking `x` for its names.
+    /// null `x` or one of unknown class) and the names as a function: for a class with numbers or
+    /// members, a test of the number, without asking `x` for its names.
     #[inline(always)]
     pub fn is_instance_numbered<'n>(
         &self,
         number: Option<u16>,
         names: impl FnOnce() -> Option<&'n [&'n str]>,
     ) -> bool {
-        match number {
-            Some(n) if self.number != 0 => n == self.number,
-            _ => self.is_instance(names()),
+        match number.and_then(|n| self.holds(n)) {
+            Some(holds) => holds,
+            None => self.is_instance(names()),
         }
     }
 
@@ -550,9 +626,8 @@ impl Class {
         number: Option<u16>,
         names: impl FnOnce() -> Option<&'n [&'n str]>,
     ) {
-        match number {
-            Some(n) if self.number != 0 && n == self.number => {}
-            _ => self.check_cast(names()),
+        if number.and_then(|n| self.holds(n)) != Some(true) {
+            self.check_cast(names());
         }
     }
 
@@ -776,5 +851,16 @@ mod tests {
         assert!(!names_contain(&["Ac", "aB"], "Ab"));
         assert!(!names_contain(&[], "Ab"));
         assert!(names_contain(&[""], ""));
+    }
+
+    #[test]
+    fn class_sets_hold_their_runs() {
+        const RUNS: [(u16, u16); 3] = [(70, 72), (130, 130), (190, 260)];
+        static SET: ClassSet<4> = ClassSet::of(&RUNS);
+        for n in 0..400u16 {
+            let inside = RUNS.iter().any(|&(a, b)| (a..=b).contains(&n));
+            assert_eq!(SET.contains(n), inside, "{n}");
+        }
+        assert!(!SET.contains(u16::MAX));
     }
 }

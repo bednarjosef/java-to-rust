@@ -363,12 +363,15 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   that nothing below it can have instances of (a final class of the runtime, or a class or enum
   of the program that no class of the program extends, other than a `Throwable`, which the
   runtime makes by name) is marked a leaf, and they test only the first name, the value's own
-  class. A leaf of the program also carries its class number (`Class::numbered`): where the
-  translation has the value's class number (a value of an enum of classes carries it, whether a
-  variable, an array's element, a field or a call gives it, which is then evaluated once, after
-  the class; a variable of a leaf's type has the leaf's), `isInstance` and `cast` compare the
-  numbers and ask the value for its names only when they differ, to throw
-  (`is_instance_numbered`).
+  class. A class of the program carries the class numbers of the classes at or below it, from
+  its own to its last subclass's, which are one range (`Class::numbered` for a leaf,
+  `Class::numbers`; not a `Throwable`), and an interface of the program the numbers of the
+  classes that implement it, a bit for each (`Class::members`, a `java::ClassSet`; not one that
+  a `Throwable` implements). Where the translation has the value's class number (a value of an
+  enum of classes carries it, whether a variable, an array's element, a field or a call gives
+  it, which is then evaluated once, after the class; a variable of a leaf's type has the
+  leaf's), `isInstance` and `cast` test the number, one subtract and compare or one load and
+  shift, and ask the value for its names only to throw (`is_instance_numbered`).
   `getModifiers`, `isMemberClass`, `isLocalClass`, `isAnonymousClass`, `getEnclosingClass` and
   `getDeclaringClass` answer from what the class value carries in a program that asks for them:
   the modifiers javac gives the class, implicit ones included, and where it is declared
