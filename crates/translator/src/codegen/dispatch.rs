@@ -2351,7 +2351,10 @@ impl<'a> Gen<'a> {
         }
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
         let ty = struct_name(&self.class.types[t].name);
-        self.line(&format!("{}fn {}(this: {ty}{all}){ret} {{", self.vis(), self.enum_fn(t, &name)));
+        // A method that stays a Rust generic, as one whose overrides no live class has, keeps its
+        // type parameters (`DatagramSocketImpl.setOption`).
+        let generics = self.type_params(&m.type_params).0;
+        self.line(&format!("{}fn {}{generics}(this: {ty}{all}){ret} {{", self.vis(), self.enum_fn(t, &name)));
         self.indent += 1;
         let outer = std::mem::replace(&mut self.thin_this, true);
         self.dispatcher_body(t, r, among, &variants, &args, &general);

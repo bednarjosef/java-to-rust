@@ -365,6 +365,28 @@ fn a_program_split_into_crates_matches_java() {
     assert_eq!(rust, Ok(java));
 }
 
+/// A generic method that stays a Rust generic in a class that no object is of: split into crates,
+/// the class's dispatcher keeps the method's type parameters.
+#[test]
+fn a_generic_method_without_objects_splits_into_crates() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/whole-program");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-split-generic");
+    std::fs::create_dir_all(&work).unwrap();
+    let programs = programs(&root, &work);
+    let p = programs
+        .iter()
+        .find(|p| p.name == "genericmethodwithoutobjects")
+        .expect("corpus/whole-program/GenericMethodWithoutObjects.java");
+    let cache = check_cache::test_root().join("whole-program-java");
+    let java = run_java(p, &work.join(&p.name).join("classes"), &cache);
+    let (rust, _) = run_rust(p, &library, &work, &work.join("unused"), None, Some(3));
+    assert_eq!(rust, Ok(java));
+}
+
 /// A program that uses the JDK's collections, boxing and a lambda, as
 /// `targets/IntegerKeyedGroups.java` does. Its translation is rejected or not depending on what
 /// the translator supports; this test is about what javac does for it.

@@ -602,6 +602,13 @@ class ClassLoader {
         return SYSTEM;
     }
 
+    // Every loader of the translation may load in parallel, having no class loading locks, so
+    // the registration that the JDK's `SecureClassLoader` makes in its static initializer
+    // succeeds, as Java's does for a loader whose superclass is registered.
+    protected static boolean registerAsParallelCapable() {
+        return true;
+    }
+
     public static ClassLoader getPlatformClassLoader() {
         return PLATFORM;
     }
