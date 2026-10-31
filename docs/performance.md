@@ -699,10 +699,12 @@ thread that took it: with glibc's one arena, the generator's threads waited for 
 allocator (eight threads made javac's first round 3.1 s instead of 3.4 s), and with an arena for
 each thread they kept memory the others could not reuse (a census peak of 0.79 GB instead of 0.53
 GB). On javac's whole translation, mimalloc takes the generator from 7.0 s to 4.7 s on one thread
-and 3.7 s on four, at a peak of 2.19 GB instead of 1.90 GB. The generator still writes on one
-thread unless `JAVA_TO_RUST_GENERATOR_THREADS` asks for more. Plan: measure a census of the
-Minecraft server on several threads, whose peak of 16 GB must stay well under the machine's 24 GB,
-and then write on several threads by default.
+and 3.7 s on four, at a peak of 2.19 GB instead of 1.90 GB. On the Minecraft server's census,
+four threads with mimalloc take the generator from 97 s to 42 s (its first round from 34 s to
+8 s) at a census peak of 15.3 GB, and the trial's sources are the same, byte for byte, as one
+thread's. The generator writes on four threads, or on as many as the machine has if fewer, unless
+`JAVA_TO_RUST_GENERATOR_THREADS` says how many: past four, the crate root, which one thread
+writes, is most of the first round (5.6 s of 8 s on the Minecraft server).
 
 **Messages kept from round to round.** Pass 3 of a census runs the analyses, the messages of
 `NullPointerException`s and the generator once per round, and the stubs between the rounds change
