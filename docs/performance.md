@@ -991,7 +991,12 @@ written before they became functions of their module). Then come the 178,000 sma
 (`CLASS__..`). Those are statics that name their
 superclass, interfaces and declaring class by references: as constants that named them by
 closures, 93,000 function bodies for rustc, they alone took rustc 2.8 GB and 15.9 s in release,
-and as statics 1.8 GB and 13.0 s.
+and as statics 1.8 GB and 13.0 s. rustc evaluates each one when it compiles the header, so each
+is one call, `java::Class::of_program(..)` with every field and its name's hash written out: as a
+chain of builder calls (`java::Class::new(..).implementing(..).numbered(..).declared(..)`) whose
+first computed the hash in a loop over the name, 20,000 of them took rustc 13.3 s, and as one
+call 5.0 s, at the same memory (a synthetic crate of 20,000 classes with names of the server's
+length).
 
 Cranelift (`-Zcodegen-backend=cranelift`, nightly) builds javac's translation in debug in 55 s
 instead of 82 s with LLVM (two jobs), but the binary it builds ends with status 101 at once on

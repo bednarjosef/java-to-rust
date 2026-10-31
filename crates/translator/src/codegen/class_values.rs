@@ -1,7 +1,8 @@
 //! Classes as values (see `lower::classes`): a `java::Class`, with its names, a reference to its
 //! superclass (or a function for an array's component type) and the binary names of the classes
-//! and interfaces above it (`java::Class::new("Main$Dog", "Dog", Some(&CLASS__MAIN_ANIMAL),
-//! &["Main$Dog", "Main$Animal", "java.lang.Object"])`). The class of the program that code names
+//! and interfaces above it (`java::Class::of_program("Main$Dog", "Dog", java::ClassKind::Class,
+//! Some(&CLASS__MAIN_ANIMAL), &["Main$Dog", "Main$Animal", "java.lang.Object"], &[], true, 7, 7, 0x1,
+//! java::Nest::TopLevel, None, 54742993)`, its name's hash last). The class of the program that code names
 //! is a static at the crate root (`static CLASS__MAIN_DOG: java::Class = ..;`), written once
 //! however many places name it, as the reflection tables name a class in each of its methods; the
 //! runtime's classes and arrays are written out where they are used. Code holds a class value as
@@ -351,25 +352,31 @@ impl<'a> Gen<'a> {
     }
 
     /// The `java::Class` of the body of a constant of enum `c`, named `binary`: an anonymous
-    /// class, the enum its superclass, with no simple name and no interfaces of its own.
+    /// class, the enum its superclass, with no simple name and no interfaces of its own, and
+    /// `static final enum`'s flags, as javac writes the body's class (`program_class`).
     fn body_class_value(&mut self, c: usize, binary: &str) -> String {
         let superclass = self.decl_class(c);
         let mut names = vec![rust_string(binary)];
         names.extend(self.decl_names(c).iter().map(|n| rust_string(n)));
-        let value = format!(
-            "java::Class::new({}, \"\", Some({superclass}), &[{}])",
-            rust_string(binary),
-            names.join(", ")
-        );
-        let value = match self.class_interfaces {
-            true => format!("{value}.implementing(&[])"),
-            false => value,
+        let names = format!("&[{}]", names.join(", "));
+        let (modifiers, nest, enclosing) = match self.class_details {
+            true => (0x4010, "Anonymous", format!("Some({superclass})")),
+            false => (0x1, "TopLevel", "None".to_string()),
         };
-        match self.class_details {
-            // `static final enum`'s flags, as javac writes the body's class.
-            true => format!("{value}.declared(0x4010, java::Nest::Anonymous, Some({superclass}))"),
-            false => value,
-        }
+        program_class(ProgramClass {
+            name: binary,
+            simple: "",
+            kind: "Class",
+            superclass: &format!("Some({superclass})"),
+            names: &names,
+            interfaces: "",
+            leaf: false,
+            number: 0,
+            last: 0,
+            modifiers,
+            nest,
+            enclosing: &enclosing,
+        })
     }
 
     /// The class of the value `value` of enum `c`, whose constants with a body are of their
@@ -463,7 +470,9 @@ impl<'a> Gen<'a> {
         Some(format!("java::ClassSet::<{words}>::of(&[{}])", list.join(", ")))
     }
 
-    /// The `java::Class` of class `c` of the program, written out.
+    /// The `java::Class` of class `c` of the program, written out (`program_class`). Its
+    /// interfaces, modifiers and nesting are those of the class only in a program that asks for
+    /// them; others carry the defaults of its kind.
     fn class_value(&mut self, c: usize) -> String {
         let decl = &self.class.types[c];
         let (kind, extends) = (decl.kind, decl.extends);
@@ -471,12 +480,12 @@ impl<'a> Gen<'a> {
         // type. `Object` has none.
         let record = decl.record || decl.implements.iter().any(|&i| self.class.types[i].name == RECORD);
         let object = self.java_class_name(c, false) == "java.lang.Object";
-        let name = rust_string(&self.java_class_name(c, false));
-        let simple = rust_string(&self.java_class_name(c, true));
+        let name = self.java_class_name(c, false);
+        let simple = self.java_class_name(c, true);
         let names = self.names_list(c);
-        let value = match kind {
-            TypeKind::Interface => format!("java::Class::interface({name}, {simple}, {names})"),
-            TypeKind::Enum => format!("java::Class::enumeration({name}, {simple}, {names})"),
+        let (kind_name, superclass, default_modifiers) = match kind {
+            TypeKind::Interface => ("Interface", "None".to_string(), 0x601),
+            TypeKind::Enum => ("Enum", "Some(&java::Class::ENUM)".to_string(), 0x4011),
             _ => {
                 let superclass = match extends {
                     Some(s) => format!("Some({})", self.decl_class(s)),
@@ -484,12 +493,12 @@ impl<'a> Gen<'a> {
                     None if object => "None".to_string(),
                     None => "Some(&java::Class::OBJECT)".to_string(),
                 };
-                format!("java::Class::new({name}, {simple}, {superclass}, {names})")
+                ("Class", superclass, 0x1)
             }
         };
-        let value = match self.class_interfaces {
-            true => format!("{value}.implementing(&[{}])", self.interface_values(c)),
-            false => value,
+        let interfaces = match self.class_interfaces {
+            true => self.interface_values(c),
+            false => String::new(),
         };
         // A class that no class of the program extends has instances of exactly itself, which
         // `isInstance` and `cast` test by one name. Not a `Throwable`: the runtime makes
@@ -499,34 +508,52 @@ impl<'a> Gen<'a> {
             && !self.class.hierarchy.has_subtypes(c)
             && throwable.is_none_or(|t| t != c && !self.class.hierarchy.ancestors(c).contains(&t));
         // Any other class of a tree has the numbers from its own to its last subclass's
-        // (`dispatch::class_numbers`), which `isInstance` and `cast` test as a range.
+        // (`dispatch::class_numbers`), which `isInstance` and `cast` test as a range; an
+        // interface may have the set of its classes' numbers instead (`members`).
         let tree = matches!(kind, TypeKind::Class | TypeKind::Enum)
             && throwable.is_none_or(|t| t != c && !self.class.hierarchy.ancestors(c).contains(&t));
-        let value = match (leaf, tree) {
-            (true, _) => format!("{value}.numbered({})", self.class_tag(c)),
-            (false, true) => format!("{value}.numbers({}, {})", self.class_tag(c), self.last_class_tag(c)),
-            (false, false) => match self.interface_members(c) {
-                Some(set) => format!("{value}.members(&const {{ {set} }})"),
-                None => value,
-            },
+        let (number, last, members) = match (leaf, tree) {
+            (true, _) => (self.class_tag(c), self.class_tag(c), None),
+            (false, true) => (self.class_tag(c), self.last_class_tag(c), None),
+            (false, false) => (0, 0, self.interface_members(c)),
         };
-        if !self.class_details {
-            return value;
-        }
         // Its modifiers and nesting, which only a program that asks for them carries.
-        let decl = &self.class.types[c];
-        let (modifiers, enclosing) = (decl.modifiers, decl.enclosing);
-        let nest = match (&decl.origin, enclosing) {
-            (Origin::Anonymous { .. }, _) => "Anonymous",
-            (Origin::Local { .. }, _) => "Local",
-            (Origin::Member, Some(_)) => "Member",
-            _ => "TopLevel",
+        let (modifiers, nest, enclosing) = match self.class_details {
+            false => (default_modifiers, "TopLevel", "None".to_string()),
+            true => {
+                let decl = &self.class.types[c];
+                let (modifiers, enclosing) = (decl.modifiers, decl.enclosing);
+                let nest = match (&decl.origin, enclosing) {
+                    (Origin::Anonymous { .. }, _) => "Anonymous",
+                    (Origin::Local { .. }, _) => "Local",
+                    (Origin::Member, Some(_)) => "Member",
+                    _ => "TopLevel",
+                };
+                let enclosing = match enclosing {
+                    Some(e) => format!("Some({})", self.decl_class(e)),
+                    None => "None".to_string(),
+                };
+                (u32::from(modifiers), nest, enclosing)
+            }
         };
-        let enclosing = match enclosing {
-            Some(e) => format!("Some({})", self.decl_class(e)),
-            None => "None".to_string(),
-        };
-        format!("{value}.declared({modifiers:#x}, java::Nest::{nest}, {enclosing})")
+        let value = program_class(ProgramClass {
+            name: &name,
+            simple: &simple,
+            kind: kind_name,
+            superclass: &superclass,
+            names: &names,
+            interfaces: &interfaces,
+            leaf,
+            number,
+            last,
+            modifiers,
+            nest,
+            enclosing: &enclosing,
+        });
+        match members {
+            Some(set) => format!("{value}.members(&const {{ {set} }})"),
+            None => value,
+        }
     }
 
     /// References to the class values of the interfaces that class `c` implements directly, which
@@ -1058,5 +1085,70 @@ fn simple_name(g: &mut Gen, ty: Type) -> String {
         Type::Array(inner) => format!("{}[]", simple_name(g, *inner)),
         _ if !ty.is_reference() && !matches!(ty, Type::Enum(_)) => ty.to_string(),
         _ => class_name(g, ty).rsplit(['.', '$']).next().unwrap_or_default().to_string(),
+    }
+}
+
+/// The parts of a class of the program's `java::Class`, written out by `program_class`.
+struct ProgramClass<'s> {
+    name: &'s str,
+    simple: &'s str,
+    /// The variant of `java::ClassKind`.
+    kind: &'s str,
+    /// `Some(&..)` or `None`.
+    superclass: &'s str,
+    /// The slice of the binary names above it, `&[..]`.
+    names: &'s str,
+    /// The references to the interfaces it implements, comma-separated.
+    interfaces: &'s str,
+    /// Whether no class is below it (`Class::numbered`).
+    leaf: bool,
+    /// The class numbers at or below it, from its own to its last subclass's; 0 and 0 where
+    /// unknown (`Class::numbers`).
+    number: u16,
+    last: u16,
+    modifiers: u32,
+    /// The variant of `java::Nest`.
+    nest: &'s str,
+    /// `Some(&..)` or `None`.
+    enclosing: &'s str,
+}
+
+/// A class of the program as one call of `java::Class::of_program`, with the hash of its name
+/// computed here: rustc evaluates every class value when it compiles the crate, and a chain of
+/// builder calls with the hash's loop over the name in `const` code cost it about three times
+/// as much (docs/performance.md, "Compile time").
+fn program_class(c: ProgramClass<'_>) -> String {
+    format!(
+        "java::Class::of_program({}, {}, java::ClassKind::{}, {}, {}, &[{}], {}, {}, {}, {:#x}, java::Nest::{}, {}, {})",
+        rust_string(c.name),
+        rust_string(c.simple),
+        c.kind,
+        c.superclass,
+        c.names,
+        c.interfaces,
+        c.leaf,
+        c.number,
+        c.last,
+        c.modifiers,
+        c.nest,
+        c.enclosing,
+        java_string_hash(c.name)
+    )
+}
+
+/// `String.hashCode()` of `text`, over its UTF-16 units, as `java::Class` keeps it.
+fn java_string_hash(text: &str) -> i32 {
+    text.encode_utf16().fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(i32::from(u)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_class_name_hashes_as_a_java_string() {
+        assert_eq!(java_string_hash("java.lang.String"), 1195259493);
+        // A character past U+FFFF counts as its two UTF-16 units.
+        assert_eq!(java_string_hash("Main$\u{e9}\u{1F600}"), 56670913);
     }
 }
