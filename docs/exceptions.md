@@ -105,7 +105,12 @@ Err(Throwable::j2r_null_pointer("Cannot invoke ..."))`. In a method that does no
 a call of one that does (because other callers observe it) is
 `call.unwrap_or_else(java::uncaught)`, and `throw e` where nothing catches it is
 `java::throw_uncaught(e)`: nothing here observes the exception, so ending the program at once is
-what propagating it would do.
+what propagating it would do. A `throw new X(..)`, or a `throw` of what a call returns (the
+factory that `new` of a class tree calls, or a helper that makes the exception), makes its
+exception inside `java::cold(|| ..)`, a closure that runs out of line, where the expression has no
+`return`, `break`, `continue` or `?` of its own: the message and the object stay out of the method, and a method that checks a
+condition and throws (`Validate.inclusiveBetween`) stays small enough to inline where it is
+called, also from another crate of a split program.
 
 The `match` is written out, rather than a `?` or a macro, for the time rustc takes: a `?` leaves
 the `Try` trait and the `From` conversion to be worked out at each one, and a macro is expanded
@@ -123,7 +128,7 @@ static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty");
 ```rust
 fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
     if s.is_empty() {
-        return Err(Throwable::Bad(Arc::new(Bad::new(java::wtf8("empty")))));
+        return Err(java::cold(|| Throwable::Bad(Arc::new(Bad::new(java::wtf8("empty"))))));
     }
     // checked only if a caller observes it
     Ok(match java::try_parse_radix::<i32>(Some(s), 10) { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) })
@@ -630,8 +635,9 @@ stored in (`(s = a).next` fails `because "a" is null`, `(this.f = g()).next` `be
 value of "Main.g()" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
 (`program::MODULE_CALLS`), `c.isAssignableFrom(d)` as itself (a null `d` fails in the JVM's
-native code, which gives no message), `c.getEnumConstants()` (a block that checks `c` first) as
-itself, `n.byteValue()` and `n.shortValue()` of a `Number` (lowered as the narrowed
+native code, which gives no message), `c.getEnumConstants()`, `c.getGenericSuperclass()`,
+`c.getGenericInterfaces()` and `c.getTypeParameters()` (each a block that checks `c` first) as
+themselves, `n.byteValue()` and `n.shortValue()` of a `Number` (lowered as the narrowed
 `intValue()`) as themselves, an enum's `toString()` as the enum's, `c.cast(x)` (a block that
 checks `x`) as `java.lang.Class.cast(Object)`, `subSequence` (lowered as `substring`) as
 itself, and a `CharSequence`'s `isEmpty()` (lowered as a zero `length()`) as itself; the

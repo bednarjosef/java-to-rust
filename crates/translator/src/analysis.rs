@@ -397,7 +397,7 @@ impl Analysed {
 }
 
 /// What the analyses find from the code alone, after the checks (`analyze_from`).
-struct FromCode {
+struct FromCode<'scope> {
     ranges: Facts,
     fixed_fields: FastSet<(usize, String)>,
     eager_init: FastSet<usize>,
@@ -405,8 +405,8 @@ struct FromCode {
     frozen_statics: FastSet<(usize, String)>,
     entry_init: FastSet<usize>,
     early_static_reads: FastSet<ExprId>,
-    /// `Facts::ascii_length`, from the ranges' `ascii_chars`.
-    ascii_length: alongside::Done<FastSet<ExprId>>,
+    /// `Facts::ascii_length`, from the ranges' `ascii_chars`, on a thread of its own.
+    ascii_length: alongside::Alongside<'scope, FastSet<ExprId>>,
 }
 
 /// `analyze_tolerating`, from the facts that `represented` found for `class` (which it finds
@@ -424,9 +424,9 @@ struct FromCode {
 ///
 /// So the steps that read none of each other's facts run at once, on threads of their own
 /// (`alongside`): from the start, alongside the representation and the checks, the ranges, fixed
-/// fields, statics, early reads and ASCII strings (`ascii_length`), which read the code and the
-/// ranges alone, and the objects on the stack, which read the code alone, until the caller takes
-/// them; once the representation and the pattern variables are checked, nullness, which reads the
+/// fields, statics and early reads, which read the code and the ranges alone, with the ASCII
+/// strings (`ascii_length`) on a thread of their own once the ranges are found, and the objects on
+/// the stack, which read the code alone, until the caller takes them; once the representation and the pattern variables are checked, nullness, which reads the
 /// representation's facts and the statics, and then the borrowed parameters, which read nullness
 /// alone, alongside the object values and the checks after them. Nothing after them but the
 /// generator reads the borrowed parameters and ASCII strings. Each step's result is taken where
@@ -513,13 +513,14 @@ fn analyze_with(
                 let entry = statics::entry_inits(class, &eager);
                 (eager, finals, frozen, entry)
             });
-            let early_static_reads =
-                phase("analysis: early static reads", || early_reads::early_reads(class, &eager_init));
-            let ascii_length = alongside::Done::of(|| {
-                let mut facts = Facts { ascii_chars: ranges.ascii_chars.clone(), ..Facts::default() };
+            let ascii_chars = ranges.ascii_chars.clone();
+            let ascii_length = Alongside::start(scope, move || {
+                let mut facts = Facts { ascii_chars, ..Facts::default() };
                 phase("analysis: ascii", || ascii_strings(class, &mut facts));
                 facts.ascii_length
             });
+            let early_static_reads =
+                phase("analysis: early static reads", || early_reads::early_reads(class, &eager_init));
             FromCode {
                 ranges,
                 fixed_fields,
@@ -597,7 +598,7 @@ fn analyze_with(
         facts.faithful_boxes = faithful_boxes;
         facts.class_monitors = monitors::class_monitors(class, &facts);
         borrowing.take();
-        facts.ascii_length = ascii_length.take();
+        facts.ascii_length = ascii_length.join();
         lent_strings(class, &mut facts);
         phase("analysis: frozen fields", || frozen_fields::analyze(class, &mut facts));
         phase("analysis: arrays", || arrays::analyze(class, &mut facts));

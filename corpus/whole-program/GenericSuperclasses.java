@@ -200,5 +200,23 @@ public class GenericSuperclasses {
         } catch (IllegalStateException e) {
             System.out.println(e.getMessage());
         }
+
+        // A null class throws as Java's call does, whose message names the method and the local.
+        Class<?> missing = args.length > 5 ? Holder.class : null;
+        try {
+            System.out.println(missing.getGenericSuperclass());
+        } catch (NullPointerException e) {
+            System.out.println(e.getMessage());
+        }
+        try {
+            System.out.println(missing.getGenericInterfaces().length);
+        } catch (NullPointerException e) {
+            System.out.println(e.getMessage());
+        }
+        try {
+            System.out.println(missing.getTypeParameters().length);
+        } catch (NullPointerException e) {
+            System.out.println(e.getMessage());
+        }
     }
 }

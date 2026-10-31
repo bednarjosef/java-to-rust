@@ -35,6 +35,11 @@ impl Bits {
         self.words.get(i / 64).is_some_and(|w| w & (1u64 << (i % 64)) != 0)
     }
 
+    /// The words of the set, the bits of members 0 to 63 first; there may be empty words last.
+    pub fn words(&self) -> &[u64] {
+        &self.words
+    }
+
     /// Adds every member of `other`.
     pub fn union(&mut self, other: &Bits) {
         if self.words.len() < other.words.len() {

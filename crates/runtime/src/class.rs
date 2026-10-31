@@ -96,6 +96,8 @@ pub struct Class {
     /// The class number of a `leaf` of the program (`numbered`), which its values carry: a test
     /// of a value whose number the translation has compares the numbers; 0 when unknown.
     number: u16,
+    /// The hash of the name as a string's (`hash_code`), computed when the class value is made.
+    hash: i32,
 }
 
 impl Class {
@@ -174,6 +176,7 @@ impl Class {
             interfaces: &[],
             leaf: false,
             number: 0,
+            hash: name_hash(name),
         }
     }
 
@@ -588,13 +591,46 @@ impl Class {
     /// `hashCode()`: Java's is the class object's identity hash, which nothing can depend on; this
     /// one is the hash of its name.
     pub fn hash_code(&self) -> i32 {
-        crate::string_hash(crate::Wtf8::new(self.name))
+        self.hash
     }
 }
 
+/// `String.hashCode` of `name` over its UTF-16 units, for a class value made at compile time.
+const fn name_hash(name: &str) -> i32 {
+    let bytes = name.as_bytes();
+    let (mut hash, mut i) = (0i32, 0);
+    while i < bytes.len() {
+        let b = bytes[i] as u32;
+        let (c, n) = match b {
+            0..0x80 => (b, 1),
+            0xC0..0xE0 => ((b & 0x1F) << 6 | (bytes[i + 1] as u32 & 0x3F), 2),
+            0xE0..0xF0 => {
+                ((b & 0x0F) << 12 | (bytes[i + 1] as u32 & 0x3F) << 6 | (bytes[i + 2] as u32 & 0x3F), 3)
+            }
+            _ => {
+                let c = (b & 0x07) << 18
+                    | (bytes[i + 1] as u32 & 0x3F) << 12
+                    | (bytes[i + 2] as u32 & 0x3F) << 6
+                    | (bytes[i + 3] as u32 & 0x3F);
+                (c, 4)
+            }
+        };
+        if c >= 0x10000 {
+            let c = c - 0x10000;
+            hash = hash.wrapping_mul(31).wrapping_add((0xD800 + (c >> 10)) as i32);
+            hash = hash.wrapping_mul(31).wrapping_add((0xDC00 + (c & 0x3FF)) as i32);
+        } else {
+            hash = hash.wrapping_mul(31).wrapping_add(c as i32);
+        }
+        i += n;
+    }
+    hash
+}
+
 impl PartialEq for Class {
+    /// The same name, which two values of one class usually hold at one address.
     fn eq(&self, other: &Class) -> bool {
-        self.name == other.name
+        std::ptr::eq(self.name, other.name) || (self.hash == other.hash && self.name == other.name)
     }
 }
 
@@ -640,6 +676,14 @@ mod tests {
         assert_eq!(Class::OBJECT.get_superclass(), None);
         assert!(points.is_array() && !point.is_array());
         assert_ne!(point, Class::STRING);
+    }
+
+    #[test]
+    fn a_class_hashes_as_its_name_does() {
+        for name in ["Main$Point", "java.lang.Object", "[I", "Ünïcode$Klasse", "Main$\u{1F600}"] {
+            let class = Class::new(name, name, Some(&Class::OBJECT), &[]);
+            assert_eq!(class.hash_code(), crate::string_hash(crate::Wtf8::new(name)), "{name}");
+        }
     }
 
     #[test]

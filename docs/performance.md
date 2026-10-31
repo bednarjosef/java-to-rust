@@ -24,9 +24,10 @@ One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clo
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
 clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (five runs a side,
 at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
-Interpreter's from one at a load average of 6.3, SortMillion's from five runs a side at a
-load average of 4, and BinaryTrees', SmallObjects' and ManyThreadsAllocating's from five runs a
-side, alternating, at a load average of about 3.
+Interpreter's from one at a load average of 6.3, SortMillion's from five runs a side at a load
+average of 4, ReflectionLookups' from one of it alone (five runs a side), and BinaryTrees',
+SmallObjects' and ManyThreadsAllocating's from five runs a side, alternating, at a load average
+of about 3.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -52,7 +53,7 @@ side, alternating, at a load average of about 3.
 | ObjectDispatch        |     249 |     135 |      0.54 |         169 |         111 |         0.66 |
 | ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
 | ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
-| ReflectionLookups     |     155 |     183 |      1.18 |         106 |         162 |         1.53 |
+| ReflectionLookups     |     207 |     210 |      1.01 |         146 |         189 |         1.29 |
 | ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
 | Sieve                 |    1278 |    1006 |      0.79 |           - |           - |            - |
 | SmallObjects          |     145 |     131 |      0.90 |           - |           - |            - |
@@ -574,6 +575,14 @@ static initializer are walked as one group, since reaching one reaches all (each
 stays a group of its own, as a class's walk cuts off its own); and the test that leaves out code
 from which no read of the class's statics can run is worked out over the groups.
 `Hierarchy::targets` no longer checks each implementation against the list found so far.
+A group that runs thousands of others (one that holds a virtual call on a wide type) has them by
+the set of initializers whose statics they may read: the sets are kept once each (javac's 34,800
+groups have 158), so a class's walk tests a set once rather than every group that has it, and
+the groups that read nothing are left out for good. The classes' walks are independent, so they
+run on up to eight threads, each taking the next class not walked yet, after the statements of
+every initializer are summarized on the step's own thread: the Minecraft server's 5,300 walks
+enter about 144 million groups, 25 s on one thread. With `JAVA_TO_RUST_TIMINGS` the step prints
+how many groups and sets the walks enter and look at.
 `JAVA_TO_RUST_EARLY_CHECK=1` also walks every method one by one, leaving none out, and panics
 unless both find the same reads. On javac the step goes from 0.25 to 0.11 s, and its census
 report and the 28 targets' translations are byte for byte the same.
@@ -652,9 +661,11 @@ million (0.17 s instead of 3.9 s).
 it find, so none can move ahead of another; what a round can do is find its facts sooner. The
 steps that read none of each other's
 facts run at once, on threads of their own (`analysis/alongside.rs`): from the start of a round,
-alongside the representation and the checks, the ranges, fixed fields, statics, early reads and
-ASCII strings, which read the code and the ranges alone, and the objects on the stack, which the
-census takes once the messages of `NullPointerException`s pass; once the representation and the
+alongside the representation and the checks, the ranges, fixed fields, statics and early reads,
+which read the code and the ranges alone, the ASCII strings on a thread of their own from when the
+ranges are found (nothing reads them before the generator, and on the thread of the early reads
+they held up nullness, which waits for those, by 12 s on the Minecraft server), and the objects on
+the stack, which the census takes once the messages of `NullPointerException`s pass; once the representation and the
 pattern variables are checked, nullness and then the borrowed parameters, alongside the object
 values and the checks after them. Each step's result is taken where the step ran before, so a
 round finds the same facts and stops at the same error or panic (a panic carries its place in

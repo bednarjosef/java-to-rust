@@ -329,16 +329,25 @@ fn is_object(decl: &TypeDecl) -> bool {
     decl.name == OBJECT || decl.name == "java.lang.Object"
 }
 
-/// Whether a block of `cases` is the call `c.getEnumConstants()` as lowering writes it
-/// (`lower::classes`): `{ Class c_ = c; NullChecked(c_); yield .. }`.
-fn enum_constants(cases: &[Case]) -> bool {
-    let [Case { body, .. }] = cases else { return false };
-    matches!(
-        &body[..],
-        [Stmt::Local { .. }, Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NullChecked(Some(name)), _), .. }), Stmt::Yield(_)]
-            if *name == crate::lower::ENUM_CONSTANTS
-    )
+/// The method, if a block of `cases` is a call of `Class` that lowering writes as a block that
+/// checks the receiver: `c.getEnumConstants()` (`lower::classes`), or `c.getGenericSuperclass()`,
+/// `c.getGenericInterfaces()` and `c.getTypeParameters()` (`lower::generic_types`):
+/// `{ Class c_ = c; NullChecked(c_); yield .. }`.
+fn checked_class_call(cases: &[Case]) -> Option<&'static str> {
+    let [Case { body, .. }] = cases else { return None };
+    match &body[..] {
+        [
+            Stmt::Local { .. },
+            Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NullChecked(Some(name)), _), .. }),
+            Stmt::Yield(_),
+        ] if CHECKED_CLASS_CALLS.contains(name) => Some(name),
+        _ => None,
+    }
 }
+
+/// The methods of `Class` that lowering writes as a block that checks the receiver.
+const CHECKED_CLASS_CALLS: [&str; 4] =
+    [crate::lower::ENUM_CONSTANTS, "getGenericSuperclass", "getGenericInterfaces", "getTypeParameters"];
 
 /// The qualified name of the outermost class that declares type `t`, by which `BytecodeNames`
 /// knows its code: `com.example.Main` for `com.example.Main.Inner`, and for the local class
@@ -1346,10 +1355,10 @@ impl Messages<'_> {
     /// The method that `e` calls, as the class file names it, if it is a call.
     fn called(&self, e: &Expr) -> Option<String> {
         match &e.kind {
-            // `c.getEnumConstants()`, a block that checks `c` (`lower::classes`).
-            ExprKind::Switch { cases, .. } if enum_constants(cases) => match self.jdk {
-                true => Some(format!("java.lang.Class.{}()", crate::lower::ENUM_CONSTANTS)),
-                false => self.call(e.pos, crate::lower::ENUM_CONSTANTS),
+            // A call of `Class`, a block that checks `c` (`checked_class_call`).
+            ExprKind::Switch { cases, .. } if let Some(name) = checked_class_call(cases) => match self.jdk {
+                true => Some(format!("java.lang.Class.{name}()")),
+                false => self.call(e.pos, name),
             },
             ExprKind::MethodCall { name, .. } => self.call_of(e, name).or_else(|| self.jdk_call(e)),
             ExprKind::Call { name, resolved, .. } => self.call_of(e, name).or_else(|| {
