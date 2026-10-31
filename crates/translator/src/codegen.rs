@@ -173,7 +173,10 @@ pub fn generate_all_stubbing(
         let live = std::mem::replace(&mut stubbed.live, setup.live.clone());
         if stubbed != setup {
             if crate::timings::enabled() {
-                eprintln!("timing: codegen: the stubs change what the whole program is written with");
+                eprintln!(
+                    "timing: codegen: the stubs change what the whole program is written with: {}",
+                    stubbed.differences(&setup).join(", ")
+                );
             }
             return generate_all(class, facts);
         }
@@ -504,6 +507,29 @@ struct Setup {
 }
 
 impl Setup {
+    /// The names of the fields in which `self` and `other` differ, for the timings.
+    fn differences(&self, other: &Setup) -> Vec<&'static str> {
+        let fields = [
+            ("live", self.live == other.live),
+            ("homes", self.homes == other.homes),
+            ("fn_names", self.fn_names == other.fn_names),
+            ("group_names", self.group_names == other.group_names),
+            ("struct_methods", self.struct_methods == other.struct_methods),
+            ("static_fn_names", self.static_fn_names == other.static_fn_names),
+            ("fn_name_set", self.fn_name_set == other.fn_name_set),
+            ("receiver_sets", self.receiver_sets == other.receiver_sets),
+            ("class_tags", self.class_tags == other.class_tags),
+            ("runs", self.runs == other.runs),
+            ("super_targets", self.super_targets == other.super_targets),
+            ("plans", self.plans == other.plans),
+            ("conversion_names", self.conversion_names == other.conversion_names),
+            ("stack_forms", self.stack_forms == other.stack_forms),
+            ("stack_sites", self.stack_sites == other.stack_sites),
+            ("checked_value_ofs", self.checked_value_ofs == other.checked_value_ofs),
+        ];
+        fields.into_iter().filter(|(_, same)| !same).map(|(name, _)| name).collect()
+    }
+
     fn new(class: &Class, facts: &Facts) -> Setup {
         // The names of methods are made in the program's modules, before any is written.
         let _modules = modules::enter(class);
