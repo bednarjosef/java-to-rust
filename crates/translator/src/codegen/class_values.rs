@@ -411,7 +411,9 @@ impl<'a> Gen<'a> {
             );
         }
         let class = if self.nullable(&args[0]) {
-            format!("{}({})", self.runtime("non_null"), self.expr(&args[0]).text)
+            let option = self.expr(&args[0]).text;
+            let d = self.dereference(&[args[0].id], &option);
+            Code::new(d, LOWEST).at(ATOM)
         } else {
             self.expr(&args[0]).at(ATOM)
         };
@@ -510,6 +512,7 @@ impl<'a> Gen<'a> {
     /// `ClassIsInstance(class, x)`, or with `check` the statement `ClassCheck(class, x)`: the
     /// runtime's test of the binary names of the classes and interfaces of `x`'s class
     /// (`instance_names`) against the class's, or of the class numbers where `x`'s value has one.
+    /// A null class throws in the checked form where a `catch` may see it (`dereference`).
     pub(super) fn class_instance(&mut self, check: bool, args: &'a [Expr]) -> Code {
         let method = if check { "check_cast" } else { "is_instance" };
         // A value of an enum of classes that is not a variable, such as an array's element, is
@@ -521,7 +524,7 @@ impl<'a> Gen<'a> {
             && x.ty != Type::Null
         {
             let checked = match self.nullable(&args[0]) {
-                true => format!("{}(class_)", self.runtime("non_null")),
+                true => Code::new(self.dereference(&[args[0].id], "class_"), LOWEST).at(ATOM),
                 false => "class_".to_string(),
             };
             let class = self.expr(&args[0]).text;
@@ -536,7 +539,8 @@ impl<'a> Gen<'a> {
             );
         }
         let class = if self.nullable(&args[0]) {
-            format!("{}({})", self.runtime("non_null"), self.expr(&args[0]).text)
+            let option = self.expr(&args[0]).text;
+            Code::new(self.dereference(&[args[0].id], &option), LOWEST).at(ATOM)
         } else {
             self.expr(&args[0]).at(ATOM)
         };
