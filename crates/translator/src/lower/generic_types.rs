@@ -21,7 +21,8 @@
 //! interface with type arguments (an interface's are those it extends), `typeParameters0` over
 //! those that declare type variables, and `bounds0` over those whose type variables have bounds.
 //! Any other class answers its interfaces, no type variables, and `Object` as a variable's
-//! bound, as in Java. A variable's bounds are made when they are first asked for, as the JDK's
+//! bound, as in Java. Each of the three calls holds `c` and checks it first, so a null class
+//! throws the `NullPointerException` Java's call does, which names the method and `c`. A variable's bounds are made when they are first asked for, as the JDK's
 //! are: a bound may name the variable itself (`E extends Enum<E>`). A field's generic type is a
 //! case of the field's slot in `genericTypePart` (`lower::reflection`), for each field of the
 //! reflection table whose type has type arguments; the others answer their class.
@@ -157,21 +158,25 @@ impl<'t> Lowering<'t> {
     pub(super) fn generic_superclass(&self, node: Node<'t>, receiver: Node<'t>) -> Result<ExprKind, Error> {
         let (methods, type_ty) = self.generic_methods(node, "`getGenericSuperclass`")?;
         let pos = node.pos();
-        let local = self.fresh_name("class");
-        let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
         // The classes `c` can be, each with the superclass javac gives it.
         let of = self.classes_of(receiver)?;
+        let class = self.convert(self.expr(receiver)?, Type::JavaClass);
+        let (mut body, local) = self.held_receiver(class, "getGenericSuperclass", pos);
+        let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
         if of.is_none() {
             // Any class of the program: the one chain of `TranslatedTypes`.
             let method = methods[GENERIC_SUPERCLASS];
-            let class = self.convert(self.expr(receiver)?, Type::JavaClass);
             let ret = self.return_type(node, method)?;
             let call = ExprKind::Call {
                 name: "genericSuperclass".to_string(),
-                args: vec![class],
+                args: vec![var()],
                 resolved: Some(method),
             };
-            return Ok(self.synth(call, pos, ret).kind);
+            body.push(Stmt::Yield(self.synth(call, pos, ret)));
+            return Ok(ExprKind::Switch {
+                selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+                cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+            });
         }
         let mut found = Vec::new();
         for t in 0..self.types.len() {
@@ -203,11 +208,7 @@ impl<'t> Lowering<'t> {
                 type_ty,
             );
         }
-        let class = self.convert(self.expr(receiver)?, Type::JavaClass);
-        let body = vec![
-            Stmt::Local { ty: Type::JavaClass, name: local, init: Some(class), pos },
-            Stmt::Yield(chain),
-        ];
+        body.push(Stmt::Yield(chain));
         Ok(ExprKind::Switch {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body }],
@@ -223,14 +224,38 @@ impl<'t> Lowering<'t> {
         receiver: Node<'t>,
     ) -> Result<ExprKind, Error> {
         let (methods, _) = self.generic_methods(node, &format!("`Class.{name}`"))?;
-        let (method, made) = match name {
-            "getGenericInterfaces" => (methods[GENERIC_INTERFACES], "genericInterfaces"),
-            _ => (methods[TYPE_PARAMETERS], "typeParameters"),
+        let (method, made, name) = match name {
+            "getGenericInterfaces" => {
+                (methods[GENERIC_INTERFACES], "genericInterfaces", "getGenericInterfaces")
+            }
+            _ => (methods[TYPE_PARAMETERS], "typeParameters", "getTypeParameters"),
         };
+        let pos = node.pos();
         let class = self.convert(self.expr(receiver)?, Type::JavaClass);
+        let (mut body, local) = self.held_receiver(class, name, pos);
         let ret = self.return_type(node, method)?;
-        let call = ExprKind::Call { name: made.to_string(), args: vec![class], resolved: Some(method) };
-        Ok(self.synth(call, node.pos(), ret).kind)
+        let var = self.synth(ExprKind::Var(local), pos, Type::JavaClass);
+        let call = ExprKind::Call { name: made.to_string(), args: vec![var], resolved: Some(method) };
+        body.push(Stmt::Yield(self.synth(call, pos, ret)));
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
+    }
+
+    /// `class`, the receiver of `Class.method`, held in a local, and the check that throws Java's
+    /// `NullPointerException` (which names `method` and the receiver) when it is null: the
+    /// statements, and the local's name. `TranslatedTypes`'s methods take the class as an
+    /// argument, which Java does not check.
+    fn held_receiver(&self, class: Expr, method: &'static str, pos: Pos) -> (Vec<Stmt>, String) {
+        let name = format!("{RECEIVER}{}", class.id);
+        let var = self.synth(ExprKind::Var(name.clone()), pos, Type::JavaClass);
+        let check = ExprKind::Builtin(Builtin::NullChecked(Some(method)), vec![var]);
+        let body = vec![
+            Stmt::Local { ty: Type::JavaClass, name: name.clone(), init: Some(class), pos },
+            Stmt::Expr(self.synth(check, pos, Type::Void)),
+        ];
+        (body, name)
     }
 
     /// A native of `TranslatedTypes`, with its arguments: `typeParameters0(c)`,
