@@ -380,9 +380,15 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   source names them (`TypeDecl::interfaces`), the runtime's classes with the JDK's lists and an
   array with `Cloneable` and `Serializable`; an interface that the translation has no type of
   (`Serializable`, `Cloneable`, a marker) is a class value of its name, which extends nothing.
-  `getSigners()` is `null`, as for a class without signers: a translated class comes from no jar,
-  even where Java's came from a signed one (the Minecraft server's `ModCheck` then reports the
-  server as very likely modified). A class held as an `Object` is `Object`'s `Class` variant, and one held as a
+  `getSigners()` is `null` in a single file, and in a whole program none of whose roots has a
+  jar's signatures, which then reaches none of the JDK's certificate code. Otherwise it is the
+  certificates of the signers of the jar the class comes from, where the root of its sources has
+  the jar's signatures (`META-INF/X.SF` with its block `X.RSA`, `X.DSA` or `X.EC`) and the signature file
+  signs the class files of the class's package (`TranslatedModules.signersOf`, read from the
+  block with the JDK's `PKCS7` once): each signer's chain in turn, as `Certificate[]`, a copy each
+  call, as Java's class loader takes them from the jar; `null` for a class of another root, an
+  array, a primitive type and a class of the JDK. Java checks the jar's digests as it loads the
+  classes; the translation takes the signatures as the jar has them. A class held as an `Object` is `Object`'s `Class` variant, and one held as a
   `java.lang.reflect.Type` is `Type`'s.
 - `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
   type arguments (written at the call when the call narrows the class down, as `getClass()` and

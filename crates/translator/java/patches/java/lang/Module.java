@@ -693,6 +693,14 @@ class Module {
     static native String manifest0(String pn);
 
     /**
+     * The signature blocks that sign the classes of the package {@code pn} of the unnamed module,
+     * as the jar its root's classes come from has them, the paths of their files a line each;
+     * null where none signs them.
+     */
+    @Add
+    static native String signers0(String pn);
+
+    /**
      * The data file {@code name} of the JDK, which the translator read from the image of the JDK
      * it ran with, its bytes as the chars of the string; null for a name it did not read.
      */

@@ -411,17 +411,20 @@ multi-release() {
   done
 }
 
-# Each jar's manifest, put in the source roots of its classes, where a jar has it: the translation
-# reads the versioning attributes of a root's packages from it (`Package.getImplementationVersion`,
-# which log4j prints as it configures itself).
+# Each jar's manifest and signatures, put in the source roots of its classes, where a jar has
+# them: the translation reads the versioning attributes of a root's packages from the manifest
+# (`Package.getImplementationVersion`, which log4j prints as it configures itself), and the
+# certificates of `Class.getSigners()` from the signatures (the server's `ModCheck` asks whether
+# the server jar is still signed).
 copy_manifests() {
-  unzip -o -qq "$(server_jar)" META-INF/MANIFEST.MF -d "$cache/src/server" || true
+  local -a files=(META-INF/MANIFEST.MF 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC')
+  unzip -o -qq "$(server_jar)" "${files[@]}" -d "$cache/src/server" || true
   local library name dir
   while IFS= read -r library; do
     name=$(basename "$library" .jar)
     for dir in "$cache/src/libraries/$name" "$cache/src/library-sources/$name"; do
       if [ -d "$dir" ]; then
-        unzip -o -qq "$library" META-INF/MANIFEST.MF -d "$dir" || true
+        unzip -o -qq "$library" "${files[@]}" -d "$dir" || true
       fi
     done
   done < <(library_jars)

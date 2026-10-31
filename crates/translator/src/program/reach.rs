@@ -2115,6 +2115,12 @@ pub const MODULE_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.lang.Class", "getPackage", "()java.lang.Package"),
         ("packageOf", "(java.lang.Class<?>)java.lang.Package"),
     ),
+    // The certificates of the jar's signers that signed the class, where a root has a jar's
+    // signatures (`Walk::signed_roots`).
+    (
+        ("java.lang.Class", "getSigners", "()java.lang.Object[]"),
+        (SIGNERS_OF, "(java.lang.Class<?>)java.lang.Object[]"),
+    ),
     // A class's resources, which its class loader finds.
     (
         ("java.lang.Class", "getResource", "(java.lang.String)java.net.URL"),
@@ -2135,6 +2141,9 @@ pub const MODULE_CALLS: &[(JdkMethod, (&str, &str))] = &[
 /// `Class.forName(module, name)` in a translation with the JDK's sources: the class that the
 /// name finds, if it is in the module (`lower::by_name`).
 pub const IN_MODULE: (&str, &str) = ("inModule", "(java.lang.Module,java.lang.Class<?>)java.lang.Class<?>");
+
+/// The method of `TRANSLATED_MODULES` that `c.getSigners()` calls (`MODULE_CALLS`).
+const SIGNERS_OF: &str = "signersOf";
 
 /// The method of `TRANSLATED_MODULES` that a call of the JDK's method `(owner, name, signature)`
 /// calls instead (`MODULE_CALLS`).
@@ -2900,6 +2909,10 @@ struct Walk<'t> {
     /// a suffix finds the classes it can name (`by_name::name_pattern`), and the patterns seen.
     class_roots: Vec<PathBuf>,
     patterns: HashSet<(String, String)>,
+    /// Whether a source root has a jar's signatures (`modules::has_signatures`): without one,
+    /// `c.getSigners()` is null and reaches nothing (`lower/classes.rs`), not
+    /// `TranslatedModules.signersOf`, which reads the signatures with the JDK's PKCS7 and X.509.
+    signed_roots: bool,
     /// Whether reachable code finds a class by a name it computes, `Class.forName(name)`, which
     /// initializes every class that it can find (`by_name.rs`).
     finds_named: bool,
@@ -3082,6 +3095,7 @@ impl<'t> Walk<'t> {
             why: std::env::var_os("JAVA_TO_RUST_REACH_WHY").map(|_| HashMap::default()),
             locale_data: locale_data.to_vec(),
             class_roots: class_roots.to_vec(),
+            signed_roots: class_roots.iter().any(|r| super::modules::has_signatures(r)),
             providers: providers.to_vec(),
             config_pending: (0..reflect_config.len()).collect(),
             reflect_config: reflect_config.to_vec(),
@@ -3127,6 +3141,7 @@ impl<'t> Walk<'t> {
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
             class_roots: std::mem::take(&mut self.class_roots),
+            signed_roots: self.signed_roots,
             providers: std::mem::take(&mut self.providers),
             config_pending: (0..self.reflect_config.len()).collect(),
             reflect_config: std::mem::take(&mut self.reflect_config),
@@ -4123,9 +4138,11 @@ impl<'t> Walk<'t> {
         for (_, (class, method, signature)) in STANDARD_CALLS.iter().filter(|(m, _)| *m == member) {
             self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
         }
-        // The translator's methods that give a class's module, class loader and package (`MODULE_CALLS`).
+        // The translator's methods that give a class's module, class loader and package
+        // (`MODULE_CALLS`), and a class's signers where a root has a jar's signatures.
         if text(symbol, "kind") == "METHOD"
             && let Some((to, signature)) = module_call(member.0, member.1, member.2)
+            && (to != SIGNERS_OF || self.signed_roots)
         {
             self.work.push(Item::Method((TRANSLATED_MODULES.into(), to.into(), signature.into())));
         }

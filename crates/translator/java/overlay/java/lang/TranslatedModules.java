@@ -3,18 +3,24 @@ package java.lang;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.cert.Certificate;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import sun.security.pkcs.PKCS7;
+import sun.security.pkcs.SignerInfo;
 
 /**
  * The translator's methods that calls of the JDK's class loading methods of {@code BootLoader},
  * {@code ClassLoaders} and {@code Reflection} call instead ({@code REDIRECTED_CALLS} in
  * {@code program/reach.rs}), and those that {@code Class.getModule()},
- * {@code Class.getClassLoader()}, {@code Class.getPackage()}, {@code ClassLoader.getUnnamedModule()}
- * and {@code Class.forName(module, name)} are ({@code MODULE_CALLS}, {@code lower/modules.rs}):
+ * {@code Class.getClassLoader()}, {@code Class.getPackage()}, {@code Class.getSigners()},
+ * {@code ClassLoader.getUnnamedModule()} and {@code Class.forName(module, name)} are ({@code MODULE_CALLS}, {@code lower/modules.rs}):
  * over the translation's modules ({@link Module}), whose classes are all the code there is.
  */
 public final class TranslatedModules {
@@ -31,6 +37,9 @@ public final class TranslatedModules {
      */
     private static final IdentityHashMap<ClassLoader, ConcurrentHashMap<?, ?>> LOADER_VALUES =
             new IdentityHashMap<>();
+
+    /** The certificates of {@link #signersOf}, by the blocks that gave them. */
+    private static final LinkedHashMap<String, Certificate[]> SIGNERS = new LinkedHashMap<>();
 
     private TranslatedModules() {
     }
@@ -61,6 +70,44 @@ public final class TranslatedModules {
             PACKAGES.put(name, p);
         }
         return p;
+    }
+
+    /**
+     * {@code c.getSigners()}: the certificates of the signers of the jar that the class comes
+     * from, where its root has the jar's signatures ({@code Module.signers0}): those of each
+     * signer's chain, as Java's class loader takes them from the jar's code source
+     * ({@code CodeSource.getCertificates}). Null for a class of no signed root, an array, a
+     * primitive type and {@code void}, as in Java. Java verifies the jar's digests as it reads
+     * the classes; a translation's classes come from their sources, so the signatures are taken
+     * as the jar has them. A copy each call, of the certificates that the blocks gave the first
+     * time.
+     */
+    public static synchronized Object[] signersOf(Class<?> c) {
+        if (c.isArray() || c.isPrimitive() || Module.of(c).isNamed()) {
+            return null;
+        }
+        String blocks = Module.signers0(c.getPackageName());
+        if (blocks == null) {
+            return null;
+        }
+        Certificate[] signers = SIGNERS.get(blocks);
+        if (signers == null) {
+            ArrayList<Certificate> certificates = new ArrayList<>();
+            for (String block : blocks.split("\n")) {
+                try {
+                    PKCS7 signed = new PKCS7(Files.readAllBytes(Path.of(block)));
+                    for (SignerInfo signer : signed.getSignerInfos()) {
+                        certificates.addAll(signer.getCertificateChain(signed));
+                    }
+                } catch (IOException e) {
+                    // Java's class loader drops a jar whose signatures it cannot read.
+                    throw new SecurityException("the signature " + block + " of " + c.getName(), e);
+                }
+            }
+            signers = certificates.toArray(new Certificate[0]);
+            SIGNERS.put(blocks, signers);
+        }
+        return signers.clone();
     }
 
     /** {@code loader.getUnnamedModule()}. */
