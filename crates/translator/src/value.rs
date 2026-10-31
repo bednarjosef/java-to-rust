@@ -10,8 +10,10 @@
 //! length and items (`ThinVec`). With a `&str` and `Vec`s, a value took 32 bytes and a field 48,
 //! and the Minecraft server's trees about 9 GB.
 
+use std::alloc::Layout;
 use std::fmt;
 use std::ops::{Deref, Index, IndexMut};
+use std::ptr::NonNull;
 use std::sync::{LazyLock, Mutex};
 use thin_vec::ThinVec;
 
@@ -209,56 +211,168 @@ impl fmt::Display for Number {
 
 /// A JSON object: its fields in the order of their names, as `serde_json`'s `BTreeMap` keeps
 /// them (the walks of the trees see them in that order).
-#[derive(Clone, PartialEq, Default)]
-pub struct Map(ThinVec<(Str, Value)>);
+///
+/// The names of the fields are held once for every object with the same names (`keys`): an
+/// object is one allocation of a pointer to those names and its values, 16 bytes and 16 for each
+/// field, where a list of (name, value) pairs took 16 and 24 for each.
+pub struct Map(NonNull<Header>);
+
+/// The start of an object's allocation, whose values follow it.
+#[repr(C)]
+struct Header {
+    keys: &'static [Str],
+}
+
+/// The header of every object without fields, which is never freed.
+static EMPTY: Header = Header { keys: &[] };
+
+/// The lists of field names held so far, each once (`Map::keys`).
+static KEYS: LazyLock<Mutex<crate::analysis::FastSet<&'static [Str]>>> = LazyLock::new(Default::default);
+
+/// The one copy of the names `keys`.
+fn held_keys(keys: &[Str]) -> &'static [Str] {
+    if keys.is_empty() {
+        return &[];
+    }
+    let mut held = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&found) = held.get(keys) {
+        return found;
+    }
+    let found: &'static [Str] = Box::leak(keys.to_vec().into_boxed_slice());
+    held.insert(found);
+    found
+}
+
+// A `Map` owns its values as a `Box<[Value]>` would.
+unsafe impl Send for Map {}
+unsafe impl Sync for Map {}
 
 /// The most fields of an object that `Map::find` scans rather than searches.
 const SCANNED: usize = 12;
 
 impl Map {
     pub fn new() -> Map {
-        Map(ThinVec::new())
+        Map(NonNull::from(&EMPTY))
+    }
+
+    /// The layout of an object of `n` fields, and where its values start.
+    fn layout(n: usize) -> (Layout, usize) {
+        Layout::new::<Header>()
+            .extend(Layout::array::<Value>(n).expect("an object too large"))
+            .expect("an object too large")
+    }
+
+    /// The object with fields `keys`, in the order of their names and each once, and `values`,
+    /// one for each.
+    fn from_parts(keys: &[Str], values: impl ExactSizeIterator<Item = Value>) -> Map {
+        assert_eq!(keys.len(), values.len());
+        if keys.is_empty() {
+            return Map::new();
+        }
+        let keys = held_keys(keys);
+        let (layout, offset) = Map::layout(keys.len());
+        // SAFETY: the layout has the header's size, which is not zero; the header and each value
+        // are written before the map is used, at the offsets of the layout.
+        unsafe {
+            let start = std::alloc::alloc(layout);
+            let Some(header) = NonNull::new(start.cast::<Header>()) else {
+                std::alloc::handle_alloc_error(layout)
+            };
+            header.as_ptr().write(Header { keys });
+            let first = start.add(offset).cast::<Value>();
+            let mut written = 0;
+            for value in values.take(keys.len()) {
+                first.add(written).write(value);
+                written += 1;
+            }
+            assert_eq!(written, keys.len(), "an iterator gave fewer values than its length");
+            Map(header)
+        }
+    }
+
+    /// The names of the fields, in order.
+    fn keys_slice(&self) -> &'static [Str] {
+        // SAFETY: the header is `EMPTY` or one that `from_parts` wrote, alive as long as `self`.
+        unsafe { self.0.as_ref().keys }
+    }
+
+    /// Where the values start.
+    fn first(&self) -> *mut Value {
+        let n = self.keys_slice().len();
+        if n == 0 {
+            return NonNull::dangling().as_ptr();
+        }
+        // SAFETY: the offset is within the allocation of `n` values (`layout`).
+        unsafe { self.0.as_ptr().cast::<u8>().add(Map::layout(n).1).cast::<Value>() }
+    }
+
+    fn values_slice(&self) -> &[Value] {
+        // SAFETY: the values are initialized and owned by `self`.
+        unsafe { std::slice::from_raw_parts(self.first(), self.keys_slice().len()) }
+    }
+
+    fn values_slice_mut(&mut self) -> &mut [Value] {
+        // SAFETY: as `values_slice`, borrowed mutably with `self`.
+        unsafe { std::slice::from_raw_parts_mut(self.first(), self.keys_slice().len()) }
+    }
+
+    /// The values, moved out, with the allocation freed.
+    fn into_values(self) -> Vec<Value> {
+        let this = std::mem::ManuallyDrop::new(self);
+        let n = this.keys_slice().len();
+        let mut values = Vec::with_capacity(n);
+        if n > 0 {
+            // SAFETY: each value is read once, then the allocation is freed without dropping
+            // them (`this` is not dropped).
+            unsafe {
+                values.extend((0..n).map(|i| this.first().add(i).read()));
+                std::alloc::dealloc(this.0.as_ptr().cast::<u8>(), Map::layout(n).0);
+            }
+        }
+        values
     }
 
     /// Where field `key` is, or would be.
     fn search(&self, key: &str) -> Result<usize, usize> {
         // The first bytes decide most comparisons, without comparing the strings in full.
         let first = key.as_bytes().first();
-        self.0.binary_search_by(|(k, _)| {
-            k.as_str().as_bytes().first().cmp(&first).then_with(|| k.as_str().cmp(key))
-        })
+        self.keys_slice()
+            .binary_search_by(|k| k.as_str().as_bytes().first().cmp(&first).then_with(|| k.as_str().cmp(key)))
     }
 
     /// Where field `key` is, if the object has it. A tree's node has a few fields, which a scan
     /// that compares lengths first finds sooner than a binary search of the names.
     fn find(&self, key: &str) -> Option<usize> {
-        match self.0.len() {
-            0..=SCANNED => {
-                self.0.iter().position(|(k, _)| k.as_str().len() == key.len() && k.as_str() == key)
-            }
+        let keys = self.keys_slice();
+        match keys.len() {
+            0..=SCANNED => keys.iter().position(|k| k.as_str().len() == key.len() && k.as_str() == key),
             _ => self.search(key).ok(),
         }
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.find(key).map(|i| &self.0[i].1)
+        self.find(key).map(|i| &self.values_slice()[i])
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
-        self.find(key).map(|i| &mut self.0[i].1)
+        self.find(key).map(|i| &mut self.values_slice_mut()[i])
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        self.get(key).is_some()
+        self.find(key).is_some()
     }
 
     /// Sets field `key`, returning its value before.
     pub fn insert(&mut self, key: impl Into<Str>, value: Value) -> Option<Value> {
         let key = key.into();
         match self.search(&key) {
-            Ok(i) => Some(std::mem::replace(&mut self.0[i].1, value)),
+            Ok(i) => Some(std::mem::replace(&mut self.values_slice_mut()[i], value)),
             Err(i) => {
-                self.0.insert(i, (key, value));
+                let mut keys = self.keys_slice().to_vec();
+                keys.insert(i, key);
+                let mut values = std::mem::take(self).into_values();
+                values.insert(i, value);
+                *self = Map::from_parts(&keys, values.into_iter());
                 None
             }
         }
@@ -266,35 +380,40 @@ impl Map {
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         let i = self.search(key).ok()?;
-        Some(self.0.remove(i).1)
+        let mut keys = self.keys_slice().to_vec();
+        keys.remove(i);
+        let mut values = std::mem::take(self).into_values();
+        let removed = values.remove(i);
+        *self = Map::from_parts(&keys, values.into_iter());
+        Some(removed)
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.keys_slice().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.keys_slice().is_empty()
     }
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&Str, &Value)> + ExactSizeIterator {
-        self.0.iter().map(|(k, v)| (k, v))
+        self.into_iter()
     }
 
     pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = (&Str, &mut Value)> + ExactSizeIterator {
-        self.0.iter_mut().map(|(k, v)| (&*k, v))
+        self.into_iter()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &Str> {
-        self.0.iter().map(|(k, _)| k)
+        self.keys_slice().iter()
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Value> {
-        self.0.iter().map(|(_, v)| v)
+        self.values_slice().iter()
     }
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
-        self.0.iter_mut().map(|(_, v)| v)
+        self.values_slice_mut().iter_mut()
     }
 
     /// Sets the fields of `other`, as `insert` sets each.
@@ -303,43 +422,84 @@ impl Map {
             self.insert(k, v);
         }
     }
+
+    /// The object of `fields`, which may be in any order: one named twice keeps its last value.
+    fn of_fields(mut fields: Vec<(Str, Value)>) -> Map {
+        fields.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        let mut kept: Vec<(Str, Value)> = Vec::with_capacity(fields.len());
+        for (key, value) in fields {
+            match kept.last_mut() {
+                Some(last) if last.0 == key => last.1 = value,
+                _ => kept.push((key, value)),
+            }
+        }
+        let keys: Vec<Str> = kept.iter().map(|(k, _)| *k).collect();
+        Map::from_parts(&keys, kept.into_iter().map(|(_, v)| v))
+    }
+}
+
+impl Drop for Map {
+    fn drop(&mut self) {
+        let n = self.keys_slice().len();
+        if n > 0 {
+            // SAFETY: the values are initialized and owned, and the allocation is the one that
+            // `from_parts` made for `n` values.
+            unsafe {
+                std::ptr::drop_in_place(self.values_slice_mut());
+                std::alloc::dealloc(self.0.as_ptr().cast::<u8>(), Map::layout(n).0);
+            }
+        }
+    }
+}
+
+impl Clone for Map {
+    fn clone(&self) -> Map {
+        Map::from_parts(self.keys_slice(), self.values_slice().iter().cloned())
+    }
+}
+
+impl PartialEq for Map {
+    fn eq(&self, other: &Map) -> bool {
+        self.keys_slice() == other.keys_slice() && self.values_slice() == other.values_slice()
+    }
+}
+
+impl Default for Map {
+    fn default() -> Map {
+        Map::new()
+    }
 }
 
 impl<'a> IntoIterator for &'a Map {
     type Item = (&'a Str, &'a Value);
-    type IntoIter =
-        std::iter::Map<std::slice::Iter<'a, (Str, Value)>, fn(&'a (Str, Value)) -> (&'a Str, &'a Value)>;
+    type IntoIter = std::iter::Zip<std::slice::Iter<'a, Str>, std::slice::Iter<'a, Value>>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter().map(|(k, v)| (k, v))
+        self.keys_slice().iter().zip(self.values_slice())
     }
 }
 
 impl<'a> IntoIterator for &'a mut Map {
     type Item = (&'a Str, &'a mut Value);
-    type IntoIter = std::iter::Map<
-        std::slice::IterMut<'a, (Str, Value)>,
-        fn(&'a mut (Str, Value)) -> (&'a Str, &'a mut Value),
-    >;
+    type IntoIter = std::iter::Zip<std::slice::Iter<'a, Str>, std::slice::IterMut<'a, Value>>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter_mut().map(|(k, v)| (&*k, v))
+        let keys = self.keys_slice();
+        keys.iter().zip(self.values_slice_mut())
     }
 }
 
 impl IntoIterator for Map {
     type Item = (Str, Value);
-    type IntoIter = thin_vec::IntoIter<(Str, Value)>;
+    type IntoIter =
+        std::iter::Zip<std::iter::Copied<std::slice::Iter<'static, Str>>, std::vec::IntoIter<Value>>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        let keys = self.keys_slice();
+        keys.iter().copied().zip(self.into_values())
     }
 }
 
 impl<K: Into<Str>> FromIterator<(K, Value)> for Map {
     fn from_iter<I: IntoIterator<Item = (K, Value)>>(iter: I) -> Map {
-        let mut map = Map::new();
-        for (k, v) in iter {
-            map.insert(k, v);
-        }
-        map
+        Map::of_fields(iter.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 }
 
@@ -519,14 +679,10 @@ impl Key for str {
             *v = Value::Object(Map::new());
         }
         let Value::Object(fields) = v else { panic!("cannot index a non-object JSON value with {self:?}") };
-        let i = match fields.search(self) {
-            Ok(i) => i,
-            Err(i) => {
-                fields.0.insert(i, (Str::new(self), Value::Null));
-                i
-            }
-        };
-        &mut fields.0[i].1
+        if fields.find(self).is_none() {
+            fields.insert(self, Value::Null);
+        }
+        fields.get_mut(self).expect("a field just set")
     }
 }
 
@@ -864,14 +1020,18 @@ impl<'de> serde::de::Visitor<'de> for Visitor {
             // In the order of their names; a key that javac writes twice keeps the last value, as
             // `serde_json` does.
             read.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
-            let mut kept: ThinVec<(Str, Value)> = ThinVec::with_capacity(read.len());
+            let mut keys: Vec<Str> = Vec::with_capacity(read.len());
+            let mut values: Vec<Value> = Vec::with_capacity(read.len());
             for (key, value) in fields.drain(start..) {
-                match kept.last_mut() {
-                    Some(last) if last.0 == key => last.1 = value,
-                    _ => kept.push((key, value)),
+                match keys.last() {
+                    Some(&last) if last == key => *values.last_mut().expect("a value for each key") = value,
+                    _ => {
+                        keys.push(key);
+                        values.push(value);
+                    }
                 }
             }
-            Map(kept)
+            Map::from_parts(&keys, values.into_iter())
         })))
     }
 }
@@ -916,3 +1076,32 @@ macro_rules! json {
     };
 }
 pub(crate) use json;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn objects_read_set_and_remove_fields() {
+        let mut v: Value =
+            serde_json::from_str(r#"{"b": [1, {"x": null}], "a": "s", "b": 2, "c": {}}"#).unwrap();
+        assert_eq!(v.to_string(), r#"{"a":"s","b":2,"c":{}}"#);
+        v["d"] = Value::from(true);
+        v["a"] = Value::from(3i64);
+        let fields = v.as_object_mut().unwrap();
+        assert_eq!(fields.remove("b"), Some(Value::from(2i64)));
+        assert_eq!(fields.remove("b"), None);
+        assert_eq!(fields.len(), 3);
+        let copy = v.clone();
+        assert_eq!(copy, v);
+        assert_eq!(v.to_string(), r#"{"a":3,"c":{},"d":true}"#);
+        let Value::Object(fields) = v else { unreachable!() };
+        let pairs: Vec<(String, Value)> = fields.into_iter().map(|(k, v)| (k.into(), v)).collect();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[2], ("d".to_string(), Value::from(true)));
+        let mut emptied: Map = [("k", Value::from("v"))].into_iter().collect();
+        emptied.remove("k");
+        assert!(emptied.is_empty());
+        assert_eq!(emptied, Map::new());
+    }
+}
