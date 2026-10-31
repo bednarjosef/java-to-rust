@@ -334,6 +334,9 @@ struct Heap {
     /// Free blocks below `top`, as runs (start, length), in an array of `MAX_BLOCKS` entries.
     runs: *mut (u32, u32),
     run_count: usize,
+    /// Whether the runs are in descending order of their start (`take_blocks`), as they are but
+    /// while a sweep frees blocks.
+    runs_descending: bool,
     /// Bytes handed to threads or large allocations since the last collection, and the amount
     /// that starts the next one.
     taken: usize,
@@ -411,6 +414,7 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     tails: NONE,
     runs: ptr::null_mut(),
     run_count: 0,
+    runs_descending: true,
     taken: 0,
     next_collection: MIN_COLLECT,
     alive: 0,
@@ -810,39 +814,26 @@ impl Heap {
         self.base + (b << BLOCK_SHIFT)
     }
 
-    /// `n` free blocks in a row: from a run of free ones, or new ones at the top.
+    /// `n` free blocks in a row: from a run of free ones, or new ones at the top. The runs are
+    /// kept from the highest to the lowest (`runs_descending`), so the lowest run long enough is
+    /// the last that is: one look for a single block, as most takes are, where a search of every
+    /// run cost ManyThreadsAllocating, whose heap has hundreds of them, 8% of its instructions.
     fn take_blocks(&mut self, n: usize) -> usize {
-        if self.low_first {
-            let lowest = (0..self.run_count)
-                .filter(|&i| unsafe { (*self.runs.add(i)).1 } as usize >= n)
-                .min_by_key(|&i| unsafe { (*self.runs.add(i)).0 });
-            if let Some(i) = lowest {
-                let (start, len) = unsafe { *self.runs.add(i) };
-                unsafe {
-                    if len as usize == n {
-                        self.run_count -= 1;
-                        *self.runs.add(i) = *self.runs.add(self.run_count);
-                    } else {
-                        *self.runs.add(i) = (start + n as u32, len - n as u32);
-                    }
-                }
-                return start as usize;
+        let low_first = self.low_first;
+        let runs = self.sorted_runs();
+        let found = match low_first {
+            true => runs.iter().rposition(|&(_, len)| len as usize >= n),
+            false => runs.iter().position(|&(_, len)| len as usize >= n),
+        };
+        if let Some(i) = found {
+            let (start, len) = runs[i];
+            if len as usize == n {
+                self.remove_run(i);
+            } else {
+                // What is left of the run starts higher, still below the run before it.
+                runs[i] = (start + n as u32, len - n as u32);
             }
-        }
-        for i in 0..self.run_count {
-            let (start, len) = unsafe { *self.runs.add(i) };
-            if len as usize >= n {
-                let rest = (start as usize + n, len as usize - n);
-                unsafe {
-                    if rest.1 == 0 {
-                        self.run_count -= 1;
-                        *self.runs.add(i) = *self.runs.add(self.run_count);
-                    } else {
-                        *self.runs.add(i) = (rest.0 as u32, rest.1 as u32);
-                    }
-                }
-                return start as usize;
-            }
+            return start as usize;
         }
         if self.top + n > MAX_BLOCKS {
             out_of_memory();
@@ -863,27 +854,29 @@ impl Heap {
             END.store(self.block_address(self.top), Ordering::Release);
             return true;
         }
-        for i in 0..self.run_count {
-            let (from, len) = unsafe { *self.runs.add(i) };
-            let (from, len) = (from as usize, len as usize);
-            if from <= start && start + n <= from + len {
-                let (before, after) = (start - from, from + len - start - n);
-                unsafe {
-                    if before > 0 {
-                        *self.runs.add(i) = (from as u32, before as u32);
-                    } else {
-                        self.run_count -= 1;
-                        *self.runs.add(i) = *self.runs.add(self.run_count);
-                    }
-                    if after > 0 {
-                        *self.runs.add(self.run_count) = ((start + n) as u32, after as u32);
-                        self.run_count += 1;
-                    }
-                }
-                return true;
+        // The run that would hold them is the highest that starts at `start` or below.
+        let runs = self.sorted_runs();
+        let i = runs.partition_point(|&(from, _)| from as usize > start);
+        let Some(&(from, len)) = runs.get(i) else {
+            return false;
+        };
+        let (from, len) = (from as usize, len as usize);
+        if start + n > from + len {
+            return false;
+        }
+        let (before, after) = (start - from, from + len - start - n);
+        // What is left keeps the order: the part after them in the run's place, the part before
+        // just after it.
+        match (before > 0, after > 0) {
+            (false, false) => self.remove_run(i),
+            (true, false) => runs[i] = (from as u32, before as u32),
+            (false, true) => runs[i] = ((start + n) as u32, after as u32),
+            (true, true) => {
+                runs[i] = ((start + n) as u32, after as u32);
+                self.insert_run(i + 1, (from as u32, before as u32));
             }
         }
-        false
+        true
     }
 
     /// Puts block `b`, a tail, on the list of tails, unless it is there.
@@ -950,8 +943,46 @@ impl Heap {
             m.tail_of = 0;
             m.shared_end = false;
         }
-        unsafe { *self.runs.add(self.run_count) = (start as u32, n as u32) };
+        // In its place among the runs; at the end during a sweep, which rebuilds them in order
+        // (`merge_runs`) once it has freed every empty block.
+        let at = match self.runs_descending {
+            true => self.free_runs().partition_point(|&(from, _)| from as usize > start),
+            false => self.run_count,
+        };
+        self.insert_run(at, (start as u32, n as u32));
+    }
+
+    /// The runs of free blocks.
+    fn free_runs(&mut self) -> &mut [(u32, u32)] {
+        match self.run_count {
+            0 => &mut [],
+            n => unsafe { std::slice::from_raw_parts_mut(self.runs, n) },
+        }
+    }
+
+    /// The runs of free blocks, from the highest to the lowest.
+    fn sorted_runs(&mut self) -> &mut [(u32, u32)] {
+        if !self.runs_descending {
+            self.free_runs().sort_unstable_by_key(|&(start, _)| std::cmp::Reverse(start));
+            self.runs_descending = true;
+        }
+        self.free_runs()
+    }
+
+    /// Puts `run` at `i` among the runs of free blocks, moving those from there up one place.
+    fn insert_run(&mut self, i: usize, run: (u32, u32)) {
+        // At most one run per free block: there is room.
+        unsafe {
+            ptr::copy(self.runs.add(i), self.runs.add(i + 1), self.run_count - i);
+            *self.runs.add(i) = run;
+        }
         self.run_count += 1;
+    }
+
+    /// Removes the run of free blocks at `i`, moving those after it down one place.
+    fn remove_run(&mut self, i: usize) {
+        self.free_runs().copy_within(i + 1.., i);
+        self.run_count -= 1;
     }
 
     /// A new small block of class `class`, all its slots untaken.
@@ -3304,6 +3335,8 @@ fn sweep(h: &mut Heap, helpers: usize) {
     }
     SWEEPING.store(false, Ordering::Release);
     h.lists = [NONE; CLASSES];
+    // The blocks freed here go at the end of the runs, rebuilt in order below (`merge_runs`).
+    h.runs_descending = false;
     let mut alive = SWEEP_ALIVE.load(Ordering::Acquire);
     // Neighbouring empty blocks are freed together, in one call to the system.
     let mut empty: Option<(usize, usize)> = None;
@@ -3432,22 +3465,24 @@ fn sweep_block(m: *mut Meta) -> usize {
     alive
 }
 
-/// Rebuilds the runs of free blocks from the blocks' kinds, merging neighbours.
+/// Rebuilds the runs of free blocks from the blocks' kinds, merging neighbours, from the highest
+/// to the lowest.
 fn merge_runs(h: &mut Heap) {
     h.run_count = 0;
-    let mut b = 0;
-    while b < h.top {
-        if h.meta(b).kind == FREE {
-            let start = b;
-            while b < h.top && h.meta(b).kind == FREE {
-                b += 1;
+    let mut b = h.top;
+    while b > 0 {
+        if h.meta(b - 1).kind == FREE {
+            let end = b;
+            while b > 0 && h.meta(b - 1).kind == FREE {
+                b -= 1;
             }
-            unsafe { *h.runs.add(h.run_count) = (start as u32, (b - start) as u32) };
+            unsafe { *h.runs.add(h.run_count) = (b as u32, (end - b) as u32) };
             h.run_count += 1;
         } else {
-            b += 1;
+            b -= 1;
         }
     }
+    h.runs_descending = true;
 }
 
 /// Runs a collection now, for tests (`System.gc()` does nothing, see `system::gc`). A collection

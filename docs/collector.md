@@ -49,7 +49,9 @@ owned, and that Rust therefore never freed, is found unreachable too.
   size hands out its partly free blocks lowest first, so the objects that live gather at the
   bottom and whole huge pages above them empty and go back to the system. On the Minecraft
   server's bench this lowered the peak from 1,030–1,089 MB to 1,013–1,020 MB, at the same tick
-  speed (`JAVA_GC_LOW_FIRST=0` turns it off).
+  speed (`JAVA_GC_LOW_FIRST=0` turns it off). The free runs are kept from the highest to the
+  lowest, so the lowest one long enough is found from the end, at once for a single block, where
+  a search of every run took 8% of ManyThreadsAllocating's instructions.
 - **Code pages.** A second after the heap starts, then after waits that double up to 10 seconds
   (`JAVA_GC_CODE_PAGES=<seconds>` sets that most, 0 never), a collection gives the pages of the
   executable's code and constants back to the system once the program's threads run again. They
