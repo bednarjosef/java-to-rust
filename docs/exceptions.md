@@ -635,8 +635,8 @@ stored in (`(s = a).next` fails `because "a" is null`, `(this.f = g()).next` `be
 value of "Main.g()" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
 (`program::MODULE_CALLS`), `c.isAssignableFrom(d)` as itself (a null `d` fails in the JVM's
-native code, which gives no message), `c.isInstance(x)` of a null `c` as itself, after `x` is
-evaluated, `c.getEnumConstants()`, `c.getGenericSuperclass()`,
+native code, which gives no message), `c.isInstance(x)` and `c.cast(x)` of a null `c` as
+themselves, after `x` is evaluated, `c.getEnumConstants()`, `c.getGenericSuperclass()`,
 `c.getGenericInterfaces()` and `c.getTypeParameters()` (each a block that checks `c` first) as
 themselves, `n.byteValue()` and `n.shortValue()` of a `Number` (lowered as the narrowed
 `intValue()`) as themselves, an enum's `toString()` as the enum's, `c.cast(x)` (a block that

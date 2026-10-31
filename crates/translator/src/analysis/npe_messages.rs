@@ -943,6 +943,14 @@ impl Messages<'_> {
                         };
                         add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                     }
+                    // `c.cast(x)` of a null class `c`, whose check `lower::classes` writes.
+                    Builtin::ClassCheck => {
+                        let call = match self.jdk {
+                            true => Some("java.lang.Class.cast(Object)".to_string()),
+                            false => self.call(x.pos, "cast"),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                    }
                     Builtin::ClassMethod(ClassOp::IsAssignableFrom) => {
                         let call = match self.jdk {
                             true => Some("java.lang.Class.isAssignableFrom(java.lang.Class)".to_string()),

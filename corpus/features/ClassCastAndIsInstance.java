@@ -123,6 +123,16 @@ public class ClassCastAndIsInstance {
             System.out.println("caught " + e.getMessage());
         }
         try {
+            System.out.println(noKind.cast(keyOf("before the cast", keys, 1)));
+        } catch (NullPointerException e) {
+            System.out.println("caught " + e.getMessage());
+        }
+        try {
+            System.out.println(noKind.cast(some) + " " + noKind.cast(null));
+        } catch (NullPointerException e) {
+            System.out.println("caught " + e.getMessage());
+        }
+        try {
             System.out.println(1 / (args.length));
         } catch (RuntimeException e) {
             System.out.println(ArithmeticException.class.isInstance(e) + " " + RuntimeException.class.isInstance(e));
