@@ -327,6 +327,11 @@ impl<'t> Flow<'_, 't> {
         }
         let listed = |decl: Node<'t>| match symbol.name {
             "typeParameters0" => decl.list("typeParameters").next().is_some(),
+            "genericSuperclass0" => {
+                decl.kind() == "ENUM"
+                    || decl.kind() == "CLASS"
+                        && decl.get("extendsClause").is_some_and(|c| c.java_type().contains('<'))
+            }
             "genericInterfaces0" => decl.list("implementsClause").any(|c| c.java_type().contains('<')),
             "bounds0" => decl.list("typeParameters").any(|v| v.list("bounds").next().is_some()),
             _ => false,

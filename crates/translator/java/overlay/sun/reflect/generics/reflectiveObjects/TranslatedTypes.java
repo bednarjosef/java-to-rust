@@ -41,6 +41,15 @@ final class TranslatedTypes {
         return declared != null ? declared : new TypeVariable<?>[0];
     }
 
+    /**
+     * {@code c.getGenericSuperclass()} of a class that the call cannot narrow down: its superclass
+     * with the type arguments javac gives it, or its superclass where it has none.
+     */
+    static Type genericSuperclass(Class<?> c) {
+        Type generic = genericSuperclass0(c);
+        return generic != null ? generic : c.getSuperclass();
+    }
+
     /** {@code c.getGenericInterfaces()}: the interfaces the class implements, with their type arguments. */
     static Type[] genericInterfaces(Class<?> c) {
         Type[] generic = genericInterfaces0(c);
@@ -66,6 +75,9 @@ final class TranslatedTypes {
 
     /** The type variables of a class that declares any, null for any other. */
     private static native TypeVariable<?>[] typeParameters0(Class<?> c);
+
+    /** The superclass of a class that extends one with type arguments, or an enum's, null for any other. */
+    private static native Type genericSuperclass0(Class<?> c);
 
     /** The interfaces of a class that implements one with type arguments, null for any other. */
     private static native Type[] genericInterfaces0(Class<?> c);
