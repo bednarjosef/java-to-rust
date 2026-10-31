@@ -3155,24 +3155,41 @@ impl<'a> Gen<'a> {
     /// (`same_variant`) look further, through the view.
     fn identity_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
-        self.gap();
-        self.line(&format!("impl PartialEq for {name} {{"));
-        self.indent += 1;
-        self.line(&format!("fn eq(&self, other: &{name}) -> bool {{"));
-        self.indent += 1;
         let by_value: Vec<(usize, String)> = variants
             .iter()
             .map(|&c| (c, self.same_variant(c)))
             .filter(|(_, same)| same != IDENTITY)
             .collect();
-        if variants.is_empty() {
-            self.line("match self.view() {}");
-        } else if by_value.is_empty() {
-            self.line("self.0 == other.0");
+        self.gap();
+        self.line(&format!("impl PartialEq for {name} {{"));
+        self.indent += 1;
+        if by_value.is_empty() || variants.is_empty() {
+            self.line(&format!("fn eq(&self, other: &{name}) -> bool {{"));
+            self.indent += 1;
+            match variants.is_empty() {
+                true => self.line("match self.view() {}"),
+                false => self.line("self.0 == other.0"),
+            }
         } else {
+            // Values with the same bits are equal, and values of two classes are not: both tests
+            // are inlined where `==` is, and only two values of one class with different bits go
+            // on to `eq_by_value`, which compares those of the classes held as values. The split
+            // puts a small function in the header, which every crate inlines, and the long test
+            // of the class (900 classes on the Minecraft server) in a body crate.
+            self.line("#[inline]");
+            self.line(&format!("fn eq(&self, other: &{name}) -> bool {{"));
+            self.line("    self.0 == other.0 || self.0.tag() == other.0.tag() && self.eq_by_value(other)");
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+            self.gap();
+            self.line(&format!("impl {name} {{"));
+            self.indent += 1;
+            self.line(&format!("fn eq_by_value(&self, other: &{name}) -> bool {{"));
+            self.indent += 1;
             let tags: Vec<String> = by_value.iter().map(|&(c, _)| self.class_tag(c).to_string()).collect();
             self.line(&format!(
-                "self.0 == other.0 || self.0.tag() == other.0.tag() && matches!(self.0.tag(), {}) && match (self.view(), other.view()) {{",
+                "matches!(self.0.tag(), {}) && match (self.view(), other.view()) {{",
                 tags.join(" | ")
             ));
             self.indent += 1;
@@ -3250,17 +3267,40 @@ impl<'a> Gen<'a> {
         }
         let name = struct_name(&self.class.types[t].name);
         let trait_name = self.runtime("SameObject");
-        self.gap();
-        self.line(&format!("impl {trait_name} for {name} {{"));
-        self.indent += 1;
-        self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
-        self.indent += 1;
         // The objects whose identity is their handle's, and the values that are equal exactly
         // when their bits are (an enum's constant, a `Boolean` or a `Byte`, which `java::Thin`
         // holds in the low bytes of zeroed bits): the same object exactly when the two values
         // have the same bits, one test for all of them.
         let by_bits: Vec<usize> = variants.iter().copied().filter(|&c| self.same_by_bits(c)).collect();
         let others: Vec<usize> = variants.iter().copied().filter(|c| !by_bits.contains(c)).collect();
+        // Where both kinds are among the values, the test of the first one's class and the
+        // compare of the bits are inlined where `==` is (a search for a key in a palette, a list
+        // of states), and only a value of one of the others (strings, boxes, builders) goes on to
+        // `same_object_slow`, out of line: the split puts a small function in the header, which
+        // every crate inlines, and the whole test in a body crate.
+        let split = !by_bits.is_empty() && !others.is_empty();
+        self.gap();
+        self.line(&format!("impl {trait_name} for {name} {{"));
+        self.indent += 1;
+        if split {
+            let tags = self.tags(&others, variants);
+            self.line("#[inline]");
+            self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
+            self.line(&format!("    if !matches!(self.0.tag(), {tags}) {{"));
+            self.line("        return self.0 == other.0;");
+            self.line("    }");
+            self.line("    self.same_object_slow(other)");
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+            self.gap();
+            self.line(&format!("impl {name} {{"));
+            self.indent += 1;
+            self.line(&format!("fn same_object_slow(&self, other: &{name}) -> bool {{"));
+        } else {
+            self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
+        }
+        self.indent += 1;
         if by_bits.len() == variants.len() && !variants.is_empty() {
             self.line("self.0 == other.0");
         } else if variants.is_empty() {
@@ -3268,26 +3308,12 @@ impl<'a> Gen<'a> {
         } else {
             // Values of two classes are never the same object. The few classes of the others
             // (strings, boxes, builders) are the test, not the many of the rest, which a `match`
-            // on the number would test one range after another. The bits are compared first:
-            // they hold the class number, so values whose bits differ are the same only when both
-            // are of one of the others, and a search for a key by `==` (a palette, a list of
-            // states) is then one compare per value once the compiler hoists the key's class.
-            if by_bits.is_empty() {
-                self.line("if self.0.tag() != other.0.tag() {");
-                self.line("    return false;");
-                self.line("}");
-            } else {
-                let tags = self.tags(&others, variants);
-                self.line("if self.0 == other.0 {");
-                self.line(&format!("    if !matches!(self.0.tag(), {tags}) {{"));
-                self.line("        return true;");
-                self.line("    }");
-                self.line(&format!(
-                    "}} else if !matches!(self.0.tag(), {tags}) || self.0.tag() != other.0.tag() {{"
-                ));
-                self.line("    return false;");
-                self.line("}");
-            }
+            // on the number would test one range after another; values whose bits differ are
+            // the same only when both are of one of the others. Here the first value is one of
+            // them, where the test was inlined (`split`).
+            self.line("if self.0.tag() != other.0.tag() {");
+            self.line("    return false;");
+            self.line("}");
             self.line("match (self.view(), other.view()) {");
             self.indent += 1;
             for &c in &others {
@@ -3667,13 +3693,25 @@ impl<'a> Gen<'a> {
                 self.line("}");
                 continue;
             }
+            if let Need::RuntimeClass(_) = need {
+                // Read from the table by class number (`classes_table`), but for an `Object[]`
+                // that may be a covariant array, which carries its class.
+                let carried: Vec<usize> =
+                    variants.iter().copied().filter(|&c| self.class_carried(c)).collect();
+                let table = format!("*crate::{}[self.0.tag() as usize]", super::class_values::CLASSES);
+                if carried.is_empty() {
+                    self.line(&table);
+                } else {
+                    self.match_arms_or(&carried, Some(table), &|g: &mut Self, c| {
+                        (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
+                    });
+                }
+                self.indent -= 1;
+                self.line("}");
+                continue;
+            }
             let ret = format!(" -> {ret}");
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
-                // An `Object[]` that may be a covariant array, which carries its class.
-                Need::RuntimeClass(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
-                    (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
-                }
-                Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
                 // Read from the value's bits, the same text for every such class, whose arms

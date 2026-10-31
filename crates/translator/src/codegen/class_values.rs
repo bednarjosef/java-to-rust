@@ -7,7 +7,8 @@
 //! runtime's classes and arrays are written out where they are used. A static rather than a
 //! constant, so that classes can name each other in a loop and no function is written to name
 //! one: rustc checks and compiles each function body, and the Minecraft server has 40,000 classes. For a value of an enum of classes, the enum's
-//! `runtime_class()` and `runtime_type_names()` hold the `match` over its variants
+//! `runtime_class()` and `runtime_type_names()` read tables by class number, with a `match` for
+//! the variants that carry their class
 //! (`dispatch::class_value_impls`).
 
 use super::*;
@@ -15,6 +16,9 @@ use super::*;
 /// The static at the crate root that holds the binary names above each class by its class
 /// number (`Gen::type_names_table`).
 pub(super) const TYPE_NAMES: &str = "TYPE_NAMES_BY_CLASS_NUMBER";
+
+/// The static at the crate root that holds each class by its class number (`Gen::classes_table`).
+pub(super) const CLASSES: &str = "CLASSES_BY_CLASS_NUMBER";
 
 /// `match obj.view() { arms }` over the variants of an enum of classes, whose arms match the
 /// view's variants (`dispatch::view_pattern`). With no arms, for an interface that no created class
@@ -651,6 +655,45 @@ impl<'a> Gen<'a> {
             entries.len(),
             entries.iter().map(|e| format!("    {e},\n")).collect::<String>()
         )
+    }
+
+    /// The static `CLASSES` at the crate root, if an enum of classes reads it: a reference to each
+    /// class at its class number, for the classes of those enums, whose `runtime_class()` reads it
+    /// (`dispatch::class_value_impls`). One read by number, where a `match` over the 20,000
+    /// classes of the Minecraft server's `Object` was cut into parts, two calls in another crate.
+    pub(super) fn classes_table(&mut self) -> String {
+        let enums: Vec<usize> = self
+            .wanted
+            .iter()
+            .filter_map(|need| match need {
+                Need::RuntimeClass(t) => Some(*t),
+                _ => None,
+            })
+            .collect();
+        let mut by_number = std::collections::BTreeMap::new();
+        for t in enums {
+            for c in self.enum_variants(t) {
+                if !self.class_carried(c) {
+                    by_number.insert(self.class_tag(c), c);
+                }
+            }
+        }
+        let Some((&last, _)) = by_number.last_key_value() else { return String::new() };
+        let mut entries = vec!["&java::Class::OBJECT".to_string(); usize::from(last) + 1];
+        for (number, c) in by_number {
+            entries[usize::from(number)] = format!("&{}", self.decl_class(c));
+        }
+        format!(
+            "static {CLASSES}: [&java::Class; {}] = [\n{}];\n",
+            entries.len(),
+            entries.iter().map(|e| format!("    {e},\n")).collect::<String>()
+        )
+    }
+
+    /// Whether an object of class `c` carries its class, as an `Object[]` that may be a covariant
+    /// array does (`java::array_class`), which `runtime_class()` then asks it for.
+    pub(super) fn class_carried(&self, c: usize) -> bool {
+        self.class.array_of(c).is_some_and(|ty| self.carries_class(ty))
     }
 
     /// `decl_names(c)` as a slice: `&["Main$Dog", .., "java.lang.Object"]`.
