@@ -4,7 +4,7 @@ import java.util.EnumMap;
 // with and without a body, own classes and records, strings, boxes, arrays of primitives, arrays
 // whose class is fixed and `Object[]`s that are arrays of a subtype. Each class is read from a
 // table by the class's number, except an `Object[]` that may be a covariant array, which carries
-// its class. `EnumMap`'s test of a key: its class is the key type, or the key type is its
+// its class, and an enum's constant, which may be of its body's class. `EnumMap`'s test of a key: its class is the key type, or the key type is its
 // superclass; and `EnumMap` itself, given keys of every kind.
 public class ClassesOfObjectsByNumber {
     enum Plain { A, B }
@@ -40,13 +40,12 @@ public class ClassesOfObjectsByNumber {
         };
         for (Object value : values) {
             Class<?> c = value.getClass();
-            // A constant with a body is of a class of its own, which the translation gives the
-            // enum's name: the enum's names are left out.
-            String name = value instanceof WithBodies ? "" : c.getName() + " " + c.getSimpleName();
-            System.out.println(name + " plain " + validKey(value, Plain.class) + " bodies "
-                + validKey(value, WithBodies.class) + " same " + (c == values[0].getClass()));
+            System.out.println(c.getName() + " " + c.getSimpleName() + " super " + c.getSuperclass()
+                + " plain " + validKey(value, Plain.class) + " bodies " + validKey(value, WithBodies.class)
+                + " same " + (c == values[0].getClass()));
         }
         System.out.println(validKey(null, Plain.class));
+        System.out.println(WithBodies.UP.getClass() == WithBodies.DOWN.getClass());
         System.out.println(WithBodies.UP.getDeclaringClass() == WithBodies.FLAT.getClass());
         System.out.println(covariant.getClass() == String[].class);
         EnumMap<WithBodies, String> map = new EnumMap<>(WithBodies.class);

@@ -273,6 +273,7 @@ impl<'t> Lowering<'t> {
                 cloneable: false,
                 modifiers: 0x1010,
                 enclosing: None,
+                record: false,
             })
         };
         self.current.set(t);

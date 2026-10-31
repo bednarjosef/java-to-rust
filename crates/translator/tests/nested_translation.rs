@@ -273,7 +273,7 @@ fn for_each_over_an_iterable_is_the_iterator_loop() {
             "let it = A__iterator_on_stack(&a, &slot_1);",
             "let it = A__iterator_on_stack(&a, &slot_2);",
             "'outer: while it.has_next() {",
-            "let s = java::cast(&it.next(), |o| o.as_string(), (\"java.lang.String\", java::BASE));",
+            "let s = java::cast(&it.next(), |o| o.as_string(), &(\"java.lang.String\", java::BASE));",
             "continue 'outer;",
         ],
     );

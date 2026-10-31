@@ -32,11 +32,18 @@ impl<'a> Gen<'a> {
         if has_effects(object) || self.object_may_fail(object) || self.enum_of(object).is_some() {
             return None;
         }
-        self.struct_class(object)
+        // An enum's constant with a body is of the body's class.
+        self.struct_class(object).filter(|&c| !self.has_bodies(c))
     }
 
     /// Whether the class of `object` is class `c` (`!same`: is not).
     fn has_class(&mut self, object: &'a Expr, c: usize, same: bool) -> Code {
+        // Of an enum whose constants with a body are of the body's class, the names are compared.
+        if self.has_bodies(c) {
+            let name = Code::atom(rust_string(&self.java_class_name(c, false)));
+            let text = self.class_text(object);
+            return infix(if same { "==" } else { "!=" }, CMP, &text, &name);
+        }
         let Some(t) = self.enum_of(object) else {
             let is = self.struct_class(object) == Some(c);
             return self.after_object(object, if is == same { "true" } else { "false" });
@@ -56,6 +63,10 @@ impl<'a> Gen<'a> {
     pub(super) fn class_text(&mut self, object: &'a Expr) -> Code {
         let Some(t) = self.enum_of(object) else {
             let c = self.struct_class(object).expect("an object has a class");
+            if self.has_bodies(c) {
+                let value = self.object(object);
+                return Code::atom(self.constant_class_name(c, &value, false));
+            }
             let name = rust_string(&self.java_class_name(c, false));
             return self.after_object(object, &name);
         };

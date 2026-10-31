@@ -6147,8 +6147,8 @@ fn downcasts_are_checked() {
     assert_contains(
         &rust,
         &[
-            "let r = java::cast(&all[1], |o| o.as_rect(), (\"Rect\", java::APP));",
-            "java::cast(&s, |o| o.as_unit(), (\"Unit\", java::APP)) as i32",
+            "let r = java::cast(&all[1], |o| o.as_rect(), &(\"Rect\", java::APP));",
+            "java::cast(&s, |o| o.as_unit(), &(\"Unit\", java::APP)) as i32",
             "    fn as_unit(&self) -> Option<Unit> {\n        match self.0.tag() {\n            4 => { let o: &Unit = unsafe { self.0.as_value() }; Some(*o) }",
         ],
     );
@@ -6224,7 +6224,7 @@ fn object_values_are_an_enum() {
             "enum ObjectView<'a> {\n    Key(&'a Arc<Key>) = 1,\n    Plain(&'a Arc<Plain>) = 2,\n    String(&'a java::JString) = 4,\n    Integer(&'a i32) = 5,\n}",
             "let s = Object::String(java::JString::from(\"text\"));",
             "let n = Object::Integer(5);",
-            "let back = java::cast(&n, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE));",
+            "let back = java::cast(&n, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE));",
             "if let Some(s) = o.as_string() {",
         ],
     );
@@ -6367,7 +6367,7 @@ fn use_sites_check_cast() {
     assert_contains(
         &rust,
         &[
-            "let x = java::cast(&b.get(), |o| o.as_integer(), (\"java.lang.Integer\", java::BASE)).wrapping_add(1);",
+            "let x = java::cast(&b.get(), |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE)).wrapping_add(1);",
         ],
     );
 }
@@ -6383,7 +6383,7 @@ fn bounded_type_variables_erase_to_the_bound() {
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
             "enum ComparableView<'a> {\n    Point(&'a Arc<Point>) = 5,\n    String(&'a java::JString) = 7,\n}",
             "5 => { let o: &Arc<Point> = unsafe { this.0.as_pointer() }; o.compare_to(other) }",
-            "7 => { let o: &java::JString = unsafe { this.0.as_value() }; match (&other).view() { ComparableView::String(b) => java::compare_to(o, b), _ => { let b = &other; java::cast_failed(java::CastSource::cast_class(&b), (\"java.lang.String\", java::BASE)) } } }",
+            "7 => { let o: &java::JString = unsafe { this.0.as_value() }; match (&other).view() { ComparableView::String(b) => java::compare_to(o, b), _ => { let b = &other; java::cast_failed_on(&b, &(\"java.lang.String\", java::BASE)) } } }",
         ],
     );
 }
@@ -6413,7 +6413,7 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
         &[
             "fn max(a: Object, b: Object) -> Object {",
             // The argument, a cast that may fail, is computed before the receiver's check.
-            "let receiver_0 = java::cast(&a, |o| o.as_comparable(), (\"java.lang.Comparable\", java::BASE));",
+            "let receiver_0 = java::cast(&a, |o| o.as_comparable(), &(\"java.lang.Comparable\", java::BASE));",
             "Comparable__compare_to(receiver_0, ",
             "t.name()",
         ],
@@ -6440,7 +6440,7 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
         &[
             "IntArray(&'a java::Array<i32>) = 11,",
             "let held = Object::IntArray(cell.clone());",
-            "java::cast(&held, |o| o.as_int_array(), (\"[I\", java::BASE))",
+            "java::cast(&held, |o| o.as_int_array(), &(\"[I\", java::BASE))",
             "fn eq(&self, other: &Object) -> bool {",
             "self.0 == other.0",
             "11 => { let o: &java::Array<i32> = unsafe { this.0.as_pointer() }; java::identity_hash(o) }",
@@ -6494,7 +6494,7 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
             "String(&'a java::JString) = 2,",
             "fn first(a: &[Object]) -> Object {",
             "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || java::Class::STRING), \"java.lang.String\", java::BASE, |v| Some(v.runtime_type_names()), &[\"[Ljava.lang.String;\", \"[Ljava.io.Serializable;\", \"[Ljava.lang.Comparable;\", \"[Ljava.lang.CharSequence;\", \"[Ljava.lang.constant.Constable;\", \"[Ljava.lang.constant.ConstantDesc;\", \"[Ljava.lang.Object;\", \"java.lang.Cloneable\", \"java.io.Serializable\", \"java.lang.Object\"])));",
-            "java::join(java::wtf8(\",\"), &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), (\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
+            "java::join(java::wtf8(\",\"), &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), &(\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
         ],
     );
 }
@@ -6518,8 +6518,8 @@ fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_con
         &rust,
         &[
             "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
-            "java::non_null(last(&days).as_ref().map(|o| java::cast(o, Object::as_day, (\"Main$Day\", java::APP)))) as i32",
-            "some[0].as_ref().map(|o| java::cast(o, Object::as_day, (\"Main$Day\", java::APP))).is_none()",
+            "java::non_null(last(&days).as_ref().map(|o| java::cast(o, Object::as_day, &(\"Main$Day\", java::APP)))) as i32",
+            "some[0].as_ref().map(|o| java::cast(o, Object::as_day, &(\"Main$Day\", java::APP))).is_none()",
         ],
     );
 }
@@ -6679,7 +6679,7 @@ fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
             "fn count(xs: &[Object]) -> i32 {",
             "let vs: Vec<Object> = vec![Object::V(Arc::new(V__new(1)))];",
             "count(&vs)",
-            "java::cast(&vs[0], |o| o.as_v(), (\"V\", java::APP)).n",
+            "java::cast(&vs[0], |o| o.as_v(), &(\"V\", java::APP)).n",
         ],
     );
 }
@@ -6695,7 +6695,7 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
             "fn next_integer(&self) -> i32 {",
             "fn next(&self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
             "fn compare_to_point(&self, o: &Arc<Point>) -> i32 {",
-            "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(&other, |o| o.as_point(), (\"Point\", java::APP)))\n    }",
+            "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(&other, |o| o.as_point(), &(\"Point\", java::APP)))\n    }",
         ],
     );
 }
@@ -6706,7 +6706,7 @@ fn wildcards_and_raw_types_erase() {
     // `? extends Shape` is `Shape`, and a raw `Box` is the class itself.
     assert_contains(
         &rust,
-        &["java::cast(&b.get(), |o| o.as_shape(), (\"Shape\", java::APP)).sides()", "let raw = b;"],
+        &["java::cast(&b.get(), |o| o.as_shape(), &(\"Shape\", java::APP)).sides()", "let raw = b;"],
     );
 }
 
@@ -6722,7 +6722,7 @@ fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
         &[
             "fn first(xs: &[Object]) -> Object {",
             "let s: Vec<Object> = vec![Object::String(java::JString::from(\"a\"))];",
-            "java::cast(&first(&s), |o| o.as_string(), (\"java.lang.String\", java::BASE))",
+            "java::cast(&first(&s), |o| o.as_string(), &(\"java.lang.String\", java::BASE))",
         ],
     );
 }
@@ -7430,4 +7430,61 @@ fn a_string_parameter_read_by_index_is_given_with_whether_it_is_ascii() {
             "walk(java::Str::known(java::wtf8(\"é f\"), false))",
         ],
     );
+}
+
+#[test]
+fn a_small_default_body_is_copied_for_each_class_whose_arm_calls_it() {
+    // The dispatcher's arm for each class that runs `Reader.minY()` calls a copy of it for the
+    // class, where `dimension()` is the class's own method rather than a dispatch.
+    let rust = translate(
+        r#"
+        public class Heights {
+            record Dimension(int minY) { }
+
+            interface Accessor { int minY(); }
+
+            interface Reader extends Accessor {
+                Dimension dimension();
+                default int minY() { return dimension().minY(); }
+            }
+
+            static class Level implements Reader {
+                final Dimension d;
+                Level(Dimension d) { this.d = d; }
+                public Dimension dimension() { return d; }
+            }
+
+            static class Other implements Reader {
+                public Dimension dimension() { return new Dimension(1); }
+            }
+
+            static class Region implements Reader {
+                public Dimension dimension() { return new Dimension(2); }
+                public int minY() { return 7; }
+            }
+
+            static class Fixed implements Accessor {
+                public int minY() { return 3; }
+            }
+
+            public static void main(String[] args) {
+                Accessor[] all = { new Level(new Dimension(-64)), new Other(), new Region(), new Fixed() };
+                int sum = 0;
+                for (Accessor a : all) {
+                    sum += a.minY();
+                }
+                System.out.println(sum);
+            }
+        }
+    "#,
+    );
+    assert_contains(
+        &rust,
+        &[
+            "HeightsReader__min_y_in_reader__on_heights_level(HeightsReader::Level(o.clone()))",
+            "fn HeightsReader__min_y_in_reader__on_heights_level(this: HeightsReader) -> i32 {\n    ({ let o: &Arc<HeightsLevel> = unsafe { this.0.as_pointer() }; o.dimension() }).min_y()",
+            "fn HeightsReader__min_y_in_reader__on_heights_other(",
+        ],
+    );
+    assert_lacks(&rust, &["__on_heights_region", "__on_heights_fixed"]);
 }

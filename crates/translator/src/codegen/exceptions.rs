@@ -1616,6 +1616,13 @@ impl<'a> Gen<'a> {
                 let class = self.type_class(Type::class(&self.class.types[c].name));
                 self.after_object(object, &format!("{class}.{method}()"))
             }
+            // An enum's constant with a body is of the body's class.
+            None if self.struct_class(object).is_some_and(|c| self.has_bodies(c)) => {
+                let c = self.struct_class(object).expect("an object has a class");
+                let value = self.object(object);
+                let name = self.constant_class_name(c, &value, simple);
+                Code::atom(format!("java::JString::from({name})"))
+            }
             None => {
                 let c = self.struct_class(object).expect("an object has a class");
                 let name = rust_string(&self.java_class_name(c, simple));
@@ -1627,9 +1634,11 @@ impl<'a> Gen<'a> {
                 let object_array = Type::array(Type::class(OBJECT));
                 // So is a value that may be of a proxy class (`Class::proxy_classes`).
                 let variants = self.enum_variants(t);
+                // So is an enum's constant whose body is its class.
                 if self.carries_class(object_array)
                     && variants.iter().any(|&c| self.class.array_of(c) == Some(object_array))
                     || variants.iter().any(|c| self.class.proxy_classes.contains(c))
+                    || variants.iter().any(|&c| self.has_bodies(c))
                 {
                     self.need(Need::RuntimeClass(t));
                     let class = super::class_values::method_on(&obj, "runtime_class");

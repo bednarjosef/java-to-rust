@@ -87,6 +87,24 @@ impl<'t> Lowering<'t> {
         self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).map(|m| m.str("name"))
     }
 
+    /// `constants`, the constants of enum `class`, with the binary name of each one's body
+    /// (`EnumConstant::body`).
+    pub(super) fn with_body_classes(
+        &self,
+        class: usize,
+        mut constants: Vec<EnumConstant>,
+    ) -> Vec<EnumConstant> {
+        let members = self.types[class].node.list("members").filter(|m| is_enum_constant(*m));
+        for (constant, member) in constants.iter_mut().zip(members) {
+            constant.body = member
+                .get("initializer")
+                .and_then(|i| i.get("classBody"))
+                .and_then(|b| b.get("symbol"))
+                .and_then(|s| s.0["binary"].as_str().map(str::to_string));
+        }
+        constants
+    }
+
     /// The value of the enum constant that a symbol names, if it is one.
     pub(super) fn enum_constant(&self, symbol: &Symbol) -> Option<ExprKind> {
         if symbol.kind != "ENUM_CONSTANT" {
@@ -156,7 +174,7 @@ impl<'t> Lowering<'t> {
                 };
                 values.push(value);
             }
-            constants.push(EnumConstant { name: member.str("name").to_string(), values });
+            constants.push(EnumConstant { name: member.str("name").to_string(), values, body: None });
         }
         Ok(constants)
     }
@@ -321,8 +339,16 @@ impl<'t> Lowering<'t> {
             }
             "name" | "toString" => Builtin::EnumName,
             "compareTo" => Builtin::EnumCompareTo,
-            // The class of an enum's constant is its enum's, a constant body's too.
-            "getDeclaringClass" => return Ok(Some(ExprKind::Builtin(Builtin::GetClass, vec![receiver]))),
+            // The enum of a constant: its class, or the superclass of its body's class.
+            "getDeclaringClass" => {
+                let pos = receiver.pos;
+                let class =
+                    self.synth(ExprKind::Builtin(Builtin::GetClass, vec![receiver]), pos, Type::JavaClass);
+                return Ok(Some(ExprKind::Builtin(
+                    Builtin::ClassMethod(ClassOp::EnumDeclaringClass),
+                    vec![class],
+                )));
+            }
             // `Enum`'s `equals` and `hashCode` are `Object`'s identity ones (and final), so a
             // constant of a known enum is compared and hashed as an `Object` too.
             "equals" | "hashCode" if erased || self.object.is_some() => {

@@ -736,6 +736,7 @@ impl<'a> Gen<'a> {
             double_receiver: false,
             this_form: ThisForm::Shared,
             thin_this: false,
+            this_class: None,
             lazy_text: false,
             formatting: false,
             chars: false,
@@ -963,6 +964,9 @@ struct Gen<'a> {
     /// is the enum's value itself (`this: Shape`, see `Gen::enum_fn`), rather than a method of the
     /// enum's `impl`, whose `self` borrows it.
     thin_this: bool,
+    /// The class of `this` in a copy of a body of a type's enum written for one class of the
+    /// enum (`Need::BodyFor`), whose calls on `this` run that class's methods directly.
+    this_class: Option<usize>,
     /// Whether the concatenation being written takes objects, enums and builders as they are, as
     /// `java::Piece`s whose text is made when the string is built, rather than converted to a
     /// string first (see `parts`).
@@ -1408,6 +1412,8 @@ impl<'a> Gen<'a> {
             format!("{init}_slow")
         } else if self.module_fn(index) {
             format!("{}__{}", self.struct_of(self.this_struct), self.fn_names[index])
+        } else if thin && let Some(c) = self.this_class {
+            self.enum_fn(self.this_struct, &self.body_for_name(index, c))
         } else if thin {
             self.enum_fn(self.this_struct, &self.fn_names[index])
         } else {

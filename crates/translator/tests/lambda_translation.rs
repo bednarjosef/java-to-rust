@@ -97,9 +97,9 @@ fn a_generic_interfaces_closure_converts_its_arguments_and_its_result() {
     assert_contains(
         &rust,
         &[
-            "let square = |t: Object| -> Object {\n        let x: i32 = java::cast(&t, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE));\n        Object::Integer(x.wrapping_mul(x))\n    };",
+            "let square = |t: Object| -> Object {\n        let x: i32 = java::cast(&t, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE));\n        Object::Integer(x.wrapping_mul(x))\n    };",
             "square(Object::Integer(7))",
-            "let show = |t: Object| {\n        let s_text = &java::cast(&t, |o| o.as_string(), (\"java.lang.String\", java::BASE));\n        let s: java::Str<'_> = java::Str::of(s_text);\n        java::println!(\"{}\", java::string_length(s.as_text()));\n    };",
+            "let show = |t: Object| {\n        let s_text = &java::cast(&t, |o| o.as_string(), &(\"java.lang.String\", java::BASE));\n        let s: java::Str<'_> = java::Str::of(s_text);\n        java::println!(\"{}\", java::string_length(s.as_text()));\n    };",
         ],
     );
     assert_lacks(&rust, &["fn apply_integer", "struct FunctionLambdaInMain"]);
@@ -126,7 +126,7 @@ fn a_lambda_that_returns_early_behind_a_bridge_is_a_closure_called_at_once() {
         &[
             "Object::Integer((|x: i32| -> i32 {",
             "return x.wrapping_sub(4);",
-            "})(java::cast(&t, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE))))",
+            "})(java::cast(&t, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE))))",
         ],
     );
 }
