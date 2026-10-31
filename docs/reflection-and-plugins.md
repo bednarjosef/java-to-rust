@@ -138,7 +138,10 @@ program where such a lookup can happen, so they can be checked before the progra
   few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
   size. The table itself is data: each part is three constant arrays, of the classes its members
   name, of their names, and of numbers (indices into those two, modifiers and slots), which
-  `java/Reflection.java` makes the objects from, not code that makes each. A whole program, and
+  `java/Reflection.java` makes the objects from, not code that makes each. The generator writes
+  a long array literal of string or class constants as a `static` of the constants and a loop
+  that makes the elements (`codegen/arrays.rs`, `table_lit`): written element by element, each
+  of the server's 32 parts was a function of 1.3 MB of machine code that ran once. A whole program, and
   a census, then cut the table to the members that a lookup can find
   (`analysis/reflection_table.rs`); a census does it with the facts that lowering found the
   methods that can run by, and walks those again only when the table lost members.
