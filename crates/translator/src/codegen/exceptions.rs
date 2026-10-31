@@ -1067,7 +1067,25 @@ impl<'a> Gen<'a> {
     /// `throw value;`.
     pub(super) fn throw_stmt(&mut self, value: &'a Expr) {
         let text = self.thrown_text(value);
+        let text = self.cold_thrown(value, text);
         self.throw_text(&text);
+    }
+
+    /// `text`, the exception that `throw value` throws, made out of line (`java::cold`, a closure that borrows what it needs) where
+    /// `value` makes a new object and `text` is an expression alone: no `return`, `break`,
+    /// `continue` or `?` that would leave the closure instead of the method. A method that checks
+    /// a condition and throws (`Validate.inclusiveBetween`) is then small enough for its callers
+    /// to inline.
+    pub(super) fn cold_thrown(&mut self, value: &Expr, text: String) -> String {
+        let made = match &value.kind {
+            ExprKind::Cast(_, inner) => inner,
+            _ => value,
+        };
+        let plain = !["return", "break", "continue", "?", "'"].iter().any(|word| text.contains(word));
+        match matches!(made.kind, ExprKind::New { .. }) && plain {
+            true => format!("{}(|| {text})", self.runtime("cold")),
+            false => text,
+        }
     }
 
     /// The `Throwable` that `throw value` throws. A value that may be null throws a
