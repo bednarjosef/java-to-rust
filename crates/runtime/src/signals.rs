@@ -49,7 +49,8 @@ pub(crate) fn install() {
         }
         WRITE_END.store(fds[1], Ordering::Relaxed);
         let read_end = fds[0];
-        if std::thread::Builder::new().name("signals".into()).spawn(move || wait(read_end)).is_err() {
+        // No std name: std keeps a thread's name where the collector does not look (`gc::keep_spans`).
+        if std::thread::Builder::new().spawn(move || wait(read_end)).is_err() {
             return;
         }
         for sig in [SIGTERM, SIGINT, SIGHUP] {

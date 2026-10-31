@@ -30,12 +30,13 @@
 //! mark and sweep alongside (see "Marking"). The roots are scanned conservatively: any aligned word that points into a
 //! taken slot keeps it, which makes interior pointers and pointers in registers work. They are
 //! - the stacks of the threads (from the stack pointer recorded when it stopped, which is below
-//!   the registers that the signal saved), and of the collecting thread, with its registers;
+//!   the registers that the signal saved), and of the collecting thread, from where the
+//!   collection began, with its registers there (`OwnStack`);
 //! - the program's static data, the writable segments of every loaded object;
 //! - each thread's static thread-local storage, where the slots its free lists start from are;
 //! - the free lists of every thread, whose slots are marked without being scanned, and the slots
-//!   of their spans not handed out yet, and the last one that was, which are marked once marking
-//!   is done (`keep_spans`).
+//!   of their spans not handed out yet, and the last one that was (all that were, in a span that
+//!   handed out slots to Rust code), which are marked once marking is done (`keep_spans`).
 //!
 //! Slots are scanned whole, word by word, except in blocks that cannot hold pointers.
 //!
@@ -922,6 +923,9 @@ struct Lists {
     /// Whether `keep_spans` marked the slot before `span_next`, whose mark goes once the sweep is
     /// done, as do those of the slots not handed out.
     span_kept: [Cell<bool>; CLASSES],
+    /// Whether the span handed out a slot to Rust code, through the global allocator's `alloc`,
+    /// rather than only objects and arrays: then `keep_spans` keeps every slot it handed out.
+    span_rust: [Cell<bool>; CLASSES],
     /// The block the span is in, and the slot of it to look for the next run from.
     span_block: [Cell<u32>; CLASSES],
     span_from: [Cell<u32>; CLASSES],
@@ -940,6 +944,7 @@ thread_local! {
             span_end: [const { Cell::new(0) }; CLASSES],
             span_start: [const { Cell::new(0) }; CLASSES],
             span_kept: [const { Cell::new(false) }; CLASSES],
+            span_rust: [const { Cell::new(false) }; CLASSES],
             span_block: [const { Cell::new(NONE) }; CLASSES],
             span_from: [const { Cell::new(0) }; CLASSES],
             entry: Cell::new(NO_ENTRY),
@@ -1061,6 +1066,7 @@ fn unregister(lists: &Lists) {
         lists.span_end[class].set(0);
         lists.span_start[class].set(0);
         lists.span_kept[class].set(false);
+        lists.span_rust[class].set(false);
         lists.span_block[class].set(NONE);
     }
     THREADS[i].used.store(false, Ordering::Release);
@@ -1141,9 +1147,9 @@ extern "C" fn begin(start: *mut u8) -> *mut u8 {
 }
 
 /// A slot (or a large allocation) for `layout`, of the kind of scanning `scan`, zeroed if it is
-/// scanned whole.
+/// scanned whole; for Rust code (`RUST`, the global allocator), or for an object or array.
 #[inline(always)]
-fn allocate(layout: Layout, scan: Scan) -> *mut u8 {
+fn allocate<const RUST: bool>(layout: Layout, scan: Scan) -> *mut u8 {
     let Some(index) = size_index(layout.size(), layout.align()) else {
         let p = allocate_large(layout, scan);
         if census::TYPES.load(Ordering::Relaxed) {
@@ -1164,9 +1170,19 @@ fn allocate(layout: Layout, scan: Scan) -> *mut u8 {
             let next = lists.span_next[class].get();
             if next != lists.span_end[class].get() {
                 lists.span_next[class].set(next + SIZES[index] as usize);
+                if RUST {
+                    lists.span_rust[class].set(true);
+                }
                 return next as *mut u8;
             }
-            if lists.ended.get() { allocate_without_lists(class) } else { refill(lists, class) }
+            if lists.ended.get() {
+                return allocate_without_lists(class);
+            }
+            let p = refill(lists, class);
+            if RUST {
+                lists.span_rust[class].set(true);
+            }
+            p
         })
         .unwrap_or_else(|_| allocate_without_lists(class));
     // A slot that may hold pointers is zeroed whole as it is handed out, so that no old word
@@ -1202,7 +1218,18 @@ fn allocate(layout: Layout, scan: Scan) -> *mut u8 {
 #[inline]
 pub(crate) fn alloc_array(size: usize, align: usize, references: bool) -> *mut u8 {
     let layout = Layout::from_size_align(size, align).expect("an array's layout");
-    let p = allocate(layout, if references { SCAN_ALL } else { SCAN_HEAD });
+    let p = allocate::<false>(layout, if references { SCAN_ALL } else { SCAN_HEAD });
+    if p.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    p
+}
+
+/// Memory for an object of `layout` that the calling thread's free list and span could not give
+/// (`Arc::new`, `take_slot`): as the global allocator's `alloc`, but not counted as Rust code's
+/// (see `Lists::span_rust`).
+pub(crate) fn alloc_object(layout: Layout) -> *mut u8 {
+    let p = allocate::<false>(layout, scan_of(layout.align()));
     if p.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
@@ -1215,7 +1242,7 @@ pub struct Allocator;
 unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        allocate(layout, scan_of(layout.align()))
+        allocate::<true>(layout, scan_of(layout.align()))
     }
 
     #[inline]
@@ -1347,7 +1374,11 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
     let size = SIZES[class / SCANS] as usize;
     loop {
         let b = lists.span_block[class].get();
+        // The span's block may have been freed, and taken for another class, since: when every
+        // slot the span handed out was freed.
         if b != NONE
+            && h.meta(b as usize).kind == SMALL
+            && h.meta(b as usize).class as usize == class
             && let Some((first, n)) =
                 h.take_run(b as usize, lists.span_from[class].get() as usize, (SPAN_BYTES / size).max(1))
         {
@@ -1355,6 +1386,7 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
             let end = start + n * size;
             lists.span_from[class].set((first + n) as u32);
             lists.span_start[class].set(start);
+            lists.span_rust[class].set(false);
             lists.span_next[class].set(start + size);
             lists.span_end[class].set(end);
             // The span's slots are fetched into the cache now, before the program writes them.
@@ -2142,25 +2174,43 @@ fn statics() -> Statics {
 
 /// Spills the callee-saved registers onto the stack, then scans the stack from there.
 #[inline(never)]
-fn scan_own_stack(marker: &mut Marker, top: usize) {
-    let mut registers = [0usize; 6];
-    unsafe {
-        std::arch::asm!(
-            "mov [{0}], rbx", "mov [{0} + 8], rbp", "mov [{0} + 16], r12",
-            "mov [{0} + 24], r13", "mov [{0} + 32], r14", "mov [{0} + 40], r15",
-            in(reg) registers.as_mut_ptr(), options(nostack, preserves_flags),
-        )
-    };
-    let here = registers.as_ptr() as usize;
-    marker.root_range(here, here + std::mem::size_of_val(&registers));
-    std::hint::black_box(&registers);
-    marker.root_range(here, top);
+fn scan_own_stack(marker: &mut Marker, own: &OwnStack, top: usize) {
+    marker.root_range(own.from(), top);
+}
+
+/// Where the collecting thread's stack is scanned from: the callee-saved registers as `collect`
+/// began, stored in its frame, and the frames above. The frames of the collection itself, below,
+/// are left out: they reuse stack that the program's calls used before, and their unwritten words
+/// still hold addresses from those calls, which would keep dead objects alive.
+struct OwnStack {
+    registers: [usize; 6],
+}
+
+impl OwnStack {
+    #[inline(always)]
+    fn here() -> OwnStack {
+        let mut own = OwnStack { registers: [0; 6] };
+        unsafe {
+            std::arch::asm!(
+                "mov [{0}], rbx", "mov [{0} + 8], rbp", "mov [{0} + 16], r12",
+                "mov [{0} + 24], r13", "mov [{0} + 32], r14", "mov [{0} + 40], r15",
+                in(reg) own.registers.as_mut_ptr(), options(nostack, preserves_flags),
+            )
+        };
+        std::hint::black_box(&own.registers);
+        own
+    }
+
+    fn from(&self) -> usize {
+        self.registers.as_ptr() as usize
+    }
 }
 
 /// A collection, with the lock held.
 #[cold]
 #[inline(never)]
 fn collect(g: &Guard) {
+    let own = OwnStack::here();
     if SPAWNING.load(Ordering::SeqCst) > 0 {
         // A thread is starting, and the closure it runs is only known to the C library: try
         // again a little later.
@@ -2192,9 +2242,10 @@ fn collect(g: &Guard) {
     // died do not decide when the next collection runs.
     let h = heap(g);
     let minor = h.pagemap >= 0 && h.alive < h.next_full && !h.protected_lost;
-    if mark_and_sweep(g, me, shares, minor, taken, started) && heap(g).alive >= heap(g).next_full {
-        mark_and_sweep(g, me, shares, false, taken, started);
+    if mark_and_sweep(g, me, &own, shares, minor, taken, started) && heap(g).alive >= heap(g).next_full {
+        mark_and_sweep(g, me, &own, shares, false, taken, started);
     }
+    std::hint::black_box(&own);
     let h = heap(g);
     if h.pagemap >= 0 {
         age(h);
@@ -2317,6 +2368,7 @@ fn scale_by_time(h: &mut Heap, started: u64) {
 fn mark_and_sweep(
     g: &Guard,
     me: usize,
+    own: &OwnStack,
     shares: bool,
     minor: bool,
     taken: usize,
@@ -2392,7 +2444,7 @@ fn mark_and_sweep(
             marker.drain();
         }
         if i == me {
-            scan_own_stack(&mut marker, t.stack_top.get());
+            scan_own_stack(&mut marker, own, t.stack_top.get());
         } else if t.stopped_sp.get() != 0 {
             marker.root_range(t.stopped_sp.get(), t.stack_top.get());
         }
@@ -2434,8 +2486,12 @@ fn mark_and_sweep(
 
 /// Keeps the slots of each thread's spans not handed out yet, once marking is done, and the last
 /// one handed out, which a thread stopped in `alloc` may have been handing out before its address
-/// was anywhere the marking looks. Marking scans each slot that something reaches the first time
-/// it marks it, which a mark set here before would prevent.
+/// was anywhere the marking looks. A span that handed out slots to Rust code (`span_rust`) keeps
+/// all it handed out, until the thread takes a new span: some are held only by memory the marking
+/// does not read, as a thread's name is, which std keeps in the thread's `Thread`, allocated by
+/// the C library's allocator. Spans of only objects keep only the last, so that what weak
+/// references refer to dies. Marking scans each slot that something reaches the first time it
+/// marks it, which a mark set here before would prevent.
 fn keep_spans(h: &mut Heap) {
     for t in &THREADS {
         if !t.used.load(Ordering::Acquire) {
@@ -2458,6 +2514,9 @@ fn keep_spans(h: &mut Heap) {
                 let kept = m.taken[w] & bit != 0 && m.marks[w] & bit == 0;
                 lists.span_kept[class].set(kept);
                 m.marks[w] |= if kept { bit } else { 0 };
+                if lists.span_rust[class].get() {
+                    keep_taken(m, first, last - first);
+                }
             }
             set_bits(&mut m.marks, first + (next - start) / size, (end - next) / size, true);
         }
@@ -2475,6 +2534,18 @@ fn span_slots<'m>(h: &Heap, class: usize, start: usize) -> Option<(&'m mut Meta,
     }
     let first = (start - h.block_address(b) - m.start as usize) / m.size as usize;
     Some((m, first))
+}
+
+/// Marks the taken slots among the `n` from slot `from`. Their marks stay until the next full
+/// collection clears them, so in a minor one they count as old.
+fn keep_taken(m: &mut Meta, from: usize, n: usize) {
+    let mut at = from;
+    while at < from + n {
+        let len = (64 - at % 64).min(from + n - at);
+        let mask = if len == 64 { u64::MAX } else { ((1u64 << len) - 1) << (at % 64) };
+        m.marks[at / 64] |= m.taken[at / 64] & mask;
+        at += len;
+    }
 }
 
 /// Sets or clears `n` bits of a bitmap from bit `from`.
