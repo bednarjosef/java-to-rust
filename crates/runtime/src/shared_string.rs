@@ -63,6 +63,7 @@ impl JStr {
             (p as *mut u32).write(len);
             (p as *mut u32).add(1).write(0);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(TEXT), bytes.len());
+            crate::gc::note_name(p, "java.lang.String");
             JStr(NonNull::new_unchecked(p as *mut u32))
         }
     }

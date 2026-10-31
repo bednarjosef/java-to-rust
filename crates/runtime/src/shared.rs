@@ -44,9 +44,12 @@ impl<T> Arc<T> {
         // otherwise the global allocator's path, which refills them.
         let slot = crate::gc::take_slot::<T>() as *mut T;
         let Some(ptr) = NonNull::new(slot) else {
-            return Arc { ptr: NonNull::from(Box::leak(Box::new(value))), owns: PhantomData };
+            let ptr = NonNull::from(Box::leak(Box::new(value)));
+            crate::gc::note_type::<T>(ptr.as_ptr());
+            return Arc { ptr, owns: PhantomData };
         };
         unsafe { ptr.as_ptr().write(value) };
+        crate::gc::note_type::<T>(ptr.as_ptr());
         Arc { ptr, owns: PhantomData }
     }
 
@@ -60,6 +63,7 @@ impl<T> Arc<T> {
         let Some(ptr) = NonNull::new(p) else { std::alloc::handle_alloc_error(layout) };
         // Writing a value of no size writes nothing, but moves it into place.
         unsafe { ptr.as_ptr().write(value) };
+        crate::gc::note_type::<T>(ptr.as_ptr());
         Arc { ptr, owns: PhantomData }
     }
 

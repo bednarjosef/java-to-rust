@@ -288,6 +288,15 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   young generation misses. Running a program under `systemd-run --user --wait --pipe -p
   SystemCallFilter=~userfaultfd -p SystemCallErrorNumber=EPERM` tests the fallback to full
   collections.
+- `JAVA_GC_CENSUS=<level>` reports after each full collection what the live slots hold
+  (`gc/census.rs`): with 1, how many of their words are zero, references (a `java::Thin` or the
+  address of a slot's start), the buffers of `Vec`s and boxed slices, numbers below 2^32 and other
+  words, and what 4-byte references would save, three ways, from a low bound to a high one; with
+  2, also per slot size, and per class number of the objects that `java::Thin`s reach; with 3,
+  also per Rust type, each type's objects and the buffers they own (an array's elements, a plain
+  string's bytes), and the slots of no type by size, to set beside a JVM's class histogram. Level
+  3 records each allocation's type from the start, in a table beside the heap of 2 bytes per 16;
+  without it the cost is one load and branch per allocation, not measurable on BinaryTrees.
 - `JAVA_GC_GROWTH=<percent>` sets the bytes taken between collections as a percentage of the
   bytes alive (100 by default), which trades memory for time.
 - `JAVA_GC_TIME=<percent>` sets the share of processor time above which that grows (50 by

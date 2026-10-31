@@ -54,6 +54,8 @@
 //! ends. No collection runs between the call and the registration, while the closure the thread
 //! runs is only known to the C library.
 
+mod census;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr;
@@ -569,6 +571,11 @@ fn start(h: &mut Heap) {
     h.code_pages = number_from(c"JAVA_GC_CODE_PAGES").unwrap_or(CODE_PAGES_EVERY) as u64;
     h.code_pages_at = monotonic_seconds();
     h.low_first = number_from(c"JAVA_GC_LOW_FIRST") != Some(0);
+    let census = number_from(c"JAVA_GC_CENSUS").unwrap_or(0);
+    census::LEVEL.store(census, Ordering::Relaxed);
+    if census >= 3 {
+        census::start_types(h.base);
+    }
 }
 
 /// Has the system track the writes into the heap's reservation: registers it with a
@@ -1043,7 +1050,11 @@ unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let Some(index) = size_index(layout.size(), layout.align()) else {
-            return allocate_large(layout);
+            let p = allocate_large(layout);
+            if census::TYPES.load(Ordering::Relaxed) {
+                census::note_untyped(p as usize);
+            }
+            return p;
         };
         let class = index * 2 + (layout.align() < 8) as usize;
         let p = LISTS
@@ -1083,6 +1094,9 @@ unsafe impl GlobalAlloc for Allocator {
             } else {
                 unsafe { zero_slot(p, size) };
             }
+        }
+        if census::TYPES.load(Ordering::Relaxed) {
+            census::note_untyped(p as usize);
         }
         p
     }
@@ -1244,6 +1258,23 @@ pub(crate) fn take_slot<T>() -> *mut u8 {
         unsafe { zero_slot(p, size) };
     }
     p
+}
+
+/// Records, for the census of types (`JAVA_GC_CENSUS=3`), that the allocation at `p` holds a
+/// `T`.
+#[inline(always)]
+pub(crate) fn note_type<T>(p: *const T) {
+    if census::TYPES.load(Ordering::Relaxed) {
+        census::note(p as usize, std::any::type_name::<T>());
+    }
+}
+
+/// Records, for the census of types, that the allocation at `p` holds what `name` names.
+#[inline(always)]
+pub(crate) fn note_name(p: *const u8, name: &'static str) {
+    if census::TYPES.load(Ordering::Relaxed) {
+        census::note(p as usize, name);
+    }
 }
 
 /// Zeroes the `size` bytes at `p`, a slot being handed out, all of them. Inlined where the value
@@ -2052,6 +2083,10 @@ fn mark_and_sweep(
     let marked = started.elapsed();
     sweep(h, helpers);
     release_kept(h);
+    let census = census::LEVEL.load(Ordering::Relaxed);
+    if census > 0 && !minor {
+        census::census(h, census);
+    }
     if h.pagemap >= 0 && !protect_old(h) {
         h.pagemap = -1;
     }
