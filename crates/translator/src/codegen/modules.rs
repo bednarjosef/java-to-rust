@@ -577,9 +577,12 @@ impl<'a> Gen<'a> {
             tree.modules.push(Module { package, path, uses, items });
         }
         // The classes as values, which every module may name, once each at the crate root, and
-        // the names above each class by its number.
+        // each class and the names above it by its number. The table of classes names the
+        // classes' statics, so it is made before them.
+        let classes = self.classes_table();
         let table = self.type_names_table();
         let (mut text, names) = self.class_value_constants();
+        text.push_str(&classes);
         text.push_str(&table);
         if !text.is_empty() {
             let root = &mut tree.modules[0];

@@ -85,7 +85,11 @@ every call, has no `match`: it reads a static at the crate root that holds each 
 class number (`TYPE_NAMES_BY_CLASS_NUMBER`, `class_values::type_names_table`), one load at any
 optimization level, where a `match` over the thousand classes that implement `Comparable` is a
 thousand compares without optimizations; only an `Object[]` that carries its own class answers
-from its value first.
+from its value first. `runtime_class()`, which `getClass()` asks (`EnumMap.get` for every key),
+reads the same way from `CLASSES_BY_CLASS_NUMBER` (`class_values::classes_table`), a reference
+to each class's `java::Class` static: small enough to stay in the header of a split program and
+be inlined at each call, where the Minecraft server's `match` over 20 000 classes was two calls
+into a body crate.
 
 Terms:
 

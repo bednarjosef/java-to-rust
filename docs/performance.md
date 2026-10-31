@@ -26,7 +26,8 @@ clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (fiv
 at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
 Interpreter's from one at a load average of 6.3, SortMillion's from five runs a side at a load
 average of 4, ReflectionLookups' from one of it alone (five runs a side), OwnerThreadChecks' and StringKeyHash's
-from one of each alone at a load average of 12.7, and BinaryTrees',
+from one of each alone at a load average of 12.7, EnumKeyLookups' from five runs a side at a
+load average of 12, and BinaryTrees',
 SmallObjects' and ManyThreadsAllocating's from five runs a side, alternating, at a load average
 of about 3.
 
@@ -42,6 +43,7 @@ of about 3.
 | BinaryTrees           |     719 |    1056 |      1.47 |           - |           - |            - |
 | ClassCast             |      85 |      83 |      0.97 |          37 |          71 |         1.92 |
 | Collatz               |    1155 |     581 |      0.50 |           - |           - |            - |
+| EnumKeyLookups        |     313 |     226 |      0.72 |         237 |         190 |         0.80 |
 | Interpreter           |    1314 |    1000 |      0.76 |         382 |         300 |         0.79 |
 | LargeArrays           |      34 |       7 |      0.21 |           - |           - |            - |
 | Mandelbrot            |    3400 |    1143 |      0.34 |        1128 |        1141 |         1.01 |
@@ -225,6 +227,14 @@ made on the stack (`java::count_allocation`).
   kernel took 184 ms in release, 446 ms at `opt-level = 1` and 1450 ms at `opt-level = 0` (the
   runtime at 2), against 89, 242 and 1030 ms now (medians of five, three at 0, at a load of 7;
   Java's kernel is about 48 ms).
+- **Enum keys looked up as `Object`s (EnumKeyLookups 0.72x, kernel 0.8x).** Lookups in tables
+  of four enums by keys held as `Object`, as `java.util.EnumMap.get` does them (the Minecraft
+  server's item entities read their items' components so), among 200 more classes held as
+  `Object`: each lookup compares the key's `getClass()` with the table's key type and its
+  superclass. `runtime_class()` reads the class from a table by class number
+  (`CLASSES_BY_CLASS_NUMBER`) rather than a `match` over the classes: the kernel takes 0.88
+  billion cycles against 1.09 (6.1 billion instructions against 6.4), 190 ms against 286 (medians
+  of five at a load of 12).
 - **Objects of many classes hashed as `Object`s (ObjectHash 0.45x, kernel 0.7x).** An
   open-addressing set of 300 objects probed for each, as `ImmutableCollections.SetN.probe` is in the
   Minecraft server: two classes in three hash by their address and the others override `hashCode`,

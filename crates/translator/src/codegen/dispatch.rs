@@ -3676,13 +3676,25 @@ impl<'a> Gen<'a> {
                 self.line("}");
                 continue;
             }
+            if let Need::RuntimeClass(_) = need {
+                // Read from the table by class number (`classes_table`), but for an `Object[]`
+                // that may be a covariant array, which carries its class.
+                let carried: Vec<usize> =
+                    variants.iter().copied().filter(|&c| self.class_carried(c)).collect();
+                let table = format!("*crate::{}[self.0.tag() as usize]", super::class_values::CLASSES);
+                if carried.is_empty() {
+                    self.line(&table);
+                } else {
+                    self.match_arms_or(&carried, Some(table), &|g: &mut Self, c| {
+                        (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
+                    });
+                }
+                self.indent -= 1;
+                self.line("}");
+                continue;
+            }
             let ret = format!(" -> {ret}");
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
-                // An `Object[]` that may be a covariant array, which carries its class.
-                Need::RuntimeClass(_) if g.class.array_of(c).is_some_and(|ty| g.carries_class(ty)) => {
-                    (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
-                }
-                Need::RuntimeClass(_) => (g.decl_class(c), false),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
                 // Read from the value's bits, the same text for every such class, whose arms
