@@ -912,6 +912,12 @@ impl<'a> Gen<'a> {
                     ExprKind::Field { object, name } if self.field_in_place(object, name) => {
                         self.object_place(&args[0])
                     }
+                    ExprKind::Static { .. }
+                        if let Some(place) =
+                            self.final_place(&args[0]).or_else(|| self.lent_static(&args[0])) =>
+                    {
+                        place
+                    }
                     _ => self.expr(&args[0]).at(ATOM),
                 };
                 Code::new(format!("{s}.len() as i32"), AS)

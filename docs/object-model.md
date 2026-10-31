@@ -1091,7 +1091,8 @@ normal text stays plain UTF-8 at no cost:
   holds WTF-8, with the `str`-like methods the generator and the runtime use; `java::JString` is
   the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one (the address of its length,
   cached hash and bytes in the collected heap, `Copy`, see 1.6); both deref to `Wtf8`. `Type::String` is `java::JString` (or `java::JStr`
-  where strings are shared), a borrowed string parameter is a `&java::Wtf8`, and a literal is
+  where strings are shared), a borrowed string parameter is a `&java::Wtf8` (a `java::Str` where
+  the method reads it by code unit index, see "Code units" below), and a literal is
   `java::wtf8("..")`, a `&'static Wtf8` view of its UTF-8 made at compile time. A literal with
   a lone surrogate, which javac's tree gives as its code units, is
   `const { java::wtf8_bytes(b"..") }`: its WTF-8 bytes, checked when Rust compiles the program;
@@ -1112,9 +1113,15 @@ normal text stays plain UTF-8 at no cost:
   coder, so that on an ASCII string a unit index is a byte offset and no call scans the whole
   text first. A `JString` finds that out by a scan the first time something asks and keeps it
   until its text changes (an `AtomicU8` beside the bytes, so a `JString` is 32 bytes); a `JStr`
-  has it as the top bit of its length word, set when it is made; a borrowed `&Wtf8` (a string
-  parameter that the method never assigns, a literal) is scanned at each call. A `JStr` is passed
-  as itself (`as_text()`, `codegen/strings.rs`, `text_owner`) where other methods get its text.
+  has it as the top bit of its length word, set when it is made; a borrowed `&Wtf8` is scanned at
+  each call. A string parameter that the method never assigns, and that a method of its override
+  group reads by unit index (`Facts::lent_strings`), is a `java::Str` (an `Option` of one where
+  it may be null): its text and what the caller knew of it, a `JString`'s kept flag, a literal's
+  known when translated, unknown for text borrowed from elsewhere (scanned at each call, as a
+  `&Wtf8`), so that a helper called for each token of a long string does not scan it each time.
+  The method uses its text (`as_wtf8()`) where it does not index it. A `JStr`, and such a
+  parameter, is passed as itself (`as_text()`, `codegen/strings.rs`, `text_owner`) where other
+  methods get its text.
   Searching for a string looks for the pattern's first byte and compares the rest there, so a
   match near `from` costs only the bytes up to it. On other text these methods decode WTF-8 to
   units exactly and encode a lone surrogate back (`from_units`); `charAt` and `hashCode` read the

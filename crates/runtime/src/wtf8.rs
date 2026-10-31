@@ -521,6 +521,12 @@ impl JString {
         }
     }
 
+    /// Records whether the text is ASCII, which the caller knows.
+    pub(crate) fn know_ascii(&self, ascii: bool) {
+        debug_assert_eq!(ascii, self.0.is_ascii());
+        self.1.store(if ascii { ASCII } else { NOT_ASCII }, Ordering::Relaxed);
+    }
+
     /// Forgets whether the text is ASCII, before it changes.
     fn changing(&mut self) {
         *self.1.get_mut() = UNKNOWN;

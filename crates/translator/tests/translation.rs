@@ -7316,3 +7316,74 @@ fn a_shared_string_is_given_itself_to_the_methods_that_take_an_index() {
         &["java::index_of_char(s.as_text(), ' ' as i32, 0)", "java::char_at(s.as_text(), i)"],
     );
 }
+
+#[test]
+fn a_string_static_is_read_in_place_where_the_statement_cannot_change_it() {
+    let rust = translate(
+        "class A {
+            static String text = \"a b c\";
+            static String line;
+            static int change() {
+                text = \"changed\";
+                return 1;
+            }
+            public static void main(String[] a) {
+                int n = 0;
+                for (int i = text.indexOf(' '); i >= 0; i = text.indexOf(' ', i + 1)) {
+                    n += text.substring(0, i).length() + text.length();
+                }
+                int m = text.length() + change() + text.length();
+                text = text.substring(1);
+                line = a.length > 0 ? a[0] : null;
+                n += line.indexOf('x', 1);
+                System.out.println(n + \" \" + m + \" \" + text);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::index_of_char(&(*std::cell::RefCell::borrow(&A_TEXT)), ' ' as i32, 0)",
+            "java::ascii_substring(&(*std::cell::RefCell::borrow(&A_TEXT)), 0, i)",
+            "((*std::cell::RefCell::borrow(&A_TEXT)).len() as i32)",
+            "(A_TEXT.cloned().len() as i32).wrapping_add(change())",
+            "A_TEXT.set(java::ascii_substring_from(&A_TEXT.cloned(), 1))",
+            "java::index_of_char(java::non_null((*std::cell::RefCell::borrow(&A_LINE)).as_ref()), 'x' as i32, 1)",
+        ],
+    );
+}
+
+#[test]
+fn a_string_parameter_read_by_index_is_given_with_whether_it_is_ascii() {
+    let rust = translate(
+        "class A {
+            static int next(String s, int from) { return s.indexOf(' ', from); }
+            static int first(String s) { return s == null ? -1 : s.charAt(0); }
+            static int walk(String s) {
+                int n = 0;
+                for (int i = next(s, 0); i >= 0; i = next(s, i + 1)) {
+                    n += s.charAt(i) + first(s);
+                }
+                return n;
+            }
+            public static void main(String[] a) {
+                String built = a.length > 0 ? a[0] : \"x y z\";
+                System.out.println(walk(built) + walk(\"a b\") + walk(\"é f\") + first(a.length > 1 ? a[1] : null));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn next(s: java::Str<'_>, from: i32) -> i32",
+            "java::index_of_char(s.as_text(), ' ' as i32, from)",
+            "fn first(s: Option<java::Str<'_>>) -> i32",
+            "fn walk(s: java::Str<'_>) -> i32",
+            "next(s, 0)",
+            "first(Some(s))",
+            "walk(java::Str::of(&built))",
+            "walk(java::Str::known(java::wtf8(\"a b\"), true))",
+            "walk(java::Str::known(java::wtf8(\"é f\"), false))",
+        ],
+    );
+}

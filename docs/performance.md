@@ -109,6 +109,19 @@ made on the stack (`java::count_allocation`).
   - A string field of a plain object (an owned or immutable object, or `this` in its methods) is
     borrowed where it is when the statement neither assigns that field, nor passes the object on,
     nor calls a `&mut self` method of it (`codegen/strings.rs`, `Steady`).
+  - A string static of a program that starts no thread is borrowed from its `RefCell` for the
+    statement (`(*RefCell::borrow(&X))`) instead of copied, when the statement assigns no static
+    and runs no other Java code: no call, no `new`, no other class's initialization, no object
+    whose `toString` a concatenation or library method calls (`codegen/statics.rs`,
+    `lent_static`). A static that may be null is unwrapped as the `&JString` (`as_ref`), so the
+    runtime functions see its ASCII flag. A walk of a 3.4 MB static with `indexOf` and
+    `substring` copied it at each read: 556 s, now 41-57 ms against Java's 41-53.
+  - A string parameter that a method reads by code unit index is a `java::Str`, which carries
+    whether the caller's string is ASCII (see object-model.md, "Code units"). As a `&Wtf8` each
+    `charAt`, `indexOf` or `substring` of it scanned the whole text: a walk of a 3.4 MB string by
+    helpers called for each word (`nextSpace(s, from)`, `word(s, from, to)`, `unitAt(s, i)`)
+    took 153 s, and the same walk inside one method 128 s; now 49-71 and 44-69 ms, against
+    Java's 63-84 and 60-63.
   - The ASCII analysis follows `String` fields (instance and static, by name, only where every
     field of that name is a `String`), the overrides of a method, enum constants, and the
     exceptions the runtime raises. On a string proved ASCII, `length()` is the byte length and

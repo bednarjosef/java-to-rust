@@ -126,6 +126,11 @@ pub struct Facts {
     pub borrowed_params: FastSet<(usize, usize)>,
     /// String parameters that are never assigned but can be null: `Option<&str>`.
     pub borrowed_optional_params: FastSet<(usize, usize)>,
+    /// The borrowed string parameters (`borrowed_params`, `borrowed_optional_params`) that a
+    /// method of their group reads by code unit index (`charAt`, `indexOf`, `substring`,
+    /// `length`): a `java::Str` (an `Option` of one where it may be null), which keeps whether the
+    /// string is ASCII, rather than a `&java::Wtf8`.
+    pub lent_strings: FastSet<(usize, usize)>,
     /// Object parameters, as (method, parameter) indexes, that the method never assigns and only
     /// uses through: it reads and writes their fields, calls their methods, compares or prints
     /// them, passes them on to such parameters, and copies them into locals. They are `&Rc<..>`,
@@ -583,6 +588,7 @@ fn analyze_with(
         facts.class_monitors = monitors::class_monitors(class, &facts);
         borrowing.take();
         facts.ascii_length = ascii_length.join();
+        lent_strings(class, &mut facts);
         phase("analysis: arrays", || arrays::analyze(class, &mut facts));
         phase("analysis: indexing", || indexing::analyze(class, &mut facts));
         phase("analysis: moves", || moves::analyze(class, &mut facts));
@@ -861,6 +867,60 @@ fn borrowed_params(class: &Class, facts: &mut Facts) {
     }
     align_groups(class, &mut facts.borrowed_params);
     align_groups(class, &mut facts.borrowed_optional_params);
+}
+
+/// `Facts::lent_strings`, once `borrowed_params` and `ascii_length` are known.
+fn lent_strings(class: &Class, facts: &mut Facts) {
+    for (m, method) in class.methods.iter().enumerate() {
+        for (i, p) in method.params.iter().enumerate() {
+            let borrowed =
+                facts.borrowed_params.contains(&(m, i)) || facts.borrowed_optional_params.contains(&(m, i));
+            if borrowed && indexes(&method.body, &p.name, &facts.ascii_length) {
+                facts.lent_strings.insert((m, i));
+            }
+        }
+    }
+    // The methods of a group take their parameters alike: one that reads it by index makes it a
+    // `Str` in all, which those that do not read it so use as its text.
+    let lent: Vec<(usize, usize)> = facts.lent_strings.iter().copied().collect();
+    for (m, i) in lent {
+        for &g in class.hierarchy.group_members(m) {
+            facts.lent_strings.insert((g, i));
+        }
+    }
+}
+
+/// Whether `body` reads the string variable `name` by code unit index where it is not proved
+/// ASCII (`ascii`): `charAt`, `indexOf`, `lastIndexOf`, `substring` or `length` of it.
+fn indexes(body: &[Stmt], name: &str, ascii: &FastSet<ExprId>) -> bool {
+    let mut found = false;
+    for s in body {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    let ExprKind::Builtin(builtin, args) = &x.kind else { return };
+                    let indexed = matches!(
+                        builtin,
+                        Builtin::StringCharAt
+                            | Builtin::StringLength
+                            | Builtin::String(
+                                StringOp::Substring | StringOp::IndexOf | StringOp::LastIndexOf
+                            )
+                    );
+                    let mut text = args.first();
+                    while let Some(Expr { kind: ExprKind::Cast(_, inner), .. }) = text {
+                        text = Some(inner);
+                    }
+                    found |= indexed
+                        && !ascii.contains(&x.id)
+                        && matches!(text, Some(Expr { kind: ExprKind::Var(v), .. }) if v == name);
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    found
 }
 
 /// Keeps a (method, parameter) pair only when every method of the method's override group has

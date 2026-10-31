@@ -70,17 +70,151 @@ fn check_begin_end(begin: i32, end: i32, length: usize) -> Result<(), crate::Exc
 }
 
 /// `s.substring(begin)`.
-pub fn substring_from(s: &Wtf8, begin: i32) -> JString {
+pub fn substring_from<S: Text + ?Sized>(s: &S, begin: i32) -> JString {
     try_substring_from(s, begin).unwrap_or_else(crate::uncaught)
 }
 
 /// A string that a `String` method taking a code unit index reads: its text, and whether that
 /// is all ASCII, in which case a unit index is a byte offset. A `JString` and a `JStr` keep that
 /// (Java's coder; `JString::is_ascii_text`), so a loop over a long string that is not known to be
-/// ASCII from its translation does not scan all of it at each call; a borrowed `Wtf8` is scanned.
+/// ASCII from its translation does not scan all of it at each call; so does a `Str` where its
+/// caller knew; a borrowed `Wtf8` is scanned.
 pub trait Text {
     fn wtf8_text(&self) -> &Wtf8;
     fn ascii_text(&self) -> bool;
+    /// The string as a method that borrows it takes it (`Str`): with whether it is ASCII where
+    /// the string keeps that, so that finding it out once lasts for the string's life.
+    #[inline]
+    fn lent(&self) -> Str<'_> {
+        Str { text: self.wtf8_text(), ascii: UNKNOWN }
+    }
+}
+
+const UNKNOWN: u8 = 0;
+const ASCII: u8 = 1;
+const NOT_ASCII: u8 = 2;
+
+/// A `String` parameter that a method borrows rather than owns: its text, and whether that is all
+/// ASCII where the caller knew (a `JString` or `JStr` keeps it; a literal is known when
+/// translated). A `&Wtf8` would lose that, so that each `charAt`, `indexOf` or `substring` of the
+/// parameter scanned all of it. Unknown, as for text borrowed from elsewhere, it is found by a
+/// scan at each call, as for a `&Wtf8`.
+#[derive(Clone, Copy)]
+pub struct Str<'a> {
+    text: &'a Wtf8,
+    ascii: u8,
+}
+
+impl<'a> Str<'a> {
+    /// `s` as a borrowed parameter (`Text::lent`).
+    #[inline]
+    pub fn of<S: Text + ?Sized>(s: &'a S) -> Str<'a> {
+        s.lent()
+    }
+
+    /// A literal, which the translation knows to be ASCII or not.
+    #[inline]
+    pub const fn known(text: &'a Wtf8, ascii: bool) -> Str<'a> {
+        Str { text, ascii: if ascii { ASCII } else { NOT_ASCII } }
+    }
+
+    #[inline]
+    pub fn as_wtf8(self) -> &'a Wtf8 {
+        self.text
+    }
+
+    /// Itself, as `JString::as_text`.
+    #[inline]
+    pub fn as_text(&self) -> &Str<'a> {
+        self
+    }
+}
+
+impl<'a> Str<'a> {
+    /// A copy of the text, which keeps whether it is ASCII where this knows.
+    #[inline]
+    pub fn to_owned(self) -> JString {
+        let owned = self.text.to_owned();
+        if self.ascii != UNKNOWN {
+            owned.know_ascii(self.ascii == ASCII);
+        }
+        owned
+    }
+}
+
+impl std::ops::Deref for Str<'_> {
+    type Target = Wtf8;
+    #[inline]
+    fn deref(&self) -> &Wtf8 {
+        self.text
+    }
+}
+
+impl std::fmt::Display for Str<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.text, f)
+    }
+}
+
+impl std::fmt::Debug for Str<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.text, f)
+    }
+}
+
+impl crate::Piece for Str<'_> {
+    fn push_to(&self, out: &mut JString) {
+        self.text.push_to(out);
+    }
+}
+
+impl PartialEq for Str<'_> {
+    fn eq(&self, other: &Str<'_>) -> bool {
+        self.text == other.text
+    }
+}
+
+impl PartialEq<&Wtf8> for Str<'_> {
+    fn eq(&self, other: &&Wtf8) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<Str<'_>> for &Wtf8 {
+    fn eq(&self, other: &Str<'_>) -> bool {
+        *self == other.text
+    }
+}
+
+impl PartialEq<JString> for Str<'_> {
+    fn eq(&self, other: &JString) -> bool {
+        self.text == other.as_wtf8()
+    }
+}
+
+impl PartialEq<Str<'_>> for JString {
+    fn eq(&self, other: &Str<'_>) -> bool {
+        self.as_wtf8() == other.text
+    }
+}
+
+impl Text for Str<'_> {
+    #[inline]
+    fn wtf8_text(&self) -> &Wtf8 {
+        self.text
+    }
+    #[inline]
+    fn ascii_text(&self) -> bool {
+        match self.ascii {
+            ASCII => true,
+            NOT_ASCII => false,
+            _ => self.text.is_ascii(),
+        }
+    }
+    #[inline]
+    fn lent(&self) -> Str<'_> {
+        *self
+    }
 }
 
 impl Text for Wtf8 {
@@ -103,6 +237,10 @@ impl Text for JString {
     fn ascii_text(&self) -> bool {
         self.is_ascii_text()
     }
+    #[inline]
+    fn lent(&self) -> Str<'_> {
+        Str::known(self.as_wtf8(), self.is_ascii_text())
+    }
 }
 
 impl Text for crate::JStr {
@@ -113,6 +251,10 @@ impl Text for crate::JStr {
     #[inline]
     fn ascii_text(&self) -> bool {
         self.is_ascii_text()
+    }
+    #[inline]
+    fn lent(&self) -> Str<'_> {
+        Str::known(self.as_wtf8(), self.is_ascii_text())
     }
 }
 
@@ -126,6 +268,10 @@ macro_rules! text_through {
             #[inline]
             fn ascii_text(&self) -> bool {
                 (**self).ascii_text()
+            }
+            #[inline]
+            fn lent(&self) -> Str<'_> {
+                (**self).lent()
             }
         }
     )*};
@@ -1146,6 +1292,34 @@ mod tests {
                     assert_eq!(try_substring(&shared, i, end).ok(), a);
                 }
                 assert_eq!(try_substring_from(&shared, i).ok(), try_substring_from(text, i).ok());
+            }
+        }
+    }
+
+    #[test]
+    fn a_lent_string_answers_as_its_text_and_keeps_what_its_owner_knew() {
+        let mut lone = JString::from("a b");
+        lone.push_unit(0xD800);
+        lone.push_str(" x😀y é ab ");
+        let texts = [JString::from("ab cd ab x"), JString::from("caf\u{e9} x😀y ab "), lone, JString::new()];
+        for owned in &texts {
+            let text = owned.as_wtf8();
+            let ascii = text.is_ascii();
+            let shared = crate::JStr::new(text);
+            let lent = [Str::of(owned), Str::of(text), Str::known(text, ascii), Str::of(&shared)];
+            for s in lent {
+                assert_eq!(s.ascii_text(), ascii);
+                assert_eq!(s.to_owned(), *owned);
+                assert_eq!(s.to_owned().is_ascii_text(), ascii);
+                assert!(s == text && text == s && s == *owned);
+                let len = crate::string_length(&s);
+                assert_eq!(len, crate::string_length(text));
+                for i in -1..=len + 1 {
+                    assert_eq!(index_of_char(&s, ' ' as i32, i), index_of_char(text, ' ' as i32, i));
+                    assert_eq!(last_index_of(&s, w("ab"), i), last_index_of(text, w("ab"), i));
+                    assert_eq!(crate::try_char_at(&s, i).ok(), crate::try_char_at(text, i).ok());
+                    assert_eq!(try_substring_from(&s, i).ok(), try_substring_from(text, i).ok());
+                }
             }
         }
     }

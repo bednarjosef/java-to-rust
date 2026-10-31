@@ -1207,7 +1207,11 @@ impl<'a> Gen<'a> {
             .enumerate()
             .map(|(i, p)| {
                 let mutable = if body && assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty = if self.borrowed_optional.contains(&p.name) {
+                let ty = if self.borrowed_optional.contains(&p.name)
+                    && self.facts.lent_strings.contains(&(index, i))
+                {
+                    "Option<java::Str<'_>>".to_string()
+                } else if self.borrowed_optional.contains(&p.name) {
                     "Option<&java::Wtf8>".to_string()
                 } else if self.facts.borrowed_optional_objects.contains(&(index, i)) {
                     format!("&Option<{}>", self.ty_name(p.ty))
@@ -1215,6 +1219,8 @@ impl<'a> Gen<'a> {
                     format!("Option<{}>", self.ty_name(p.ty))
                 } else if self.facts.borrowed_objects.contains(&(index, i)) {
                     format!("&{}", self.ty_name(p.ty))
+                } else if self.borrowed.contains(&p.name) && self.facts.lent_strings.contains(&(index, i)) {
+                    "java::Str<'_>".to_string()
                 } else if self.borrowed.contains(&p.name) {
                     "&java::Wtf8".to_string()
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {

@@ -1278,12 +1278,20 @@ impl<'a> Gen<'a> {
             .zip(params)
             .enumerate()
             .map(|(i, (a, p))| {
-                if self.facts.borrowed_params.contains(&(index, i)) {
+                if self.facts.borrowed_params.contains(&(index, i))
+                    && self.facts.lent_strings.contains(&(index, i))
+                {
+                    self.str_arg(a)
+                } else if self.facts.borrowed_params.contains(&(index, i)) {
                     self.str_ref(a)
                 } else if self.facts.borrowed_objects.contains(&(index, i)) {
                     self.object_ref(a)
                 } else if self.facts.borrowed_optional_objects.contains(&(index, i)) {
                     self.optional_object_ref(a, p.ty)
+                } else if self.facts.borrowed_optional_params.contains(&(index, i))
+                    && self.facts.lent_strings.contains(&(index, i))
+                {
+                    self.optional_str_arg(a)
                 } else if self.facts.borrowed_optional_params.contains(&(index, i)) {
                     self.option_arg(a)
                 } else if self.optional_var(index, p.ty, &p.name) {
