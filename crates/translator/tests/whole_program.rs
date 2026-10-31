@@ -1223,6 +1223,92 @@ public class Main {
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "3 false\n");
 }
 
+/// A census whose lowering found the methods that can run (`Lowered::live`), here because code
+/// that cannot run is rejected and the program has Rust generics, cuts the reflection table by
+/// the facts that found them, and puts in it the classes that a lookup gets without a class
+/// literal (`o.getClass()`, `getSuperclass()`), as a translation does: the crate prints what
+/// Java prints, and the table keeps neither field of `Unrelated`, whose class is only named.
+#[test]
+fn a_census_cuts_the_reflection_table_by_the_facts_of_lowering() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-census-reflection-table");
+    let _ = std::fs::remove_dir_all(&work);
+    let sources = work.join("src");
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), CENSUS_LOOKUPS).unwrap();
+    let dir = work.join("crate");
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--census", "--keep-going", "--timings", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("--crate")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&translated.stderr);
+    assert!(dir.join("Cargo.toml").exists(), "{stderr}");
+    assert!(
+        stderr.contains("timing: methods that can run"),
+        "lowering did not find the methods that can run"
+    );
+    assert!(stderr.contains("reflection table: kept 2 of 4 members"), "{stderr}");
+    let target = work.join("cargo");
+    let built = Command::new("cargo")
+        .args(["build", "-q", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let ran = Command::new(target.join("debug/main")).env_remove("LD_LIBRARY_PATH").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "held Unrelated\nSquare side=2.5 Shape label=square\n");
+}
+
+const CENSUS_LOOKUPS: &str = r#"import java.lang.reflect.Field;
+abstract class Shape {
+    String label;
+    Shape(String label) { this.label = label; }
+}
+class Square extends Shape {
+    double side;
+    Square(double side) { super("square"); this.side = side; }
+}
+class Holder<T> {
+    T held;
+    Holder(T held) { this.held = held; }
+    T get() { return held; }
+}
+class Unrelated {
+    int a = 1;
+    String b = "b";
+    public void m() {}
+}
+public class Main {
+    static <T> T same(T t) { return t; }
+    static long frames() { return StackWalker.getInstance().walk(s -> s.count()); }
+    public static void main(String[] args) throws Exception {
+        if (args.length > 5) System.out.println(frames());
+        String held = same(new Holder<String>("held").get());
+        System.out.println(held + " " + Unrelated.class.getSimpleName());
+        Object o = new Square(2.5);
+        StringBuilder text = new StringBuilder();
+        for (Class<?> c = o.getClass(); c != Object.class; c = c.getSuperclass()) {
+            text.append(c.getSimpleName());
+            for (Field f : c.getDeclaredFields()) {
+                f.setAccessible(true);
+                text.append(' ').append(f.getName()).append('=').append(f.get(o));
+            }
+            text.append(' ');
+        }
+        System.out.println(text.toString().trim());
+    }
+}
+"#;
+
 /// A `match` on the class number over more classes than are written whole (`CUT_ABOVE` in
 /// `codegen/dispatch.rs`, 2048) is cut into methods by number (`PART_CLASSES`, 256 each): a
 /// program with 2100 classes that shows each object and its class's name runs as Java does,

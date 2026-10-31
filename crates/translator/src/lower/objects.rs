@@ -157,6 +157,7 @@ impl<'t> Lowering<'t> {
             rejected_classes: Default::default(),
             callers: Default::default(),
             reflection_tables: Default::default(),
+            reflection_layout: Default::default(),
         }
     }
 

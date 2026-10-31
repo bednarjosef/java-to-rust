@@ -97,8 +97,9 @@ program where such a lookup can happen, so they can be checked before the progra
   `@PluginVisitorStrategy(PluginValueVisitor.class)`), and on a `Class<? extends T>` of a `T`
   other than `Object` those of its class literals too (the JDK's key store delegator makes
   `PKCS12KeyStore.class`'s object); or only the class of the receiver when it is a class
-  literal. A lookup on a `Class<? extends T>` finds only the classes that are or extend or
-  implement `T`. The annotations of a class that reachable code names are reached with
+  literal; plus the classes that the points-to facts find a lookup of that kind gets (below). A
+  lookup on a `Class<? extends T>` finds only the classes that are or extend or implement `T`.
+  The annotations of a class that reachable code names are reached with
   it, values included. The names of the classes
   that security providers register for their services are left out: the providers' own lookup
   makes those (`program/reach/services.rs`). The member names are
@@ -137,7 +138,46 @@ program where such a lookup can happen, so they can be checked before the progra
   few hundred cases that rustc compiles one by one: LLVM's time grows faster than a function's
   size. The table itself is data: each part is three constant arrays, of the classes its members
   name, of their names, and of numbers (indices into those two, modifiers and slots), which
-  `java/Reflection.java` makes the objects from, not code that makes each. A lookup reads only
+  `java/Reflection.java` makes the objects from, not code that makes each. A whole program, and
+  a census, then cut the table to the members that a lookup can find
+  (`analysis/reflection_table.rs`); a census does it with the facts that lowering found the
+  methods that can run by, and walks those again only when the table lost members.
+  Reachability puts in the members of every class that a lookup could look in by the trees
+  alone: for a lookup on any `Class` value that is not a class literal, every class whose class
+  literal reachable code has. The points-to facts that decide which methods can run
+  (`analysis/object_values.rs`) follow `Class` values too, from class literals, `getClass()` of
+  the objects followed and `getSuperclass()`, `getEnclosingClass()` and `getDeclaringClass()`
+  of those (any other `Class` value may be of any class), and so give the classes that the
+  lookups of each kind get: methods, fields and constructors are looked up by the translator's
+  `Method`, `Field` and `Constructor`'s `find` and `list`, whose first parameter is the class.
+  A member found on a class that no lookup of its kind gets is left out, its numbers and its
+  cases; the members kept keep their slots, which each member's numbers hold. The table's own
+  data gives `Class` values too (a field's `getType()`, a method's result), and the facts take
+  those of the members kept only, so that the table does not keep itself. The class literals of a
+  registry's keys, of an `EnumSet` or of a logger's name then keep no members, while
+  `o.getClass().getDeclaredFields()` keeps those of the classes of the objects `o` can be
+  (`corpus/whole-program/LookupsOnClassesThatReachThem.java`); `JAVA_TO_RUST_TABLE_DUMP=file`
+  writes how many members of each class are kept and left out. A class can reach a lookup with
+  no class literal anywhere: `o.getClass()` of an object made with `new`, and its
+  `getSuperclass()`. Where the facts find a lookup gets a class whose members reachability did
+  not put in (`analysis::reflection_table::missing`), the program is translated again, from
+  reachability on, with that class among the candidates of lookups of that kind
+  (`Program::flow_classes`), so that a lookup never silently finds nothing
+  (`corpus/whole-program/LookupsOnClassesWithoutLiterals.java`); each round adds classes, so the
+  rounds end. Where the facts say a lookup of a kind may get any class, its candidates stay
+  reachability's. The `Class` values in arrays are kept apart by where each array was made
+  (`Class[][]` and the arrays inside it too), so a read of an element of an array gets those
+  stored in arrays made where it was, unless the facts do not follow the array (a library's
+  result), when it gets those of every array, and what is stored through such an array goes to
+  every array that the runtime was given (`corpus/whole-program/ClassValuesInArrays.java`). Each
+  table's data is in a class of its own (`MethodTableData`, `FieldTableData`,
+  `ConstructorTableData`), as the facts hold one field for all the objects of a class: a field's
+  type then comes from the classes that the kept fields name, not from those of every table.
+  What the facts still merge: the elements of one array are one place (a lookup on
+  `groups[1][0]` gets the classes of `groups[0]` too), a field of a class holds what any of its
+  objects holds (the keys of every map are one, and so are the types of every `Field` object),
+  and the lists of parameter types of methods and constructors are made in one place. A lookup
+  reads only
   the members of its class: the first lookup of methods, fields or constructors reads the
   table's data (`TableData`) and groups the slots by the class that finds each member
   (`MemberIndex`, a hash table from the class to the run of its members, in the table's order),

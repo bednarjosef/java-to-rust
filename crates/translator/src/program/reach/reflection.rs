@@ -6,14 +6,17 @@
 //! classes it can look in are those that code can get a `Class` value of without naming them in
 //! a type: the classes that string literals of reachable code name (`by_name`), the locale data
 //! that a computed name finds, and, for methods and fields, the classes of the class literals of
-//! reachable code, as for constructors on a `Class<? extends T>` of a `T` other than `Object`. A lookup on a class literal, or on `Class.forName` of a name spelled out,
-//! looks in that class only, and one on a `Class<? extends T>` in those that are or extend or
-//! implement `T`. The names it can find are the one it
-//! spells out as a string literal, or for a name that code computes, any string literal of
-//! reachable code; `getMethods()` and its relatives find every member. Each member found is
-//! reachable, with the members of the same name that the class inherits, and is noted in
-//! `Reach::reflected` by the class it is looked up in, which lowering makes the table of.
-//! A constructor looked up without parameter types is only the one without parameters.
+//! reachable code, as for constructors on a `Class<? extends T>` of a `T` other than `Object`;
+//! and the classes that the flow of `Class` values of an earlier translation found that the
+//! lookups of the kind get (`Walk::flow_classes`, `analysis::reflection_table::missing`): an
+//! object's `getClass()`, or its `getSuperclass()`, with no class literal anywhere. A lookup on a
+//! class literal, or on `Class.forName` of a name spelled out, looks in that class only, and one
+//! on a `Class<? extends T>` in those that are or extend or implement `T`. The names it can find
+//! are the one it spells out as a string literal, or for a name that code computes, any string
+//! literal of reachable code; `getMethods()` and its relatives find every member. Each member
+//! found is reachable, with the members of the same name that the class inherits, and is noted
+//! in `Reach::reflected` by the class it is looked up in, which lowering makes the table of. A
+//! constructor looked up without parameter types is only the one without parameters.
 //!
 //! A read of records' components (`getRecordComponents`, called, or found by its name on
 //! `Class.class` as gson finds it) looks in the classes that a lookup of fields does, and in the
@@ -37,7 +40,7 @@
 //! finds it not, and its code never assigns the parameter. A load of any other `Class` value
 //! loads any service whose class literal reachable code has.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{
     Item, MethodKey, Walk, by_name::class_bound, by_name::class_for_name, has_flag, literal_class,
@@ -69,6 +72,10 @@ pub const RECORD_COMPONENT_METHODS: [&str; 6] =
 
 /// The key in `Walk::reflected_keys` of a record whose components are found.
 const RECORD_KEY: &str = "<record>";
+
+/// The classes that the flow of `Class` values found that the lookups of each kind look in
+/// (`Walk::flow_classes`).
+pub type FlowClasses = BTreeMap<Kind, BTreeSet<String>>;
 
 /// What a lookup looks for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -348,6 +355,7 @@ impl<'t> Walk<'t> {
                         .or_insert_with(|| {
                             let mut all: BTreeSet<&String> = self.named.iter().collect();
                             all.extend(self.reach.found_by_name.iter());
+                            all.extend(self.flow_classes.get(&lookup.kind).into_iter().flatten());
                             match lookup.kind {
                                 Kind::Constructor => {
                                     all.extend(self.annotation_classes.iter());
@@ -629,6 +637,26 @@ impl<'t> Walk<'t> {
             self.work.extend(made.into_iter().map(Item::Method));
         }
         new
+    }
+
+    /// The classes that a lookup of each kind on a `Class` value that is not a class literal may
+    /// look in, whatever the bound of its type (`Reach::lookup_candidates`), as `reflected_members`
+    /// takes them: for constructors, without the class literals that a lookup on a
+    /// `Class<? extends T>` below `Object` looks in too, so that one on any other `Class` value
+    /// that gets one of those has it put in (at the cost of a translation made again).
+    pub(super) fn lookup_candidates(&self) -> BTreeMap<Kind, BTreeSet<String>> {
+        let mut out = BTreeMap::new();
+        for kind in [Kind::Method, Kind::Field, Kind::Constructor] {
+            let mut all: BTreeSet<String> = self.named.iter().cloned().collect();
+            all.extend(self.reach.found_by_name.iter().cloned());
+            all.extend(self.flow_classes.get(&kind).into_iter().flatten().cloned());
+            match kind {
+                Kind::Constructor => all.extend(self.annotation_classes.iter().cloned()),
+                _ => all.extend(self.class_literals.iter().cloned()),
+            }
+            out.insert(kind, all);
+        }
+        out
     }
 
     /// The class `class` and its supertypes, directly or not.

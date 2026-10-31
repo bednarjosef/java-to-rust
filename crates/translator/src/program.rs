@@ -79,6 +79,11 @@ pub struct Program {
     /// the program with the rejection's message, where a census otherwise leaves a rejected
     /// initializer out (`lower::census_lower_program`, `census::Stubs`).
     pub ends_rejected: bool,
+    /// The classes that the lookups of each kind also look in: those that the flow of `Class`
+    /// values of a translation found that they get, which reachability did not take for
+    /// candidates (`analysis::reflection_table::missing`). A translation that finds such classes
+    /// is made again with them; empty to start with.
+    pub flow_classes: reach::FlowClasses,
 }
 
 /// A translation error with the file it is in, when it is in one.
@@ -125,15 +130,23 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 /// pass to the JDK's method (`JAVA_TO_RUST_STRING_WRITES_CHECK=1` checks that it does not).
 /// Otherwise the program is translated without the writes, and again with them, reached by a
 /// walk of their own, where a rejected one can run.
+///
+/// Where the flow of `Class` values finds that a lookup gets classes that reachability did not
+/// take for its candidates (`analysis::reflection_table::missing`), the program is translated
+/// again with them (`Program::flow_classes`).
 pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, ProgramError> {
     let (units, reach, asked) = load(program, Reaching::Walk(false))?;
     let Some(asked) = asked else {
         return match translate_reached(program, units, reach, Writes::Without)? {
             Translated::Done(tree) => Ok(tree),
+            Translated::Flow(missing) => translate_program_modules(&with_flow_classes(program, missing)),
             Translated::Again(_, _) => {
                 let (units, reach, _) = load(program, Reaching::Walk(true))?;
                 match translate_reached(program, units, reach, Writes::With)? {
                     Translated::Done(tree) => Ok(tree),
+                    Translated::Flow(missing) => {
+                        translate_program_modules(&with_flow_classes(program, missing))
+                    }
                     Translated::Again(..) => unreachable!("a translation with the writes is not taken again"),
                 }
             }
@@ -143,6 +156,9 @@ pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, Progra
     loop {
         match translate_reached(program, units, reach, writes)? {
             Translated::Done(tree) => return Ok(tree),
+            Translated::Flow(missing) => {
+                return translate_program_modules(&with_flow_classes(program, missing));
+            }
             Translated::Again(again, next) => {
                 // javac's trees were let go: javac is asked for the same units again.
                 (units, reach, writes) =
@@ -168,10 +184,28 @@ pub(crate) enum Writes {
 }
 
 /// What `translate_reached` gives: the translation, or the reach to translate again with, and
-/// how.
+/// how, or the classes that the lookups of each kind get that reachability did not take for
+/// their candidates.
 enum Translated {
     Done(ModuleTree),
     Again(Box<Reach>, Writes),
+    Flow(Vec<(crate::ast::TableKind, String)>),
+}
+
+/// `program` with the lookups of each kind also looking in the classes `missing`
+/// (`Program::flow_classes`), each of which it did not look in before.
+pub(crate) fn with_flow_classes(program: &Program, missing: Vec<(crate::ast::TableKind, String)>) -> Program {
+    let mut program = program.clone();
+    for (kind, class) in missing {
+        let kind = match kind {
+            crate::ast::TableKind::Method => LookupKind::Method,
+            crate::ast::TableKind::Field => LookupKind::Field,
+            crate::ast::TableKind::Constructor => LookupKind::Constructor,
+        };
+        let added = program.flow_classes.entry(kind).or_default().insert(class);
+        assert!(added, "a class missing from the reflection table that a translation added before");
+    }
+    program
 }
 
 /// Whether `JAVA_TO_RUST_STRING_WRITES_CHECK` is set: where the writes of `String` arrays are
@@ -228,8 +262,13 @@ fn translate_reached(
     stamp_units(&mut class, &lowered.units);
     print_notes(&class, &units.iter().map(|u| u.file.clone()).collect::<Vec<_>>());
     let watched = &lowered.string_array_writes;
-    let live = || narrow(&mut class, lowered.rejected, None, &|_| false, watched);
-    let (running, unresolved, writes_run) = phase("live methods", live).expect("nothing stops the walk");
+    let mut missing = Vec::new();
+    let live = || narrow(&mut class, lowered.rejected, None, &|_| false, watched, Some(&mut missing));
+    let narrowed = phase("live methods", live);
+    if !missing.is_empty() {
+        return Ok(Translated::Flow(missing));
+    }
+    let (running, unresolved, writes_run) = narrowed.expect("nothing stops the walk");
     if let Some(without) = without {
         let with = wrote && writes_run;
         assert_eq!(
@@ -285,7 +324,7 @@ fn rejected_write_runs(lowered: lower::Lowered) -> bool {
         Err((_, error)) => is_write(&error) || lowered.rejected.iter().any(|r| is_write(&r.error)),
         Ok(mut class) => {
             stamp_units(&mut class, &lowered.units);
-            let narrowed = narrow(&mut class, lowered.rejected, None, &|_| false, &[]);
+            let narrowed = narrow(&mut class, lowered.rejected, None, &|_| false, &[], None);
             let (running, _, _) = narrowed.expect("nothing stops the walk");
             running.iter().any(|r| is_write(&r.error))
         }
@@ -311,26 +350,35 @@ fn class_file_names(program: &Program, reached: &[String]) -> Result<javac::Byte
 
 /// The pieces of code that lowering rejected (`rejected`, stubs in `class`) that can run, and
 /// the calls that lowering left unresolved that can run; the methods that cannot run get a body
-/// that never runs (`analysis::live_methods::prune`). When the methods that can run are not
-/// known, every rejection can run and nothing changes (and the unresolved calls are not looked
-/// for). `found` are the methods that can run when lowering found them already (`Lowered::live`),
-/// before `stamp_units`: the positions of their unresolved calls have no unit. `None`, with
-/// `class` as it was, when the methods that can run are looked for here and a rejection that
-/// `stops` can run: the walk stops there (`live_methods_unless`). Also whether any of the pieces
-/// of code `watched` (each as `lower::Rejected` names its code) can run.
+/// that never runs (`analysis::live_methods::prune`). The reflection table first loses the
+/// members that no lookup can find (`analysis::reflection_table`), by the facts that find the
+/// methods that can run. When those are not known, every rejection can run and nothing changes
+/// (and the unresolved calls are not looked for). `found` are the methods that can run when
+/// lowering found them already (`Lowered::live`), before `stamp_units`: the positions of their
+/// unresolved calls have no unit. Where they come with their facts (`LiveMethods::facts`), the
+/// table is cut by those, and the methods that can run are found again unless it lost nothing.
+/// With `missing`, the classes that the facts find a lookup gets that the table lacks
+/// (`analysis::reflection_table::missing`) are put there, and where there are any the result is
+/// `None`, as the program is to be lowered again. `None`, with `class` as it was, when the
+/// methods that can run are looked for here and a rejection that `stops` can run: the walk
+/// stops there (`live_methods_unless`). Also whether any of the pieces of code `watched` (each
+/// as `lower::Rejected` names its code) can run.
 fn narrow(
     class: &mut crate::ast::Class,
     rejected: Vec<lower::Rejected>,
     found: Option<analysis::live_methods::LiveMethods>,
     stops: &dyn Fn(&lower::Rejected) -> bool,
     watched: &[(usize, Option<usize>)],
+    missing: Option<&mut Vec<(crate::ast::TableKind, String)>>,
 ) -> Option<(Vec<lower::Rejected>, Vec<Error>, bool)> {
     let live = match found {
-        Some(live) => Ok(live),
-        None => {
+        // Without facts to cut the reflection table by (`LiveMethods::facts`), those found are
+        // the methods that can run.
+        Some(live) if live.facts.is_none() => Ok(live),
+        found => {
             let code: Vec<(usize, Option<usize>)> =
                 rejected.iter().filter(|r| stops(r)).map(|r| (r.ty, r.method)).collect();
-            analysis::live_methods::live_methods_unless(class, &code).transpose()?
+            analysis::live_methods::live_methods_of_pruned(class, &code, missing, found).transpose()?
         }
     };
     let live = match live {
@@ -461,7 +509,8 @@ fn load_in_rounds(
             .with_locale_data(locale_data.clone())
             .with_class_roots(program.sources.iter().chain(&program.libraries).cloned().collect())
             .with_providers(providers.clone())
-            .with_reflect_config(reflect_config.clone());
+            .with_reflect_config(reflect_config.clone())
+            .with_flow_classes(program.flow_classes.clone());
         if string_array_writes { rounds.with_string_array_writes() } else { rounds }
     };
     let mut rounds = new_rounds();

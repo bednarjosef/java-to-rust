@@ -103,6 +103,7 @@ impl<'t> Lowering<'t> {
                 self.uses_real.take();
                 // The tables of reflection that the scan made, and what making them recorded.
                 self.reflection_tables.borrow_mut().clear();
+                self.reflection_layout.take();
                 arrays
             });
         }

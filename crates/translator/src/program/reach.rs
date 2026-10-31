@@ -36,7 +36,7 @@ pub use initialize::{is_ensure_initialized, literal_class};
 pub use jdk_resources::read as read_jdk_resources;
 pub use native_image::{ReflectEntry, reflect_config};
 pub use proxies::ProxyClass;
-pub use reflection::{Kind as LookupKind, Lookup, lookup};
+pub use reflection::{FlowClasses, Kind as LookupKind, Lookup, lookup};
 pub use services::constructs as constructs_services;
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
@@ -115,6 +115,11 @@ pub struct Reach {
     /// The records whose components reflection reads (`Class.getRecordComponents`), which the
     /// translator's `RecordComponent` lists (`reflection.rs`).
     pub records: BTreeSet<String>,
+    /// The classes that a lookup of each kind on a `Class` value that is not a class literal may
+    /// look in, before the bound of its type (`reflection.rs`): a class that the flow of `Class`
+    /// values finds a lookup gets and that is not here is missing from the table
+    /// (`analysis::reflection_table::missing`).
+    pub lookup_candidates: BTreeMap<LookupKind, BTreeSet<String>>,
     /// The proxy classes of the lists of interfaces that reachable code makes proxies of
     /// (`proxies.rs`).
     pub proxies: BTreeMap<Vec<String>, ProxyClass>,
@@ -2550,6 +2555,9 @@ pub struct Rounds<'t> {
     providers: Vec<super::modules::ServiceProvider>,
     /// The entries of the roots' reflection metadata (`Walk::reflect_config`).
     reflect_config: Vec<ReflectEntry>,
+    /// The classes that the flow of `Class` values says the lookups of each kind look in
+    /// (`Walk::flow_classes`).
+    flow_classes: FlowClasses,
     /// The walk without the assumption, made once it fails, and then kept up too.
     parallel: Option<Walk<'t>>,
     /// How many times a walk started again (`Walk::stale`).
@@ -2577,6 +2585,7 @@ impl<'t> Rounds<'t> {
             class_roots: Vec::new(),
             providers: Vec::new(),
             reflect_config: Vec::new(),
+            flow_classes: FlowClasses::new(),
             parallel: None,
             restarts: 0,
             string_array_writes: false,
@@ -2635,6 +2644,14 @@ impl<'t> Rounds<'t> {
         self
     }
 
+    /// Reachability in which the lookups of each kind on a `Class` value that is not a class
+    /// literal also look in these classes, which the flow of `Class` values of an earlier
+    /// translation found that they get (`analysis::reflection_table::missing`).
+    pub fn with_flow_classes(mut self, classes: FlowClasses) -> Rounds<'t> {
+        self.flow_classes = classes;
+        self
+    }
+
     /// How many times a walk started again from `main` over all the units so far, because
     /// what it reached before a unit came differs from what it would have reached with it
     /// (`Walk::stale`).
@@ -2676,7 +2693,7 @@ impl<'t> Rounds<'t> {
                     true,
                     self.string_array_writes,
                     (&self.locale_data, &self.class_roots),
-                    (&self.providers, &self.reflect_config),
+                    (&self.providers, &self.reflect_config, &self.flow_classes),
                     self.asked.clone(),
                 )?;
                 self.sequential.insert(walk)
@@ -2698,7 +2715,7 @@ impl<'t> Rounds<'t> {
                     false,
                     self.string_array_writes,
                     (&self.locale_data, &self.class_roots),
-                    (&self.providers, &self.reflect_config),
+                    (&self.providers, &self.reflect_config, &self.flow_classes),
                     self.asked.clone(),
                 )?;
                 self.parallel = Some(walk);
@@ -2760,10 +2777,14 @@ impl<'t> Rounds<'t> {
         if let Some(walk) = &self.parallel {
             walk.explain();
         }
-        let sequential = self.sequential.map(|walk| walk.reach).unwrap_or_default();
+        let reach = |mut walk: Walk| {
+            walk.reach.lookup_candidates = walk.lookup_candidates();
+            walk.reach
+        };
+        let sequential = self.sequential.map(reach).unwrap_or_default();
         match self.parallel {
             Some(walk) if !self.stays_sequential => {
-                let mut parallel = walk.reach;
+                let mut parallel = reach(walk);
                 parallel.missing.extend(sequential.missing);
                 parallel
             }
@@ -2893,6 +2914,9 @@ struct Walk<'t> {
     /// The classes of the class literals among the values of annotations, which code that
     /// reads the annotation makes objects of (`reflection.rs`).
     annotation_classes: HashSet<String>,
+    /// The classes that the flow of `Class` values of an earlier translation found that the
+    /// lookups of each kind get (`Rounds::with_flow_classes`).
+    flow_classes: FlowClasses,
     /// The classes that the types of the components of the records found so far name, which
     /// reflection hands out as `Class` values (`reflection.rs`).
     record_types: HashSet<String>,
@@ -3036,7 +3060,11 @@ impl<'t> Walk<'t> {
         sequential: bool,
         string_array_writes: bool,
         (locale_data, class_roots): (&[String], &[PathBuf]),
-        (providers, reflect_config): (&[super::modules::ServiceProvider], &[ReflectEntry]),
+        (providers, reflect_config, flow_classes): (
+            &[super::modules::ServiceProvider],
+            &[ReflectEntry],
+            &FlowClasses,
+        ),
         asked: Option<HashSet<String>>,
     ) -> Result<Walk<'t>, String> {
         let mut walk = Walk {
@@ -3048,6 +3076,7 @@ impl<'t> Walk<'t> {
             providers: providers.to_vec(),
             config_pending: (0..reflect_config.len()).collect(),
             reflect_config: reflect_config.to_vec(),
+            flow_classes: flow_classes.clone(),
             ..Walk::default()
         };
         walk.reach.sequential = sequential;
@@ -3092,6 +3121,7 @@ impl<'t> Walk<'t> {
             providers: std::mem::take(&mut self.providers),
             config_pending: (0..self.reflect_config.len()).collect(),
             reflect_config: std::mem::take(&mut self.reflect_config),
+            flow_classes: std::mem::take(&mut self.flow_classes),
             asked: self.asked.take(),
             why: self.why.as_ref().map(|_| HashMap::new()),
             ..Walk::default()

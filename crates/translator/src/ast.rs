@@ -471,6 +471,59 @@ pub struct Class {
     /// allows. Calls with the same classes share one list: on the Minecraft server thousands of
     /// calls may be on any of tens of thousands of classes.
     pub receivers: HashMap<ExprId, std::sync::Arc<[usize]>>,
+    /// Where the reflection table's members are in the code that lowering wrote for it
+    /// (`lower::reflection`), so that a whole program can leave out the members of the classes
+    /// whose `Class` values no lookup gets (`analysis::reflection_table`).
+    #[serde(default)]
+    pub reflection_table: ReflectionTable,
+}
+
+/// The kinds of members in the reflection table, each a table of its own.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TableKind {
+    Method,
+    Field,
+    Constructor,
+}
+
+/// Where the reflection table's members are in the code that lowering wrote for it
+/// (`lower::reflection`): the slots, the cases of the `switch`es over them and their numbers in
+/// the data of each part. A slot is a member of a kind, by its number.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default, Debug)]
+pub struct ReflectionTable {
+    /// The methods of the translator's `Method`, `Field` and `Constructor` that look members up
+    /// in the class that their first parameter holds (`find` and `list`).
+    pub lookups: Vec<(TableKind, usize)>,
+    /// The class that finds each slot's member, by type index: `None` for a member that no class
+    /// of the program finds (`Object`'s, a box's `valueOf`, `Class`'s own).
+    pub found_on: HashMap<(TableKind, i32), Option<usize>>,
+    /// The case of each slot in a `switch` over the slots of a part (`invokePart`, `getPart`,
+    /// ...), by the expression of the `yield` that ends it.
+    pub cases: HashMap<ExprId, (TableKind, i32)>,
+    /// The arrays of a part's data, by their first item.
+    pub data: HashMap<ExprId, TableData>,
+    /// The methods whose calls in the program's code name the class that a lookup of each kind
+    /// looks in by their first argument: `find` and `list`, and `Constructor.newInstanceOf`.
+    pub entries: Vec<(TableKind, usize)>,
+    /// The translator's classes of reflection (`Method`, `Field`, `Constructor`,
+    /// `RecordComponent`), whose own calls of those methods are not the program's lookups.
+    pub internal: Vec<usize>,
+    /// For each kind, the classes of the program, by type index with their names as javac
+    /// gives them, that could have members in the table but that reachability did not take
+    /// for candidates of a lookup on a `Class` value that is not a class literal
+    /// (`Reach::lookup_candidates`).
+    pub uncovered: HashMap<TableKind, HashMap<usize, String>>,
+}
+
+/// An array of a part's data in the reflection table (`tableInts`, `tableClasses`).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct TableData {
+    pub kind: TableKind,
+    /// For the numbers, the items of each slot's member: the slot, the first and the end. Item 0
+    /// is the number of members.
+    pub members: Vec<(i32, usize, usize)>,
+    /// For the classes, the slots whose members name each item.
+    pub named_by: Vec<Vec<i32>>,
 }
 
 impl Class {

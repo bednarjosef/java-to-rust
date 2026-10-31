@@ -469,6 +469,7 @@ fn lower_into<'t>(
         volatile_elements: lowering.volatile_elements.take(),
         proxy_classes: (0..lowering.types.len()).filter(|&t| lowering.is_proxy_class(t)).collect(),
         receivers: Default::default(),
+        reflection_table: lowering.reflection_table(),
     };
     Ok((class, lowering.real.clone(), failed))
 }

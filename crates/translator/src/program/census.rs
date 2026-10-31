@@ -52,8 +52,8 @@ use super::checkpoint;
 use super::survey::{self, Part, Piece};
 use super::{Program, ProgramError, Reach, Reaching, Writes, class_file_names, load, source_files};
 use crate::ast::{
-    Builtin, Class, Error, Expr, ExprId, ExprKind, Method, PROVIDED_UNIT, Pos, Stmt, Type, visit_expr,
-    visit_stmt, visit_stmt_exprs,
+    Builtin, Class, Error, Expr, ExprId, ExprKind, Method, PROVIDED_UNIT, Pos, Stmt, TableKind, Type,
+    visit_expr, visit_stmt, visit_stmt_exprs,
 };
 use crate::output::ModuleTree;
 use crate::value::{Value, json};
@@ -164,6 +164,7 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     loop {
         match census_reached(program, loaded, writes, same)? {
             Taken::Census(census) => return Ok(census),
+            Taken::Flow(missing) => return census_program(&super::with_flow_classes(program, missing)),
             Taken::Again(Some(again), next) => (loaded, writes) = (*again, next),
             Taken::Again(None, next) => {
                 let (units, reach, _) = load(program, Reaching::Walk(true))?;
@@ -174,10 +175,12 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
 }
 
 /// What `census_reached` gives: the census, or the census to take instead, over these units and
-/// reach or, with none, over a load with the writes of `String` arrays.
+/// reach or, with none, over a load with the writes of `String` arrays, or over the program with
+/// the classes missing from its reflection table (`super::with_flow_classes`).
 enum Taken {
     Census(Census),
     Again(Option<Box<(Vec<Value>, Reach)>>, Writes),
+    Flow(Vec<(TableKind, String)>),
 }
 
 /// `census_program` over these units and reach (`super::load`), with the writes of `String`
@@ -209,7 +212,11 @@ fn census_reached(
              without them ({without})"
         );
     }
-    let Narrowed { class, mut rejections, mut fatal, again, units: lowered_units, .. } = narrowed;
+    let Narrowed { class, mut rejections, mut fatal, again, units: lowered_units, missing, .. } = narrowed;
+    if !missing.is_empty() {
+        std::panic::set_hook(hook);
+        return Ok(Taken::Flow(missing));
+    }
     if let Some(next) = again {
         std::panic::set_hook(hook);
         drop((class, trees));
@@ -331,6 +338,9 @@ struct Narrowed {
     again: Option<Writes>,
     /// Whether lowering lowered a write of a `String` array as a call of the JDK's method.
     wrote: bool,
+    /// The classes that a lookup gets that the reflection table lacks (`super::narrow`), with
+    /// which the census is taken again.
+    missing: Vec<(TableKind, String)>,
 }
 
 /// Lowers the program for a census, with the writes of `String` arrays as `writes` says (as
@@ -368,6 +378,7 @@ fn lower_and_narrow(
     let mut rejections = Vec::new();
     // Whether a write that can run takes the census again.
     let mut again = None;
+    let mut missing = Vec::new();
     let (class, fatal) = match lowered.class {
         Err((unit, error)) => {
             rejections.extend(lowered.rejected.into_iter().map(rejection));
@@ -381,8 +392,11 @@ fn lower_and_narrow(
             // change nothing.
             let stops = |r: &lower::Rejected| rejects_writes(&r.error.message);
             let watched = &lowered.string_array_writes;
-            let narrow = || super::narrow(&mut class, lowered.rejected, lowered.live, &stops, watched);
+            let narrow = || {
+                super::narrow(&mut class, lowered.rejected, lowered.live, &stops, watched, Some(&mut missing))
+            };
             match phase("live methods", narrow) {
+                _ if !missing.is_empty() => (None, None),
                 // With the writes, over the reach without them, none of those lowered can run.
                 Some((_, _, false)) if writes == Writes::First && wrote => {
                     again = Some(Writes::Without);
@@ -403,7 +417,7 @@ fn lower_and_narrow(
     if again.is_none() && rejections.iter().chain(&fatal).any(|r| rejects_writes(&r.error.message)) {
         again = Some(Writes::With);
     }
-    Narrowed { class, rejections, fatal, units: lowered.units, again, wrote }
+    Narrowed { class, rejections, fatal, units: lowered.units, again, wrote, missing }
 }
 
 /// How the class files name what the messages of a `NullPointerException` show, found the first
