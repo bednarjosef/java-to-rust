@@ -2570,6 +2570,9 @@ impl<'a> Gen<'a> {
             None => general.clone(),
         };
         self.gap();
+        // The mark that tells the split a dispatcher (`split::DISPATCHER_MARK`), which a build
+        // drops: a small one stays in the header, where its callers inline its `match`.
+        self.line(&format!("#[{}]", crate::split::DISPATCHER_MARK));
         if among.is_some() {
             self.line("#[inline]");
         }

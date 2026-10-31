@@ -407,6 +407,35 @@ fn movable(sig: &syn::Signature, text: &str) -> bool {
 /// The most tokens that the code of a function kept in the header has (`small`).
 const SMALL_TOKENS: usize = 48;
 
+/// The attribute that marks a dispatcher (`codegen/dispatch.rs`): one whose condition never
+/// holds, so that a build drops it unread.
+pub(crate) const DISPATCHER_MARK: &str = "cfg_attr(any(), dispatcher)";
+
+/// The most arms of a dispatcher that stays in the header whatever its size (`small_dispatcher`).
+const DISPATCHER_ARMS: usize = 8;
+
+/// Whether a function with attributes `attrs` and block `code` is a dispatcher of at most
+/// `DISPATCHER_ARMS` arms (each a call, or several class numbers calling one), which stays in the
+/// header, `#[inline]`: a call through an interface is then the caller's `match` on the class
+/// number and one call of the method it picks, not a call of the dispatcher that calls it.
+fn small_dispatcher(attrs: &[syn::Attribute], code: &str) -> bool {
+    let marked = attrs.iter().any(|a| {
+        a.path().is_ident("cfg_attr")
+            && matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string().replace(' ', "") == "any(),dispatcher")
+    });
+    // The arms of the outermost `match`, less the one for a class number no class has.
+    let arms = || {
+        let block: syn::Block = syn::parse_str(code).ok()?;
+        block.stmts.iter().find_map(|s| match s {
+            syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(
+                m.arms.iter().filter(|a| !matches!(a.pat, syn::Pat::Ident(_) | syn::Pat::Wild(_))).count(),
+            ),
+            _ => None,
+        })
+    };
+    marked && arms().is_some_and(|n| n <= DISPATCHER_ARMS)
+}
+
 /// Whether `code`, a function's block, is small enough to stay in the header, `#[inline]`, where
 /// every crate that calls it can inline it: a getter, a buffer's `get`, a class's initialization
 /// check, `Math.lerp`. A call into a body crate cannot be inlined without link-time optimization,
@@ -627,7 +656,8 @@ fn split_module(
                 let block = f.block.span().byte_range();
                 let can_move = movable(&f.sig, text);
                 // A `#[cold]` function is not inlined, so it moves whatever its size.
-                let moves = can_move && !stays(&f.attrs, &text[block.clone()]);
+                let code = &text[block.clone()];
+                let moves = can_move && !(stays(&f.attrs, code) || small_dispatcher(&f.attrs, code));
                 if !moves {
                     // A function kept in the header for its size is inlined where it is called.
                     // The mark goes before the edit that makes the function public, at the same
@@ -1323,6 +1353,44 @@ mod tests {
             "{moved}"
         );
         assert!(moved.contains("    fn body_odd(&self, p0: i32) -> java::Ret<bool, Throwable>;"), "{moved}");
+    }
+
+    #[test]
+    fn small_dispatchers_stay_in_the_header_whatever_their_size() {
+        // A dispatcher as `codegen/dispatch.rs` writes it, with `arms` classes that each call a
+        // method of their own.
+        let dispatcher = |name: &str, arms: usize| {
+            let arms: String = (0..arms)
+                .map(|i| {
+                    format!(
+                        "        {i} => {{\n            let o: &std::sync::Arc<java::Monitored<C{i}>> = unsafe {{ this.0.as_pointer() }};\n            C{i}__get(o, index)\n        }}\n"
+                    )
+                })
+                .collect();
+            format!(
+                "#[{DISPATCHER_MARK}]\nfn {name}(this: E, index: i32) -> Result<i32, Throwable> {{\n    match this.0.tag() {{\n{arms}        tag => java::bad_tag(tag),\n    }}\n}}\n\n"
+            )
+        };
+        let text =
+            format!("{}{}", dispatcher("few", DISPATCHER_ARMS), dispatcher("many", DISPATCHER_ARMS + 1));
+        let part = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
+            .unwrap();
+        let header = &part.split.header;
+        assert!(
+            header.contains("#[cfg_attr(not(debug_assertions), inline)] pub fn few(this: E, index: i32)"),
+            "{header}"
+        );
+        // Its arms call the methods through the header's declarations, as the moved code would.
+        assert!(header.contains("C0__get(o, index)"), "{header}");
+        // A larger one moves, and the header keeps a wrapper of it.
+        assert!(
+            header.contains(
+                "pub fn many(p0: E, p1: i32) -> Result<i32, Throwable> { many__ret(p0, p1).result() }"
+            ),
+            "{header}"
+        );
+        let moved: String = part.split.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert!(moved.contains("fn j2r__p__many(") && !moved.contains("j2r__p__few"), "{moved}");
     }
 
     #[test]
