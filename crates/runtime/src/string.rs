@@ -592,8 +592,33 @@ pub(crate) fn text_hash(s: &Wtf8) -> i32 {
     let bytes = s.as_bytes();
     let ascii = bytes.iter().position(|&b| !b.is_ascii()).unwrap_or(bytes.len());
     let step = |h: i32, c: i32| h.wrapping_mul(31).wrapping_add(c);
-    let h = bytes[..ascii].iter().fold(0i32, |h, &b| step(h, b as i32));
+    let h = ascii_hash(&bytes[..ascii]);
     s.slice(ascii, bytes.len()).units().fold(h, |h, c| step(h, c as i32))
+}
+
+/// `31 * h + b` over `bytes`, eight at a time: `h * 31^8 + b0 * 31^7 + .. + b7`, the same sum
+/// modulo 2^32, whose eight products are independent where the one-at-a-time form waits for each
+/// multiplication before the next.
+fn ascii_hash(bytes: &[u8]) -> i32 {
+    const POWERS: [i32; 9] = {
+        let mut p = [1i32; 9];
+        let mut i = 1;
+        while i < 9 {
+            p[i] = p[i - 1].wrapping_mul(31);
+            i += 1;
+        }
+        p
+    };
+    let (chunks, rest) = bytes.as_chunks::<8>();
+    let mut h = 0i32;
+    for c in chunks {
+        let mut sum = h.wrapping_mul(POWERS[8]);
+        for (i, &b) in c.iter().enumerate() {
+            sum = sum.wrapping_add((b as i32).wrapping_mul(POWERS[7 - i]));
+        }
+        h = sum;
+    }
+    rest.iter().fold(h, |h, &b| h.wrapping_mul(31).wrapping_add(b as i32))
 }
 
 /// `new String(chars, offset, count)` and `String.valueOf(chars, offset, count)`.
@@ -988,6 +1013,27 @@ mod tests {
         assert_eq!(uppercase_in(w("title"), w("")), "TITLE");
         assert_eq!(lowercase_in(w("\u{39f}\u{394}\u{39f}\u{3a3}"), w("de")), "\u{3bf}\u{3b4}\u{3bf}\u{3c2}");
         assert_eq!(lowercase_in(w("ISTANBUL"), w("fr")), "istanbul");
+    }
+
+    #[test]
+    fn a_hash_is_javas_for_every_length_and_kind_of_text() {
+        let one_at_a_time = |s: &Wtf8| s.units().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32));
+        let texts = [
+            "",
+            "a",
+            "minecraft:stone",
+            "the quick brown fox jumps over the lazy dog",
+            "héllo wörld, a longer text",
+            "😀 and \u{7f}\u{80}",
+        ];
+        for text in texts {
+            for end in 0..=text.len() {
+                if let Some(prefix) = text.get(..end) {
+                    assert_eq!(text_hash(w(prefix)), one_at_a_time(w(prefix)), "{prefix:?}");
+                }
+            }
+        }
+        assert_eq!(text_hash(w("hello")), 99162322);
     }
 
     #[test]

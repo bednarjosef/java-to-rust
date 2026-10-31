@@ -535,6 +535,13 @@ fn read_bytes<S: RawBytes, A: Elements<S>>(array: &A, offset: i64, bytes: i64) -
 fn write_bytes<D: RawBytes, B: Elements<D>>(array: &B, offset: i64, bytes: &[u8]) {
     let range = byte_range(array.length(), D::SIZE, offset, bytes.len() as i64);
     let first = range.start / D::SIZE;
+    // Whole elements are stored as they are made, without reading the ones they replace: for
+    // bytes, one store each.
+    if range.start.is_multiple_of(D::SIZE) && range.end.is_multiple_of(D::SIZE) {
+        let items: Vec<D> = bytes.chunks_exact(D::SIZE).map(D::get).collect();
+        array.store_from(first, &items);
+        return;
+    }
     array.writing(first..range.end.div_ceil(D::SIZE), |items| {
         let mut element = vec![0; D::SIZE];
         let mut taken = 0;
@@ -728,5 +735,12 @@ mod tests {
         let two = crate::from_vec(vec![0u16; 2]);
         put_memory(&two, base, 0x0003_0002i32);
         assert_eq!(two.take_items(), vec![2, 3]);
+        // Into arrays that threads share: whole elements, and part of one.
+        let shared = crate::shared_from_vec(vec![9u16; 4]);
+        copy_memory(&bytes, base + 2, &shared, base + 2, 4, 0);
+        assert_eq!(shared.take_items(), vec![9, 2, 3, 9]);
+        let shared_longs = crate::shared_from_vec(vec![0i64]);
+        copy_memory(&crate::from_vec(vec![-1i8; 2]), base, &shared_longs, base + 2, 2, 0);
+        assert_eq!(shared_longs.take_items(), vec![0xffff_0000]);
     }
 }
