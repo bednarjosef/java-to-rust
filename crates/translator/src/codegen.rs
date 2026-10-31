@@ -137,7 +137,7 @@ pub fn generate_all_stubbing(
     stub: &mut Stub,
 ) -> Result<ModuleTree, Vec<Error>> {
     SHARED_STRINGS.set(class.shared_strings);
-    let setup = Setup::new(class, facts);
+    let setup = crate::timings::phase("codegen: setup", || Setup::new(class, facts));
     let start = std::time::Instant::now();
     let mut kept = None;
     let wanted = Needs::new();
@@ -170,9 +170,14 @@ pub fn generate_all_stubbing(
         }
         // Which classes are live may change (a stub takes away the only `new` of a class), as
         // nothing else of the setup does where the stubs replace bodies alone.
-        let mut stubbed = Setup::new(class, facts);
-        let live = std::mem::replace(&mut stubbed.live, setup.live.clone());
-        if stubbed != setup {
+        let (mut stubbed, live, same) =
+            crate::timings::phase("codegen: setup with the stubs, compared", || {
+                let mut stubbed = Setup::new(class, facts);
+                let live = std::mem::replace(&mut stubbed.live, setup.live.clone());
+                let same = stubbed == setup;
+                (stubbed, live, same)
+            });
+        if !same {
             if crate::timings::enabled() {
                 eprintln!(
                     "timing: codegen: the stubs change what the whole program is written with: {}",
