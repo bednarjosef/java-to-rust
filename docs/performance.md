@@ -24,7 +24,8 @@ One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clo
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
 clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (five runs a side,
 at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
-and Interpreter's and SortMillion's from one at a load average of 6.3.
+Interpreter's from one at a load average of 6.3, and SortMillion's from five runs a side at a
+load average of 4.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -54,7 +55,7 @@ and Interpreter's and SortMillion's from one at a load average of 6.3.
 | ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
 | Sieve                 |    1278 |    1006 |      0.79 |           - |           - |            - |
 | SmallObjects          |     147 |     203 |      1.38 |           - |           - |            - |
-| SortMillion           |    1780 |    1639 |      0.92 |         542 |         547 |         1.01 |
+| SortMillion           |    1691 |    1439 |      0.85 |         520 |         479 |         0.92 |
 | Statics               |    1286 |    1266 |      0.98 |           - |           - |            - |
 | StringBuild           |      28 |       1 |      0.04 |           - |           - |            - |
 | TokenScanner          |     994 |     775 |      0.78 |           - |           - |            - |
@@ -139,7 +140,10 @@ made on the stack (`java::count_allocation`).
   are 2-3% larger and none runs more cycles (BinaryTrees, SortMillion and ObjectHash 2-8%
   fewer); aligning loops to 32 bytes instead does not help Interpreter.
   `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`;
-  `Arrays.sort` of integers is Rust's unstable sort, since equal integers cannot be told apart.
+  `Arrays.sort` of 4096 integers or more sorts them by their bytes, four passes for an `int`
+  (`radix_sort` in `array.rs`), as Java's `DualPivotQuicksort` sorts a large `int[]` by its
+  digits: SortMillion's library sorts took about 87 ms of its kernel with Rust's unstable sort
+  and Java's about 50 ms; a million `int`s now sort in 2.6 ms against 9 ms.
 - **MatrixMultiply (0.65x, kernel 0.9x).** The matrices are plain
   `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
   and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
