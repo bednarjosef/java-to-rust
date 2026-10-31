@@ -782,8 +782,8 @@ pub fn equals_ignore_case(a: &Wtf8, b: &Wtf8) -> bool {
     length(a) == length(b) && compare_to_ignore_case(a, b) == 0
 }
 
-/// `s.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the code units, wrapping. A string object
-/// (`JStr`) keeps its hash once computed.
+/// `s.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the code units, wrapping. A string that
+/// owns its text (`JString`) or a string object (`JStr`) keeps its hash once computed.
 #[inline]
 pub fn string_hash<S: StringHash + ?Sized>(s: &S) -> i32 {
     s.string_hash()
@@ -803,7 +803,7 @@ impl StringHash for Wtf8 {
 
 impl StringHash for JString {
     fn string_hash(&self) -> i32 {
-        text_hash(self)
+        self.hash_code()
     }
 }
 

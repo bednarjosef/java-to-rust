@@ -80,7 +80,7 @@ impl<'a> Gen<'a> {
         }
         match o.ty {
             Type::String if nullable => {
-                let option = self.option_ref(o);
+                let option = self.string_option_kept(o);
                 Code::atom(format!("{option}.map_or(0, {})", self.runtime("string_hash")))
             }
             Type::String => {

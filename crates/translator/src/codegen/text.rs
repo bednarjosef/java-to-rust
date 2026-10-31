@@ -19,6 +19,16 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A possibly-null string as an `Option` of a reference to the `java::JString` itself where
+    /// it is one (a field, an element, a static), which keeps its hash, rather than to its text.
+    pub(super) fn string_option_kept(&mut self, e: &'a Expr) -> String {
+        let option = self.option_ref(e);
+        match option.strip_suffix(".as_deref()") {
+            Some(place) => format!("{place}.as_ref()"),
+            None => option,
+        }
+    }
+
     /// A string as the receiver of a method of `str`.
     fn str_recv(&mut self, e: &'a Expr) -> String {
         match &e.kind {
@@ -135,9 +145,13 @@ impl<'a> Gen<'a> {
                     StringOp::ToLowerCase => "lowercase",
                     _ => "string_hash",
                 };
-                // A shared string keeps its hash (`java::JStr`): its text would hash it again.
+                // A shared string keeps its hash (`java::JStr`), and so does a `java::JString`:
+                // its text alone would be hashed again.
                 let s = if op == StringOp::HashCode && args[0].ty == Type::String && super::shared_strings() {
                     self.shared_ref(&args[0])
+                } else if op == StringOp::HashCode && args[0].ty == Type::String && self.nullable(&args[0]) {
+                    let option = self.string_option_kept(&args[0]);
+                    self.dereference(&[args[0].id], &option)
                 } else {
                     self.text_ref(&args[0])
                 };
