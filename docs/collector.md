@@ -32,6 +32,18 @@ owned, and that Rust therefore never freed, is found unreachable too.
   measured difference on a system that gives them to every aligned range anyway. A free block
   whose memory stays keeps what it held, so a large allocation zeroes such blocks when it takes
   them.
+- **Lowest first.** A new block is taken from the free run lowest in the heap, and each slot
+  size hands out its partly free blocks lowest first, so the objects that live gather at the
+  bottom and whole huge pages above them empty and go back to the system. On the Minecraft
+  server's bench this lowered the peak from 1,030–1,089 MB to 1,013–1,020 MB, at the same tick
+  speed (`JAVA_GC_LOW_FIRST=0` turns it off).
+- **Code pages.** At most every 10 seconds (`JAVA_GC_CODE_PAGES=<seconds>`, 0 never), a
+  collection gives the pages of the executable's code and constants back to the system once the
+  program's threads run again. They are the file's own pages, which the loader does not write,
+  so a page that is used again comes back from the system's cached copy of the file. A large
+  program runs much of its code once, at startup: the Minecraft server held 181 MB of its 286 MB
+  of code and 47 MB of its 85 MB of constants after its tick sprint, and its peak went from
+  1,030–1,089 MB to 953–957 MB, at the same tick speed.
 - **Small blocks** hold slots of one size: one of 47 sizes from 16 bytes to 32 KB, in steps of
   8 bytes up to 128, where most objects are, so that an object takes at most 7 bytes more than
   it needs, and then of a quarter of a power of two. A slot is aligned to 8 bytes, and to 16 when
@@ -269,6 +281,8 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   at every collection however small, which with `JAVA_GC_EVERY` tests the parallel marking.
 - `JAVA_GC_LOG=1` writes a line per collection to standard error: whether it was minor or full,
   bytes taken since the last, bytes alive, heap size, and the time spent marking and sweeping.
+  `JAVA_GC_LOG=2` adds, after each full collection, the bytes alive in each slot size and in
+  large allocations, and the blocks each takes.
 - `JAVA_GC_GENERATIONS=1` with `JAVA_GC_EVERY=1` makes most collections minor ones, at every
   refill of a thread's slots: the corpus run so is the test most likely to catch a write the
   young generation misses. Running a program under `systemd-run --user --wait --pipe -p
