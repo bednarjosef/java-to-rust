@@ -275,14 +275,20 @@ struct Meta {
     magic: u64,
     taken: [u64; BITMAP_WORDS],
     marks: [u64; BITMAP_WORDS],
-    /// With generations: the slots old after the last collection, and those that lived through
-    /// one collection and are not old yet (`age`).
-    old: [u64; BITMAP_WORDS],
-    once: [u64; BITMAP_WORDS],
     /// What the sweep found: the slots alive in a small block (1 for a large allocation that
     /// lives), and whether a small block has untaken slots.
     live: u32,
     untaken: bool,
+}
+
+/// With generations, a block's ages, in a table of their own beside `Meta`'s, which only a
+/// program with generations reserves: the slots old after the last collection, and those that
+/// lived through one collection and are not old yet (`age`). In `Meta`, they took 1 KB of every
+/// 64 KB block whether or not the program had generations.
+#[repr(C)]
+struct Ages {
+    old: [u64; BITMAP_WORDS],
+    once: [u64; BITMAP_WORDS],
 }
 
 /// No block.
@@ -293,6 +299,8 @@ struct Heap {
     /// The first block's address, and the end of the blocks used so far.
     base: usize,
     meta: *mut Meta,
+    /// The blocks' `Ages`, with generations; null without.
+    ages: *mut Ages,
     /// Blocks `0..top` have been used.
     top: usize,
     /// Per class, the blocks with untaken slots.
@@ -370,6 +378,7 @@ unsafe impl Sync for Shared {}
 static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     base: 0,
     meta: ptr::null_mut(),
+    ages: ptr::null_mut(),
     top: 0,
     lists: [NONE; CLASSES],
     runs: ptr::null_mut(),
@@ -707,6 +716,7 @@ fn track_writes(h: &mut Heap) {
     }
     h.pagemap = pagemap;
     h.uffd = uffd;
+    h.ages = reserve(MAX_BLOCKS * std::mem::size_of::<Ages>()) as *mut Ages;
     h.regions = reserve(REGIONS * std::mem::size_of::<PageRegion>()) as *mut PageRegion;
     h.previous = reserve(PROTECTED_RUNS * std::mem::size_of::<(usize, usize)>()) as *mut (usize, usize);
     h.protected = reserve(PROTECTED_RUNS * std::mem::size_of::<(usize, usize)>()) as *mut (usize, usize);
@@ -759,6 +769,11 @@ impl Heap {
     #[allow(clippy::mut_from_ref)]
     fn meta<'m>(&self, b: usize) -> &'m mut Meta {
         unsafe { &mut *self.meta.add(b) }
+    }
+
+    /// Block `b`'s ages, in a program with generations.
+    fn ages<'m>(&self, b: usize) -> Option<&'m mut Ages> {
+        if self.ages.is_null() { None } else { Some(unsafe { &mut *self.ages.add(b) }) }
     }
 
     fn block_address(&self, b: usize) -> usize {
@@ -839,8 +854,10 @@ impl Heap {
         m.magic = (1u64 << 32) / size as u64 + 1;
         m.taken = [0; BITMAP_WORDS];
         m.marks = [0; BITMAP_WORDS];
-        m.old = [0; BITMAP_WORDS];
-        m.once = [0; BITMAP_WORDS];
+        if let Some(a) = self.ages(b) {
+            a.old = [0; BITMAP_WORDS];
+            a.once = [0; BITMAP_WORDS];
+        }
         b
     }
 
@@ -1140,8 +1157,10 @@ fn untake(h: &mut Heap, p: usize) {
     let slot = (((p - start) as u64 * m.magic) >> 32) as usize;
     m.taken[slot / 64] &= !(1u64 << (slot % 64));
     m.marks[slot / 64] &= !(1u64 << (slot % 64));
-    m.old[slot / 64] &= !(1u64 << (slot % 64));
-    m.once[slot / 64] &= !(1u64 << (slot % 64));
+    if let Some(a) = h.ages(b) {
+        a.old[slot / 64] &= !(1u64 << (slot % 64));
+        a.once[slot / 64] &= !(1u64 << (slot % 64));
+    }
     h.list(b);
 }
 
@@ -1629,8 +1648,10 @@ fn allocate_large(layout: Layout, scan: Scan) -> *mut u8 {
     m.start = color as u32;
     m.taken[0] = 1;
     m.marks[0] = 0;
-    m.old[0] = 0;
-    m.once[0] = 0;
+    if let Some(a) = h.ages(b) {
+        a.old[0] = 0;
+        a.once[0] = 0;
+    }
     for rest in b + 1..b + n {
         let m = h.meta(rest);
         m.kind = LARGE_REST;
@@ -2752,6 +2773,7 @@ fn old_on(h: &Heap, page: usize) -> bool {
 fn age(h: &mut Heap) {
     for b in 0..h.top {
         let m = h.meta(b);
+        let Some(a) = h.ages(b) else { return };
         let words = match m.kind {
             SMALL => (m.slots as usize).div_ceil(64),
             LARGE => 1,
@@ -2759,10 +2781,10 @@ fn age(h: &mut Heap) {
         };
         for w in 0..words {
             let reached = m.taken[w] & m.marks[w];
-            let fresh = reached & !m.old[w] & !m.once[w];
-            m.once[w] = fresh;
+            let fresh = reached & !a.old[w] & !a.once[w];
+            a.once[w] = fresh;
             m.marks[w] = reached & !fresh;
-            m.old[w] = m.marks[w];
+            a.old[w] = m.marks[w];
         }
     }
 }
