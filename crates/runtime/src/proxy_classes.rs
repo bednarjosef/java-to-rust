@@ -28,7 +28,7 @@ static ANNOTATIONS: AtomicBool = AtomicBool::new(false);
 /// is a dynamic one. `TranslatedProxies` passes a class of its table, never null, which comes as
 /// an `Option` where the translation does not know that.
 pub fn name_proxy_class(
-    class: impl Into<Option<Class>>,
+    class: impl Into<Option<&'static Class>>,
     name: &crate::Wtf8,
     module: &crate::Wtf8,
     dynamic: bool,
@@ -43,7 +43,7 @@ pub fn name_proxy_class(
 /// `Module.dynamicProxy0(c)`: whether `class` is a proxy class defined in a dynamic module
 /// (`jdk.proxy1`), of which the translation has no `Module`. The class comes as an `Option` where
 /// the translation does not know that it is not null.
-pub fn in_dynamic_module(class: impl Into<Option<Class>>) -> bool {
+pub fn in_dynamic_module(class: impl Into<Option<&'static Class>>) -> bool {
     let Some(class) = class.into() else { return false };
     if !ANY.load(Ordering::Acquire) {
         return false;

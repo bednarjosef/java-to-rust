@@ -215,7 +215,7 @@ pub trait CopyAcross: Sized {
     /// What the object is to `System.arraycopy`.
     fn copy_kind(&self) -> CopyKind;
     /// The object's class: for an array, the one it carries if it is a covariant array.
-    fn copy_class(&self) -> crate::Class;
+    fn copy_class(&self) -> &'static crate::Class;
     /// The length of an array of references.
     fn copy_length(&self) -> usize;
     /// The elements in `range` of an array of references, each as an object.

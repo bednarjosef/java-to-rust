@@ -873,7 +873,7 @@ impl<'a> Gen<'a> {
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
             Builtin::GetClass => self.get_class(&args[0]),
-            Builtin::ClassLiteral(ty) => Code::atom(self.type_class(ty)),
+            Builtin::ClassLiteral(ty) => Code::borrow_or_atom(self.type_class(ty)),
             Builtin::ClassMethod(op) => self.class_method(op, args),
             Builtin::ClassIsInstance | Builtin::ClassCheck => {
                 self.class_instance(builtin == Builtin::ClassCheck, args)

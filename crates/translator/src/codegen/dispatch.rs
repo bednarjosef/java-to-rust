@@ -3781,7 +3781,7 @@ impl<'a> Gen<'a> {
         }
         let wanted = |need: Need| self.wanted.contains(&need) && anew(self, need);
         let methods = [
-            (Need::RuntimeClass(t), "runtime_class", "java::Class"),
+            (Need::RuntimeClass(t), "runtime_class", "&'static java::Class"),
             (Need::RuntimeClassName(t), "runtime_class_name", "&'static str"),
             (Need::RuntimeTypeNames(t), "runtime_type_names", "&'static [&'static str]"),
             (Need::IdentityHash(t), "object_identity_hash", "i32"),
@@ -3837,7 +3837,7 @@ impl<'a> Gen<'a> {
                 // that may be a covariant array, which carries its class.
                 let by_value: Vec<usize> =
                     variants.iter().copied().filter(|&c| self.class_by_value(c)).collect();
-                let table = format!("*crate::{}[self.0.tag() as usize]", super::class_values::CLASSES);
+                let table = format!("crate::{}[self.0.tag() as usize]", super::class_values::CLASSES);
                 if by_value.is_empty() {
                     self.line(&table);
                 } else {

@@ -51,6 +51,14 @@ impl Code {
         Code::new(text, ATOM)
     }
 
+    /// An atom, or a borrow of one (`&crate::CLASS__MAIN_DOG`, a class value), which a method
+    /// call after it would take apart.
+    pub(super) fn borrow_or_atom(text: impl Into<String>) -> Code {
+        let text = text.into();
+        let prec = if text.starts_with('&') { UNARY } else { ATOM };
+        Code::new(text, prec)
+    }
+
     /// Code that never gives a value (`unreachable!`, a throw), whose type `!` a local declared
     /// with it can't call methods on: the local's type is written.
     pub(super) fn never(text: impl Into<String>) -> Code {
@@ -166,7 +174,7 @@ pub(super) fn rust_type(ty: Type) -> &'static str {
         Type::String if super::shared_strings() => "java::JStr",
         Type::String => "java::JString",
         Type::Charset => "java::Charset",
-        Type::JavaClass => "java::Class",
+        Type::JavaClass => "&'static java::Class",
         Type::Void => "()",
         // A boxed type is named by `Gen::ty_name`, which knows whether its identity is observed,
         // and a builder too, which knows whether the program has threads.

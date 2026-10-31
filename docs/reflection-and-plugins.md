@@ -86,6 +86,8 @@ program where such a lookup can happen, so they can be checked before the progra
   every such call shares, a `switch` over the binary names of the classes that code can find by
   name, cut by the names' lengths into methods of a hundred or so names in a big program. The value of each class of the program that
   code names is a static at the crate root (`static CLASS__COM_FOO_BAR: java::Class`), which
+  code holds as a reference (`&crate::CLASS__COM_FOO_BAR`, an array's class as
+  `&const { java::Class::array(..) }`), and which
   names its superclass, interfaces and declaring class by references to theirs, written once: the reflection table names a class for each of its members and their types, and written
   out at each of those, with the names above it, the Minecraft server's table had lines of 20 MB.
 - **The reflection table.** `getMethod`, `getDeclaredMethod`, `getField`, `getConstructor`,

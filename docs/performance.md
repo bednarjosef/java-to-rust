@@ -376,8 +376,7 @@ The release trial of the server peaked at 1,498 MB on the bench (`minecraft-serv
   - world generation's density buffers (`float[32768]` and `float[98304]`) come and go: up to
     120 MB of them in one dump, a few MB in another. Their pools drop a buffer unused for 20
     ticks, so they are not kept; Java's histogram was taken between them.
-- What remains larger than Java's: the handles above, a `java::Class` is an
-  88-byte value wherever it is held (a field, a boxed `Class` as an `Object`), a string field is
+- What remains larger than Java's: the handles above, a string field is
   a 24-byte `Vec` with its own copy of the text, and the heap keeps free blocks until a whole
   huge page of them is free (167 MB of free blocks in the sample).
 
