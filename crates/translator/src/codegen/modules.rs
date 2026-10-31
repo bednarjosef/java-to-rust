@@ -769,11 +769,33 @@ impl<'a> Gen<'a> {
                 format!("{what} {:.3} s", time.as_secs_f64())
             })
             .collect();
+        // The pieces by kind, the functions by their class.
+        let mut kinds: HashMap<String, (usize, std::time::Duration)> = HashMap::new();
+        for &(time, piece) in &times {
+            let kind = match piece {
+                Piece::Class(_) => "classes".to_string(),
+                Piece::ClassEnum(_) => "enums of classes".to_string(),
+                Piece::Enum(_) => "enums".to_string(),
+                Piece::Statics | Piece::Monitors | Piece::Main(_) => "the rest".to_string(),
+                Piece::Function(m) => format!("functions of {}", class.types[class.methods[m].class].name),
+            };
+            let entry = kinds.entry(kind).or_default();
+            entry.0 += 1;
+            entry.1 += time;
+        }
+        let mut kinds: Vec<(String, (usize, std::time::Duration))> = kinds.into_iter().collect();
+        kinds.sort_unstable_by_key(|(kind, (_, time))| (std::cmp::Reverse(*time), kind.clone()));
+        let kinds: Vec<String> = kinds
+            .iter()
+            .take(5)
+            .map(|(kind, (count, time))| format!("{count} {kind} {:.3} s", time.as_secs_f64()))
+            .collect();
         eprintln!(
-            "timing: codegen: the crate root's {} pieces in {:.3} s, the slowest {}",
+            "timing: codegen: the crate root's {} pieces in {:.3} s, the slowest {}; by kind {}",
             times.len(),
             all.as_secs_f64(),
-            slowest.join(", ")
+            slowest.join(", "),
+            kinds.join(", ")
         );
     }
 
