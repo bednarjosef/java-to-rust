@@ -1771,10 +1771,22 @@ impl<'a> Gen<'a> {
         if self.runtime_of(c) == Some(Type::JavaClass) && self.class_answer(resolved).is_some() {
             return None;
         }
-        let args = self.call_args(resolved, args);
+        let mut args = self.call_args(resolved, args);
         // The arm names the object `o`, which an argument may name too (`indexOf(o)`): the
-        // arguments are computed first, before `o` is bound.
-        let passed = (0..args.len()).map(|k| format!("arguments.{k}")).collect::<Vec<_>>().join(", ");
+        // arguments are computed first, before `o` is bound. A nullable string (`x.as_deref()`)
+        // is held owned in the tuple and borrowed where it is passed: a borrow of a temporary in
+        // the tuple would end with the `let`.
+        let mut passed = Vec::new();
+        for (k, arg) in args.iter_mut().enumerate() {
+            match arg.strip_suffix(".as_deref()") {
+                Some(owned) => {
+                    *arg = format!("{owned}.clone()");
+                    passed.push(format!("arguments.{k}.as_deref()"));
+                }
+                None => passed.push(format!("arguments.{k}")),
+            }
+        }
+        let passed = passed.join(", ");
         let (text, uses) = self.arm_call(t, c, i, &passed);
         let text = self.covariant_ret(i, resolved, text);
         let arguments = match args.is_empty() {
