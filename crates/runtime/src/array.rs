@@ -152,7 +152,9 @@ impl<T> Clone for ElementClass<T> {
 
 /// A handle of an array: an `Array` or a `SharedArray`, or a reference to one. Each access of an
 /// element is checked against the length the way Java checks it; the `try_` forms give the
-/// `ArrayIndexOutOfBoundsException` back instead of throwing it.
+/// `ArrayIndexOutOfBoundsException` back instead of throwing it, and the `_in_bounds` forms, for
+/// an index the translator proved in bounds, keep only a check that stops the program
+/// (`wrong_bound`), which LLVM drops where it sees the bound.
 pub trait Elements<T> {
     /// `a.length`.
     fn length(&self) -> usize;
@@ -166,6 +168,22 @@ pub trait Elements<T> {
     /// `a[i] = v`.
     fn put(&self, i: i32, v: T);
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception>;
+    /// `a[i]` for an `i` that is in bounds (`analysis::arrays::bounds`).
+    fn element_in_bounds(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        self.element(i)
+    }
+    /// `a[i] = v` for an `i` that is in bounds.
+    fn put_in_bounds(&self, i: i32, v: T) {
+        self.put(i, v)
+    }
+    /// The elements as a counting loop reads them (`view`).
+    type View<'v>: View<T>
+    where
+        Self: 'v;
+    fn view(&self) -> Self::View<'_>;
     /// `a[i]` as a volatile read (`VarHandle.getVolatile`, `Unsafe.getIntVolatile`), which is
     /// sequentially consistent with the other volatile accesses: a `SeqCst` load from a
     /// `SharedArray`; a plain read from an `Array`, which one thread holds.
@@ -295,6 +313,29 @@ impl<T, A: Elements<T>> Elements<T> for &A {
     #[inline(always)]
     fn put(&self, i: i32, v: T) {
         (**self).put(i, v)
+    }
+
+    #[inline(always)]
+    fn element_in_bounds(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        (**self).element_in_bounds(i)
+    }
+
+    #[inline(always)]
+    fn put_in_bounds(&self, i: i32, v: T) {
+        (**self).put_in_bounds(i, v)
+    }
+
+    type View<'v>
+        = A::View<'v>
+    where
+        Self: 'v;
+
+    #[inline(always)]
+    fn view(&self) -> A::View<'_> {
+        (**self).view()
     }
 
     #[inline(always)]
@@ -441,6 +482,42 @@ impl<T> Elements<T> for Array<T> {
     }
 
     #[inline(always)]
+    fn element_in_bounds(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        let (items, n) = self.raw();
+        if (i as usize) >= n {
+            wrong_bound(n, i)
+        }
+        unsafe { (*items.add(i as usize)).clone() }
+    }
+
+    #[inline(always)]
+    fn put_in_bounds(&self, i: i32, v: T) {
+        let (items, n) = self.raw();
+        if (i as usize) >= n {
+            wrong_bound(n, i)
+        }
+        unsafe { *items.add(i as usize) = v }
+    }
+
+    type View<'v>
+        = ArrayView<'v, T>
+    where
+        Self: 'v;
+
+    #[inline(always)]
+    fn view(&self) -> ArrayView<'_, T> {
+        // The start and the length stay right while the handle lives: the `Vec` of an `Array` is
+        // never grown, shrunk or replaced, but by `take_items` of an array no other handle holds
+        // yet, and the collected heap never moves a slot (`gc.rs`). Each access is still checked
+        // against the length, so that a wrong proof stops the program and never reaches past it.
+        let (items, len) = self.raw();
+        ArrayView { items, len, array: std::marker::PhantomData }
+    }
+
+    #[inline(always)]
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
         let (items, n) = self.raw();
         unsafe { *items.add(try_position(n, i)?) = v }
@@ -573,6 +650,39 @@ impl<T> Elements<T> for SharedArray<T> {
     fn put(&self, i: i32, v: T) {
         let cells = &self.items.0;
         cells[position(cells.len(), i)].set(v)
+    }
+
+    #[inline(always)]
+    fn element_in_bounds(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        let cells = &self.items.0;
+        match cells.get(i as usize) {
+            Some(cell) => cell.get(),
+            None => wrong_bound(cells.len(), i),
+        }
+    }
+
+    #[inline(always)]
+    fn put_in_bounds(&self, i: i32, v: T) {
+        let cells = &self.items.0;
+        match cells.get(i as usize) {
+            Some(cell) => cell.set(v),
+            None => wrong_bound(cells.len(), i),
+        }
+    }
+
+    type View<'v>
+        = SharedView<'v, T>
+    where
+        Self: 'v;
+
+    /// The cells, which are never replaced: each element is still read and written through its
+    /// cell, as one atomic action.
+    #[inline(always)]
+    fn view(&self) -> SharedView<'_, T> {
+        SharedView(&self.items.0)
     }
 
     #[inline(always)]
@@ -796,6 +906,35 @@ impl<T, const N: usize> Elements<T> for Frozen<T, N> {
     #[inline(always)]
     fn put(&self, i: i32, v: T) {
         self.replace(position(self.len(), i), v);
+    }
+
+    #[inline(always)]
+    fn element_in_bounds(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        if (i as usize) >= self.len() {
+            wrong_bound(self.len(), i)
+        }
+        unsafe { (*self.cell(i as usize).get()).clone() }
+    }
+
+    #[inline(always)]
+    fn put_in_bounds(&self, i: i32, v: T) {
+        if (i as usize) >= self.len() {
+            wrong_bound(self.len(), i)
+        }
+        self.replace(i as usize, v);
+    }
+
+    type View<'v>
+        = FrozenView<'v, T>
+    where
+        Self: 'v;
+
+    #[inline(always)]
+    fn view(&self) -> FrozenView<'_, T> {
+        FrozenView(&self.0)
     }
 
     #[inline(always)]
@@ -1086,6 +1225,126 @@ pub(crate) fn position(len: usize, i: i32) -> usize {
     if (i as usize) < len { i as usize } else { out_of_bounds(len, i) }
 }
 
+/// The elements of an array taken once before a counting loop whose accesses of it are proven
+/// in bounds (`java::view`), so that the loop does not load the start and the length again at
+/// each access, which a call in the loop could have changed as far as the compiler knows. An
+/// access still compares the index with the length, now a value the compiler can compare with the
+/// loop's bound, and stops the program on a wrong proof (`wrong_bound`).
+pub trait View<T> {
+    /// `a[i]`.
+    fn at(&self, i: i32) -> T
+    where
+        T: Clone;
+    /// `a[i] = v`.
+    fn put(&self, i: i32, v: T);
+}
+
+/// The view of an `Array`: the start and the length of its `Vec`, which hold while the handle
+/// lives (`Elements::view`). The elements are reached through the pointer, not a borrowed slice,
+/// as other handles may write them while the loop runs.
+pub struct ArrayView<'v, T> {
+    items: *mut T,
+    len: usize,
+    array: std::marker::PhantomData<&'v T>,
+}
+
+impl<T> View<T> for ArrayView<'_, T> {
+    #[inline(always)]
+    fn at(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        if (i as usize) >= self.len {
+            wrong_bound(self.len, i)
+        }
+        unsafe { (*self.items.add(i as usize)).clone() }
+    }
+
+    #[inline(always)]
+    fn put(&self, i: i32, v: T) {
+        if (i as usize) >= self.len {
+            wrong_bound(self.len, i)
+        }
+        unsafe { *self.items.add(i as usize) = v }
+    }
+}
+
+/// The view of a `SharedArray`: its cells.
+pub struct SharedView<'v, T>(&'v [SharedField<T>]);
+
+impl<T> View<T> for SharedView<'_, T> {
+    #[inline(always)]
+    fn at(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        match self.0.get(i as usize) {
+            Some(cell) => cell.get(),
+            None => wrong_bound(self.0.len(), i),
+        }
+    }
+
+    #[inline(always)]
+    fn put(&self, i: i32, v: T) {
+        match self.0.get(i as usize) {
+            Some(cell) => cell.set(v),
+            None => wrong_bound(self.0.len(), i),
+        }
+    }
+}
+
+/// The view of a `Frozen` array: its cells, read and written where they are, as `Frozen` does.
+pub struct FrozenView<'v, T>(&'v [UnsafeCell<T>]);
+
+impl<T> View<T> for FrozenView<'_, T> {
+    #[inline(always)]
+    fn at(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        match self.0.get(i as usize) {
+            Some(cell) => unsafe { (*cell.get()).clone() },
+            None => wrong_bound(self.0.len(), i),
+        }
+    }
+
+    #[inline(always)]
+    fn put(&self, i: i32, v: T) {
+        match self.0.get(i as usize) {
+            Some(cell) => unsafe { *cell.get() = v },
+            None => wrong_bound(self.0.len(), i),
+        }
+    }
+}
+
+/// The elements of `a` for a counting loop that reads or writes them by indexes proven in bounds
+/// (`View`).
+#[inline(always)]
+pub fn view<T, A: Elements<T>>(a: &A) -> A::View<'_> {
+    a.view()
+}
+
+/// `a[i]` through a view.
+#[inline(always)]
+pub fn view_get<T: Clone>(v: &impl View<T>, i: i32) -> T {
+    v.at(i)
+}
+
+/// `a[i] = x` through a view.
+#[inline(always)]
+pub fn view_set<T>(v: &impl View<T>, i: i32, x: T) {
+    v.put(i, x)
+}
+
+/// Stops the program at an index that the translator proved in bounds and is not: a mistake of the
+/// translator, which no `catch` of the program should see, as a plain array's `a[i as usize]`
+/// panics on one.
+#[cold]
+#[inline(never)]
+fn wrong_bound(len: usize, i: i32) -> ! {
+    panic!("index {i} proven in bounds is out of bounds for length {len}")
+}
+
 /// Throws Java's `ArrayIndexOutOfBoundsException` for index `i` of an array of `len` elements.
 #[cold]
 #[inline(never)]
@@ -1284,6 +1543,18 @@ pub fn try_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
 #[inline(always)]
 pub fn set<T>(a: &impl Elements<T>, i: i32, v: T) {
     a.put(i, v)
+}
+
+/// `a[i]` for an `i` that the translator proved in bounds: a wrong proof stops the program.
+#[inline(always)]
+pub fn get_in_bounds<T: Clone>(a: &impl Elements<T>, i: i32) -> T {
+    a.element_in_bounds(i)
+}
+
+/// `a[i] = v` for an `i` that the translator proved in bounds.
+#[inline(always)]
+pub fn set_in_bounds<T>(a: &impl Elements<T>, i: i32, v: T) {
+    a.put_in_bounds(i, v)
 }
 
 /// `a[i]` as a volatile read (`Elements::try_element_volatile`), which a volatile access through

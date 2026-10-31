@@ -289,9 +289,13 @@ impl<'a> Gen<'a> {
         } else {
             range
         };
+        let viewed = self.bind_views(body);
         self.line(&format!("for {var} in {range} {{"));
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");
+        for id in viewed {
+            self.views.remove(&id);
+        }
     }
 
     pub(super) fn local_decl(&mut self, ty: Type, name: &str, init: Option<&'a Expr>, mutable: bool) {

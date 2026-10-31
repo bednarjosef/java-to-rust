@@ -46,6 +46,7 @@ struct Saved<'a> {
     try_assigned: HashSet<String>,
     annotations: Vec<(String, Type, String)>,
     elements: HashMap<ExprId, String>,
+    views: HashMap<ExprId, String>,
     sliced: HashMap<String, (String, usize)>,
     sliced_accesses: HashSet<ExprId>,
     out: String,
@@ -530,6 +531,7 @@ impl<'a> Gen<'a> {
             try_assigned: std::mem::take(&mut self.try_assigned),
             annotations: std::mem::take(&mut self.annotations),
             elements: std::mem::take(&mut self.elements),
+            views: std::mem::take(&mut self.views),
             sliced: std::mem::take(&mut self.sliced),
             sliced_accesses: std::mem::take(&mut self.sliced_accesses),
             out: std::mem::take(&mut self.out),
@@ -569,6 +571,7 @@ impl<'a> Gen<'a> {
         self.try_assigned = s.try_assigned;
         self.annotations = s.annotations;
         self.elements = s.elements;
+        self.views = s.views;
         self.sliced = s.sliced;
         self.sliced_accesses = s.sliced_accesses;
         self.out = s.out;
