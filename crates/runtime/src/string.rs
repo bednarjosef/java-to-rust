@@ -796,30 +796,36 @@ pub trait StringHash {
 }
 
 impl StringHash for Wtf8 {
+    #[inline]
     fn string_hash(&self) -> i32 {
         text_hash(self)
     }
 }
 
 impl StringHash for JString {
+    #[inline]
     fn string_hash(&self) -> i32 {
         self.hash_code()
     }
 }
 
 impl StringHash for crate::JStr {
+    #[inline]
     fn string_hash(&self) -> i32 {
         self.hash_code()
     }
 }
 
 impl<S: StringHash + ?Sized> StringHash for &S {
+    #[inline]
     fn string_hash(&self) -> i32 {
         (**self).string_hash()
     }
 }
 
-/// The hash of `s`'s text, computed.
+/// The hash of `s`'s text, computed. Out of line, so that the strings that keep their hash read
+/// it inline and call this only the first time.
+#[inline(never)]
 pub(crate) fn text_hash(s: &Wtf8) -> i32 {
     // The ASCII bytes at the start are units of their own, read without decoding.
     let bytes = s.as_bytes();

@@ -110,15 +110,25 @@ impl JStr {
     /// compute it at once store the same value.
     #[inline]
     pub fn hash_code(&self) -> i32 {
-        // The object's second word is its hash, alive while the object is reachable.
-        let cached = unsafe { std::sync::atomic::AtomicI32::from_ptr(self.header().add(1) as *mut i32) };
-        let hash = cached.load(std::sync::atomic::Ordering::Relaxed);
+        let hash = self.known_hash();
         if hash != 0 {
             return hash;
         }
         let hash = crate::string::text_hash(self.as_wtf8());
-        cached.store(hash, std::sync::atomic::Ordering::Relaxed);
+        self.hash_cell().store(hash, std::sync::atomic::Ordering::Relaxed);
         hash
+    }
+
+    /// The hash kept in the object, or 0 before it is computed.
+    #[inline]
+    fn known_hash(&self) -> i32 {
+        self.hash_cell().load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The object's second word, its hash, alive while the object is reachable.
+    #[inline]
+    fn hash_cell(&self) -> &std::sync::atomic::AtomicI32 {
+        unsafe { std::sync::atomic::AtomicI32::from_ptr(self.header().add(1) as *mut i32) }
     }
 
     /// The text, as a new plain string.
@@ -173,8 +183,18 @@ impl From<JStr> for JString {
 // Equality, order and hashing are of the text, as `equals`, `compareTo` and `hashCode` are; `==`
 // on objects is `same_str`.
 impl PartialEq for JStr {
+    /// The same object is equal, as Java's `equals` first asks; otherwise, as `JString`'s, hashes
+    /// both known and different tell the strings apart without their text.
+    #[inline]
     fn eq(&self, other: &JStr) -> bool {
-        self.bytes() == other.bytes()
+        if self.header() == other.header() {
+            return true;
+        }
+        let (a, b) = (self.known_hash(), other.known_hash());
+        if a != b && a != 0 && b != 0 {
+            return false;
+        }
+        crate::wtf8::same_bytes(self.bytes(), other.bytes())
     }
 }
 
@@ -182,49 +202,49 @@ impl Eq for JStr {}
 
 impl PartialEq<str> for JStr {
     fn eq(&self, other: &str) -> bool {
-        self.bytes() == other.as_bytes()
+        crate::wtf8::same_bytes(self.bytes(), other.as_bytes())
     }
 }
 
 impl PartialEq<&str> for JStr {
     fn eq(&self, other: &&str) -> bool {
-        self.bytes() == other.as_bytes()
+        crate::wtf8::same_bytes(self.bytes(), other.as_bytes())
     }
 }
 
 impl PartialEq<Wtf8> for JStr {
     fn eq(&self, other: &Wtf8) -> bool {
-        self.bytes() == other.as_bytes()
+        crate::wtf8::same_bytes(self.bytes(), other.as_bytes())
     }
 }
 
 impl PartialEq<&Wtf8> for JStr {
     fn eq(&self, other: &&Wtf8) -> bool {
-        self.bytes() == other.as_bytes()
+        crate::wtf8::same_bytes(self.bytes(), other.as_bytes())
     }
 }
 
 impl PartialEq<JStr> for Wtf8 {
     fn eq(&self, other: &JStr) -> bool {
-        self.as_bytes() == other.bytes()
+        crate::wtf8::same_bytes(self.as_bytes(), other.bytes())
     }
 }
 
 impl PartialEq<JStr> for &Wtf8 {
     fn eq(&self, other: &JStr) -> bool {
-        self.as_bytes() == other.bytes()
+        crate::wtf8::same_bytes(self.as_bytes(), other.bytes())
     }
 }
 
 impl PartialEq<JString> for JStr {
     fn eq(&self, other: &JString) -> bool {
-        self.bytes() == other.as_bytes()
+        crate::wtf8::same_bytes(self.bytes(), other.as_bytes())
     }
 }
 
 impl PartialEq<JStr> for JString {
     fn eq(&self, other: &JStr) -> bool {
-        self.as_bytes() == other.bytes()
+        crate::wtf8::same_bytes(self.as_bytes(), other.bytes())
     }
 }
 

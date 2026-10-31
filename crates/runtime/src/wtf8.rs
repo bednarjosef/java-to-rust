@@ -79,9 +79,45 @@ const fn well_formed(bytes: &[u8]) -> bool {
 }
 
 /// A string slice of WTF-8 bytes.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Wtf8([u8]);
+
+/// Whether `a` and `b` are the same bytes: inline for texts of up to 32 bytes, which most keys
+/// and names are, a word at a time where the slice comparison calls `memcmp`, whose call costs
+/// more than comparing so few bytes.
+#[inline]
+pub(crate) fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    let word = |s: &[u8], i: usize| u64::from_ne_bytes(s[i..i + 8].try_into().unwrap());
+    let half = |s: &[u8], i: usize| u32::from_ne_bytes(s[i..i + 4].try_into().unwrap());
+    match n {
+        // The last word may overlap the one before it, which compares those bytes twice.
+        8..=32 => {
+            let mut i = 0;
+            while i + 8 < n {
+                if word(a, i) != word(b, i) {
+                    return false;
+                }
+                i += 8;
+            }
+            word(a, n - 8) == word(b, n - 8)
+        }
+        4..8 => half(a, 0) == half(b, 0) && half(a, n - 4) == half(b, n - 4),
+        0..4 => a.iter().zip(b).all(|(x, y)| x == y),
+        _ => a == b,
+    }
+}
+
+impl PartialEq for Wtf8 {
+    #[inline]
+    fn eq(&self, other: &Wtf8) -> bool {
+        same_bytes(&self.0, &other.0)
+    }
+}
 
 impl Wtf8 {
     /// The text of a Rust string, which is its own WTF-8.
@@ -643,8 +679,15 @@ impl Default for JString {
 }
 
 impl PartialEq for JString {
+    /// Two strings whose hashes are both known and differ are not equal, which a lookup that
+    /// compares keys of the same bucket finds without reading their text.
+    #[inline]
     fn eq(&self, other: &JString) -> bool {
-        self.0 == other.0
+        let (a, b) = (self.2.load(Ordering::Relaxed), other.2.load(Ordering::Relaxed));
+        if a != b && a != 0 && b != 0 {
+            return false;
+        }
+        same_bytes(&self.0, &other.0)
     }
 }
 
@@ -746,25 +789,25 @@ impl PartialEq<&str> for Wtf8 {
 
 impl PartialEq<JString> for Wtf8 {
     fn eq(&self, other: &JString) -> bool {
-        self.0 == *other.0
+        same_bytes(&self.0, &other.0)
     }
 }
 
 impl PartialEq<Wtf8> for JString {
     fn eq(&self, other: &Wtf8) -> bool {
-        *self.0 == other.0
+        same_bytes(&self.0, &other.0)
     }
 }
 
 impl PartialEq<&Wtf8> for JString {
     fn eq(&self, other: &&Wtf8) -> bool {
-        *self.0 == other.0
+        same_bytes(&self.0, &other.0)
     }
 }
 
 impl PartialEq<JString> for &Wtf8 {
     fn eq(&self, other: &JString) -> bool {
-        self.0 == *other.0
+        same_bytes(&self.0, &other.0)
     }
 }
 
@@ -968,5 +1011,31 @@ mod tests {
         t.push_code_point(0x1F600);
         t.push_code_point(0xDFFF);
         assert_eq!(units(&t), [0xD83D, 0xDE00, 0xDFFF]);
+    }
+
+    #[test]
+    fn same_bytes_finds_a_difference_anywhere() {
+        for n in 0..48 {
+            let a: Vec<u8> = (0..n as u8).collect();
+            assert!(same_bytes(&a, &a.clone()));
+            for i in 0..n {
+                let mut b = a.clone();
+                b[i] ^= 0x80;
+                assert!(!same_bytes(&a, &b), "{n} bytes, differing at {i}");
+            }
+            assert!(!same_bytes(&a, &a[..n.saturating_sub(1)]) || n == 0);
+        }
+    }
+
+    #[test]
+    fn strings_with_different_known_hashes_differ() {
+        let (a, b) = (JString::from("Aa"), JString::from("BB"));
+        // Java's well-known pair of equal hashes, which must still be compared by their text.
+        assert_eq!(a.hash_code(), b.hash_code());
+        assert_ne!(a, b);
+        let c = JString::from("Ab");
+        c.hash_code();
+        assert_ne!(a, c);
+        assert_eq!(a, JString::from("Aa"));
     }
 }
