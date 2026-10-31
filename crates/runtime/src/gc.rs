@@ -2726,11 +2726,23 @@ fn merge_runs(h: &mut Heap) {
     }
 }
 
-/// Runs a collection now, for tests (`System.gc()` does nothing, see `system::gc`).
+/// Runs a collection now, for tests (`System.gc()` does nothing, see `system::gc`). A collection
+/// waits while a thread is starting (`collect`), which with tests run side by side is often, as
+/// the test harness starts a thread for each: so this tries again, the lock released for the
+/// thread to register, until one ran.
 pub fn collect_now() {
-    let g = lock();
-    if heap(&g).base != 0 {
+    loop {
+        let g = lock();
+        if heap(&g).base == 0 {
+            return;
+        }
+        let before = heap(&g).collections;
         collect(&g);
+        if heap(&g).collections != before {
+            return;
+        }
+        drop(g);
+        std::thread::yield_now();
     }
 }
 
