@@ -31,8 +31,10 @@ enum Slot {
     /// A static field: a `Cell` when `plain`, else a `RefCell`; a `java::Global` when `global`
     /// (a program that starts no thread), else a thread-local cell or a `java::Locked`.
     Static { cell: String, plain: bool, global: bool },
-    /// A static field that is a `java::Final`, read with no lock.
-    Final { cell: String },
+    /// A static field that is a `java::Final`, read with no lock; `freeze` is the runtime's
+    /// `freeze` where it holds a frozen array (`Facts::frozen_statics`), which a new array is
+    /// made into as it is stored.
+    Final { cell: String, freeze: Option<String> },
 }
 
 impl Slot {
@@ -55,8 +57,8 @@ impl Slot {
             Slot::Static { cell, plain: false, global: false } => {
                 format!("{cell}.with_borrow({})", if copy { "|v| *v" } else { "|v| v.clone()" })
             }
-            Slot::Final { cell } if copy => format!("(*{cell}.get())"),
-            Slot::Final { cell } => format!("{cell}.get().clone()"),
+            Slot::Final { cell, .. } if copy => format!("(*{cell}.get())"),
+            Slot::Final { cell, .. } => format!("{cell}.get().clone()"),
         }
     }
 
@@ -73,7 +75,8 @@ impl Slot {
             }
             Slot::Static { cell, plain: true, .. } => format!("{cell}.set({value});"),
             Slot::Static { cell, plain: false, .. } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
-            Slot::Final { cell } => format!("{cell}.set({value});"),
+            Slot::Final { cell, freeze: None } => format!("{cell}.set({value});"),
+            Slot::Final { cell, freeze: Some(freeze) } => format!("{cell}.set({freeze}({value}));"),
         }
     }
 }
@@ -1595,7 +1598,8 @@ impl<'a> Gen<'a> {
     fn static_slot(&mut self, class: usize, name: &str, ty: Type) -> Slot {
         let cell = self.cell_name(class, name);
         if self.final_static(class, name) {
-            Slot::Final { cell }
+            let freeze = self.frozen_static(class, name).then(|| self.runtime("freeze"));
+            Slot::Final { cell, freeze }
         } else {
             Slot::Static { cell, plain: is_cell(ty), global: !self.facts.threaded }
         }
@@ -2056,6 +2060,10 @@ impl<'a> Gen<'a> {
             Update::Assign(value) => {
                 let nullable = self.place_nullable(target);
                 let v = self.field_value(value, ty, nullable);
+                let v = match self.frozen_static(*class, name) {
+                    true => format!("{}({v})", self.runtime("freeze")),
+                    false => v,
+                };
                 // Java computes the value before it initializes the class to write it.
                 match init {
                     Some(init) => {

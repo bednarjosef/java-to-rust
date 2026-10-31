@@ -128,6 +128,39 @@ fn a_static_final_that_threads_read_is_read_without_a_lock() {
 }
 
 #[test]
+fn a_static_final_array_that_is_only_read_is_frozen() {
+    // `PRIMES` and `NAMES` are only indexed and measured: frozen, read with no atomic load.
+    // `COUNTS` has its elements written, and `SHOWN` is used as a value: shared arrays.
+    let rust = translate(
+        "class A {
+            static final int[] PRIMES = {2, 3, 5, 7};
+            static final String[] NAMES = new String[] {\"a\", \"b\"};
+            static final int[] COUNTS = new int[2];
+            static final int[] SHOWN = {1};
+            static String log;
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> {
+                    COUNTS[0]++;
+                    log = NAMES[1] + PRIMES[3] + PRIMES.length + COUNTS[0] + java.util.Arrays.toString(SHOWN);
+                });
+                t.start();
+                t.join();
+                System.out.println(log);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "static A_PRIMES: java::Final<java::Frozen<i32>> = java::Final::lazy(|| java::freeze(java::shared_from_vec(vec![2, 3, 5, 7])));",
+            "static A_NAMES: java::Final<java::Frozen<",
+            "static A_COUNTS: java::Final<java::SharedArray<i32>>",
+            "static A_SHOWN: java::Final<java::SharedArray<i32>>",
+        ],
+    );
+}
+
+#[test]
 fn the_started_thread_runs_the_thread_object_it_was_given() {
     let rust = translate(WORKER);
     // The handle is cloned into the new thread, which makes it its current thread and runs it;

@@ -674,6 +674,124 @@ impl<T> Elements<T> for SharedArray<T> {
     }
 }
 
+/// An array that nothing writes once it is made: a `static final` array that its class's static
+/// initialization assigns a new array, and that the program only indexes and measures (the
+/// translator's `frozen_statics`). Its elements are a boxed slice, read where they are, with no
+/// atomic load and no borrow flag; the `java::Final` that holds it publishes them to every
+/// thread with the array. It is never a value of the program, so nothing compares, copies or
+/// stores into it: the trait's writes are never called.
+pub struct Frozen<T>(Box<[T]>);
+
+/// The elements of the new array `a`, frozen (see `Frozen`).
+pub fn freeze<T: Clone>(a: impl Elements<T>) -> Frozen<T> {
+    Frozen(a.take_items().into_boxed_slice())
+}
+
+impl<T> Frozen<T> {
+    #[cold]
+    #[inline(never)]
+    fn written() -> ! {
+        unreachable!("a frozen array is never written")
+    }
+}
+
+impl<T> Elements<T> for Frozen<T> {
+    #[inline(always)]
+    fn length(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline(always)]
+    fn in_place(&self) -> Option<&[T]> {
+        Some(&self.0)
+    }
+
+    #[inline(always)]
+    fn element(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        self.0[position(self.0.len(), i)].clone()
+    }
+
+    #[inline(always)]
+    fn try_element(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        Ok(self.0[try_position(self.0.len(), i)?].clone())
+    }
+
+    fn put(&self, _: i32, _: T) {
+        Self::written()
+    }
+
+    fn try_put(&self, _: i32, _: T) -> Result<(), Exception> {
+        Self::written()
+    }
+
+    fn try_swap(&self, _: i32, _: T) -> Result<T, Exception> {
+        Self::written()
+    }
+
+    fn try_compare_exchange(&self, _: i32, _: T, _: T, _: impl Fn(&T, &T) -> bool) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn try_get_and_update(&self, _: i32, _: impl Fn(&T) -> T) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        f(&self.0[range])
+    }
+
+    fn writing<R>(&self, _: Range<usize>, _: impl FnOnce(&mut [T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn store_from(&self, _: usize, _: &[T])
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn copy_within(&self, _: usize, _: usize, _: usize)
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn address(&self) -> *const u8 {
+        self.0.as_ptr() as *const u8
+    }
+
+    fn element_class(&self) -> Option<&ElementClass<T>> {
+        None
+    }
+
+    fn take_items(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.0.to_vec()
+    }
+}
+
 impl<T> MadeElements<T> for SharedArray<T> {
     fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> SharedArray<T> {
         Arc::new(ArrayData { items: SharedElements::new(items), class: class.map(Box::new) })

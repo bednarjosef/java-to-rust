@@ -218,6 +218,11 @@ pub struct Facts {
     /// Where they are the process's, those of object, array or string type are `java::Final`
     /// cells, which a thread reads without a lock (see `codegen/statics.rs`).
     pub final_statics: FastSet<(usize, String)>,
+    /// The final statics that are frozen arrays: one-dimensional arrays that only their class's
+    /// static initialization makes, as new arrays, and that the program only indexes to read and
+    /// measures (`statics::frozen`). Where they are `java::Final`s, they hold a `java::Frozen`,
+    /// whose elements a thread reads with no atomic load.
+    pub frozen_statics: FastSet<(usize, String)>,
     /// The static methods and constructors that run their class's `init` when they start.
     pub entry_init: FastSet<usize>,
     /// The class of `main`, when the program has exactly one, which `main` initializes first.
@@ -381,6 +386,7 @@ struct FromCode {
     fixed_fields: FastSet<(usize, String)>,
     eager_init: FastSet<usize>,
     final_statics: FastSet<(usize, String)>,
+    frozen_statics: FastSet<(usize, String)>,
     entry_init: FastSet<usize>,
     early_static_reads: FastSet<ExprId>,
     /// `Facts::ascii_length`, from the ranges' `ascii_chars`.
@@ -485,10 +491,11 @@ fn analyze_with(
             let threaded = threads::threaded(class);
             let fixed_fields =
                 phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, threaded));
-            let (eager_init, final_statics, entry_init) = phase("analysis: statics", || {
+            let (eager_init, final_statics, frozen_statics, entry_init) = phase("analysis: statics", || {
                 let (eager, finals) = statics::eager_and_final(class);
+                let frozen = statics::frozen(class, &finals);
                 let entry = statics::entry_inits(class, &eager);
-                (eager, finals, entry)
+                (eager, finals, frozen, entry)
             });
             let early_static_reads =
                 phase("analysis: early static reads", || early_reads::early_reads(class, &eager_init));
@@ -502,6 +509,7 @@ fn analyze_with(
                 fixed_fields,
                 eager_init,
                 final_statics,
+                frozen_statics,
                 entry_init,
                 early_static_reads,
                 ascii_length,
@@ -523,6 +531,7 @@ fn analyze_with(
                 fixed_fields,
                 eager_init,
                 final_statics,
+                frozen_statics,
                 entry_init,
                 early_static_reads,
                 ascii_length,
@@ -534,6 +543,7 @@ fn analyze_with(
             facts.fixed_fields = fixed_fields;
             facts.eager_init = eager_init;
             facts.final_statics = final_statics;
+            facts.frozen_statics = frozen_statics;
             facts.entry_init = entry_init;
             facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
                 [main] => Some(main.class),

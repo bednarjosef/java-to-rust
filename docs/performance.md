@@ -22,9 +22,9 @@ benchmarks that measure it are in "Memory".
 
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
-clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (three runs a side),
-ObjectDispatch's from one of five runs a side at a load average of 6, and Interpreter's and
-SortMillion's from one at a load average of 6.3.
+clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (five runs a side,
+at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
+and Interpreter's and SortMillion's from one at a load average of 6.3.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -46,7 +46,7 @@ SortMillion's from one at a load average of 6.3.
 | MonitoredObjects      |      67 |      33 |      0.48 |           - |           - |            - |
 | NBody                 |    1811 |    1884 |      1.04 |         601 |         598 |         1.00 |
 | NodeList              |     175 |     110 |      0.63 |           - |           - |            - |
-| NoiseTree             |     369 |     442 |      1.20 |         287 |         400 |         1.39 |
+| NoiseTree             |     364 |     425 |      1.17 |         282 |         384 |         1.36 |
 | ObjectDispatch        |     249 |     135 |      0.54 |         169 |         111 |         0.66 |
 | ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
 | ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
@@ -228,7 +228,10 @@ made on the stack (`java::count_allocation`).
   and length from the array's header, then the element, an atomic load. Java reads the element after
   the array's header in one load, and takes a `static final` array for a constant whose length it
   knows, so `GRADIENT[hash & 15]` has no check. The `static final` is a `java::Final`, which a read
-  reaches with one load of a pointer and a test (docs/multi-threading.md, 2.3); inside a `LazyLock`,
+  reaches with one load of a pointer and a test (docs/multi-threading.md, 2.3), holding a frozen
+  array (`java::Frozen`), since the program only indexes it: its elements are a plain slice, read
+  with no atomic load, which took the program 2.10 G cycles against 2.25 G with a `SharedArray`
+  (alternating runs, about 6% less); inside a `LazyLock`,
   as it was, a read tested the `LazyLock` and then the `OnceLock` inside it (kernel 2502 ms against
   2480 ms with the `java::Final`, alternating runs at about 850 MHz; Java's kernel is about 1610 ms
   there). With the permutation table a plain `[u8; 256]` field and the gradients a constant table of

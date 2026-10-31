@@ -229,6 +229,7 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
 | object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())`; `X.set(v)` |
+| array that only its class's initialization makes, and that the program only indexes to read and measures | `java::Final<java::Frozen<T>>` | `java::get(&(*X.get()), i)`, `java::len(&(*X.get()))`; `X.set(java::freeze(a))` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
 
 A `static final` of object, array or string type that no code but its class's static
@@ -248,6 +249,17 @@ progress. The Minecraft server's noise functions index a `static final` array mi
 from every worker thread; behind a `java::Locked`, most of those threads stood in its lock. A
 small program of eight threads doing the same runs 25 times faster in a debug build, and over
 100 times faster in a release one, with a `java::Final`.
+
+Such a `static final` that is a one-dimensional array, which every assignment gives a new array
+(`{..}`, `new T[] {..}`, `new T[n]`) and which every expression of the program only indexes to
+read an element or measures (`S[i]`, `S.length`, never `S` alone, `S[i] = v` or `S[i]++`), is a
+frozen array (`Facts::frozen_statics`, `statics::frozen`): no name but the static reaches it, so
+nothing writes its elements once the initializer has made it. Its `java::Final` holds a
+`java::Frozen<T>`, the elements in a boxed slice, which the initializer's assignment makes from
+the new array (`java::freeze`) and publishes with the `java::Final`'s release. A read is a plain
+load from the slice, with no atomic load: an acquire load of a `SharedArray`'s element would keep
+the compiler from reusing the array's address and length across reads. A static that may be read
+before it is assigned (null then) keeps its `SharedArray`.
 
 `java::ClassInit` is the JLS 12.4.2 procedure: the thread that finds the class not started runs
 the initializer, another thread finding it in progress waits, and the same thread finding its
