@@ -253,6 +253,27 @@ The Minecraft server's world generation, whose density functions call buffer acc
 helpers and field getters for every cell, spent about a quarter of its time inside functions of
 at most 64 bytes of machine code, nearly all of them calls into body crates.
 
+### What LTO costs the build
+
+With thin LTO, Cargo has every library crate's rustc write LLVM's bitcode, optimized but not made
+into machine code, and the binary's rustc then imports across modules what it inlines, optimizes
+every module of every crate again and generates all of the program's machine code: the binary's
+step is the largest of the build, and nothing of it is kept between builds, so a change to one
+crate, or to the binary's two lines, does all of it again. Measured on javac's census
+translation split into 22 body crates (release, 2 jobs, instructions of all rustc processes):
+
+| | header | bodies | binary | in all | javac compiling corpus/features |
+|---|---:|---:|---:|---:|---:|
+| thin LTO (rustc) | 137 G | 1,155 G | 2,418 G | 3,710 G | 8.86 G instructions |
+| no LTO | 173 G | 2,475 G | 3 G | 2,651 G | 9.42 G |
+
+The binary's step with thin LTO is 717 s of processor time, of which the link is 0.4 s; it is the
+same 2,418 G after only the binary crate's file is touched. Without LTO each crate generates its
+own code, which the body crates' groups build in parallel, and the binary's step is the link
+alone (1.5 s); the build does 29% less work, and a change rebuilds only the crates it touches and
+links. javac then runs 6% more instructions. The Minecraft server's binary step with thin LTO
+(240 MB of machine code, six times javac's) takes about 460 s on 16 threads.
+
 ## Not done yet
 
 - The translated JDK as a crate reused between programs ([large-projects.md](large-projects.md)):
