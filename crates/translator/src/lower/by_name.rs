@@ -404,38 +404,72 @@ impl<'t> Lowering<'t> {
         })
     }
 
-    /// `Class.forName(name)`, or `Class.forName(name, initialize, loader)` with a literal
-    /// `initialize`, of a name that code computes: a call of the method with a `switch` over the
-    /// classes that names in reachable code find (`Reach::named`), or in a file over its classes
-    /// that are not local nor anonymous, by binary name, each initialized if the call says so.
+    /// `Class.forName(name)`, or `Class.forName(name, initialize, loader)`, of a name that code
+    /// computes: a call of the method with a `switch` over the classes that names in reachable
+    /// code find (`Reach::named`), or in a file over its classes that are not local nor anonymous,
+    /// by binary name, each initialized if the call says so. Where code computes `initialize`, the
+    /// call is of the method that initializes or of the one that does not, as it says.
     pub(super) fn computed_for_name(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let arguments: Vec<Node<'t>> = node.list("arguments").collect();
-        let initialize = match arguments.get(1) {
-            None => true,
-            Some(flag) if flag.kind() == "BOOLEAN_LITERAL" => flag.0["value"].as_bool() == Some(true),
-            Some(_) => {
-                return unsupported(
-                    node,
-                    "`Class.forName` that initializes the class or not as code computes",
-                );
-            }
-        };
         let pos = node.pos();
         let mut block = Vec::new();
         let class_name = self.fresh_name("class_name");
         let name = self.convert(self.expr(arguments[0])?, Type::String);
         let given = self.fresh_name("given_name");
         block.push(Stmt::Local { ty: Type::String, name: given.clone(), init: Some(name), pos });
+        let initialize = match arguments.get(1) {
+            None => Ok(true),
+            Some(flag) if flag.kind() == "BOOLEAN_LITERAL" => Ok(flag.0["value"].as_bool() == Some(true)),
+            // Evaluated in its place, after the name and before the loader.
+            Some(flag) => {
+                let computed = self.fresh_name("initialize");
+                let init = Some(self.expr(*flag)?);
+                block.push(Stmt::Local { ty: Type::Boolean, name: computed.clone(), init, pos });
+                Err(computed)
+            }
+        };
         if let Some(loader) = arguments.get(2) {
             let loader = self.expr(*loader)?;
             if has_effects(&loader) {
                 block.push(Stmt::Expr(loader));
             }
         }
+        let call = |initialize: bool| -> Result<Expr, Error> {
+            let method = self.for_name_method(node, initialize, &class_name, &given)?;
+            let given = self.synth(ExprKind::Var(given.clone()), pos, Type::String);
+            Ok(self.added_call(&method, vec![given], pos, Type::JavaClass))
+        };
+        let found = match initialize {
+            Ok(initialize) => call(initialize)?,
+            Err(computed) => {
+                let flag = self.synth(ExprKind::Var(computed), pos, Type::Boolean);
+                let kind = ExprKind::Conditional(Box::new(flag), Box::new(call(true)?), Box::new(call(false)?));
+                self.synth(kind, pos, Type::JavaClass)
+            }
+        };
+        block.push(Stmt::Yield(found));
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
+    }
+
+    /// The method that `Class.forName` of a computed name calls, made once for each `initialize`:
+    /// the `switch` over the names (see `computed_for_name`).
+    fn for_name_method(
+        &self,
+        node: Node<'t>,
+        initialize: bool,
+        class_name: &str,
+        given: &str,
+    ) -> Result<String, Error> {
+        let pos = node.pos();
+        let class_name = class_name.to_string();
+        let given = given.to_string();
         // The `switch` over the names is the same at every call (thousands of cases in a big
         // program): one method has it, which each call calls (`shared_method`).
         let key = format!("Class.forName, initialize {initialize}");
-        let method = self.shared_method(&key, &mut || {
+        self.shared_method(&key, &mut || {
             let mut body = Vec::new();
             let var = || self.synth(ExprKind::Var(class_name.clone()), pos, Type::String);
             body.push(self.checked_name(&class_name, &given, Some(FOR_NAME_NULL), pos));
@@ -476,12 +510,6 @@ impl<'t> Lowering<'t> {
             let params = vec![Param { name: given.clone(), ty: Type::String }];
             let (class, name, ret) = (self.current.get(), base.to_string(), Type::JavaClass);
             Ok(super::added_methods::AddedMethod { class, name, params, ret, body, pos })
-        })?;
-        let given = self.synth(ExprKind::Var(given.clone()), pos, Type::String);
-        block.push(Stmt::Yield(self.added_call(&method, vec![given], pos, Type::JavaClass)));
-        Ok(ExprKind::Switch {
-            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
-            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
         })
     }
 

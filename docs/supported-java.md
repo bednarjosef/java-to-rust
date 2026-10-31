@@ -405,7 +405,8 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   `UnsupportedOperationException`. The generic types of methods are still rejected.
 - `Class.forName` of a constant name is that class, and of an array's descriptor
   (`"[La.B;"`) that array's class; of a computed name, a `switch` over the classes code can find
-  by name. An unknown name throws `ClassNotFoundException`.
+  by name, each initialized or not as the call's `initialize` says, a literal or a computed one.
+  An unknown name throws `ClassNotFoundException`.
 - **Handles**: `Unsafe` offsets, field updaters and `VarHandle`s of fields and array elements,
   and the `MethodHandle`s of the handle factories, are the accesses they name, and a
   `MethodHandle` of a static method (`findStatic`) is a call of it, followed through
