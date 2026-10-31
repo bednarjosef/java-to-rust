@@ -1074,21 +1074,34 @@ impl<'a> Gen<'a> {
     /// `text`, the exception that `throw value` throws, made out of line (`java::cold`, a closure
     /// that borrows what it needs) where `value` is made by `new` or a call (the factory that
     /// `new` of a class tree calls, `analysis::whole_objects`, or a helper that makes the
-    /// exception) and `text` is an expression alone: no `return`, `break`, `continue` or `?` that
-    /// would leave the closure instead of the method. A method that checks a condition and throws
-    /// (`Validate.inclusiveBetween`) is then small enough for its callers to inline.
+    /// exception). A method that checks a condition and throws (`Validate.inclusiveBetween`) is
+    /// then small enough for its callers to inline.
+    ///
+    /// The closure can hold no `break` or `continue`, which would leave it instead of the method.
+    /// A `return Err(e)` or a `?`, where a call in the message throws (`"unbound " + key`, whose
+    /// `toString()` can), leaves the method with `e` only where the throw would leave it too: in a
+    /// method that throws, outside any `try`. There the closure gives either exception
+    /// (`java::cold_or_raised`); elsewhere the text stays in place.
     pub(super) fn cold_thrown(&mut self, value: &Expr, text: String) -> String {
         let made = match &value.kind {
             ExprKind::Cast(_, inner) => inner,
             _ => value,
         };
-        let plain = !["return", "break", "continue", "?", "'"].iter().any(|word| text.contains(word));
         let call =
             matches!(made.kind, ExprKind::New { .. } | ExprKind::Call { .. } | ExprKind::MethodCall { .. });
-        match call && plain {
-            true => format!("{}(|| {text})", self.runtime("cold")),
-            false => text,
+        let exits = Exits::of(&text);
+        if !call || exits.jumps || exits.other_returns {
+            return text;
         }
+        if !exits.raises {
+            return format!("{}(|| {text})", self.runtime("cold"));
+        }
+        if !self.throwing || !self.attempts.is_empty() {
+            return text;
+        }
+        let throwable = self.throwable_type();
+        // A closure that returns a `Result` may pass a failure on (`check_closures`).
+        format!("{}(|| -> Result<{throwable}, {throwable}> {{ Ok({text}) }})", self.runtime("cold_or_raised"))
     }
 
     /// The `Throwable` that `throw value` throws. A value that may be null throws a
@@ -1659,5 +1672,103 @@ impl<'a> Gen<'a> {
         } else {
             format!("{}.{}", decl.package, decl.name[decl.package.len() + 1..].replace('.', "$"))
         }
+    }
+}
+
+/// What the text of an expression does that would leave a closure it is put in: `break` or
+/// `continue` (`jumps`), `return Err(..)` or `?` (`raises`, how a call's exception leaves a
+/// method), any other `return`. String and character literals are skipped, and a `'` that starts
+/// no character literal is a lifetime or a label, which leaves nothing.
+#[derive(Default)]
+struct Exits {
+    jumps: bool,
+    raises: bool,
+    other_returns: bool,
+}
+
+impl Exits {
+    fn of(text: &str) -> Exits {
+        let mut exits = Exits::default();
+        let chars: Vec<char> = text.chars().collect();
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                '"' => {
+                    i += 1;
+                    while i < chars.len() && chars[i] != '"' {
+                        i += if chars[i] == '\\' { 2 } else { 1 };
+                    }
+                    i += 1;
+                }
+                // A character literal: an escape, or one character and the closing quote.
+                '\'' if chars.get(i + 1) == Some(&'\\') => {
+                    i += 3;
+                    while i < chars.len() && chars[i] != '\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                '\'' if chars.get(i + 2) == Some(&'\'') => i += 3,
+                // A lifetime or a label: its name is no keyword.
+                '\'' => {
+                    i += 1;
+                    while i < chars.len() && ident(chars[i]) {
+                        i += 1;
+                    }
+                }
+                '?' => {
+                    exits.raises = true;
+                    i += 1;
+                }
+                c if ident(c) => {
+                    let start = i;
+                    while i < chars.len() && ident(chars[i]) {
+                        i += 1;
+                    }
+                    let word: String = chars[start..i].iter().collect();
+                    match word.as_str() {
+                        "break" | "continue" => exits.jumps = true,
+                        "return" => {
+                            let rest: String = chars[i..].iter().collect();
+                            match rest.trim_start().starts_with("Err(") {
+                                true => exits.raises = true,
+                                false => exits.other_returns = true,
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        exits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Exits;
+
+    #[test]
+    fn exits_skip_literals_and_lifetimes() {
+        let message = r#"new_x(&java::concat!("unbound value '", key, "' of registry"))"#;
+        let e = Exits::of(message);
+        assert!(!e.jumps && !e.raises && !e.other_returns);
+        let e = Exits::of(r#"f('\'', '"', '\u{7f}', "return break ?", x.as_ref::<'static>())"#);
+        assert!(!e.jumps && !e.raises && !e.other_returns);
+        let e = Exits::of("new_x(returned, breaker, continued)");
+        assert!(!e.jumps && !e.raises && !e.other_returns);
+    }
+
+    #[test]
+    fn exits_find_what_leaves_a_closure() {
+        let e = Exits::of("new_x(match f() { Ok(v) => v, Err(e) => return Err(e) })");
+        assert!(e.raises && !e.jumps && !e.other_returns);
+        assert!(Exits::of("new_x(g()?)").raises);
+        assert!(Exits::of("new_x(match a { Some(v) => v, None => return Ok(0) })").other_returns);
+        assert!(Exits::of("new_x('l: { break 'l 1 })").jumps);
+        assert!(Exits::of("new_x(loop { continue })").jumps);
     }
 }

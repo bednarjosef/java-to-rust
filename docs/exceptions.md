@@ -108,9 +108,16 @@ a call of one that does (because other callers observe it) is
 what propagating it would do. A `throw new X(..)`, or a `throw` of what a call returns (the
 factory that `new` of a class tree calls, or a helper that makes the exception), makes its
 exception inside `java::cold(|| ..)`, a closure that runs out of line, where the expression has no
-`return`, `break`, `continue` or `?` of its own: the message and the object stay out of the method, and a method that checks a
-condition and throws (`Validate.inclusiveBetween`) stays small enough to inline where it is
-called, also from another crate of a split program.
+`break` or `continue` of its own: the message and the object stay out of the method, and a method
+that checks a condition and throws (`Validate.inclusiveBetween`, `Holder.Reference.value()`)
+stays small enough to inline where it is called, also from another crate of a split program.
+Where the message calls a method that can throw (`"unbound " + key`, whose `toString()` can), its
+`return Err(e)` or `?` throws what that call threw, which leaves the method just as the `throw`
+would in a method that throws, outside any `try`: there the closure returns a `Result` and
+`java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(..) })` gives either exception to
+the `throw`. Inside a `try`, or in a method whose `throw` ends the program, such a message stays
+in place. The test for these words skips string and character literals, so a message with a `'`
+in it is made out of line too.
 
 The `match` is written out, rather than a `?` or a macro, for the time rustc takes: a `?` leaves
 the `Try` trait and the `From` conversion to be worked out at each one, and a macro is expanded

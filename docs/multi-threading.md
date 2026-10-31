@@ -533,7 +533,7 @@ group enumeration.
 | native | Rust (`crates/runtime/src/thread.rs` unless noted) |
 | --- | --- |
 | `start0(t, tid, name, daemon)` | `java::start_thread`: a `std::thread` with that name, which sets the current thread and calls `t.run()`; a daemon is not counted among the live threads |
-| `currentThread` | a thread-local current `Thread`; the main thread's is made on first use |
+| `currentThread` | a thread-local current `Thread`, found through one thread-local pointer and its type (no borrow and no virtual call, for code that checks its owner thread on every call); the main thread's is made on first use |
 | `alive0`, `state0` | the record's alive flag and state byte |
 | `join0(tid, millis)` | wait on the record's condition variable until it is not alive or the timeout passes, interruptible |
 | `interrupt0`, `isInterrupted0`, `clearInterrupt0` | the interrupt status (3.3) |

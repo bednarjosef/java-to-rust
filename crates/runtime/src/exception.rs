@@ -15,6 +15,17 @@ pub fn cold<T>(make: impl FnOnce() -> T) -> T {
     make()
 }
 
+/// Runs `make` out of line as `cold` does, where making the exception can itself throw (its
+/// message calls a method that can): `make` gives the exception made (`Ok`) or the one thrown
+/// while making it (`Err`), and either is what the `throw` throws, as in Java.
+#[cold]
+#[inline(never)]
+pub fn cold_or_raised<T>(make: impl FnOnce() -> Result<T, T>) -> T {
+    match make() {
+        Ok(e) | Err(e) => e,
+    }
+}
+
 /// An exception that the runtime raises: the qualified name of its standard class, such as
 /// `java.lang.ArithmeticException`, and its message.
 #[derive(Clone, Debug, PartialEq, Eq)]
