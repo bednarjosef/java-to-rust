@@ -780,11 +780,11 @@ Further speed-ups, not done:
     drops whenever a stub changes the program, for the methods no stub changed, where they are
     facts of a method's own code. The representation is mostly whole-program (borrowing,
     owned, flows), so this saves part of its 34 s at most.
-  - Find the class files' names (104 s, the first round only) and the messages of the first
-    round alongside the analyses, since the messages read no facts until they are picked:
-    their results are taken only where a `catch` reads a message, as now. This needs the
-    class files compiled while the analyses run (javac peaked at 1.9 GB) and `Names` made
-    safe to share between threads.
+  - Find the messages of the first round alongside the analyses, since the messages read no
+    facts until they are picked: their results are taken only where a `catch` reads a message,
+    as now. This needs `Names` made safe to share between threads. The class files that the
+    messages need (56 s for the Minecraft server) already compile on a thread of their own
+    while the analyses run (`Names::early`), javac beside them.
 
 ## The translated javac
 
