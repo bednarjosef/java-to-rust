@@ -1731,15 +1731,22 @@ impl<'a> Gen<'a> {
         if self.runtime_of(c) == Some(Type::JavaClass) && self.class_answer(resolved).is_some() {
             return None;
         }
-        let args = self.call_args(resolved, args).join(", ");
-        let (text, uses) = self.arm_call(t, c, i, &args);
+        let args = self.call_args(resolved, args);
+        // The arm names the object `o`, which an argument may name too (`indexOf(o)`): the
+        // arguments are computed first, before `o` is bound.
+        let passed = (0..args.len()).map(|k| format!("arguments.{k}")).collect::<Vec<_>>().join(", ");
+        let (text, uses) = self.arm_call(t, c, i, &passed);
         let text = self.covariant_ret(i, resolved, text);
+        let arguments = match args.is_empty() {
+            true => String::new(),
+            false => format!("let arguments = ({},); ", args.join(", ")),
+        };
         if !uses {
-            return Some(Code::atom(text));
+            return Some(Code::atom(if args.is_empty() { text } else { format!("{{ {arguments}{text} }}") }));
         }
         let payload = self.payload(c);
         let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
-        Some(Code::atom(format!("{{ let o: &{payload} = unsafe {{ this.0.{lend}() }}; {text} }}")))
+        Some(Code::atom(format!("{{ {arguments}let o: &{payload} = unsafe {{ this.0.{lend}() }}; {text} }}")))
     }
 
     /// Whether a dispatcher's arm for class `c` calls a copy of body `i` written for `c`
