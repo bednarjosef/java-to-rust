@@ -62,11 +62,13 @@ pub(super) struct Scan {
     pub row_loops: Vec<(String, String)>,
 }
 
-/// A call and what each argument is.
+/// A call and what each argument is. A call of a method of an override group is a call of each
+/// method of the group (`arrays::analyze`), which share the arguments: a call of `toString` on
+/// the Minecraft server is one of thousands of methods.
 #[derive(Clone)]
 pub(super) struct Call {
     pub callee: usize,
-    pub args: Vec<Arg>,
+    pub args: std::rc::Rc<[Arg]>,
 }
 
 #[derive(Clone)]
@@ -638,7 +640,7 @@ impl<'m> Walk<'m> {
             };
             recorded.push(Arg::of(a, name, row, fresh, moved));
         }
-        self.scan.calls.push(Call { callee, args: recorded });
+        self.scan.calls.push(Call { callee, args: recorded.into() });
     }
 }
 
