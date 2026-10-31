@@ -252,12 +252,12 @@ pub trait MadeElements<T>: Elements<T> {
 }
 
 impl<T, A: Elements<T>> Elements<T> for &A {
-    #[inline]
+    #[inline(always)]
     fn length(&self) -> usize {
         (**self).length()
     }
 
-    #[inline]
+    #[inline(always)]
     fn element(&self, i: i32) -> T
     where
         T: Clone,
@@ -265,7 +265,7 @@ impl<T, A: Elements<T>> Elements<T> for &A {
         (**self).element(i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_element(&self, i: i32) -> Result<T, Exception>
     where
         T: Clone,
@@ -273,12 +273,12 @@ impl<T, A: Elements<T>> Elements<T> for &A {
         (**self).try_element(i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn put(&self, i: i32, v: T) {
         (**self).put(i, v)
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
         (**self).try_put(i, v)
     }
@@ -377,12 +377,12 @@ impl<T> ArrayData<RefCell<Vec<T>>, T> {
 }
 
 impl<T> Elements<T> for Array<T> {
-    #[inline]
+    #[inline(always)]
     fn length(&self) -> usize {
         self.raw().1
     }
 
-    #[inline]
+    #[inline(always)]
     fn element(&self, i: i32) -> T
     where
         T: Clone,
@@ -391,7 +391,7 @@ impl<T> Elements<T> for Array<T> {
         unsafe { (*items.add(position(n, i))).clone() }
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_element(&self, i: i32) -> Result<T, Exception>
     where
         T: Clone,
@@ -400,13 +400,13 @@ impl<T> Elements<T> for Array<T> {
         Ok(unsafe { (*items.add(try_position(n, i)?)).clone() })
     }
 
-    #[inline]
+    #[inline(always)]
     fn put(&self, i: i32, v: T) {
         let (items, n) = self.raw();
         unsafe { *items.add(position(n, i)) = v }
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
         let (items, n) = self.raw();
         unsafe { *items.add(try_position(n, i)?) = v }
@@ -512,12 +512,12 @@ impl<T> MadeElements<T> for Array<T> {
 }
 
 impl<T> Elements<T> for SharedArray<T> {
-    #[inline]
+    #[inline(always)]
     fn length(&self) -> usize {
         self.items.0.len()
     }
 
-    #[inline]
+    #[inline(always)]
     fn element(&self, i: i32) -> T
     where
         T: Clone,
@@ -526,7 +526,7 @@ impl<T> Elements<T> for SharedArray<T> {
         cells[position(cells.len(), i)].get()
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_element(&self, i: i32) -> Result<T, Exception>
     where
         T: Clone,
@@ -535,13 +535,13 @@ impl<T> Elements<T> for SharedArray<T> {
         Ok(cells[try_position(cells.len(), i)?].get())
     }
 
-    #[inline]
+    #[inline(always)]
     fn put(&self, i: i32, v: T) {
         let cells = &self.items.0;
         cells[position(cells.len(), i)].set(v)
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_put(&self, i: i32, v: T) -> Result<(), Exception> {
         let cells = &self.items.0;
         cells[try_position(cells.len(), i)?].set(v);
@@ -846,7 +846,7 @@ pub(crate) fn try_size(len: i32) -> Result<usize, Exception> {
 /// A negative `i` becomes a huge `usize`, so one comparison checks both ends. The check is
 /// inlined into every access and the throw is kept out of line, so an access that stays in
 /// bounds costs a compare and a branch that is never taken.
-#[inline]
+#[inline(always)]
 pub(crate) fn position(len: usize, i: i32) -> usize {
     if (i as usize) < len { i as usize } else { out_of_bounds(len, i) }
 }
@@ -859,7 +859,7 @@ fn out_of_bounds(len: usize, i: i32) -> ! {
 }
 
 /// `position` where the program observes the `ArrayIndexOutOfBoundsException`.
-#[inline]
+#[inline(always)]
 pub(crate) fn try_position(len: usize, i: i32) -> Result<usize, Exception> {
     if (i as usize) < len {
         return Ok(i as usize);
@@ -896,31 +896,31 @@ pub fn try_shared_tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Result<
 }
 
 /// `a.length`.
-#[inline]
+#[inline(always)]
 pub fn len<T>(a: &impl Elements<T>) -> i32 {
     a.length() as i32
 }
 
 /// `a[i]`.
-#[inline]
+#[inline(always)]
 pub fn get<T: Clone>(a: &impl Elements<T>, i: i32) -> T {
     a.element(i)
 }
 
 /// `a[i]` where the program observes the `ArrayIndexOutOfBoundsException`.
-#[inline]
+#[inline(always)]
 pub fn try_get<T: Clone>(a: &impl Elements<T>, i: i32) -> Result<T, Exception> {
     a.try_element(i)
 }
 
 /// `a[i] = v` where the program observes the `ArrayIndexOutOfBoundsException`.
-#[inline]
+#[inline(always)]
 pub fn try_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
     a.try_put(i, v)
 }
 
 /// `a[i] = v`. Java evaluates `a`, `i` and `v` before the check, and so do the arguments.
-#[inline]
+#[inline(always)]
 pub fn set<T>(a: &impl Elements<T>, i: i32, v: T) {
     a.put(i, v)
 }
