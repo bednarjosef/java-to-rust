@@ -63,7 +63,8 @@ Every test program runs on Java and, translated, as Rust; printed output and exi
 exactly. The Java run is the expected result, so no expectations are written by hand.
 
 - `scripts/check.sh` is the check every branch passes: formatting, clippy with warnings as
-  errors, and `cargo test`. With `JAVA_BASE_SOURCES` set it also checks that the translator's
+  errors, and the tests, built optimized with debug assertions and overflow checks
+  (`cargo test --profile checks`). With `JAVA_BASE_SOURCES` set it also checks that the translator's
   Java holds no copy of the JDK's ([docs/jdk-overlays.md](docs/jdk-overlays.md)).
 - `corpus/` holds the test programs: `features` (one or more per language feature), `programs`
   (larger realistic programs), `threads`, and `projects` (multi-file programs, each with a source
