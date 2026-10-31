@@ -320,9 +320,10 @@ impl<'a> Gen<'a> {
         let decl = &self.class.types[c];
         let (kind, extends) = (decl.kind, decl.extends);
         // A record's superclass is `Record`, which the program's records implement where it is a
-        // type.
+        // type. `Object` has none.
         let record = decl.implements.iter().any(|&i| self.class.types[i].name == RECORD);
         let name = rust_string(&self.java_class_name(c, false));
+        let object = self.java_class_name(c, false) == "java.lang.Object";
         let simple = rust_string(&self.java_class_name(c, true));
         let names = self.names_list(c);
         let value = match kind {
@@ -330,11 +331,12 @@ impl<'a> Gen<'a> {
             TypeKind::Enum => format!("java::Class::enumeration({name}, {simple}, {names})"),
             _ => {
                 let superclass = match extends {
-                    Some(s) => self.decl_class(s),
-                    None if record => "java::Class::RECORD".to_string(),
-                    None => "java::Class::OBJECT".to_string(),
+                    Some(s) => format!("Some(&{})", self.decl_class(s)),
+                    None if record => "Some(&java::Class::RECORD)".to_string(),
+                    None if object => "None".to_string(),
+                    None => "Some(&java::Class::OBJECT)".to_string(),
                 };
-                format!("java::Class::new({name}, {simple}, Some(&{superclass}), {names})")
+                format!("java::Class::new({name}, {simple}, {superclass}, {names})")
             }
         };
         let value = match self.class_interfaces {
