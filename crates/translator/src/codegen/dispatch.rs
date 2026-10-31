@@ -180,6 +180,9 @@ pub(super) enum Need {
     /// `java::CopyAcross`: what `System.arraycopy` between arrays of two classes asks of the
     /// object (see `arraycopy`).
     CopyAcross(usize),
+    /// The constructor of the variant of class `c` on the enum of `t`, as `(t, c)`: written only
+    /// where code makes a value of it (`Gen::variant`).
+    Variant(usize, usize),
 }
 
 /// The items of `wanted` written in the `impl` of the enum of each type (`type_enum_items`), in
@@ -193,7 +196,8 @@ pub(super) fn impl_needs(wanted: &Needs, homes: &[Home]) -> HashMap<usize, Vec<N
             | Need::Convert(s, _)
             | Need::Narrow(s, _)
             | Need::Dispatch(s, _)
-            | Need::Among(s, _, _) => s,
+            | Need::Among(s, _, _)
+            | Need::Variant(s, _) => s,
             Need::Body(i) | Need::BodyFor(i, _) => match homes[i] {
                 Home::Enum(t) => t,
                 _ => continue,
@@ -232,7 +236,8 @@ pub(super) fn need_types(class: &Class, homes: &[Home], need: Need) -> Vec<usize
         | Need::IdentityHash(t)
         | Need::CastSource(t)
         | Need::CopyKind(t)
-        | Need::CopyAcross(t) => vec![t],
+        | Need::CopyAcross(t)
+        | Need::Variant(t, _) => vec![t],
     }
 }
 
@@ -269,7 +274,8 @@ impl<'a> Gen<'a> {
             | Need::RuntimeTypeNames(t)
             | Need::IdentityHash(t)
             | Need::CastSource(t)
-            | Need::CopyKind(t) => {
+            | Need::CopyKind(t)
+            | Need::Variant(t, _) => {
                 needs.insert(Need::Enum(t));
             }
             Need::NullableText(t) | Need::JavaString(t) => {
@@ -359,7 +365,16 @@ impl<'a> Gen<'a> {
     /// named after its class, with the class's outer classes when two variants share a name, and
     /// with its package too when two classes of different packages share that
     /// (`JavaUtilStreamAbstractSetInEntrySet`).
+    ///
+    /// Code that names it makes a value of it, so its constructor is written
+    /// (`Need::Variant`); `variant_path` names it without.
     pub(super) fn variant(&self, t: usize, c: usize) -> String {
+        self.need(Need::Variant(t, c));
+        self.variant_path(t, c)
+    }
+
+    /// `variant`'s path, for a pattern or the enum's own items, which need no constructor.
+    fn variant_path(&self, t: usize, c: usize) -> String {
         self.need(Need::Enum(t));
         let names = self.variant_names_of(t);
         let name = match names.get(&c) {
@@ -372,7 +387,7 @@ impl<'a> Gen<'a> {
     /// The path of the variant of class `c` in the view of the enum of `t` (see `thin_impl`), as
     /// a pattern matches it: `ShapeView::Circle`.
     pub(super) fn view_pattern(&self, t: usize, c: usize) -> String {
-        let variant = self.variant(t, c);
+        let variant = self.variant_path(t, c);
         let short = variant.rsplit("::").next().unwrap_or_default();
         format!("{}::{short}", self.view_name(t))
     }
@@ -461,23 +476,31 @@ impl<'a> Gen<'a> {
         runs
     }
 
-    /// The constructor of each variant (`Shape::Circle(handle)`, an associated function named as
-    /// the variant was) and `view()`, which lends what the value holds as the view's variant
-    /// (`java::Thin`).
+    /// The constructor of the variant of class `c` on the enum named `name`
+    /// (`Shape::Circle(handle)`), an associated function named as the variant is. Only those that
+    /// code calls are written: a class is a variant of the enum of every type above it, and most
+    /// of those are never made (javac's translation calls 6,900 of 11,700), while each is a
+    /// function for rustc to check and to keep in the header's metadata.
+    fn variant_constructor(&mut self, t: usize, c: usize, name: &str) {
+        let vis = self.vis();
+        let short = self.variant_path(t, c).rsplit("::").next().unwrap_or_default().to_string();
+        let payload = self.payload(c);
+        let (tag, make) = (self.class_tag(c), if self.thin_pointer(c) { "pointer" } else { "value" });
+        self.line("#[allow(non_snake_case)]");
+        self.line("#[inline]");
+        self.line(&format!("{vis}fn {short}(o: {payload}) -> {name} {{"));
+        self.line(&format!("    {name}(java::Thin::{make}({tag}, o))"));
+        self.line("}");
+    }
+
+    /// `view()`, which lends what the value holds as the view's variant (`java::Thin`). The
+    /// constructors of the variants are written with the enum's other items, each where code
+    /// makes a value of it (`variant_constructor`).
     fn thin_impl(&mut self, name: &str, view: &str, variants: &[usize], shorts: &[String]) {
         let vis = self.vis();
         self.gap();
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
-        for (&c, short) in variants.iter().zip(shorts) {
-            let payload = self.payload(c);
-            let (tag, make) = (self.class_tag(c), if self.thin_pointer(c) { "pointer" } else { "value" });
-            self.line("#[allow(non_snake_case)]");
-            self.line("#[inline]");
-            self.line(&format!("{vis}fn {short}(o: {payload}) -> {name} {{"));
-            self.line(&format!("    {name}(java::Thin::{make}({tag}, o))"));
-            self.line("}");
-        }
         self.line("#[inline]");
         if variants.is_empty() {
             self.line(&format!("{vis}fn view(&self) -> {view} {{"));
@@ -2098,7 +2121,7 @@ impl<'a> Gen<'a> {
             let view = self.view_name(t);
             let shorts: Vec<String> = variants
                 .iter()
-                .map(|&c| self.variant(t, c).rsplit("::").next().unwrap_or_default().to_string())
+                .map(|&c| self.variant_path(t, c).rsplit("::").next().unwrap_or_default().to_string())
                 .collect();
             let vis = self.vis();
             self.gap();
@@ -2160,6 +2183,7 @@ impl<'a> Gen<'a> {
                 Need::BaseMut(_) => self.base_fn(t, true),
                 Need::Convert(_, to) => self.convert_fn(to),
                 Need::Narrow(_, to) => self.narrow_fn(t, to),
+                Need::Variant(_, c) => self.variant_constructor(t, c, &name),
                 _ => {}
             }
         }
