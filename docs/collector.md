@@ -200,11 +200,16 @@ A collection runs when the program has taken as many bytes as were alive after t
 least 64 MB), so the heap is about twice what is alive, times a scale for programs that spend
 most of their time collecting: while a collection takes more than half as much processor time
 (all its markers') as the program's threads used since the last one, the bytes taken before the
-next grow by a tenth, up to twice; while it takes less, they shrink back. The small step keeps a
+next grow by a tenth, up to twice, or up to 256 MB where twice is less (`SMALL_ROOM`): a program
+with little alive that collects often may take more between collections, while a large heap
+stays within twice; while it takes less, they shrink back. The small step keeps a
 short phase of costly collections from growing the heap. BinaryTrees, which marks a tree of up
 to 85 MB alive on every processor, so collects 38 times instead of 70 and runs 1.06 s instead of
 1.18 s, at a peak of 279 MB instead of 217 MB (Java: 2 GB); SmallObjects 0.131 s instead of
-0.152 s at 203 MB instead of 171 MB (Java: 812 MB). On the Minecraft benchmark the optimized
+0.152 s at 203 MB instead of 171 MB (Java: 812 MB). The room past twice takes BinaryTrees from
+38 collections to 26 and 15% fewer instructions (21.8 G against 25.6 G), at a peak of 340 MB
+against 245 MB (Java: 1.8 GB); SmallObjects, ManyThreadsAllocating, NodeList and ChunkSections
+collect as often as with twice. On the Minecraft benchmark the optimized
 translated javac takes 14.5 s and 1.03 GB collecting after half as much as is alive, 13.1 s and
 1.36 GB after as much, and 12.4 s and 2.0 GB after twice as much (the Java VM: 11.3 s, 4.1 GB). It:
 
