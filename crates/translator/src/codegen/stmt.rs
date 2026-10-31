@@ -42,6 +42,11 @@ impl<'a> Gen<'a> {
             if self.early_pattern_exit(stmt, rest) {
                 continue;
             }
+            if let Some(name) = self.early_length_read(stmt, rest, after)
+                && self.borrowed.insert(name.to_string())
+            {
+                narrowed.push(name);
+            }
             match stmt {
                 // A `throw` that ends a method that throws is its `Err` result.
                 Stmt::Throw(value) if tail && rest.is_empty() && self.throwing => {

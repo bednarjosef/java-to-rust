@@ -90,7 +90,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
                 }
             });
         }
-        let proven = bounds::in_bounds(method, &solution.plain[m], &scans[m].reshaped, facts);
+        let proven = bounds::in_bounds(class, method, &solution.plain[m], &scans[m].reshaped, facts);
         facts.in_bounds.extend(proven);
         facts.sliced_loops.extend(slices::sliced_loops(method, &solution.plain[m], facts));
         facts.moves.extend(scans[m].moves.iter().copied());
