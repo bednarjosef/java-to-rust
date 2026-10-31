@@ -266,6 +266,8 @@ translation split into 22 body crates (release, 2 jobs, instructions of all rust
 |---|---:|---:|---:|---:|---:|
 | thin LTO (rustc) | 137 G | 1,155 G | 2,418 G | 3,710 G | 8.86 G instructions |
 | no LTO | 173 G | 2,475 G | 3 G | 2,651 G | 9.42 G |
+| thin LTO (rust-lld) | 137 G | 1,155 G | 2,496 G | 3,788 G | 8.86 G |
+| the same, its cache filled | 137 G | 1,155 G | 32 G | 1,324 G | |
 
 The binary's step with thin LTO is 717 s of processor time, of which the link is 0.4 s; it is the
 same 2,418 G after only the binary crate's file is touched. Without LTO each crate generates its
@@ -273,6 +275,17 @@ own code, which the body crates' groups build in parallel, and the binary's step
 alone (1.5 s); the build does 29% less work, and a change rebuilds only the crates it touches and
 links. javac then runs 6% more instructions. The Minecraft server's binary step with thin LTO
 (240 MB of machine code, six times javac's) takes about 460 s on 16 threads.
+
+rust-lld can do the thin LTO instead: with `-Clinker-plugin-lto` every crate's rustc, the
+binary's too, writes bitcode, rustc passes the linker its opt-level and target-cpu
+(`-plugin-opt=O3`, `-plugin-opt=mcpu=x86-64-v3`), and lld imports, optimizes and generates the
+code at the link (`-mllvm -align-loops=64` gives it the workspace's loop alignment). Its code is
+rustc's: javac runs the same instructions. lld keeps each module's machine code in a cache
+(`--thinlto-cache-dir`) under a key made of the module's bitcode and of what it imports, and a
+module whose key did not change is not optimized again. rustc writes the same bitcode for the same
+code, so after every body crate was built again with its text unchanged, as after a change to
+the header, the binary's step took 32 G instructions (6.5 s) where it took 2,496 G. The survey's
+`TRIAL_LTO=lld` builds the trial so ([minecraft-server.md](minecraft-server.md)).
 
 ## Not done yet
 
