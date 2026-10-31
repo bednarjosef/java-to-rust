@@ -291,7 +291,10 @@ keeps (`gc/references.rs`, `weak.rs`).
   it has a queue, in a table outside the heap, under the heap's lock. A `FinalReference` is not
   registered: the translation runs no finalizers, so it keeps its referent as long as it lives,
   and is never cleared or enqueued. Nor is a reference to `null`. A reference never lives on a
-  method's stack (`analysis/escape.rs`), as the registry holds its address in the heap.
+  method's stack (`analysis/escape.rs`), as the registry holds its address in the heap, and
+  neither does what it holds in its other fields, such as a `Cleaner`'s action or the value of a
+  `WeakHashMap` entry: the analysis takes a reference as escaping, and so what is stored in it
+  (`corpus/whole-program/ObjectsHeldByReferences.java`).
 - **A collection**, after marking and before the sweep, (1) marks the references that wait to
   be put on their queues; (2) keeps the soft referents that the policy keeps and marks what they
   reach, until no more are kept, so that an object both softly and weakly reachable stays with

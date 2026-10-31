@@ -6,8 +6,8 @@
 //! element or a static, returned, thrown, handed to the runtime (a builtin, a string
 //! concatenation, which calls its `toString`), or passed to a call whose callee lets that
 //! parameter escape, or to a call that is not known. Anything the analysis does not model
-//! escapes. A `java.lang.ref.Reference` always does: the collector clears its referent in the
-//! heap.
+//! escapes. A `java.lang.ref.Reference` always does, and so what it holds: the collector clears
+//! its referent in the heap.
 //!
 //! Each method gets a summary of its parameters, `this` first: whether each may escape, and
 //! whether each may be what the method returns (`ListBuffer.append` returns `this`), so that a
@@ -949,13 +949,12 @@ fn compile<'a>(
     }
     // A `Reference` (or a subclass, such as `WeakHashMap.Entry`) never stays: the collector's
     // registry of references holds the reference's address in the heap, to clear its referent
-    // there (`java::register_reference`).
+    // there (`java::register_reference`). It is a site that escapes, rather than no site, so that
+    // what its constructor stores in it escapes too: a `Cleaner`'s action, the value of a
+    // `WeakHashMap` entry, the fields of a subclass.
     let reference = class.type_index("java.lang.ref.Reference");
     for x in made {
         let site = match x.kind {
-            ExprKind::New { class: c, .. } if reference.is_some_and(|r| class.hierarchy.is_subtype(c, r)) => {
-                None
-            }
             ExprKind::New { class: c, .. } => Some((c, None)),
             _ => match cx.targets(x) {
                 Some(l) => match cx.lists.targets[l as usize][..] {
@@ -968,8 +967,15 @@ fn compile<'a>(
         if let Some((c, call)) = site
             && !cx.site_of.contains_key(&x.id)
         {
-            cx.site_of.insert(x.id, cx.code.sites.len() as u32);
+            let s = cx.code.sites.len() as u32;
+            cx.site_of.insert(x.id, s);
             cx.code.sites.push(Site { id: x.id, class: c, call, loops: None });
+            if let ExprKind::New { class: c, .. } = x.kind
+                && reference.is_some_and(|r| class.hierarchy.is_subtype(c, r))
+            {
+                cx.code.escapes.push(Value { vars: Vec::new(), sources: vec![cx.code.arity as u32 + s] });
+                cx.code.labels.push("a reference, which the collector's registry holds");
+            }
         }
     }
     // The expressions the method runs: its body's, and for a constructor that does not delegate,
