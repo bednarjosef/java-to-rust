@@ -366,7 +366,9 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   server as very likely modified). A class held as an `Object` is `Object`'s `Class` variant, and one held as a
   `java.lang.reflect.Type` is `Type`'s.
 - `getGenericSuperclass()` is a chain of tests of the class against those whose superclass has
-  type arguments, each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,
+  type arguments (written at the call when the call narrows the class down, as `getClass()` and
+  a class literal do; otherwise one chain over the program's classes, shared by every call),
+  each making the type javac gives as the JDK's own `ParameterizedTypeImpl`,
   `WildcardTypeImpl` and `GenericArrayTypeImpl` (`lower/generic_types.rs`), so a type token
   (`new TypeToken<List<String>>() {}`) reads its type argument as in Java.
   `getGenericInterfaces()` and `getTypeParameters()` are made the same way, and a class's type

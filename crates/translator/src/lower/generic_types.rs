@@ -6,12 +6,15 @@
 //! through the translator's `TranslatedTypes` (`java/overlay/sun/reflect/generics/reflectiveObjects/`),
 //! so they print, compare and hash as in Java.
 //!
-//! `getGenericSuperclass` is a chain, at the call, of tests of `c` against the classes whose
-//! superclass javac gives with type arguments, each making that type. Any other class answers
-//! its superclass, which is `null` for `Object`, an interface and a primitive type, as in Java.
-//! The classes tested are those `c` can be: for `o.getClass()`, the classes that can be made
-//! (not abstract) and are of `o`'s type; otherwise every class of the program. An enum's
-//! superclass, `Enum<E>`, is made like any other.
+//! `getGenericSuperclass` is a chain of tests of `c` against the classes whose superclass javac
+//! gives with type arguments, each making that type. Any other class answers its superclass,
+//! which is `null` for `Object`, an interface and a primitive type, as in Java. Where the call
+//! narrows down the classes `c` can be (for `o.getClass()`, the classes that can be made, not
+//! abstract, and are of `o`'s type; for a class literal, the class), the chain is written at the
+//! call over those. Otherwise the call is `TranslatedTypes.genericSuperclass`, whose native
+//! `genericSuperclass0` is the one chain over every class of the program: written at each call,
+//! it made gson's `getGenericSupertype`, with six calls, 3.4 MB of Rust. An enum's superclass,
+//! `Enum<E>`, is made like any other.
 //!
 //! `getGenericInterfaces` and `getTypeParameters` call `TranslatedTypes`, whose natives are each
 //! one chain over the classes of the program: `genericInterfaces0` over those that implement an
@@ -32,8 +35,8 @@
 //! that mentions one throws `UnsupportedOperationException`, which says so, when it is asked
 //! for, as most classes a chain tests are never the ones a call gets. So does a type that this
 //! does not make (a captured type, an intersection, a class the program leaves out) where it is
-//! a field's or in a native; at a `getGenericSuperclass` call, such a superclass among the
-//! classes tested is rejected with the call. As with `getAnnotation`, each call makes new
+//! a field's or in a native; at a `getGenericSuperclass` call that narrows the classes down, such
+//! a superclass among the classes tested is rejected with the call. As with `getAnnotation`, each call makes new
 //! objects, where Java's class keeps the ones it made, so two calls give types that are `equals`
 //! but not `==`.
 
@@ -53,6 +56,7 @@ const VARIABLE: usize = 3;
 const UNSUPPORTED: usize = 4;
 const TYPE_PARAMETERS: usize = 5;
 const GENERIC_INTERFACES: usize = 6;
+const GENERIC_SUPERCLASS: usize = 7;
 
 /// The type variables of the runtime's generic classes (`program::RUNTIME_CLASSES`), which the
 /// program does not declare, with their bounds as javac writes them.
@@ -138,7 +142,7 @@ fn parse(text: &str) -> Option<Generic> {
 impl<'t> Lowering<'t> {
     /// The methods of `GENERIC_TYPES`, which a whole program has when it uses one, and the type
     /// `java.lang.reflect.Type`.
-    fn generic_methods(&self, node: Node<'t>, what: &str) -> Result<([usize; 7], Type), Error> {
+    fn generic_methods(&self, node: Node<'t>, what: &str) -> Result<([usize; 8], Type), Error> {
         let found = crate::program::GENERIC_TYPES.map(|(c, m, s)| self.template_method(c, m, s));
         if found.iter().any(Option::is_none) {
             return unsupported(node, &format!("{what} outside a whole program"));
@@ -151,12 +155,24 @@ impl<'t> Lowering<'t> {
 
     /// `receiver.getGenericSuperclass()` (see the module's comment).
     pub(super) fn generic_superclass(&self, node: Node<'t>, receiver: Node<'t>) -> Result<ExprKind, Error> {
-        let (_, type_ty) = self.generic_methods(node, "`getGenericSuperclass`")?;
+        let (methods, type_ty) = self.generic_methods(node, "`getGenericSuperclass`")?;
         let pos = node.pos();
         let local = self.fresh_name("class");
         let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
         // The classes `c` can be, each with the superclass javac gives it.
         let of = self.classes_of(receiver)?;
+        if of.is_none() {
+            // Any class of the program: the one chain of `TranslatedTypes`.
+            let method = methods[GENERIC_SUPERCLASS];
+            let class = self.convert(self.expr(receiver)?, Type::JavaClass);
+            let ret = self.return_type(node, method)?;
+            let call = ExprKind::Call {
+                name: "genericSuperclass".to_string(),
+                args: vec![class],
+                resolved: Some(method),
+            };
+            return Ok(self.synth(call, pos, ret).kind);
+        }
         let mut found = Vec::new();
         for t in 0..self.types.len() {
             let decl = self.types[t].node;
@@ -166,14 +182,7 @@ impl<'t> Lowering<'t> {
             {
                 continue;
             }
-            let superclass = match decl.kind() {
-                "CLASS" => match decl.get("extendsClause") {
-                    Some(clause) if clause.java_type().contains('<') => clause.java_type().to_string(),
-                    _ => continue,
-                },
-                "ENUM" => format!("java.lang.Enum<{}>", self.types[t].javac),
-                _ => continue,
-            };
+            let Some(superclass) = generic_superclass_of(self, t) else { continue };
             let Some(generic) = parse(&superclass) else {
                 return unsupported(
                     node,
@@ -271,6 +280,11 @@ impl<'t> Lowering<'t> {
                         continue;
                     }
                     array(variables)
+                }
+                "genericSuperclass0" => {
+                    let Some(superclass) = generic_superclass_of(self, t) else { continue };
+                    let why = "`Class.getGenericSuperclass` of a class that extends";
+                    self.made_or_thrown(node, &superclass, Context::Class(t), type_ty, why)
                 }
                 "genericInterfaces0" => {
                     let clauses: Vec<Node<'t>> = decl.list("implementsClause").collect();
@@ -562,5 +576,18 @@ fn array_text(component: &Generic) -> Option<String> {
         Generic::Class { name, .. } => Some(format!("{name}[]")),
         Generic::Array(inner) => Some(format!("{}[]", array_text(inner)?)),
         Generic::Wildcard { .. } => None,
+    }
+}
+
+/// The superclass of class `t` as javac writes it, where it has type arguments: a class's
+/// `extends` clause, an enum's `Enum<E>`; `None` for any other type.
+fn generic_superclass_of(l: &Lowering, t: usize) -> Option<String> {
+    let decl = l.types[t].node;
+    match decl.kind() {
+        "CLASS" => {
+            decl.get("extendsClause").map(|c| c.java_type()).filter(|s| s.contains('<')).map(str::to_string)
+        }
+        "ENUM" => Some(format!("java.lang.Enum<{}>", l.types[t].javac)),
+        _ => None,
     }
 }

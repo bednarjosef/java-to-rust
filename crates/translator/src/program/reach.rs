@@ -1631,7 +1631,7 @@ pub const ANNOTATION_VALUES: [JdkMethod; 2] = [
 /// The translator's methods that make the generic types that reflection answers
 /// (`java/overlay/sun/reflect/generics/reflectiveObjects/TranslatedTypes.java`, see
 /// `lower::generic_types`).
-pub const GENERIC_TYPES: [JdkMethod; 7] = [
+pub const GENERIC_TYPES: [JdkMethod; 8] = [
     (
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "parameterized",
@@ -1666,6 +1666,11 @@ pub const GENERIC_TYPES: [JdkMethod; 7] = [
         "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
         "genericInterfaces",
         "(java.lang.Class<?>)java.lang.reflect.Type[]",
+    ),
+    (
+        "sun.reflect.generics.reflectiveObjects.TranslatedTypes",
+        "genericSuperclass",
+        "(java.lang.Class<?>)java.lang.reflect.Type",
     ),
 ];
 
