@@ -263,11 +263,17 @@ pub enum Native {
     WaitForProcess,
     /// `ProcessHandleImpl.destroy0(pid, startTime, force)`.
     DestroyProcess,
-    /// `Reference.hasReferencePendingList()`: a translated program's collector traces a
-    /// referent as any other field and discovers no references, so none is ever pending.
-    NoPendingReferences,
-    /// `Reference.waitForReferencePendingList()`: waits for ever, as no reference becomes pending.
+    /// `Reference.hasReferencePendingList()`: whether the collector cleared the referent of a
+    /// reference with a queue that the program has not taken yet (`java::has_pending_references`).
+    HasPendingReferences,
+    /// `Reference.waitForReferencePendingList()`: waits until one is.
     WaitForPendingReferences,
+    /// `TranslatedReferences.register(reference, kind, queued)` of the translator's overlay:
+    /// registers a reference with the collector (`java::register_reference`).
+    RegisterReference,
+    /// `TranslatedReferences.next()`: a reference whose referent the collector cleared, or null
+    /// (`java::take_pending_reference`).
+    NextPendingReference,
     /// `Unsafe.getLoadAverage0(loadavg, nelems)`.
     LoadAverage,
     /// A native of `com.sun.management.internal.OperatingSystemImpl` or
@@ -546,9 +552,17 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.util.zip.Deflater", "setDictionaryBuffer", "(long,long,int)void") => {
             Native::DeflateSetDictionaryBuffer
         }
-        ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
+        ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::HasPendingReferences,
         ("java.lang.ref.Reference", "waitForReferencePendingList", "()void") => {
             Native::WaitForPendingReferences
+        }
+        (
+            "java.lang.ref.TranslatedReferences",
+            "register",
+            "(java.lang.ref.Reference<?>,int,boolean)void",
+        ) => Native::RegisterReference,
+        ("java.lang.ref.TranslatedReferences", "next", "()java.lang.ref.Reference<?>") => {
+            Native::NextPendingReference
         }
         ("jdk.internal.misc.Unsafe", "getLoadAverage0", "(double[],int)int") => Native::LoadAverage,
         // The memory, swap, processor time and descriptors of the process and the machine, as the
@@ -636,8 +650,6 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 // Lowered as code on the referent (`lower::references`).
                 | ("java.lang.ref.Reference", "get0" | "refersTo0" | "clear0")
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
-                // No reference is pending (`lower/natives.rs`).
-                | ("java.lang.ref.Reference", "getAndClearReferencePendingList")
                 // `LockSupport`'s, with the thread's id for `unpark` (`lower/natives.rs`).
                 | ("jdk.internal.misc.Unsafe", "park" | "unpark")
                 // What the translator read from the program's roots: its modules and the

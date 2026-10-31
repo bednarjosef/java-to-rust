@@ -55,6 +55,7 @@
 //! runs is only known to the C library.
 
 mod census;
+pub(crate) mod references;
 mod who;
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -597,6 +598,7 @@ fn start(h: &mut Heap) {
     let census = number_from(c"JAVA_GC_CENSUS").unwrap_or(0);
     census::LEVEL.store(census, Ordering::Relaxed);
     census::FROM.store(number_from(c"JAVA_GC_CENSUS_FROM").unwrap_or(0), Ordering::Relaxed);
+    references::start_clock();
     if census >= 3 {
         census::start_types(h.base);
     }
@@ -1792,6 +1794,55 @@ impl Marker {
         }
     }
 
+    /// Whether the taken slot that `word` points into is marked; `None` if it points into none.
+    fn marked(&self, word: usize) -> Option<bool> {
+        let word = word & crate::thin::ADDRESS;
+        if word.wrapping_sub(self.base) >= self.end - self.base {
+            return None;
+        }
+        let mut b = (word - self.base) >> BLOCK_SHIFT;
+        let mut m = unsafe { self.meta.add(b) };
+        let (w, bit) = match unsafe { (*m).kind } {
+            SMALL => {
+                let start = self.base + (b << BLOCK_SHIFT) + unsafe { (*m).start } as usize;
+                if word < start {
+                    return None;
+                }
+                let slot = (((word - start) as u64 * unsafe { (*m).magic }) >> 32) as usize;
+                if slot >= unsafe { (*m).slots } as usize {
+                    return None;
+                }
+                (slot / 64, 1u64 << (slot % 64))
+            }
+            LARGE | LARGE_REST => {
+                if unsafe { (*m).kind } == LARGE_REST {
+                    b = unsafe { (*m).size } as usize;
+                    m = unsafe { self.meta.add(b) };
+                }
+                (0, 1)
+            }
+            _ => return None,
+        };
+        if unsafe { (*m).taken[w] } & bit == 0 {
+            return None;
+        }
+        Some(unsafe { (*m).marks[w] } & bit != 0)
+    }
+
+    /// Scans the words of `[from, to)` of a root, inverted too, once the program has references
+    /// (`references`): a thread stopped while it reads a referent (`java::WeakField`) may hold
+    /// its word inverted.
+    fn root_range(&mut self, from: usize, to: usize) {
+        self.range(from, to);
+        if references::USED.load(Ordering::Relaxed) {
+            let mut p = (from + 7) & !7;
+            while p + 8 <= to {
+                self.candidate(!unsafe { (p as *const usize).read() });
+                p += 8;
+            }
+        }
+    }
+
     /// Scans the words of `[from, to)`.
     fn range(&mut self, from: usize, to: usize) {
         let mut p = (from + 7) & !7;
@@ -1998,9 +2049,9 @@ fn scan_own_stack(marker: &mut Marker, top: usize) {
         )
     };
     let here = registers.as_ptr() as usize;
-    marker.range(here, here + std::mem::size_of_val(&registers));
+    marker.root_range(here, here + std::mem::size_of_val(&registers));
     std::hint::black_box(&registers);
-    marker.range(here, top);
+    marker.root_range(here, top);
 }
 
 /// A collection, with the lock held.
@@ -2015,6 +2066,7 @@ fn collect(g: &Guard) {
         return;
     }
     let me = ENTRY.try_with(|e| e.get()).unwrap_or(NO_ENTRY);
+    references::tick();
     let started = std::time::Instant::now();
     let started_time = process_time();
     let taken = heap(g).taken;
@@ -2167,13 +2219,13 @@ fn mark_and_sweep(
         }
         let tp = if i == me { thread_pointer() } else { t.thread_pointer.get() };
         if tls > 0 && tp != 0 {
-            marker.range(tp - tls, tp);
+            marker.root_range(tp - tls, tp);
             marker.drain();
         }
         if i == me {
             scan_own_stack(&mut marker, t.stack_top.get());
         } else if t.stopped_sp.get() != 0 {
-            marker.range(t.stopped_sp.get(), t.stack_top.get());
+            marker.root_range(t.stopped_sp.get(), t.stack_top.get());
         }
         marker.drain();
     }
@@ -2185,6 +2237,9 @@ fn mark_and_sweep(
         }
         futex_wait(&MARK_DONE, done);
     }
+    // The helpers are done: what references keep is marked by this thread alone.
+    marker.shares = false;
+    references::process(g, &mut marker, minor, heap(g).alive);
     let h = heap(g);
     keep_spans(h);
     let marked = started.elapsed();

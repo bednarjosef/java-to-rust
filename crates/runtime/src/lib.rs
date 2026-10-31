@@ -80,6 +80,7 @@ mod translate_escapes;
 mod unix;
 mod unsigned;
 mod vm;
+mod weak;
 pub mod wtf8;
 pub use allocation_counts::{AllocationCount, count_allocation};
 pub use arguments::main_args;
@@ -114,6 +115,7 @@ pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects, print_format, print_format_objects};
 pub use fs::*;
+pub use gc::references::{has_pending_references, wait_for_pending_references};
 pub use gc::{Allocator, CompactAllocator, compact_references};
 pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use inflate::{
@@ -167,6 +169,7 @@ pub use unsigned::{
     try_parse_unsigned,
 };
 pub use vm::*;
+pub use weak::{WeakField, register_reference, take_pending_reference};
 pub use wtf8::{JString, Piece, Wtf8, string_case, wtf8, wtf8_bytes};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.

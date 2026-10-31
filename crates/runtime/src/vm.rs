@@ -235,16 +235,6 @@ pub fn load_average(loadavg: &mut [f64], nelems: i32) -> i32 {
     n
 }
 
-/// `Reference.waitForReferencePendingList()`, which the reference handler thread calls before it
-/// takes the references that the collector discovered: a translated program's collector
-/// (`gc.rs`) traces a referent as any other field and discovers none, so it waits for ever, as
-/// on a JVM whose collector never needs the memory.
-pub fn wait_for_pending_references() {
-    loop {
-        std::thread::park();
-    }
-}
-
 /// `OperatingSystemImpl.getTotalMemorySize0()` and `getFreeMemorySize0()`: the machine's memory
 /// and its free memory, `sysconf`'s pages times the page size, as the JDK reads them on Linux.
 pub fn os_total_memory() -> i64 {

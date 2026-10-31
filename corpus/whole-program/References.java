@@ -1,7 +1,6 @@
 // Soft, weak and phantom references, translated from the JDK's java.lang.ref, with the referent
-// natives as code on the referent. A translated program has no collector that clears a
-// reference behind its back, as on a JVM whose collector never needs the memory: the referents
-// here stay strongly reachable, so Java gives the same output. Only `clear` changes a
+// natives as code on the referent. The referents here stay strongly reachable, so the collector
+// clears none of them (WeakReferencesCleared has those it does): only `clear` changes a
 // reference, and a queue stays empty. (`enqueue` waits for `Object.notifyAll`.)
 import java.lang.ref.PhantomReference;
 import java.lang.ref.Reference;

@@ -1,11 +1,9 @@
 //! The natives of `java.lang.ref.Reference` and `PhantomReference` that read and write the
-//! referent: `get0`, `refersTo0` and `clear0`. The referent is an ordinary field, which the
-//! collector (`runtime/src/gc.rs`) traces as any other, so a reference keeps its referent alive
-//! and nothing clears it behind the program's back. So a reference behaves as on a JVM whose
-//! collector never needs the memory: `get` gives the referent until `clear` sets it to null,
-//! `refersTo` compares it, and a reference is enqueued only by its `enqueue`, so a
-//! `ReferenceQueue` gets nothing else. The rest of `java.lang.ref` is translated from the JDK's
-//! source.
+//! referent: `get0`, `refersTo0` and `clear0`. The referent is a `java::WeakField`
+//! (`codegen::objects::weak_referent`), which the collector does not trace and clears once
+//! nothing else keeps the referent (docs/collector.md, "References"); the rest of
+//! `java.lang.ref` is translated from the JDK's source, with the translator's patch of
+//! `Reference` and `ReferenceQueue`.
 //!
 //! Each native is lowered as the Java code it stands for, on the field `referent`:
 //! `this.referent`, `this.referent == o` and `this.referent = null`.
