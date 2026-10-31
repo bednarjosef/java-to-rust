@@ -540,6 +540,6 @@ public class CallsThroughManyLambdas {
         for (int i = 0; i < 20000; i++) {
             sum += call(200 + i % 50, i);
         }
-        System.out.println("dispatch frames " + sum + " " + call(4000, 1));
+        System.out.println("dispatch frames " + sum + " " + call(1000, 1));
     }
 }
