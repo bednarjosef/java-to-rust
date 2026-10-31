@@ -1031,7 +1031,7 @@ fn assigned_null_test(e: &Expr) -> Option<(&str, bool)> {
 /// one that the leading assignments of its class's `<clinit>` set to a value that is not null and
 /// that nothing else assigns. Code of another thread that reads it waits until the class is
 /// initialized; code of the initializing thread runs after that assignment, or else during the
-/// values of it and the assignments before it, which `reads_static` shows never read it.
+/// values of it and the assignments before it, which `Reached` shows never read it.
 fn initialized_statics(class: &Class, facts: &Facts) -> FastSet<(usize, String)> {
     let mut walk = StaticReads::new(class);
     let mut leading = Vec::new();
@@ -1039,7 +1039,7 @@ fn initialized_statics(class: &Class, facts: &Facts) -> FastSet<(usize, String)>
         if method.name != "<clinit>" {
             continue;
         }
-        let mut before: Vec<&Expr> = Vec::new();
+        let mut before = Reached::default();
         let mut first = Vec::new();
         // A `<clinit>` that keeps the state of its class's initialization (`lower::clinit_errors`)
         // runs its own statements in a `try` after it: a use of the class after a failure throws
@@ -1061,14 +1061,13 @@ fn initialized_statics(class: &Class, facts: &Facts) -> FastSet<(usize, String)>
                 }) => (*c, name, value),
                 // Other expressions and locals' values, which run before what follows.
                 Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::If { cond: e, .. } => {
-                    before.push(e);
+                    before.add(&mut walk, e, method.class);
                     continue;
                 }
                 _ => continue,
             };
-            before.push(value);
-            if c == method.class && !maybe_null(facts, m, value) && !reads_static(&mut walk, &before, c, name)
-            {
+            before.add(&mut walk, value, method.class);
+            if c == method.class && !maybe_null(facts, m, value) && !before.reads(name) {
                 leading.push((c, name.clone()));
             }
         }
@@ -1121,37 +1120,50 @@ fn leading_statements<'s>(stmts: &'s [Stmt], out: &mut Vec<&'s Stmt>) -> bool {
     true
 }
 
-/// Whether evaluating `roots` may read the static `name` of class `c`: whether it, or a method
-/// or static initializer that it may run, transitively, reads it. A walk too long to follow says
-/// it may.
-fn reads_static(walk: &mut StaticReads, roots: &[&Expr], c: usize, name: &str) -> bool {
-    const LIMIT: usize = 2000;
-    let mut root = StaticRead::default();
-    for e in roots {
-        walk.look(e, &mut root);
-    }
-    let mut reads = root.reads.iter().any(|(d, n)| *d == c && n == name);
-    walk.turn += 1;
-    let turn = walk.turn;
-    let mut seen = 0;
-    let mut work = root.runs;
-    while let Some(m) = work.pop() {
-        if walk.seen[m] == turn {
-            continue;
-        }
-        walk.seen[m] = turn;
-        seen += 1;
-        if seen > LIMIT {
-            return true;
-        }
-        let known = walk.summary(m);
-        reads |= known.reads.iter().any(|(d, n)| *d == c && n == name);
-        work.extend(known.runs.iter().filter(|&&r| walk.seen[r] != turn));
-    }
-    reads
+/// What evaluating the leading statements of a static initializer may do, transitively, as far as
+/// they go (`initialized_statics`): the statics of its own class that it, or a method or static
+/// initializer it may run, reads, and the methods it may run. The statements only add to it, one
+/// at a time, so each is looked at once, and each method once for the initializer. A walk too long
+/// to follow may read any static.
+#[derive(Default)]
+struct Reached {
+    reads: FastSet<String>,
+    runs: FastSet<usize>,
+    unknown: bool,
 }
 
-/// What evaluating some code reads and runs, for `reads_static`: the statics it reads, and the
+impl Reached {
+    /// Adds what evaluating `e`, in a static initializer of class `c`, may do.
+    fn add(&mut self, walk: &mut StaticReads, e: &Expr, c: usize) {
+        const LIMIT: usize = 2000;
+        if self.unknown {
+            return;
+        }
+        let mut root = StaticRead::default();
+        walk.look(e, &mut root);
+        self.reads.extend(root.reads.into_iter().filter(|(d, _)| *d == c).map(|(_, n)| n));
+        let mut work = root.runs;
+        while let Some(m) = work.pop() {
+            if !self.runs.insert(m) {
+                continue;
+            }
+            if self.runs.len() > LIMIT {
+                self.unknown = true;
+                return;
+            }
+            let known = walk.summary(m);
+            self.reads.extend(known.reads.iter().filter(|(d, _)| *d == c).map(|(_, n)| n.clone()));
+            work.extend(known.runs.iter().filter(|r| !self.runs.contains(r)));
+        }
+    }
+
+    /// Whether what was added may read the static `name` of the initializer's class.
+    fn reads(&self, name: &str) -> bool {
+        self.unknown || self.reads.contains(name)
+    }
+}
+
+/// What evaluating some code reads and runs, for `Reached`: the statics it reads, and the
 /// methods and static initializers it may run.
 #[derive(Default)]
 struct StaticRead {
@@ -1159,14 +1171,11 @@ struct StaticRead {
     runs: Vec<usize>,
 }
 
-/// The walks of `reads_static`: each method's `StaticRead`, found once, and the methods seen by
-/// the current walk, as the number of its turn.
+/// The walks of `Reached`: each method's `StaticRead`, found once.
 struct StaticReads<'c> {
     class: &'c Class,
     clinits: FastMap<usize, usize>,
     summaries: Vec<Option<std::rc::Rc<StaticRead>>>,
-    seen: Vec<u32>,
-    turn: u32,
 }
 
 impl StaticReads<'_> {
@@ -1176,7 +1185,7 @@ impl StaticReads<'_> {
             .map(|(i, m)| (m.class, i))
             .collect();
         let n = class.methods.len();
-        StaticReads { class, clinits, summaries: vec![None; n], seen: vec![0; n], turn: 0 }
+        StaticReads { class, clinits, summaries: vec![None; n] }
     }
 
     fn summary(&mut self, m: usize) -> std::rc::Rc<StaticRead> {
