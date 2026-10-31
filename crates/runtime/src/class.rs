@@ -75,7 +75,7 @@ impl<const N: usize> ClassSet<N> {
 
 /// What a class is, which its `toString` shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
+pub enum ClassKind {
     Class,
     Enum,
     Interface,
@@ -107,7 +107,7 @@ pub struct Class {
     name: &'static str,
     /// The name in the source, as `getSimpleName` gives it: `String`, `Point`, `int[]`.
     simple: &'static str,
-    kind: Kind,
+    kind: ClassKind,
     superclass: Option<&'static Class>,
     component: Option<fn() -> &'static Class>,
     /// The binary names of the class and of every class and interface above it, its own first,
@@ -149,17 +149,17 @@ impl Class {
         superclass: Option<&'static Class>,
         names: Names,
     ) -> Class {
-        Class::made(name, simple, Kind::Class, superclass, None, names, PUBLIC)
+        Class::made(name, simple, ClassKind::Class, superclass, None, names, PUBLIC)
     }
 
     /// An enum, whose superclass is `Enum`.
     pub const fn enumeration(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Enum, Some(&Class::ENUM), None, names, PUBLIC | FINAL | ENUM)
+        Class::made(name, simple, ClassKind::Enum, Some(&Class::ENUM), None, names, PUBLIC | FINAL | ENUM)
     }
 
     /// An interface, which has no superclass.
     pub const fn interface(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Interface, None, None, names, PUBLIC | INTERFACE | ABSTRACT)
+        Class::made(name, simple, ClassKind::Interface, None, None, names, PUBLIC | INTERFACE | ABSTRACT)
     }
 
     /// An annotation type, an interface that `isAnnotation()`.
@@ -167,7 +167,7 @@ impl Class {
         Class::made(
             name,
             simple,
-            Kind::Annotation,
+            ClassKind::Annotation,
             None,
             None,
             names,
@@ -178,27 +178,27 @@ impl Class {
     /// An array class, `[Ljava.lang.String;`, whose superclass is `Object`.
     pub const fn array(name: &'static str, simple: &'static str, component: fn() -> &'static Class) -> Class {
         // `getModifiers` answers from the component's.
-        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), Some(component), &[], 0)
+        Class::made(name, simple, ClassKind::Class, Some(&Class::OBJECT), Some(component), &[], 0)
     }
 
     const fn primitive(name: &'static str) -> Class {
-        Class::made(name, name, Kind::Primitive, None, None, &[], PUBLIC | FINAL | ABSTRACT)
+        Class::made(name, name, ClassKind::Primitive, None, None, &[], PUBLIC | FINAL | ABSTRACT)
     }
 
     /// A class of the runtime that is final, as most of the standard classes are.
     const fn standard(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), None, names, PUBLIC | FINAL).leaf()
+        Class::made(name, simple, ClassKind::Class, Some(&Class::OBJECT), None, names, PUBLIC | FINAL).leaf()
     }
 
     /// One of the runtime's abstract classes.
     const fn abstract_standard(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(&Class::OBJECT), None, names, PUBLIC | ABSTRACT)
+        Class::made(name, simple, ClassKind::Class, Some(&Class::OBJECT), None, names, PUBLIC | ABSTRACT)
     }
 
     const fn made(
         name: &'static str,
         simple: &'static str,
-        kind: Kind,
+        kind: ClassKind,
         superclass: Option<&'static Class>,
         component: Option<fn() -> &'static Class>,
         names: Names,
@@ -220,6 +220,48 @@ impl Class {
             last: 0,
             members: (0, &[]),
             hash: name_hash(name),
+        }
+    }
+
+    /// A class of the program, as the translator writes it out: every field given, the hash of
+    /// its name included, in one call. rustc evaluates each class value of a program when it
+    /// compiles it, and a chain of builder calls (`new(..).implementing(..).numbered(..)`) with
+    /// the hash's loop over the name cost it about three times as much: 13.3 s against 5.0 s for
+    /// 20,000 classes (the Minecraft server has 44,000). `leaf`, `number` and `last` are as
+    /// `numbered` and `numbers` set them (0 and 0 where unknown); an interface's `members` follow
+    /// the call. `hash` is the name's `String.hashCode`.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn of_program(
+        name: &'static str,
+        simple: &'static str,
+        kind: ClassKind,
+        superclass: Option<&'static Class>,
+        names: Names,
+        interfaces: &'static [&'static Class],
+        leaf: bool,
+        number: u16,
+        last: u16,
+        modifiers: u16,
+        nest: Nest,
+        enclosing: Option<&'static Class>,
+        hash: i32,
+    ) -> Class {
+        Class {
+            name,
+            simple,
+            kind,
+            superclass,
+            component: None,
+            names,
+            modifiers,
+            nest,
+            enclosing,
+            interfaces,
+            leaf,
+            number,
+            last,
+            members: (0, &[]),
+            hash,
         }
     }
 
@@ -280,7 +322,7 @@ impl Class {
 
     /// A box of a number, whose superclass is `Number`.
     const fn number(name: &'static str, simple: &'static str, names: Names) -> Class {
-        Class::made(name, simple, Kind::Class, Some(&Class::NUMBER), None, names, PUBLIC | FINAL).leaf()
+        Class::made(name, simple, ClassKind::Class, Some(&Class::NUMBER), None, names, PUBLIC | FINAL).leaf()
     }
 
     const SERIALIZABLE: Class = Class::interface(SERIAL, "Serializable", &[SERIAL, OBJECT]);
@@ -456,7 +498,7 @@ impl Class {
     /// of the class of a constant's body.
     pub fn enum_declaring_class(&'static self) -> &'static Class {
         match self.superclass {
-            Some(s) if s.kind == Kind::Enum => s,
+            Some(s) if s.kind == ClassKind::Enum => s,
             _ => self,
         }
     }
@@ -492,7 +534,7 @@ impl Class {
         if let Some(component) = self.get_component_type() {
             return component.canonical_name().map(|name| format!("{name}[]"));
         }
-        if self.kind == Kind::Primitive {
+        if self.kind == ClassKind::Primitive {
             return Some(self.name.to_string());
         }
         if let Some(name) = crate::proxy_classes::proxy_name(self.name) {
@@ -510,7 +552,7 @@ impl Class {
 
     /// `descriptorString()`: the class's type descriptor, `I`, `[I` or `Ljava/lang/String;`.
     pub fn descriptor_string(&self) -> crate::JString {
-        let text = if self.kind == Kind::Primitive {
+        let text = if self.kind == ClassKind::Primitive {
             match self.name {
                 "boolean" => "Z".to_string(),
                 "long" => "J".to_string(),
@@ -530,7 +572,7 @@ impl Class {
         if let Some(component) = self.get_component_type() {
             return component.get_package_name();
         }
-        if self.kind == Kind::Primitive {
+        if self.kind == ClassKind::Primitive {
             return "java.lang".into();
         }
         self.shown().rsplit_once('.').map_or("", |(package, _)| package).into()
@@ -580,22 +622,22 @@ impl Class {
 
     /// `isInterface()`.
     pub fn is_interface(&self) -> bool {
-        matches!(self.kind, Kind::Interface | Kind::Annotation)
+        matches!(self.kind, ClassKind::Interface | ClassKind::Annotation)
     }
 
     /// `isAnnotation()`.
     pub fn is_annotation(&self) -> bool {
-        self.kind == Kind::Annotation
+        self.kind == ClassKind::Annotation
     }
 
     /// `isEnum()`.
     pub fn is_enum(&self) -> bool {
-        self.kind == Kind::Enum
+        self.kind == ClassKind::Enum
     }
 
     /// `isPrimitive()`.
     pub fn is_primitive(&self) -> bool {
-        self.kind == Kind::Primitive
+        self.kind == ClassKind::Primitive
     }
 
     /// `isInstance(x)`, given the binary names of the class of `x` and of every class and
@@ -649,7 +691,7 @@ impl Class {
         if self.name == other.name {
             return true;
         }
-        if self.kind == Kind::Primitive || other.kind == Kind::Primitive {
+        if self.kind == ClassKind::Primitive || other.kind == ClassKind::Primitive {
             return false;
         }
         match (self.get_component_type(), other.get_component_type()) {
@@ -734,9 +776,9 @@ impl Hash for Class {
 impl fmt::Display for Class {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.kind {
-            Kind::Class | Kind::Enum => write!(f, "class {}", self.shown()),
-            Kind::Interface | Kind::Annotation => write!(f, "interface {}", self.name),
-            Kind::Primitive => f.write_str(self.name),
+            ClassKind::Class | ClassKind::Enum => write!(f, "class {}", self.shown()),
+            ClassKind::Interface | ClassKind::Annotation => write!(f, "interface {}", self.name),
+            ClassKind::Primitive => f.write_str(self.name),
         }
     }
 }

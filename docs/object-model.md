@@ -277,6 +277,10 @@ Rules:
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
   wraps the object in that type's enum (`Binary__eval(Binary::Add(o.clone()))`) rather than
   converting the whole value.
+- A variant's constructor (`Base::Circle(o)`) is written only when code makes a value of that
+  variant: a class is a variant of the enum of every type above it, and most of those values are
+  never made (javac's translation makes 6,900 of its 11,700), while each constructor is a
+  function for rustc to check and to keep in the header crate's metadata.
 - An object is held by a `java::Arc`, a handle with no count (docs/collector.md). A value of an
   enum is that handle's address with the class's number in the top 16 bits (`java::Thin`,
   `crates/runtime/src/thin.rs`); `Arc` ignores those bits when it reads its pointer, so `view()`
