@@ -653,6 +653,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut raised_by_calls: FastMap<&[usize], BTreeSet<Kind>> = Default::default();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
+            // What a point raises matters here only to the `try`s around it, or as a failure of
+            // the runtime: most calls are in neither, and their callees are many.
+            if p.frames.is_empty() && !matches!(p.raise, Raise::Runtime { .. }) {
+                continue;
+            }
             let gathered;
             let kinds = match &p.raise {
                 Raise::Call(callees) => {
