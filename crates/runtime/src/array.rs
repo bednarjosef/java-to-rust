@@ -1328,9 +1328,10 @@ pub fn fill<T: Clone>(a: &impl Elements<T>, v: T) {
     a.writing(0..a.length(), |items| items.fill(v));
 }
 
-/// `Arrays.sort(a)` for integers and booleans.
+/// `Arrays.sort(a)` for integers and booleans. Equal values cannot be told apart, so the order
+/// among them is not seen and an unstable sort, which moves less, gives the same array.
 pub fn sort<T: Ord + Clone>(a: &impl Elements<T>) {
-    a.writing(0..a.length(), |items| items.sort());
+    a.writing(0..a.length(), |items| items.sort_unstable());
 }
 
 /// `Arrays.sort(a)` for doubles, in Java's order (`Double.compare`): -0.0 before 0.0, and every
