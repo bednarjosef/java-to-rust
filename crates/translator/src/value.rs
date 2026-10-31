@@ -2,13 +2,16 @@
 //! methods, in a fraction of its memory. A `serde_json` object is a `BTreeMap` whose smallest
 //! node has room for eleven entries, each key a `String` of its own, so a node of a few fields
 //! takes over half a kilobyte, about ten times its JSON text. Here an object is a list of its
-//! fields, and every string, key or value, is interned: the few hundred keys and the names and
+//! values beside its fields' names, and every string, key or value, is interned: the few hundred keys and the names and
 //! types that repeat across the units are each held once, for the whole run.
 //!
-//! A value is 16 bytes and a field 24: an interned string is a pointer to the one copy of its
-//! text, and the elements of an array and the fields of an object are behind one pointer to their
-//! length and items (`ThinVec`). With a `&str` and `Vec`s, a value took 32 bytes and a field 48,
-//! and the Minecraft server's trees about 9 GB.
+//! A value is 16 bytes: an interned string is a pointer to the one copy of its text, and the
+//! elements of an array are behind one pointer to their length and items (`ThinVec`). An object
+//! is one allocation of a pointer to the names of its fields, held once for all objects with the
+//! same names, and its values, 16 bytes each (`Map`); one whose values are all strings, numbers,
+//! booleans or nulls is held once for all objects equal to it (`Map::leaf`). With a `&str`,
+//! `Vec`s and (name, value) pairs, a value took 32 bytes and a field 48, and the Minecraft
+//! server's trees about 9 GB.
 
 use std::alloc::Layout;
 use std::fmt;
@@ -37,7 +40,7 @@ impl Str {
     }
 
     pub fn as_str(&self) -> &'static str {
-        *self.0
+        self.0
     }
 }
 
@@ -290,10 +293,61 @@ impl Map {
         }
     }
 
+    /// The object of fields `keys`, as `from_parts`, whose `values` are all strings, numbers,
+    /// booleans or nulls: the one copy of it (`LEAVES`).
+    fn leaf(keys: &[Str], values: Vec<Value>) -> Map {
+        let keys = held_keys(keys);
+        if keys.is_empty() {
+            return Map::new();
+        }
+        assert_eq!(keys.len(), values.len());
+        let hash = leaf_hash(keys, &values);
+        let mut leaves = LEAVES.lock().unwrap_or_else(|e| e.into_inner());
+        let bucket = leaves.entry(hash).or_default();
+        for held in bucket.iter() {
+            let map = std::mem::ManuallyDrop::new(Map(held.0.map_addr(|a| a | SHARED)));
+            if std::ptr::eq(map.keys_slice(), keys)
+                && map.values_slice().iter().zip(&values).all(|(a, b)| same(a, b))
+            {
+                // SAFETY: the count of a shared object changes only under the lock of `LEAVES`.
+                unsafe { *count(held.0.as_ptr()) += 1 };
+                return Map(map.0);
+            }
+        }
+        let (layout, offset) = shared_layout(keys.len());
+        // SAFETY: as in `from_parts`, after the count, which the layout puts first.
+        unsafe {
+            let start = std::alloc::alloc(layout);
+            if start.is_null() {
+                std::alloc::handle_alloc_error(layout)
+            }
+            start.cast::<usize>().write(1);
+            let header = NonNull::new_unchecked(start.add(offset).cast::<Header>());
+            header.as_ptr().write(Header { keys });
+            let first = start.add(offset + Map::layout(keys.len()).1).cast::<Value>();
+            for (i, value) in values.into_iter().enumerate() {
+                first.add(i).write(value);
+            }
+            bucket.push(Leaf(header));
+            Map(header.map_addr(|a| a | SHARED))
+        }
+    }
+
+    /// Whether the object is the one copy of objects equal to it (`leaf`).
+    fn is_shared(&self) -> bool {
+        self.0.addr().get() & SHARED != 0
+    }
+
+    /// Where the header is.
+    fn header(&self) -> *mut Header {
+        self.0.as_ptr().map_addr(|a| a & !SHARED)
+    }
+
     /// The names of the fields, in order.
     fn keys_slice(&self) -> &'static [Str] {
-        // SAFETY: the header is `EMPTY` or one that `from_parts` wrote, alive as long as `self`.
-        unsafe { self.0.as_ref().keys }
+        // SAFETY: the header is `EMPTY` or one that `from_parts` or `leaf` wrote, alive as long
+        // as `self`.
+        unsafe { (*self.header()).keys }
     }
 
     /// Where the values start.
@@ -303,21 +357,28 @@ impl Map {
             return NonNull::dangling().as_ptr();
         }
         // SAFETY: the offset is within the allocation of `n` values (`layout`).
-        unsafe { self.0.as_ptr().cast::<u8>().add(Map::layout(n).1).cast::<Value>() }
+        unsafe { self.header().cast::<u8>().add(Map::layout(n).1).cast::<Value>() }
     }
 
     fn values_slice(&self) -> &[Value] {
-        // SAFETY: the values are initialized and owned by `self`.
+        // SAFETY: the values are initialized and alive as long as `self`.
         unsafe { std::slice::from_raw_parts(self.first(), self.keys_slice().len()) }
     }
 
+    /// The values, to change: a shared object (`leaf`) is copied first.
     fn values_slice_mut(&mut self) -> &mut [Value] {
-        // SAFETY: as `values_slice`, borrowed mutably with `self`.
+        if self.is_shared() {
+            *self = Map::from_parts(self.keys_slice(), self.values_slice().iter().cloned());
+        }
+        // SAFETY: as `values_slice`, owned by `self` alone and borrowed mutably with it.
         unsafe { std::slice::from_raw_parts_mut(self.first(), self.keys_slice().len()) }
     }
 
     /// The values, moved out, with the allocation freed.
     fn into_values(self) -> Vec<Value> {
+        if self.is_shared() {
+            return self.values_slice().to_vec();
+        }
         let this = std::mem::ManuallyDrop::new(self);
         let n = this.keys_slice().len();
         let mut values = Vec::with_capacity(n);
@@ -326,7 +387,7 @@ impl Map {
             // them (`this` is not dropped).
             unsafe {
                 values.extend((0..n).map(|i| this.first().add(i).read()));
-                std::alloc::dealloc(this.0.as_ptr().cast::<u8>(), Map::layout(n).0);
+                std::alloc::dealloc(this.header().cast::<u8>(), Map::layout(n).0);
             }
         }
         values
@@ -441,20 +502,109 @@ impl Map {
 impl Drop for Map {
     fn drop(&mut self) {
         let n = self.keys_slice().len();
-        if n > 0 {
-            // SAFETY: the values are initialized and owned, and the allocation is the one that
-            // `from_parts` made for `n` values.
+        if n == 0 {
+            return;
+        }
+        if self.is_shared() {
+            let mut leaves = LEAVES.lock().unwrap_or_else(|e| e.into_inner());
+            let header = self.header();
+            // SAFETY: the count changes only under the lock; the last object to go frees the
+            // allocation that `leaf` made, after taking it out of `LEAVES`.
             unsafe {
-                std::ptr::drop_in_place(self.values_slice_mut());
-                std::alloc::dealloc(self.0.as_ptr().cast::<u8>(), Map::layout(n).0);
+                *count(header) -= 1;
+                if *count(header) > 0 {
+                    return;
+                }
+                let hash = leaf_hash(self.keys_slice(), self.values_slice());
+                if let Some(bucket) = leaves.get_mut(&hash) {
+                    bucket.retain(|l| l.0.as_ptr() != header);
+                    if bucket.is_empty() {
+                        leaves.remove(&hash);
+                    }
+                }
+                std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(self.first(), n));
+                let (layout, offset) = shared_layout(n);
+                std::alloc::dealloc(header.cast::<u8>().sub(offset), layout);
             }
+            return;
+        }
+        // SAFETY: the values are initialized and owned, and the allocation is the one that
+        // `from_parts` made for `n` values.
+        unsafe {
+            std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(self.first(), n));
+            std::alloc::dealloc(self.header().cast::<u8>(), Map::layout(n).0);
         }
     }
 }
 
 impl Clone for Map {
     fn clone(&self) -> Map {
+        if self.is_shared() {
+            let _leaves = LEAVES.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: the count changes only under the lock.
+            unsafe { *count(self.header()) += 1 };
+            return Map(self.0);
+        }
         Map::from_parts(self.keys_slice(), self.values_slice().iter().cloned())
+    }
+}
+
+/// The bit of a `Map`'s pointer that marks an object shared by all those equal to it
+/// (`Map::leaf`); headers are aligned to eight bytes.
+const SHARED: usize = 1;
+
+/// An object held by `LEAVES`.
+struct Leaf(NonNull<Header>);
+
+// The objects of `LEAVES` change only under its lock.
+unsafe impl Send for Leaf {}
+
+/// The objects of javac's trees whose values are all strings, numbers, booleans or nulls (the
+/// nodes of most identifiers, literals and primitive types), each held once for all equal to it,
+/// by `leaf_hash`, with a count of the copies of it before its header (`count`). Most such nodes
+/// repeat: on javac's census, 1.57 million are 402 thousand different ones.
+static LEAVES: LazyLock<Mutex<crate::analysis::FastMap<u64, Vec<Leaf>>>> = LazyLock::new(Default::default);
+
+/// The layout of a shared object of `n` fields (`Map::leaf`): its count, then the object as
+/// `Map::layout`; and where the header starts.
+fn shared_layout(n: usize) -> (Layout, usize) {
+    Layout::new::<usize>().extend(Map::layout(n).0).expect("an object too large")
+}
+
+/// The count of copies of a shared object, whose header is `header`.
+///
+/// # Safety
+/// The object is shared (`Map::leaf`) and alive, and the lock of `LEAVES` is held.
+unsafe fn count(header: *mut Header) -> *mut usize {
+    unsafe { header.cast::<u8>().sub(shared_layout(0).1).cast::<usize>() }
+}
+
+/// The hash of an object of `LEAVES`.
+fn leaf_hash(keys: &'static [Str], values: &[Value]) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = crate::analysis::IndexHasher::default();
+    hasher.write_usize(keys.as_ptr().addr());
+    for value in values {
+        let (kind, bits) = match value {
+            Value::Null => (0, 0),
+            Value::Bool(b) => (1, *b as u64),
+            Value::Number(Number::Int(n)) => (2, *n as u64),
+            Value::Number(Number::Float(x)) => (3, x.to_bits()),
+            Value::String(s) => (4, s.as_str().as_ptr().addr() as u64),
+            Value::Array(_) | Value::Object(_) => (5, 0),
+        };
+        hasher.write_usize(kind);
+        hasher.write_u64(bits);
+    }
+    hasher.finish()
+}
+
+/// Whether two values of objects of `LEAVES` are the same: a number of the same bits.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(Number::Float(x)), Value::Number(Number::Float(y))) => x.to_bits() == y.to_bits(),
+        (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_), _) => a == b,
+        _ => false,
     }
 }
 
@@ -1031,7 +1181,14 @@ impl<'de> serde::de::Visitor<'de> for Visitor {
                     }
                 }
             }
-            Map::from_parts(&keys, values.into_iter())
+            if values
+                .iter()
+                .all(|v| matches!(v, Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)))
+            {
+                Map::leaf(&keys, values)
+            } else {
+                Map::from_parts(&keys, values.into_iter())
+            }
         })))
     }
 }
@@ -1103,5 +1260,30 @@ mod tests {
         emptied.remove("k");
         assert!(emptied.is_empty());
         assert_eq!(emptied, Map::new());
+    }
+
+    #[test]
+    fn equal_leaves_are_shared_and_copied_to_change() {
+        let text =
+            r#"[{"k": "a", "n": 1.5}, {"k": "a", "n": 1.5}, {"k": "a", "n": -0.0}, {"k": "a", "n": 0.0}]"#;
+        let mut v: Value = serde_json::from_str(text).unwrap();
+        let items = v.as_array().unwrap();
+        let shared = |i: usize| items[i].as_object().unwrap().0;
+        assert_eq!(shared(0), shared(1));
+        assert_ne!(shared(2), shared(3));
+        let copy = v.clone();
+        v[1]["n"] = Value::from(2i64);
+        v[0].as_object_mut().unwrap().insert("m", Value::Null);
+        assert_eq!(
+            v.to_string(),
+            r#"[{"k":"a","m":null,"n":1.5},{"k":"a","n":2},{"k":"a","n":-0.0},{"k":"a","n":0.0}]"#
+        );
+        assert_eq!(
+            copy.to_string(),
+            r#"[{"k":"a","n":1.5},{"k":"a","n":1.5},{"k":"a","n":-0.0},{"k":"a","n":0.0}]"#
+        );
+        drop((v, copy));
+        let again: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(again[1]["n"].as_f64(), Some(1.5));
     }
 }
