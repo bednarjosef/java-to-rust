@@ -278,7 +278,20 @@ Design: [closures-and-nested-classes.md](closures-and-nested-classes.md).
   `java::share` where they meet code that needs a shared one. Parameters become `&[T]` or
   `&mut [T]` where every call can lend one.
 - Indexing is `a[i as usize]` where the bounds analysis proves the index in range
-  (`analysis/arrays/bounds.rs`), and `java::at`/`java::put` otherwise. An innermost counting loop
+  (`analysis/arrays/bounds.rs`), and `java::at`/`java::put` otherwise. A `java::Array` held in a
+  local variable or a parameter, whose length the analysis knows in the same way, is read and
+  written with `java::get_in_bounds`/`java::set_in_bounds`: no `ArrayIndexOutOfBoundsException`
+  can come of them, so none is passed on, but they still compare the index with the length, and
+  a wrong proof stops the program (a translator bug, never memory corruption), as a plain array's
+  does. A counting loop takes the view (`java::view`) of each such array that its body never
+  assigns once, before it starts: the start and the length of the elements, then values the
+  compiler keeps across the loop's calls and compares with the loop's bound, which drops the
+  check and lets it unroll the loop. That rests on an array's elements staying where they are
+  while a handle lives: an `Array`'s `Vec` is never grown, shrunk or replaced (only
+  `take_items` empties one, of an array no other handle holds yet), a `SharedArray`'s and a
+  `Frozen`'s cells never move, and the collected heap never moves a slot (`gc.rs`). A view of a
+  `SharedArray` still reads and writes each element through its cell, as one atomic action. Other
+  accesses use `java::get`/`java::set`. An innermost counting loop
   can check its whole range once and then run over slices without checks
   (`analysis/arrays/slices.rs`).
 - `java.util.Arrays` on primitives and strings is hand-written (`equals`, `hashCode`, `sort`,

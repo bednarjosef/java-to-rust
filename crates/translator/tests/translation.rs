@@ -388,6 +388,47 @@ fn unaliased_arrays_are_vecs_indexed_in_bounds() {
 }
 
 #[test]
+fn guarded_indexes_of_shared_arrays_in_variables_are_not_checked() {
+    let rust = translate(
+        "class A {
+            static int[] kept = new int[4];
+            static int sum(int[] values) {
+                int sum = 0;
+                for (int i = 0; i < values.length; i++) { sum += values[i]; }
+                return sum;
+            }
+            static int zero(int[] values) {
+                int i = 0;
+                while (i < values.length && values[i] != 0) { i++; }
+                return i;
+            }
+            static int past(int[] values) {
+                int sum = 0;
+                for (int i = 0; i <= values.length; i++) { sum += values[i]; }
+                return sum;
+            }
+            public static void main(String[] args) {
+                int[] a = kept;
+                for (int i = 0; i < a.length; i++) { a[i] = i + 1; }
+                System.out.println(sum(kept) + zero(kept) + past(kept));
+            } }",
+    );
+    // A counting loop takes the array's view once; another guarded access checks the length
+    // only against a wrong proof; an index past the end is checked as Java checks it.
+    assert_contains(
+        &rust,
+        &[
+            "let values_elements = java::view(&values);",
+            "java::view_get(&values_elements, i)",
+            "let a_elements = java::view(&a);",
+            "java::view_set(&a_elements, i, ",
+            "java::get_in_bounds(&values, i)",
+            "java::get(&values, i)",
+        ],
+    );
+}
+
+#[test]
 fn arrays_seen_through_two_names_are_shared() {
     let rust = translate(
         "class A { public static void main(String[] args) {
@@ -2862,7 +2903,7 @@ fn arrays_whose_elements_may_be_null_hold_options() {
             "words[1] = Some(java::JString::from(\"mid\"));",
             "java::println!(\"{}\", java::concat!(words[0].as_deref().unwrap_or(java::wtf8(\"null\")), words[1].as_deref().unwrap_or(java::wtf8(\"null\"))));",
             "let rows: java::Array<Option<java::Array<i32>>> = java::filled(2, None);",
-            "java::println!(\"{}\", java::get(&rows, 1).is_none());",
+            "java::println!(\"{}\", java::get_in_bounds(&rows, 1).is_none());",
         ],
     );
 }

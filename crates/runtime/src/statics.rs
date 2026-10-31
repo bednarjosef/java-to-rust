@@ -254,6 +254,14 @@ impl<T: Primitive> Atomic<T> {
 /// writes `settled` again, so its plain reads race with nothing. A plain read is one the compiler
 /// may keep from one use to the next, which it does not do with the acquire load of `current`:
 /// a loop that reads the static on each pass then reads it once.
+///
+/// A static of an eager class (one that runs its `<clinit>` on first use) is prepared instead:
+/// `main` calls `prepare` on each before any other code runs, which points `current` at the value
+/// the static starts with, so that a read (`get_prepared`) is the acquire load of `current` alone,
+/// with no test. A test and its out-of-line call on each read split the code around the read and
+/// keep values from staying in registers across it; in a thread started after the class's
+/// initialization, where `settled` is never set, NoiseTree's noise function, which reads its
+/// gradient table eight times, ran 290 instructions a call with the test and 221 without.
 pub struct Final<T> {
     settled: UnsafeCell<*const T>,
     current: AtomicPtr<T>,
@@ -303,6 +311,27 @@ impl<T> Final<T> {
             return unsafe { &*settled };
         }
         self.unsettled()
+    }
+
+    /// The value of a prepared static (see the type's documentation): `current` is set before
+    /// any thread starts and never unset.
+    #[inline(always)]
+    pub fn get_prepared(&self) -> &T {
+        let p = self.current.load(Ordering::Acquire);
+        debug_assert!(!p.is_null(), "a static final read before it was prepared");
+        // `prepare` set `current`, before any thread started; it points at `value` or a starting
+        // value, as in `unsettled`.
+        unsafe { &*p }
+    }
+
+    /// Points `current` at the starting value, unless it is set: `main` calls it for each static
+    /// read with `get_prepared`, before any other code runs.
+    #[cold]
+    #[inline(never)]
+    pub fn prepare(&self) {
+        if self.current.load(Ordering::Acquire).is_null() {
+            self.first_read();
+        }
     }
 
     /// A read that finds `settled` unset: one out-of-line call, so that a function that reads the

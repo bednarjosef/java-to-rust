@@ -1,4 +1,5 @@
-//! Indexes of plain arrays that are always in bounds, so that `a[i]` needs no check of its own.
+//! Indexes of arrays that are always in bounds, so that `a[i]` needs no check of its own: of plain
+//! arrays, and of other arrays held in a local variable or a parameter.
 //! An index `i` (or `i + c`) is in bounds at an access when the range analysis shows it is not
 //! negative, and a condition that still holds there bounds it by the array's length:
 //!
@@ -19,7 +20,7 @@ use super::super::{FastMap, FastSet};
 use super::declarations;
 use crate::ast::*;
 
-/// The accesses of plain arrays in `method` whose index is always in bounds: element reads and
+/// The accesses of arrays in `method` whose index is always in bounds: element reads and
 /// writes and row reads, by expression id.
 pub(super) fn in_bounds(
     method: &Method,
@@ -508,7 +509,10 @@ impl Walk<'_> {
 
     /// Whether the access `array[index]` with id `id` is always in bounds.
     fn proven(&self, id: ExprId, array: &Expr, index: &Expr) -> bool {
-        if !root_of(array).is_some_and(|r| self.plain.contains(r)) {
+        // An array that is not plain is reached through its variable alone, whose array is never
+        // replaced where a guard of its length holds (`ends`), and whose length never changes.
+        let plain = root_of(array).is_some_and(|r| self.plain.contains(r));
+        if !plain && !matches!(array.kind, ExprKind::Var(_)) {
             return false;
         }
         let range = self.facts.index_ranges.get(&id).copied();

@@ -228,7 +228,7 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | compile-time constant | `const` | `X` |
 | primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
-| object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())`; `X.set(v)` |
+| object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())` (`get_prepared` for an eager class's, which `main` prepares); `X.set(v)` |
 | array that only its class's initialization makes, and that the program only indexes to read and measures | `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` when every array it is given has the constant length `N` | `java::get(&(*X.get()), i)`, `java::len(&(*X.get()))`; `X.set(java::freeze(a))`, `X.set(java::freeze_fixed(a))` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
 
@@ -247,7 +247,18 @@ nothing writes it once one has, so the plain read races with nothing, and the co
 it from one read to the next, which it does not do with an acquire load. The slower path, an
 acquire load of the pointer, is a call out of line, so that a function reading the static several
 times reaches each later read only from the first read or from that call, and the compiler reads
-`settled` once (the `GRADIENT` of NoiseTree's noise, read 8 times a call). Where the read is only borrowed (the object of a call or a field access,
+`settled` once.
+
+A class initialized once threads run never has its statics settled, and there the test and its
+call cost more than the load: they split the code around each read, and the values that are live
+across the call leave their registers. A noise function that reads a table 8 times a call ran
+290 instructions a call with them and 221 without. So an eager class's `java::Final` statics are
+prepared instead (`prepared_static` in `codegen/statics.rs`): `main` first calls `X.prepare()` on
+each, which points the pointer at the starting value, before any thread exists, and a read is
+`X.get_prepared()`, the acquire load alone, with no test, since nothing unsets the pointer. The
+starting value of an eager class's static is Java's default, cheap to make; a frozen array of a
+constant length `N` starts with `N` default elements. One whose elements are objects that are
+never null has no default to fill it with, and is read with `get()`. Where the read is only borrowed (the object of a call or a field access,
 an array that is indexed or measured, a string that is lent, a null test), the generator writes
 the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clone; a static that
 starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is

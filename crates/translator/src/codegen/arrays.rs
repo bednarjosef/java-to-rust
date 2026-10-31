@@ -136,12 +136,112 @@ impl<'a> Gen<'a> {
         let (binding, handle) = self.write_handle(array, bound);
         let volatile = self.class.volatile_elements.contains(&index.id);
         let i = self.value(index, Type::Int).text;
-        let name = if volatile { "get_volatile" } else { "get" };
-        let get = self.may_fail(id, name, "", &format!("{handle}, {i}"));
+        // An index proven in bounds (`Facts::in_bounds`) is checked only against a wrong proof,
+        // through the loop's view where it took one.
+        let get = if let Some(view) = self.views.get(&id).cloned() {
+            Code::atom(format!("{}(&{view}, {i})", self.runtime("view_get")))
+        } else if !volatile && self.facts.in_bounds.contains(&id) {
+            Code::atom(format!("{}({handle}, {i})", self.runtime("get_in_bounds")))
+        } else {
+            let name = if volatile { "get_volatile" } else { "get" };
+            self.may_fail(id, name, "", &format!("{handle}, {i}"))
+        };
         match binding {
             Some(binding) => Code::atom(format!("{{ {binding} {} }}", get.text)),
             None => get,
         }
+    }
+
+    /// Before a counting loop: binds the view (`java::view`) of each array in a local variable or
+    /// a parameter that `body` reads, or writes as a statement, at indexes proven in bounds, and
+    /// never assigns; those accesses then go through the view (`views`), whose start and length
+    /// are values the compiler keeps in registers across the loop's calls. Gives back the
+    /// accesses. A lambda or a class in the body is a method of its own, whose accesses are not
+    /// the loop's, and Java lets it capture only a variable that nothing assigns.
+    pub(super) fn bind_views(&mut self, body: &'a Stmt) -> Vec<ExprId> {
+        let mut found: Vec<(&'a Expr, &'a Expr, ExprId, Option<&'a Expr>)> = Vec::new();
+        let mut writes = Vec::new();
+        visit_stmt(
+            body,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    if let ExprKind::Index(array, index) = &x.kind {
+                        found.push((array, index, x.id, None));
+                    }
+                })
+            },
+            &mut |s| {
+                if let Stmt::Expr(x) = s
+                    && let ExprKind::Assign { op: None, target: Place::Index(array, index), value } = &x.kind
+                {
+                    writes.push((&**array, &**index, x.id, Some(&**value)));
+                }
+            },
+        );
+        found.extend(writes);
+        // Names the body declares, whose variables do not exist before the loop.
+        let mut declared: HashSet<&'a str> = HashSet::new();
+        let mut bound: Vec<&'a str> = Vec::new();
+        visit_stmt(
+            body,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    if let ExprKind::InstanceOf { binding: Some(b), .. } = &x.kind {
+                        bound.push(b);
+                    }
+                })
+            },
+            &mut |s| match s {
+                Stmt::Local { name, .. } | Stmt::ForEach { name, .. } => {
+                    declared.insert(name);
+                }
+                Stmt::Try { catches, .. } => declared.extend(catches.iter().map(|c| c.name.as_str())),
+                _ => {}
+            },
+        );
+        declared.extend(bound);
+        let mut views: Vec<(String, String)> = Vec::new();
+        let mut viewed = Vec::new();
+        for (array, index, id, stored) in found {
+            let ExprKind::Var(name) = &array.kind else { continue };
+            let fits = self.facts.in_bounds.contains(&id)
+                && !self.views.contains_key(&id)
+                && !self.elements.contains_key(&id)
+                && !self.class.volatile_elements.contains(&index.id)
+                && stored.is_none_or(|v| !self.class.checks_store(array.ty, v))
+                && self.plain_path(array).is_none()
+                && !self.nullable(array)
+                && self.locals.contains_key(name.as_str())
+                && !declared.contains(name.as_str())
+                && !assigns_stmt(body, name);
+            if !fits {
+                continue;
+            }
+            let view = match views.iter().find(|(java, _)| java == name) {
+                Some((_, view)) => view.clone(),
+                None => {
+                    let local = self.local(name);
+                    let taken =
+                        |n: &str| self.locals.values().any(|l| l == n) || self.fn_name_set.contains(n);
+                    let view = (0..)
+                        .map(|k| {
+                            if k == 0 { format!("{local}_elements") } else { format!("{local}_elements{k}") }
+                        })
+                        .find(|n| !taken(n))
+                        .unwrap_or_default();
+                    views.push((name.clone(), view.clone()));
+                    view
+                }
+            };
+            self.views.insert(id, view);
+            viewed.push(id);
+        }
+        for (name, view) in views {
+            let handle = format!("&{}", self.local(&name));
+            let make = self.runtime("view");
+            self.line(&format!("let {view} = {make}({handle});"));
+        }
+        viewed
     }
 
     /// `a.length`.
@@ -350,6 +450,10 @@ impl<'a> Gen<'a> {
             ("set_volatile", self.element_value(rhs, ty))
         } else if used && self.stores_some(rhs, ty) {
             ("store_some", self.value(rhs, ty).text)
+        } else if !used && self.views.contains_key(&id) {
+            ("view_set", self.element_value(rhs, ty))
+        } else if !used && self.facts.in_bounds.contains(&id) && !self.class.checks_store(array.ty, rhs) {
+            ("set_in_bounds", self.element_value(rhs, ty))
         } else {
             (if used { "store" } else { "set" }, self.element_value(rhs, ty))
         };
@@ -365,6 +469,10 @@ impl<'a> Gen<'a> {
             i = self.bind_first(&mut binding, i, &["index", "slot", "at"]);
             v = self.bind_first(&mut binding, v, &["value", "item", "new"]);
         }
+        let handle = match (helper, self.views.get(&id)) {
+            ("view_set", Some(view)) => format!("&{view}"),
+            _ => handle,
+        };
         let call = self.may_fail(id, helper, "", &format!("{handle}, {i}, {v}")).text;
         Self::bound_write(binding, call)
     }
