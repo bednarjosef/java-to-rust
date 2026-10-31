@@ -505,16 +505,39 @@ impl<'a> Gen<'a> {
 
     /// `ClassIsInstance(class, x)`, or with `check` the statement `ClassCheck(class, x)`: the
     /// runtime's test of the binary names of the classes and interfaces of `x`'s class
-    /// (`instance_names`) against the class's.
+    /// (`instance_names`) against the class's, or of the class numbers where `x`'s value has one.
     pub(super) fn class_instance(&mut self, check: bool, args: &'a [Expr]) -> Code {
+        let method = if check { "check_cast" } else { "is_instance" };
+        // A value of an enum of classes that is not a variable, such as an array's element, is
+        // evaluated once, after the class and before a null class throws, as in Java, and both
+        // its number and its names are read from it.
+        let x = &args[1];
+        if let Some(t) = self.enum_of(x)
+            && !matches!(x.kind, ExprKind::Var(_) | ExprKind::This | ExprKind::Null)
+            && x.ty != Type::Null
+        {
+            let checked = match self.nullable(&args[0]) {
+                true => format!("{}(class_)", self.runtime("non_null")),
+                false => "class_".to_string(),
+            };
+            let class = self.expr(&args[0]).text;
+            self.need(Need::RuntimeTypeNames(t));
+            let value = self.enum_option(x);
+            return Code::new(
+                format!(
+                    "match ({class}, {value}) {{ (class_, object_) => {checked}.{method}_numbered(object_.map(|o| \
+                     o.0.tag()), || object_.map(|o| o.runtime_type_names())) }}"
+                ),
+                LOWEST,
+            );
+        }
         let class = if self.nullable(&args[0]) {
             format!("{}({})", self.runtime("non_null"), self.expr(&args[0]).text)
         } else {
             self.expr(&args[0]).at(ATOM)
         };
-        let names = self.instance_names(&args[1]);
-        let method = if check { "check_cast" } else { "is_instance" };
-        match self.instance_number(&args[1]) {
+        let names = self.instance_names(x);
+        match self.instance_number(x) {
             Some(number) => Code::atom(format!("{class}.{method}_numbered({number}, || {names})")),
             None => Code::atom(format!("{class}.{method}({names})")),
         }

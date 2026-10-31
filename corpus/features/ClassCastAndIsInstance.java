@@ -21,6 +21,22 @@ public class ClassCastAndIsInstance {
     }
     static final class Point { }
 
+    static Comparable<?> first = Op.PLUS;
+
+    static Comparable<?> firstKey(Comparable<?>[] keys) {
+        return keys[0];
+    }
+
+    static Class<?> kindOf(String why) {
+        System.out.println("kind " + why);
+        return Op.class;
+    }
+
+    static Comparable<?> keyOf(String why, Comparable<?>[] keys, int i) {
+        System.out.println("key " + why);
+        return keys[i];
+    }
+
     static <T> T as(Class<T> type, Object o) {
         if (!type.isInstance(o)) {
             return null;
@@ -82,6 +98,17 @@ public class ClassCastAndIsInstance {
         System.out.println(Point.class.isInstance(point) + " " + Point.class.isInstance(none) + " "
             + Color.class.isInstance(point) + " " + Object.class.isInstance(point) + " "
             + Color.class.isInstance(held) + " " + Op.class.isInstance(held) + " " + (Point.class.cast(none) == null));
+        // Values that are not variables: elements, a field, a call's result, and the class first.
+        Comparable<?>[] keys = { Color.GREEN, Op.TIMES, 7, null, "k" };
+        Class<?>[] kinds = { Color.class, Op.class, Integer.class, Color.class, Op.class };
+        StringBuilder tests = new StringBuilder("elements:");
+        for (int i = 0; i < keys.length; i++) {
+            tests.append(' ').append(kinds[i].isInstance(keys[i]) ? 1 : 0)
+                .append(kinds[(i + 1) % kinds.length].isInstance(keys[i]) ? 1 : 0);
+        }
+        System.out.println(tests + " " + Op.class.isInstance(first) + Color.class.isInstance(firstKey(keys))
+            + " " + kindOf("class").isInstance(keyOf("value", keys, 1)));
+        System.out.println(Op.class.cast(keys[1]) + " " + Color.class.cast(keys[3]));
         try {
             System.out.println(1 / (args.length));
         } catch (RuntimeException e) {
