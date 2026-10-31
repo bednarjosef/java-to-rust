@@ -523,7 +523,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         })
         .collect();
     let mut queue: VecDeque<usize> = closure::components(&callees).1.into_iter().rev().flatten().collect();
-    // The groups that a call has grown already: a virtual call's implementations share one.
+    // The groups that what a call passes on has grown already: a virtual call's implementations
+    // share one, and the calls of a method that pass on the same, as those outside its `try`s do,
+    // pass it on once (`Object.toString()`'s thousands of implementations, called many times).
     let mut grown_at = vec![0; class.methods.len()];
     let mut visit = 0;
     let grow = |seen: &mut Seen, more: &Seen| {
@@ -550,13 +552,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             continue;
         }
         let mut grown = Vec::new();
+        visit += 1;
+        let plain = visit;
         for p in &points[m] {
             let Raise::Call(callees) = &p.raise else { continue };
-            visit += 1;
             let with_tries;
-            let here = match (&added, p.frames.is_empty()) {
-                (Some(_), _) | (None, true) => &now,
+            let (here, stamp) = match (&added, p.frames.is_empty()) {
+                (Some(_), _) | (None, true) => (&now, plain),
                 (None, false) => {
+                    visit += 1;
                     let mut here = now.clone();
                     for f in &p.frames {
                         for &t in &f.catches {
@@ -565,14 +569,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                         here.all |= f.finally;
                     }
                     with_tries = here;
-                    &with_tries
+                    (&with_tries, visit)
                 }
             };
             for &c in callees {
-                if grown_at[at[c]] == visit {
+                if grown_at[at[c]] == stamp {
                     continue;
                 }
-                grown_at[at[c]] = visit;
+                grown_at[at[c]] = stamp;
                 let grew = match &added {
                     None => grow(&mut seen[at[c]], here),
                     Some((types, all)) => {
