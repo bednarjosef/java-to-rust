@@ -640,8 +640,9 @@ fn split_module(
                     let name = f.sig.ident.to_string();
                     let symbol = symbol(path, "", &name, used);
                     key.get_or_insert_with(|| symbol.clone());
-                    let (params, _) = rename_params(&f.sig, text, &mut Vec::new(), None);
+                    let (params, args) = rename_params(&f.sig, text, &mut Vec::new(), None);
                     let ret = at_or_empty(text, &f.sig.output);
+                    let small = small_result(&f.sig.output, text);
                     // `#[inline]` does nothing on an exported function, and is not allowed on a
                     // declaration.
                     let kept: Vec<&str> = f
@@ -667,18 +668,41 @@ fn split_module(
                         .chain([sig_start(&f.sig)])
                         .min()
                         .unwrap_or(block.start);
-                    edits.push(Edit { start, end: block.end, text: String::new() });
                     let decl_attrs: String = kept.iter().map(|a| format!("    {a}\n")).collect();
-                    externs.push_str(&format!(
-                        "{decl_attrs}    #[link_name = \"{symbol}\"]\n    pub safe fn {name}({params}){ret};\n"
-                    ));
                     let attrs: String = kept.iter().map(|a| format!("{a}\n")).collect();
                     let inputs = f.sig.inputs.span().byte_range();
                     let inputs = if f.sig.inputs.is_empty() { "" } else { &text[inputs] };
-                    let code = &text[block];
-                    body.push_str(&format!(
-                        "{attrs}#[unsafe(no_mangle)]\npub fn {symbol}({inputs}){ret} {code}\n\n"
-                    ));
+                    let code = &text[block.clone()];
+                    match &small {
+                        // A `Result` of a small value is returned widened (`java::Ret`): the
+                        // declaration has the function's name with `__ret`, and the function of
+                        // the header by its own name narrows the value back.
+                        Some(ret_type) => {
+                            edits.push(Edit {
+                                start,
+                                end: block.end,
+                                text: format!(
+                                    "#[inline]\npub fn {name}({params}){ret} {{ {name}__ret({args}).result() }}"
+                                ),
+                            });
+                            externs.push_str(&format!(
+                                "{decl_attrs}    #[link_name = \"{symbol}\"]\n    safe fn {name}__ret({params}) -> {ret_type};\n"
+                            ));
+                            let code = widened(&ret, code);
+                            body.push_str(&format!(
+                                "{attrs}#[unsafe(no_mangle)]\npub fn {symbol}({inputs}) -> {ret_type} {code}\n\n"
+                            ));
+                        }
+                        None => {
+                            edits.push(Edit { start, end: block.end, text: String::new() });
+                            externs.push_str(&format!(
+                                "{decl_attrs}    #[link_name = \"{symbol}\"]\n    pub safe fn {name}({params}){ret};\n"
+                            ));
+                            body.push_str(&format!(
+                                "{attrs}#[unsafe(no_mangle)]\npub fn {symbol}({inputs}){ret} {code}\n\n"
+                            ));
+                        }
+                    }
                 }
             }
             syn::Item::Impl(imp) => {
@@ -748,11 +772,21 @@ fn split_module(
                         Some(ty) => ("self, ", format!("this: {ty}, ")),
                         None => ("", String::new()),
                     };
+                    // A `Result` of a small value is returned widened, as by a function.
+                    let small = small_result(&f.sig.output, text);
+                    let narrowed = if small.is_some() { ".result()" } else { "" };
                     edits.push(Edit {
                         start: block.start,
                         end: block.end,
-                        text: format!("{{ {symbol}({call_this}{args}) }}"),
+                        text: format!("{{ {symbol}({call_this}{args}){narrowed} }}"),
                     });
+                    let (ret_here, ret_moved) = match &small {
+                        Some(ret_type) => {
+                            let ret_type = format!(" -> {}", replace_word(ret_type, "Self", &self_ty));
+                            (ret_type.clone(), ret_type)
+                        }
+                        None => (ret_here, ret.clone()),
+                    };
                     externs.push_str(&format!("    safe fn {symbol}({this_param}{params}){ret_here};\n"));
                     // The trait's method: the receiver as declared, without `mut`, and the
                     // parameters by the header's names.
@@ -766,16 +800,17 @@ fn split_module(
                         None => String::new(),
                     };
                     let decl_params = trait_params(&f.sig, text);
-                    let decl = format!("    fn body_{name}({decl_receiver}{decl_params}){ret};\n");
+                    let decl = format!("    fn body_{name}({decl_receiver}{decl_params}){ret_moved};\n");
                     let attrs: String =
                         f.attrs.iter().map(|a| format!("    {}\n", at(text, a.span()))).collect();
                     let inputs =
                         if f.sig.inputs.is_empty() { "" } else { &text[f.sig.inputs.span().byte_range()] };
                     let code = &text[block];
+                    let code = if small.is_some() { widened(&ret, code) } else { code.to_string() };
                     // The method itself is the function that the header declares: a method's
                     // `self` is passed as a first parameter of its type is.
                     let code = format!(
-                        "{attrs}    #[unsafe(export_name = \"{symbol}\")]\n    fn body_{name}({inputs}){ret} {code}\n"
+                        "{attrs}    #[unsafe(export_name = \"{symbol}\")]\n    fn body_{name}({inputs}){ret_moved} {code}\n"
                     );
                     moved.push((symbol, decl, code));
                 }
@@ -1031,6 +1066,36 @@ fn at_or_empty(text: &str, output: &syn::ReturnType) -> String {
     }
 }
 
+/// The type that a moved function returning `output` returns instead, when that is a `Result` of
+/// a small value, which Rust returns through memory: `java::Ret<i32, Throwable>`, which comes back
+/// in registers (`java::Ret`).
+fn small_result(output: &syn::ReturnType, text: &str) -> Option<String> {
+    let syn::ReturnType::Type(_, ty) = output else { return None };
+    let syn::Type::Path(path) = &**ty else { return None };
+    let last = path.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else { return None };
+    if last.ident != "Result" || path.qself.is_some() || arguments.args.len() != 2 {
+        return None;
+    }
+    let mut args = arguments.args.iter();
+    let (Some(syn::GenericArgument::Type(ok)), Some(syn::GenericArgument::Type(err))) =
+        (args.next(), args.next())
+    else {
+        return None;
+    };
+    let ok = at(text, ok.span());
+    ["i32", "bool", "f32", "i16", "u16", "i8", "u8"]
+        .contains(&ok)
+        .then(|| format!("java::Ret<{ok}, {}>", at(text, err.span())))
+}
+
+/// The block `code` of a function that returns `ret` (` -> Result<..>`), as the block of the same
+/// function that returns it widened (`small_result`): the code runs in a closure, where each
+/// `return` returns as it did.
+fn widened(ret: &str, code: &str) -> String {
+    format!("{{ java::Ret::from((move ||{ret} {code})()) }}")
+}
+
 /// Renames the parameters of `sig` other than `self` to `p0`, `p1`, .. in the header (an edit of
 /// each pattern), and gives them as `p0: T0, ..` (each `Self` in a type replaced by `self_ty`) and
 /// as the arguments `p0, ..`.
@@ -1213,6 +1278,51 @@ mod tests {
         );
         assert!(moved.contains("fn j2r__p__sum") && moved.contains("fn body_total"), "{moved}");
         assert!(moved.contains("fn j2r__p__slow"), "{moved}");
+    }
+
+    /// A moved function or method that returns a `Result` of a small value returns it widened,
+    /// which the header narrows back where it is called.
+    #[test]
+    fn a_result_of_a_small_value_is_returned_widened() {
+        let large = (0..40).map(|i| format!("    let v{i} = x + {i};\n")).collect::<String>();
+        let text = format!(
+            "fn get(x: i32) -> Result<i32, Throwable> {{\n{large}    if x < 0 {{ return Err(t()); }}\n    Ok(x)\n}}\n\n\
+             fn name(x: i32) -> Result<JString, Throwable> {{\n{large}    Ok(s(x))\n}}\n\n\
+             pub struct S;\n\nimpl S {{\n    fn odd(&self, x: i32) -> Result<bool, Throwable> {{\n{large}        Ok(x % 2 == 1)\n    }}\n}}\n"
+        );
+        let part = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
+            .unwrap();
+        let header = &part.split.header;
+        assert!(
+            header.contains(
+                "#[inline]\npub fn get(p0: i32) -> Result<i32, Throwable> { get__ret(p0).result() }"
+            ),
+            "{header}"
+        );
+        assert!(header.contains("{ j2r__p__S__odd(self, p0).result() }"), "{header}");
+        let externs = &part.externs;
+        assert!(
+            externs.contains("    #[link_name = \"j2r__p__get\"]\n    safe fn get__ret(p0: i32) -> java::Ret<i32, Throwable>;"),
+            "{externs}"
+        );
+        assert!(
+            externs.contains("    safe fn j2r__p__S__odd(this: &S, p0: i32) -> java::Ret<bool, Throwable>;"),
+            "{externs}"
+        );
+        // A `Result` of anything larger is returned as it is.
+        assert!(externs.contains("pub safe fn name(p0: i32) -> Result<JString, Throwable>;"), "{externs}");
+        let moved: String = part.split.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert!(
+            moved.contains("pub fn j2r__p__get(x: i32) -> java::Ret<i32, Throwable> { java::Ret::from((move || -> Result<i32, Throwable> {\n"),
+            "{moved}"
+        );
+        assert!(
+            moved.contains(
+                "fn body_odd(&self, x: i32) -> java::Ret<bool, Throwable> { java::Ret::from((move ||"
+            ),
+            "{moved}"
+        );
+        assert!(moved.contains("    fn body_odd(&self, p0: i32) -> java::Ret<bool, Throwable>;"), "{moved}");
     }
 
     #[test]

@@ -145,6 +145,16 @@ along classes. It splits declarations from code, as C splits headers from source
   declaration costs rustc about three times what the declaration does: about 21 KB of memory
   against 8 KB, measured on synthetic header crates of 40,000 moved functions in a release
   build.
+- **A moved function that returns a `Result` of a small value** (an `i32`, a `bool`, a `float`
+  or a narrower integer, with any error) returns it widened, as a `java::Ret<i32, Throwable>`,
+  whose layout is a `Result<u64, Throwable>`'s. Rust returns a `Result<i32, Throwable>` through
+  memory, as its `Ok` value and its error are at different offsets, and a `Result<u64,
+  Throwable>` in two registers. Such a function is declared as `<name>__ret`, and the header has
+  a function by its name, inlined where it is called, that narrows the value back (`.result()`);
+  a method's body narrows the value of its declaration's call. The moved code runs in a closure
+  that returns the `Result` (`java::Ret::from((move || -> Result<i32, Throwable> {..})())`), so
+  each `return` returns as it did. HeightChain, a dispatcher's call of a default body in a loop
+  split into three crates, runs 2.84 billion instructions where it ran 3.52.
 - **Each body crate** depends on the header alone and defines those functions for the items
   given to it: a function with `#[unsafe(no_mangle)]`, a method as below. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names

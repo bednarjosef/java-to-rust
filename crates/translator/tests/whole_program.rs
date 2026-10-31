@@ -365,6 +365,30 @@ fn a_program_split_into_crates_matches_java() {
     assert_eq!(rust, Ok(java));
 }
 
+/// Methods that return small values and throw, split into crates, where they return the values
+/// widened (`java::Ret`) and their callers narrow them back.
+#[test]
+fn small_results_split_into_crates_match_java() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/whole-program");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-split-small-results");
+    std::fs::create_dir_all(&work).unwrap();
+    let programs = programs(&root, &work);
+    let p = programs
+        .iter()
+        .find(|p| p.name == "smallresultsacrosscrates")
+        .expect("corpus/whole-program/SmallResultsAcrossCrates.java");
+    let cache = check_cache::test_root().join("whole-program-java");
+    let java = run_java(p, &work.join(&p.name).join("classes"), &cache);
+    let (rust, _) = run_rust(p, &library, &work, &work.join("unused"), None, Some(3));
+    assert_eq!(rust, Ok(java));
+    let header = std::fs::read_to_string(work.join(&p.name).join("crate/header/src/lib.rs")).unwrap();
+    assert!(header.contains("-> java::Ret<i32, "), "no widened result in the header");
+}
+
 /// A generic method that stays a Rust generic in a class that no object is of: split into crates,
 /// the class's dispatcher keeps the method's type parameters.
 #[test]
