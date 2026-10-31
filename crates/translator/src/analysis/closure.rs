@@ -119,7 +119,7 @@ impl FromIterator<usize> for Bits {
 /// For each node of the graph whose edges are `next`, the union of `own` over the nodes it
 /// reaches, itself included: the least fixpoint of `reach[n] = own[n] ∪ reach[m]` for every edge
 /// `n → m`.
-pub fn reached_union(next: &[Vec<usize>], own: &[Bits]) -> Vec<Bits> {
+pub fn reached_union(next: &[Vec<usize>], own: &[Bits]) -> Reached {
     let (component, components) = components(next);
     // Each component's union, from those it calls, which come before it.
     let mut unions: Vec<Bits> = Vec::with_capacity(components.len());
@@ -135,7 +135,23 @@ pub fn reached_union(next: &[Vec<usize>], own: &[Bits]) -> Vec<Bits> {
         }
         unions.push(union);
     }
-    (0..next.len()).map(|n| unions[component[n]].clone()).collect()
+    Reached { component, unions }
+}
+
+/// What each node reaches (`reached_union`), held once for each strongly connected component, whose
+/// nodes reach the same: a copy for each node would double the memory of the unions, which on
+/// the Minecraft server are hundreds of thousands of sets of thousands of bits.
+pub struct Reached {
+    component: Vec<usize>,
+    unions: Vec<Bits>,
+}
+
+impl std::ops::Index<usize> for Reached {
+    type Output = Bits;
+
+    fn index(&self, n: usize) -> &Bits {
+        &self.unions[self.component[n]]
+    }
 }
 
 /// The strongly connected components of the graph, as each node's component and the members of
