@@ -432,11 +432,14 @@ but stands for the code at its call sites, so calling it does not initialize tha
   ? f(c) : true`; all in `lower/negated_patterns.rs`). A read anywhere else is rejected: "a
   pattern variable used here not supported yet". A pattern variable may be assigned, except one of a record or switch
   pattern.
-- A downcast `(Circle) s` is `java::cast(&s, |o| o.as_circle(), ("Circle", java::APP))`, which
+- A downcast `(Circle) s` is `java::cast(&s, |o| o.as_circle(), &("Circle", java::APP))`, which
   returns the value or throws `ClassCastException` with HotSpot's message: "class Square cannot
   be cast to class Circle (Square and Circle are in unnamed module of loader 'app')", or with each
   class's module of its own when they differ. The object's class comes from the enum's
-  `java::CastSource`, a `match` written once per enum; the target's is written at the cast. A
+  `java::CastSource`, a `match` written once per enum; the target's is a constant written at the
+  cast. Both are found in `java::cast_failed_on`, out of the line of the cast, so that where the
+  cast is inlined its failure is one call with two pointers and does not count against
+  inlining its caller. A
   class's module is its package's named module, with the loader the JVM gives it (`bootstrap`,
   `platform`, or `app`, `program::loader_name`), or the unnamed module of the system class loader;
   the runtime's own classes (strings, boxes, arrays of primitives) and the standard classes the

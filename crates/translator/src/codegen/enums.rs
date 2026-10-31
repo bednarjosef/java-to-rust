@@ -364,9 +364,9 @@ impl<'a> Gen<'a> {
     /// constant, which fails the cast to `Enum` that Java makes.
     fn not_enum_arm(&mut self, t: usize) -> String {
         self.need(Need::CastSource(t));
-        let (source, failed) = (self.runtime("CastSource"), self.runtime("cast_failed"));
+        let failed = self.runtime("cast_failed_on");
         let base = self.runtime("BASE");
-        format!("_ => {failed}({source}::cast_class(&value), (\"java.lang.Enum\", {base}))")
+        format!("_ => {failed}(&value, &(\"java.lang.Enum\", {base}))")
     }
 
     /// An enum's builtin on an `Enum` that is an `Object` (of the enum of type `t`): a `match`

@@ -804,12 +804,12 @@ impl<'a> Gen<'a> {
         let text = if self.nullable(value) {
             let option = self.object_place(value);
             let enum_name = struct_name(&self.class.types[s].name);
-            let call = check(self, format!("{cast}(o, {enum_name}::{name}, {target})"));
+            let call = check(self, format!("{cast}(o, {enum_name}::{name}, &{target})"));
             format!("{option}.as_ref().map(|o| {call})")
         } else {
             let obj = self.object(value);
             let obj = super::class_values::borrow_of(&obj);
-            check(self, format!("{cast}({obj}, |o| o.{name}(), {target})"))
+            check(self, format!("{cast}({obj}, |o| o.{name}(), &{target})"))
         };
         self.cast_result(text, checked, self.nullable(value))
     }
@@ -984,8 +984,8 @@ impl<'a> Gen<'a> {
             let (cast, name) = (self.runtime("cast"), self.as_name(string));
             let target = self.cast_class(string);
             (
-                format!("{cast}(&s, |o| o.{name}(), {target})"),
-                format!("s.as_ref().map(|o| {cast}(o, |o| o.{name}(), {target}))"),
+                format!("{cast}(&s, |o| o.{name}(), &{target})"),
+                format!("s.as_ref().map(|o| {cast}(o, |o| o.{name}(), &{target}))"),
             )
         };
         let each = match (from_nullable, to_nullable) {
@@ -2932,8 +2932,7 @@ impl<'a> Gen<'a> {
         }
         // Any other object fails the cast to `c` that `compareTo` makes; null fails first.
         self.need(Need::CastSource(e));
-        let from = format!("{}::cast_class(&b)", self.runtime("CastSource"));
-        let fail = failed(self, from);
+        let fail = format!("{}(&b, &{target})", self.runtime("cast_failed_on"));
         if optional {
             // A null argument fails inside the class's own `compareTo`, with that one's message: a
             // string's or a box's as a `Result` that the `?` of `compare_to` passes on, where the

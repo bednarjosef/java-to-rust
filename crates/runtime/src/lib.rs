@@ -444,12 +444,18 @@ pub fn cast_message(from: CastClass, to: CastClass) -> String {
 }
 
 /// Java's checked cast `(T) x` on a non-null object `from`: the object as a `T` if it is one,
-/// which the translation finds (`|o| o.as_t()`), else a `ClassCastException`.
+/// which the translation finds (`|o| o.as_t()`), else a `ClassCastException`. `to` is a
+/// reference to a constant, so that where the cast is inlined its failure is one call with two
+/// pointers (`cast_failed_on`), cheap enough not to keep the caller from being inlined in turn.
 #[inline]
-pub fn cast<S: CastSource + ?Sized, T>(from: &S, as_t: impl FnOnce(&S) -> Option<T>, to: CastClass) -> T {
+pub fn cast<S: CastSource + ?Sized, T>(
+    from: &S,
+    as_t: impl FnOnce(&S) -> Option<T>,
+    to: &'static CastClass,
+) -> T {
     match as_t(from) {
         Some(value) => value,
-        None => cast_failed(from.cast_class(), to),
+        None => cast_failed_on(from, to),
     }
 }
 
@@ -459,9 +465,12 @@ pub fn cast<S: CastSource + ?Sized, T>(from: &S, as_t: impl FnOnce(&S) -> Option
 pub fn try_cast<S: CastSource + ?Sized, T>(
     from: &S,
     as_t: impl FnOnce(&S) -> Option<T>,
-    to: CastClass,
+    to: &'static CastClass,
 ) -> Result<T, Exception> {
-    as_t(from).ok_or_else(|| cast_exception(from.cast_class(), to))
+    match as_t(from) {
+        Some(value) => Ok(value),
+        None => Err(cast_exception_on(from, to)),
+    }
 }
 
 /// The `ClassCastException` of a cast of an object of class `from` to class `to`.
@@ -474,6 +483,20 @@ pub fn cast_exception(from: CastClass, to: CastClass) -> Exception {
 #[cold]
 pub fn cast_failed(from: CastClass, to: CastClass) -> ! {
     throw("java.lang.ClassCastException", &cast_message(from, to))
+}
+
+/// `cast_failed` of the object `from`, whose class it asks out of the line of the cast.
+#[cold]
+#[inline(never)]
+pub fn cast_failed_on<S: CastSource + ?Sized>(from: &S, to: &'static CastClass) -> ! {
+    cast_failed(from.cast_class(), *to)
+}
+
+/// `cast_exception` of the object `from`, out of the line of the cast (`cast_failed_on`).
+#[cold]
+#[inline(never)]
+pub fn cast_exception_on<S: CastSource + ?Sized>(from: &S, to: &'static CastClass) -> Exception {
+    cast_exception(from.cast_class(), *to)
 }
 
 #[cfg(test)]
