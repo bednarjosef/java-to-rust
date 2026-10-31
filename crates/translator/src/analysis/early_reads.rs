@@ -72,6 +72,8 @@ fn walk(
     // set for each class without clearing one.
     let mut seen_in: Vec<u32> = vec![0; groups.next.len()];
     let mut turn = 0;
+    // How much the walks take: the groups entered and the edges looked at.
+    let (mut entered, mut looked) = (0usize, 0usize);
     for (w, (t, clinit, unset)) in walked.iter().enumerate() {
         let mut unset = unset.clone();
         let mut statements = Vec::new();
@@ -105,6 +107,7 @@ fn walk(
                     continue;
                 }
                 seen_in[g] = turn;
+                entered += 1;
                 let of_group = &groups.reads[g];
                 let from = of_group.partition_point(|r| r.0 < w);
                 for (_, name, id) in of_group[from..].iter().take_while(|r| r.0 == w) {
@@ -112,7 +115,12 @@ fn walk(
                         early.insert(*id);
                     }
                 }
-                work.extend(groups.next[g].iter().filter(|&&h| seen_in[h] != turn && reaching.reads(h, w)));
+                for (set, next) in &reaching.next[g] {
+                    looked += 1;
+                    if reaching.sets[*set].contains(w) {
+                        work.extend(next.iter().filter(|&&h| seen_in[h] != turn));
+                    }
+                }
             }
             if let Stmt::Expr(Expr {
                 kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, .. },
@@ -123,6 +131,16 @@ fn walk(
                 unset.remove(name.as_str());
             }
         }
+    }
+    if crate::timings::enabled() {
+        let edges: usize = groups.next.iter().map(Vec::len).sum();
+        eprintln!(
+            "timing: early static reads: {} initializers walked, {} groups with {edges} edges, {entered} \
+             groups entered, {looked} sets of next groups looked at, {} sets of initializers",
+            walked.len(),
+            groups.next.len(),
+            reaching.sets.len()
+        );
     }
     early
 }
@@ -260,10 +278,15 @@ impl<'c> Groups<'c> {
 
 /// For each group, the initializers walked (by their place in `walked`) whose class's statics
 /// that start unset its methods may read, themselves or through what they run: one set for each
-/// set of groups that run each other.
+/// set of groups that run each other, the same sets kept once (`sets`). A group that runs
+/// thousands of others (a virtual call on a wide type) has them by their set (`next`), so that
+/// each walk tests the set once rather than each group, and those that read nothing are left out.
 struct Reaching {
-    component: Vec<usize>,
-    unions: Vec<Bits>,
+    /// The set of each group, by index into `sets`.
+    set: Vec<usize>,
+    sets: Vec<Bits>,
+    /// The groups that each group runs, by their set, without those of the empty set.
+    next: Vec<Vec<(usize, Vec<usize>)>>,
 }
 
 impl Reaching {
@@ -284,12 +307,41 @@ impl Reaching {
             }
             unions.push(union);
         }
-        Reaching { component, unions }
+        // Each distinct set once, the empty one first.
+        let mut index: FastMap<Vec<u64>, usize> = FastMap::default();
+        let mut sets = vec![Bits::default()];
+        index.insert(Vec::new(), 0);
+        let of_component: Vec<usize> = unions
+            .into_iter()
+            .map(|union| {
+                let mut words = union.words().to_vec();
+                while words.last() == Some(&0) {
+                    words.pop();
+                }
+                *index.entry(words).or_insert_with(|| {
+                    sets.push(union);
+                    sets.len() - 1
+                })
+            })
+            .collect();
+        let set: Vec<usize> = component.iter().map(|&c| of_component[c]).collect();
+        let next = (groups.next.iter())
+            .map(|next| {
+                let mut by_set: Vec<(usize, usize)> =
+                    next.iter().map(|&h| (set[h], h)).filter(|&(s, _)| s != 0).collect();
+                by_set.sort_unstable();
+                by_set
+                    .chunk_by(|a, b| a.0 == b.0)
+                    .map(|run| (run[0].0, run.iter().map(|r| r.1).collect()))
+                    .collect()
+            })
+            .collect();
+        Reaching { set, sets, next }
     }
 
     /// Whether group `g` may read a static of the class of initializer `w` that starts unset.
     fn reads(&self, g: usize, w: usize) -> bool {
-        self.unions[self.component[g]].contains(w)
+        self.sets[self.set[g]].contains(w)
     }
 }
 
