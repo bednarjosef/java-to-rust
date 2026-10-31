@@ -73,16 +73,14 @@ slot on the stack) that made the most objects, on standard error, with the total
 made on the stack (`java::count_allocation`).
 
 - **Allocation (BinaryTrees 2.4x, SmallObjects 1.4x, NodeList 0.6x).** Objects live in the runtime's
-  garbage collected heap (docs/collector.md): an allocation takes a slot from a per-thread list
-  through the global allocator, and a handle is copied without a count. The slot is zeroed word by
-  word rather than with a call of `memset`: BinaryTrees took 7.8 s against 9.4 s with the call
-  (alternating runs, at about 620 MHz). Taking the slot inlined at every `new` took it to 5.8 s but
-  slowed other loops, which the compiler no longer optimized as well (docs/collector.md,
-  "Allocation"). BinaryTrees keeps a tree of about 32 MB alive while it builds and drops millions of
+  garbage collected heap (docs/collector.md): `new` takes a slot from a per-thread list or span
+  inline, with the slot's class and size constants of the type, and calls the global allocator
+  only to refill them; a handle is copied without a count. Through the global allocator at every
+  `new`, BinaryTrees ran 19.7 G cycles against 17.0 G inline, and SmallObjects 2.23 G against
+  2.06 G (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 32 MB alive while it builds and drops millions of
   short-lived ones; the collector marks that long-lived tree again at each of its 70 collections,
   which at full clock pause the program for about 0.2 s of its 1.6 s in all (on 16 threads; 0.9 s on
-  one). The rest is the program itself: half of its own time is in the allocator, most of that in
-  the first store to each new slot, a cache miss, which not zeroing the slot moves to the
+  one). The rest is the program itself, much of it the first store to each new slot, a cache miss, which not zeroing the slot moves to the
   constructor's stores without saving time. `SmallObjects` likewise marks a linked list of 2 million
   nodes again at each of its collections, which no helper can share. Of the 60 million nodes its
   last loop makes, the half that each iteration's `Node n` holds are made on the stack, because the
