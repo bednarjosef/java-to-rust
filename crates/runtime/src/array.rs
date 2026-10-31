@@ -217,6 +217,14 @@ pub trait Elements<T> {
     fn store_from(&self, at: usize, values: &[T])
     where
         T: Clone;
+    /// Stores `v` into every element in `range` (within the length): `Arrays.fill`. A
+    /// `SharedArray` stores into each cell, rather than copying the range out and back.
+    fn fill_with(&self, range: Range<usize>, v: T)
+    where
+        T: Clone,
+    {
+        self.writing(range, |items| items.fill(v));
+    }
     /// Copies the `n` elements from position `from` to position `to`, which the caller has
     /// checked, as if through a temporary array where the two overlap (`System.arraycopy` within
     /// one array); within a `SharedArray`, one element at a time, in the order that keeps each
@@ -352,6 +360,13 @@ impl<T, A: Elements<T>> Elements<T> for &A {
         T: Clone,
     {
         (**self).store_from(at, values)
+    }
+
+    fn fill_with(&self, range: Range<usize>, v: T)
+    where
+        T: Clone,
+    {
+        (**self).fill_with(range, v)
     }
 
     fn copy_within(&self, from: usize, to: usize, n: usize)
@@ -637,6 +652,15 @@ impl<T> Elements<T> for SharedArray<T> {
         T: Clone,
     {
         for (cell, v) in self.items.0[at..at + values.len()].iter().zip(values) {
+            cell.set(v.clone());
+        }
+    }
+
+    fn fill_with(&self, range: Range<usize>, v: T)
+    where
+        T: Clone,
+    {
+        for cell in &self.items.0[range] {
             cell.set(v.clone());
         }
     }
@@ -1443,7 +1467,7 @@ pub fn to_string<T: Clone, S: Into<crate::JString>>(
 
 /// `Arrays.fill(a, v)`.
 pub fn fill<T: Clone>(a: &impl Elements<T>, v: T) {
-    a.writing(0..a.length(), |items| items.fill(v));
+    a.fill_with(0..a.length(), v);
 }
 
 /// `Arrays.sort(a)` for integers (`int`, `long`, `short`, `byte`, `char`). Equal values cannot be
@@ -1679,6 +1703,11 @@ mod tests {
         let shared = shared_from_vec(vec![5, 3, 9, 1, 7]);
         sort(&shared);
         assert_eq!(shared.take_items(), [1, 3, 5, 7, 9]);
+        let filled = shared_from_vec(vec![0; 5]);
+        crate::fill_range(&filled, 1, 4, 6);
+        assert_eq!(filled.take_items(), [0, 6, 6, 6, 0]);
+        fill(&filled, 2);
+        assert_eq!(filled.take_items(), [2; 5]);
         assert_eq!(compare_and_exchange_element(&shared, 2, 5, 6, |x, y| x == y), 5);
         assert!(!compare_and_set_element(&shared, 2, 5, 8, |x, y| x == y));
         assert_eq!(get_and_add_element(&shared, 2, 10, i32::wrapping_add), 6);

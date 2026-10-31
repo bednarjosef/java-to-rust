@@ -174,7 +174,7 @@ pub fn sort_range<T: JavaElement>(a: &impl Elements<T>, from: i32, to: i32) {
 /// `Arrays.fill(a, from, to, v)`.
 pub fn fill_range<T: Clone>(a: &impl Elements<T>, from: i32, to: i32, v: T) {
     let r = range(a.length(), from, to);
-    a.writing(r, |items| items.fill(v));
+    a.fill_with(r, v);
 }
 
 /// `Arrays.copyOfRange(a, from, to)`: the elements from `from` up to `to`, padded with `zero` past
