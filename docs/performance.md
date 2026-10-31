@@ -25,7 +25,9 @@ milliseconds), at a load average of 1.6 at its start and about 4 during it, on 1
 clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (five runs a side,
 at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
 Interpreter's from one at a load average of 6.3, SortMillion's from five runs a side at a load
-average of 4, and ReflectionLookups' from one of it alone (five runs a side).
+average of 4, ReflectionLookups' from one of it alone (five runs a side), and BinaryTrees',
+SmallObjects' and ManyThreadsAllocating's from five runs a side, alternating, at a load average
+of about 3.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
@@ -36,13 +38,13 @@ average of 4, and ReflectionLookups' from one of it alone (five runs a side).
 | program               | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
 |-----------------------|--------:|--------:|----------:|------------:|------------:|-------------:|
 | BaseFields            |     170 |      69 |      0.41 |         145 |          66 |         0.46 |
-| BinaryTrees           |     686 |    1634 |      2.38 |           - |           - |            - |
+| BinaryTrees           |     719 |    1056 |      1.47 |           - |           - |            - |
 | ClassCast             |      85 |      83 |      0.97 |          37 |          71 |         1.92 |
 | Collatz               |    1155 |     581 |      0.50 |           - |           - |            - |
 | Interpreter           |    1314 |    1000 |      0.76 |         382 |         300 |         0.79 |
 | LargeArrays           |      34 |       7 |      0.21 |           - |           - |            - |
 | Mandelbrot            |    3400 |    1143 |      0.34 |        1128 |        1141 |         1.01 |
-| ManyThreadsAllocating |     136 |     108 |      0.79 |           - |           - |            - |
+| ManyThreadsAllocating |     155 |     106 |      0.68 |           - |           - |            - |
 | MatrixMultiply        |     124 |      80 |      0.65 |          27 |          25 |         0.93 |
 | MonitoredObjects      |      67 |      33 |      0.48 |           - |           - |            - |
 | NBody                 |    1811 |    1884 |      1.04 |         601 |         598 |         1.00 |
@@ -54,7 +56,7 @@ average of 4, and ReflectionLookups' from one of it alone (five runs a side).
 | ReflectionLookups     |     207 |     210 |      1.01 |         146 |         189 |         1.29 |
 | ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
 | Sieve                 |    1278 |    1006 |      0.79 |           - |           - |            - |
-| SmallObjects          |     147 |     203 |      1.38 |           - |           - |            - |
+| SmallObjects          |     145 |     131 |      0.90 |           - |           - |            - |
 | SortMillion           |    1691 |    1439 |      0.85 |         520 |         479 |         0.92 |
 | Statics               |    1286 |    1266 |      0.98 |           - |           - |            - |
 | StringBuild           |      28 |       1 |      0.04 |           - |           - |            - |
@@ -73,15 +75,17 @@ sites (class, the method the `new` is in, and "on the stack" for a `new` whose o
 slot on the stack) that made the most objects, on standard error, with the total and the share
 made on the stack (`java::count_allocation`).
 
-- **Allocation (BinaryTrees 2.4x, SmallObjects 1.4x, NodeList 0.6x).** Objects live in the runtime's
+- **Allocation (BinaryTrees 1.5x, SmallObjects 0.9x, NodeList 0.6x).** Objects live in the runtime's
   garbage collected heap (docs/collector.md): `new` takes a slot from a per-thread list or span
   inline, with the slot's class and size constants of the type, and calls the global allocator
   only to refill them; a handle is copied without a count. Through the global allocator at every
   `new`, BinaryTrees ran 19.7 G cycles against 17.0 G inline, and SmallObjects 2.23 G against
   2.06 G (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 32 MB alive while it builds and drops millions of
-  short-lived ones; the collector marks that long-lived tree again at each of its 70 collections,
-  which at full clock pause the program for about 0.2 s of its 1.6 s in all (on 16 threads; 0.9 s on
-  one). The rest is the program itself, much of it the first store to each new slot, a cache miss, which not zeroing the slot moves to the
+  short-lived ones; the collector marks that long-lived tree again at each collection. Its
+  marking on 16 threads takes several times the program's own processor time between
+  collections, so the collector lets twice as many bytes be taken between them (docs/collector.md,
+  "Collection"): 38 collections instead of 70, 1.06 s instead of 1.18 s, at a peak of 279 MB
+  instead of 217 MB. The rest is the program itself, much of it the first store to each new slot, a cache miss, which not zeroing the slot moves to the
   constructor's stores without saving time. `SmallObjects` likewise marks a linked list of 2 million
   nodes again at each of its collections, which no helper can share. Of the 60 million nodes its
   last loop makes, the half that each iteration's `Node n` holds are made on the stack, because the

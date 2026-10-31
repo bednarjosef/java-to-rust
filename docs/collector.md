@@ -100,7 +100,14 @@ else touched; at allocation the sweep takes 11 ms and the run is 0.4 s faster.
 ## Collection
 
 A collection runs when the program has taken as many bytes as were alive after the last one (at
-least 64 MB), so the heap is about twice what is alive. On the Minecraft benchmark the optimized
+least 64 MB), so the heap is about twice what is alive, times a scale for programs that spend
+most of their time collecting: while a collection takes more than half as much processor time
+(all its markers') as the program's threads used since the last one, the bytes taken before the
+next grow by a tenth, up to twice; while it takes less, they shrink back. The small step keeps a
+short phase of costly collections from growing the heap. BinaryTrees, which marks a tree of up
+to 85 MB alive on every processor, so collects 38 times instead of 70 and runs 1.06 s instead of
+1.18 s, at a peak of 279 MB instead of 217 MB (Java: 2 GB); SmallObjects 0.131 s instead of
+0.152 s at 203 MB instead of 171 MB (Java: 812 MB). On the Minecraft benchmark the optimized
 translated javac takes 14.5 s and 1.03 GB collecting after half as much as is alive, 13.1 s and
 1.36 GB after as much, and 12.4 s and 2.0 GB after twice as much (the Java VM: 11.3 s, 4.1 GB). It:
 
@@ -261,6 +268,8 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   collections.
 - `JAVA_GC_GROWTH=<percent>` sets the bytes taken between collections as a percentage of the
   bytes alive (100 by default), which trades memory for time.
+- `JAVA_GC_TIME=<percent>` sets the share of processor time above which that grows (50 by
+  default); 0 turns the growth off. `JAVA_GC_LOG` shows the scale of each collection.
 
 ## Costs and limits
 
