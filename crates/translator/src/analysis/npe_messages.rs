@@ -935,6 +935,14 @@ impl Messages<'_> {
                         };
                         add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                     }
+                    // `c.isInstance(x)` of a null class `c`, a call of `Class`.
+                    Builtin::ClassIsInstance => {
+                        let call = match self.jdk {
+                            true => Some("java.lang.Class.isInstance(Object)".to_string()),
+                            false => self.call(x.pos, "isInstance"),
+                        };
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                    }
                     Builtin::ClassMethod(ClassOp::IsAssignableFrom) => {
                         let call = match self.jdk {
                             true => Some("java.lang.Class.isAssignableFrom(java.lang.Class)".to_string()),

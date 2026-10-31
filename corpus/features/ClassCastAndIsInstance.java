@@ -109,6 +109,19 @@ public class ClassCastAndIsInstance {
         System.out.println(tests + " " + Op.class.isInstance(first) + Color.class.isInstance(firstKey(keys))
             + " " + kindOf("class").isInstance(keyOf("value", keys, 1)));
         System.out.println(Op.class.cast(keys[1]) + " " + Color.class.cast(keys[3]));
+        // A null class throws after the value is evaluated, where a catch sees it.
+        Class<?> noKind = args.length > 5 ? Op.class : null;
+        try {
+            System.out.println(noKind.isInstance(keyOf("after the class", keys, 0)));
+        } catch (NullPointerException e) {
+            System.out.println("caught " + e.getMessage());
+        }
+        Object some = keys[2];
+        try {
+            System.out.println(noKind.isInstance(some));
+        } catch (NullPointerException e) {
+            System.out.println("caught " + e.getMessage());
+        }
         try {
             System.out.println(1 / (args.length));
         } catch (RuntimeException e) {

@@ -701,6 +701,12 @@ pub(super) fn runtime_failures(
                     out.push((NPE, "this call", true, arg.id));
                 }
             }
+            // A null class of `isInstance`, as for `isAssignableFrom`; a null object is a value.
+            Builtin::ClassIsInstance => {
+                if null(&args[0]) {
+                    out.push((NPE, "this call", true, args[0].id));
+                }
+            }
             Builtin::Println
             | Builtin::Print
             | Builtin::MathAbs
@@ -733,7 +739,6 @@ pub(super) fn runtime_failures(
             | Builtin::SameClass { .. }
             | Builtin::ClassLiteral(_)
             | Builtin::ClassMethod(_)
-            | Builtin::ClassIsInstance
             | Builtin::ComparableClassFor
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
