@@ -278,12 +278,12 @@ impl<'a> Gen<'a> {
             ExprKind::NewArray(sizes) => self.owned_new(e.ty, sizes),
             ExprKind::ArrayLit(items) => {
                 let elem = element(e.ty);
-                let items: Vec<String> = if matches!(elem, Type::Array(_)) {
+                let texts: Vec<String> = if matches!(elem, Type::Array(_)) {
                     items.iter().map(|item| self.owned(item)).collect()
                 } else {
                     items.iter().map(|item| self.element_value(item, elem)).collect()
                 };
-                format!("vec![{}]", items.join(", "))
+                self.table_lit(items, &texts).unwrap_or_else(|| format!("vec![{}]", texts.join(", ")))
             }
             ExprKind::Var(name) => self.local(name),
             ExprKind::Builtin(Builtin::MainArgs, _) => self.main_args_vec(e.ty),
