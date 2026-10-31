@@ -308,19 +308,32 @@ a noise call, is such a static: its run took 6.81 G instructions with the test o
 initialization is observable:
 
 - its `<clinit>` (the code inside the `try` of a rewritten one, `lower::clinit_errors`) is only
-  assignments to statics of its class;
-- each assigned value reads only literals, constants and statics of its class assigned before,
+  assignments to statics of its class, and, for an enum whose fields are tables
+  (`lower/enum_tables.rs`), calls of its constant builders that only fill rows of its tables
+  with their parameters or literals (`inert_builder`);
+- each assigned value or argument reads only literals, constants of any class, statics of its
+  class assigned before, and constants of enums, its own or one that is not eager or is
+  initialized this way too,
   with operators that cannot throw (no integer division or remainder), new arrays of a literal
   size or of literal elements, and `new` of objects whose constructor (`plain_constructor`)
   only assigns fields of the new object its parameters or literals, of a class that has no
   superclass in the program, no field initializer but a literal, and no static initialization
-  that runs eagerly: no call, no lambda, no other class's static, nothing that throws but
-  `OutOfMemoryError`;
-- the class is not an enum, and no superclass or superinterface of it initializes eagerly.
+  that runs eagerly: no other call, no lambda, no other class's static but constants, nothing
+  that throws but `OutOfMemoryError`;
+- no superclass of it, nor a superinterface that it initializes with it, initializes eagerly.
+
+Since such a class is initialized before any code that could use it runs, nothing tests whether
+it is: its static methods and constructors start with no call of its `init`, and a read of its
+statics or constants from another class has none either (`Facts::initialized_first`). The code
+that runs before, the other such initializations, names nothing of it but constants and the
+values of its enum constants, which need no initialization. In javac, the enums of tree tags and
+type tags are such enums, whose constants nearly every method reads.
 
 A class that prints, reads a static another class changes, or may throw keeps its initialization
-at its first use (corpus `threads/EarlyStaticInitializers`). Only a program that starts threads
-does this, as only its statics are `java::Final`s. Where the read is only borrowed (the object of a call or a field access,
+at its first use (corpus `threads/EarlyStaticInitializers`), and so does an enum whose constants
+are built from such an enum's constants (corpus `threads/EarlyEnumTables`). Only a program that
+starts threads does this, as only its statics are `java::Final`s. Where the read is only borrowed
+(the object of a call or a field access,
 an array that is indexed or measured, a string that is lent, a null test), the generator writes
 the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clone; a static that
 starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is

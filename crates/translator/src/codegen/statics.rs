@@ -310,7 +310,8 @@ impl<'a> Gen<'a> {
 
     /// The call that initializes the class of a static field or method before it is used, or
     /// `None` when neither the class nor a superclass is eager, or the code is in that class or
-    /// a subclass of it, which is already initialized by then.
+    /// a subclass of it, which is already initialized by then, or `main` initializes the class
+    /// first (`Facts::initialized_first`).
     pub(super) fn init_call(&mut self, class: usize) -> Option<String> {
         let init = self.uninitialized(class)?;
         Some(format!("{};", self.init_run(init)))
@@ -318,13 +319,15 @@ impl<'a> Gen<'a> {
 
     /// The class whose initialization a use of class `class` runs here (`init_call`), if any:
     /// none in that class or a subclass of it, nor after a statement of the same method that
-    /// surely ran it (`known_init`).
+    /// surely ran it (`known_init`), nor for a class that `main` initializes first
+    /// (`Facts::initialized_first`).
     pub(super) fn uninitialized(&self, class: usize) -> Option<usize> {
         let current = self.class.methods[self.method].class;
         let init = self.facts.init_class(self.class, class)?;
         let initialized = current == init
             || self.class.hierarchy.ancestors(current).contains(&init)
-            || self.known_init.contains(&(self.method, init));
+            || self.known_init.contains(&(self.method, init))
+            || self.facts.initialized_first(init);
         (!initialized).then_some(init)
     }
 

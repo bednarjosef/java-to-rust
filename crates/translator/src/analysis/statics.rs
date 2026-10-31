@@ -85,42 +85,124 @@ fn changed_later(class: &Class) -> FastMap<usize, FastSet<String>> {
 /// a program that starts threads: those whose `<clinit>` has no effect Java could observe, so
 /// that it may run at any time before the class's first use. Run before any thread starts, it
 /// assigns the class's `java::Final` statics where every thread reads them with no test (see the
-/// runtime's `Final`). Such a `<clinit>` only assigns statics of its class values that `inert`
-/// accepts, the class is not an enum, and no superclass or superinterface of it is eager.
+/// runtime's `Final`), and no code needs to initialize the class before it uses it: every static
+/// method, constructor and static access of such a class runs with no test (`Gen::init_call`,
+/// `entry_inits`). Such a `<clinit>` only assigns statics of its class values that `inert`
+/// accepts, or, for an enum in table form (`lower/enum_tables.rs`), calls its constant builders
+/// with such values, and builders that only fill rows of their enum's tables (`inert_builder`).
+/// No superclass of the class, nor a superinterface that it initializes with it, is eager. A
+/// value may name a constant of another enum only if that enum is not eager or is one of these
+/// too: the value needs no initialization, and the other enum's has no effect either.
 pub fn early(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
     let changed = changed_later(class);
     let none = FastSet::default();
-    eager
-        .iter()
-        .copied()
-        .filter(|&t| {
-            let decl = &class.types[t];
-            decl.enum_constants.is_none()
-                && !class.hierarchy.ancestors(t).iter().any(|a| eager.contains(a))
-                && class.methods.iter().filter(|m| m.class == t && m.name == "<clinit>").all(|clinit| {
-                    let changed = changed.get(&t).unwrap_or(&none);
-                    let mut assigned: FastSet<&str> = FastSet::default();
-                    let body = match crate::lower::rewritten_clinit(decl) {
-                        true => clinit_code(&clinit.body),
-                        false => Some(&clinit.body[..]),
-                    };
-                    body.is_some_and(|body| body.iter().all(|stmt| {
-                        let Stmt::Expr(Expr {
-                            kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, value },
-                            ..
-                        }) = stmt
-                        else {
-                            return false;
-                        };
-                        let ok = *c == t && inert(value, t, &assigned, decl, &|k| plain_constructor(class, eager, k));
-                        if !changed.contains(name) {
-                            assigned.insert(name.as_str());
+    // Each candidate with the other eager enums whose constants its initialization names.
+    let mut candidates: FastMap<usize, FastSet<usize>> = FastMap::default();
+    for &t in eager {
+        let decl = &class.types[t];
+        if class.hierarchy.ancestors(t).iter().any(|a| eager.contains(a))
+            || crate::codegen::default_superinterfaces(class, t).iter().any(|i| eager.contains(i))
+        {
+            continue;
+        }
+        let mut enums = FastSet::default();
+        let ok = class.methods.iter().filter(|m| m.class == t && m.name == "<clinit>").all(|clinit| {
+            let changed = changed.get(&t).unwrap_or(&none);
+            let mut assigned: FastSet<&str> = FastSet::default();
+            let body = match crate::lower::rewritten_clinit(decl) {
+                true => clinit_code(&clinit.body),
+                false => Some(&clinit.body[..]),
+            };
+            // A constant of another class is inlined and runs nothing.
+            let mut named = |c: usize, name: Option<&str>| match name {
+                Some(name) => class.types[c].statics.iter().any(|f| f.name == name && f.constant),
+                None => {
+                    if c != t && eager.contains(&c) {
+                        enums.insert(c);
+                    }
+                    true
+                }
+            };
+            let new = |k| plain_constructor(class, eager, k);
+            body.is_some_and(|body| {
+                body.iter().all(|stmt| {
+                    let Stmt::Expr(e) = stmt else { return false };
+                    match &e.kind {
+                        ExprKind::Assign { op: None, target: Place::Static { class: c, name }, value } => {
+                            let ok = *c == t && inert(value, t, &assigned, decl, &new, &mut named);
+                            if !changed.contains(name) {
+                                assigned.insert(name.as_str());
+                            }
+                            ok
                         }
-                        ok
-                    }))
+                        ExprKind::Call { resolved: Some(k), args, .. } => {
+                            class.methods[*k].class == t
+                                && inert_builder(class, *k, &mut FastSet::default())
+                                && args.iter().all(|a| {
+                                    matches!(a.kind, ExprKind::Null)
+                                        || inert(a, t, &assigned, decl, &new, &mut named)
+                                })
+                        }
+                        _ => false,
+                    }
                 })
-        })
-        .collect()
+            })
+        });
+        if ok {
+            candidates.insert(t, enums);
+        }
+    }
+    // Drop the candidates that name a constant of an eager enum that is not one, until none does.
+    loop {
+        let out: Vec<usize> = candidates
+            .iter()
+            .filter(|(_, enums)| enums.iter().any(|e| !candidates.contains_key(e)))
+            .map(|(&t, _)| t)
+            .collect();
+        if out.is_empty() {
+            break;
+        }
+        for t in out {
+            candidates.remove(&t);
+        }
+    }
+    candidates.into_keys().collect()
+}
+
+/// Whether method `k` is a builder of its enum's constants that only fills rows of the enum's
+/// tables (`table[constantOrdinal] = v`, where `v` is a parameter, a literal or null) and calls other
+/// such builders, with parameters or literals (`this(..)` of a constructor, or the builder of the
+/// fields of the constants' bodies). Called with `inert` arguments, it has no effect but filling
+/// its rows, and cannot throw: the ordinals are those of the constants. `seen` holds the builders
+/// being checked, against a loop.
+fn inert_builder(class: &Class, k: usize, seen: &mut FastSet<usize>) -> bool {
+    let m = &class.methods[k];
+    if !class.builds_constants(k) || !seen.insert(k) {
+        return false;
+    }
+    let decl = &class.types[m.class];
+    let param = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if m.params.iter().any(|p| p.name == *v));
+    let value = |e: &Expr| {
+        param(e) || matches!(e.kind, ExprKind::Null) || pure(e, usize::MAX, &FastSet::default(), decl)
+    };
+    m.body.iter().all(|stmt| match stmt {
+        Stmt::Return(None, _) => true,
+        Stmt::Expr(Expr {
+            kind: ExprKind::Assign { op: None, target: Place::Index(array, index), value: v },
+            ..
+        }) => {
+            matches!(&array.kind, ExprKind::Static { class: c, name }
+                if *c == m.class && crate::lower::tabled_field(name).is_some())
+                && matches!(&index.kind, ExprKind::Var(v) if v == crate::lower::TABLE_ORDINAL)
+                && value(v)
+        }
+        Stmt::Expr(Expr { kind: ExprKind::Call { resolved: Some(callee), args, .. }, .. }) => {
+            class.methods[*callee].class == m.class
+                && args.iter().all(value)
+                && inert_builder(class, *callee, seen)
+        }
+        _ => false,
+    })
 }
 
 /// The code of a rewritten `<clinit>` (`lower::clinit_errors`), which runs inside the `try` that
@@ -163,21 +245,29 @@ fn plain_constructor(class: &Class, eager: &FastSet<usize>, k: usize) -> bool {
 /// only if it is a constant or was assigned before, so that a lazy cell never needs another one
 /// that is still being computed.
 fn pure(e: &Expr, index: usize, assigned: &FastSet<&str>, decl: &TypeDecl) -> bool {
-    inert(e, index, assigned, decl, &|_| false)
+    inert(e, index, assigned, decl, &|_| false, &mut |_, _| false)
 }
 
 /// `pure`, where `e` may also make objects with the constructors `new` accepts, which has no
-/// effect but the allocation either.
+/// effect but the allocation either, and name what `named` accepts: an enum's constant
+/// (`named(enum, None)`), or a static of another class (`named(class, Some(name))`).
 fn inert(
     e: &Expr,
     index: usize,
     assigned: &FastSet<&str>,
     decl: &TypeDecl,
     new: &dyn Fn(usize) -> bool,
+    named: &mut dyn FnMut(usize, Option<&str>) -> bool,
 ) -> bool {
-    let recur = |x: &Expr| inert(x, index, assigned, decl, new);
+    let mut recur = |x: &Expr| inert(x, index, assigned, decl, new, named);
     match &e.kind {
         ExprKind::New { ctor: Some(k), args, .. } => new(*k) && args.iter().all(recur),
+        ExprKind::EnumConstant { class, .. } => named(*class, None),
+        // The ordinal of a constant, which is never null.
+        ExprKind::Builtin(Builtin::EnumOrdinal, args) => match &args[..] {
+            [x @ Expr { kind: ExprKind::EnumConstant { .. }, .. }] => recur(x),
+            _ => false,
+        },
         ExprKind::Int(_)
         | ExprKind::Long(_)
         | ExprKind::Double(_)
@@ -186,10 +276,9 @@ fn inert(
         | ExprKind::Bool(_)
         | ExprKind::Str(_)
         | ExprKind::Units(_) => true,
-        ExprKind::Static { class, name } => {
-            *class == index
-                && (assigned.contains(name.as_str())
-                    || decl.statics.iter().any(|f| f.name == *name && f.constant))
+        ExprKind::Static { class, name } if *class != index => named(*class, Some(name)),
+        ExprKind::Static { name, .. } => {
+            assigned.contains(name.as_str()) || decl.statics.iter().any(|f| f.name == *name && f.constant)
         }
         ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::InstanceOf { value: x, .. } => recur(x),
         // Integer division can divide by zero, which throws.
@@ -205,9 +294,10 @@ fn inert(
 /// The static methods and constructors of eagerly initialized classes that start by running
 /// their class's `init`. Java initializes a class when one of them is first called; a method that
 /// only methods of its own class call, or any method of the class of `main` but `main` itself,
-/// cannot run before that has started, so it skips the check. A method that lowering adds for an
-/// expression (`Method::added`) never runs it: it is the code of its call sites.
-pub fn entry_inits(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
+/// cannot run before that has started, so it skips the check, as does one of a class that `main`
+/// initializes first (`early`). A method that lowering adds for an expression (`Method::added`)
+/// never runs it: it is the code of its call sites.
+pub fn entry_inits(class: &Class, eager: &FastSet<usize>, early: &FastSet<usize>) -> FastSet<usize> {
     let mains: Vec<&Method> = class.methods.iter().filter(|m| m.is_main).collect();
     let main_class = match mains[..] {
         [main] => Some(main.class),
@@ -249,6 +339,12 @@ pub fn entry_inits(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
     (0..class.methods.len())
         .filter(|&i| {
             let m = &class.methods[i];
+            let init = std::iter::once(m.class)
+                .chain(class.hierarchy.ancestors(m.class))
+                .find(|c| eager.contains(c));
+            if init.is_some_and(|c| early.contains(&c)) {
+                return false;
+            }
             if !m.is_static && !m.is_abstract && eager.contains(&m.class) && tables(m.class) {
                 return true;
             }

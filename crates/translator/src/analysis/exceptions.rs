@@ -1761,6 +1761,7 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
         .filter_map(|t| {
             let init = facts.init_class(class, t)?;
             let initialized = Some(init) == main_class
+                || facts.initialized_first(init)
                 || current.is_some_and(|c| c == init || class.hierarchy.ancestors(c).contains(&init));
             if initialized {
                 return None;
