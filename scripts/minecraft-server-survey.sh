@@ -808,10 +808,10 @@ gamemode creative bot
 gamemode survival bot
 give bot minecraft:diamond 5
 clear bot minecraft:diamond 2
-tp bot 100 120 100
+setblock 100 100 100 minecraft:gold_block
+tp bot 100 101 100
 data get entity bot Pos
 time set 1000
-time query daytime
 weather rain
 weather thunder 600
 weather clear
@@ -820,11 +820,10 @@ difficulty
 gamerule keep_inventory true
 gamerule keep_inventory
 seed
-setblock 100 100 100 minecraft:gold_block
 fill 101 100 100 103 102 102 minecraft:stone
 execute if block 100 100 100 minecraft:gold_block
 summon minecraft:pig 100 101 100
-kill @e[type=minecraft:pig]
+kill @e[type=minecraft:pig,x=100,y=101,z=100,distance=..2]
 effect give bot minecraft:speed 30 1
 xp add bot 15 levels
 experience query bot levels
@@ -836,9 +835,9 @@ tag bot list
 say done
 msg bot hello
 banlist
-locate biome minecraft:desert
+locate biome minecraft:plains
 locate structure minecraft:village_plains
-spawnpoint bot 100 120 100
+spawnpoint bot 100 101 100
 worldborder set 1000
 worldborder get
 save-all
