@@ -8,7 +8,14 @@ does not translate or compile, is reported and not timed. Times are the median o
 wall clock: Java with its default flags, JVM start-up included. A program that warms up prints
 a line `kernel-ms N` on standard error after its warm-up runs: N is the time of the timed kernel
 measured inside the program, and it is reported as well. So is each side's peak memory, the most
-resident memory the process held (the median over the runs of its `ru_maxrss`).
+resident memory the process held (the median over the runs of its `ru_maxrss`), measured by
+`scripts/peak-rss.c`, which runs the program as its own child so that the peak is the program's
+alone and not the forked Python's (about 20 MB). Java runs with `-XX:MaxRAM` set to the machine's
+memory, so that its heap is sized as at its defaults even under a cap of the memory of a cgroup.
+
+A program that does not translate on its own, as one that uses the JDK's collections, is
+translated as a whole program with the JDK's sources when `JAVA_BASE_SOURCES` names the source
+root of `java.base`; its name is marked `*` in the table.
 
     python3 scripts/benchmark.py [--runs N] [Program ...]
 """
@@ -16,6 +23,7 @@ resident memory the process held (the median over the runs of its `ru_maxrss`).
 import argparse
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -28,7 +36,13 @@ ROOT = Path(__file__).resolve().parent.parent
 PROGRAMS = ROOT / "benchmarks"
 OUT = ROOT / "target" / "benchmarks"
 KERNEL_MS = re.compile(r"^kernel-ms (\d+)$", re.MULTILINE)
+PEAK_RSS = re.compile(r"^peak-rss-kb (\d+)\n", re.MULTILINE)
 RUN_TIMEOUT = 600  # seconds; a run that takes longer fails the program
+# The machine's memory in bytes, for Java's `-XX:MaxRAM`: inside a cgroup with a memory cap, the
+# JVM sizes its heap from the cap (768 MB under a cap of 3 GB, against 7.8 GB on this machine).
+MACHINE_MEMORY = next(
+    int(l.split()[1]) * 1024 for l in Path("/proc/meminfo").read_text().splitlines() if l.startswith("MemTotal:")
+)
 
 
 @dataclass
@@ -50,6 +64,7 @@ class Row:
     rust_kernel: float | None = None
     java_mb: float = 0.0
     rust_mb: float = 0.0
+    whole: bool = False
 
 
 def crate_name(stem):
@@ -64,11 +79,21 @@ def first_error(stderr):
     return stderr.strip().splitlines()[-1] if stderr.strip() else "failed"
 
 
+def peak_rss_helper():
+    """Builds `scripts/peak-rss.c` (with `cc`, which Rust needs as its linker anyway)."""
+    helper = OUT / "peak-rss"
+    source = ROOT / "scripts" / "peak-rss.c"
+    if not helper.exists() or helper.stat().st_mtime < source.stat().st_mtime:
+        OUT.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["cc", "-O2", "-o", str(helper), str(source)], check=True)
+    return helper
+
+
 def measured_run(cmd):
-    """Runs `cmd` to its end: its output, exit code, wall time and peak resident memory, which
-    `wait4` gives for the one process."""
+    """Runs `cmd` to its end through `peak-rss`: its output, exit code, wall time and peak
+    resident memory, which `peak-rss` writes as the last line of standard error."""
     start = time.perf_counter()
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen([str(HELPER)] + cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     output = {}
 
     def read(name, stream):
@@ -79,13 +104,15 @@ def measured_run(cmd):
         r.start()
     timer = threading.Timer(RUN_TIMEOUT, proc.kill)
     timer.start()
-    _, status, usage = os.wait4(proc.pid, 0)
+    _, status, _ = os.wait4(proc.pid, 0)
     timer.cancel()
     ms = (time.perf_counter() - start) * 1000
     proc.returncode = os.waitstatus_to_exitcode(status)
     for r in readers:
         r.join()
-    return Run(output["out"], proc.returncode, output["err"], ms, usage.ru_maxrss / 1024)
+    peaks = PEAK_RSS.findall(output["err"])
+    stderr = PEAK_RSS.sub("", output["err"])
+    return Run(output["out"], proc.returncode, stderr, ms, int(peaks[-1]) / 1024 if peaks else 0.0)
 
 
 def timed_runs(cmd, runs):
@@ -111,8 +138,21 @@ def benchmark(java_file, translator, runs):
     translation = subprocess.run(
         [str(translator), str(java_file), "--crate", str(crate)], capture_output=True, text=True
     )
+    library = os.environ.get("JAVA_BASE_SOURCES")
+    if translation.returncode and library:
+        # Translated whole, with the JDK's sources, from a source root of its own.
+        sources = OUT / "sources" / stem
+        sources.mkdir(parents=True, exist_ok=True)
+        shutil.copy(java_file, sources / java_file.name)
+        whole = subprocess.run(
+            [str(translator), "--main", stem, "--source", str(sources), "--library", library, "--crate", str(crate)],
+            capture_output=True,
+            text=True,
+        )
+        if not whole.returncode:
+            translation, row.whole = whole, True
     if translation.returncode:
-        row.status = f"does not translate: {translation.stderr.strip()}"
+        row.status = f"does not translate: {translation.stderr.strip()[-400:]}"
         return row
     build = subprocess.run(
         ["cargo", "build", "--release", "-q", "--target-dir", str(OUT / "target")],
@@ -124,7 +164,7 @@ def benchmark(java_file, translator, runs):
         row.status = f"does not compile: {first_error(build.stderr)}"
         return row
 
-    java = timed_runs(["java", "-cp", str(classes), stem], runs)
+    java = timed_runs(["java", f"-XX:MaxRAM={MACHINE_MEMORY}", "-cp", str(classes), stem], runs)
     rust = timed_runs([str(OUT / "target" / "release" / crate_name(stem))], runs)
     expected = (java[0].stdout, java[0].code)
     for run in java + rust:
@@ -150,8 +190,9 @@ def print_table(rows):
         f"{'Java kernel':>13}{'Rust kernel':>13}{'kernel ratio':>14}{'Java MB':>9}{'Rust MB':>9}"
     )
     for r in rows:
+        name = r.name + ("*" if r.whole else "")
         if r.status != "ok":
-            print(f"{r.name:<16}  {r.status}")
+            print(f"{name:<16}  {r.status}")
             continue
         kernel = (
             f"{r.java_kernel:>13.0f}{r.rust_kernel:>13.0f}{ratio(r.rust_kernel, r.java_kernel):>14}"
@@ -159,7 +200,7 @@ def print_table(rows):
             else f"{'-':>13}{'-':>13}{'-':>14}"
         )
         print(
-            f"{r.name:<16}{r.java_ms:>10.0f}{r.rust_ms:>10.0f}{ratio(r.rust_ms, r.java_ms):>11}{kernel}"
+            f"{name:<16}{r.java_ms:>10.0f}{r.rust_ms:>10.0f}{ratio(r.rust_ms, r.java_ms):>11}{kernel}"
             f"{r.java_mb:>9.1f}{r.rust_mb:>9.1f}"
         )
 
@@ -195,6 +236,8 @@ def main():
     # Cargo builds where CARGO_TARGET_DIR says, when it is set.
     translator = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "release" / "java-to-rust"
 
+    global HELPER
+    HELPER = peak_rss_helper()
     print(environment())
     print(f"median of {args.runs} runs, wall clock, milliseconds; peak resident memory, MB\n")
     rows = []
