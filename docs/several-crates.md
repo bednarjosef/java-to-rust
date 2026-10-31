@@ -221,9 +221,13 @@ compiles a program.
 The split parses each item of a module (a class with its `impl`s) by itself with `syn` and drops
 its text once split: a syntax tree is many times its text, and the Minecraft server's crate root
 alone is 2.3 million lines (its `Object` enum 650,000). It parses the items and the signatures of their
-functions, not the functions' code: before `syn` parses an item, each function's braces are
-emptied with their place kept (`hollow`), and the split takes the code's text from the module's
-text. A function's code that is not Rust is then rustc's to report, not the split's.
+functions, not the functions' code: before the item's text is made into tokens, the text inside
+each function's braces is made blank, a space for each byte and each line break kept
+(`blank_bodies`, which finds the braces past strings, characters and comments), so that every
+place in it is the place in the text; the braces are then emptied (`hollow`), and the split takes
+the code's text from the module's text. Writing the Minecraft server's trial from a saved
+translation takes 24 s, against 37 s when the code was made into tokens only to be dropped. A
+function's code that is not Rust is then rustc's to report, not the split's.
 
 What it costs: a call of a moved function from another crate cannot be inlined without
 link-time optimization. The split workspace's release profile has thin LTO, which inlines across
