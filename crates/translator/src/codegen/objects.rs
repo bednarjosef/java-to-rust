@@ -654,25 +654,70 @@ impl<'a> Gen<'a> {
         if self.volatile_cell(object, name) { ("get_volatile", "set_volatile") } else { ("get", "set") }
     }
 
-    /// The cell type of a field of class `t` whose value is of type `ty`.
-    pub(super) fn cell_type(&self, t: usize, ty: &str) -> String {
+    /// The cell type of field `f` of class `t`, whose value is of type `ty`.
+    pub(super) fn cell_type(&self, t: usize, f: &Field, ty: &str) -> String {
+        let compact = if self.compact_field(t, f) { "Ref" } else { "" };
         if self.shared_cells(&self.class.types[t].name) {
-            format!("java::SharedField<{ty}>")
+            format!("java::Shared{compact}Field<{ty}>")
         } else {
-            format!("java::Field<{ty}>")
+            format!("java::{compact}Field<{ty}>")
         }
     }
 
-    /// The value of a field in a struct literal of class `t`: a cell for a celled class.
-    pub(super) fn field_cell(&self, t: usize, value: String) -> String {
+    /// The value of field `f` in a struct literal of class `t`: a cell for a celled class.
+    pub(super) fn field_cell(&self, t: usize, f: &Field, value: String) -> String {
         let name = &self.class.types[t].name;
+        let compact = if self.compact_field(t, f) { "Ref" } else { "" };
         if self.shared_cells(name) {
-            format!("java::SharedField::new({value})")
+            format!("java::Shared{compact}Field::new({value})")
         } else if self.celled(name) {
-            format!("java::Field::new({value})")
+            format!("java::{compact}Field::new({value})")
         } else {
             value
         }
+    }
+
+    /// Whether field `f` of class `t` holds its reference in 4 bytes, in a `java::RefField` or a
+    /// `java::SharedRefField` (`codegen::compact_references`): a field of a celled class whose
+    /// value is the handle of an object of one class, of an array, or of a string with an identity
+    /// (`java::Compress`). A reference to an object of several classes (`java::Thin`) keeps its
+    /// 8 bytes, as does a frozen array.
+    pub(super) fn compact_field(&self, t: usize, f: &Field) -> bool {
+        let decl = &self.class.types[t];
+        compact_references()
+            && self.celled(&decl.name)
+            && !self.facts.frozen_fields.contains(&(t, f.name.clone()))
+            && self.compact_type(f.ty)
+    }
+
+    /// Whether the values of type `ty` are handles that `java::Compress` holds in 4 bytes.
+    fn compact_type(&self, ty: Type) -> bool {
+        match ty {
+            Type::String => shared_strings(),
+            Type::Array(_) => true,
+            Type::Class(name, _) => self.class.type_index(name).is_some_and(|t| {
+                let rep = self.rep_name(name);
+                self.class.types[t].kind != TypeKind::Param
+                    && !self.facts.closure_types.contains(&t)
+                    && !matches!(self.rep(t), hierarchy::Rep::Enum(_))
+                    && !self.facts.owned.contains(rep)
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the field `name` of `object` holds its reference in 4 bytes (`compact_field`).
+    fn compact_cell(&self, object: &Expr, name: &str) -> bool {
+        if !compact_references() || !self.celled_object(object) {
+            return false;
+        }
+        let owner = match self.struct_class(object) {
+            Some(s) => Some(self.class.hierarchy.field_owner(s, name)),
+            None => self.class.field_owner(object.ty, name),
+        };
+        owner.is_some_and(|o| {
+            self.class.types[o].fields.iter().any(|f| f.name == name && self.compact_field(o, f))
+        })
     }
 
     /// Whether `e` is an object whose fields are read and written without a `RefCell`: an object of
@@ -759,6 +804,7 @@ impl<'a> Gen<'a> {
     pub(super) fn fixed_cell(&self, object: &Expr, name: &str, ty: Type) -> bool {
         !(ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_)))
             && self.celled_object(object)
+            && !self.compact_cell(object, name)
             && self.fixed(object, name)
             && !self.volatile_cell(object, name)
             && !self.in_field_inits
@@ -2291,9 +2337,17 @@ impl<'a> Gen<'a> {
         // class (`dispatch::base_fn`). Its own fields follow, the most aligned first, so that
         // `#[repr(C)]`, which keeps them in this order, pads them no more than rustc would.
         let mut fields: Vec<&Field> = decl.fields.iter().collect();
+        // An object whose fields hold 4-byte references is aligned to 8 bytes all the same: the
+        // collector scans only the blocks of objects so aligned (`gc::Allocator`), and a struct
+        // that embeds this one as its `base` is aligned so too.
+        let align = if decl.fields.iter().any(|f| self.compact_field(index, f)) { "align(8)" } else { "" };
         if base.is_some() {
-            self.line("#[repr(C)]");
-            fields.sort_by_key(|f| alignment_rank(f.ty));
+            let sep = if align.is_empty() { "" } else { ", " };
+            self.line(&format!("#[repr(C{sep}{align})]"));
+            // A 4-byte reference is aligned as an `int`.
+            fields.sort_by_key(|f| if self.compact_field(index, f) { 1 } else { alignment_rank(f.ty) });
+        } else if !align.is_empty() {
+            self.line(&format!("#[repr({align})]"));
         }
         self.line(&format!("{}struct {name}{args} {{", self.vis()));
         self.indent += 1;
@@ -2305,7 +2359,7 @@ impl<'a> Gen<'a> {
                 true => self.frozen_ty(index, &f.name, f.ty),
                 false => self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name)),
             };
-            let ty = if self.celled(&decl.name) { self.cell_type(index, &ty) } else { ty };
+            let ty = if self.celled(&decl.name) { self.cell_type(index, f, &ty) } else { ty };
             self.line(&format!("{}{}: {ty},", self.vis(), field_name(decl, &f.name)));
         }
         self.indent -= 1;
@@ -2467,7 +2521,7 @@ impl<'a> Gen<'a> {
                 let mut fields: Vec<String> = base.into_iter().map(|b| format!("base: {b}")).collect();
                 fields.extend(decl.fields.iter().map(|f| {
                     let value = self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name));
-                    format!("{}: {}", field_name(decl, &f.name), self.field_cell(m.class, value))
+                    format!("{}: {}", field_name(decl, &f.name), self.field_cell(m.class, f, value))
                 }));
                 let name = self.struct_of(m.class);
                 let fields = fields.join(", ");

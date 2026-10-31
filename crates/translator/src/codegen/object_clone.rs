@@ -74,7 +74,7 @@ impl<'a> Gen<'a> {
         let decl = &self.class.types[k];
         for f in &decl.fields {
             let rust = field_name(decl, &f.name);
-            parts.push(format!("{rust}: {}", self.field_cell(k, read(self, path, f, &rust))));
+            parts.push(format!("{rust}: {}", self.field_cell(k, f, read(self, path, f, &rust))));
         }
         format!("{} {{ {} }}", self.struct_of(k), parts.join(", "))
     }

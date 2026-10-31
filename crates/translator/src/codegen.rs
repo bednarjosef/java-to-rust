@@ -396,6 +396,13 @@ thread_local! {
     static SHARED_STRINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Whether references in the fields of objects are 4 bytes (`java::RefField`, docs/native-speed.md
+/// 1.1): with `JAVA_TO_RUST_COMPACT_REFERENCES=1`, while the form is being built.
+pub(crate) fn compact_references() -> bool {
+    static COMPACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COMPACT.get_or_init(|| std::env::var("JAVA_TO_RUST_COMPACT_REFERENCES").is_ok_and(|v| v == "1"))
+}
+
 /// Whether the program being written has every string as a `java::JStr`.
 pub(crate) fn shared_strings() -> bool {
     SHARED_STRINGS.get()
@@ -831,9 +838,14 @@ pub const OBJECTLESS_CLASSES: [&str; 2] = ["java.lang.Runtime", "java.lang.Syste
 
 const RECURSION_LIMIT: u32 = 1024;
 
-/// The crate root's allocator: the runtime's, which caches small blocks (runtime `allocator.rs`),
-/// as Java programs make and drop many small objects.
-const ALLOCATOR: &str = "#[global_allocator]\nstatic JAVA_RUNTIME_ALLOCATOR: java_runtime::Allocator = java_runtime::Allocator;\n";
+/// The crate root's allocator: the runtime's collector (runtime `gc.rs`), or for a program with
+/// 4-byte references the form of it that looks for them (`java::CompactAllocator`).
+fn allocator() -> String {
+    let allocator = if compact_references() { "CompactAllocator" } else { "Allocator" };
+    format!(
+        "#[global_allocator]\nstatic JAVA_RUNTIME_ALLOCATOR: java_runtime::{allocator} = java_runtime::{allocator};\n"
+    )
+}
 
 /// How `this` is written in the code being generated.
 #[derive(Clone, Copy, PartialEq)]

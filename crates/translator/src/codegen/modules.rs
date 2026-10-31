@@ -529,7 +529,7 @@ impl<'a> Gen<'a> {
     /// with a call that throws inside a closure (`Gen::closures`), in the order of the items.
     pub(super) fn finish(&mut self, header: String, written: Vec<Written>) -> (ModuleTree, Vec<Error>) {
         let packages = all_packages(self.class);
-        let mut tree = ModuleTree { header, modules: Vec::new(), footer: ALLOCATOR.to_string() };
+        let mut tree = ModuleTree { header, modules: Vec::new(), footer: allocator() };
         let mut closures = Vec::new();
         for module in written {
             let Written { package, path, items, imports, traits, .. } = module;

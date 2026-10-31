@@ -22,7 +22,9 @@
 //! - **narrow**: a number below 2^32, such as an `int` with the 4 bytes of padding after it;
 //! - **other**: anything else (wider numbers, addresses outside the heap).
 //!
-//! References are the thin and handle words. What 4-byte references save is estimated per slot,
+//! References are the thin and handle words; in a program with 4-byte references
+//! (`java::CompactAllocator`), the halves of words that, times 8, are the start of a live slot are
+//! counted besides, as the KB in 4-byte references. What 4-byte references save is estimated per slot,
 //! as the slot's size against the size class that holds its size less what they free, three
 //! ways (`saving`):
 //!
@@ -160,6 +162,9 @@ struct Counts {
     saved: u64,
     saved_paired: u64,
     saved_with_zeros: u64,
+    /// The 4-byte references among the halves of the words, in a program that has them
+    /// (`super::COMPACT`).
+    compact: u64,
 }
 
 impl Counts {
@@ -172,6 +177,7 @@ impl Counts {
         self.saved += other.saved;
         self.saved_paired += other.saved_paired;
         self.saved_with_zeros += other.saved_with_zeros;
+        self.compact += other.compact;
     }
 
     fn references(&self) -> u64 {
@@ -349,6 +355,14 @@ impl Census<'_> {
         mut owned: impl FnMut(&mut Self, Target),
     ) {
         let mut kinds = [0u64; KINDS];
+        if COMPACT.load(Ordering::Relaxed) {
+            for &word in words {
+                for half in [word as u32, (word >> 32) as u32] {
+                    let target = self.target((half as usize) << 3);
+                    counts.compact += matches!(target, Target::Slot { .. } | Target::Large { .. }) as u64;
+                }
+            }
+        }
         for (i, &word) in words.iter().enumerate() {
             let kind = if word == 0 {
                 ZERO
@@ -780,7 +794,7 @@ fn report_counts(name: std::fmt::Arguments, c: &Counts) {
     let kb = |words: u64| (words * 8) >> 10;
     let tenths = c.references() * 8 * 1000 / c.bytes.max(1);
     line(format_args!(
-        "[gc census {name}: {} slots, {} KB; words in KB: {} zero, {} thin, {} thin value, {} handle, {} buffer, {} interior, {} narrow, {} other; references {} KB ({}.{}%); 4-byte references save {} KB, {} KB paired, {} KB with zeros]",
+        "[gc census {name}: {} slots, {} KB; words in KB: {} zero, {} thin, {} thin value, {} handle, {} buffer, {} interior, {} narrow, {} other; references {} KB ({}.{}%); 4-byte references save {} KB, {} KB paired, {} KB with zeros; {} KB in 4-byte references]",
         c.slots,
         c.bytes >> 10,
         kb(w[ZERO]),
@@ -796,7 +810,8 @@ fn report_counts(name: std::fmt::Arguments, c: &Counts) {
         tenths % 10,
         c.saved >> 10,
         c.saved_paired >> 10,
-        c.saved_with_zeros >> 10
+        c.saved_with_zeros >> 10,
+        (c.compact * 4) >> 10
     ));
 }
 

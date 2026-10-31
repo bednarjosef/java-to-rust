@@ -616,7 +616,11 @@ to run.
   fields struct as `&XFields`. A field assignment whose object may be null computes the value
   first, as Java does. A family that threads share has `java::SharedField`s, and one whose
   objects a monitor site may lock is an `Arc<java::Monitored<C>>` (docs/multi-threading.md,
-  2.1).
+  2.1). With `JAVA_TO_RUST_COMPACT_REFERENCES=1`, a cell whose value is a reference to an
+  object of one class, an array or a string is a `java::RefField` (`java::SharedRefField`) that
+  holds it in 4 bytes (docs/native-speed.md 1.1): the same reads and writes, converting to and
+  from the `Arc` as they go, and never lent in place. A struct with such a cell is
+  `#[repr(align(8))]`, as the collector scans only allocations so aligned.
 - **Fixed fields** (`analysis/fixed_fields.rs`): a field of a mutable class that only
   constructors write, through `this` (a `final` field, or one written the same way), keeps its
   value once the object is built. Its read on a concrete receiver is `java::fixed!(c, base.name)`

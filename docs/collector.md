@@ -19,9 +19,12 @@ owned, and that Rust therefore never freed, is found unreachable too.
 
 ## The heap
 
-- **Address space.** One range of 64 GB is reserved at start and used as needed, cut into
-  blocks of 64 KB. A side table holds each block's kind, size and bitmaps, so objects carry no
-  header.
+- **Address space.** One range of 28 GB is reserved at start and used as needed, cut into
+  blocks of 64 KB. It is placed from 4 GB to 32 GB of the address space when that range is free
+  (`MAP_FIXED_NOREPLACE`), as it is in a Linux process, so that an object's address divided by 8
+  fits in 4 bytes (4-byte references, docs/native-speed.md 1.1); else it goes where the system
+  puts it, and a program with 4-byte references stops. A side table holds each block's kind,
+  size and bitmaps, so objects carry no header.
 - **Huge pages.** The range is aligned to 2 MB and asks the system for huge pages
   (`MADV_HUGEPAGE`; `JAVA_GC_HUGE_PAGES=0` leaves the system's default). Memory goes back to the
   system only as whole huge pages, when all 32 blocks of one are free. Giving back each empty
@@ -150,7 +153,12 @@ possible classes (`java::Thin`, docs/object-model.md 1.2). The roots are:
 - each thread's static thread-local storage;
 - the free lists of every thread, whose slots are kept without being scanned.
 
-Slots are scanned whole, word by word, except in blocks that cannot hold pointers.
+Slots are scanned whole, word by word, except in blocks that cannot hold pointers. In a program
+with 4-byte references (`java::CompactAllocator`, docs/native-speed.md 1.1), each half of each
+word scanned, in a slot or a root, is also read as one: it keeps a slot only if, times 8, it is
+the slot's start, since such a reference never points inside an object. A number that happens to
+name a slot's start keeps that slot too; in the census of a run of the small-objects benchmark,
+about 234 of every 10 million halves did (`JAVA_GC_CENSUS`, "lookalikes").
 
 ## Objects on the stack
 
@@ -174,7 +182,9 @@ The collector needs nothing for them:
   object is stored in a field, an array element, a static or a closure, returned, thrown, or
   passed to a call that may keep it; anything it does not model counts as kept. The one field
   it may be stored in is one of another object of the same frame that only that object's own
-  methods read (a lambda's capture, an iterator's list), when that object is kept no longer.
+  methods read (a lambda's capture, an iterator's list), when that object is kept no longer;
+  in a program with 4-byte references not even that, since a field's 4 bytes reach only the
+  heap.
   The object is then held only by the method's variables and its other objects.
 - **A slot in a loop** is filled again on every iteration, so the object of the previous one
   must be unreachable by then: every variable that may hold the object must be declared inside
@@ -293,7 +303,8 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   address of a slot's start), the buffers of `Vec`s and boxed slices, numbers below 2^32 and other
   words, and what 4-byte references would save, three ways, from a low bound to a high one, and
   how many 4-byte halves of the other words would read as a 4-byte reference to a live slot (the
-  numbers a scan for such references without types would take for references); with
+  numbers a scan for such references without types would take for references), and in a
+  program with 4-byte references the bytes they take; with
   2, also per slot size, and per class number of the objects that `java::Thin`s reach; with 3,
   also per Rust type, each type's objects and the buffers they own (an array's elements, a plain
   string's bytes), and the slots of no type by size, to set beside a JVM's class histogram. Level

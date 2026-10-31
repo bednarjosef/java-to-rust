@@ -67,6 +67,16 @@ impl<T> Arc<T> {
         Arc { ptr, owns: PhantomData }
     }
 
+    /// The handle of the object at `address`, which a 4-byte reference named (`compact.rs`).
+    ///
+    /// # Safety
+    ///
+    /// `address` is that of a live `T` that a handle was made for.
+    #[inline(always)]
+    pub(crate) unsafe fn from_address(address: usize) -> Arc<T> {
+        Arc { ptr: unsafe { NonNull::new_unchecked(address as *mut T) }, owns: PhantomData }
+    }
+
     /// Whether `a` and `b` are handles of the same object (Java's `==`).
     #[inline]
     pub fn ptr_eq(a: &Arc<T>, b: &Arc<T>) -> bool {
