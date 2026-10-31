@@ -240,8 +240,89 @@ impl<'a> Gen<'a> {
     /// `{a, b}` and `new T[] {a, b}`.
     pub(super) fn array_lit(&mut self, ty: Type, items: &'a [Expr]) -> Code {
         let elem = element(ty);
-        let items: Vec<String> = items.iter().map(|item| self.element_value(item, elem)).collect();
-        Code::atom(format!("{}(vec![{}])", self.array_maker("from_vec", ty), items.join(", ")))
+        let texts: Vec<String> = items.iter().map(|item| self.element_value(item, elem)).collect();
+        let maker = self.array_maker("from_vec", ty);
+        let elements = self.table_lit(items, &texts).unwrap_or_else(|| format!("vec![{}]", texts.join(", ")));
+        Code::atom(format!("{maker}({elements})"))
+    }
+
+    /// The `Vec` of the elements of a long array literal of string literals or of class
+    /// literals (the tables of the
+    /// reflection table, of resource bundles): a `static` of the constants and a loop that makes
+    /// the elements from them, where `vec![..]` would be code that makes each one, 1.3 MB of
+    /// machine code for a part of the server's reflection table, which takes long to compile and
+    /// stays in memory after it ran once. `texts` are the elements as written one by one; each
+    /// must be the same text around its constant.
+    pub(super) fn table_lit(&mut self, items: &'a [Expr], texts: &[String]) -> Option<String> {
+        const SHORTEST: usize = 32;
+        if items.len() < SHORTEST {
+            return None;
+        }
+        // An element of an `Object[]` or a `Class<?>[]` is the constant in a cast.
+        fn constant(mut e: &Expr) -> &Expr {
+            while let ExprKind::Cast(_, inner) = &e.kind {
+                e = inner;
+            }
+            e
+        }
+        let strings = items.iter().all(|e| matches!(constant(e).kind, ExprKind::Str(_)));
+        let classes =
+            items.iter().all(|e| matches!(constant(e).kind, ExprKind::Builtin(Builtin::ClassLiteral(_), _)));
+        let (static_type, read) = match (strings, classes) {
+            (true, _) => ("&str", "*x"),
+            (_, true) => ("&java::Class", "**x"),
+            _ => return None,
+        };
+        let mut constants = Vec::with_capacity(items.len());
+        let mut template: Option<String> = None;
+        for (item, text) in items.iter().zip(texts) {
+            let constant = match &constant(item).kind {
+                ExprKind::Str(s) => rust_string(s),
+                _ => self.expr(constant(item)).text,
+            };
+            // A class is a path to a constant or a static, or an array class, made by a `const fn`
+            // that a static's initializer can call; named once in the element.
+            let path = constant.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
+            let array = constant.starts_with("java::Class::array(");
+            if (classes && !path && !array) || text.matches(constant.as_str()).count() != 1 {
+                return None;
+            }
+            let around = text.replacen(constant.as_str(), "\u{0}", 1);
+            if template.get_or_insert_with(|| around.clone()) != &around {
+                return None;
+            }
+            constants.push(if strings { constant } else { format!("&{constant}") });
+        }
+        let template = template?;
+        // In parentheses only where a method is called on it, which `*` would take first.
+        let read = match template.split_once('\u{0}') {
+            Some((_, after)) if after.starts_with('.') => format!("({read})"),
+            _ => read.to_string(),
+        };
+        let mut element = template.replacen('\u{0}', &read, 1);
+        // An interned literal looks its string up once per place (`string_literal`): here once
+        // per element, each with a cell of its own.
+        let jstr = self.runtime("JStr");
+        let cell = format!("static LITERAL: std::sync::OnceLock<{jstr}> = std::sync::OnceLock::new(); ");
+        let mut cells = String::new();
+        if element.contains(&cell) {
+            element = element.replacen(&cell, "", 1).replacen("&LITERAL", "&CELLS[i]", 1);
+            cells = format!(
+                "static CELLS: [std::sync::OnceLock<{jstr}>; {n}] = [const {{ std::sync::OnceLock::new() }}; {n}]; ",
+                n = items.len()
+            );
+        }
+        // Any other place of the element's own would be one for all elements.
+        if element.contains("static ") || element.contains("LITERAL") {
+            return None;
+        }
+        Some(format!(
+            "{{ static ITEMS: [{static_type}; {}] = [{}]; {cells}ITEMS.iter(){}.map(|{}| {element}).collect::<Vec<_>>() }}",
+            items.len(),
+            constants.join(", "),
+            if cells.is_empty() { "" } else { ".enumerate()" },
+            if cells.is_empty() { "x" } else { "(i, x)" },
+        ))
     }
 
     /// `a[i] = v`, as a call of a runtime helper. Java evaluates the array, the index and then
