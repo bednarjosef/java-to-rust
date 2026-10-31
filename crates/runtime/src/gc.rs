@@ -100,6 +100,10 @@ const MIN_COLLECT: usize = 64 << 20;
 /// often (the translated javac) then holds about as much as with `JAVA_GC_GROWTH=200`, 2.0 GB
 /// against the Java VM's 4.1 GB (docs/collector.md).
 const TIME_SHARE: usize = 50;
+
+/// Seconds between the times a collection gives the program's code pages back to the system
+/// (`give_code_pages_back`).
+const CODE_PAGES_EVERY: usize = 10;
 const SCALE_STEP: f64 = 1.1;
 const MAX_SCALE: usize = 200;
 
@@ -289,10 +293,12 @@ struct Heap {
     /// Whether the last collection was minor.
     minor: bool,
     /// Seconds between the times a collection gives the program's code pages back to the system
-    /// (`JAVA_GC_CODE_PAGES`; 0 never), and the monotonic second it last did.
+    /// (`CODE_PAGES_EVERY`, or `JAVA_GC_CODE_PAGES`; 0 never), and the monotonic second it last
+    /// did.
     code_pages: u64,
     code_pages_at: u64,
-    /// Whether small slots and free blocks are taken lowest address first (`JAVA_GC_LOW_FIRST`).
+    /// Whether small slots and free blocks are taken lowest address first (`JAVA_GC_LOW_FIRST=0`
+    /// turns it off).
     low_first: bool,
     /// Whether each full collection also reports the bytes alive per slot size
     /// (`JAVA_GC_LOG=2`).
@@ -560,9 +566,9 @@ fn start(h: &mut Heap) {
     if number_from(c"JAVA_GC_GENERATIONS") == Some(1) {
         track_writes(h);
     }
-    h.code_pages = number_from(c"JAVA_GC_CODE_PAGES").unwrap_or(0) as u64;
+    h.code_pages = number_from(c"JAVA_GC_CODE_PAGES").unwrap_or(CODE_PAGES_EVERY) as u64;
     h.code_pages_at = monotonic_seconds();
-    h.low_first = number_from(c"JAVA_GC_LOW_FIRST") == Some(1);
+    h.low_first = number_from(c"JAVA_GC_LOW_FIRST") != Some(0);
 }
 
 /// Has the system track the writes into the heap's reservation: registers it with a
