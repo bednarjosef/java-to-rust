@@ -669,9 +669,11 @@ java-run() {
 }
 
 # The commands that a bench run gives the server, each once its log shows the line it waits for:
-# once started, force-load the chunks within BENCH_RADIUS chunks of the world's centre; once they
-# are marked, and after BENCH_WARMUP seconds (default 30) for them to generate, a tick sprint of
-# BENCH_TICKS ticks (default 1000), which runs them as fast as the server can; once it reports, stop.
+# once started, turn off the items that broken blocks drop (unless BENCH_DROPS=true), since a random
+# event breaks kelp in some worlds and its floating items decide the sprint's speed, and force-load
+# the chunks within BENCH_RADIUS chunks of the world's centre; once they are marked, and after
+# BENCH_WARMUP seconds (default 30) for them to generate, a tick sprint of BENCH_TICKS ticks (default
+# 1000), which runs them as fast as the server can; once it reports, count the item entities, then stop.
 # Gives up (stops the server) after SERVER_SECONDS, and ends when the server, run by shell $1, does.
 bench_input() {
   local shell=$1 waited=0 radius=${BENCH_RADIUS:-5}
@@ -684,11 +686,14 @@ bench_input() {
     done
   }
   wait_for 'Done ('
+  echo "gamerule block_drops ${BENCH_DROPS:-false}"
   echo "forceload add $((-16 * radius)) $((-16 * radius)) $((16 * radius + 15)) $((16 * radius + 15))"
   wait_for 'to be force loaded'
   sleep "${BENCH_WARMUP:-30}"
   echo "tick sprint ${BENCH_TICKS:-1000}"
   wait_for 'Sprint completed'
+  echo "execute if entity @e[type=item]"
+  wait_for 'Test \(passed\|failed\)'
   echo stop
 }
 
@@ -708,7 +713,7 @@ sys.exit(code)' "$@"
 # The server's speed, on Java (BENCH=java, the default) or as the trial step built it
 # (BENCH=trial), in bench-java or bench-trial: a new world of seed BENCH_SEED (default 1), the
 # commands of bench_input, and in result.txt the time it took to start (its "Done" line), the
-# speed of the tick sprint, its peak memory and its processor time.
+# speed of the tick sprint, the item entities left after it, its peak memory and its processor time.
 bench() {
   local which=${BENCH:-java}
   local dir=$cache/bench-$which
@@ -730,6 +735,8 @@ bench() {
     echo "$which, exit $code"
     grep -o 'Done ([0-9.]*s)' "$dir/stdout.txt" | head -n 1 || echo "never started"
     grep -o 'Sprint completed.*' "$dir/stdout.txt" || echo "no sprint report"
+    grep -o 'Test passed, count: [0-9]*' "$dir/stdout.txt" | sed 's/.* /item entities /' \
+      || echo "item entities 0"
     cat "$dir/usage.txt" 2>/dev/null
   } | tee "$dir/result.txt"
 }
