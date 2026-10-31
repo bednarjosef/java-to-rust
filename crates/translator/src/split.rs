@@ -562,7 +562,7 @@ fn split_module(
     used: &mut std::collections::HashSet<String>,
     traits: &mut std::collections::HashSet<String>,
 ) -> Result<Part, String> {
-    let file = text
+    let file = blank_bodies(text)
         .parse::<proc_macro2::TokenStream>()
         .map_err(syn::Error::from)
         .and_then(|tokens| syn::parse2::<syn::File>(hollow(tokens, true)))
@@ -826,6 +826,159 @@ fn split_module(
     Ok(Part { split: Split { header, uses, pieces }, externs })
 }
 
+/// `text` with the code inside the braces of every function that `hollow` takes out made blank,
+/// byte for byte (each byte a space, each line break kept), so that the tokens are made of the
+/// signatures alone and every place in it is the place in `text`: lexing the bodies only for
+/// `hollow` to drop them took most of the time of the write. It finds the braces as `hollow` does,
+/// on the tokens of the module's top and of the braces of an item there, past the text of strings,
+/// characters and comments.
+fn blank_bodies(text: &str) -> String {
+    /// A delimited group being read: whether its tokens are `hollow`'s (`walked`), whether its
+    /// braces are walked too (`top`), whether an `fn` has come since the last `;` (`after_fn`),
+    /// and, for a function's braces, where they open.
+    struct Group {
+        walked: bool,
+        top: bool,
+        after_fn: bool,
+        body: Option<usize>,
+    }
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut groups = vec![Group { walked: true, top: true, after_fn: false, body: None }];
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    // The end of a string whose quote is at `i`, or of a raw one with `hashes` after its `r`.
+    let string_end = |mut i: usize, raw: Option<usize>| -> usize {
+        i += 1;
+        match raw {
+            None => {
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i + 1
+            }
+            Some(hashes) => {
+                let close: Vec<u8> = std::iter::once(b'"').chain(std::iter::repeat_n(b'#', hashes)).collect();
+                match text[i..].find(std::str::from_utf8(&close).expect("ASCII")) {
+                    Some(at) => i + at + close.len(),
+                    None => bytes.len(),
+                }
+            }
+        }
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let group = groups.last_mut().expect("the module's top stays");
+        match b {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                i = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let mut depth = 0;
+                while i < bytes.len() {
+                    if bytes[i..].starts_with(b"/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes[i..].starts_with(b"*/") {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'"' => i = string_end(i, None),
+            b'\'' => {
+                // A character (`'x'`, `'\n'`, `'\u{7b}'`), or a lifetime or a label.
+                let next = text[i + 1..].chars().next().map_or(0, char::len_utf8);
+                if bytes.get(i + 1) == Some(&b'\\') {
+                    i += 3;
+                    while i < bytes.len() && bytes[i] != b'\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                } else if bytes.get(i + 1 + next) == Some(&b'\'') {
+                    i += next + 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ if ident(b) => {
+                let start = i;
+                while i < bytes.len() && ident(bytes[i]) {
+                    i += 1;
+                }
+                let word = &text[start..i];
+                let prefix = matches!(word, "r" | "b" | "br" | "c" | "cr");
+                match bytes.get(i) {
+                    Some(b'"') if prefix => i = string_end(i, None),
+                    Some(b'#') if prefix && word.ends_with('r') => {
+                        let hashes = bytes[i..].iter().take_while(|&&h| h == b'#').count();
+                        if bytes.get(i + hashes) == Some(&b'"') {
+                            i = string_end(i + hashes, Some(hashes));
+                        } else if word == "r" {
+                            // A raw identifier (`r#fn`), which is not the keyword.
+                            i += 1;
+                            while i < bytes.len() && ident(bytes[i]) {
+                                i += 1;
+                            }
+                        }
+                    }
+                    Some(b'\'') if word == "b" => {
+                        // A byte, as a character after its `b`.
+                        let quote = i;
+                        i = quote + 1;
+                        if bytes.get(i) == Some(&b'\\') {
+                            i += 2;
+                        }
+                        while i < bytes.len() && bytes[i] != b'\'' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    _ => group.after_fn |= group.walked && word == "fn",
+                }
+            }
+            b';' => {
+                group.after_fn &= !group.walked;
+                i += 1;
+            }
+            b'{' if group.walked && group.after_fn => {
+                group.after_fn = false;
+                groups.push(Group { walked: false, top: false, after_fn: false, body: Some(i) });
+                i += 1;
+            }
+            b'{' => {
+                let walked = group.walked && group.top;
+                groups.push(Group { walked, top: false, after_fn: false, body: None });
+                i += 1;
+            }
+            b'(' | b'[' => {
+                groups.push(Group { walked: false, top: false, after_fn: false, body: None });
+                i += 1;
+            }
+            b')' | b']' | b'}' => {
+                if groups.len() > 1
+                    && let Some(open) = groups.pop().and_then(|g| g.body)
+                {
+                    for byte in &mut out[open + 1..i] {
+                        if *byte != b'\n' {
+                            *byte = b' ';
+                        }
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    // Only ASCII bytes became spaces, and only whole characters inside braces did.
+    String::from_utf8(out).expect("blanked between ASCII braces")
+}
+
 /// `tokens` with the code of every function of the module, or of an `impl`, a trait or any other
 /// item's braces at its top (`top`), taken out: the braces after `fn` hold nothing, with the
 /// place of the code (its span) kept. The split reads a function's signature and where its code
@@ -948,6 +1101,29 @@ mod tests {
         };
         let Err(e) = split(tree, 2) else { panic!("items that are not Rust were split") };
         assert!(e.contains("package `a`") && e.contains("package `c`") && !e.contains("package `b`"), "{e}");
+    }
+
+    /// The text of the functions' code is blank, past braces in strings, characters and comments,
+    /// with every place kept, and the tokens `hollow` gives of it are those it gives of the text.
+    #[test]
+    fn the_code_of_functions_is_blank_where_it_was() {
+        let text = concat!(
+            "const S: &str = \"}{\\\"}\";\n",
+            "fn f<'a>(x: &'a u8) -> char { let c = '}'; let s = r#\"}\"#; /* } /* { */ */ // }\n",
+            "    let q = '\\''; let u = '\\u{7b}'; 'l: loop { break 'l; } 'é' }\n",
+            "impl T { fn g(&self, a: [u8; 2]) { { let x = 1; } } const K: [u8; 2] = [0; 2]; }\n",
+            "fn r#fn() { let b = b'}'; let c = c\"}\"; let d = b\"{\"; }\n",
+            "static F: fn() = h;\n",
+            "struct P { a: u8 }\n",
+            "thread_local! { static V: u8 = 0; }\n",
+        );
+        let blanked = blank_bodies(text);
+        assert_eq!(blanked.len(), text.len());
+        assert_eq!(blanked.lines().count(), text.lines().count());
+        assert!(!blanked.contains("let"), "{blanked}");
+        assert!(blanked.contains("const K: [u8; 2] = [0; 2];") && blanked.contains("struct P { a: u8 }"));
+        let hollowed = |text: &str| hollow(text.parse().expect("Rust"), true).to_string();
+        assert_eq!(hollowed(&blanked), hollowed(text));
     }
 
     /// A piece that grows, and one added, change the crates around them only: the others keep
