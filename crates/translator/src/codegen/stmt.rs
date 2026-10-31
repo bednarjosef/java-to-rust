@@ -218,6 +218,9 @@ impl<'a> Gen<'a> {
         update: &'a [Expr],
         body: &'a Stmt,
     ) {
+        if self.search_loop(init, cond, update, body) {
+            return;
+        }
         if let Some(cond) = cond
             && self.element_loop(cond, body)
         {

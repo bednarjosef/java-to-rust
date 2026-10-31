@@ -221,3 +221,16 @@ shared_across_as_is!(
     crate::JStr,
     Option<crate::JStr>
 );
+
+/// `search_eq` (array.rs) over a plain array.
+#[inline(always)]
+pub fn slice_search_eq<T: PartialEq + Clone>(a: &[T], from: i32, end: Option<i32>, key: T) -> Option<i32> {
+    let (start, stop, past) = crate::array::search_range(a.len(), from, end, |i| {
+        let _ = at(a, i);
+    })?;
+    crate::array::first_equal(&a[start..stop], &key).map(|k| (start + k) as i32).or_else(|| {
+        crate::array::search_past(past, |i| {
+            let _ = at(a, i);
+        })
+    })
+}

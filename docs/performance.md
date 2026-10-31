@@ -22,14 +22,16 @@ benchmarks that measure it are in "Memory".
 
 One run of `python3 scripts/benchmark.py` (five runs per side, medians, wall clock, in
 milliseconds), at a load average of 1.6 at its start and about 4 during it, on 16 cores at full
-clock (4.8 GHz under load); NoiseTree's and ObjectDispatch's rows are from later runs of each
-alone (three runs a side), ReflectionLookups' from one of it alone (five runs a side).
+clock (4.8 GHz under load); NoiseTree's row is from a later run of it alone (five runs a side,
+at a load average of 10), ObjectDispatch's from one of five runs a side at a load average of 6,
+Interpreter's and SortMillion's from one at a load average of 6.3, and ReflectionLookups' from
+one of it alone (five runs a side).
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
 - Rust: rustc 1.99.0 (b940084d7 2026-09-28); the crates the translator writes build in release
-  with fat LTO, for processors with AVX2 (`target-cpu=x86-64-v3`, in the crate's
-  `.cargo/config.toml`)
+  with fat LTO, for processors with AVX2 (`target-cpu=x86-64-v3`), with each loop starting at a
+  64-byte line (`-align-loops=64`), both in the crate's `.cargo/config.toml`
 
 | program               | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
 |-----------------------|--------:|--------:|----------:|------------:|------------:|-------------:|
@@ -37,7 +39,7 @@ alone (three runs a side), ReflectionLookups' from one of it alone (five runs a 
 | BinaryTrees           |     686 |    1634 |      2.38 |           - |           - |            - |
 | ClassCast             |      85 |      83 |      0.97 |          37 |          71 |         1.92 |
 | Collatz               |    1155 |     581 |      0.50 |           - |           - |            - |
-| Interpreter           |    1046 |    1177 |      1.12 |         341 |         393 |         1.15 |
+| Interpreter           |    1314 |    1000 |      0.76 |         382 |         300 |         0.79 |
 | LargeArrays           |      34 |       7 |      0.21 |           - |           - |            - |
 | Mandelbrot            |    3400 |    1143 |      0.34 |        1128 |        1141 |         1.01 |
 | ManyThreadsAllocating |     136 |     108 |      0.79 |           - |           - |            - |
@@ -45,15 +47,15 @@ alone (three runs a side), ReflectionLookups' from one of it alone (five runs a 
 | MonitoredObjects      |      67 |      33 |      0.48 |           - |           - |            - |
 | NBody                 |    1811 |    1884 |      1.04 |         601 |         598 |         1.00 |
 | NodeList              |     175 |     110 |      0.63 |           - |           - |            - |
-| NoiseTree             |     369 |     442 |      1.20 |         287 |         400 |         1.39 |
-| ObjectDispatch        |     169 |     376 |      2.23 |         111 |         311 |         2.80 |
+| NoiseTree             |     364 |     425 |      1.17 |         282 |         384 |         1.36 |
+| ObjectDispatch        |     249 |     135 |      0.54 |         169 |         111 |         0.66 |
 | ObjectHash            |     106 |      48 |      0.45 |          59 |          41 |         0.69 |
 | ParticleArray         |    1426 |     892 |      0.63 |           - |           - |            - |
 | ReflectionLookups     |     207 |     210 |      1.01 |         146 |         189 |         1.29 |
 | ReflectionTableMemory |      25 |       2 |      0.09 |           - |           - |            - |
 | Sieve                 |    1278 |    1006 |      0.79 |           - |           - |            - |
 | SmallObjects          |     147 |     203 |      1.38 |           - |           - |            - |
-| SortMillion           |    1731 |    1727 |      1.00 |         535 |         577 |         1.08 |
+| SortMillion           |    1780 |    1639 |      0.92 |         542 |         547 |         1.01 |
 | Statics               |    1286 |    1266 |      0.98 |           - |           - |            - |
 | StringBuild           |      28 |       1 |      0.04 |           - |           - |            - |
 | TokenScanner          |     994 |     775 |      0.78 |           - |           - |            - |
@@ -72,16 +74,14 @@ slot on the stack) that made the most objects, on standard error, with the total
 made on the stack (`java::count_allocation`).
 
 - **Allocation (BinaryTrees 2.4x, SmallObjects 1.4x, NodeList 0.6x).** Objects live in the runtime's
-  garbage collected heap (docs/collector.md): an allocation takes a slot from a per-thread list
-  through the global allocator, and a handle is copied without a count. The slot is zeroed word by
-  word rather than with a call of `memset`: BinaryTrees took 7.8 s against 9.4 s with the call
-  (alternating runs, at about 620 MHz). Taking the slot inlined at every `new` took it to 5.8 s but
-  slowed other loops, which the compiler no longer optimized as well (docs/collector.md,
-  "Allocation"). BinaryTrees keeps a tree of about 32 MB alive while it builds and drops millions of
+  garbage collected heap (docs/collector.md): `new` takes a slot from a per-thread list or span
+  inline, with the slot's class and size constants of the type, and calls the global allocator
+  only to refill them; a handle is copied without a count. Through the global allocator at every
+  `new`, BinaryTrees ran 19.7 G cycles against 17.0 G inline, and SmallObjects 2.23 G against
+  2.06 G (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 32 MB alive while it builds and drops millions of
   short-lived ones; the collector marks that long-lived tree again at each of its 70 collections,
   which at full clock pause the program for about 0.2 s of its 1.6 s in all (on 16 threads; 0.9 s on
-  one). The rest is the program itself: half of its own time is in the allocator, most of that in
-  the first store to each new slot, a cache miss, which not zeroing the slot moves to the
+  one). The rest is the program itself, much of it the first store to each new slot, a cache miss, which not zeroing the slot moves to the
   constructor's stores without saving time. `SmallObjects` likewise marks a linked list of 2 million
   nodes again at each of its collections, which no helper can share. Of the 60 million nodes its
   last loop makes, the half that each iteration's `Node n` holds are made on the stack, because the
@@ -122,7 +122,7 @@ made on the stack (`java::count_allocation`).
   those statements assigns the array, the index, or an element of any object array, and none of
   them calls a method (`lower/element_reads.rs`). The local is declared without `mut` when it is
   assigned once.
-- **Plain arrays (Sieve 0.8x, SortMillion 1.0x, Interpreter 1.1x).** An array that is not
+- **Plain arrays (Sieve 0.8x, SortMillion 0.9x, Interpreter 0.8x).** An array that is not
   shared is a `Vec`, borrowed as a slice by the methods it is passed to. Sieve's indexes are
   proven in range, so every access is `composite[i as usize]` with no check: `i * i <= limit`
   with `i >= 2` gives `i <= limit`, and the size `limit + 1` is longer than any of them.
@@ -130,12 +130,17 @@ made on the stack (`java::count_allocation`).
   range, so they keep Java's check, an inlined compare and a branch to a `#[cold]`,
   `#[inline(never)]` throwing function (runtime `array.rs`). Interpreter's stack and locals are
   plain `Vec<i32>` with the same checks, since its indexes come from the program it interprets.
-  Its kernel depends on where the linker puts `run`: two builds with the same instructions in
+  Its kernel depended on where the linker put `run`: two builds with the same instructions in
   `run`, one starting 32 bytes past a 64-byte line and one at a line, ran the kernel in 390 ms
   and 260 ms (the same instructions and branch misses executed, 4.9 against 7.3 instructions a
   cycle). In the slow one, the block every opcode jumps back to, which reads the next opcode and
-  jumps through the table, spans two 64-byte lines.
-  `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`.
+  jumps through the table, spanned two 64-byte lines. The crates are now built with each loop
+  starting at a line (`-align-loops=64`, `split.rs`): the kernel runs in 270-300 ms, 3.8 G
+  cycles against 5.7 G for the same build without it. Across the 25 benchmarks the binaries
+  are 2-3% larger and none runs more cycles (BinaryTrees, SortMillion and ObjectHash 2-8%
+  fewer); aligning loops to 32 bytes instead does not help Interpreter.
+  `library` in SortMillion is given to `Arrays.sort`, so it stays a shared `java::Array`;
+  `Arrays.sort` of integers is Rust's unstable sort, since equal integers cannot be told apart.
 - **MatrixMultiply (0.65x, kernel 0.9x).** The matrices are plain
   `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
   and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
@@ -155,7 +160,7 @@ made on the stack (`java::count_allocation`).
   whose address it does not know: each iteration stored the state and the next read it back
   (2.6 s). Reading or writing one element of a `java::Array` checks no borrow flag
   (`array.rs`, `ArrayData::raw`), whose store and reload also chained the iterations.
-- **Objects of many classes behind one type (ObjectDispatch 2.2x, kernel 2.8x).** 48 enums held as
+- **Objects of many classes behind one type (ObjectDispatch 0.5x, kernel 0.7x).** 48 enums held as
   `Comparable` and `Object`: a palette that also holds strings searched by `==`
   (`java::same_object`), casts back to an enum (`as_<type>()`) and `ordinal()` through `Enum`, the
   operations at the top of the Minecraft server's profile. Each tests the value's class number: a
@@ -164,22 +169,30 @@ made on the stack (`java::count_allocation`).
   in release (fat LTO, `opt-level = 3`) and 14751 ms at `opt-level = 1`, against 781 ms and 4183 ms
   with the class numbers tested (medians of five, at a load of 6; Java's kernel is about 120 ms).
   `same_object` compares the two values' bits first, which hold the class number: equal bits are the
-  same object and different bits different objects, but where both are strings or boxes. In the
-  palette's search the compiler then tests the key's class once, before the loop, and each element
-  is one compare, as in Java; comparing the class numbers first, the kernel took 1.8 times as long.
-  The search reads the palette, a static, at each iteration; `java::Global::cloned` reads it without
-  writing its borrow flag, whose increment and decrement were stores the compiler could not tell
-  apart from the array, so the loop reloaded the array's element pointer at each element.
-  `java::len` stops the program for an array longer than `i32::MAX` elements, which Java's arrays
-  never are, and so tells the compiler that `i < palette.length` keeps `i` in bounds: the loop has
-  no bounds check left. What remains is the loop itself, about 1.3 cycles an element against Java's
-  0.5: the JIT unrolls it (its kernel takes 362 ms with `-XX:LoopUnrollLimit=1`, against 112 ms),
-  and LLVM does not unroll a loop with a second exit, the element found. With `-C
-  llvm-args=-unroll-runtime-multi-exit` it does, and the kernel takes 104 ms against 308 ms, but the
-  same flag slows SortMillion's kernel from 563 to 634 ms (its partition scans `while (a[i] < pivot)
-  i++` end after a few elements, and the unrolled loop runs more instructions and mispredicts more)
-  and ObjectHash's from 41 to 47 ms (its probes end after one or two slots), so the translation does
-  not set it.
+  same object and different bits different objects, but where both are strings or boxes.
+  The palette's search, `for (int i = 0; i < palette.length; i++) if (palette[i] == key) return
+  i;`, is a call of `java::search_same` (`codegen/search_loops.rs`), which reads the palette once
+  and, where the key is the same object as an element exactly when their bits are equal (a class
+  compared by identity, which the call tests once), compares the elements as machine words, four
+  to a turn, with no branch between the four: the compiler makes them one vector compare, and the
+  loop leaves at one place a turn. As Java writes it, the loop also leaves at the element found,
+  and LLVM does not unroll a loop with two exits: it took about 1.3 cycles an element against
+  Java's 0.5, as the JIT unrolls it (its kernel takes 362 ms with `-XX:LoopUnrollLimit=1`, against
+  112 ms). `-C llvm-args=-unroll-runtime-multi-exit` unrolls it too (kernel 104 ms against 308
+  ms), but slows SortMillion's kernel from 563 to 634 ms (its partition scans `while (a[i] <
+  pivot) i++` end after a few elements, and the unrolled loop runs more instructions and
+  mispredicts more) and ObjectHash's from 41 to 47 ms (its probes end after one or two slots), so
+  the translation does not set it. Unrolled by hand, four elements a turn each tested with
+  `same_object` and a branch, the compiler no longer tested the key's class once before the loop,
+  as it does for the loop Java writes, and kept the bounds checks: the kernel took 560 ms against
+  335 ms; compared as words, 78 ms (alternating runs of hand-edited translations, at a load of 6).
+  `java::search_eq` does the same for integers, characters, booleans and enum constants compared
+  with `==`. With the search, the kernel takes 111 ms against Java's 169 (medians of five, at a
+  load of 6). A loop that reads a static at each iteration reads it with `java::Global::cloned`,
+  without writing its borrow flag, whose increment and decrement were stores the compiler could
+  not tell apart from an array the loop reads, so it reloaded the array's element pointer at each
+  element. `java::len` stops the program for an array longer than `i32::MAX` elements, which
+  Java's arrays never are, and so tells the compiler that `i < a.length` keeps `i` in bounds.
 - **Classes known only at run time (ClassCast 1.0x, kernel 1.9x).** `Class.cast` and
   `Class.isInstance` of values of 258 classes behind `Comparable` with their own class and another,
   as the Minecraft server's `StateHolder.getValue` casts each property's value. Each asks the value
@@ -214,7 +227,10 @@ made on the stack (`java::count_allocation`).
   and length from the array's header, then the element, an atomic load. Java reads the element after
   the array's header in one load, and takes a `static final` array for a constant whose length it
   knows, so `GRADIENT[hash & 15]` has no check. The `static final` is a `java::Final`, which a read
-  reaches with one load of a pointer and a test (docs/multi-threading.md, 2.3); inside a `LazyLock`,
+  reaches with one load of a pointer and a test (docs/multi-threading.md, 2.3), holding a frozen
+  array (`java::Frozen`), since the program only indexes it: its elements are a plain slice, read
+  with no atomic load, which took the program 2.10 G cycles against 2.25 G with a `SharedArray`
+  (alternating runs, about 6% less); inside a `LazyLock`,
   as it was, a read tested the `LazyLock` and then the `OnceLock` inside it (kernel 2502 ms against
   2480 ms with the `java::Final`, alternating runs at about 850 MHz; Java's kernel is about 1610 ms
   there). With the permutation table a plain `[u8; 256]` field and the gradients a constant table of

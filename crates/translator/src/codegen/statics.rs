@@ -23,7 +23,10 @@
 //! builds a starting value that is not a constant itself, on its first read), which a read reaches
 //! with no lock:
 //! `X.get().clone()` as a value, and `(*X.get())`, a place, where the read is only borrowed (the
-//! object of a call or a field access, an array that is indexed, a string that is lent).
+//! object of a call or a field access, an array that is indexed, a string that is lent). Such an
+//! array that the program only indexes to read and measures (`Facts::frozen_statics`) is a
+//! `java::Final<java::Frozen<T>>`: the new array is frozen as it is stored (`java::freeze`), and
+//! its elements are a plain boxed slice, read with no atomic load.
 
 use super::*;
 
@@ -193,6 +196,16 @@ impl<'a> Gen<'a> {
         for (t, f) in cells {
             let (cell, ty, init, constant) = self.static_cell(t, f);
             let fixed = !is_cell(f.ty) && self.final_static(t, &f.name);
+            let (ty, init) = match self.frozen_static(t, &f.name) {
+                true => {
+                    let elem = self.element_ty_name(f.ty.element());
+                    (
+                        format!("{}<{elem}>", self.runtime("Frozen")),
+                        format!("{}({init})", self.runtime("freeze")),
+                    )
+                }
+                false => (ty, init),
+            };
             let kind = if is_cell(f.ty) {
                 self.runtime("Atomic")
             } else if fixed {
@@ -318,6 +331,14 @@ impl<'a> Gen<'a> {
         self.facts.process_statics(class)
             && self.facts.final_statics.contains(&(class, name.to_string()))
             && self.class.types[class].statics.iter().any(|f| f.name == name && !is_cell(f.ty))
+    }
+
+    /// Whether static `name` of class `class` is a `java::Final` that holds a `java::Frozen`: a
+    /// frozen array (`Facts::frozen_statics`) that is never null, whose reads see it made.
+    pub(super) fn frozen_static(&self, class: usize, name: &str) -> bool {
+        self.final_static(class, name)
+            && self.facts.frozen_statics.contains(&(class, name.to_string()))
+            && !self.static_optional(class, name)
     }
 
     /// A read of a `java::Final` static (`e`) as the place that holds the value that the read

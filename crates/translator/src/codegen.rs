@@ -75,6 +75,7 @@ mod owned;
 mod patterns;
 mod plain_arrays;
 mod range_loops;
+mod search_loops;
 mod shared_strings;
 mod sliced_loops;
 mod stack_objects;

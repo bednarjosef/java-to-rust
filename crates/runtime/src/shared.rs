@@ -40,7 +40,14 @@ impl<T> Arc<T> {
         if const { std::mem::size_of::<T>() == 0 } {
             return Arc::new_zero_sized(value);
         }
-        Arc { ptr: NonNull::from(Box::leak(Box::new(value))), owns: PhantomData }
+        // A slot of the thread's free list or span where there is one, taken inline (`take_slot`);
+        // otherwise the global allocator's path, which refills them.
+        let slot = crate::gc::take_slot::<T>() as *mut T;
+        let Some(ptr) = NonNull::new(slot) else {
+            return Arc { ptr: NonNull::from(Box::leak(Box::new(value))), owns: PhantomData };
+        };
+        unsafe { ptr.as_ptr().write(value) };
+        Arc { ptr, owns: PhantomData }
     }
 
     /// A handle of a value of no size (an object without fields), which still needs an address

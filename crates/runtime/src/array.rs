@@ -195,6 +195,12 @@ pub trait Elements<T> {
     fn try_get_and_update(&self, i: i32, f: impl Fn(&T) -> T) -> Result<T, Exception>
     where
         T: Clone;
+    /// The elements where they are, for a search that reads them while no code of the program
+    /// runs: an `Array`'s; `None` for a `SharedArray`, whose elements are atomic.
+    #[inline(always)]
+    fn in_place(&self) -> Option<&[T]> {
+        None
+    }
     /// Runs `f` on the elements in `range` (within the length): borrowed from an `Array`, read
     /// one at a time into a copy from a `SharedArray`. `f` runs no code of the program.
     fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
@@ -255,6 +261,11 @@ impl<T, A: Elements<T>> Elements<T> for &A {
     #[inline(always)]
     fn length(&self) -> usize {
         (**self).length()
+    }
+
+    #[inline(always)]
+    fn in_place(&self) -> Option<&[T]> {
+        (**self).in_place()
     }
 
     #[inline(always)]
@@ -380,6 +391,14 @@ impl<T> Elements<T> for Array<T> {
     #[inline(always)]
     fn length(&self) -> usize {
         self.raw().1
+    }
+
+    #[inline(always)]
+    fn in_place(&self) -> Option<&[T]> {
+        let (items, len) = self.raw();
+        // SAFETY: the elements stay where they are while the caller reads them: it runs no code
+        // of the program, which alone could store into the array or let it go.
+        Some(unsafe { std::slice::from_raw_parts(items, len) })
     }
 
     #[inline(always)]
@@ -655,6 +674,124 @@ impl<T> Elements<T> for SharedArray<T> {
     }
 }
 
+/// An array that nothing writes once it is made: a `static final` array that its class's static
+/// initialization assigns a new array, and that the program only indexes and measures (the
+/// translator's `frozen_statics`). Its elements are a boxed slice, read where they are, with no
+/// atomic load and no borrow flag; the `java::Final` that holds it publishes them to every
+/// thread with the array. It is never a value of the program, so nothing compares, copies or
+/// stores into it: the trait's writes are never called.
+pub struct Frozen<T>(Box<[T]>);
+
+/// The elements of the new array `a`, frozen (see `Frozen`).
+pub fn freeze<T: Clone>(a: impl Elements<T>) -> Frozen<T> {
+    Frozen(a.take_items().into_boxed_slice())
+}
+
+impl<T> Frozen<T> {
+    #[cold]
+    #[inline(never)]
+    fn written() -> ! {
+        unreachable!("a frozen array is never written")
+    }
+}
+
+impl<T> Elements<T> for Frozen<T> {
+    #[inline(always)]
+    fn length(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline(always)]
+    fn in_place(&self) -> Option<&[T]> {
+        Some(&self.0)
+    }
+
+    #[inline(always)]
+    fn element(&self, i: i32) -> T
+    where
+        T: Clone,
+    {
+        self.0[position(self.0.len(), i)].clone()
+    }
+
+    #[inline(always)]
+    fn try_element(&self, i: i32) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        Ok(self.0[try_position(self.0.len(), i)?].clone())
+    }
+
+    fn put(&self, _: i32, _: T) {
+        Self::written()
+    }
+
+    fn try_put(&self, _: i32, _: T) -> Result<(), Exception> {
+        Self::written()
+    }
+
+    fn try_swap(&self, _: i32, _: T) -> Result<T, Exception> {
+        Self::written()
+    }
+
+    fn try_compare_exchange(&self, _: i32, _: T, _: T, _: impl Fn(&T, &T) -> bool) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn try_get_and_update(&self, _: i32, _: impl Fn(&T) -> T) -> Result<T, Exception>
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn reading<R>(&self, range: Range<usize>, f: impl FnOnce(&[T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        f(&self.0[range])
+    }
+
+    fn writing<R>(&self, _: Range<usize>, _: impl FnOnce(&mut [T]) -> R) -> R
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn store_from(&self, _: usize, _: &[T])
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn copy_within(&self, _: usize, _: usize, _: usize)
+    where
+        T: Clone,
+    {
+        Self::written()
+    }
+
+    fn address(&self) -> *const u8 {
+        self.0.as_ptr() as *const u8
+    }
+
+    fn element_class(&self) -> Option<&ElementClass<T>> {
+        None
+    }
+
+    fn take_items(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.0.to_vec()
+    }
+}
+
 impl<T> MadeElements<T> for SharedArray<T> {
     fn made_as(items: Vec<T>, class: Option<ElementClass<T>>) -> SharedArray<T> {
         Arc::new(ArrayData { items: SharedElements::new(items), class: class.map(Box::new) })
@@ -915,6 +1052,122 @@ fn too_long(n: usize) -> ! {
 #[inline(always)]
 pub fn get<T: Clone>(a: &impl Elements<T>, i: i32) -> T {
     a.element(i)
+}
+
+/// `for (i = from; i < end; i++) if (a[i] == key) ..`, with `end` the length when it is `None`:
+/// the first such `i`, for values that `==` compares and that cannot fail to compare (integers,
+/// characters, booleans, enum constants). The elements of an `Array` are compared in place, four
+/// to a turn: LLVM does not unroll a loop that it can leave in two places, its end and the element
+/// found, so as Java writes it each element also paid the loop's compare and branch; the JIT
+/// unrolls such a loop. An `end` past the length throws Java's `ArrayIndexOutOfBoundsException`
+/// once the elements before it are compared, a negative `from` at once.
+#[inline(always)]
+pub fn search_eq<T: PartialEq + Clone>(
+    a: &impl Elements<T>,
+    from: i32,
+    end: Option<i32>,
+    key: T,
+) -> Option<i32> {
+    let (start, stop, past) = search_range(a.length(), from, end, |i| {
+        let _ = a.element(i);
+    })?;
+    match a.in_place() {
+        Some(items) => first_equal(&items[start..stop], &key).map(|k| (start + k) as i32),
+        None => (start..stop).find(|&i| a.element(i as i32) == key).map(|i| i as i32),
+    }
+    .or_else(|| {
+        search_past(past, |i| {
+            let _ = a.element(i);
+        })
+    })
+}
+
+/// `search_eq` for `a[i] == key` by identity, of references (`Option<E>`): the elements found
+/// `same` as the key. Where the key is the same object as a value exactly when their bits are
+/// equal (`by_bits`: a handle, or a value of an enum of classes whose class is compared by
+/// identity) and an element is one word, the elements are compared as words, four to a turn,
+/// which the compiler does with vector compares; otherwise one at a time with `same`.
+#[inline(always)]
+pub fn search_same<E: Clone>(
+    a: &impl Elements<Option<E>>,
+    from: i32,
+    end: Option<i32>,
+    key: Option<&E>,
+    by_bits: bool,
+    mut same: impl FnMut(Option<E>) -> bool,
+) -> Option<i32> {
+    let (start, stop, past) = search_range(a.length(), from, end, |i| {
+        let _ = a.element(i);
+    })?;
+    let words = std::mem::size_of::<Option<E>>() == 8 && std::mem::align_of::<Option<E>>() == 8;
+    match a.in_place() {
+        Some(items) if by_bits && words => {
+            let key: Option<E> = key.cloned();
+            // SAFETY: a one-word `Option` of a handle or a value held in a word has every bit
+            // initialized, and the slice is aligned and as long as `items`.
+            let (key, items) = unsafe {
+                let key = std::mem::transmute_copy::<Option<E>, u64>(&key);
+                (key, std::slice::from_raw_parts(items.as_ptr() as *const u64, items.len()))
+            };
+            first_equal(&items[start..stop], &key).map(|k| (start + k) as i32)
+        }
+        _ => (start..stop).find(|&i| same(a.element(i as i32))).map(|i| i as i32),
+    }
+    .or_else(|| {
+        search_past(past, |i| {
+            let _ = a.element(i);
+        })
+    })
+}
+
+/// The elements a search compares, `start..stop`, and the index past the length that throws
+/// once they are compared, where its end is past the length (Java's next `a[i]`); `None` where it
+/// compares nothing. A negative `from` below the end throws at once, through `fail`, as Java's
+/// first `a[from]` does.
+#[inline(always)]
+pub(crate) fn search_range(
+    len: usize,
+    from: i32,
+    end: Option<i32>,
+    fail: impl Fn(i32),
+) -> Option<(usize, usize, Option<i32>)> {
+    let end = end.unwrap_or(len as i32);
+    if from >= end {
+        return None;
+    }
+    if from < 0 {
+        fail(from);
+    }
+    let start = (from as usize).min(len);
+    let stop = (end as usize).min(len).max(start);
+    let past = ((end as usize) > len).then(|| from.max(len as i32));
+    Some((start, stop, past))
+}
+
+/// After a search found nothing: throws at `past`, where it is the index past the length that
+/// Java's loop reads next.
+#[inline(always)]
+pub(crate) fn search_past(past: Option<i32>, fail: impl Fn(i32)) -> Option<i32> {
+    if let Some(i) = past {
+        fail(i);
+    }
+    None
+}
+
+/// The first position of `key` in `items`, four to a turn: the four compares are made whatever
+/// they find, then one branch, so the loop has one exit per turn and the compiler can make the
+/// compares one vector compare.
+#[inline(always)]
+pub(crate) fn first_equal<T: PartialEq>(items: &[T], key: &T) -> Option<usize> {
+    let mut i = 0;
+    while i + 4 <= items.len() {
+        let turn = &items[i..i + 4];
+        if (turn[0] == *key) | (turn[1] == *key) | (turn[2] == *key) | (turn[3] == *key) {
+            break;
+        }
+        i += 4;
+    }
+    items[i..].iter().position(|item| item == key).map(|k| i + k)
 }
 
 /// `a[i]` where the program observes the `ArrayIndexOutOfBoundsException`.
@@ -1193,9 +1446,10 @@ pub fn fill<T: Clone>(a: &impl Elements<T>, v: T) {
     a.writing(0..a.length(), |items| items.fill(v));
 }
 
-/// `Arrays.sort(a)` for integers and booleans.
+/// `Arrays.sort(a)` for integers and booleans. Equal values cannot be told apart, so the order
+/// among them is not seen and an unstable sort, which moves less, gives the same array.
 pub fn sort<T: Ord + Clone>(a: &impl Elements<T>) {
-    a.writing(0..a.length(), |items| items.sort());
+    a.writing(0..a.length(), |items| items.sort_unstable());
 }
 
 /// `Arrays.sort(a)` for doubles, in Java's order (`Double.compare`): -0.0 before 0.0, and every

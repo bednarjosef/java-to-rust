@@ -46,15 +46,22 @@ use syn::spanned::Spanned;
 const CODEGEN_UNIT: usize = 512 * 1024;
 
 /// The `.cargo/config.toml` of a translation's Cargo project on x86-64, one crate's or a split
-/// workspace's: it builds for processors with AVX2 (`x86-64-v3`), and builds a binary that is
-/// not position-independent (`relocation-model=static`). A position-independent binary is moved
-/// to a random address when it starts, and every pointer in its data is fixed up then: the
-/// Minecraft server's has 4.6 million of them (the place of every panic message, every table of
-/// functions), 105 MB of fix-ups that the loader reads and 61 MB of data that fixing them writes,
-/// 166 MB of its peak memory. A binary at a fixed address keeps those pointers in its file, read
-/// only where used.
-pub const CARGO_CONFIG: &str =
-    "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\", \"-C\", \"relocation-model=static\"]\n";
+/// workspace's: it builds for processors with AVX2 (`x86-64-v3`), starts each loop at a 64-byte
+/// line (`align-loops=64`), and builds a binary that is not position-independent
+/// (`relocation-model=static`).
+///
+/// LLVM starts a loop at 16 bytes, so how many lines a hot loop's first block spans depends on
+/// where the linker puts its function: Interpreter's dispatch loop, whose block every opcode jumps
+/// back to, ran its kernel in 260 ms at one place and 390 ms at another, with the same
+/// instructions. At a line, it runs in 270-300 ms wherever it lands; the binaries are 2-3%
+/// larger, and no benchmark is slower.
+///
+/// A position-independent binary is moved to a random address when it starts, and every pointer
+/// in its data is fixed up then: the Minecraft server's has 4.6 million of them (the place of
+/// every panic message, every table of functions), 105 MB of fix-ups that the loader reads and
+/// 61 MB of data that fixing them writes, 166 MB of its peak memory. A binary at a fixed address
+/// keeps those pointers in its file, read only where used.
+pub const CARGO_CONFIG: &str = "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\", \"-C\", \"llvm-args=-align-loops=64\", \"-C\", \"relocation-model=static\"]\n";
 
 /// The crates of a split program, each as its files under `src/`.
 pub struct Workspace {

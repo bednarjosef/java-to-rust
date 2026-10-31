@@ -139,6 +139,27 @@ fn size_index(size: usize, align: usize) -> Option<usize> {
     SIZES.iter().position(|&s| s as usize >= size)
 }
 
+/// `size_index` at compile time, for a type's size and alignment (`take_slot`): the same answer,
+/// by a search of `SIZES` rather than a table that a `const fn` cannot read.
+const fn size_index_of(size: usize, align: usize) -> Option<usize> {
+    let wanted = if align > 16 {
+        (if size > align { size } else { align }).next_power_of_two()
+    } else if align > 8 {
+        size.next_multiple_of(16)
+    } else {
+        size
+    };
+    let mut i = 0;
+    while i < SIZE_COUNT {
+        let s = SIZES[i] as usize;
+        if s >= wanted && (align <= 16 || s == wanted) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Where the first slot of small block `b` of slots of `size` bytes is, past the block's
 /// address: one of eight cache lines, by the block's number. Blocks are aligned to 64 KB, so
 /// without this the first slots of every block would share their offset in a page, and the
@@ -1096,6 +1117,45 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
         lists.span_block[class].set(h.next_block(class) as u32);
         lists.span_next[class].set(0);
     }
+}
+
+/// A slot for a new value of type `T`, zeroed, from the calling thread's free list or span, or
+/// null when both are empty or `T` takes a large allocation: then `Arc::new` takes the global
+/// allocator's path, which refills them. Inlined into each `Arc::new`, where the slot's class and
+/// size are constants, unlike a call of the global allocator, which finds them from the layout
+/// it is given at run time: BinaryTrees spent about 40% of its main thread in that call.
+#[inline(always)]
+pub(crate) fn take_slot<T>() -> *mut u8 {
+    let Some(index) = (const { size_index_of(size_of::<T>(), align_of::<T>()) }) else {
+        return ptr::null_mut();
+    };
+    let scanned = const { align_of::<T>() >= 8 };
+    let class = index * 2 + !scanned as usize;
+    let size = SIZES[index] as usize;
+    let p = LISTS
+        .try_with(|lists| {
+            let head = lists.heads[class].get();
+            if !head.is_null() {
+                let next = unsafe { (head as *mut *mut u8).read() };
+                lists.heads[class].set(next);
+                lists.bytes[class].set(lists.bytes[class].get() - size);
+                return head;
+            }
+            let bits = lists.span_bits[class].get();
+            if bits != 0 {
+                lists.span_bits[class].set(bits & (bits - 1));
+                let slot = bits.trailing_zeros() as usize;
+                return (lists.span_base[class].get() + slot * size) as *mut u8;
+            }
+            ptr::null_mut()
+        })
+        .unwrap_or(ptr::null_mut());
+    // Zeroed as `alloc` zeroes a slot that may hold pointers; the size is a constant here, so
+    // this is a few stores.
+    if scanned && !p.is_null() {
+        unsafe { ptr::write_bytes(p, 0, size) };
+    }
+    p
 }
 
 /// An allocation on a thread whose free lists are gone (while its thread-local storage is
@@ -2225,6 +2285,11 @@ mod tests {
         assert_eq!(size_index(1025, 8).map(|i| SIZES[i]), Some(1280));
         assert_eq!(size_index(32768, 8).map(|i| SIZES[i]), Some(32768));
         assert_eq!(size_index(32769, 8), None);
+        for align in [1, 2, 4, 8, 16, 32, 64, 4096] {
+            for size in 1..40000 {
+                assert_eq!(size_index_of(size, align), size_index(size, align), "size {size}, align {align}");
+            }
+        }
         assert_eq!(size_index(40, 32).map(|i| SIZES[i]), Some(64));
     }
 }

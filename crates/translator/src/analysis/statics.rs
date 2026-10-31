@@ -171,3 +171,62 @@ pub fn entry_inits(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
         })
         .collect()
 }
+
+/// The statics among `finals` that are frozen arrays (`Facts::frozen_statics`): one-dimensional
+/// arrays that every assignment, and the initializer, gives a new array (`{..}`, `new T[] {..}`,
+/// `new T[n]`), and that every expression of the program only indexes to read an element or
+/// measures (`S[i]`, `S.length`). Nothing else can reach such an array, so nothing writes its
+/// elements once its class's static initialization has made it.
+pub fn frozen<'a>(class: &'a Class, finals: &FastSet<(usize, String)>) -> FastSet<(usize, String)> {
+    let new_array = |e: &Expr| matches!(e.kind, ExprKind::NewArray(_) | ExprKind::ArrayLit(_));
+    let mut frozen: FastSet<(usize, String)> = class
+        .types
+        .iter()
+        .enumerate()
+        .flat_map(|(t, decl)| decl.statics.iter().map(move |f| (t, f)))
+        .filter(|(t, f)| {
+            matches!(f.ty, Type::Array(_))
+                && !matches!(f.ty.element(), Type::Array(_))
+                && f.init.as_ref().is_none_or(new_array)
+                && finals.contains(&(*t, f.name.clone()))
+        })
+        .map(|(t, f)| (t, f.name.clone()))
+        .collect();
+    if frozen.is_empty() {
+        return frozen;
+    }
+    // Each static's mentions as an expression, and those that are `S[i]` read or `S.length`.
+    let mut mentions: FastMap<(usize, &'a str), (usize, usize)> = FastMap::default();
+    let mut assigned_other: FastSet<(usize, String)> = FastSet::default();
+    let mut visit = |x: &'a Expr| match &x.kind {
+        ExprKind::Static { class: c, name } => mentions.entry((*c, name.as_str())).or_default().0 += 1,
+        ExprKind::Index(a, _) | ExprKind::Length(a) => {
+            if let ExprKind::Static { class: c, name } = &a.kind {
+                mentions.entry((*c, name.as_str())).or_default().1 += 1;
+            }
+        }
+        ExprKind::Assign { target: Place::Static { class: c, name }, op, value }
+            if op.is_some() || !new_array(value) =>
+        {
+            assigned_other.insert((*c, name.clone()));
+        }
+        _ => {}
+    };
+    for m in &class.methods {
+        for stmt in &m.body {
+            visit_stmt_exprs(stmt, &mut visit);
+        }
+    }
+    for decl in &class.types {
+        for f in decl.fields.iter().chain(&decl.statics) {
+            if let Some(init) = &f.init {
+                visit_expr(init, &mut visit);
+            }
+        }
+    }
+    frozen.retain(|(t, name)| {
+        !assigned_other.contains(&(*t, name.clone()))
+            && mentions.get(&(*t, name.as_str())).is_none_or(|(all, read)| all == read)
+    });
+    frozen
+}
