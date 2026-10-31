@@ -3812,14 +3812,16 @@ impl<'a> Gen<'a> {
             if let Need::RuntimeClass(_) = need {
                 // Read from the table by class number (`classes_table`), but for an `Object[]`
                 // that may be a covariant array, which carries its class.
-                let carried: Vec<usize> =
-                    variants.iter().copied().filter(|&c| self.class_carried(c)).collect();
+                let by_value: Vec<usize> =
+                    variants.iter().copied().filter(|&c| self.class_by_value(c)).collect();
                 let table = format!("*crate::{}[self.0.tag() as usize]", super::class_values::CLASSES);
-                if carried.is_empty() {
+                if by_value.is_empty() {
                     self.line(&table);
                 } else {
-                    self.match_arms_or(&carried, Some(table), &|g: &mut Self, c| {
-                        (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true)
+                    self.match_arms_or(&by_value, Some(table), &|g: &mut Self, c| match g.class_carried(c) {
+                        true => (format!("{}(o, || {})", g.runtime("array_class"), g.decl_class(c)), true),
+                        // An enum's constant, whose body may be its class.
+                        false => (g.constant_class(c, "*o"), true),
                     });
                 }
                 self.indent -= 1;
@@ -3828,6 +3830,7 @@ impl<'a> Gen<'a> {
             }
             let ret = format!(" -> {ret}");
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
+                Need::RuntimeClassName(_) if g.has_bodies(c) => (g.constant_class_name(c, "*o", false), true),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
                 Need::CopyKind(_) => (g.copy_kind(c), false),
                 // Read from the value's bits, the same text for every such class, whose arms

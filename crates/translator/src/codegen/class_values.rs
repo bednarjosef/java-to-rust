@@ -73,9 +73,19 @@ impl<'a> Gen<'a> {
                 let handle = self.handle(object);
                 return Code::atom(format!("{}({handle}, || {exact})", self.runtime("array_class")));
             }
+            // A constant with a body is of the body's class.
+            Type::Enum(_) if let Some(c) = self.class.type_of(object.ty).filter(|&c| self.has_bodies(c)) => {
+                let value = self.object(object);
+                return Code::atom(self.constant_class(c, &value));
+            }
             ty => self.type_class(ty),
         };
         self.after_object(object, &class)
+    }
+
+    /// Whether some constant of enum `c` has a body, and so a class of its own.
+    pub(super) fn has_bodies(&self, c: usize) -> bool {
+        (self.class.types[c].enum_constants.iter().flatten()).any(|k| k.body.is_some())
     }
 
     /// Whether an array of type `ty` may carry its class: an `Object[]` in a program that makes
@@ -306,6 +316,10 @@ impl<'a> Gen<'a> {
                 done.insert(c);
                 let value = self.class_value(c);
                 constants.insert(self.class_value_name(c), value);
+                for (ordinal, binary) in self.constant_bodies(c) {
+                    let value = self.body_class_value(c, &binary);
+                    constants.insert(self.body_class_value_name(c, ordinal), value);
+                }
             }
         }
         let text = constants
@@ -315,6 +329,80 @@ impl<'a> Gen<'a> {
         (text, done.iter().map(|&c| self.class.types[c].name.clone()).collect())
     }
 
+    /// The constants of enum `c` that have a body, which is their class: each one's ordinal and
+    /// its body's binary name (`EnumConstant::body`).
+    pub(super) fn constant_bodies(&self, c: usize) -> Vec<(usize, String)> {
+        let constants = self.class.types[c].enum_constants.as_deref().unwrap_or_default();
+        (constants.iter().enumerate()).filter_map(|(i, k)| Some((i, k.body.clone()?))).collect()
+    }
+
+    /// The name of the static of the class of the body of constant `ordinal` of enum `c`, beside
+    /// the enum's own (`class_value_constants`).
+    fn body_class_value_name(&mut self, c: usize, ordinal: usize) -> String {
+        format!("{}__BODY_{ordinal}", self.class_value_name(c))
+    }
+
+    /// The `java::Class` of the body of a constant of enum `c`, named `binary`: an anonymous
+    /// class, the enum its superclass, with no simple name and no interfaces of its own.
+    fn body_class_value(&mut self, c: usize, binary: &str) -> String {
+        let superclass = self.decl_class(c);
+        let mut names = vec![rust_string(binary)];
+        names.extend(self.decl_names(c).iter().map(|n| rust_string(n)));
+        let value = format!(
+            "java::Class::new({}, \"\", Some(&{superclass}), &[{}])",
+            rust_string(binary),
+            names.join(", ")
+        );
+        let value = match self.class_interfaces {
+            true => format!("{value}.implementing(&[])"),
+            false => value,
+        };
+        match self.class_details {
+            // `static final enum`'s flags, as javac writes the body's class.
+            true => format!("{value}.declared(0x4010, java::Nest::Anonymous, Some(&{superclass}))"),
+            false => value,
+        }
+    }
+
+    /// The class of the value `value` of enum `c`, whose constants with a body are of their
+    /// body's class: a `match` of those constants, else the enum's class.
+    pub(super) fn constant_class(&mut self, c: usize, value: &str) -> String {
+        let enum_class = self.decl_class(c);
+        let bodies = self.constant_bodies(c);
+        if bodies.is_empty() {
+            return enum_class;
+        }
+        let mut arms: Vec<String> = Vec::new();
+        for (ordinal, _) in &bodies {
+            let name = self.body_class_value_name(c, *ordinal);
+            arms.push(format!("{} => crate::{name}", self.constant_path(c, *ordinal)));
+        }
+        let count = self.class.types[c].enum_constants.as_ref().map_or(0, Vec::len);
+        if bodies.len() < count {
+            arms.push(format!("_ => {enum_class}"));
+        }
+        format!("match {value} {{ {} }}", arms.join(", "))
+    }
+
+    /// The name of the class of the value `value` of enum `c` (`constant_class`), a `&str`.
+    pub(super) fn constant_class_name(&mut self, c: usize, value: &str, simple: bool) -> String {
+        let own = rust_string(&self.java_class_name(c, simple));
+        let bodies = self.constant_bodies(c);
+        if bodies.is_empty() {
+            return own;
+        }
+        let mut arms: Vec<String> = Vec::new();
+        for (ordinal, binary) in &bodies {
+            let name = if simple { "\"\"".to_string() } else { rust_string(binary) };
+            arms.push(format!("{} => {name}", self.constant_path(c, *ordinal)));
+        }
+        let count = self.class.types[c].enum_constants.as_ref().map_or(0, Vec::len);
+        if bodies.len() < count {
+            arms.push(format!("_ => {own}"));
+        }
+        format!("match {value} {{ {} }}", arms.join(", "))
+    }
+
     /// The `java::Class` of class `c` of the program, written out.
     fn class_value(&mut self, c: usize) -> String {
         let decl = &self.class.types[c];
@@ -322,8 +410,8 @@ impl<'a> Gen<'a> {
         // A record's superclass is `Record`, which the program's records implement where it is a
         // type. `Object` has none.
         let record = decl.record || decl.implements.iter().any(|&i| self.class.types[i].name == RECORD);
-        let name = rust_string(&self.java_class_name(c, false));
         let object = self.java_class_name(c, false) == "java.lang.Object";
+        let name = rust_string(&self.java_class_name(c, false));
         let simple = rust_string(&self.java_class_name(c, true));
         let names = self.names_list(c);
         let value = match kind {
@@ -428,6 +516,7 @@ impl<'a> Gen<'a> {
             ClassOp::IsInterface => "is_interface",
             ClassOp::IsPrimitive => "is_primitive",
             ClassOp::IsEnum => "is_enum",
+            ClassOp::EnumDeclaringClass => "enum_declaring_class",
             ClassOp::ToString => {
                 return Code::atom(format!("{}::from({class}.to_string())", self.runtime("JString")));
             }
@@ -652,7 +741,7 @@ impl<'a> Gen<'a> {
         let mut by_number = std::collections::BTreeMap::new();
         for t in enums {
             for c in self.enum_variants(t) {
-                if !self.class_carried(c) {
+                if !self.class_by_value(c) {
                     by_number.insert(self.class_tag(c), c);
                 }
             }
@@ -673,6 +762,13 @@ impl<'a> Gen<'a> {
     /// array does (`java::array_class`), which `runtime_class()` then asks it for.
     pub(super) fn class_carried(&self, c: usize) -> bool {
         self.class.array_of(c).is_some_and(|ty| self.carries_class(ty))
+    }
+
+    /// Whether `runtime_class()` asks an object of class `c` for its class rather than reading
+    /// it by class number: an array that carries its class (`class_carried`), or an enum whose
+    /// constants with a body are of the body's class (`constant_class`).
+    pub(super) fn class_by_value(&self, c: usize) -> bool {
+        self.class_carried(c) || self.has_bodies(c)
     }
 
     /// `decl_names(c)` as a slice: `&["Main$Dog", .., "java.lang.Object"]`.

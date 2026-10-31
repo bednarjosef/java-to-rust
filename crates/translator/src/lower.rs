@@ -590,8 +590,9 @@ impl<'t> Lowering<'t> {
                 // In a census, an enum that lowering rejects keeps its constants without values.
                 self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
                 let names = self.enum_constant_names(index);
-                let constants = names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() });
-                types[index].enum_constants = Some(constants.collect());
+                let constants =
+                    names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new(), body: None });
+                types[index].enum_constants = Some(self.with_body_classes(index, constants.collect()));
                 // The methods that the constants' bodies override have no `switch` over the
                 // constants, and those that implement an interface's abstract method no body at
                 // all (Guava's `Predicates.ObjectPredicate.apply`): they are rejected with it.
@@ -631,10 +632,12 @@ impl<'t> Lowering<'t> {
                 self.add_body_fields(&bodies, &mut types[index].fields)?;
                 self.enum_tables(index, types, methods, bodies, &mut kept.uses, &kept.clinit_ctors)?;
                 let names = self.enum_constant_names(index);
-                names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
+                names
+                    .map(|name| EnumConstant { name: name.to_string(), values: Vec::new(), body: None })
+                    .collect()
             }
         };
-        types[index].enum_constants = Some(constants);
+        types[index].enum_constants = Some(self.with_body_classes(index, constants));
         Ok(())
     }
 
