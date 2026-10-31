@@ -636,9 +636,10 @@ trial() {
     # rustc writes LLVM's bitcode rather than machine code for every crate, the binary's too, and
     # passes its opt-level and target-cpu to the linker; the .cargo/config.toml's -align-loops
     # goes to the linker's code generation by -mllvm. The cache's keys are each module's code and
-    # what it imports, so a module whose code and imports did not change is not optimized again.
+    # what it imports, so a module whose code and imports did not change is not optimized again;
+    # it keeps at most 4 GB, the modules used last.
     lld) build+=(--config "profile.$profile-lld-lto.inherits = \"$profile\"" --config "profile.$profile-lld-lto.lto = false"
-      --config "build.rustflags = [\"-Clinker-plugin-lto\", \"-Clink-arg=-Wl,--thinlto-cache-dir=$cache/thinlto-cache\", \"-Clink-arg=-Wl,--thinlto-jobs=all\", \"-Clink-arg=-Wl,-mllvm,-align-loops=64\"]") ;;
+      --config "build.rustflags = [\"-Clinker-plugin-lto\", \"-Clink-arg=-Wl,--thinlto-cache-dir=$cache/thinlto-cache\", \"-Clink-arg=-Wl,--thinlto-jobs=all\", \"-Clink-arg=-Wl,--thinlto-cache-policy=cache_size_bytes=4g\", \"-Clink-arg=-Wl,-mllvm,-align-loops=64\"]") ;;
     *) echo "TRIAL_LTO is empty, off or lld, not $TRIAL_LTO" >&2; exit 1 ;;
   esac
   local jobs=${CARGO_BUILD_JOBS:-$(nproc)} group=() size total=0 crate
