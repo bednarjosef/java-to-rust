@@ -38,12 +38,22 @@ impl<'a> Gen<'a> {
     /// The first argument of a runtime function that takes any `java::Text` (`substring`,
     /// `index_of`, `char_at`, `string_length`, ...), made from what `text_ref` or `str_ref` gave:
     /// a shared string as itself (`as_text`) rather than its text (`as_wtf8`), since the string
-    /// keeps whether it is ASCII and its text would be scanned at each call.
+    /// keeps whether it is ASCII and its text would be scanned at each call. So is a string that
+    /// may be null, of a program without threads, read where it is (`java::non_null(x.as_deref())`):
+    /// it is unwrapped as the `&JString` (`as_ref`), not as its text.
     pub(super) fn text_owner(&self, text: String) -> String {
-        match text.strip_suffix(".as_wtf8()") {
-            Some(base) => format!("{base}.as_text()"),
-            None => text,
+        if let Some(base) = text.strip_suffix(".as_wtf8()") {
+            return format!("{base}.as_text()");
         }
+        if !self.facts.threaded
+            && let Some(inner) = text.strip_prefix("java::non_null(")
+            && let Some(place) = inner.strip_suffix(".as_deref())")
+            && !place.contains('"')
+            && balanced(place)
+        {
+            return format!("java::non_null({place}.as_ref())");
+        }
+        text
     }
 
     /// A string expression as a `&java::Wtf8`.
@@ -76,7 +86,7 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Static { .. }
                 if !self.nullable(e)
-                    && let Some(place) = self.final_place(e) =>
+                    && let Some(place) = self.final_place(e).or_else(|| self.lent_static(e)) =>
             {
                 format!("&{place}")
             }
@@ -112,6 +122,47 @@ impl<'a> Gen<'a> {
             Type::Class(..) => true,
             _ => false,
         }
+    }
+
+    /// Whether a static of class `class` stays as it is while the statement being
+    /// written runs (and the next, where they are written together; see `SteadyOf`), in a program
+    /// without threads: the statements assign no static and run no Java code that might, no
+    /// method or constructor, no `toString`, `equals` or `hashCode` of an object that a library
+    /// method or a concatenation calls, no other class's static initialization.
+    pub(super) fn static_steady(&self, class: usize) -> bool {
+        let Some(s) = self.steady.as_ref() else { return false };
+        let current = self.class.methods[self.method].class;
+        let objects = |ty: Type| {
+            let mut ty = ty;
+            while let Type::Array(inner) = ty {
+                ty = *inner;
+            }
+            matches!(ty, Type::Class(..) | Type::Enum(_) | Type::Null)
+        };
+        let runs_java = |x: &Expr| match &x.kind {
+            ExprKind::Assign { target: Place::Static { .. }, .. }
+            | ExprKind::IncDec { target: Place::Static { .. }, .. }
+            | ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::New { .. }
+            | ExprKind::ThisCall { .. }
+            | ExprKind::SuperInit { .. }
+            | ExprKind::Switch { .. }
+            | ExprKind::EnumConstant { .. } => true,
+            ExprKind::Builtin(_, args) => args.iter().any(|a| objects(a.ty)),
+            ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => objects(l.ty) || objects(r.ty),
+            ExprKind::Static { class: c, .. } if *c != class => {
+                self.facts.init_class(self.class, *c).is_some_and(|init| {
+                    init != current && !self.class.hierarchy.ancestors(current).contains(&init)
+                })
+            }
+            _ => false,
+        };
+        let mut steady = true;
+        for stmt in s.stmts.iter().flatten() {
+            visit_stmt(stmt, &mut |e| visit_expr(e, &mut |x| steady &= !runs_java(x)), &mut |_| {});
+        }
+        steady
     }
 
     /// What the statements do to the objects that `this` and the locals name (see `Steady`).
@@ -429,6 +480,20 @@ impl<'a> Gen<'a> {
         let args: String = args.iter().map(|a| format!(", {a}")).collect();
         Code::atom(format!("{mac}(\"{template}\"{args})"))
     }
+}
+
+/// Whether the parentheses of `code` pair up, none closing before it opens.
+fn balanced(code: &str) -> bool {
+    let mut depth = 0usize;
+    for c in code.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return false,
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 /// The WTF-8 bytes of the UTF-16 code units `units`: a pair is its character's 4-byte form, a lone

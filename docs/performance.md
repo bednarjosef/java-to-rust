@@ -108,6 +108,13 @@ made on the stack (`java::count_allocation`).
   - A string field of a plain object (an owned or immutable object, or `this` in its methods) is
     borrowed where it is when the statement neither assigns that field, nor passes the object on,
     nor calls a `&mut self` method of it (`codegen/strings.rs`, `Steady`).
+  - A string static of a program that starts no thread is borrowed from its `RefCell` for the
+    statement (`(*RefCell::borrow(&X))`) instead of copied, when the statement assigns no static
+    and runs no other Java code: no call, no `new`, no other class's initialization, no object
+    whose `toString` a concatenation or library method calls (`codegen/statics.rs`,
+    `lent_static`). A static that may be null is unwrapped as the `&JString` (`as_ref`), so the
+    runtime functions see its ASCII flag. A walk of a 3.4 MB static with `indexOf` and
+    `substring` copied it at each read: 556 s, now 41-57 ms against Java's 41-53.
   - The ASCII analysis follows `String` fields (instance and static, by name, only where every
     field of that name is a `String`), the overrides of a method, enum constants, and the
     exceptions the runtime raises. On a string proved ASCII, `length()` is the byte length and

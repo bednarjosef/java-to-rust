@@ -196,7 +196,11 @@ impl<'a> Gen<'a> {
                 format!("{}.as_deref()", self.object_place(e))
             }
             // A `java::Final` static never changes once its class is initialized.
-            ExprKind::Static { .. } if let Some(place) = self.final_place(e) => format!("{place}.as_deref()"),
+            ExprKind::Static { .. }
+                if let Some(place) = self.final_place(e).or_else(|| self.lent_static(e)) =>
+            {
+                format!("{place}.as_deref()")
+            }
             _ => format!("{}.as_deref()", self.expr(e).at(ATOM)),
         }
     }

@@ -7313,3 +7313,39 @@ fn a_shared_string_is_given_itself_to_the_methods_that_take_an_index() {
         &["java::index_of_char(s.as_text(), ' ' as i32, 0)", "java::char_at(s.as_text(), i)"],
     );
 }
+
+#[test]
+fn a_string_static_is_read_in_place_where_the_statement_cannot_change_it() {
+    let rust = translate(
+        "class A {
+            static String text = \"a b c\";
+            static String line;
+            static int change() {
+                text = \"changed\";
+                return 1;
+            }
+            public static void main(String[] a) {
+                int n = 0;
+                for (int i = text.indexOf(' '); i >= 0; i = text.indexOf(' ', i + 1)) {
+                    n += text.substring(0, i).length() + text.length();
+                }
+                int m = text.length() + change() + text.length();
+                text = text.substring(1);
+                line = a.length > 0 ? a[0] : null;
+                n += line.indexOf('x', 1);
+                System.out.println(n + \" \" + m + \" \" + text);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::index_of_char(&(*std::cell::RefCell::borrow(&A_TEXT)), ' ' as i32, 0)",
+            "java::ascii_substring(&(*std::cell::RefCell::borrow(&A_TEXT)), 0, i)",
+            "((*std::cell::RefCell::borrow(&A_TEXT)).len() as i32)",
+            "(A_TEXT.cloned().len() as i32).wrapping_add(change())",
+            "A_TEXT.set(java::ascii_substring_from(&A_TEXT.cloned(), 1))",
+            "java::index_of_char(java::non_null((*std::cell::RefCell::borrow(&A_LINE)).as_ref()), 'x' as i32, 1)",
+        ],
+    );
+}

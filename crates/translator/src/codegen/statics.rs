@@ -363,6 +363,31 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// A string static of a program without threads, borrowed where it is (`(*cell.borrow())`,
+    /// its `Option` where it may be null) instead of copied, where the statement being written
+    /// cannot change it (`static_steady`): reading a long string in a loop copied all of it at
+    /// each read. The borrow is a `RefCell`'s, which ends with the statement.
+    pub(super) fn lent_static(&mut self, e: &Expr) -> Option<String> {
+        let ExprKind::Static { class, name } = &e.kind else { return None };
+        if e.ty != Type::String
+            || self.facts.threaded
+            || super::shared_strings()
+            || self.final_static(*class, name)
+            || self.class.types[*class].statics.iter().any(|f| f.name == *name && f.constant)
+            || self.facts.early_static_reads.contains(&e.id)
+            || self.facts.placeholder_statics.contains(&(*class, name.clone()))
+            || !self.static_steady(*class)
+        {
+            return None;
+        }
+        let cell = self.cell_name(*class, name);
+        let borrow = format!("std::cell::RefCell::borrow(&{cell})");
+        Some(match self.init_call(*class) {
+            Some(init) => format!("(*{{ {init} {borrow} }})"),
+            None => format!("(*{borrow})"),
+        })
+    }
+
     /// The `const` read of a constant static field, or `None` for any other static field.
     pub(super) fn constant_read(&mut self, class: usize, name: &str, ty: Type) -> Option<Code> {
         let field = self.class.types[class].statics.iter().find(|f| f.name == name)?;

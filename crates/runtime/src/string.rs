@@ -70,7 +70,7 @@ fn check_begin_end(begin: i32, end: i32, length: usize) -> Result<(), crate::Exc
 }
 
 /// `s.substring(begin)`.
-pub fn substring_from(s: &Wtf8, begin: i32) -> JString {
+pub fn substring_from<S: Text + ?Sized>(s: &S, begin: i32) -> JString {
     try_substring_from(s, begin).unwrap_or_else(crate::uncaught)
 }
 
