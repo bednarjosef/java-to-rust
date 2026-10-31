@@ -59,7 +59,9 @@ owned, and that Rust therefore never freed, is found unreachable too.
   constants after its tick sprint, and its peak went from 1,030–1,089 MB to 953–957 MB, at the
   same tick speed. With every give-back 10 seconds apart, it held 172 MB of code and constants
   until the first, at 10 seconds, which was its peak (702 MB) once the heap was kept smaller
-  (`JAVA_GC_GROWTH=50`); the doubling waits give startup's code back within its first seconds.
+  (`JAVA_GC_GROWTH=50`). Given back every second (`JAVA_GC_CODE_PAGES=1`), it held 35–42 MB of
+  them through startup and peaked at 646–671 MB, at its end; the doubling waits give startup's
+  code back as soon, and the rest of the run as seldom as before.
 - **Stack pages.** Each collection, while the threads are stopped, gives back the pages of each
   thread's stack below where it stopped (less 64 KB that the stop's handler still uses):
   nothing below a stack pointer is alive, and a page the thread reaches again comes back zeroed.
