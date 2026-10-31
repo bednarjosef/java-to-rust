@@ -703,6 +703,7 @@ impl<'a> Gen<'a> {
             variant_names: Default::default(),
             cell_names: Default::default(),
             object_hash_code: Default::default(),
+            object_type: Default::default(),
             enum_bodies: Default::default(),
             reps: Default::default(),
             variant_lists: Default::default(),
@@ -884,6 +885,9 @@ struct Gen<'a> {
     cell_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashMap<String, String>>>>,
     /// `Object`'s `hashCode`, if the program has it (`hash_index`), found once.
     object_hash_code: std::cell::OnceCell<Option<usize>>,
+    /// The interface `Object` (`object_index`), found once: each dispatcher of the enum of
+    /// `Object` asks for it once per class.
+    object_type: std::cell::OnceCell<Option<usize>>,
     /// The body that a call of a method on the enum of a type calls directly, by type and method
     /// (`dispatch::enum_body`), once found.
     enum_bodies: std::cell::RefCell<HashMap<(usize, usize), Option<usize>>>,

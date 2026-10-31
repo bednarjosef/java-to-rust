@@ -2539,13 +2539,15 @@ impl<'a> Gen<'a> {
 
     /// The type of `Object`, when the program uses it.
     pub(super) fn object_index(&self) -> Option<usize> {
-        // The first type of that name, found by the index, is the one unless it is not the
-        // interface.
-        let t = self.class.type_index(OBJECT)?;
-        if self.class.types[t].kind == TypeKind::Interface {
-            return Some(t);
-        }
-        self.class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
+        *self.object_type.get_or_init(|| {
+            // The first type of that name, found by the index, is the one unless it is not the
+            // interface.
+            let t = self.class.type_index(OBJECT)?;
+            if self.class.types[t].kind == TypeKind::Interface {
+                return Some(t);
+            }
+            self.class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
+        })
     }
 
     /// The index of `Object`'s method `name`, when the program uses `Object`.
