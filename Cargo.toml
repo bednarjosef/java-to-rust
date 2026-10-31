@@ -11,11 +11,11 @@ license = "GPL-3.0-or-later"
 [profile.dev.package."*"]
 opt-level = 3
 
-# The build that scripts/check.sh tests and targets/run.sh runs: whole-program translations with
-# the JDK's sources take up to a minute each in a debug build and seconds optimized. It keeps the
-# debug build's checks (debug assertions, overflow checks), so it translates as `cargo test`'s
-# translator does, and of the debug information only the line tables, which panics' backtraces
-# need.
+# The build that scripts/check.sh runs the integration tests in and targets/run.sh runs:
+# whole-program translations with the JDK's sources take up to a minute each in a debug build and
+# seconds optimized. It keeps the debug build's checks (debug assertions, overflow checks), so it
+# translates as `cargo test`'s translator does, and of the debug information only the line tables,
+# which panics' backtraces need.
 [profile.checks]
 inherits = "dev"
 opt-level = 2
