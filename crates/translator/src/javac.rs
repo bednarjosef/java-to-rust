@@ -20,18 +20,32 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
 
-/// The command that runs `JavaTree`.
+/// The command that runs `JavaTree` on one source.
 fn java_tree() -> Command {
-    java("JavaTree", &[])
+    java("JavaTree", &[], Run::Short)
+}
+
+/// How long a JVM runs: on one source, for a second or two, or on a whole program, whose javac
+/// runs for seconds to minutes (javac's own sources, 20 s; the Minecraft server, 103 s for its
+/// 15,525 units).
+#[derive(Clone, Copy, PartialEq)]
+enum Run {
+    Short,
+    Long,
 }
 
 /// The command that runs `main`, one of the programs of `java/` that `build.rs` compiles, with
 /// the JVM's `options`.
-fn java(main: &str, options: &[&str]) -> Command {
+fn java(main: &str, options: &[&str], run: Run) -> Command {
     let mut command = Command::new("java");
-    // A short-lived JVM: skip the optimizing compiler, the parallel collector and perf data
-    // (whose lock-file warnings go to stdout when many JVMs run at once).
-    command.args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData"]);
+    // Neither the parallel collector nor perf data (whose lock-file warnings go to stdout when
+    // many JVMs run at once). A short-lived JVM skips the optimizing compiler too; a long one
+    // gains from it (javac's census: its javac step takes 19-21 s on the first compiler alone,
+    // 14-15 s with both).
+    if run == Run::Short {
+        command.arg("-XX:TieredStopAtLevel=1");
+    }
+    command.args(["-XX:+UseSerialGC", "-XX:-UsePerfData"]);
     // A small young generation: left to itself, the collector grows it to gigabytes of garbage
     // between collections (2.4 GB of memory for javac's 0.35 GB of live trees and symbols, for a
     // program that reaches 600 of the JDK's units), at no gain in speed.
@@ -102,7 +116,7 @@ pub fn program_tree(
 /// the first of `roots` that has it, writing the patched files under `out` when it is given, and
 /// returns why any patch was refused.
 pub fn check_patches(patches: &Path, roots: &[PathBuf], out: Option<&Path>) -> Result<(), String> {
-    let mut command = java("JdkPatch", &[]);
+    let mut command = java("JdkPatch", &[], Run::Short);
     command.arg(patches).args(roots);
     if let Some(out) = out {
         command.arg("--out").arg(out);
@@ -125,7 +139,7 @@ fn program_command(
     module_info: Option<&Path>,
     patches: Option<&Path>,
 ) -> Result<Command, (Option<String>, Error)> {
-    let mut command = java_tree();
+    let mut command = java("JavaTree", &[], Run::Long);
     command.arg("--program");
     if !sourcepath.is_empty() {
         let joined = std::env::join_paths(sourcepath).map_err(|e| fail(format!("bad source path: {e}")))?;
