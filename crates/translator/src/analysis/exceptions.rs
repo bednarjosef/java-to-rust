@@ -69,8 +69,9 @@ enum Kind {
 enum Raise {
     /// `throw`: an object of a class under this type.
     Throw(usize),
-    /// A call of one of these methods.
-    Call(Vec<usize>),
+    /// A call of one of these methods: a list shared by the calls of the same methods
+    /// (`shared_callees`), so that what is found for one list is kept by its address.
+    Call(std::rc::Rc<[usize]>),
     /// The text of an object, which runs one of these `toString` methods; what they throw ends the
     /// program here.
     Text(Vec<usize>),
@@ -164,6 +165,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // What showing each type runs is the same for every point while the program does not change.
     TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
     RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
+    CALLEE_LISTS.with_borrow_mut(|lists| *lists = Some(FastSet::default()));
     let mut points: Vec<Vec<Point>> = phase("exceptions: points", || {
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect()
     });
@@ -295,7 +297,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         // their set of methods: what escapes the methods of a set is kept as one union, grown as
         // theirs grow, so that a call reads one set rather than each of its methods. What escapes
         // a method only grows, so the union of what has escaped each is what escapes them now.
-        let mut set_of: FastMap<&[usize], usize> = FastMap::default();
+        let mut set_of: FastMap<*const usize, usize> = FastMap::default();
         let mut set_callers: Vec<Vec<usize>> = Vec::new();
         let mut sets_with: Vec<Vec<usize>> = vec![Vec::new(); n];
         let call_sets: Vec<Vec<usize>> = points
@@ -305,8 +307,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 ps.iter()
                     .map(|p| match &p.raise {
                         Raise::Call(called) if called.len() > 1 => {
-                            let set = *set_of.entry(&called[..]).or_insert_with(|| {
-                                for &c in called {
+                            let set = *set_of.entry(called.as_ptr()).or_insert_with(|| {
+                                for &c in called.iter() {
                                     sets_with[c].push(set_callers.len());
                                 }
                                 set_callers.push(Vec::new());
@@ -360,7 +362,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         for (m, ps) in points.iter().enumerate() {
             for (i, p) in ps.iter().enumerate() {
                 if let Raise::Call(called) = &p.raise {
-                    for &c in called {
+                    for &c in called.iter() {
                         if called_by[c] != m {
                             called_by[c] = m;
                             callees[m].push(c);
@@ -385,7 +387,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 if let Raise::Call(called) = &p.raise {
                     match call_sets[m][i] {
                         usize::MAX => {
-                            for &c in called {
+                            for &c in called.iter() {
                                 out.union_except(&escapes[c], caught);
                                 program.union_except(&from_program[c], caught);
                             }
@@ -512,7 +514,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             let mut out = Vec::new();
             for p in ps {
                 let Raise::Call(called) = &p.raise else { continue };
-                for &c in called {
+                for &c in called.iter() {
                     if called_by[c] != m {
                         called_by[c] = m;
                         out.push(c);
@@ -568,7 +570,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     &with_tries
                 }
             };
-            for &c in callees {
+            for &c in callees.iter() {
                 if grown_at[at[c]] == visit {
                     continue;
                 }
@@ -650,7 +652,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut raised_classes = BTreeSet::new();
     // What the calls of the same methods raise, gathered once: a call of an override group's
     // method has thousands of them.
-    let mut raised_by_calls: FastMap<&[usize], BTreeSet<Kind>> = Default::default();
+    let mut raised_by_calls: FastMap<*const usize, BTreeSet<Kind>> = Default::default();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
             // What a point raises matters here only to the `try`s around it, or as a failure of
@@ -661,7 +663,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             let gathered;
             let kinds = match &p.raise {
                 Raise::Call(callees) => {
-                    raised_by_calls.entry(callees.as_slice()).or_insert_with(|| raised(p, &escapes))
+                    raised_by_calls.entry(callees.as_ptr()).or_insert_with(|| raised(p, &escapes))
                 }
                 _ => {
                     gathered = raised(p, &escapes);
@@ -865,14 +867,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         .flatten()
         .filter(|p| p.frames.iter().any(|f| reading_tries.contains(&f.id) && !f.catches.is_empty()))
         .flat_map(|p| match &p.raise {
-            Raise::Call(callees) => callees.clone(),
+            Raise::Call(callees) => callees.to_vec(),
             _ => Vec::new(),
         })
         .collect();
     while let Some(m) = calls.pop() {
         if reached.insert(m) {
             calls.extend(points[m].iter().flat_map(|p| match &p.raise {
-                Raise::Call(callees) => callees.clone(),
+                Raise::Call(callees) => callees.to_vec(),
                 _ => Vec::new(),
             }));
         }
@@ -928,6 +930,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // (`analysis::analyze_collecting`), and the messages of the dereferences read them.
     TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = None);
     RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = None);
+    CALLEE_LISTS.with_borrow_mut(|lists| *lists = None);
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -1599,14 +1602,14 @@ fn expr_points(
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        let raise = Raise::Call(callees);
+        let raise = Raise::Call(shared_callees(callees));
         out.push(Point { raise, pos: x.pos, what: "this call", frames: frames.to_vec(), known });
     }
     let mut push = |raise: Raise, pos: Pos, what: &'static str| {
         out.push(Point { raise, pos, what, frames: frames.to_vec(), known: Vec::new() });
     };
     for init in static_inits(class, facts, m, x) {
-        push(Raise::Call(vec![init]), x.pos, "this static use");
+        push(Raise::Call(shared_callees(vec![init])), x.pos, "this static use");
     }
     let calls_text = generator_text(x);
     for object in text_objects(x) {
@@ -1620,7 +1623,7 @@ fn expr_points(
                 && !from_jdk(class, &class.types[class.methods[i].class])
         });
         if !calls.is_empty() {
-            push(Raise::Call(calls), object.pos, "this toString");
+            push(Raise::Call(shared_callees(calls)), object.pos, "this toString");
         }
         if !shown.is_empty() {
             push(Raise::Text(shown), object.pos, "this toString");
@@ -1877,6 +1880,24 @@ thread_local! {
     /// The methods that a call runs on the objects of a list of `Class::receivers`, by the list
     /// and the called method, while `analyze` runs (`Some`): calls share the lists.
     static RECEIVER_TARGETS: SharedLists<(usize, usize)> = const { std::cell::RefCell::new(None) };
+    /// The lists of methods that calls run, each once, while `analyze` runs (`Some`).
+    static CALLEE_LISTS: std::cell::RefCell<Option<FastSet<std::rc::Rc<[usize]>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `callees` as the list that every call of the same methods shares while `analyze` runs.
+fn shared_callees(callees: Vec<usize>) -> std::rc::Rc<[usize]> {
+    CALLEE_LISTS.with_borrow_mut(|lists| match lists {
+        Some(lists) => match lists.get(&callees[..]) {
+            Some(shared) => shared.clone(),
+            None => {
+                let shared: std::rc::Rc<[usize]> = callees.into();
+                lists.insert(shared.clone());
+                shared
+            }
+        },
+        None => callees.into(),
+    })
 }
 
 /// The methods that the call `x` may run (`Class::callees`); for an instance call that the
