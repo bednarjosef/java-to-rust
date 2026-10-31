@@ -69,8 +69,9 @@ enum Kind {
 enum Raise {
     /// `throw`: an object of a class under this type.
     Throw(usize),
-    /// A call of one of these methods.
-    Call(Vec<usize>),
+    /// A call of one of these methods: a list shared by the calls of the same methods
+    /// (`shared_callees`), so that what is found for one list is kept by its address.
+    Call(std::rc::Rc<[usize]>),
     /// The text of an object, which runs one of these `toString` methods; what they throw ends the
     /// program here.
     Text(Vec<usize>),
@@ -164,6 +165,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // What showing each type runs is the same for every point while the program does not change.
     TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
     RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = Some(FastMap::default()));
+    CALLEE_LISTS.with_borrow_mut(|lists| *lists = Some(FastSet::default()));
     let mut points: Vec<Vec<Point>> = phase("exceptions: points", || {
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect()
     });
@@ -295,7 +297,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         // their set of methods: what escapes the methods of a set is kept as one union, grown as
         // theirs grow, so that a call reads one set rather than each of its methods. What escapes
         // a method only grows, so the union of what has escaped each is what escapes them now.
-        let mut set_of: FastMap<&[usize], usize> = FastMap::default();
+        let mut set_of: FastMap<*const usize, usize> = FastMap::default();
         let mut set_callers: Vec<Vec<usize>> = Vec::new();
         let mut sets_with: Vec<Vec<usize>> = vec![Vec::new(); n];
         let call_sets: Vec<Vec<usize>> = points
@@ -305,8 +307,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 ps.iter()
                     .map(|p| match &p.raise {
                         Raise::Call(called) if called.len() > 1 => {
-                            let set = *set_of.entry(&called[..]).or_insert_with(|| {
-                                for &c in called {
+                            let set = *set_of.entry(called.as_ptr()).or_insert_with(|| {
+                                for &c in called.iter() {
                                     sets_with[c].push(set_callers.len());
                                 }
                                 set_callers.push(Vec::new());
@@ -360,7 +362,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         for (m, ps) in points.iter().enumerate() {
             for (i, p) in ps.iter().enumerate() {
                 if let Raise::Call(called) = &p.raise {
-                    for &c in called {
+                    for &c in called.iter() {
                         if called_by[c] != m {
                             called_by[c] = m;
                             callees[m].push(c);
@@ -385,7 +387,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 if let Raise::Call(called) = &p.raise {
                     match call_sets[m][i] {
                         usize::MAX => {
-                            for &c in called {
+                            for &c in called.iter() {
                                 out.union_except(&escapes[c], caught);
                                 program.union_except(&from_program[c], caught);
                             }
@@ -512,7 +514,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             let mut out = Vec::new();
             for p in ps {
                 let Raise::Call(called) = &p.raise else { continue };
-                for &c in called {
+                for &c in called.iter() {
                     if called_by[c] != m {
                         called_by[c] = m;
                         out.push(c);
@@ -572,7 +574,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     (&with_tries, visit)
                 }
             };
-            for &c in callees {
+            for &c in callees.iter() {
                 if grown_at[at[c]] == stamp {
                     continue;
                 }
@@ -608,6 +610,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     if crate::timings::enabled() {
         eprintln!("timing: exceptions: observed: {:.3} s", started.elapsed().as_secs_f64());
     }
+    // The timings of the steps that follow, each since the one before.
+    let mut step = std::time::Instant::now();
+    let mut timed = |what: &str| {
+        if crate::timings::enabled() {
+            eprintln!("timing: exceptions: {what}: {:.3} s", step.elapsed().as_secs_f64());
+        }
+        step = std::time::Instant::now();
+    };
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|t| matches(k, t));
 
     // An object's text whose `toString`, one the program wrote, may throw what a `catch` around
@@ -627,6 +637,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         .collect();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
+    timed("texts and throwing methods");
 
     // The failures of the runtime that something would see, the `try`s that catch something,
     // and those that an exception of the program leaves.
@@ -645,13 +656,18 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut raised_classes = BTreeSet::new();
     // What the calls of the same methods raise, gathered once: a call of an override group's
     // method has thousands of them.
-    let mut raised_by_calls: FastMap<&[usize], BTreeSet<Kind>> = Default::default();
+    let mut raised_by_calls: FastMap<*const usize, BTreeSet<Kind>> = Default::default();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
+            // What a point raises matters here only to the `try`s around it, or as a failure of
+            // the runtime: most calls are in neither, and their callees are many.
+            if p.frames.is_empty() && !matches!(p.raise, Raise::Runtime { .. }) {
+                continue;
+            }
             let gathered;
             let kinds = match &p.raise {
                 Raise::Call(callees) => {
-                    raised_by_calls.entry(callees.as_slice()).or_insert_with(|| raised(p, &escapes))
+                    raised_by_calls.entry(callees.as_ptr()).or_insert_with(|| raised(p, &escapes))
                 }
                 _ => {
                     gathered = raised(p, &escapes);
@@ -741,6 +757,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             );
         }
     }
+    timed("what each point raises");
 
     // Java's message of a `NullPointerException` that the runtime raises describes the
     // dereference ("Cannot invoke ..."); the message of one that code creates is its own. Where
@@ -854,14 +871,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         .flatten()
         .filter(|p| p.frames.iter().any(|f| reading_tries.contains(&f.id) && !f.catches.is_empty()))
         .flat_map(|p| match &p.raise {
-            Raise::Call(callees) => callees.clone(),
+            Raise::Call(callees) => callees.to_vec(),
             _ => Vec::new(),
         })
         .collect();
     while let Some(m) = calls.pop() {
         if reached.insert(m) {
             calls.extend(points[m].iter().flat_map(|p| match &p.raise {
-                Raise::Call(callees) => callees.clone(),
+                Raise::Call(callees) => callees.to_vec(),
                 _ => Vec::new(),
             }));
         }
@@ -874,6 +891,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         })
         .map(|&(id, ..)| id)
         .collect();
+    timed("messages that catches read");
 
     // A static initializer's exception reaches the program as `ExceptionInInitializerError`, and
     // a later use of the class as `NoClassDefFoundError`: a `try` that may see either (a `catch`
@@ -889,6 +907,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
+    timed("static initializers in trys");
     // The initializers of instance fields run in each constructor, outside its `try`s: what they
     // raise escapes the constructor (see `field_inits`).
     let init_throwing =
@@ -915,6 +934,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // (`analysis::analyze_collecting`), and the messages of the dereferences read them.
     TO_STRING_IMPLS.with_borrow_mut(|cache| *cache = None);
     RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = None);
+    CALLEE_LISTS.with_borrow_mut(|lists| *lists = None);
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -1035,7 +1055,7 @@ fn assigned_null_test(e: &Expr) -> Option<(&str, bool)> {
 /// one that the leading assignments of its class's `<clinit>` set to a value that is not null and
 /// that nothing else assigns. Code of another thread that reads it waits until the class is
 /// initialized; code of the initializing thread runs after that assignment, or else during the
-/// values of it and the assignments before it, which `reads_static` shows never read it.
+/// values of it and the assignments before it, which `Reached` shows never read it.
 fn initialized_statics(class: &Class, facts: &Facts) -> FastSet<(usize, String)> {
     let mut walk = StaticReads::new(class);
     let mut leading = Vec::new();
@@ -1043,7 +1063,7 @@ fn initialized_statics(class: &Class, facts: &Facts) -> FastSet<(usize, String)>
         if method.name != "<clinit>" {
             continue;
         }
-        let mut before: Vec<&Expr> = Vec::new();
+        let mut before = Reached::default();
         let mut first = Vec::new();
         // A `<clinit>` that keeps the state of its class's initialization (`lower::clinit_errors`)
         // runs its own statements in a `try` after it: a use of the class after a failure throws
@@ -1065,14 +1085,13 @@ fn initialized_statics(class: &Class, facts: &Facts) -> FastSet<(usize, String)>
                 }) => (*c, name, value),
                 // Other expressions and locals' values, which run before what follows.
                 Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::If { cond: e, .. } => {
-                    before.push(e);
+                    before.add(&mut walk, e, method.class);
                     continue;
                 }
                 _ => continue,
             };
-            before.push(value);
-            if c == method.class && !maybe_null(facts, m, value) && !reads_static(&mut walk, &before, c, name)
-            {
+            before.add(&mut walk, value, method.class);
+            if c == method.class && !maybe_null(facts, m, value) && !before.reads(name) {
                 leading.push((c, name.clone()));
             }
         }
@@ -1125,37 +1144,50 @@ fn leading_statements<'s>(stmts: &'s [Stmt], out: &mut Vec<&'s Stmt>) -> bool {
     true
 }
 
-/// Whether evaluating `roots` may read the static `name` of class `c`: whether it, or a method
-/// or static initializer that it may run, transitively, reads it. A walk too long to follow says
-/// it may.
-fn reads_static(walk: &mut StaticReads, roots: &[&Expr], c: usize, name: &str) -> bool {
-    const LIMIT: usize = 2000;
-    let mut root = StaticRead::default();
-    for e in roots {
-        walk.look(e, &mut root);
-    }
-    let mut reads = root.reads.iter().any(|(d, n)| *d == c && n == name);
-    walk.turn += 1;
-    let turn = walk.turn;
-    let mut seen = 0;
-    let mut work = root.runs;
-    while let Some(m) = work.pop() {
-        if walk.seen[m] == turn {
-            continue;
-        }
-        walk.seen[m] = turn;
-        seen += 1;
-        if seen > LIMIT {
-            return true;
-        }
-        let known = walk.summary(m);
-        reads |= known.reads.iter().any(|(d, n)| *d == c && n == name);
-        work.extend(known.runs.iter().filter(|&&r| walk.seen[r] != turn));
-    }
-    reads
+/// What evaluating the leading statements of a static initializer may do, transitively, as far as
+/// they go (`initialized_statics`): the statics of its own class that it, or a method or static
+/// initializer it may run, reads, and the methods it may run. The statements only add to it, one
+/// at a time, so each is looked at once, and each method once for the initializer. A walk too long
+/// to follow may read any static.
+#[derive(Default)]
+struct Reached {
+    reads: FastSet<String>,
+    runs: FastSet<usize>,
+    unknown: bool,
 }
 
-/// What evaluating some code reads and runs, for `reads_static`: the statics it reads, and the
+impl Reached {
+    /// Adds what evaluating `e`, in a static initializer of class `c`, may do.
+    fn add(&mut self, walk: &mut StaticReads, e: &Expr, c: usize) {
+        const LIMIT: usize = 2000;
+        if self.unknown {
+            return;
+        }
+        let mut root = StaticRead::default();
+        walk.look(e, &mut root);
+        self.reads.extend(root.reads.into_iter().filter(|(d, _)| *d == c).map(|(_, n)| n));
+        let mut work = root.runs;
+        while let Some(m) = work.pop() {
+            if !self.runs.insert(m) {
+                continue;
+            }
+            if self.runs.len() > LIMIT {
+                self.unknown = true;
+                return;
+            }
+            let known = walk.summary(m);
+            self.reads.extend(known.reads.iter().filter(|(d, _)| *d == c).map(|(_, n)| n.clone()));
+            work.extend(known.runs.iter().filter(|r| !self.runs.contains(r)));
+        }
+    }
+
+    /// Whether what was added may read the static `name` of the initializer's class.
+    fn reads(&self, name: &str) -> bool {
+        self.unknown || self.reads.contains(name)
+    }
+}
+
+/// What evaluating some code reads and runs, for `Reached`: the statics it reads, and the
 /// methods and static initializers it may run.
 #[derive(Default)]
 struct StaticRead {
@@ -1163,14 +1195,11 @@ struct StaticRead {
     runs: Vec<usize>,
 }
 
-/// The walks of `reads_static`: each method's `StaticRead`, found once, and the methods seen by
-/// the current walk, as the number of its turn.
+/// The walks of `Reached`: each method's `StaticRead`, found once.
 struct StaticReads<'c> {
     class: &'c Class,
     clinits: FastMap<usize, usize>,
     summaries: Vec<Option<std::rc::Rc<StaticRead>>>,
-    seen: Vec<u32>,
-    turn: u32,
 }
 
 impl StaticReads<'_> {
@@ -1180,7 +1209,7 @@ impl StaticReads<'_> {
             .map(|(i, m)| (m.class, i))
             .collect();
         let n = class.methods.len();
-        StaticReads { class, clinits, summaries: vec![None; n], seen: vec![0; n], turn: 0 }
+        StaticReads { class, clinits, summaries: vec![None; n] }
     }
 
     fn summary(&mut self, m: usize) -> std::rc::Rc<StaticRead> {
@@ -1577,14 +1606,14 @@ fn expr_points(
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        let raise = Raise::Call(callees);
+        let raise = Raise::Call(shared_callees(callees));
         out.push(Point { raise, pos: x.pos, what: "this call", frames: frames.to_vec(), known });
     }
     let mut push = |raise: Raise, pos: Pos, what: &'static str| {
         out.push(Point { raise, pos, what, frames: frames.to_vec(), known: Vec::new() });
     };
     for init in static_inits(class, facts, m, x) {
-        push(Raise::Call(vec![init]), x.pos, "this static use");
+        push(Raise::Call(shared_callees(vec![init])), x.pos, "this static use");
     }
     let calls_text = generator_text(x);
     for object in text_objects(x) {
@@ -1598,7 +1627,7 @@ fn expr_points(
                 && !from_jdk(class, &class.types[class.methods[i].class])
         });
         if !calls.is_empty() {
-            push(Raise::Call(calls), object.pos, "this toString");
+            push(Raise::Call(shared_callees(calls)), object.pos, "this toString");
         }
         if !shown.is_empty() {
             push(Raise::Text(shown), object.pos, "this toString");
@@ -1855,6 +1884,24 @@ thread_local! {
     /// The methods that a call runs on the objects of a list of `Class::receivers`, by the list
     /// and the called method, while `analyze` runs (`Some`): calls share the lists.
     static RECEIVER_TARGETS: SharedLists<(usize, usize)> = const { std::cell::RefCell::new(None) };
+    /// The lists of methods that calls run, each once, while `analyze` runs (`Some`).
+    static CALLEE_LISTS: std::cell::RefCell<Option<FastSet<std::rc::Rc<[usize]>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `callees` as the list that every call of the same methods shares while `analyze` runs.
+fn shared_callees(callees: Vec<usize>) -> std::rc::Rc<[usize]> {
+    CALLEE_LISTS.with_borrow_mut(|lists| match lists {
+        Some(lists) => match lists.get(&callees[..]) {
+            Some(shared) => shared.clone(),
+            None => {
+                let shared: std::rc::Rc<[usize]> = callees.into();
+                lists.insert(shared.clone());
+                shared
+            }
+        },
+        None => callees.into(),
+    })
 }
 
 /// The methods that the call `x` may run (`Class::callees`); for an instance call that the

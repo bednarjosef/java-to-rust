@@ -25,7 +25,7 @@ pub(super) fn entry_point(class: &Class, facts: &Facts, m: usize) -> Option<Poin
     let clinit =
         (class.hierarchy.methods_of(init).iter().copied()).find(|&c| class.methods[c].name == "<clinit>")?;
     Some(Point {
-        raise: Raise::Call(vec![clinit]),
+        raise: Raise::Call(super::shared_callees(vec![clinit])),
         pos: method.pos,
         what: START,
         frames: Vec::new(),
