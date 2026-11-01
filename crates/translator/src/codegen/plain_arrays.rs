@@ -417,10 +417,18 @@ impl<'a> Gen<'a> {
         let row = matches!(ty, Type::Array(_));
         let in_order = rust_order_is_same(index, Some(rhs))
             && path.rows.iter().all(|(i, _)| rust_order_is_same(i, Some(rhs)));
-        if !used && self.in_bounds(id) && self.rows_in_bounds(&path) && in_order {
+        // `place[k] = v` borrows the array mutably before it computes the positions in it: a row's
+        // position that reads the array takes the way below, and an index that reads it
+        // (`a[n % a.length]`) is computed first.
+        let rows_read_root = path.rows.iter().any(|(i, _)| mentions(i, root));
+        if !used && self.in_bounds(id) && self.rows_in_bounds(&path) && in_order && !rows_read_root {
             let place = self.path_place(&path, true);
             let k = self.position(index);
             let v = self.assigned_element(rhs, ty);
+            if mentions(index, root) {
+                let slot = self.fresh_name(&["index", "slot", "at"]);
+                return format!("{{ let {slot} = {k}; {place}[{slot}] = {v} }}");
+            }
             return format!("{place}[{k}] = {v}");
         }
         let mentioned =
