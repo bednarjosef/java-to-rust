@@ -9,13 +9,20 @@ them is `scripts/benchmark.py`:
 With no program names it times every file in `benchmarks/`; `--runs` defaults to 5.
 
 Each program is compiled with `javac`, translated with `java-to-rust --crate`, built with
-`cargo build --release`, and run on both sides. The Rust run must print the same standard output
+`cargo build --release`, and run on both sides. A program that does not translate on its own,
+as one that uses the JDK's collections or atomics (`BitStorageReads`, `RandomBits`), is
+translated as a whole program with the JDK's sources when `JAVA_BASE_SOURCES` names the source
+root of `java.base`, and marked `*` in the table. The Rust run must print the same standard output
 and exit with the same code as Java's, or the program is reported and not timed. Times are the
-median of the runs, wall clock. Java runs with its default flags, so JVM start-up is included. A
+median of the runs, wall clock. Java runs with its default flags but `-XX:MaxRAM` set to the
+machine's memory, so that its heap is sized as at its defaults even under a cgroup's memory cap
+(a cap of 3 GB made it 768 MB rather than 7.8 GB); JVM start-up is included. A
 program that warms up prints `kernel-ms N` on standard error; that is the time of the timed loop
 measured inside the program, and it is reported in the two kernel columns. The last two columns
 are each side's peak memory: the most resident memory the process held, its `ru_maxrss`, the
-median over the runs. The table below is of the times; the memory of translated programs and the
+median over the runs. Each run is a child of `scripts/peak-rss.c`, a small program that reports
+it: a child of Python counts Python's 20 MB, from before its exec, in its peak, which was most
+of the peak of a small translated program (4 to 6 MB of its own). The table below is of the times; the memory of translated programs and the
 benchmarks that measure it are in "Memory".
 
 ## Results

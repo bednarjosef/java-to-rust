@@ -103,7 +103,10 @@ owned, and that Rust therefore never freed, is found unreachable too.
   whole blocks (128 KB), and colored it took one block more. The Minecraft server held 361 such
   allocations, 23 MB of blocks that only their colors took.
 - **Bitmaps.** Each small block has a bit per slot saying that the slot is taken (an object, or
-  a free slot that a thread holds) and a bit per slot for marking.
+  a free slot that a thread holds) and a bit per slot for marking, in the side table: 1 KB per
+  64 KB block, room for slots of 16 bytes. The two bitmaps of ages that generations need (below)
+  are in a table of their own, which only a program with generations reserves; in the side
+  table they took another 1 KB of every block, 1.6% of the heap.
 
 ## Allocation
 
