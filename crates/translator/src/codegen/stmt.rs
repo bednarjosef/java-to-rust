@@ -149,14 +149,16 @@ impl<'a> Gen<'a> {
 
     fn do_while_loop(&mut self, body: &'a Stmt, cond: &'a Expr) {
         let kind = if has_continue(body) { Loop::DoWhile(cond) } else { Loop::Plain };
-        self.line("loop {");
-        let fenced = !matches!(cond.kind, ExprKind::Bool(true)) && self.narrows_for(body, cond);
-        if fenced {
-            self.indent += 1;
-            self.line("{");
-        }
+        // The body, when the condition reads a local, is a block of its own: a name that the
+        // body narrows (`let Some(node) = .. else`, `let mags = ..`) is the body's to its end, and
+        // the condition, written after it, reads the variable itself. Java's condition sees none
+        // of the body's own locals. The block opens on the loop's line, where the loop's label
+        // goes.
+        let fenced = !matches!(cond.kind, ExprKind::Bool(true)) && reads_a_local(cond);
+        self.line(if fenced { "loop { {" } else { "loop {" });
         self.loop_body(kind, body, &[]);
         if fenced {
+            self.indent += 1;
             self.line("}");
             self.indent -= 1;
         }
@@ -494,4 +496,11 @@ impl<'a> Gen<'a> {
             }
         }
     }
+}
+
+/// Whether expression `e` reads a local.
+fn reads_a_local(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Var(_)));
+    found
 }
