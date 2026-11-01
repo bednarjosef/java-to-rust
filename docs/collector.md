@@ -85,9 +85,20 @@ owned, and that Rust therefore never freed, is found unreachable too.
   not scan; and arrays of numbers (`gc::alloc_array`), whose 16-byte header may hold a pointer
   and whose elements cannot, of which it scans the header alone. So the numbers of a `long[]` or
   a `double[]` never keep an object alive by looking like its address.
-- **Large allocations** take whole blocks. An array whose elements fill whole blocks takes one
-  block more for its 16-byte header, which the heap's huge pages make 64 KB of memory: LargeArrays,
-  700 arrays of 64, 128 and 256 KB of elements, peaks at about 134 MB rather than 88.
+- **Large allocations** take the blocks their size needs, and share the last one when they end
+  1 KB (`TAIL_ROOM`) or more short of its end. The rest of that block, a tail, goes to the next
+  large allocation, which starts there when the blocks after it are free (of the 8 latest tails),
+  or to a new small block of slots under 1 KB, whose first slot is then past the tail's start.
+  An array whose elements fill whole blocks ends 16 bytes into one more block, for its header,
+  and shares that block, which the heap's huge pages make 64 KB of memory: LargeArrays, 700
+  arrays of 64, 128 and 256 KB of elements, peaks at 87 MB, about what their elements take
+  (88 MB; 134 MB with a block of its own for each array's end). A shared block records in the side table the allocation that ends in it
+  (`tail_of`), below its own start: a word that points there keeps that allocation. Marking
+  scans a large allocation's own bytes, not its blocks. When an allocation dies, its own blocks
+  are freed, its first block becomes a tail again if another allocation ends in it, and its last
+  block is freed if nothing else took the tail. A large allocation that `realloc` grows in its
+  blocks does not grow into a shared last block. With generations, large allocations share no
+  blocks: a minor collection finds the old ones by the blocks of the pages written.
 - **Colors.** A small block's first slot is at one of eight cache lines past the block's start,
   chosen by the block's number, and each large allocation starts at one of the 64 cache lines of
   a page, in turn (`gc.rs`, `color`). With every block aligned to 64 KB, the first objects of

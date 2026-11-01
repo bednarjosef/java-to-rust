@@ -307,8 +307,10 @@ impl Census<'_> {
                     false => Target::Inside,
                 }
             }
-            // A large allocation starts within the first page of its first block (see `color`).
-            LARGE if address - self.h.block_address(b) < PAGE && m.live > 0 => {
+            // A reference to a large allocation is to its start (see `allocate_large`).
+            LARGE
+                if address.wrapping_sub(self.h.block_address(b) + m.start as usize) < PAGE && m.live > 0 =>
+            {
                 Target::Large { block: b, blocks: m.size as usize }
             }
             _ => Target::Inside,
@@ -450,9 +452,14 @@ impl Census<'_> {
                 )
             }
             Target::Large { block, blocks } => {
-                let at = self.h.block_address(block);
-                let words = unsafe { std::slice::from_raw_parts(at as *const usize, blocks * BLOCK / 8) };
-                (words, 0, self.h.meta(block).scan == SCAN_ALL)
+                // Its own bytes, from its start (`allocate_large`); of one of 4 GB or more, its blocks.
+                let m = self.h.meta(block);
+                let (at, bytes) = match m.scanned as usize {
+                    0 => (self.h.block_address(block), blocks * BLOCK),
+                    bytes => (self.h.block_address(block) + m.start as usize, bytes),
+                };
+                let words = unsafe { std::slice::from_raw_parts(at as *const usize, bytes / 8) };
+                (words, 0, m.scan == SCAN_ALL)
             }
             Target::Inside => (&[], 0, false),
         }
@@ -465,14 +472,7 @@ impl Census<'_> {
                 Some(self.h.block_address(block) + self.h.meta(block).start as usize + slot * size)
             }
             Target::Large { block, .. } => {
-                let (words, _, _) = self.words_of(target);
-                let at = self.h.block_address(block);
-                // A large allocation starts at the first entry of the shadow in its first page.
-                let shadow = SHADOW.load(Ordering::Relaxed);
-                (0..PAGE >> GRANULE_SHIFT)
-                    .map(|g| at + (g << GRANULE_SHIFT))
-                    .find(|&a| unsafe { *shadow.add((a - self.h.base) >> GRANULE_SHIFT) } != 0)
-                    .or(Some(words.as_ptr() as usize))
+                Some(self.h.block_address(block) + self.h.meta(block).start as usize)
             }
             Target::Inside => None,
         }
@@ -539,7 +539,7 @@ pub(super) fn each_live(h: &Heap, mut each: impl FnMut(Target)) {
                 if m.live > 0 {
                     each(Target::Large { block: b, blocks: n });
                 }
-                b += n;
+                b += n - m.shared_end as usize;
             }
             _ => b += 1,
         }
