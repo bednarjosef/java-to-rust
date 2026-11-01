@@ -152,7 +152,10 @@ made on the stack (`java::count_allocation`).
   static and an index that is a local or a constant, read it once into a local, when none of
   those statements assigns the array, the index, or an element of any object array, and none of
   them calls a method (`lower/element_reads.rs`). The local is declared without `mut` when it is
-  assigned once.
+  assigned once. A primitive field of a local's object or of `this` is read once the same way,
+  when none of the statements assigns the local or a field of that name of any object and no
+  class has a volatile field of that name: `bj.mass`, read after each store to `bi.vx`, which
+  Rust's compiler could not tell from a store to `bj.mass`.
 - **Fields that a loop only reads (NBody).** Java's compiler keeps `bi.x` in a register through
   NBody's inner loop, as it tells fields apart by name; Rust's reads it again at every turn,
   since the store to `bj.vx`, a cell of an object it knows nothing of, might be one to `bi.x`. A
@@ -160,7 +163,8 @@ made on the stack (`java::count_allocation`).
   assign and that is not null (or through `this`), is read once into a local before the loop
   when nothing in the loop assigns a field of that name and the loop runs no code but its own
   (`codegen/loop_fields.rs`). NBody went from 27.8 G to 25.6 G instructions and from 11.1 G to
-  10.3 G cycles; a hand edit that also reads `bj.mass` once per turn reached 9.3 G cycles.
+  10.3 G cycles, and reading `bj.mass` once per turn (above) took it to 23.4 G instructions and
+  9.2 G cycles.
 - **Plain arrays (Sieve 0.8x, SortMillion 0.9x, Interpreter 0.8x).** An array that is not
   shared is a `Vec`, borrowed as a slice by the methods it is passed to. Sieve's indexes are
   proven in range, so every access is `composite[i as usize]` with no check: `i * i <= limit`

@@ -1,21 +1,27 @@
-//! Repeated reads of one array element. `bodies[j].x - ...; bodies[j].vx += ...` reads the
-//! element `bodies[j]` again for every use, which in Rust clones its handle out of the shared
-//! array each time (a borrow of the array, a count increment and decrement), where Java only
-//! loads it. Within a run of statements that cannot change the array, the index or the element,
-//! the element is read once into a new local at its first read, which becomes
-//! `(element = bodies[j])`, so the order of evaluation and of any exception stays Java's; the
-//! later reads of the run read the local.
+//! Repeated reads of one array element or one field. `bodies[j].x - ...; bodies[j].vx += ...`
+//! reads the element `bodies[j]` again for every use, which in Rust clones its handle out of the
+//! shared array each time (a borrow of the array, a count increment and decrement), where Java only
+//! loads it. `bi.vx -= dx * bj.mass * mag; bi.vy -= dy * bj.mass * mag;` reads `bj.mass` again
+//! after each store, as Rust's compiler cannot tell that the store to `bi.vx`, a cell
+//! (`java::Field`) of an object it knows nothing of, is not one to `bj.mass`; Java's tells fields
+//! apart by name and reads it once. Within a run of statements that cannot change the array, the
+//! index, the element or the field, the value is read once into a new local at its first read,
+//! which becomes `(element = bodies[j])` or `(bj_mass = bj.mass)`, so the order of evaluation and
+//! of any exception stays Java's; the later reads of the run read the local.
 //!
 //! A run is a sequence of statements of one block (declarations with initializers and
 //! expression statements) without a call, an object or array creation, a pattern, a switch or a
 //! library method other than `Math`'s `abs`, `min`, `max`, `sqrt` and `pow`: nothing in it runs
-//! code that could change the array through another reference. An element is shared when the
-//! array is a local, a field of `this` or a static field, the index is a local or a constant,
-//! nothing in the run assigns the array (a field of that name of any object, for a field), the
-//! index or an element of an array of references, and its first read is not inside a
+//! code that could change the array or the field through another reference. An element is shared
+//! when the array is a local, a field of `this` or a static field, the index is a local or a
+//! constant, nothing in the run assigns the array (a field of that name of any object, for a
+//! field), the index or an element of an array of references, and its first read is not inside a
 //! conditional part (`&&`, `||`, `?:`). Only elements that are objects or strings are shared: an
 //! element that is itself an array stays a read, as the array analyses decide how each array is
-//! held from the names that reach it.
+//! held from the names that reach it. A field is shared when it is a primitive of a local's
+//! object or of `this`, nothing in the run assigns the local or a field of that name of any
+//! object, its first read is not conditional, and no class has a volatile field of that name,
+//! whose every read Java makes again.
 
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -35,8 +41,28 @@ enum Index {
     Constant(i32),
 }
 
-/// The element that `e` reads, if it is one this pass can share.
-fn key_of(e: &Expr) -> Option<(Array, Index)> {
+/// What a shared read reads.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Element(Array, Index),
+    /// A primitive field, by name, of the object of a local (`Some`) or of `this` (`None`).
+    Field(Option<String>, String),
+}
+
+/// The element or field that `e` reads, if it is one this pass can share; `volatile`: the names
+/// of the volatile fields.
+fn key_of(e: &Expr, volatile: &HashSet<String>) -> Option<Key> {
+    if let ExprKind::Field { object, name } = &e.kind {
+        if !(e.ty.is_numeric() || e.ty == Type::Boolean) || volatile.contains(name) {
+            return None;
+        }
+        let object = match &object.kind {
+            ExprKind::Var(v) => Some(v.clone()),
+            ExprKind::This => None,
+            _ => return None,
+        };
+        return Some(Key::Field(object, name.clone()));
+    }
     let ExprKind::Index(array, index) = &e.kind else { return None };
     if !matches!(e.ty, Type::Class(..) | Type::String) {
         return None;
@@ -54,22 +80,27 @@ fn key_of(e: &Expr) -> Option<(Array, Index)> {
         ExprKind::Int(n) => Index::Constant(*n),
         _ => return None,
     };
-    Some((array, index))
+    Some(Key::Element(array, index))
 }
 
 /// What a run of statements does, in Java's order of evaluation.
-#[derive(Default)]
-struct Walk {
-    /// Every element read that may be shared: its key, its id, and whether it is evaluated only
-    /// under a condition.
-    reads: Vec<((Array, Index), ExprId, bool)>,
+struct Walk<'v> {
+    /// The names of the volatile fields, whose reads are not shared.
+    volatile: &'v HashSet<String>,
+    /// Every element or field read that may be shared: its key, its id, and whether it is
+    /// evaluated only under a condition.
+    reads: Vec<(Key, ExprId, bool)>,
     /// The locals, fields (by name, of any object) and statics that the run assigns.
     assigned: HashSet<Array>,
     /// Whether the run assigns an element of an array of references.
     writes_references: bool,
 }
 
-impl Walk {
+impl<'v> Walk<'v> {
+    fn new(volatile: &'v HashSet<String>) -> Self {
+        Walk { volatile, reads: Vec::new(), assigned: HashSet::new(), writes_references: false }
+    }
+
     /// Walks `e` in evaluation order; false when `e` has something that ends a run.
     fn expr(&mut self, e: &Expr, conditional: bool) -> bool {
         match &e.kind {
@@ -87,8 +118,16 @@ impl Walk {
             ExprKind::Unary(_, x)
             | ExprKind::Cast(_, x)
             | ExprKind::Length(x)
-            | ExprKind::Field { object: x, .. }
             | ExprKind::InstanceOf { value: x, binding: None, .. } => self.expr(x, conditional),
+            ExprKind::Field { object, .. } => {
+                if !self.expr(object, conditional) {
+                    return false;
+                }
+                if let Some(key) = key_of(e, self.volatile) {
+                    self.reads.push((key, e.id, conditional));
+                }
+                true
+            }
             ExprKind::Binary(op, l, r) => {
                 let short = matches!(op, BinOp::And | BinOp::Or);
                 self.expr(l, conditional) && self.expr(r, conditional || short)
@@ -100,7 +139,7 @@ impl Walk {
                 if !(self.expr(array, conditional) && self.expr(index, conditional)) {
                     return false;
                 }
-                if let Some(key) = key_of(e) {
+                if let Some(key) = key_of(e, self.volatile) {
                     self.reads.push((key, e.id, conditional));
                 }
                 true
@@ -143,11 +182,20 @@ impl Walk {
         }
     }
 
-    /// Whether an element's array and index stay the same through the run.
-    fn steady(&self, (array, index): &(Array, Index)) -> bool {
-        let index_assigned =
-            matches!(index, Index::Local(v) if self.assigned.contains(&Array::Local(v.clone())));
-        !self.writes_references && !self.assigned.contains(array) && !index_assigned
+    /// Whether an element's array and index, or a field's object and value, stay the same
+    /// through the run.
+    fn steady(&self, key: &Key) -> bool {
+        let local_assigned = |v: &String| self.assigned.contains(&Array::Local(v.clone()));
+        match key {
+            Key::Element(array, index) => {
+                let index_assigned = matches!(index, Index::Local(v) if local_assigned(v));
+                !self.writes_references && !self.assigned.contains(array) && !index_assigned
+            }
+            Key::Field(object, name) => {
+                !object.as_ref().is_some_and(local_assigned)
+                    && !self.assigned.contains(&Array::Field(name.clone()))
+            }
+        }
     }
 }
 
@@ -160,7 +208,7 @@ fn run_expr(stmt: &Stmt) -> Option<&Expr> {
 }
 
 fn in_run(stmt: &Stmt) -> bool {
-    run_expr(stmt).is_some_and(|e| Walk::default().expr(e, false))
+    run_expr(stmt).is_some_and(|e| Walk::new(&HashSet::new()).expr(e, false))
 }
 
 impl<'t> Lowering<'t> {
@@ -249,7 +297,7 @@ impl<'t> Lowering<'t> {
         end: usize,
         taken: &mut HashSet<String>,
     ) -> usize {
-        let mut walk = Walk::default();
+        let mut walk = Walk::new(self.volatile_field_names());
         // The statement of the run that each read is in.
         let mut in_stmt = HashMap::new();
         for (i, stmt) in stmts[start..end].iter().enumerate() {
@@ -260,7 +308,7 @@ impl<'t> Lowering<'t> {
             }
         }
         // Per element: its first read, which is unconditional, and the reads after it.
-        let mut shared: Vec<((Array, Index), ExprId, Vec<ExprId>)> = Vec::new();
+        let mut shared: Vec<(Key, ExprId, Vec<ExprId>)> = Vec::new();
         for (key, id, conditional) in &walk.reads {
             if !walk.steady(key) {
                 continue;
@@ -273,15 +321,20 @@ impl<'t> Lowering<'t> {
         }
         shared.retain(|(_, _, later)| !later.is_empty());
         let mut declarations = Vec::new();
-        for ((array, index), first, later) in shared {
-            let array = match array {
-                Array::Local(n) | Array::Field(n) | Array::Static(_, n) => n,
+        for (key, first, later) in shared {
+            let mut name = match key {
+                Key::Element(array, index) => {
+                    let array = match array {
+                        Array::Local(n) | Array::Field(n) | Array::Static(_, n) => n,
+                    };
+                    let index = match index {
+                        Index::Local(v) => v,
+                        Index::Constant(n) => n.to_string(),
+                    };
+                    format!("{array}_{index}")
+                }
+                Key::Field(object, field) => format!("{}_{field}", object.as_deref().unwrap_or("this")),
             };
-            let index = match index {
-                Index::Local(v) => v,
-                Index::Constant(n) => n.to_string(),
-            };
-            let mut name = format!("{array}_{index}");
             while taken.contains(&name) {
                 name.push('_');
             }
@@ -302,6 +355,18 @@ impl<'t> Lowering<'t> {
             stmts.insert(start + i, declaration);
         }
         added
+    }
+
+    /// The names of the volatile fields of every class (`Lowering::volatile_field_names`).
+    fn volatile_field_names(&self) -> &HashSet<String> {
+        self.volatile_field_names.get_or_init(|| {
+            self.types
+                .iter()
+                .flat_map(|t| t.node.list("members"))
+                .filter(|m| m.kind() == "VARIABLE" && m.has_flag("VOLATILE"))
+                .map(|m| m.str("name").to_string())
+                .collect()
+        })
     }
 
     /// Rewrites, in `e`, the read `first` into `(name = element)` and the reads `later` into
