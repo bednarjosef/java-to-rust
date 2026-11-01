@@ -446,6 +446,8 @@ mod tests {
         fd_close(again);
         fd_close(other);
         close(fd, &path);
-        assert_eq!(channel_lock(fd, false, 0, 1, false).unwrap_err().message, "Bad file descriptor");
+        // A closed descriptor's number goes back to the table, where a test running beside this
+        // one may take it; a number the table never handed out stays bad.
+        assert_eq!(channel_lock(i32::MAX, false, 0, 1, false).unwrap_err().message, "Bad file descriptor");
     }
 }
