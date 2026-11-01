@@ -192,6 +192,17 @@ functions are small, about a tenth of the code. The header calls into the body
 crates, which depend on it; rustc's linker (lld, the default on x86-64 Linux) resolves symbols
 whatever the order of the libraries.
 
+A dispatcher, the function that runs an interface's or a class's method for whichever class an
+object has (`match this.0.tag() { 3 => C__get(o, index), .. }`), stays in the header whatever its
+size when its `match` has at most 8 arms, not counting the one for a class number no class has
+(`split.rs`, `small_dispatcher`). The generator marks each dispatcher with
+`#[cfg_attr(any(), dispatcher)]`, an attribute a build drops unread, so that the split knows one
+without reading its code. Each arm calls a method through the header's declaration of it, so a
+call through an interface becomes, in the calling crate, a `match` on the class number and one
+direct call of the method it picks, not a call of a dispatcher that then calls the method. In the
+Minecraft server the dispatchers' own instructions were about a tenth of a tick's (54k of 544k),
+spent picking a method and calling it.
+
 The moved code goes to the body crates item by item (a function, or an `impl` with its trait), in
 the order of the module tree and of each module's items, cut into runs of about the same size,
 about `N` of them (`split.rs`, `chunks`). Where a run ends is chosen by the items' names, not
