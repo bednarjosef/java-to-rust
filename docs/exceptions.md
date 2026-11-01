@@ -26,16 +26,21 @@ the object model (`docs/object-model.md`): exception classes are ordinary class 
 4. **Which methods throw is an analysis** (`analysis/exceptions.rs`). A method returns `Result`
    exactly when some caller observes an exception that may escape it. Everything else ends the
    program where it is thrown, which is what Java does once nothing catches it.
-5. **Failures of the runtime become values only where they are observed.** Division by zero,
+5. **A catch-all far up catches by unwinding.** A `try` with a clause of `Throwable`,
+   `Exception`, `RuntimeException` or `Error` (the crash handler around a server's tick, a task
+   runner's guard) runs its body in `java::unwinding`, and what its calls throw reaches it as a
+   panic that it takes back, so those calls observe nothing for that clause and their callees
+   keep plain signatures. See "Catching by unwinding".
+6. **Failures of the runtime become values only where they are observed.** Division by zero,
    bad indexes, null dereferences, malformed numbers and the like normally print and exit
    (`java::throw`). Where a `catch` or a `finally` could see one, the operation uses a checked
    form that returns `Result<_, java::Exception>` instead. The fast exiting form stays the default.
-6. **`try` is a labeled block** that evaluates to a `Result` (or a `java::Completion` when a
+7. **`try` is a labeled block** that evaluates to a `Result` (or a `java::Completion` when a
    `return` or a jump has to pass through a `finally`); the `catch` clauses are a `match`.
-7. **Uncaught exceptions** end the program as Java's do: `Exception in thread "main" ` and the
+8. **Uncaught exceptions** end the program as Java's do: `Exception in thread "main" ` and the
    exception's stack trace on standard error, exit code 1. Stack traces have no frames (see
    "Stack traces").
-8. **Static initializers return `Result` only where a `catch` observes them.** The uncaught case
+9. **Static initializers return `Result` only where a `catch` observes them.** The uncaught case
    prints `ExceptionInInitializerError` and exits without any `Result` in the code.
 
 ## The standard classes
@@ -241,6 +246,44 @@ Rules the generator keeps:
   s.readObject()))` in `Component.readObject`), needs nothing. Set anywhere else (only inside an
   `if` of the block, or in a `try` with a `finally` that a `return` or a jump leaves), it is
   rejected. A local declared inside the body itself is left alone, as Rust follows it there.
+
+## Catching by unwinding
+
+A `try` catches by unwinding (`analysis::exceptions::catches_by_unwinding`) when one of its
+clauses catches `Throwable`, `Exception`, `RuntimeException` or `Error`, it has no `finally`, and
+no `return`, `break`, `continue` or `yield` leaves its body. Such clauses are mostly handlers of
+last resort, far from where their exceptions are thrown: the Minecraft server's tick runs inside
+`catch (Throwable)` handlers that make crash reports, so a `Result` for them made 60% of its
+functions return one, each call followed by a check. Instead, the body runs inside
+`java::unwinding(|| 'attempt: { .. }, Throwable::j2r_raised)` (`crates/runtime/src/catching.rs`):
+
+- The calls in the body observe nothing for the catch-all clauses (a specific clause of the same
+  `try` is still observed). What the `try`'s own method throws or raises in the body leaves the
+  block as a value, as in any `try`.
+- Below it, a method that does not return `Result` passes an exception on with `java::uncaught`
+  or `java::throw_uncaught`, and the runtime's failures go through `java::throw`. Inside
+  `java::unwinding` (a count per thread), these unwind with the exception instead of ending the
+  program, and `unwinding` returns it as the block's `Err`: the program's `Throwable` as it is, a
+  failure of the runtime made its object as in a `try` (so the analysis gives `raised_classes` the
+  classes that the calls let out). The `catch` arms then match it as any other. What no clause
+  matches goes on from the `try` (an `Error` through `catch (Exception e)` reaches the next
+  catch-all out, or ends the program).
+- The frames on the way run what Java runs: a `finally` and a specific `catch` still make their
+  calls observe, so those calls return `Result` and the block handles the exception before it
+  unwinds on; a monitor's guard and a `RefCell` borrow are dropped as the frame unwinds; a
+  try-with-resources' inner `try` catches `Throwable`, so it catches by unwinding too and closes
+  the resource. A `try` that catches `Throwable` lets nothing past it, so the `try`s around it
+  observe nothing of its body's calls.
+- A static initialization runs with the count set to zero (`java::exceptions_held`): its failure
+  ends the program as it does outside, rather than unwinding out of a class left started. A
+  class whose failure a `catch` can see keeps its own state and rethrows (`lower/clinit_errors.rs`),
+  as everywhere.
+- A dereference whose `NullPointerException` may unwind to such a `try` whose `catch` reads the
+  exception raises Java's message (`java::non_null_message`, `Facts::npe_unwound`) where the
+  message is found, and none where it is not.
+
+An exception that a catch-all catches often costs an unwinding, a few microseconds deeper than a
+return, where Java's own throw fills in a stack trace.
 
 ## try-with-resources
 
@@ -499,7 +542,8 @@ written in checked form exactly when it is in the analysis's set.
   that may be null raises `NullPointerException` as it starts, where it reads the length.
 - **Escapes** of a method: what its points raise, minus what an enclosing `catch` in the same
   method catches, plus what its `catch` and `finally` bodies raise.
-- **Observed** at a point: the classes under the enclosing `catch` types; everything, when an
+- **Observed** at a point: the classes under the enclosing `catch` types, from the innermost
+  `try` out to one that catches `Throwable`, but for those a `try` catches by unwinding; everything, when an
   enclosing `finally` observes (it does unless it only assigns variables, fields and array
   elements with operations that cannot fail, which is invisible once the program ends); and what
   the method's callers observe of what escapes it. Both are fixpoints, unioned over override
@@ -530,8 +574,8 @@ written in checked form exactly when it is in the analysis's set.
   language that lowering passes to `toLowerCase(locale)` and `toUpperCase(locale)` is read after
   the check of the string, as the JDK's code reads it.
 - **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
-  `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`, and the
-  `NullPointerException` message facts below.
+  `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`,
+  `unwinding_tries`, and the `NullPointerException` message facts below.
 
 Interaction with the other analyses:
 
@@ -796,6 +840,8 @@ is rejected.
   program instead.
 - `toString`s of the JDK that throw (only for bugs) end the program even inside a `try` that
   would catch them.
+- A failure of the runtime whose class the program does not declare ends the program even when
+  it unwinds to a `try` that catches by unwinding.
 
 ## Not done
 

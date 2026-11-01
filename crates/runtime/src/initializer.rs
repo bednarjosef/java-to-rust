@@ -4,7 +4,12 @@
 use std::fmt;
 
 /// `throw e` in a static initializer that nothing catches: the program ends as Java's does.
+///
+/// Inside a `try` that catches by unwinding (`java::unwinding`), `e` unwinds to it instead: only
+/// in an initializer that keeps its class's state and catches what its body throws itself
+/// (`lower/clinit_errors.rs`), as the others hold the exceptions (`java::exceptions_held`).
 pub fn throw_initializer(e: impl fmt::Display + 'static) -> ! {
+    let e = crate::catching::raise_thrown(e);
     crate::out::eprint_text(&format!(
         "Exception in thread \"main\" java.lang.ExceptionInInitializerError\nCaused by: {}\n",
         crate::uncaught_text(&e)

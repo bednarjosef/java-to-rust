@@ -955,6 +955,14 @@ impl<'a> Gen<'a> {
     /// from here as a thrown exception does.
     pub(super) fn dereference(&mut self, ids: &[ExprId], option: &str) -> String {
         let Some(&id) = ids.iter().find(|id| self.facts.null_checked.contains_key(id)) else {
+            // Java's message where a `try` that catches by unwinding may read it.
+            let unwound = ids
+                .iter()
+                .find_map(|id| Some((self.facts.npe_unwound.get(id)?, self.facts.npe_messages.get(id)?)));
+            if let Some((&pos, Some(message))) = unwound {
+                let message = self.npe_message(&message.clone(), pos);
+                return format!("{}({option}, {message})", self.runtime("non_null_message"));
+            }
             return format!("{}({option})", self.runtime("non_null"));
         };
         self.dereferenced.insert(id);

@@ -7580,3 +7580,40 @@ fn a_field_that_a_loop_only_reads_is_read_once_before_it() {
     // `a.x` at every turn.
     assert_contains(&rust, &["let a_x = a.x.get();", "a_x - b.x.get()", "s += a.x.get();"]);
 }
+
+#[test]
+fn a_catch_all_far_from_the_throw_catches_by_unwinding_and_its_callees_return_plain_values() {
+    let rust = translate(
+        "class A {
+            static int leaf(int n) { if (n > 3) throw new IllegalStateException(\"big\"); return n; }
+            static int middle(int n) { return leaf(n) * 2; }
+            public static void main(String[] a) {
+                try { System.out.println(middle(a.length + 4)); }
+                catch (Exception e) { System.out.println(\"caught \" + e.getMessage()); }
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::unwinding(|| ", "fn middle(n: i32) -> i32 {"]);
+}
+
+#[test]
+fn a_failure_of_a_class_the_program_lacks_that_unwinds_to_a_catch_all_is_rejected() {
+    // A `PatternSyntaxException` is not one of the standard classes, so it could not reach the
+    // `catch` as an object: rejected as where a `catch` observes the call that fails.
+    let error = java_to_rust::translate(
+        "class A {
+            static int parts(String s, String p) { return s.split(p).length; }
+            public static void main(String[] a) {
+                try { System.out.println(parts(\"a,b\", a[0])); }
+                catch (RuntimeException e) { System.out.println(\"bad pattern\"); }
+            }
+        }",
+    )
+    .expect_err("a PatternSyntaxException that unwinds to a catch of RuntimeException");
+    assert!(
+        error
+            .to_string()
+            .contains("catching the `PatternSyntaxException` that this call may throw not supported yet"),
+        "{error}"
+    );
+}

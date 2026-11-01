@@ -8,6 +8,23 @@ pub fn non_null<T>(value: Option<T>) -> T {
     }
 }
 
+/// `non_null` with Java's message (`try_non_null_message`), where a `try` that catches by
+/// unwinding may read it (`java::unwinding`).
+#[inline]
+pub fn non_null_message<T>(value: Option<T>, message: &'static str) -> T {
+    match value {
+        Some(value) => value,
+        None => null_pointer_thrown(message),
+    }
+}
+
+/// The `NullPointerException` of `non_null_message`, out of line.
+#[cold]
+#[inline(never)]
+fn null_pointer_thrown(message: &str) -> ! {
+    crate::throw("java.lang.NullPointerException", message)
+}
+
 /// `non_null` where the program observes the `NullPointerException`, without a message: where
 /// nothing reads it, or where Java's has none (as `Objects.requireNonNull`'s).
 #[inline]

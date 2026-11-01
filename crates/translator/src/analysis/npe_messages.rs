@@ -140,19 +140,21 @@ pub fn npe_messages_kept(
             cache.methods.values().map(|m| m.messages.len()).sum::<usize>()
         );
     }
-    messages.retain(|id, _| facts.null_checked.contains_key(id));
+    messages.retain(|id, _| facts.null_checked.contains_key(id) || facts.npe_unwound.contains_key(id));
     let mut missing: Vec<(Pos, ExprId)> = facts
         .npe_message_needed
         .iter()
         .filter(|id| !messages.contains_key(id))
         .filter_map(|id| facts.null_checked.get(id).map(|p| (*p, *id)))
+        // Those whose exception may unwind to a `catch` that reads it need theirs as much.
+        .chain(facts.npe_unwound.iter().filter(|(id, _)| !messages.contains_key(id)).map(|(id, p)| (*p, *id)))
         .collect();
     if approximate {
         for (_, id) in missing.drain(..) {
             messages.insert(id, None);
             approximated.insert(id);
         }
-        approximated.retain(|id| facts.npe_message_needed.contains(id));
+        approximated.retain(|id| facts.npe_message_needed.contains(id) || facts.npe_unwound.contains_key(id));
         facts.npe_approximated = approximated_places(class, facts, &approximated);
     }
     if missing.is_empty() {

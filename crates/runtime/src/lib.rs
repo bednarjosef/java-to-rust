@@ -88,7 +88,7 @@ pub use allocation_counts::{AllocationCount, count_allocation};
 pub use arguments::main_args;
 pub use boxed::*;
 pub use builder::{Builder, BuilderCell, SharedStringBuilder, StringBuilder, same_builder};
-pub use catching::catching;
+pub use catching::{ExceptionsHeld, catching, exceptions_held, unwinding};
 pub use ceil_div::*;
 pub use character::*;
 pub use character_classes::*;
@@ -140,8 +140,8 @@ pub use native_memory::*;
 pub use natives::*;
 pub use net::*;
 pub use null::{
-    Handle, OrNull, SameObject, non_null, or_null, same, same_object, try_non_null, try_non_null_message,
-    unkept_identity,
+    Handle, OrNull, SameObject, non_null, non_null_message, or_null, same, same_object, try_non_null,
+    try_non_null_message, unkept_identity,
 };
 pub use out::{
     Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,
