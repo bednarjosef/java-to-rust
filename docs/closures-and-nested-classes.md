@@ -554,9 +554,14 @@ closure's `Rc`, which is never freed.
 Closure-typed values are never compared (4.2, condition 4). A lambda in enum form is an object
 like any other: compared by identity, and printed as `Main$$Lambda@<hash>`. A lambda or method
 reference that captures nothing is one object per place it is written, as HotSpot makes it (the
-JLS leaves this open): the place keeps it in a thread-local `OnceCell`, made the first time the
-place runs on a thread (`captures_nothing` in `codegen/objects.rs`), which also saves an
-allocation each time it runs. A lambda that captures something is a new object at each
+JLS leaves this open), made the first time the place runs (`captures_nothing` in
+`codegen/objects.rs`), which also saves an allocation each time it runs. The place keeps it in a
+`static` (`java::PlaceObject`), shared by every thread, as an object without fields can be unless
+it is a `RefCell`, whose borrow flag is not atomic: in a program that starts threads, such a place
+keeps a thread-local `OnceCell` instead, one object per thread. A thread-local takes its room in
+every thread's static thread-local storage, which the C library zeroes for each thread it starts
+and the collector scans at each collection: the Minecraft server's 14,300 places, all
+thread-local, took 114 KB of each of its 60 threads' 120 KB. A lambda that captures something is a new object at each
 evaluation.
 
 ### 4.9 Threads
