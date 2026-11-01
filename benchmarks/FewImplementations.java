@@ -106,7 +106,7 @@ public class FewImplementations {
                 sum += p.valueFor(i + round) + p.size() + h.minY() + h.height();
             }
         }
-        System.out.println("kernel-ms " + (System.nanoTime() - start) / 1000000);
+        System.err.println("kernel-ms " + (System.nanoTime() - start) / 1000000);
         System.out.println(sum);
     }
 }
