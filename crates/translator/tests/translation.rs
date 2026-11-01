@@ -7558,3 +7558,36 @@ fn a_small_default_body_is_copied_for_each_class_whose_arm_calls_it() {
     );
     assert_lacks(&rust, &["__on_heights_region", "__on_heights_fixed"]);
 }
+
+#[test]
+fn a_field_that_a_loop_only_reads_is_read_once_before_it() {
+    let rust = translate(
+        "class A {
+            double x, vx;
+            static void step(A[] all, int n) {
+                for (int i = 0; i < n; i++) {
+                    A a = all[i];
+                    for (int j = i + 1; j < n; j++) {
+                        A b = all[j];
+                        a.vx -= a.x - b.x;
+                    }
+                }
+            }
+            static double called(A a, int n) {
+                double s = 0;
+                for (int i = 0; i < n; i++) { s += a.x; a.move(); }
+                return s;
+            }
+            void move() { x += 1; }
+            public static void main(String[] args) {
+                A[] all = {new A(), new A()};
+                all[1].x = 2;
+                step(all, 2);
+                System.out.println(all[0].vx + called(all[0], 3));
+            }
+        }",
+    );
+    // `a.x` is read once before the inner loop, `b.x` at every turn; the loop with a call reads
+    // `a.x` at every turn.
+    assert_contains(&rust, &["let a_x = a.x.get();", "a_x - b.x.get()", "s += a.x.get();"]);
+}

@@ -327,6 +327,9 @@ impl<'a> Gen<'a> {
                     None => Code::atom(path),
                 }
             }
+            ExprKind::Field { .. } if let Some(local) = self.loop_fields.get(&e.id) => {
+                Code::atom(local.clone())
+            }
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
             // A read during its class's initialization, which may see the static still empty.
             ExprKind::Static { class, name } if self.facts.early_static_reads.contains(&e.id) => {

@@ -306,10 +306,16 @@ impl<'a> Gen<'a> {
     /// `None` when neither the class nor a superclass is eager, or the code is in that class or
     /// a subclass of it, which is already initialized by then.
     pub(super) fn init_call(&mut self, class: usize) -> Option<String> {
+        let init = self.uninitialized(class)?;
+        Some(format!("{};", self.init_run(init)))
+    }
+
+    /// The class whose initialization a use of class `class` runs here (`init_call`), if any.
+    pub(super) fn uninitialized(&self, class: usize) -> Option<usize> {
         let current = self.class.methods[self.method].class;
         let init = self.facts.init_class(self.class, class)?;
         let initialized = current == init || self.class.hierarchy.ancestors(current).contains(&init);
-        (!initialized).then(|| format!("{};", self.init_run(init)))
+        (!initialized).then_some(init)
     }
 
     /// The call that runs the initialization of the class `init` (its `init` function), without
