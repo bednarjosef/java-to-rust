@@ -1210,7 +1210,7 @@ impl<'a> Gen<'a> {
         self.finallies.clear();
         self.finally_ends.clear();
         self.attempt_count = 0;
-        self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
+        self.try_assigned = exceptions::try_assigned(self.facts, self.class, &m.body);
         self.unset_locals.clear();
         let starts = |ty: Type| self.try_start(ty).is_some();
         let optional = |ty: Type, name: &str| self.optional_var(index, ty, name);
@@ -1463,6 +1463,18 @@ impl<'a> Gen<'a> {
         self.declare_slots(&sites);
         if m.is_main {
             self.prepare_finals();
+        }
+        // A failure of a static initialization (or of the building of an enum's constants) ends
+        // the program, also inside a `try` that catches by unwinding: unwound, it would leave the
+        // class started and not done, and reach the `catch` as itself rather than as Java's
+        // `ExceptionInInitializerError`. One that keeps its state (`lower/clinit_errors.rs`)
+        // catches by unwinding itself.
+        if self.class.is_initializer(index)
+            && self.facts.unwinding_tries
+            && !crate::lower::rewritten_clinit(&self.class.types[m.class])
+        {
+            let held = self.runtime("exceptions_held");
+            self.line(&format!("let _held = {held}();"));
         }
         if m.name == "<clinit>" {
             self.init_guard(m.class);

@@ -60,8 +60,10 @@ impl fmt::Display for Exception {
 /// `toString()`, then its causes and suppressed exceptions, without frames) to standard error and
 /// exits with code 1. Generic in what it
 /// "returns", so that it fits anywhere a value is expected: `f().unwrap_or_else(java::uncaught)`.
+/// Inside a `try` that catches by unwinding (`java::unwinding`), the exception unwinds to it
+/// instead.
 pub fn uncaught<T>(e: impl fmt::Display + 'static) -> T {
-    die(e)
+    die(crate::catching::raise_thrown(e))
 }
 
 /// `Object.clone()` of an object of the class with binary name `class`, which is not
@@ -75,9 +77,10 @@ pub fn try_clone_refused<T>(class: &str) -> Result<T, Exception> {
     Err(Exception::new("java.lang.CloneNotSupportedException", class))
 }
 
-/// `throw e` where nothing catches what is thrown: the program ends as `uncaught` describes.
+/// `throw e` where nothing catches what is thrown: the program ends as `uncaught` describes (or
+/// the exception unwinds to a `try` that catches by unwinding).
 pub fn throw_uncaught(e: impl fmt::Display + 'static) -> ! {
-    die(e)
+    die(crate::catching::raise_thrown(e))
 }
 
 ///

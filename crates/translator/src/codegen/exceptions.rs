@@ -21,6 +21,7 @@
 //! the jump is made. A `try` that nothing leaves early is its body followed by the `finally`.
 
 use super::*;
+use crate::analysis::{catches_by_unwinding, jumps_out};
 
 /// The places of `missed`, each once, ordered by line and column; those at the same line and
 /// column keep the order they were found in, so the first is the one that a translation, which
@@ -119,10 +120,14 @@ fn breaks_out_of(stmt: &Stmt, label: Option<&str>) -> bool {
 /// one declared without a value is assigned on every path to a read after the `try`, as Java can,
 /// so it is given one. A local declared inside the block (`for (Object e; ..)` in
 /// `ArrayList.batchRemove`), or read only there (`script` in `CharPredicates.forUnicodeScript`),
-/// is read where Rust follows its assignments as Java does.
-pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
-    // `all`: the method's body, for the reads of a local outside the block.
-    fn assigned(all: &[Stmt], stmts: &[Stmt], out: &mut HashSet<String>) {
+/// is read where Rust follows its assignments as Java does. A `try` that catches by unwinding runs
+/// its body in a closure, which cannot set a local that is not set yet: there a local that is also
+/// assigned outside the block is given one too, and one used only in the block is declared again
+/// inside the closure (`confined_locals`).
+pub(super) fn try_assigned(facts: &Facts, class: &Class, body: &[Stmt]) -> HashSet<String> {
+    // `all`: the method's body, for the reads of a local outside the block; `closure`: whether
+    // the block is the body of a closure.
+    fn assigned(all: &[Stmt], stmts: &[Stmt], closure: bool, out: &mut HashSet<String>) {
         let mut found = HashSet::new();
         let mut declared = HashSet::new();
         for s in stmts {
@@ -144,44 +149,20 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                 },
             );
         }
-        out.extend(
-            found
-                .into_iter()
-                .filter(|name| !declared.contains(name) && reads(all, name) > reads(stmts, name)),
-        );
-    }
-    // The reads of local `name` in `stmts` (and of other locals of that name).
-    fn reads(stmts: &[Stmt], name: &str) -> usize {
-        let mut count = 0;
-        for s in stmts {
-            visit_stmt(
-                s,
-                &mut |e| {
-                    visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Var(v)
-                        | ExprKind::Assign { target: Place::Var(v), op: Some(_), .. }
-                        | ExprKind::IncDec { target: Place::Var(v), .. }
-                            if v == name =>
-                        {
-                            count += 1
-                        }
-                        _ => {}
-                    })
-                },
-                &mut |_| {},
-            );
-        }
-        count
+        out.extend(found.into_iter().filter(|name| {
+            !declared.contains(name)
+                && (reads(all, name) > reads(stmts, name) || closure && uses(all, name) > uses(stmts, name))
+        }));
     }
     // Finds the `try` statements of `stmts`, including those in the cases of a switch expression,
     // at any depth, which `visit_stmt` reports as it reports the others.
-    fn scan(facts: &Facts, all: &[Stmt], stmts: &[Stmt], out: &mut HashSet<String>) {
+    fn scan(facts: &Facts, class: &Class, all: &[Stmt], stmts: &[Stmt], out: &mut HashSet<String>) {
         for s in stmts {
             visit_stmt(s, &mut |_| {}, &mut |s| match s {
-                Stmt::Try { body, finally: None, .. }
+                Stmt::Try { body, catches, finally: None }
                     if facts.live_tries.contains(&(s as *const Stmt as usize)) =>
                 {
-                    assigned(all, body, out)
+                    assigned(all, body, catches_by_unwinding(class, body, catches, false), out)
                 }
                 // The body and the `catch` clauses of a `try` with a `finally` are blocks whose
                 // ends Rust does not follow into the code after the `finally`, unless nothing
@@ -190,9 +171,9 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                     if facts.raising_tries.contains(&(s as *const Stmt as usize))
                         || leaves_early(body, catches) != (false, false) =>
                 {
-                    assigned(all, body, out);
+                    assigned(all, body, false, out);
                     for catch in catches {
-                        assigned(all, &catch.body, out);
+                        assigned(all, &catch.body, false, out);
                     }
                 }
                 _ => {}
@@ -200,7 +181,116 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
         }
     }
     let mut out = HashSet::new();
-    scan(facts, body, body, &mut out);
+    scan(facts, class, body, body, &mut out);
+    out
+}
+
+/// The reads of local `name` in `stmts` (and of other locals of that name).
+fn reads(stmts: &[Stmt], name: &str) -> usize {
+    let mut count = 0;
+    for s in stmts {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| match &x.kind {
+                    ExprKind::Var(v)
+                    | ExprKind::Assign { target: Place::Var(v), op: Some(_), .. }
+                    | ExprKind::IncDec { target: Place::Var(v), .. }
+                        if v == name =>
+                    {
+                        count += 1
+                    }
+                    _ => {}
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    count
+}
+
+/// Whether `body` reads local `name` before a statement sets it (`sets`), or as it does
+/// (`s = f(s)`): Java's definite assignment then has it set before `body`. A read in a block, an
+/// `if` or a `switch` that sets it is before only if it is before the setting in its branch
+/// (`filter = ..; filter.parse();` in each case of `SearchFilter.createNextFilter`).
+fn read_before_set(body: &[Stmt], name: &str) -> bool {
+    let read_in = |e: &Expr| {
+        let mut found = false;
+        visit_expr(e, &mut |x| found |= matches!(&x.kind, ExprKind::Var(v) if v == name));
+        found
+    };
+    for s in body {
+        let read = match s {
+            Stmt::Block(stmts) => read_before_set(stmts, name),
+            Stmt::If { cond, then, otherwise } => {
+                read_in(cond)
+                    || read_before_set(std::slice::from_ref(then), name)
+                    || otherwise.as_deref().is_some_and(|o| read_before_set(std::slice::from_ref(o), name))
+            }
+            Stmt::Switch { selector, cases } => {
+                read_in(selector) || cases.iter().any(|c| read_before_set(&c.body, name))
+            }
+            _ => reads(std::slice::from_ref(s), name) > 0,
+        };
+        if read {
+            return true;
+        }
+        if sets(s, name) {
+            return false;
+        }
+    }
+    false
+}
+
+/// The reads and assignments of local `name` in `stmts` (and of other locals of that name).
+fn uses(stmts: &[Stmt], name: &str) -> usize {
+    let mut count = 0;
+    for s in stmts {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| match &x.kind {
+                    ExprKind::Var(v)
+                    | ExprKind::Assign { target: Place::Var(v), .. }
+                    | ExprKind::IncDec { target: Place::Var(v), .. }
+                        if v == name =>
+                    {
+                        count += 1
+                    }
+                    _ => {}
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    count
+}
+
+/// The locals of method body `all` declared outside `body` without a value that `body` assigns
+/// and that nothing outside it uses, with their types: the body of a `try` that catches by
+/// unwinding declares them again inside its closure, which could not set them (`try_assigned`).
+pub(super) fn confined_locals(all: &[Stmt], body: &[Stmt]) -> Vec<(String, Type)> {
+    let mut inside = HashSet::new();
+    for s in body {
+        visit_stmt(s, &mut |_| {}, &mut |s| {
+            if let Stmt::Local { name, .. } | Stmt::ForEach { name, .. } = s {
+                inside.insert(name.clone());
+            }
+        });
+    }
+    let mut out: Vec<(String, Type)> = Vec::new();
+    for s in all {
+        visit_stmt(s, &mut |_| {}, &mut |s| {
+            if let Stmt::Local { ty, name, init: None, .. } = s
+                && !inside.contains(name)
+                && !out.iter().any(|(n, _)| n == name)
+                && assigns(body, name)
+                && uses(all, name) == uses(body, name)
+            {
+                out.push((name.clone(), *ty));
+            }
+        });
+    }
     out
 }
 
@@ -640,55 +730,6 @@ pub(super) struct Finally {
     /// The jumps out of it, as the frames they go to and whether they `continue`; a jump is
     /// `java::Completion::Jump(n)` with its index here.
     jumps: Vec<(usize, bool)>,
-}
-
-/// Whether a `return`, or a `break`, `continue` or `yield` to a statement outside them, leaves the
-/// statements.
-fn jumps_out(stmts: &[Stmt]) -> (bool, bool) {
-    // `labels`: the labels of the statements around the one being walked, inside `stmts`.
-    fn walk(s: &Stmt, in_loop: bool, in_switch: bool, labels: &mut Vec<String>, out: &mut (bool, bool)) {
-        match s {
-            Stmt::Return(..) => out.0 = true,
-            Stmt::Break if !in_loop && !in_switch => out.1 = true,
-            Stmt::Continue if !in_loop => out.1 = true,
-            Stmt::BreakLabel(l) | Stmt::ContinueLabel(l) if !labels.contains(l) => out.1 = true,
-            Stmt::Yield(_) => out.1 = true,
-            Stmt::While { body, .. }
-            | Stmt::DoWhile { body, .. }
-            | Stmt::ForEach { body, .. }
-            | Stmt::For { body, .. } => walk(body, true, in_switch, labels, out),
-            Stmt::Switch { cases, .. } => {
-                for b in cases.iter().flat_map(|c| &c.body) {
-                    walk(b, in_loop, true, labels, out);
-                }
-            }
-            Stmt::If { then, otherwise, .. } => {
-                walk(then, in_loop, in_switch, labels, out);
-                if let Some(o) = otherwise {
-                    walk(o, in_loop, in_switch, labels, out);
-                }
-            }
-            Stmt::Block(stmts) => stmts.iter().for_each(|b| walk(b, in_loop, in_switch, labels, out)),
-            Stmt::Labeled { label, body } => {
-                labels.push(label.clone());
-                walk(body, in_loop, in_switch, labels, out);
-                labels.pop();
-            }
-            Stmt::Try { body, catches, finally } => {
-                for b in
-                    body.iter().chain(catches.iter().flat_map(|c| &c.body)).chain(finally.iter().flatten())
-                {
-                    walk(b, in_loop, in_switch, labels, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = (false, false);
-    for s in stmts {
-        walk(s, false, false, &mut Vec::new(), &mut out);
-    }
-    out
 }
 
 /// Whether a `return`, and whether a jump, leaves the body or a `catch` clause of a `try`.
@@ -1295,7 +1336,13 @@ impl<'a> Gen<'a> {
         let completes = completes_all(body);
         // The locals that the block sets for the code after the `try`, which Rust does not see
         // set on the way through the `match`, go out in its `Ok` value.
-        let carried = carried_out(body, &self.unset_locals);
+        let unwinds = catches_by_unwinding(self.class, body, catches, false);
+        // The closure of a `try` that catches by unwinding sets in place a local that its body
+        // reads before it sets it, which Java has set before the `try` (`read_before_set`).
+        let carried: Vec<String> = carried_out(body, &self.unset_locals)
+            .into_iter()
+            .filter(|n| !unwinds || !read_before_set(body, n))
+            .collect();
         let ok = match () {
             _ if !completes => "std::convert::Infallible".to_string(),
             _ if carried.is_empty() => "()".to_string(),
@@ -1306,9 +1353,43 @@ impl<'a> Gen<'a> {
         };
         let rust: Vec<String> = carried.iter().map(|n| self.local(n)).collect();
         let normal = (!carried.is_empty()).then(|| format!("Ok({})", tuple(&rust)));
-        self.line(&format!("let {result}: Result<{ok}, {throwable}> = {{"));
-        self.attempt_block(label, false, body, &[], normal);
-        self.line("};");
+        if unwinds {
+            // What the calls let out and nothing on the way catches unwinds to here; a failure of
+            // the runtime becomes its object as one in the block does.
+            let raised = match self.raised_conversions() {
+                Some(throwable) => format!("{throwable}::j2r_raised"),
+                None if self.facts.raised_classes.is_empty() => self.runtime("uncaught"),
+                None => "From::from".to_string(),
+            };
+            let unwinding = self.runtime("unwinding");
+            // Its type written out: the block's `break` leaves the closure, not the method
+            // (`check_closures`). A closure with a written type takes a plain block, so the
+            // labeled block goes inside one.
+            self.line(&format!(
+                "let {result}: Result<{ok}, {throwable}> = {unwinding}(|| -> Result<{ok}, {throwable}> {{ {{"
+            ));
+            // The locals the body sets and the code after reads are declared again inside: a
+            // closure cannot set a binding of the method that is not set yet. The block's value
+            // carries them out, as in any `try`. So are those that only the body uses, as the
+            // method declares them.
+            let mut declared: Vec<String> = carried
+                .iter()
+                .zip(&rust)
+                .map(|(n, r)| format!("let mut {r}: {};", self.ty_name(self.unset_locals[n])))
+                .collect();
+            for (name, ty) in confined_locals(&self.class.methods[self.method].body, body) {
+                let start = self.out.len();
+                self.local_decl(ty, &name, None, true);
+                let written = self.out.split_off(start);
+                declared.extend(written.lines().map(|l| l.trim().to_string()));
+            }
+            self.attempt_block(label, false, body, &declared, normal);
+            self.line(&format!("}}}}, {raised});"));
+        } else {
+            self.line(&format!("let {result}: Result<{ok}, {throwable}> = {{"));
+            self.attempt_block(label, false, body, &[], normal);
+            self.line("};");
+        }
         self.line(&format!("match {result} {{"));
         self.indent += 1;
         if completes && carried.is_empty() {

@@ -52,7 +52,7 @@ mod whole_objects;
 use crate::ast::*;
 use std::cell::RefCell;
 
-pub use exceptions::{generator_text, text_objects};
+pub use exceptions::{catches_by_unwinding, generator_text, jumps_out, text_objects};
 pub(crate) use npe_messages::{
     ENUM_COMPARE_NULL, SEARCH_NULL_ELEMENT, SEARCH_NULL_KEY, compare_null_message,
 };
@@ -293,6 +293,10 @@ pub struct Facts {
     /// catches itself, and those whose exception leaves their method. Each must have Java's
     /// message in `npe_messages`, or the program is not translated.
     pub npe_message_needed: FastSet<ExprId>,
+    /// The dereferences outside `null_checked` whose `NullPointerException` may unwind to a `try`
+    /// that catches by unwinding and reads it (`exceptions::catches_by_unwinding`): they raise
+    /// Java's message where `npe_messages` finds it. With their places.
+    pub npe_unwound: FastMap<ExprId, Pos>,
     /// The message of the `NullPointerException` of the dereference of each object of
     /// `null_checked` whose message is known: Java's text, or `None` for an exception without
     /// one (such as `Objects.requireNonNull`'s). Filled in only when `npe_message_read` is set.
@@ -306,6 +310,10 @@ pub struct Facts {
     pub catching: FastMap<ExprId, Pos>,
     /// The standard classes whose objects the runtime raises where the program may see them.
     pub raised_classes: std::collections::BTreeSet<usize>,
+    /// Whether some `try` around a point that raises catches by unwinding
+    /// (`exceptions::catches_by_unwinding`): the static initializations then hold the exceptions
+    /// they raise (`java::exceptions_held`).
+    pub unwinding_tries: bool,
     /// The functional interfaces whose values are closures, `Rc<dyn Fn(A) -> R>` (see
     /// `closures`).
     pub closure_types: FastSet<usize>,

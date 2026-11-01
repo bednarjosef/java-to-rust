@@ -88,6 +88,81 @@ struct Frame {
     id: usize,
     catches: Vec<usize>,
     finally: bool,
+    /// What of `catches` the `try` catches by unwinding (`catches_by_unwinding`): its calls'
+    /// callees need no `Result` for these.
+    unwound: Vec<usize>,
+    /// Whether a clause catches `Throwable`: nothing from the body gets past this `try`.
+    all: bool,
+}
+
+/// The classes whose `catch` clause catches every exception of a kind, so that a `try` with one
+/// is mostly a handler of last resort far from where its exceptions are thrown.
+const CATCH_ALLS: [&str; 4] =
+    ["java.lang.Throwable", "java.lang.Exception", "java.lang.RuntimeException", "java.lang.Error"];
+
+/// Whether `catch (t e)` catches every exception of a kind (`CATCH_ALLS`).
+fn catches_all_of_a_kind(class: &Class, t: usize) -> bool {
+    CATCH_ALLS.contains(&class.types[t].name.as_str())
+}
+
+/// Whether a `try` catches by unwinding: it has a clause that catches every exception of a kind
+/// (`CATCH_ALLS`), no `finally`, and no `return` or jump that leaves its body. The generator runs
+/// such a body in `java::unwinding`, where what its calls throw and nothing on the way catches
+/// unwinds to it (`java::uncaught`, `java::throw`), so the calls in it need no `Result` for those
+/// clauses: what the `try`'s own method throws or raises in the body still leaves it as a value.
+pub fn catches_by_unwinding(class: &Class, body: &[Stmt], catches: &[Catch], finally: bool) -> bool {
+    !finally
+        && catches.iter().flat_map(|c| &c.types).any(|&t| catches_all_of_a_kind(class, t))
+        && jumps_out(body) == (false, false)
+}
+
+/// Whether a `return`, or a `break`, `continue` or `yield` to a statement outside them, leaves the
+/// statements.
+pub fn jumps_out(stmts: &[Stmt]) -> (bool, bool) {
+    // `labels`: the labels of the statements around the one being walked, inside `stmts`.
+    fn walk(s: &Stmt, in_loop: bool, in_switch: bool, labels: &mut Vec<String>, out: &mut (bool, bool)) {
+        match s {
+            Stmt::Return(..) => out.0 = true,
+            Stmt::Break if !in_loop && !in_switch => out.1 = true,
+            Stmt::Continue if !in_loop => out.1 = true,
+            Stmt::BreakLabel(l) | Stmt::ContinueLabel(l) if !labels.contains(l) => out.1 = true,
+            Stmt::Yield(_) => out.1 = true,
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::For { body, .. } => walk(body, true, in_switch, labels, out),
+            Stmt::Switch { cases, .. } => {
+                for b in cases.iter().flat_map(|c| &c.body) {
+                    walk(b, in_loop, true, labels, out);
+                }
+            }
+            Stmt::If { then, otherwise, .. } => {
+                walk(then, in_loop, in_switch, labels, out);
+                if let Some(o) = otherwise {
+                    walk(o, in_loop, in_switch, labels, out);
+                }
+            }
+            Stmt::Block(stmts) => stmts.iter().for_each(|b| walk(b, in_loop, in_switch, labels, out)),
+            Stmt::Labeled { label, body } => {
+                labels.push(label.clone());
+                walk(body, in_loop, in_switch, labels, out);
+                labels.pop();
+            }
+            Stmt::Try { body, catches, finally } => {
+                for b in
+                    body.iter().chain(catches.iter().flat_map(|c| &c.body)).chain(finally.iter().flatten())
+                {
+                    walk(b, in_loop, in_switch, labels, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = (false, false);
+    for s in stmts {
+        walk(s, false, false, &mut Vec::new(), &mut out);
+    }
+    out
 }
 
 struct Point {
@@ -580,16 +655,28 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             let (here, stamp) = match (&added, p.frames.is_empty()) {
                 (Some(_), _) | (None, true) => (&now, plain),
                 (None, false) => {
-                    visit += 1;
+                    // From the innermost `try` out, to one that catches everything: what a `try`
+                    // catches by unwinding is not observed, and nothing passes one that catches
+                    // `Throwable`.
                     let mut here = now.clone();
-                    for f in &p.frames {
+                    for f in p.frames.iter().rev() {
                         for t in &f.catches {
-                            here.types.insert(catch_number[t]);
+                            if !f.unwound.contains(t) {
+                                here.types.insert(catch_number[t]);
+                            }
                         }
                         here.all |= f.finally;
+                        if f.all {
+                            break;
+                        }
                     }
-                    with_tries = here;
-                    (&with_tries, visit)
+                    if here == now {
+                        (&now, plain)
+                    } else {
+                        visit += 1;
+                        with_tries = here;
+                        (&with_tries, visit)
+                    }
                 }
             };
             for &c in callees.iter() {
@@ -671,6 +758,16 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut runtime_npe_tries = FastSet::default();
     let mut unchecked_npe_tries = FastSet::default();
     let mut npe_catchers: Vec<(ExprId, Option<usize>, usize)> = Vec::new();
+    // The dereferences that end the program where they fail, outside a `try` that catches by
+    // unwinding, or unwind to one (their method's), with their places; and those `try`s.
+    let mut unwound_npes: Vec<(ExprId, Pos, usize)> = Vec::new();
+    let unwinding_ids: FastSet<usize> = points
+        .iter()
+        .flatten()
+        .flat_map(|p| &p.frames)
+        .filter(|f| !f.unwound.is_empty())
+        .map(|f| f.id)
+        .collect();
     let mut raised_classes = BTreeSet::new();
     // What the calls of the same methods raise, gathered once: a call of an override group's
     // method has thousands of them.
@@ -704,6 +801,39 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                     }
                 }
                 let Kind::Runtime(name) = k else { continue };
+                // A failure that a call lets out unwinds to a `try` that catches it by unwinding,
+                // which makes it an object of its class (`java::unwinding`). One of a class that
+                // the program does not have is not translated, as where a `catch` observes it.
+                if let Raise::Call(_) = p.raise
+                    && catcher.is_some_and(|f| f.unwound.iter().any(|&t| matches(&k, t)))
+                {
+                    // That of a static initializer that keeps no state ends the program
+                    // (`java::exceptions_held`), where Java's `catch` would get it.
+                    if name == INITIALIZER_ERROR {
+                        reject(p.pos, "a static initializer that throws inside a `try` not supported yet");
+                        continue;
+                    }
+                    match class
+                        .type_index(name)
+                        .filter(|&c| class.hierarchy.is_concrete(c) && crate::lower::is_standard(name))
+                    {
+                        Some(c) => {
+                            raised_classes.insert(c);
+                        }
+                        None => {
+                            let simple = name.rsplit('.').next().unwrap_or_default();
+                            let exception = if name == "?" {
+                                "an exception".to_string()
+                            } else {
+                                format!("the `{simple}`")
+                            };
+                            reject(
+                                p.pos,
+                                &format!("catching {exception} that {} may throw not supported yet", p.what),
+                            );
+                        }
+                    }
+                }
                 let Raise::Runtime { checked, id, .. } = p.raise else { continue };
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
@@ -713,6 +843,13 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 let raised_class = class
                     .type_index(name)
                     .filter(|&c| class.hierarchy.is_concrete(c) && crate::lower::is_standard(name));
+                if !seen_here
+                    && checked
+                    && !unwinding_ids.is_empty()
+                    && name == "java.lang.NullPointerException"
+                {
+                    unwound_npes.push((id, p.pos, m));
+                }
                 if seen_here
                     && checked
                     && let Some(c) = raised_class
@@ -822,6 +959,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 // method, which a call in the `try` may reach.
                 if !runtime_npe_tries.contains(&id)
                     && npe_catchers.iter().all(|(_, catcher, _)| catcher.is_some())
+                    && (unwound_npes.is_empty() || !unwinding_ids.contains(&id))
                 {
                     return;
                 }
@@ -901,6 +1039,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             }));
         }
     }
+    // A dereference whose exception may unwind to a `try` whose `catch` reads it raises Java's
+    // message where it is found (`java::non_null_message`), and none where it is not.
+    facts.npe_unwound =
+        unwound_npes.iter().filter(|(.., m)| reached.contains(m)).map(|&(id, pos, _)| (id, pos)).collect();
     facts.npe_message_needed = npe_catchers
         .iter()
         .filter(|(_, catcher, m)| match catcher {
@@ -961,6 +1103,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     facts.null_checked = null_checked;
     facts.catching = catching;
     facts.raised_classes = raised_classes;
+    facts.unwinding_tries = points.iter().flatten().any(|p| p.frames.iter().any(|f| !f.unwound.is_empty()));
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
@@ -1459,10 +1602,18 @@ fn stmt_points(
             }
         }
         Stmt::Try { body, catches, finally } => {
+            let types: Vec<usize> = catches.iter().flat_map(|c| c.types.iter().copied()).collect();
+            let unwound = match catches_by_unwinding(class, body, catches, finally.is_some()) {
+                true => types.iter().copied().filter(|&t| catches_all_of_a_kind(class, t)).collect(),
+                false => Vec::new(),
+            };
+            let all = types.iter().any(|&t| class.types[t].name == "java.lang.Throwable");
             frames.push(Frame {
                 id: s as *const Stmt as usize,
-                catches: catches.iter().flat_map(|c| c.types.iter().copied()).collect(),
+                catches: types,
                 finally: finally.is_some(),
+                unwound,
+                all,
             });
             // Each block narrows as it goes, as any block does (`block_points`).
             block_points(class, facts, m, body, frames, safe, out);
@@ -1472,6 +1623,8 @@ fn stmt_points(
                 id: s as *const Stmt as usize,
                 catches: Vec::new(),
                 finally: finally.is_some(),
+                unwound: Vec::new(),
+                all: false,
             });
             for catch in catches {
                 block_points(class, facts, m, &catch.body, frames, safe, out);
