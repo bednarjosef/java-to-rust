@@ -268,7 +268,7 @@ fn run_rust(
     (Ok(run(Command::new(binary).env_remove("LD_LIBRARY_PATH").stdin(stdin_of(p)).output().unwrap())), key)
 }
 
-/// Builds the crate in `dir` and returns its binary, a link under `dir` of the one cargo wrote, or
+/// Builds the crate in `dir` and returns its binary, a link in `dir` of the one cargo wrote, or
 /// cargo's standard error. The programs build in one of `build_directories()` target directories
 /// under `work`, picked by the program's `name`, so that builds run side by side (cargo builds one
 /// at a time in a target directory) and each directory compiles the runtime once. A lock per
@@ -291,7 +291,8 @@ fn build_crate(work: &Path, name: &str, dir: &Path, crate_name: &str) -> Result<
     if !built.status.success() {
         return Err(String::from_utf8_lossy(&built.stderr).into_owned());
     }
-    let binary = dir.join(crate_name);
+    // Beside the crate's directories, which a program split into crates names after them.
+    let binary = dir.join(format!("{crate_name}.run"));
     let _ = std::fs::remove_file(&binary);
     let built = target.join("debug").join(crate_name);
     std::fs::hard_link(&built, &binary).or_else(|_| std::fs::copy(&built, &binary).map(drop)).unwrap();
