@@ -658,7 +658,8 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 // (`lower/processors.rs`).
                 | (
                     "java.lang.Module",
-                    "modules0" | "moduleOf0" | "declares0" | "holds0" | "classPath0" | "manifest0" | "jdkResource0"
+                    "modules0" | "moduleOf0" | "declares0" | "holds0" | "classPath0" | "manifest0" | "signers0"
+                        | "jdkResource0"
                 )
                 | ("java.lang.ClassLoader", "holder0")
                 | ("java.util.ServiceLoader", "providers0" | "create0")

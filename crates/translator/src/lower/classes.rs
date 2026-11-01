@@ -480,10 +480,10 @@ impl<'t> Lowering<'t> {
         })
     }
 
-    /// `c.getSigners()`: `null`, as Java gives for a class without signers. A translated class
-    /// comes from no jar, so none signed it, even where Java's came from a signed jar (the
-    /// Minecraft server's, whose `ModCheck` then reports the server as very likely modified). A
-    /// null `c` throws, as the other methods of a class do.
+    /// `c.getSigners()` where no source root has a jar's signatures, or the translation has no
+    /// JDK sources: `null`, as Java gives for a class without signers (otherwise
+    /// `TranslatedModules.signersOf` answers, `program::MODULE_CALLS`, which only then reaches
+    /// the JDK's PKCS7 and X.509 code). A null `c` throws, as the other methods of a class do.
     fn class_signers(&self, node: Node<'t>, receiver: Node<'t>) -> Result<ExprKind, Error> {
         let class = self.expr(receiver)?;
         let (pos, signers) = (node.pos(), self.ty(node, node.java_type())?);

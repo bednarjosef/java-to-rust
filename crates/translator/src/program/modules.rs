@@ -188,6 +188,11 @@ pub struct Contents {
     /// that of the jar the root's classes come from), each with the attributes that its
     /// `Package` gives (`package_attributes`), a `Name: value` line each.
     pub manifests: Vec<(String, String)>,
+    /// For the unnamed module, the packages whose classes a signature of their root signs (the
+    /// jar's `META-INF/X.SF` with its block `X.RSA`, `X.DSA` or `X.EC`, as the jar the root's
+    /// classes come from has them), each with the absolute paths of the blocks, a line each
+    /// (`signature_blocks`).
+    pub signers: Vec<(String, String)>,
 }
 
 /// The contents of the modules among `roots`, in their order, then of the unnamed module if a
@@ -222,6 +227,26 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
                         }
                     }
                 }
+                // The packages that each block signs a class of.
+                let signed: Vec<(String, std::collections::HashSet<String>)> = signature_blocks(&absolute)
+                    .into_iter()
+                    .map(|(block, entries)| {
+                        let of = |c: &String| {
+                            c.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.replace('/', "."))
+                        };
+                        (block, classes.iter().filter(|c| entries.contains(*c)).map(of).collect())
+                    })
+                    .collect();
+                for package in packages.iter().filter(|p| !unnamed.packages.contains(p)) {
+                    let blocks: Vec<&str> = signed
+                        .iter()
+                        .filter(|(_, ps)| ps.contains(package))
+                        .map(|(b, _)| b.as_str())
+                        .collect();
+                    if !blocks.is_empty() {
+                        unnamed.signers.push((package.clone(), blocks.join("\n")));
+                    }
+                }
                 unnamed.packages.extend(packages);
                 unnamed.resources.extend(resources);
                 unnamed.classes.extend(classes);
@@ -238,6 +263,7 @@ pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Optio
         unnamed.packages.sort();
         unnamed.packages.dedup();
         unnamed.manifests.sort();
+        unnamed.signers.sort();
         named.push(unnamed);
     }
     named
@@ -350,6 +376,36 @@ fn manifest_sections(manifest: &str) -> Vec<(String, Vec<(String, String)>)> {
         fresh = false;
     }
     sections
+}
+
+/// Whether the root `root` has a jar's signatures (`signature_blocks`).
+pub fn has_signatures(root: &Path) -> bool {
+    !signature_blocks(root).is_empty()
+}
+
+/// The signatures of the root `root`, as a signed jar has them in its `META-INF`: each signature
+/// file `X.SF` that has a block of signatures (`X.RSA`, `X.DSA` or `X.EC`, the certificates of the
+/// signer), by the block's path, with the entries that the file signs (its sections' names), in
+/// the order of the files' names. Java verifies the digests as it reads the jar; a root holds the
+/// sources the classes were compiled from, so a class is taken as signed when the jar's entry of
+/// its class file is.
+fn signature_blocks(root: &Path) -> Vec<(String, std::collections::HashSet<String>)> {
+    let dir = root.join("META-INF");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut files: Vec<PathBuf> =
+        entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "SF")).collect();
+    files.sort();
+    let mut blocks = Vec::new();
+    for file in files {
+        let Some(block) = ["RSA", "DSA", "EC"].iter().map(|e| file.with_extension(e)).find(|b| b.is_file())
+        else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        let signed = manifest_sections(&text).into_iter().skip(1).map(|(name, _)| name).collect();
+        blocks.push((block.to_string_lossy().into_owned(), signed));
+    }
+    blocks
 }
 
 /// The versioning attributes of package `package` from the manifest's `sections`, as Java's

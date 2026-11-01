@@ -17,7 +17,10 @@
 //!   where `Module.classPathResources` reads the class path's resources when the program runs;
 //! - `manifest0(pn)`: the versioning attributes of the package `pn` of the unnamed module from
 //!   the manifest of its root (`program::modules::package_attributes`), or null where its root
-//!   has none, as a directory of the class path has none.
+//!   has none, as a directory of the class path has none;
+//! - `signers0(pn)`: the signature blocks of the root of the package `pn` of the unnamed module
+//!   that sign its classes (`program::modules::signature_blocks`), their paths a line each, or
+//!   null, from which `TranslatedModules.signersOf` reads the certificates of `c.getSigners()`.
 //!
 //! The translator's `ClassLoader` (`java/Threads.java`) has one such native, `holder0(loader,
 //! name)`: the module that holds the resource `name` that the loader (`bootstrap`, `platform` or
@@ -275,6 +278,19 @@ impl<'t> Lowering<'t> {
                 let cases = cases.into_iter().map(|(packages, lines)| (packages, string(lines))).collect();
                 switch(var(0), cases, self.synth(ExprKind::Null, pos, Type::Null))
             }
+            ("signers0", 1) => {
+                let mut cases: Vec<(Vec<String>, &str)> = Vec::new();
+                for (package, blocks) in
+                    reach.modules.iter().filter(|m| m.name.is_empty()).flat_map(|m| &m.signers)
+                {
+                    match cases.iter_mut().find(|(_, b)| *b == blocks) {
+                        Some((packages, _)) => packages.push(package.clone()),
+                        None => cases.push((vec![package.clone()], blocks)),
+                    }
+                }
+                let cases = cases.into_iter().map(|(packages, blocks)| (packages, string(blocks))).collect();
+                switch(var(0), cases, self.synth(ExprKind::Null, pos, Type::Null))
+            }
             // A data file of the JDK, its bytes as the chars of a string (`reach/jdk_resources.rs`).
             ("jdkResource0", 1) => {
                 let cases = reach
@@ -354,6 +370,7 @@ mod tests {
             classes: vec![],
             roots: vec![],
             manifests: vec![],
+            signers: vec![],
         };
         assert_eq!(
             declared_lines(&m),

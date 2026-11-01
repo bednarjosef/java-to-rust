@@ -980,6 +980,106 @@ fn a_program_package_has_the_manifest_of_its_root() {
     );
 }
 
+/// `c.getSigners()` of a class from a signed jar gives the certificates of the jar's signer, as
+/// in Java, when the root of the class's sources has the jar's signatures (`META-INF/X.SF` and
+/// `X.RSA`); a class of another root, an array and a class of the JDK have none. The jar is signed
+/// here with a new key (`keytool`, `jarsigner`); Java runs the program from it, and its output is
+/// what the translation must print.
+#[test]
+fn a_class_of_a_signed_jar_has_its_signers() {
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-signers");
+    let _ = std::fs::remove_dir_all(&work);
+    let files = [
+        ("lib/q/Helper.java", "package q;\npublic class Helper {\n}\n"),
+        (
+            "app/p/Main.java",
+            "package p;\n\nimport java.security.cert.X509Certificate;\n\npublic class Main {\n    \
+             static String show(Class<?> c) {\n        Object[] signers = c.getSigners();\n        \
+             if (signers == null) {\n            return c.getName() + \": none\";\n        }\n        \
+             StringBuilder text = new StringBuilder(c.getName() + \": \" + signers.getClass().getSimpleName());\n        \
+             for (Object signer : signers) {\n            X509Certificate certificate = (X509Certificate) signer;\n            \
+             text.append(\" [\").append(certificate.getSubjectX500Principal().getName()).append(\" \")\n                \
+             .append(certificate.getSerialNumber().signum()).append(\" \").append(certificate.getSigAlgName()).append(\"]\");\n        \
+             }\n        return text.toString();\n    }\n\n    \
+             public static void main(String[] args) {\n        System.out.println(show(Main.class));\n        \
+             System.out.println(show(Inner.class));\n        System.out.println(show(q.Helper.class));\n        \
+             System.out.println(show(Main[].class));\n        System.out.println(show(String.class));\n        \
+             System.out.println(show(int.class));\n        Object[] first = Main.class.getSigners(), second = Main.class.getSigners();\n        \
+             System.out.println((first == second) + \" \" + (first[0] == second[0]));\n    }\n\n    \
+             static class Inner {\n    }\n}\n",
+        ),
+    ];
+    for (path, text) in files {
+        let path = work.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let run = |program: &str, args: &[&str]| {
+        let output = Command::new(program).args(args).current_dir(&work).output().unwrap();
+        assert!(output.status.success(), "{program} {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        output
+    };
+    run("javac", &["-d", "lib-classes", "lib/q/Helper.java"]);
+    run("javac", &["-d", "app-classes", "-cp", "lib-classes", "app/p/Main.java"]);
+    run("jar", &["cf", "app.jar", "-C", "app-classes", "."]);
+    run(
+        "keytool",
+        &[
+            "-genkeypair",
+            "-keystore",
+            "keys.p12",
+            "-storepass",
+            "signers",
+            "-alias",
+            "signer",
+            "-keyalg",
+            "RSA",
+            "-keysize",
+            "2048",
+            "-validity",
+            "3650",
+            "-dname",
+            "CN=Test Signer, O=java-to-rust",
+        ],
+    );
+    run(
+        "jarsigner",
+        &["-keystore", "keys.p12", "-storepass", "signers", "-sigfile", "SIGNER", "app.jar", "signer"],
+    );
+    let java = run("java", &["-cp", "app.jar:lib-classes", "p.Main"]);
+    // The jar's manifest and signatures in the root of its sources, as the Minecraft survey puts them.
+    run(
+        "unzip",
+        &["-q", "app.jar", "META-INF/MANIFEST.MF", "META-INF/SIGNER.SF", "META-INF/SIGNER.RSA", "-d", "app"],
+    );
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "p.Main", "--source"])
+        .arg(work.join("app"))
+        .arg("--library")
+        .arg(work.join("lib"))
+        .arg("--library")
+        .arg(&java_base)
+        .arg("--crate")
+        .arg(work.join("crate"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let built = Command::new("cargo")
+        .args(["run", "-q", "--manifest-path"])
+        .arg(work.join("crate/Cargo.toml"))
+        .env("CARGO_TARGET_DIR", work.join("target"))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let expected = String::from_utf8_lossy(&java.stdout);
+    assert!(expected.starts_with("p.Main: Certificate[] [CN=Test Signer,O=java-to-rust 1 SHA"), "{expected}");
+    assert_eq!(String::from_utf8_lossy(&built.stdout), expected);
+}
+
 /// A package's annotations, which the translation does not have, and packages by name
 /// that may or may not have been loaded yet, are rejected (`lower/packages.rs`;
 /// `corpus/whole-program/PackageLookups` has those that are certain).
