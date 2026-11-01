@@ -749,6 +749,112 @@ impl<'a> Gen<'a> {
         self.line("};");
         Some(name)
     }
+
+    /// A loop whose header reads the length of a possibly-null array variable `a` before it does
+    /// anything else that may throw or be seen (`for (int i = 0; i < a.length; i++)`, `while (i <
+    /// a.length)`): if `a` is null the header throws there, and otherwise `a` is not null for the
+    /// rest of the block, which never assigns it. So `a` is bound as a non-null handle before the
+    /// loop, by the same dereference that the header would make, with the same
+    /// `NullPointerException`; the loop and the rest of the block then read it without null
+    /// checks, and a counting loop takes its view (`bind_views`), whose length the compiler compares
+    /// with the loop's bound, so the bounds checks drop too, as the JIT drops them. Returns the
+    /// name, or `None`, emitting nothing.
+    pub(super) fn early_length_read(
+        &mut self,
+        stmt: &'a Stmt,
+        rest: &[Stmt],
+        after: &[Expr],
+    ) -> Option<&'a str> {
+        let array = header_length_read(stmt)?;
+        let ExprKind::Var(name) = &array.kind else { return None };
+        let rust = self.local(name);
+        if !self.optional_var(self.method, array.ty, name)
+            || self.borrowed.contains(name.as_str())
+            || self.plain(name).is_some()
+            || !rust.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || assigns_stmt(stmt, name)
+            || assigns_any(rest, name)
+            || after.iter().any(|u| assigns(u, name))
+        {
+            return None;
+        }
+        let handle = self.handle(array);
+        self.line(&format!("let {rust} = {handle}.clone();"));
+        // The later dereferences of the variable cannot find it null, so none of them throws.
+        let mut uses = Vec::new();
+        for s in std::iter::once(stmt).chain(rest) {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if matches!(&x.kind, ExprKind::Var(v) if v == name) {
+                            uses.push(x.id);
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        self.dereferenced.extend(uses);
+        Some(name)
+    }
+}
+
+/// The array variable whose length the header of loop `stmt` reads first, before anything else
+/// that may throw or have an effect (see `Gen::early_length_read`).
+fn header_length_read(stmt: &Stmt) -> Option<&Expr> {
+    match stmt {
+        Stmt::Labeled { body, .. } => header_length_read(body),
+        Stmt::While { cond, .. } => first_length_read(cond).ok().flatten(),
+        Stmt::For { init, cond: Some(cond), .. } => {
+            for s in init {
+                let Stmt::Local { init: value, .. } = s else { return None };
+                if let Some(value) = value {
+                    match first_length_read(value) {
+                        Ok(None) => {}
+                        Ok(Some(array)) => return Some(array),
+                        Err(()) => return None,
+                    }
+                }
+            }
+            first_length_read(cond).ok().flatten()
+        }
+        _ => None,
+    }
+}
+
+/// What `e` evaluates first among the things that may throw or have an effect: `Ok(Some(a))` for
+/// the length of the array variable `a`, `Ok(None)` where `e` has none (constants, primitive
+/// variables, and arithmetic and comparisons of them that cannot throw), `Err` for anything else.
+/// Only the left operand of `&&` and `||` is sure to be evaluated, so a read in the right one is
+/// not counted.
+fn first_length_read(e: &Expr) -> Result<Option<&Expr>, ()> {
+    let primitive = |t: Type| t.is_numeric() || t == Type::Boolean;
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Char(_) | ExprKind::Bool(_) => Ok(None),
+        ExprKind::Var(_) if primitive(e.ty) => Ok(None),
+        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) if primitive(e.ty) && primitive(x.ty) => {
+            first_length_read(x)
+        }
+        ExprKind::Length(array)
+            if matches!(array.kind, ExprKind::Var(_)) && matches!(array.ty, Type::Array(_)) =>
+        {
+            Ok(Some(&**array))
+        }
+        ExprKind::Binary(BinOp::And | BinOp::Or, l, _) => match first_length_read(l)? {
+            Some(array) => Ok(Some(array)),
+            None => Err(()),
+        },
+        ExprKind::Binary(op, l, r)
+            if !matches!(op, BinOp::Div | BinOp::Rem) && primitive(l.ty) && primitive(r.ty) =>
+        {
+            match first_length_read(l)? {
+                Some(array) => Ok(Some(array)),
+                None => first_length_read(r),
+            }
+        }
+        _ => Err(()),
+    }
 }
 
 /// The value of a `let .. else`, in parentheses when it ends with a block, which Rust doesn't

@@ -6,9 +6,12 @@
 //! - `for (int i = 0; i < a.length; i++) a[i]`, and `while (i < n)`, `if (i <= limit)`, the left
 //!   side of `&&` and the condition of `?:` bound `i` in what they guard, up to the first
 //!   statement that assigns `i` or a variable of the bound;
-//! - the length is the array's own (`a.length`, `m[i].length`), or the size it was made with
+//! - the length is the array's own (`a.length`, `m[i].length`, `this.f.length`), or the size it
+//!   was made with
 //!   (`new boolean[limit + 1]`, `new int[n][n]` with `int n = a.length`), given that neither the
 //!   array nor the variables of the size are ever assigned again;
+//! - outside the constructors, an array field of `this` that only constructors assign
+//!   (`Facts::fixed_fields`, Java's `final` fields) is such an array too, as the JIT takes one;
 //! - `i * i <= n` bounds `i` by `n` where `i` is at least 1 and the product cannot overflow.
 //!
 //! A row's length is known only while no row of the array is replaced and the array is not
@@ -23,6 +26,7 @@ use crate::ast::*;
 /// The accesses of arrays in `method` whose index is always in bounds: element reads and
 /// writes and row reads, by expression id.
 pub(super) fn in_bounds(
+    class: &Class,
     method: &Method,
     plain: &FastSet<String>,
     reshaped: &FastSet<String>,
@@ -85,6 +89,8 @@ pub(super) fn in_bounds(
         .map(|(name, _)| *name)
         .collect();
     let mut walk = Walk {
+        class,
+        ctor: method.is_ctor,
         facts,
         plain,
         stable,
@@ -156,6 +162,9 @@ struct Guard {
 }
 
 struct Walk<'a> {
+    class: &'a Class,
+    /// Whether the method is a constructor, which may assign its fixed fields.
+    ctor: bool,
     facts: &'a Facts,
     plain: &'a FastSet<String>,
     /// Variables declared once and never assigned after their declaration.
@@ -170,6 +179,18 @@ struct Walk<'a> {
 impl Walk<'_> {
     fn is_stable(&self, name: &str) -> bool {
         self.stable.contains(name)
+    }
+
+    /// The name standing for `this.f`, `"this.f"`, where `f` is an array field that only
+    /// constructors assign and the method is not one: its array is the same all through the
+    /// method, as a variable never assigned again is. No variable has a name with a dot.
+    fn fixed_field(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Field { object, name } = &e.kind else { return None };
+        if self.ctor || !matches!(object.kind, ExprKind::This) || !matches!(e.ty, Type::Array(_)) {
+            return None;
+        }
+        let owner = self.class.field_owner(object.ty, name)?;
+        self.facts.fixed_fields.contains(&(owner, name.clone())).then(|| format!("this.{name}"))
     }
 
     /// The bound that `e` evaluates to where a guard is tested, if it has a symbolic form.
@@ -207,6 +228,7 @@ impl Walk<'_> {
     fn index_vars(&self, path: &Expr) -> Option<(String, Vec<String>)> {
         match &path.kind {
             ExprKind::Var(v) => Some((v.clone(), Vec::new())),
+            ExprKind::Field { .. } => Some((self.fixed_field(path)?, Vec::new())),
             ExprKind::Index(inner, index) => {
                 let ExprKind::Var(i) = &index.kind else { return None };
                 let (root, mut rows) = self.index_vars(inner)?;
@@ -301,6 +323,13 @@ impl Walk<'_> {
         while let ExprKind::Index(inner, _) = &root.kind {
             rows += 1;
             root = inner;
+        }
+        if let Some(field) = self.fixed_field(root) {
+            return if rows == 0 {
+                vec![Bound { base: Some(Base::Len(field, Vec::new())), offset: 0 }]
+            } else {
+                Vec::new()
+            };
         }
         let ExprKind::Var(root) = &root.kind else { return Vec::new() };
         if rows > 0 && !self.fixed_rows.contains(root) {
@@ -512,7 +541,7 @@ impl Walk<'_> {
         // An array that is not plain is reached through its variable alone, whose array is never
         // replaced where a guard of its length holds (`ends`), and whose length never changes.
         let plain = root_of(array).is_some_and(|r| self.plain.contains(r));
-        if !plain && !matches!(array.kind, ExprKind::Var(_)) {
+        if !plain && !matches!(array.kind, ExprKind::Var(_)) && self.fixed_field(array).is_none() {
             return false;
         }
         let range = self.facts.index_ranges.get(&id).copied();

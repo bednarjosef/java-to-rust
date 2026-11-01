@@ -279,14 +279,20 @@ Design: [closures-and-nested-classes.md](closures-and-nested-classes.md).
   `&mut [T]` where every call can lend one.
 - Indexing is `a[i as usize]` where the bounds analysis proves the index in range
   (`analysis/arrays/bounds.rs`), and `java::at`/`java::put` otherwise. A `java::Array` held in a
-  local variable or a parameter, whose length the analysis knows in the same way, is read and
-  written with `java::get_in_bounds`/`java::set_in_bounds`: no `ArrayIndexOutOfBoundsException`
-  can come of them, so none is passed on, but they still compare the index with the length, and
-  a wrong proof stops the program (a translator bug, never memory corruption), as a plain array's
-  does. A counting loop takes the view (`java::view`) of each such array that its body never
-  assigns once, before it starts: the start and the length of the elements, then values the
-  compiler keeps across the loop's calls and compares with the loop's bound, which drops the
-  check and lets it unroll the loop. That rests on an array's elements staying where they are
+  local variable or a parameter, or, outside the constructors, in an array field of `this` that
+  only constructors assign (`Facts::fixed_fields`), whose length the analysis knows in the same
+  way, is read and written with `java::get_in_bounds`/`java::set_in_bounds`: no
+  `ArrayIndexOutOfBoundsException` can come of them, so none is passed on, but they still compare
+  the index with the length, and a wrong proof stops the program (a translator bug, never memory
+  corruption), as a plain array's does. A counting loop takes the view (`java::view`) of each
+  such array that its body never assigns once, before it starts (of a field, only where it is
+  read in place, as a fixed cell's `fixed()` or `java::fixed!`): the start and the length of the
+  elements, then values the compiler keeps across the loop's calls and compares with the loop's
+  bound, which drops the check and lets it unroll the loop. A variable that may be null and whose
+  length a loop's header reads before anything else that may throw (`for (int i = 0; i <
+  a.length; i++)`) is bound as not null before the loop, with the header's
+  `NullPointerException` (`Gen::early_length_read`), so the loop takes its view too, and the rest
+  of the block reads it without null checks. That rests on an array's elements staying where they are
   while a handle lives: an `Array`'s `Vec` is never grown, shrunk or replaced (only
   `take_items` empties one, of an array no other handle holds yet), a `SharedArray`'s and a
   `Frozen`'s cells never move, and the collected heap never moves a slot (`gc.rs`). A view of a

@@ -157,7 +157,9 @@ impl<'a> Gen<'a> {
     /// never assigns; those accesses then go through the view (`views`), whose start and length
     /// are values the compiler keeps in registers across the loop's calls. Gives back the
     /// accesses. A lambda or a class in the body is a method of its own, whose accesses are not
-    /// the loop's, and Java lets it capture only a variable that nothing assigns.
+    /// the loop's, and Java lets it capture only a variable that nothing assigns. An array field
+    /// of `this` that only constructors assign, read where it is (`fixed_view_place`), is viewed
+    /// as a variable is: nothing assigns it while the loop runs.
     pub(super) fn bind_views(&mut self, body: &'a Stmt) -> Vec<ExprId> {
         let mut found: Vec<(&'a Expr, &'a Expr, ExprId, Option<&'a Expr>)> = Vec::new();
         let mut writes = Vec::new();
@@ -201,8 +203,32 @@ impl<'a> Gen<'a> {
         );
         declared.extend(bound);
         let mut views: Vec<(String, String)> = Vec::new();
+        // The views of fields, with the place each borrows.
+        let mut fields: Vec<(String, String)> = Vec::new();
         let mut viewed = Vec::new();
         for (array, index, id, stored) in found {
+            if let ExprKind::Field { name, .. } = &array.kind {
+                let fits = self.facts.in_bounds.contains(&id)
+                    && !self.views.contains_key(&id)
+                    && !self.elements.contains_key(&id)
+                    && !self.class.volatile_elements.contains(&index.id)
+                    && stored.is_none_or(|v| !self.class.checks_store(array.ty, v))
+                    && !self.nullable(array);
+                let Some(place) = fits.then(|| self.fixed_view_place(array)).flatten() else { continue };
+                let key = format!("this.{name}");
+                let view = match views.iter().find(|(java, _)| *java == key) {
+                    Some((_, view)) => view.clone(),
+                    None => {
+                        let view = self.elements_view_name(&snake_case(name));
+                        views.push((key, view.clone()));
+                        fields.push((view.clone(), place));
+                        view
+                    }
+                };
+                self.views.insert(id, view);
+                viewed.push(id);
+                continue;
+            }
             let ExprKind::Var(name) = &array.kind else { continue };
             let fits = self.facts.in_bounds.contains(&id)
                 && !self.views.contains_key(&id)
@@ -220,15 +246,7 @@ impl<'a> Gen<'a> {
             let view = match views.iter().find(|(java, _)| java == name) {
                 Some((_, view)) => view.clone(),
                 None => {
-                    let local = self.local(name);
-                    let taken =
-                        |n: &str| self.locals.values().any(|l| l == n) || self.fn_name_set.contains(n);
-                    let view = (0..)
-                        .map(|k| {
-                            if k == 0 { format!("{local}_elements") } else { format!("{local}_elements{k}") }
-                        })
-                        .find(|n| !taken(n))
-                        .unwrap_or_default();
+                    let view = self.elements_view_name(&self.local(name));
                     views.push((name.clone(), view.clone()));
                     view
                 }
@@ -236,12 +254,45 @@ impl<'a> Gen<'a> {
             self.views.insert(id, view);
             viewed.push(id);
         }
+        let make = self.runtime("view");
         for (name, view) in views {
-            let handle = format!("&{}", self.local(&name));
-            let make = self.runtime("view");
+            let handle = match fields.iter().find(|(v, _)| *v == view) {
+                Some((_, place)) => format!("&{place}"),
+                None => format!("&{}", self.local(&name)),
+            };
             self.line(&format!("let {view} = {make}({handle});"));
         }
         viewed
+    }
+
+    /// A name for the view of the elements of `base` that no local and no function has.
+    fn elements_view_name(&self, base: &str) -> String {
+        let taken = |n: &str| self.locals.values().any(|l| l == n) || self.fn_name_set.contains(n);
+        (0..)
+            .map(|k| if k == 0 { format!("{base}_elements") } else { format!("{base}_elements{k}") })
+            .find(|n| !taken(n))
+            .unwrap_or_default()
+    }
+
+    /// The place of `this.f`, an array field that only constructors assign, read where it is
+    /// without a borrow of its object (a fixed cell's `fixed()`, or `java::fixed!`), which a view
+    /// may then borrow for the whole loop. `None` for any other field, whose read copies the
+    /// handle out or holds a borrow of the object that the loop's body could conflict with.
+    fn fixed_view_place(&mut self, array: &'a Expr) -> Option<String> {
+        let ExprKind::Field { object, name } = &array.kind else { return None };
+        if !matches!(object.kind, ExprKind::This)
+            || self.field_locals.contains_key(name)
+            || self.enum_of(object).is_some()
+            || !self.fixed(object, name)
+        {
+            return None;
+        }
+        let fixed = if self.celled_object(object) {
+            self.fixed_cell(object, name, array.ty)
+        } else {
+            !self.is_plain(object)
+        };
+        fixed.then(|| self.object_place(array))
     }
 
     /// `a.length`.
