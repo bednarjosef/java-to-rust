@@ -56,9 +56,13 @@
 #                    only the modules whose code, or code they inline, changed. Each builds in a
 #                    profile of its own (TRIAL_PROFILE-no-lto, TRIAL_PROFILE-lld-lto), so that the
 #                    builds do not overwrite each other in trial-target
+# TRIAL_HOT_TEXT     a symbol ordering file (scripts/hot-text-order.py) that the trial step links the
+#                    binary with: its hot functions together at the start of its code, on huge
+#                    pages (default: none)
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
 # BENCH              which server the bench step measures: java (default) or trial; BENCH_SEED,
-#                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input)
+#                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input);
+#                    BENCH_PROFILE names a file for a perf profile of the sprint (default: none)
 # JOIN               which server a bot joins in the join step: java (default) or trial; JOIN_PORT
 #                    (default 25599) and JOIN_SECONDS (default 15, how long the bot plays)
 # COMMANDS           which server the commands step runs an operator's sessions on: java (default)
@@ -667,6 +671,21 @@ trial() {
     "$@" || return
     echo "$name $((SECONDS - began)) s" >> "$cache/trial-times.txt"
   }
+  # With TRIAL_HOT_TEXT, the binary's crate is linked with that symbol ordering file, its segments
+  # aligned to 2 MB so that its code's 2 MB blocks are blocks of the file, which the runtime puts
+  # the hot range on (docs/performance.md, "Hot code together"). Only that crate gets the flags
+  # (`cargo rustc`), so the others are not built again. The file is copied under a name of its
+  # contents, since Cargo sees a flag's text, not what the file it names holds.
+  local -a binary=("${build[@]}")
+  if [ -n "${TRIAL_HOT_TEXT:-}" ]; then
+    local order
+    order=$cache/hot-text-$(sha256sum < "$TRIAL_HOT_TEXT" | cut -c1-16).txt
+    cp "$TRIAL_HOT_TEXT" "$order"
+    # The build's own arguments past `cargo build -q --keep-going`: its profile and configuration.
+    binary=(cargo rustc -q -p "$(basename "$(trial_binary)")" "${build[@]:4}" --
+      -C "link-arg=-Wl,--symbol-ordering-file=$order" -C link-arg=-Wl,--no-warn-symbol-ordering
+      -C link-arg=-Wl,-z,max-page-size=0x200000 -C link-arg=-Wl,-z,separate-loadable-segments)
+  fi
   bodies() {
     local g n=0
     for g in "${groups[@]}"; do
@@ -675,7 +694,7 @@ trial() {
       timed "bodies $n of ${#groups[@]}" env CARGO_BUILD_JOBS="$jobs" "${slot[@]}" "${cap[@]}" "${build[@]}" $g \
         || return
     done
-    timed binary env CARGO_BUILD_JOBS="${TRIAL_LINK_JOBS:-$(nproc)}" "${slot[@]}" "${cap[@]}" "${build[@]}"
+    timed binary env CARGO_BUILD_JOBS="${TRIAL_LINK_JOBS:-$(nproc)}" "${slot[@]}" "${cap[@]}" "${binary[@]}"
   }
   (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
     && timed header env CARGO_BUILD_JOBS="${TRIAL_HEADER_JOBS:-1}" "${slot[@]}" "${cap[@]}" "${build[@]}" -p header \
@@ -683,7 +702,8 @@ trial() {
     || { [ "$jobs" -gt 1 ] && ! grep -q '^error' "$cache/trial-build.txt" \
       && echo "the trial build was killed; building the rest one crate at a time" >&2 \
       && (cd "$cache/trial" && export CARGO_TARGET_DIR=$cache/trial-target \
-        && CARGO_BUILD_JOBS=1 "${slot[@]}" "${cap[@]}" "${build[@]}") >> "$cache/trial-build.txt" 2>&1; } \
+        && CARGO_BUILD_JOBS=1 "${slot[@]}" "${cap[@]}" "${build[@]}" \
+        && CARGO_BUILD_JOBS=1 "${slot[@]}" "${cap[@]}" "${binary[@]}") >> "$cache/trial-build.txt" 2>&1; } \
     || { echo "the trial translation does not build (see trial-build.txt)" >&2; tail -n 20 "$cache/trial-build.txt"; exit 1; }
   echo "built in $(($(date +%s) - start)) s"
   cat "$cache/trial-times.txt"
@@ -721,7 +741,9 @@ java-run() {
 # the chunks within BENCH_RADIUS chunks of the world's centre; once they are marked, and after
 # BENCH_WARMUP seconds (default 30) for them to generate, a tick sprint of BENCH_TICKS ticks (default
 # 1000), which runs them as fast as the server can; once it reports, count the item entities, then stop.
-# Gives up (stops the server) after SERVER_SECONDS, and ends when the server, run by shell $1, does.
+# With BENCH_PROFILE, `perf record` samples the server's cycles during the sprint into that file
+# (what scripts/hot-text-order.py reads). Gives up (stops the server) after SERVER_SECONDS, and ends
+# when the server, run by shell $1, does.
 bench_input() {
   local shell=$1 waited=0 radius=${BENCH_RADIUS:-5}
   wait_for() {
@@ -738,7 +760,20 @@ bench_input() {
   wait_for 'to be force loaded'
   sleep "${BENCH_WARMUP:-30}"
   echo "tick sprint ${BENCH_TICKS:-1000}"
+  local perf=
+  if [ -n "${BENCH_PROFILE:-}" ]; then
+    # The server is the last of the chain of processes that `measured` starts (`timeout`, then it).
+    local server
+    server=$(pgrep -P "$shell" -x python3 | head -n 1)
+    while [ -n "$(pgrep -P "$server" | head -n 1)" ]; do server=$(pgrep -P "$server" | head -n 1); done
+    perf record -q --no-buildid-cache -m 32 -e cycles:u -c 1000003 -p "$server" -o "$BENCH_PROFILE" 2> /dev/null &
+    perf=$!
+  fi
   wait_for 'Sprint completed'
+  if [ -n "$perf" ]; then
+    kill -INT "$perf"
+    wait "$perf" || true
+  fi
   echo "execute if entity @e[type=item]"
   wait_for 'Test \(passed\|failed\)'
   echo stop
@@ -770,6 +805,7 @@ bench() {
     trial) command=("$(trial_binary)") ;;
     *) echo "BENCH is java or trial, not $which" >&2; exit 1 ;;
   esac
+  [ -z "${BENCH_PROFILE:-}" ] || BENCH_PROFILE=$(realpath -m "$BENCH_PROFILE")
   rm -rf "$dir" && mkdir -p "$dir"
   echo eula=true > "$dir/eula.txt"
   echo "level-seed=${BENCH_SEED:-1}" > "$dir/server.properties"

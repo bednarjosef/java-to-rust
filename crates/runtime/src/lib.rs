@@ -43,6 +43,7 @@ pub mod format;
 mod fs;
 pub mod gc;
 mod hex_float;
+mod hot_text;
 mod inflate;
 mod initializer;
 mod integer;
