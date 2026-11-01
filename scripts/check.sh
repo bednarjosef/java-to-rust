@@ -22,7 +22,14 @@ fi
 cargo fmt --check >/dev/null 2>&1 || { cargo fmt --check 2>&1 | head -40; fail "cargo fmt (run \`cargo fmt\`)"; }
 out=$(cargo clippy --all-targets -q -- -D warnings 2>&1) || { echo "$out" | head -80; fail "clippy"; }
 # The corpus test lists every program; only those that do not pass are shown.
-out=$(cargo test -q 2>&1) || {
+# The integration tests and doctests build in the checks profile, the dev profile optimized
+# (Cargo.toml): they spend their time translating, which runs several times faster optimized, and
+# targets/run.sh uses the same build of the translator. The unit tests, a second build of each
+# crate that runs in seconds, build in the dev profile, which compiles faster.
+tests() {
+    cargo test -q --lib && cargo test -q --profile checks --bins --test '*' && cargo test -q --profile checks --doc
+}
+out=$(tests 2>&1) || {
     echo "$out" | grep -vE '^\s*$|^running |^test result: ok| PASS$| ok( \([0-9]+ rustc warnings\))?$|^[.]+( [0-9]+/[0-9]+)?$|: warning: ' | head -120
     fail "tests"
 }
