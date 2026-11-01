@@ -437,7 +437,7 @@ fn declared_impl(class: &Class, c: usize, name: &str) -> Option<usize> {
 /// borrows only when it is short (`long` has those that are not; see `threads`).
 pub fn field_level(
     class: &Class,
-    reach: &[super::closure::Bits],
+    reach: &super::closure::Reached,
     immutable: &FastSet<String>,
     structs: &FastSet<usize>,
     long: &FastSet<usize>,

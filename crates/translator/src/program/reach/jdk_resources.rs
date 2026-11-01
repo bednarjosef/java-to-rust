@@ -100,7 +100,7 @@ impl Walk<'_> {
             return;
         }
         let symbol = &node["symbol"];
-        let arguments = node["arguments"].as_array().map_or(&[][..], Vec::as_slice);
+        let arguments = node["arguments"].as_array().map_or(&[][..], |a| a.as_slice());
         let callee: MethodKey = (
             strip_arguments(text(symbol, "owner")),
             text(symbol, "name").into(),

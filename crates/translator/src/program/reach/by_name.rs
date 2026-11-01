@@ -123,7 +123,7 @@ pub fn array_for_name(node: &Value) -> Option<(String, usize)> {
 fn call<'v>(node: &'v Value, name: &str) -> Option<(&'v str, &'v Value)> {
     let symbol = &node["symbol"];
     let select = &node["methodSelect"];
-    let no_arguments = node["arguments"].as_array().is_some_and(Vec::is_empty);
+    let no_arguments = node["arguments"].as_array().is_some_and(|a| a.is_empty());
     (text(node, "kind") == "METHOD_INVOCATION"
         && text(symbol, "name") == name
         && no_arguments
@@ -266,7 +266,7 @@ pub fn created_from_class(node: &Value) -> Option<String> {
     let creates = text(node, "kind") == "METHOD_INVOCATION"
         && text(symbol, "owner") == "java.lang.Class"
         && matches!(text(symbol, "name"), "getConstructor" | "getDeclaredConstructor" | "newInstance")
-        && node["arguments"].as_array().is_some_and(Vec::is_empty);
+        && node["arguments"].as_array().is_some_and(|a| a.is_empty());
     if !creates {
         return None;
     }
@@ -403,7 +403,7 @@ impl Walk<'_> {
         let candidate = outer.is_none()
             && text(decl, "kind") == "CLASS"
             && !has_flag(decl, "ABSTRACT")
-            && decl["typeParameters"].as_array().is_none_or(Vec::is_empty)
+            && decl["typeParameters"].as_array().is_none_or(|a| a.is_empty())
             && class_name(decl) == name
             && self.is_subtype(name, target);
         let constructor = (name.to_string(), "<init>".to_string(), "()void".to_string());

@@ -31,6 +31,10 @@ pub(super) fn split_args(args: &str) -> Vec<&str> {
 /// The bounds of an intersection type as `JavaTree` writes it, its erasure first
 /// (`Main.Base & Main.Named`), split at the `&`s outside `<>`; `None` for any other type.
 pub(super) fn intersection_bounds(name: &str) -> Option<Vec<&str>> {
+    // Most names are of no intersection: the trees' scans ask of every type they meet.
+    if !name.contains('&') {
+        return None;
+    }
     let mut out = Vec::new();
     let (mut depth, mut start) = (0, 0);
     for (i, c) in name.char_indices() {

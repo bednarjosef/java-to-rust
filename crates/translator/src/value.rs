@@ -2,29 +2,41 @@
 //! methods, in a fraction of its memory. A `serde_json` object is a `BTreeMap` whose smallest
 //! node has room for eleven entries, each key a `String` of its own, so a node of a few fields
 //! takes over half a kilobyte, about ten times its JSON text. Here an object is a list of its
-//! fields, and every string, key or value, is interned: the few hundred keys and the names and
+//! values beside its fields' names, and every string, key or value, is interned: the few hundred keys and the names and
 //! types that repeat across the units are each held once, for the whole run.
+//!
+//! A value is 16 bytes: an interned string is a pointer to the one copy of its text, and the
+//! elements of an array are behind one pointer to their length and items (`ThinVec`). An object
+//! is one allocation of a pointer to the names of its fields, held once for all objects with the
+//! same names, and its values, 16 bytes each (`Map`); one whose values are all strings, numbers,
+//! booleans or nulls is held once for all objects equal to it (`Map::leaf`). With a `&str`,
+//! `Vec`s and (name, value) pairs, a value took 32 bytes and a field 48, and the Minecraft
+//! server's trees about 9 GB.
 
+use std::alloc::Layout;
 use std::fmt;
 use std::ops::{Deref, Index, IndexMut};
+use std::ptr::NonNull;
 use std::sync::{LazyLock, Mutex};
+use thin_vec::ThinVec;
 
-/// An interned string: held once for the whole run, so a copy is a pointer.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Str(&'static str);
+/// An interned string: held once for the whole run, so a copy is a pointer, to the place that
+/// holds the text's address and length.
+#[derive(Clone, Copy)]
+pub struct Str(&'static &'static str);
 
 /// The strings interned so far.
-static STRINGS: LazyLock<Mutex<crate::analysis::FastSet<&'static str>>> = LazyLock::new(Default::default);
+static STRINGS: LazyLock<Mutex<crate::analysis::FastSet<Str>>> = LazyLock::new(Default::default);
 
 impl Str {
     pub fn new(s: &str) -> Str {
         let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&held) = strings.get(s) {
-            return Str(held);
+            return held;
         }
-        let held: &'static str = Box::leak(s.to_owned().into_boxed_str());
+        let held = Str(Box::leak(Box::new(&*Box::leak(s.to_owned().into_boxed_str()))));
         strings.insert(held);
-        Str(held)
+        held
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -32,34 +44,62 @@ impl Str {
     }
 }
 
+// Strings are interned, so two are the same string exactly when they are at the same place; their
+// hash and order are those of their text, as a `Str` is looked up by a `&str` (`Borrow`).
+impl PartialEq for Str {
+    fn eq(&self, other: &Str) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for Str {}
+
+impl std::hash::Hash for Str {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl PartialOrd for Str {
+    fn partial_cmp(&self, other: &Str) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Str {
+    fn cmp(&self, other: &Str) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
 impl Deref for Str {
     type Target = str;
     fn deref(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl AsRef<str> for Str {
     fn as_ref(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl std::borrow::Borrow<str> for Str {
     fn borrow(&self) -> &str {
-        self.0
+        self.as_str()
     }
 }
 
 impl fmt::Debug for Str {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self.0, f)
+        fmt::Debug::fmt(self.as_str(), f)
     }
 }
 
 impl fmt::Display for Str {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -83,37 +123,37 @@ impl From<&String> for Str {
 
 impl From<Str> for String {
     fn from(s: Str) -> String {
-        s.0.to_string()
+        s.as_str().to_string()
     }
 }
 
 impl PartialEq<str> for Str {
     fn eq(&self, other: &str) -> bool {
-        self.0 == other
+        self.as_str() == other
     }
 }
 
 impl PartialEq<&str> for Str {
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
+        self.as_str() == *other
     }
 }
 
 impl PartialEq<String> for Str {
     fn eq(&self, other: &String) -> bool {
-        self.0 == other
+        self.as_str() == other
     }
 }
 
 impl PartialEq<Str> for str {
     fn eq(&self, other: &Str) -> bool {
-        self == other.0
+        self == other.as_str()
     }
 }
 
 impl PartialEq<Str> for &str {
     fn eq(&self, other: &Str) -> bool {
-        *self == other.0
+        *self == other.as_str()
     }
 }
 
@@ -174,52 +214,226 @@ impl fmt::Display for Number {
 
 /// A JSON object: its fields in the order of their names, as `serde_json`'s `BTreeMap` keeps
 /// them (the walks of the trees see them in that order).
-#[derive(Clone, PartialEq, Default)]
-pub struct Map(Vec<(Str, Value)>);
+///
+/// The names of the fields are held once for every object with the same names (`keys`): an
+/// object is one allocation of a pointer to those names and its values, 16 bytes and 16 for each
+/// field, where a list of (name, value) pairs took 16 and 24 for each.
+pub struct Map(NonNull<Header>);
+
+/// The start of an object's allocation, whose values follow it.
+#[repr(C)]
+struct Header {
+    keys: &'static [Str],
+}
+
+/// The header of every object without fields, which is never freed.
+static EMPTY: Header = Header { keys: &[] };
+
+/// The lists of field names held so far, each once (`Map::keys`).
+static KEYS: LazyLock<Mutex<crate::analysis::FastSet<&'static [Str]>>> = LazyLock::new(Default::default);
+
+/// The one copy of the names `keys`.
+fn held_keys(keys: &[Str]) -> &'static [Str] {
+    if keys.is_empty() {
+        return &[];
+    }
+    let mut held = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&found) = held.get(keys) {
+        return found;
+    }
+    let found: &'static [Str] = Box::leak(keys.to_vec().into_boxed_slice());
+    held.insert(found);
+    found
+}
+
+// A `Map` owns its values as a `Box<[Value]>` would.
+unsafe impl Send for Map {}
+unsafe impl Sync for Map {}
 
 /// The most fields of an object that `Map::find` scans rather than searches.
 const SCANNED: usize = 12;
 
 impl Map {
     pub fn new() -> Map {
-        Map(Vec::new())
+        Map(NonNull::from(&EMPTY))
+    }
+
+    /// The layout of an object of `n` fields, and where its values start.
+    fn layout(n: usize) -> (Layout, usize) {
+        Layout::new::<Header>()
+            .extend(Layout::array::<Value>(n).expect("an object too large"))
+            .expect("an object too large")
+    }
+
+    /// The object with fields `keys`, in the order of their names and each once, and `values`,
+    /// one for each.
+    fn from_parts(keys: &[Str], values: impl ExactSizeIterator<Item = Value>) -> Map {
+        assert_eq!(keys.len(), values.len());
+        if keys.is_empty() {
+            return Map::new();
+        }
+        let keys = held_keys(keys);
+        let (layout, offset) = Map::layout(keys.len());
+        // SAFETY: the layout has the header's size, which is not zero; the header and each value
+        // are written before the map is used, at the offsets of the layout.
+        unsafe {
+            let start = std::alloc::alloc(layout);
+            let Some(header) = NonNull::new(start.cast::<Header>()) else {
+                std::alloc::handle_alloc_error(layout)
+            };
+            header.as_ptr().write(Header { keys });
+            let first = start.add(offset).cast::<Value>();
+            let mut written = 0;
+            for value in values.take(keys.len()) {
+                first.add(written).write(value);
+                written += 1;
+            }
+            assert_eq!(written, keys.len(), "an iterator gave fewer values than its length");
+            Map(header)
+        }
+    }
+
+    /// The object of fields `keys`, as `from_parts`, whose `values` are all strings, numbers,
+    /// booleans or nulls: the one copy of it (`LEAVES`).
+    fn leaf(keys: &[Str], values: Vec<Value>) -> Map {
+        let keys = held_keys(keys);
+        if keys.is_empty() {
+            return Map::new();
+        }
+        assert_eq!(keys.len(), values.len());
+        let hash = leaf_hash(keys, &values);
+        let mut leaves = LEAVES.lock().unwrap_or_else(|e| e.into_inner());
+        let bucket = leaves.entry(hash).or_default();
+        for held in bucket.iter() {
+            let map = std::mem::ManuallyDrop::new(Map(held.0.map_addr(|a| a | SHARED)));
+            if std::ptr::eq(map.keys_slice(), keys)
+                && map.values_slice().iter().zip(&values).all(|(a, b)| same(a, b))
+            {
+                // SAFETY: the count of a shared object changes only under the lock of `LEAVES`.
+                unsafe { *count(held.0.as_ptr()) += 1 };
+                return Map(map.0);
+            }
+        }
+        let (layout, offset) = shared_layout(keys.len());
+        // SAFETY: as in `from_parts`, after the count, which the layout puts first.
+        unsafe {
+            let start = std::alloc::alloc(layout);
+            if start.is_null() {
+                std::alloc::handle_alloc_error(layout)
+            }
+            start.cast::<usize>().write(1);
+            let header = NonNull::new_unchecked(start.add(offset).cast::<Header>());
+            header.as_ptr().write(Header { keys });
+            let first = start.add(offset + Map::layout(keys.len()).1).cast::<Value>();
+            for (i, value) in values.into_iter().enumerate() {
+                first.add(i).write(value);
+            }
+            bucket.push(Leaf(header));
+            Map(header.map_addr(|a| a | SHARED))
+        }
+    }
+
+    /// Whether the object is the one copy of objects equal to it (`leaf`).
+    fn is_shared(&self) -> bool {
+        self.0.addr().get() & SHARED != 0
+    }
+
+    /// Where the header is.
+    fn header(&self) -> *mut Header {
+        self.0.as_ptr().map_addr(|a| a & !SHARED)
+    }
+
+    /// The names of the fields, in order.
+    fn keys_slice(&self) -> &'static [Str] {
+        // SAFETY: the header is `EMPTY` or one that `from_parts` or `leaf` wrote, alive as long
+        // as `self`.
+        unsafe { (*self.header()).keys }
+    }
+
+    /// Where the values start.
+    fn first(&self) -> *mut Value {
+        let n = self.keys_slice().len();
+        if n == 0 {
+            return NonNull::dangling().as_ptr();
+        }
+        // SAFETY: the offset is within the allocation of `n` values (`layout`).
+        unsafe { self.header().cast::<u8>().add(Map::layout(n).1).cast::<Value>() }
+    }
+
+    fn values_slice(&self) -> &[Value] {
+        // SAFETY: the values are initialized and alive as long as `self`.
+        unsafe { std::slice::from_raw_parts(self.first(), self.keys_slice().len()) }
+    }
+
+    /// The values, to change: a shared object (`leaf`) is copied first.
+    fn values_slice_mut(&mut self) -> &mut [Value] {
+        if self.is_shared() {
+            *self = Map::from_parts(self.keys_slice(), self.values_slice().iter().cloned());
+        }
+        // SAFETY: as `values_slice`, owned by `self` alone and borrowed mutably with it.
+        unsafe { std::slice::from_raw_parts_mut(self.first(), self.keys_slice().len()) }
+    }
+
+    /// The values, moved out, with the allocation freed.
+    fn into_values(self) -> Vec<Value> {
+        if self.is_shared() {
+            return self.values_slice().to_vec();
+        }
+        let this = std::mem::ManuallyDrop::new(self);
+        let n = this.keys_slice().len();
+        let mut values = Vec::with_capacity(n);
+        if n > 0 {
+            // SAFETY: each value is read once, then the allocation is freed without dropping
+            // them (`this` is not dropped).
+            unsafe {
+                values.extend((0..n).map(|i| this.first().add(i).read()));
+                std::alloc::dealloc(this.header().cast::<u8>(), Map::layout(n).0);
+            }
+        }
+        values
     }
 
     /// Where field `key` is, or would be.
     fn search(&self, key: &str) -> Result<usize, usize> {
         // The first bytes decide most comparisons, without comparing the strings in full.
         let first = key.as_bytes().first();
-        self.0.binary_search_by(|(k, _)| k.0.as_bytes().first().cmp(&first).then_with(|| k.0.cmp(key)))
+        self.keys_slice()
+            .binary_search_by(|k| k.as_str().as_bytes().first().cmp(&first).then_with(|| k.as_str().cmp(key)))
     }
 
     /// Where field `key` is, if the object has it. A tree's node has a few fields, which a scan
     /// that compares lengths first finds sooner than a binary search of the names.
     fn find(&self, key: &str) -> Option<usize> {
-        match self.0.len() {
-            0..=SCANNED => self.0.iter().position(|(k, _)| k.0.len() == key.len() && k.0 == key),
+        let keys = self.keys_slice();
+        match keys.len() {
+            0..=SCANNED => keys.iter().position(|k| k.as_str().len() == key.len() && k.as_str() == key),
             _ => self.search(key).ok(),
         }
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.find(key).map(|i| &self.0[i].1)
+        self.find(key).map(|i| &self.values_slice()[i])
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
-        self.find(key).map(|i| &mut self.0[i].1)
+        self.find(key).map(|i| &mut self.values_slice_mut()[i])
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        self.get(key).is_some()
+        self.find(key).is_some()
     }
 
     /// Sets field `key`, returning its value before.
     pub fn insert(&mut self, key: impl Into<Str>, value: Value) -> Option<Value> {
         let key = key.into();
         match self.search(&key) {
-            Ok(i) => Some(std::mem::replace(&mut self.0[i].1, value)),
+            Ok(i) => Some(std::mem::replace(&mut self.values_slice_mut()[i], value)),
             Err(i) => {
-                self.0.insert(i, (key, value));
+                let mut keys = self.keys_slice().to_vec();
+                keys.insert(i, key);
+                let mut values = std::mem::take(self).into_values();
+                values.insert(i, value);
+                *self = Map::from_parts(&keys, values.into_iter());
                 None
             }
         }
@@ -227,35 +441,40 @@ impl Map {
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         let i = self.search(key).ok()?;
-        Some(self.0.remove(i).1)
+        let mut keys = self.keys_slice().to_vec();
+        keys.remove(i);
+        let mut values = std::mem::take(self).into_values();
+        let removed = values.remove(i);
+        *self = Map::from_parts(&keys, values.into_iter());
+        Some(removed)
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.keys_slice().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.keys_slice().is_empty()
     }
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&Str, &Value)> + ExactSizeIterator {
-        self.0.iter().map(|(k, v)| (k, v))
+        self.into_iter()
     }
 
     pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = (&Str, &mut Value)> + ExactSizeIterator {
-        self.0.iter_mut().map(|(k, v)| (&*k, v))
+        self.into_iter()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &Str> {
-        self.0.iter().map(|(k, _)| k)
+        self.keys_slice().iter()
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Value> {
-        self.0.iter().map(|(_, v)| v)
+        self.values_slice().iter()
     }
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
-        self.0.iter_mut().map(|(_, v)| v)
+        self.values_slice_mut().iter_mut()
     }
 
     /// Sets the fields of `other`, as `insert` sets each.
@@ -265,46 +484,172 @@ impl Map {
         }
     }
 
-    fn shrink(&mut self) {
-        self.0.shrink_to_fit();
+    /// The object of `fields`, which may be in any order: one named twice keeps its last value.
+    fn of_fields(mut fields: Vec<(Str, Value)>) -> Map {
+        fields.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        let mut kept: Vec<(Str, Value)> = Vec::with_capacity(fields.len());
+        for (key, value) in fields {
+            match kept.last_mut() {
+                Some(last) if last.0 == key => last.1 = value,
+                _ => kept.push((key, value)),
+            }
+        }
+        let keys: Vec<Str> = kept.iter().map(|(k, _)| *k).collect();
+        Map::from_parts(&keys, kept.into_iter().map(|(_, v)| v))
+    }
+}
+
+impl Drop for Map {
+    fn drop(&mut self) {
+        let n = self.keys_slice().len();
+        if n == 0 {
+            return;
+        }
+        if self.is_shared() {
+            let mut leaves = LEAVES.lock().unwrap_or_else(|e| e.into_inner());
+            let header = self.header();
+            // SAFETY: the count changes only under the lock; the last object to go frees the
+            // allocation that `leaf` made, after taking it out of `LEAVES`.
+            unsafe {
+                *count(header) -= 1;
+                if *count(header) > 0 {
+                    return;
+                }
+                let hash = leaf_hash(self.keys_slice(), self.values_slice());
+                if let Some(bucket) = leaves.get_mut(&hash) {
+                    bucket.retain(|l| l.0.as_ptr() != header);
+                    if bucket.is_empty() {
+                        leaves.remove(&hash);
+                    }
+                }
+                std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(self.first(), n));
+                let (layout, offset) = shared_layout(n);
+                std::alloc::dealloc(header.cast::<u8>().sub(offset), layout);
+            }
+            return;
+        }
+        // SAFETY: the values are initialized and owned, and the allocation is the one that
+        // `from_parts` made for `n` values.
+        unsafe {
+            std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(self.first(), n));
+            std::alloc::dealloc(self.header().cast::<u8>(), Map::layout(n).0);
+        }
+    }
+}
+
+impl Clone for Map {
+    fn clone(&self) -> Map {
+        if self.is_shared() {
+            let _leaves = LEAVES.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: the count changes only under the lock.
+            unsafe { *count(self.header()) += 1 };
+            return Map(self.0);
+        }
+        Map::from_parts(self.keys_slice(), self.values_slice().iter().cloned())
+    }
+}
+
+/// The bit of a `Map`'s pointer that marks an object shared by all those equal to it
+/// (`Map::leaf`); headers are aligned to eight bytes.
+const SHARED: usize = 1;
+
+/// An object held by `LEAVES`.
+struct Leaf(NonNull<Header>);
+
+// The objects of `LEAVES` change only under its lock.
+unsafe impl Send for Leaf {}
+
+/// The objects of javac's trees whose values are all strings, numbers, booleans or nulls (the
+/// nodes of most identifiers, literals and primitive types), each held once for all equal to it,
+/// by `leaf_hash`, with a count of the copies of it before its header (`count`). Most such nodes
+/// repeat: on javac's census, 1.57 million are 402 thousand different ones.
+static LEAVES: LazyLock<Mutex<crate::analysis::FastMap<u64, Vec<Leaf>>>> = LazyLock::new(Default::default);
+
+/// The layout of a shared object of `n` fields (`Map::leaf`): its count, then the object as
+/// `Map::layout`; and where the header starts.
+fn shared_layout(n: usize) -> (Layout, usize) {
+    Layout::new::<usize>().extend(Map::layout(n).0).expect("an object too large")
+}
+
+/// The count of copies of a shared object, whose header is `header`.
+///
+/// # Safety
+/// The object is shared (`Map::leaf`) and alive, and the lock of `LEAVES` is held.
+unsafe fn count(header: *mut Header) -> *mut usize {
+    unsafe { header.cast::<u8>().sub(shared_layout(0).1).cast::<usize>() }
+}
+
+/// The hash of an object of `LEAVES`.
+fn leaf_hash(keys: &'static [Str], values: &[Value]) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = crate::analysis::IndexHasher::default();
+    hasher.write_usize(keys.as_ptr().addr());
+    for value in values {
+        let (kind, bits) = match value {
+            Value::Null => (0, 0),
+            Value::Bool(b) => (1, *b as u64),
+            Value::Number(Number::Int(n)) => (2, *n as u64),
+            Value::Number(Number::Float(x)) => (3, x.to_bits()),
+            Value::String(s) => (4, s.as_str().as_ptr().addr() as u64),
+            Value::Array(_) | Value::Object(_) => (5, 0),
+        };
+        hasher.write_usize(kind);
+        hasher.write_u64(bits);
+    }
+    hasher.finish()
+}
+
+/// Whether two values of objects of `LEAVES` are the same: a number of the same bits.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(Number::Float(x)), Value::Number(Number::Float(y))) => x.to_bits() == y.to_bits(),
+        (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_), _) => a == b,
+        _ => false,
+    }
+}
+
+impl PartialEq for Map {
+    fn eq(&self, other: &Map) -> bool {
+        self.keys_slice() == other.keys_slice() && self.values_slice() == other.values_slice()
+    }
+}
+
+impl Default for Map {
+    fn default() -> Map {
+        Map::new()
     }
 }
 
 impl<'a> IntoIterator for &'a Map {
     type Item = (&'a Str, &'a Value);
-    type IntoIter =
-        std::iter::Map<std::slice::Iter<'a, (Str, Value)>, fn(&'a (Str, Value)) -> (&'a Str, &'a Value)>;
+    type IntoIter = std::iter::Zip<std::slice::Iter<'a, Str>, std::slice::Iter<'a, Value>>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter().map(|(k, v)| (k, v))
+        self.keys_slice().iter().zip(self.values_slice())
     }
 }
 
 impl<'a> IntoIterator for &'a mut Map {
     type Item = (&'a Str, &'a mut Value);
-    type IntoIter = std::iter::Map<
-        std::slice::IterMut<'a, (Str, Value)>,
-        fn(&'a mut (Str, Value)) -> (&'a Str, &'a mut Value),
-    >;
+    type IntoIter = std::iter::Zip<std::slice::Iter<'a, Str>, std::slice::IterMut<'a, Value>>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter_mut().map(|(k, v)| (&*k, v))
+        let keys = self.keys_slice();
+        keys.iter().zip(self.values_slice_mut())
     }
 }
 
 impl IntoIterator for Map {
     type Item = (Str, Value);
-    type IntoIter = std::vec::IntoIter<(Str, Value)>;
+    type IntoIter =
+        std::iter::Zip<std::iter::Copied<std::slice::Iter<'static, Str>>, std::vec::IntoIter<Value>>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        let keys = self.keys_slice();
+        keys.iter().copied().zip(self.into_values())
     }
 }
 
 impl<K: Into<Str>> FromIterator<(K, Value)> for Map {
     fn from_iter<I: IntoIterator<Item = (K, Value)>>(iter: I) -> Map {
-        let mut map = Map::new();
-        for (k, v) in iter {
-            map.insert(k, v);
-        }
-        map
+        Map::of_fields(iter.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 }
 
@@ -322,7 +667,7 @@ pub enum Value {
     Bool(bool),
     Number(Number),
     String(Str),
-    Array(Vec<Value>),
+    Array(ThinVec<Value>),
     Object(Map),
 }
 
@@ -331,7 +676,7 @@ static NULL: Value = Value::Null;
 impl Value {
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::String(s) => Some(s.0),
+            Value::String(s) => Some(s.as_str()),
             _ => None,
         }
     }
@@ -364,14 +709,14 @@ impl Value {
         }
     }
 
-    pub fn as_array(&self) -> Option<&Vec<Value>> {
+    pub fn as_array(&self) -> Option<&ThinVec<Value>> {
         match self {
             Value::Array(items) => Some(items),
             _ => None,
         }
     }
 
-    pub fn as_array_mut(&mut self) -> Option<&mut Vec<Value>> {
+    pub fn as_array_mut(&mut self) -> Option<&mut ThinVec<Value>> {
         match self {
             Value::Array(items) => Some(items),
             _ => None,
@@ -484,14 +829,10 @@ impl Key for str {
             *v = Value::Object(Map::new());
         }
         let Value::Object(fields) = v else { panic!("cannot index a non-object JSON value with {self:?}") };
-        let i = match fields.search(self) {
-            Ok(i) => i,
-            Err(i) => {
-                fields.0.insert(i, (Str::new(self), Value::Null));
-                i
-            }
-        };
-        &mut fields.0[i].1
+        if fields.find(self).is_none() {
+            fields.insert(self, Value::Null);
+        }
+        fields.get_mut(self).expect("a field just set")
     }
 }
 
@@ -651,6 +992,12 @@ impl From<i32> for Value {
 
 impl From<Vec<Value>> for Value {
     fn from(items: Vec<Value>) -> Value {
+        Value::Array(items.into())
+    }
+}
+
+impl From<ThinVec<Value>> for Value {
+    fn from(items: ThinVec<Value>) -> Value {
         Value::Array(items)
     }
 }
@@ -686,12 +1033,12 @@ impl From<&Value> for serde_json::Value {
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Number(Number::Int(n)) => serde_json::Value::from(*n),
             Value::Number(Number::Float(x)) => serde_json::Value::from(*x),
-            Value::String(s) => serde_json::Value::String(s.0.to_string()),
+            Value::String(s) => serde_json::Value::String(s.as_str().to_string()),
             Value::Array(items) => {
                 serde_json::Value::Array(items.iter().map(serde_json::Value::from).collect())
             }
             Value::Object(fields) => serde_json::Value::Object(
-                fields.iter().map(|(k, v)| (k.0.to_string(), serde_json::Value::from(v))).collect(),
+                fields.iter().map(|(k, v)| (k.as_str().to_string(), serde_json::Value::from(v))).collect(),
             ),
         }
     }
@@ -732,7 +1079,7 @@ impl serde::Serialize for Value {
             Value::Bool(b) => serializer.serialize_bool(*b),
             Value::Number(Number::Int(n)) => serializer.serialize_i64(*n),
             Value::Number(Number::Float(x)) => serializer.serialize_f64(*x),
-            Value::String(s) => serializer.serialize_str(s.0),
+            Value::String(s) => serializer.serialize_str(s.as_str()),
             Value::Array(items) => {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {
@@ -750,7 +1097,7 @@ impl serde::Serialize for Map {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(self.len()))?;
         for (k, v) in self {
-            map.serialize_entry(k.0, v)?;
+            map.serialize_entry(k.as_str(), v)?;
         }
         map.end()
     }
@@ -803,24 +1150,61 @@ impl<'de> serde::de::Visitor<'de> for Visitor {
     }
 
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(item) = seq.next_element()? {
-            items.push(item);
+        // The elements go on a stack that every array being read shares, and are moved from there
+        // into an array of their exact length: one allocation per array, not one per doubling.
+        let start = ITEMS.with_borrow(Vec::len);
+        while let Some(item) = seq.next_element::<Value>()? {
+            ITEMS.with_borrow_mut(|items| items.push(item));
         }
-        items.shrink_to_fit();
-        Ok(Value::Array(items))
+        Ok(Value::Array(ITEMS.with_borrow_mut(|items| exact(items.drain(start..)))))
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
-        let mut fields = Map(Vec::with_capacity(access.size_hint().unwrap_or(0)));
+        let start = FIELDS.with_borrow(Vec::len);
         while let Some(key) = access.next_key::<KeyStr>()? {
-            let value = access.next_value()?;
-            // A key that javac writes twice keeps the last value, as `serde_json` does.
-            fields.insert(key.0, value);
+            let value = access.next_value::<Value>()?;
+            FIELDS.with_borrow_mut(|fields| fields.push((key.0, value)));
         }
-        fields.shrink();
-        Ok(Value::Object(fields))
+        Ok(Value::Object(FIELDS.with_borrow_mut(|fields| {
+            let read = &mut fields[start..];
+            // In the order of their names; a key that javac writes twice keeps the last value, as
+            // `serde_json` does.
+            read.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+            let mut keys: Vec<Str> = Vec::with_capacity(read.len());
+            let mut values: Vec<Value> = Vec::with_capacity(read.len());
+            for (key, value) in fields.drain(start..) {
+                match keys.last() {
+                    Some(&last) if last == key => *values.last_mut().expect("a value for each key") = value,
+                    _ => {
+                        keys.push(key);
+                        values.push(value);
+                    }
+                }
+            }
+            if values
+                .iter()
+                .all(|v| matches!(v, Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)))
+            {
+                Map::leaf(&keys, values)
+            } else {
+                Map::from_parts(&keys, values.into_iter())
+            }
+        })))
     }
+}
+
+thread_local! {
+    /// The elements of the arrays being read, innermost last (`Visitor::visit_seq`).
+    static ITEMS: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The fields of the objects being read, innermost last (`Visitor::visit_map`).
+    static FIELDS: std::cell::RefCell<Vec<(Str, Value)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The items, in a list of their exact length.
+fn exact<T>(items: impl ExactSizeIterator<Item = T>) -> ThinVec<T> {
+    let mut out = ThinVec::with_capacity(items.len());
+    out.extend(items);
+    out
 }
 
 /// A key of an object, interned as it is read.
@@ -849,3 +1233,57 @@ macro_rules! json {
     };
 }
 pub(crate) use json;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn objects_read_set_and_remove_fields() {
+        let mut v: Value =
+            serde_json::from_str(r#"{"b": [1, {"x": null}], "a": "s", "b": 2, "c": {}}"#).unwrap();
+        assert_eq!(v.to_string(), r#"{"a":"s","b":2,"c":{}}"#);
+        v["d"] = Value::from(true);
+        v["a"] = Value::from(3i64);
+        let fields = v.as_object_mut().unwrap();
+        assert_eq!(fields.remove("b"), Some(Value::from(2i64)));
+        assert_eq!(fields.remove("b"), None);
+        assert_eq!(fields.len(), 3);
+        let copy = v.clone();
+        assert_eq!(copy, v);
+        assert_eq!(v.to_string(), r#"{"a":3,"c":{},"d":true}"#);
+        let Value::Object(fields) = v else { unreachable!() };
+        let pairs: Vec<(String, Value)> = fields.into_iter().map(|(k, v)| (k.into(), v)).collect();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[2], ("d".to_string(), Value::from(true)));
+        let mut emptied: Map = [("k", Value::from("v"))].into_iter().collect();
+        emptied.remove("k");
+        assert!(emptied.is_empty());
+        assert_eq!(emptied, Map::new());
+    }
+
+    #[test]
+    fn equal_leaves_are_shared_and_copied_to_change() {
+        let text =
+            r#"[{"k": "a", "n": 1.5}, {"k": "a", "n": 1.5}, {"k": "a", "n": -0.0}, {"k": "a", "n": 0.0}]"#;
+        let mut v: Value = serde_json::from_str(text).unwrap();
+        let items = v.as_array().unwrap();
+        let shared = |i: usize| items[i].as_object().unwrap().0;
+        assert_eq!(shared(0), shared(1));
+        assert_ne!(shared(2), shared(3));
+        let copy = v.clone();
+        v[1]["n"] = Value::from(2i64);
+        v[0].as_object_mut().unwrap().insert("m", Value::Null);
+        assert_eq!(
+            v.to_string(),
+            r#"[{"k":"a","m":null,"n":1.5},{"k":"a","n":2},{"k":"a","n":-0.0},{"k":"a","n":0.0}]"#
+        );
+        assert_eq!(
+            copy.to_string(),
+            r#"[{"k":"a","n":1.5},{"k":"a","n":1.5},{"k":"a","n":-0.0},{"k":"a","n":0.0}]"#
+        );
+        drop((v, copy));
+        let again: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(again[1]["n"].as_f64(), Some(1.5));
+    }
+}

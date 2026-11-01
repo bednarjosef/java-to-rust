@@ -6,7 +6,7 @@ use super::super::FastSet;
 use super::*;
 
 /// What a point raises, given the escapes of every method (see `analyze`).
-type Raised<'a> = dyn Fn(&Point, &[BTreeSet<Kind>]) -> BTreeSet<Kind> + 'a;
+type Raised<'a> = dyn Fn(&Point, &Escaped) -> BTreeSet<Kind> + 'a;
 
 /// The classes (by index) with an instance field initializer whose points raise something that
 /// escapes it. `raised` and `escapes` are those of `analyze`.
@@ -14,7 +14,7 @@ pub(super) fn throwing(
     class: &Class,
     facts: &Facts,
     raised: &Raised<'_>,
-    escapes: &[BTreeSet<Kind>],
+    escapes: &Escaped,
 ) -> FastSet<usize> {
     let mut out = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {

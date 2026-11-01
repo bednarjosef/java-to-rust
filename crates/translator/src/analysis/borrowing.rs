@@ -19,7 +19,7 @@
 //! of them, and touching an object of a class type touches every concrete class under it.
 
 use super::Facts;
-use super::closure::{Bits, reached_union};
+use super::closure::{Bits, Reached, reached_union};
 use super::hierarchy::{Home, home, to_string_impl};
 use super::{FastMap, FastSet};
 use crate::ast::*;
@@ -49,7 +49,7 @@ pub struct Borrowing {
 /// calls.
 pub struct Reach<'c> {
     scans: Vec<Scan<'c>>,
-    pub reach: Vec<Bits>,
+    pub reach: Reached,
 }
 
 pub fn reach(class: &Class) -> Reach<'_> {
