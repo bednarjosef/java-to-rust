@@ -21,7 +21,9 @@
 //! held from the names that reach it. A field is shared when it is a primitive of a local's
 //! object or of `this`, nothing in the run assigns the local or a field of that name of any
 //! object, its first read is not conditional, and no class has a volatile field of that name,
-//! whose every read Java makes again.
+//! whose every read Java makes again. A first read is never in the value of a compound
+//! assignment to an element or to a boxed number, which the generated code computes in a
+//! closure; a later read there reads the local.
 
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -144,8 +146,13 @@ impl<'v> Walk<'v> {
                 }
                 true
             }
-            ExprKind::Assign { target, value, .. } => {
-                self.place(target, conditional) && self.expr(value, conditional)
+            ExprKind::Assign { op, target, value } => {
+                // The value of a compound assignment to an element, or to a boxed number, is
+                // written inside a closure (`java::update`, `boxed_update`), which cannot set a
+                // local of the method: a first read there would be such a setting.
+                let closure = op.is_some()
+                    && (matches!(target, Place::Index(..)) || !(e.ty.is_numeric() || e.ty == Type::Boolean));
+                self.place(target, conditional) && self.expr(value, conditional || closure)
             }
             ExprKind::IncDec { target, .. } => self.place(target, conditional),
             ExprKind::Builtin(
