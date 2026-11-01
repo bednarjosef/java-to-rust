@@ -348,7 +348,29 @@ time is under "Allocation" below):
 | ManyThreadsAllocating |  235.5 | 197.7 |  417 |
 | DeepThreadStacks      |  234.1 | 199.7 |  514 |
 
-### Where the Minecraft server's memory went
+### Where the Minecraft server's memory goes
+
+On the bench of 300,000 ticks, the release trial of 10-31 14:05 (the server-push translation),
+run with the collector's defaults of the evening (code pages given back every 10 seconds, low
+blocks first), peaks at 807–840 MB against Java's 1,232 MB, at a load of 50–70. From its memory
+map every 2 seconds (`/proc/PID/smaps`) and its collector's log (`JAVA_GC_LOG=2`):
+
+- **The peak comes at the end**, while the server saves its chunks after `stop`: the heap 736 MB
+  (311 MB alive, 723 MB of blocks), the executable's code 41 MB and constants 18 MB, the mark
+  stacks 34 MB (now a few KB, docs/collector.md, "Side tables on small pages"), the blocks' table
+  14 MB, the threads' stacks 7 MB, data and the C library 5 MB.
+- **A second peak comes at startup**, 6 to 8 seconds in, before the first give-back of code
+  pages: the heap 608 MB, code 124 MB, constants 48 MB, 820 MB in all. Once the heap is kept
+  smaller it is the higher of the two (below).
+- **The heap is about 2.3 times what is alive.** During the sprint 268 MB is alive in 630 MB of
+  blocks: 229 MB of free slots in blocks that also hold live objects (the 32-byte slots' blocks
+  are 39% full, the 24-byte ones 37%), and 130 MB of free blocks below the highest. A collection
+  runs once the program has taken as much as is alive, which the free slots and blocks are kept
+  for. Collecting after half as much (`JAVA_GC_GROWTH=50`) peaks at 689–702 MB, after three
+  quarters at 744–756 MB, after as much at 807–840 MB; the whole run then takes 15% and 10% more
+  processor time (105 s and 99 s against 90 s, two runs each). The young generation
+  (`JAVA_GC_GENERATIONS=1`) keeps old objects that died until a full collection: 1,031–1,059 MB
+  after as much as is alive, 781–853 MB after half.
 
 The release trial of the server peaked at 1,498 MB on the bench (`minecraft-server.md`, step
 `bench`), Java at 1,092 MB. Measured on that binary after the tick sprint, from its block table
