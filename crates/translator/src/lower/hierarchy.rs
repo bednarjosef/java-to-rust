@@ -125,8 +125,26 @@ impl<'t> Lowering<'t> {
             || (char_sequence && matches!(ty, Type::String | Type::StringBuilder))
             || (self.is_appendable(value) && ty == Type::StringBuilder)
             || (Self::is_class_interface(value) && ty == Type::JavaClass)
-            || Self::is_numeric_box_of(value, ty);
+            || Self::is_numeric_box_of(value, ty)
+            || Self::is_value_interface_of(value, ty);
         matches!(value, Type::Class(..) | Type::Enum(_)) && target
+    }
+
+    /// Whether `value` is an interface that the runtime's strings or boxes of type `ty` implement
+    /// besides `Comparable`: `Serializable`, `Constable`, and `ConstantDesc` for a string and the
+    /// boxes of `int`, `long`, `float` and `double` (`CodeBuilder.loadConstant` tests a
+    /// `ConstantDesc` for an `Integer`).
+    pub(super) fn is_value_interface_of(value: Type, ty: Type) -> bool {
+        let Type::Class(name, _) = value else { return false };
+        match name {
+            "java.io.Serializable" | "java.lang.constant.Constable" => {
+                matches!(ty, Type::String | Type::Boxed(_))
+            }
+            "java.lang.constant.ConstantDesc" => {
+                matches!(ty, Type::String | Type::Boxed(Type::Int | Type::Long | Type::Float | Type::Double))
+            }
+            _ => false,
+        }
     }
 
     /// Whether `ty` is a box of a number, which a value of type `value`, `Number`, may be.

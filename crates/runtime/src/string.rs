@@ -1138,6 +1138,27 @@ pub fn strip_indent(s: &Wtf8) -> JString {
     text
 }
 
+/// `s.indent(n)`: each line of `s` with `n` spaces added at its start, or for a negative `n` up
+/// to `-n` white space characters removed there, each ended by `\n`; empty for an empty `s`.
+pub fn indent(s: &Wtf8, n: i32) -> JString {
+    let mut text = JString::new();
+    let spaces = " ".repeat(usize::try_from(n).unwrap_or(0));
+    for line in lines(s) {
+        if n < 0 {
+            // White space is one code unit per code point, so counting code points counts units.
+            let white = line.code_points().take_while(|&c| is_java_whitespace(c)).count();
+            let skip = usize::try_from(-i64::from(n)).unwrap_or(usize::MAX).min(white);
+            let start = line.code_point_indices().nth(skip).map_or(line.len(), |(i, _)| i);
+            text.push_wtf8(line.slice(start, line.len()));
+        } else {
+            text.push_str(&spaces);
+            text.push_wtf8(&line);
+        }
+        text.push_str("\n");
+    }
+    text
+}
+
 /// `new String(codePoints, offset, count)`, which throws for a range outside the array and for
 /// an invalid code point.
 pub fn from_code_points(points: &(impl crate::Source<i32> + ?Sized), offset: i32, count: i32) -> JString {
@@ -1164,6 +1185,13 @@ pub fn from_high_byte(
     let high = ((hibyte & 0xff) as u16) << 8;
     let units: Vec<u16> = bytes.range(range).iter().map(|&b| high | u16::from(b as u8)).collect();
     from_units(&units)
+}
+
+/// `new String(ascii, hibyte)`: every byte of `bytes`, each the low eight bits of a character
+/// whose high eight bits are those of `hibyte`.
+pub fn from_high_byte_all(bytes: &(impl crate::Source<i8> + ?Sized), hibyte: i32) -> JString {
+    let count = i32::try_from(bytes.length()).unwrap_or(i32::MAX);
+    from_high_byte(bytes, hibyte, 0, count)
 }
 
 /// The elements `offset .. offset + count` of an array of length `len`, or the
@@ -1439,6 +1467,15 @@ mod tests {
     fn joined_ranges_have_a_prefix_and_suffix() {
         assert_eq!(join_range(w("["), w("]"), w(", "), &[Some("a"), None, Some("c")], 2), "[a, null]");
         assert_eq!(join_range(w("<"), w(">"), w("-"), &[] as &[&str], 0), "<>");
+    }
+
+    #[test]
+    fn indent_adds_or_removes_leading_white_space_per_line() {
+        assert_eq!(indent(w("a\n  b\r\nc"), 2), "  a\n    b\n  c\n");
+        assert_eq!(indent(w("   a\n b\n\tc"), -2), " a\nb\nc\n");
+        assert_eq!(indent(w("  x"), i32::MIN), "x\n");
+        assert_eq!(indent(w(""), 4), "");
+        assert_eq!(indent(w("\n"), 0), "\n");
     }
 
     #[test]

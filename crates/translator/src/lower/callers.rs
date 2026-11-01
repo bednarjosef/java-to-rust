@@ -15,8 +15,8 @@
 //! reference to a method that walks the stack is rejected: Java's walker skips the hidden frame
 //! of the reference's class and finds whoever calls the functional interface. (For
 //! `Reflection.getCallerClass()`, Java binds the caller of a method reference to the class that
-//! holds the reference, which the translation passes.) Every other way of walking the stack
-//! (`StackWalker.walk` over its frames) is rejected as before.
+//! holds the reference, which the translation passes.) `StackWalker.walk` over the frames sees
+//! only the walking method's own frame (`stack_walks.rs`).
 
 use super::*;
 use std::collections::HashMap;

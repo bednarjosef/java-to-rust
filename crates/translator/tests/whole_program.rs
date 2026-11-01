@@ -1413,7 +1413,8 @@ class Unrelated {
 }
 public class Main {
     static <T> T same(T t) { return t; }
-    static long frames() { return StackWalker.getInstance().walk(s -> s.count()); }
+    // Rejected where it can run: the JDK's StackWalker.forEach is not lowered yet.
+    static long frames() { long[] n = {0}; StackWalker.getInstance().forEach(f -> n[0]++); return n[0]; }
     public static void main(String[] args) throws Exception {
         if (args.length > 5) System.out.println(frames());
         String held = same(new Holder<String>("held").get());

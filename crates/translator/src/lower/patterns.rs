@@ -335,13 +335,19 @@ impl<'t> Lowering<'t> {
                 let variable = pattern.child("variable")?;
                 let name = variable.str("name").to_string();
                 let ty = self.ty(variable, variable.symbol().map_or("", |s| s.ty))?;
+                // An unnamed variable (`case Point _`) binds nothing, so that a case may list
+                // several such patterns.
+                let name = Some(name).filter(|n| !n.is_empty() && n != "_");
                 if self.always_is(value.ty, ty) {
-                    return Ok((None, vec![Alias { name, ty, target: target(value) }]));
+                    let aliases = name.map(|name| Alias { name, ty, target: target(value) });
+                    return Ok((None, aliases.into_iter().collect()));
                 }
                 let java = variable.symbol().map_or("", |s| s.ty);
                 Ok((Some(self.instance_test(pattern, value, ty, name, (variable, java))?), Vec::new()))
             }
             "DECONSTRUCTION_PATTERN" => self.record_test(pattern, value, fresh),
+            // `_` alone, in a record pattern (`case Point(var x, _)`): matches every value.
+            "ANY_PATTERN" => Ok((None, Vec::new())),
             kind => unsupported(pattern, &kind_words(kind)),
         }
     }
@@ -364,7 +370,7 @@ impl<'t> Lowering<'t> {
         let simple = self.types[record].node.str("simpleName");
         let name = fresh.name(&variable_name(simple));
         let typed = (deconstructor, deconstructor.java_type());
-        let mut test = self.instance_test(pattern, value, ty, name.clone(), typed)?;
+        let mut test = self.instance_test(pattern, value, ty, Some(name.clone()), typed)?;
         let mut aliases = Vec::new();
         let components = self.components(record)?;
         let nested: Vec<Node<'t>> = pattern.list("nestedPatterns").collect();
@@ -397,7 +403,7 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// `value instanceof ty name`, as `instanceof` tests it (`instance_of`): an array type
+    /// `value instanceof ty name` (`value instanceof ty` without a name), as `instanceof` tests it (`instance_of`): an array type
     /// (`case byte[] b`, as `KeyUtil.clear` writes it) by the class the array carries. `typed`
     /// is the node whose type `ty` is, and javac's name of the type.
     fn instance_test(
@@ -405,7 +411,7 @@ impl<'t> Lowering<'t> {
         pattern: Node<'t>,
         value: Expr,
         ty: Type,
-        name: String,
+        name: Option<String>,
         (typed, java): (Node<'t>, &str),
     ) -> Result<Expr, Error> {
         if !self.may_be(value.ty, ty) {
@@ -413,8 +419,10 @@ impl<'t> Lowering<'t> {
         }
         self.object_array(pattern, ty)?;
         let value = self.array_test(typed, value, ty, java)?;
-        self.forget_alias(&name);
-        let kind = ExprKind::InstanceOf { value: Box::new(value), ty, binding: Some(name) };
+        if let Some(name) = &name {
+            self.forget_alias(name);
+        }
+        let kind = ExprKind::InstanceOf { value: Box::new(value), ty, binding: name };
         Ok(self.synth(kind, pattern.pos(), Type::Boolean))
     }
 

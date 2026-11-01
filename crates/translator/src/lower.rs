@@ -76,6 +76,7 @@ mod proxies;
 mod recreate;
 mod reflection;
 mod regex;
+mod stack_walks;
 mod sun_unsafe;
 mod switch;
 mod sync;
@@ -528,6 +529,9 @@ struct Lowering<'t> {
     library_annotations: std::collections::HashSet<String>,
     /// What each method asks about its caller (see `callers`).
     callers: callers::Callers,
+    /// In a whole program, the name of the source file of each class declared at the top level of
+    /// a unit or in such a class (`stack_walks`).
+    source_files: RefCell<std::collections::HashMap<usize, &'t str>>,
     /// The reflection tables made so far (`reflection::table`).
     reflection_tables: RefCell<std::collections::HashMap<reflection::TableKey, Vec<reflection::Entry<'t>>>>,
     /// Where the members of the reflection table are in the code written for it so far
@@ -873,7 +877,7 @@ impl<'t> Lowering<'t> {
             }
             self.block_stmt(node, stmt, &unset, &mut out).inspect_err(|e| self.note_failed_stmt(stmt, e))?;
         }
-        Ok(self.exits_into_rest(out))
+        Ok(self.exits_into_rest(self.while_into_rest(out)))
     }
 
     /// Statement `stmt` of block `node` into `out`; `unset` are the block's `if`s that run only
@@ -1711,6 +1715,9 @@ impl<'t> Lowering<'t> {
                 if self.type_index(symbol.owner).is_none() || node.0["implicit"] == Value::Bool(true) =>
             {
                 return self.objects_call(node, name, args);
+            }
+            ("java.lang.StackWalker", "walk") if !symbol.is_static && args.len() == 1 => {
+                return self.stack_walk(node, receiver, args);
             }
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();

@@ -35,6 +35,20 @@
 //! !(o instanceof T name) ? false : f(name)     o instanceof T name ? f(name) : false
 //! ```
 //!
+//! A `while` loop whose condition is a negated pattern alone and whose body has no `break` of it
+//! ends only where the pattern matched, and Java scopes `name` over the rest of the block. The
+//! variable is declared before the loop, which tests the pattern first and leaves with the match
+//! (`while_into_rest`; `name2` is a name that no code there reads):
+//!
+//! ```text
+//! while (!(x instanceof T name)) {     T name;
+//!     body                             while (true) {
+//! }                                        if (x instanceof T name2) { name = name2; break; }
+//! rest(name)                               body
+//!                                      }
+//!                                      rest(name)
+//! ```
+//!
 //! An `if` whose condition (or an operand of its `||` chain) negates an `&&` chain with a pattern
 //! has it negated operand by operand first, which runs the same: `!(a && x instanceof T name)` is
 //! `!a || !(x instanceof T name)`, and `a || !(x instanceof T name && c(name))` is
@@ -112,6 +126,59 @@ impl<'t> Lowering<'t> {
         };
         stmts.push(turned);
         stmts
+    }
+
+    /// The statements of a block, each `while` whose condition is a negated pattern alone, whose
+    /// body has no `break` of it and whose variable the rest of the block reads turned into a loop
+    /// that leaves with the match, after the variable's declaration (see the module's comment).
+    pub(super) fn while_into_rest(&self, mut stmts: Vec<Stmt>) -> Vec<Stmt> {
+        let turns = |i: usize, stmts: &[Stmt]| match &stmts[i] {
+            Stmt::While { cond, body } => negated_pattern(cond).is_some_and(|name| {
+                stmts[i + 1..].iter().any(|r| mentions_stmt(r, name)) && !breaks_out(body)
+            }),
+            _ => false,
+        };
+        let mut i = 0;
+        while i < stmts.len() {
+            if !turns(i, &stmts) {
+                i += 1;
+                continue;
+            }
+            let Stmt::While { cond, body } = stmts.remove(i) else { unreachable!("the loop found above") };
+            let ExprKind::Unary(UnOp::Not, inner) = cond.kind else { unreachable!("a negated pattern") };
+            let turned = self.loop_until_match(*inner, *body, &stmts[i..]);
+            let added = turned.len();
+            stmts.splice(i..i, turned);
+            i += added;
+        }
+        stmts
+    }
+
+    /// The declaration of the variable of `test` (`x instanceof T name`) and the loop that runs
+    /// `body` until `test` matches, which leaves with the match in the variable.
+    fn loop_until_match(&self, test: Expr, body: Stmt, rest: &[Stmt]) -> Vec<Stmt> {
+        let pos = test.pos;
+        let ExprKind::InstanceOf { value, ty, binding: Some(name) } = test.kind else {
+            unreachable!("a pattern with a variable")
+        };
+        let free = |n: &str| {
+            !mentions_stmt(&body, n) && !mentions(&value, n) && !rest.iter().any(|r| mentions_stmt(r, n))
+        };
+        let matched = (1..)
+            .map(|i| if i == 1 { format!("{name}_matched") } else { format!("{name}_matched{i}") })
+            .find(|n| free(n))
+            .expect("a free name");
+        let read = self.synth(ExprKind::Var(matched.clone()), pos, ty);
+        let assign = ExprKind::Assign { op: None, target: Place::Var(name.clone()), value: Box::new(read) };
+        let assign = Stmt::Expr(self.synth(assign, pos, ty));
+        let test = Expr { kind: ExprKind::InstanceOf { value, ty, binding: Some(matched) }, ..test };
+        let leave =
+            Stmt::If { cond: test, then: Box::new(Stmt::Block(vec![assign, Stmt::Break])), otherwise: None };
+        let forever = self.synth(ExprKind::Bool(true), pos, Type::Boolean);
+        vec![
+            Stmt::Local { ty, name, init: None, pos },
+            Stmt::While { cond: forever, body: Box::new(Stmt::Block(vec![leave, body])) },
+        ]
     }
 
     /// `cond` with each operand of its `||` chain that negates an `&&` chain with a pattern (the
@@ -273,6 +340,23 @@ fn negated_pattern(e: &Expr) -> Option<&str> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Whether `stmt`, the body of a loop, has a `break` of the loop: one outside the loops and
+/// switches in it.
+fn breaks_out(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break => true,
+        Stmt::Block(stmts) => stmts.iter().any(breaks_out),
+        Stmt::If { then, otherwise, .. } => breaks_out(then) || otherwise.as_deref().is_some_and(breaks_out),
+        Stmt::Labeled { body, .. } => breaks_out(body),
+        Stmt::Try { body, catches, finally } => {
+            body.iter().any(breaks_out)
+                || catches.iter().any(|c| c.body.iter().any(breaks_out))
+                || finally.as_ref().is_some_and(|f| f.iter().any(breaks_out))
+        }
+        _ => false,
     }
 }
 

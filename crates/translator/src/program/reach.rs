@@ -144,6 +144,9 @@ pub struct Reach {
     pub modules: Vec<super::modules::Contents>,
     /// The exports that the program adds to its modules' (`Program::add_exports`).
     pub added_exports: Vec<(String, String, String)>,
+    /// The name of each unit's source file, by the unit's index, without its directories, as a
+    /// class file has it (`lower/stack_walks.rs`); set after reachability.
+    pub unit_files: Vec<String>,
     /// The index in `modules` of the module of each package (`module_of`), made when first asked.
     module_of_package: std::sync::OnceLock<HashMap<String, usize>>,
 }
@@ -522,6 +525,10 @@ type Member = (&'static str, &'static str, &'static str);
 /// (`lower/exceptions.rs`). A class loader's resource lookups read the class path's files
 /// through `Module`'s methods (`java/Threads.java`).
 const STANDARD_CALLS: &[(Member, Member)] = &[
+    (STACK_WALK, ("java.util.Objects", "requireNonNull", "<T>(T)T")),
+    (STACK_WALK, ("java.util.stream.Stream", "empty", "<T>()java.util.stream.Stream<T>")),
+    (STACK_WALK, ("java.util.stream.Stream", "of", "<T>(T)java.util.stream.Stream<T>")),
+    (STACK_WALK, ("java.util.function.Function", "apply", "(T)R")),
     (("java.lang.ClassLoader", "getResource", "(java.lang.String)java.net.URL"), CLASS_PATH_RESOURCES),
     (("java.lang.ClassLoader", "findResource", "(java.lang.String)java.net.URL"), CLASS_PATH_RESOURCES),
     (("java.lang.ClassLoader", "getSystemResource", "(java.lang.String)java.net.URL"), CLASS_PATH_RESOURCES),
@@ -559,6 +566,13 @@ const STANDARD_CALLS: &[(Member, Member)] = &[
         ),
     ),
 ];
+
+/// `StackWalker.walk`, whose stream the translator's walker makes (`lower/stack_walks.rs`).
+const STACK_WALK: Member = (
+    "java.lang.StackWalker",
+    "walk",
+    "<T>(java.util.function.Function<? super java.util.stream.Stream<java.lang.StackWalker.StackFrame>,? extends T>)T",
+);
 
 /// `Module`'s lookup of a resource in the class path's directories, and its opening of one.
 const CLASS_PATH_RESOURCES: Member =

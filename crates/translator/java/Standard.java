@@ -1227,11 +1227,77 @@ class MissingResourceException extends RuntimeException {
     }
 }
 
-// A stack walker, which a translation has only to ask for the class of its caller: lowering
-// answers `getCallerClass()` where it is called, of a walker made with `RETAIN_CLASS_REFERENCE`
-// (see `lower/callers.rs`), so this class has nothing to hold. Its other methods walk frames,
-// which a translation does not have, and are rejected.
+// A stack walker. Lowering answers `getCallerClass()` where it is called, of a walker made with
+// `RETAIN_CLASS_REFERENCE` (see `lower/callers.rs`), so this class has nothing to hold. A
+// translation has no call stack: a walk sees only the frame of the method that walks, which
+// lowering knows where the call is (`lower/stack_walks.rs` passes it to `walkFrom`), and no frame
+// where it does not know it (in a lambda, a field's initializer); `forEach` sees no frame.
 final class StackWalker {
+    public interface StackFrame {
+        String getClassName();
+
+        String getMethodName();
+
+        Class<?> getDeclaringClass();
+
+        String getFileName();
+
+        int getLineNumber();
+
+        boolean isNativeMethod();
+
+        StackTraceElement toStackTraceElement();
+    }
+
+    // The frame of a method that walks the stack, as lowering knows it: the class whose code the
+    // method is, the method's name as the class file has it, the source file and the line of the
+    // call of `walk`.
+    static final class KnownFrame implements StackFrame {
+        private final Class<?> declaringClass;
+        private final String methodName;
+        private final String fileName;
+        private final int lineNumber;
+
+        KnownFrame(Class<?> declaringClass, String methodName, String fileName, int lineNumber) {
+            this.declaringClass = declaringClass;
+            this.methodName = methodName;
+            this.fileName = fileName;
+            this.lineNumber = lineNumber;
+        }
+
+        public String getClassName() {
+            return declaringClass.getName();
+        }
+
+        public String getMethodName() {
+            return methodName;
+        }
+
+        public Class<?> getDeclaringClass() {
+            return declaringClass;
+        }
+
+        public String getFileName() {
+            return fileName;
+        }
+
+        public int getLineNumber() {
+            return lineNumber;
+        }
+
+        public boolean isNativeMethod() {
+            return false;
+        }
+
+        public StackTraceElement toStackTraceElement() {
+            return new StackTraceElement(getClassName(), methodName, fileName, lineNumber);
+        }
+
+        public String toString() {
+            return toStackTraceElement().toString();
+        }
+    }
+
     public enum Option {
         RETAIN_CLASS_REFERENCE,
         SHOW_REFLECT_FRAMES,
@@ -1260,5 +1326,25 @@ final class StackWalker {
         }
         java.util.Objects.requireNonNull(options);
         return new StackWalker();
+    }
+
+    public <T> T walk(java.util.function.Function<? super java.util.stream.Stream<StackFrame>, ? extends T> function) {
+        return walkFrom(function, null);
+    }
+
+    // `walk` with the frame of the method that walks, null where lowering does not know it.
+    <T> T walkFrom(java.util.function.Function<? super java.util.stream.Stream<StackFrame>, ? extends T> function, StackFrame top) {
+        java.util.Objects.requireNonNull(function);
+        java.util.stream.Stream<StackFrame> frames;
+        if (top == null) {
+            frames = java.util.stream.Stream.empty();
+        } else {
+            frames = java.util.stream.Stream.of(top);
+        }
+        return function.apply(frames);
+    }
+
+    public void forEach(java.util.function.Consumer<? super StackFrame> action) {
+        java.util.Objects.requireNonNull(action);
     }
 }

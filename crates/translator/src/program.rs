@@ -639,6 +639,8 @@ fn load_in_rounds(
     for index in changing {
         records.complete(&mut units[index]);
     }
+    let file_name = |u: &Value| u["file"].as_str().map(|f| f.rsplit('/').next().unwrap_or(f).to_string());
+    reach.unit_files = units.iter().map(|u| file_name(u).unwrap_or_default()).collect();
     if crate::timings::enabled() {
         let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
         let (classes, methods) = (reach.classes.len(), reach.methods.len());

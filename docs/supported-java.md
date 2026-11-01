@@ -108,7 +108,8 @@ included (docs/collector.md).
   `NumberFormatException` messages are Java's. `StrictMath` is a port of fdlibm and matches Java
   bit for bit; so does `Math` where HotSpot uses fdlibm. HotSpot's own `Math.sin`, `cos`, `tan`,
   `exp`, `log`, `pow`, `cbrt`, `sinh` and `tanh` cannot be ported and use the platform's libm,
-  which agrees on all but about 0.1 percent of arguments.
+  which agrees on all but about 0.1 percent of arguments. `Math.random` is one shared
+  generator with `java.util.Random`'s steps, seeded from the time as `new Random()` is.
 - **Regular expressions** (`split`, `replaceAll`, `replaceFirst`, `matches`) run a small
   backtracking engine in the runtime (`regex.rs`): literals, escapes, classes, `\R`, groups
   (atomic too), lookahead, back references, alternation, anchors, the word boundaries `\b` and
@@ -192,7 +193,10 @@ Design: [object-model.md](object-model.md).
   record patterns, negated patterns (`if (!(x instanceof T t)) return;` becomes `let .. else`,
   and the branches of `!(o instanceof T t) ? false : ..t..` swap), `||` chains with a negated
   pattern, and an `if` whose negated `&&` chain or `||` inside an `&&` chain binds a pattern
-  (`lower/negated_patterns.rs`). A failed downcast throws `ClassCastException`.
+  (`lower/negated_patterns.rs`), and a `while (!(x instanceof T t))` loop after which `t` is read.
+  A failed downcast throws `ClassCastException`. A value of an
+  interface that strings and boxes implement (`Serializable`, `Constable`, `ConstantDesc`) may
+  be tested for a string or a box.
 - **`Object`** is an enum with a variant per class of the program whose values become `Object`s,
   plus strings, boxes, arrays, builders and class values (`Object::String(..)`,
   `Object::Integer(5)`, `Object::IntArray(..)`). `equals`/`hashCode` are the program's where
@@ -236,7 +240,8 @@ Design: [object-model.md](object-model.md).
 - A **record** is a class with the members Java gives it (written into javac's tree by
   `javac/records.rs`): canonical or compact constructor, accessors, `toString`, `equals` and
   `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case byte[] b`, `case null`,
-  record patterns, nested records) is an `if let` chain, exhaustive over a sealed hierarchy or
+  record patterns, nested records, unnamed `_` patterns, several of which may share a case:
+  `case A _, B _ ->`) is an `if let` chain, exhaustive over a sealed hierarchy or
   enum without `default`. The components of a generic record's pattern have the erasures its
   fields hold; rejected: a record pattern of a record that is a Rust generic. An accessor written
   in the record runs at each use of a pattern variable, not once. `java.lang.Record` is a type like `Object`: a
@@ -412,7 +417,8 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   `UnsupportedOperationException`. The generic types of methods are still rejected.
 - `Class.forName` of a constant name is that class, and of an array's descriptor
   (`"[La.B;"`) that array's class; of a computed name, a `switch` over the classes code can find
-  by name. An unknown name throws `ClassNotFoundException`.
+  by name, each initialized or not as the call's `initialize` says, a literal or a computed one.
+  An unknown name throws `ClassNotFoundException`.
 - **Handles**: `Unsafe` offsets, field updaters and `VarHandle`s of fields and array elements,
   and the `MethodHandle`s of the handle factories, are the accesses they name, and a
   `MethodHandle` of a static method (`findStatic`) is a call of it, followed through
@@ -431,8 +437,12 @@ Design: [reflection-and-plugins.md](reflection-and-plugins.md).
   and `META-INF/services` declare.
 - A static method that asks for its caller's class (`StackWalker.getCallerClass()`,
   `Reflection.getCallerClass()`) gets it as an extra parameter from each call
-  (`lower/callers.rs`). Asking anywhere else, and `StackWalker.walk`, are rejected; a walker
-  itself is made with any of `getInstance`'s options. A security manager's `getClassContext()`,
+  (`lower/callers.rs`). Asking anywhere else is rejected; a walker itself is made with any of
+  `getInstance`'s options. `StackWalker.walk` sees only the frame of the method that walks, which
+  the translation knows (class, method name, source file, and the line where the call starts):
+  a walk that reads that frame, or looks past it from `main`, sees what Java sees, and one that
+  looks further finds no frames. In a lambda's body or a field's initializer the stream is empty,
+  and `forEach` sees no frame (`lower/stack_walks.rs`). A security manager's `getClassContext()`,
   the classes on the call stack, throws `UnsupportedOperationException`, which log4j and slf4j
   catch to fall back; a census lists it.
 

@@ -362,9 +362,17 @@ impl Walk<'_> {
         }
     }
 
-    /// A string literal of reachable code, which may name a class that a cast creates. One that
-    /// could name a class that no unit declares is kept for `note_named`.
+    /// A string literal of reachable code, which may name a class that a cast creates; a
+    /// binary name (`a.B$C`) names the member class `a.B.C`. One that could name a class that no
+    /// unit declares is kept for `note_named`.
     pub(super) fn named(&mut self, literal: &str) {
+        let member = literal.contains('$').then(|| literal.replace('$', "."));
+        let literal = match &member {
+            Some(member) if !self.classes.contains_key(literal) && self.classes.contains_key(member) => {
+                member
+            }
+            _ => literal,
+        };
         // A provider's registration names its class for the services alone (`services.rs`).
         if self.registered.contains(literal) {
             return;

@@ -787,9 +787,9 @@ impl<'t> Lowering<'t> {
         }
         types.push(decl(OBJECT, "", TypeKind::Interface, Vec::new()));
         let runtime = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect::<Vec<_>>();
-        // The strings and boxes are `Serializable`, and the string and the boxes of `int`, `long`,
-        // `float` and `double` `Constable` and `ConstantDesc` (`Serializable s = 2.5;`), where the
-        // program names those; `codegen::dispatch` answers the two interfaces' methods.
+        // The strings and boxes are `Serializable` and `Constable`, and the string and the boxes
+        // of `int`, `long`, `float` and `double` `ConstantDesc` (`Serializable s = 2.5;`), where
+        // the program names those; `codegen::dispatch` answers the two interfaces' methods.
         let serializable = self.type_index("java.io.Serializable");
         let constable = self.type_index("java.lang.constant.Constable");
         let constant_desc = self.type_index("java.lang.constant.ConstantDesc");
@@ -804,7 +804,7 @@ impl<'t> Lowering<'t> {
                     | "java.lang.Float"
                     | "java.lang.Double"
             );
-            implements.extend(constable.filter(|_| constant));
+            implements.extend(constable);
             implements.extend(constant_desc.filter(|_| constant));
             if let Some(n) = at.number.filter(|_| is_number_box(name)) {
                 implements.push(n.decl);
