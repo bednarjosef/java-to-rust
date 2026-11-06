@@ -254,8 +254,9 @@ What it costs: a call of a moved function from another crate cannot be inlined w
 link-time optimization. The split workspace's release profile has thin LTO, which inlines across
 crates again without the memory of a whole-program build: the Minecraft server, with its header
 alone built at 15 GB, links in about ten minutes at 7 GB, and its 5000-tick sprint runs at about
-11,000 ticks per second against about 4,000 without LTO (Java about 6,000), at 0.9 GB of peak memory
-against 1.2 GB. Fat LTO of a program of this size is a whole-program build again. Debug builds and
+11,000 ticks per second against about 4,000 without LTO, at 0.9 GB of peak memory against 1.2 GB
+(Java's speed over a sprint long enough for its compiler, and what PGO adds, are in
+`minecraft-server.md`, "The server's speed"). Fat LTO of a program of this size is a whole-program build again. Debug builds and
 `cargo check` gain the most from the split. Without
 LTO, the functions kept in the header for their size are what keeps the cost small: before they
 were, `benchmarks/NoiseTree.java` split into three body crates at `opt-level = 1` ran its kernel

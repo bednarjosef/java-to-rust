@@ -6,7 +6,7 @@
 #
 # Steps: extract, decompile, best-of, libraries, library-sources, library-best-of, multi-release,
 # repair, jdk-sources, parse, census, summary, and on their own (not run by default) trial-write,
-# trial, java-run, bench, join and commands.
+# trial, trial-pgo, java-run, bench, join and commands.
 #
 # Everything Mojang's and everything derived from it (the jars, the decompiled sources, the census
 # output) stays in MINECRAFT_CACHE, outside the repository; never commit any of it.
@@ -59,6 +59,11 @@
 # TRIAL_HOT_TEXT     a symbol ordering file (scripts/hot-text-order.py) that the trial step links the
 #                    binary with: its hot functions together at the start of its code, on huge
 #                    pages (default: none)
+# TRIAL_RUSTFLAGS    flags the trial step passes to rustc besides the trial's own, separated by
+#                    spaces (default: none)
+# PGO_TICKS          the ticks of the sprint that the trial-pgo step trains on (default 30000)
+# PGO_STACK_MB       the stack of each thread of the trial-pgo step's counting build, in megabytes
+#                    (default 256)
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
 # BENCH              which server the bench step measures: java (default) or trial; BENCH_SEED,
 #                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input);
@@ -651,6 +656,12 @@ trial() {
       --config "build.rustflags = [\"-Clinker-plugin-lto\", \"-Clink-arg=-Wl,--thinlto-cache-dir=$cache/thinlto-cache\", \"-Clink-arg=-Wl,--thinlto-jobs=all\", \"-Clink-arg=-Wl,--thinlto-cache-policy=cache_size_bytes=4g\", \"-Clink-arg=-Wl,-mllvm,-align-loops=64\"]") ;;
     *) echo "TRIAL_LTO is empty, off or lld, not $TRIAL_LTO" >&2; exit 1 ;;
   esac
+  local flag flags=()
+  for flag in ${TRIAL_RUSTFLAGS:-}; do
+    flags+=("\"$flag\"")
+  done
+  # Cargo joins this array to the rustflags of the trial's .cargo/config.toml.
+  [ ${#flags[@]} -eq 0 ] || build+=(--config "build.rustflags = [$(IFS=,; echo "${flags[*]}")]")
   local jobs=${CARGO_BUILD_JOBS:-$(nproc)} group=() size total=0 crate
   local -a groups=()
   while read -r size crate; do
@@ -728,6 +739,37 @@ trial_binary() {
   echo "$cache/trial-target/$profile/$name"
 }
 
+# The trial built with profile-guided optimization: the trial step builds it with counters
+# (-Cprofile-generate, into trial-pgo/profiles), a bench of PGO_TICKS ticks trains it, LLVM's
+# llvm-profdata (in the Rust toolchain's llvm-tools component) merges what the run counted into
+# trial-pgo/merged.profdata, and the trial step builds it again from that (-Cprofile-use), where
+# the bench step then measures it. LLVM then inlines across crates the calls that ran hot, which
+# the import limit of thin LTO otherwise leaves as calls, and lays out each function's branches
+# for the paths taken.
+trial-pgo() {
+  local dir=$cache/trial-pgo host profdata
+  host=$(rustc -vV | sed -n 's/^host: //p')
+  profdata=$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-profdata
+  [ -x "$profdata" ] || { echo "no llvm-profdata (rustup component add llvm-tools)" >&2; exit 1; }
+  rm -rf "${dir:?}" && mkdir -p "$dir/profiles"
+  # The counting build's runs get PGO_STACK_MB of stack in every thread (Rust's threads read
+  # RUST_MIN_STACK, the main thread its limit), against 2 MB and 8 MB. Its frames are much larger:
+  # the counters keep LLVM from sharing a frame's slots among the calls it inlines (the server's
+  # Function.apply, a dispatch to every lambda, takes 121 KB a call against 344 bytes), and the
+  # codecs' recursion overflowed 2 MB. rustc also writes no stack probes with -Cprofile-generate,
+  # so such an overflow jumps the guard page: a segmentation fault without Rust's "has overflowed
+  # its stack", or a write into whatever is mapped below.
+  local mb=${PGO_STACK_MB:-256}
+  (
+    ulimit -s $((mb * 1024)) || true
+    export RUST_MIN_STACK=$((mb << 20))
+    TRIAL_RUSTFLAGS="${TRIAL_RUSTFLAGS:-} -Cprofile-generate=$dir/profiles" trial
+    BENCH=trial BENCH_TICKS=${PGO_TICKS:-30000} bench
+  )
+  "$profdata" merge -o "$dir/merged.profdata" "$dir/profiles"
+  TRIAL_RUSTFLAGS="${TRIAL_RUSTFLAGS:-} -Cprofile-use=$dir/merged.profdata" trial
+}
+
 # The server on Java, from the jars, in java-run: what the trial's run is compared with.
 java-run() {
   local classpath
@@ -740,7 +782,9 @@ java-run() {
 # event breaks kelp in some worlds and its floating items decide the sprint's speed, and force-load
 # the chunks within BENCH_RADIUS chunks of the world's centre; once they are marked, and after
 # BENCH_WARMUP seconds (default 30) for them to generate, a tick sprint of BENCH_TICKS ticks (default
-# 1000), which runs them as fast as the server can; once it reports, count the item entities, then stop.
+# 100000), which runs them as fast as the server can; once it reports, count the item entities, then
+# stop. A sprint of 1000 ticks ends before Java's compiler has compiled the tick: Java ran it at about
+# 17,000 ticks a second, and at 42,000 to 51,000 over 100,000 ticks or more.
 # With BENCH_PROFILE, `perf record` samples the server's cycles during the sprint into that file
 # (what scripts/hot-text-order.py reads). Gives up (stops the server) after SERVER_SECONDS, and ends
 # when the server, run by shell $1, does.
@@ -759,7 +803,7 @@ bench_input() {
   echo "forceload add $((-16 * radius)) $((-16 * radius)) $((16 * radius + 15)) $((16 * radius + 15))"
   wait_for 'to be force loaded'
   sleep "${BENCH_WARMUP:-30}"
-  echo "tick sprint ${BENCH_TICKS:-1000}"
+  echo "tick sprint ${BENCH_TICKS:-100000}"
   local perf=
   if [ -n "${BENCH_PROFILE:-}" ]; then
     # The server is the last of the chain of processes that `measured` starts (`timeout`, then it).
@@ -1040,9 +1084,10 @@ steps=("$@")
 for step in "${steps[@]}"; do
   case $step in
     extract | decompile | best-of | libraries | library-sources | library-best-of | multi-release | repair \
-      | jdk-sources | parse | census | summary | trial-write | trial | java-run | bench | join | commands) "$step" ;;
+      | jdk-sources | parse | census | summary | trial-write | trial | trial-pgo | java-run | bench | join | commands) "$step" ;;
     *) echo "unknown step $step (extract, decompile, best-of, libraries, library-sources, library-best-of," \
-      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, java-run, bench, join, commands)" >&2
+      "multi-release, repair, jdk-sources, parse, census, summary, trial-write, trial, trial-pgo, java-run, bench," \
+      "join, commands)" >&2
       exit 2 ;;
   esac
 done
