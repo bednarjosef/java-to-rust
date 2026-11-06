@@ -84,10 +84,14 @@ impl JStr {
         JStr(unsafe { NonNull::new_unchecked(address as *mut u32) })
     }
 
-    /// The address of the object, without the tag that a `java::Thin` may have put in the top
-    /// bits.
+    /// The address of the object. A string taken out of a `java::Thin` has its class number
+    /// cleared (`Thin::to_pointer`).
     fn header(&self) -> *const u32 {
-        (self.0.as_ptr() as usize & ADDRESS) as *const u32
+        debug_assert!(
+            self.0.as_ptr() as usize & !ADDRESS == 0,
+            "a string with a class number in its top bits"
+        );
+        self.0.as_ptr()
     }
 
     /// The text's bytes.

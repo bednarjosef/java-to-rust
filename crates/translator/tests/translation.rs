@@ -947,9 +947,9 @@ fn a_type_with_several_concrete_classes_is_an_enum() {
     assert_contains(
         &rust,
         &[
-            "enum BaseView<'a> {\n    Circle(&'a Arc<Circle>) = 2,\n    Rect(&'a Arc<Rect>) = 3,\n}",
+            "enum BaseView {\n    Circle(Arc<Circle>) = 2,\n    Rect(Arc<Rect>) = 3,\n}",
             // A method of the enum is a function of its module, which takes the value.
-            "fn Base__area(this: Base) -> f64 {\n    match this.0.tag() {\n        2 => { let o: &Arc<Circle> = unsafe { this.0.as_pointer() }; o.area() }\n        3 => { let o: &Arc<Rect> = unsafe { this.0.as_pointer() }; o.area() }\n        tag => java::bad_tag(tag),\n    }\n}",
+            "fn Base__area(this: Base) -> f64 {\n    match this.0.tag() {\n        2 => { let o: &Arc<Circle> = &unsafe { this.0.to_pointer() }; o.area() }\n        3 => { let o: &Arc<Rect> = &unsafe { this.0.to_pointer() }; o.area() }\n        tag => java::bad_tag(tag),\n    }\n}",
             // Every class keeps the fields struct at the start of its object, where `base()`
             // reads it whatever the class.
             "#[repr(C)]\nstruct Circle {\n    base: BaseFields,",
@@ -1048,9 +1048,9 @@ fn an_immutable_family_has_no_refcell() {
     assert_contains(
         &rust,
         &[
-            "enum NView<'a> {\n    Leaf(&'a Arc<Leaf>) = 2,\n    Twice(&'a Arc<Twice>) = 3,\n}",
+            "enum NView {\n    Leaf(Arc<Leaf>) = 2,\n    Twice(Arc<Twice>) = 3,\n}",
             "fn base(&self) -> &NFields {",
-            "2 => { let o: &Arc<Leaf> = unsafe { this.0.as_pointer() }; o.eval() }",
+            "2 => { let o: &Arc<Leaf> = &unsafe { this.0.to_pointer() }; o.eval() }",
             "self.inner.base().v",
         ],
     );
@@ -1095,7 +1095,7 @@ fn a_class_that_is_upcast_is_shared() {
     assert_contains(
         &rust,
         &[
-            "enum ShapeView<'a> {\n    Square(&'a Arc<Square>) = 2,\n    Tri(&'a Arc<Tri>) = 3,\n}",
+            "enum ShapeView {\n    Square(Arc<Square>) = 2,\n    Tri(Arc<Tri>) = 3,\n}",
             "let s = slot_1.put(Square__new());",
             "total(&Shape::Square(s.clone()), &Shape::Tri(t))",
         ],
@@ -5480,8 +5480,8 @@ fn an_interface_is_an_enum_over_its_implementors() {
     assert_contains(
         &rust,
         &[
-            "enum ShapeView<'a> {\n    Circle(&'a Arc<Circle>) = 1,\n    Rect(&'a Arc<RectFields>) = 2,\n    Square(&'a Arc<Square>) = 3,\n    Color(&'a Color) = 6,\n}",
-            "        3 => { let o: &Arc<Square> = unsafe { this.0.as_pointer() }; o.base.area() }\n        6 => { let o: &Color = unsafe { this.0.as_value() }; (*o).area() }",
+            "enum ShapeView<'a> {\n    Circle(Arc<Circle>) = 1,\n    Rect(Arc<RectFields>) = 2,\n    Square(Arc<Square>) = 3,\n    Color(&'a Color) = 6,\n}",
+            "        3 => { let o: &Arc<Square> = &unsafe { this.0.to_pointer() }; o.base.area() }\n        6 => { let o: &Color = unsafe { this.0.as_value() }; (*o).area() }",
             "Shape::Circle(slot_2.put(Circle__new(1.0))), Shape::Rect(r.clone())",
             "&s == &Shape::Rect(r.clone())",
         ],
@@ -5496,7 +5496,7 @@ fn default_methods_live_on_the_interface_enum() {
     assert_contains(
         &rust,
         &[
-            "        1 => { let o: &Arc<Circle> = unsafe { this.0.as_pointer() }; o.kind() }\n        2..=6 => Shape__kind_in_shape(this),",
+            "        1 => { let o: &Arc<Circle> = &unsafe { this.0.to_pointer() }; o.kind() }\n        2..=6 => Shape__kind_in_shape(this),",
             "fn Shape__kind_in_shape(this: Shape) -> java::JString {\n    java::JString::from(\"shape\")\n}",
             "fn Shape__describe(this: Shape) -> java::JString {\n    java::concat!(Shape__kind(this), format_args!(\" {}\", java::Double(Shape__area(this))))\n}",
         ],
@@ -5595,7 +5595,7 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "match find(xs, x) { Ok(v) => v, Err(e) => return Err(e) }",
             "Err(caught) => {",
-            "let e = match caught.view() { ThrowableView::Missing(o) => o.clone(), _ => unreachable!(\"the arm matches its class\") };",
+            "let e = match caught.view() { ThrowableView::Missing(ref o) => o.clone(), _ => unreachable!(\"the arm matches its class\") };",
             "let attempt: Result<(), Throwable> = 'attempt: {",
             "match twice(&xs, 5) { Ok(v) => v, Err(e) => break 'attempt Err(e) }",
         ],
@@ -6179,7 +6179,7 @@ fn a_pattern_binds_the_object_with_if_let() {
     assert_contains(
         &rust,
         &[
-            "    fn as_rect(&self) -> Option<Arc<Rect>> {\n        match self.0.tag() {\n            2 => { let o: &Arc<Rect> = unsafe { self.0.as_pointer() }; Some(o.clone()) }\n            _ => None,\n        }\n    }",
+            "    fn as_rect(&self) -> Option<Arc<Rect>> {\n        match self.0.tag() {\n            2 => { let o: &Arc<Rect> = &unsafe { self.0.to_pointer() }; Some(o.clone()) }\n            _ => None,\n        }\n    }",
             "    if let Some(c) = s.as_circle() {\n",
             "    } else if let Some(r) = s.as_rect() && r.w == r.h {\n",
             "    s.as_rect().is_some_and(|r| r.w > r.h)",
@@ -6279,7 +6279,7 @@ fn object_values_are_an_enum() {
     assert_contains(
         &rust,
         &[
-            "enum ObjectView<'a> {\n    Key(&'a Arc<Key>) = 1,\n    Plain(&'a Arc<Plain>) = 2,\n    String(&'a java::JString) = 4,\n    Integer(&'a i32) = 5,\n}",
+            "enum ObjectView<'a> {\n    Key(Arc<Key>) = 1,\n    Plain(Arc<Plain>) = 2,\n    String(&'a java::JString) = 4,\n    Integer(&'a i32) = 5,\n}",
             "let s = Object::String(java::JString::from(\"text\"));",
             "let n = Object::Integer(5);",
             "let back = java::cast(&n, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE));",
@@ -6297,10 +6297,10 @@ fn equals_takes_the_object_enum() {
         &rust,
         &[
             "fn equals(&self, o: &Object) -> bool {",
-            "fn Object__equals(this: Object, other: &Object) -> bool {\n    match this.0.tag() {\n        1 => { let o: &Arc<Key> = unsafe { this.0.as_pointer() }; o.equals(other) }\n        2 => other.0 == this.0,\n        4 => { let o: &java::JString = unsafe { this.0.as_value() }; matches!(other.view(), ObjectView::String(b) if o == b) }",
+            "fn Object__equals(this: Object, other: &Object) -> bool {\n    match this.0.tag() {\n        1 => { let o: &Arc<Key> = &unsafe { this.0.to_pointer() }; o.equals(other) }\n        2 => other.0 == this.0,\n        4 => { let o: &java::JString = unsafe { this.0.as_value() }; matches!(other.view(), ObjectView::String(b) if o == b) }",
             "2 => java::address_hash(this.0.address()),",
             "4 => { let o: &java::JString = unsafe { this.0.as_value() }; java::string_hash(o) }",
-            "2 => { let o: &Arc<Plain> = unsafe { self.0.as_pointer() }; fmt::Display::fmt(&java::default_text(\"Plain\", java::address_hash(Arc::as_ptr(o))), f) }",
+            "2 => { let o: &Arc<Plain> = &unsafe { self.0.to_pointer() }; fmt::Display::fmt(&java::default_text(\"Plain\", java::address_hash(Arc::as_ptr(o))), f) }",
         ],
     );
 }
@@ -6360,7 +6360,7 @@ fn an_array_as_an_object_prints_as_its_jvm_name_and_hash() {
     assert_contains(
         &rust,
         &[
-            "11 => { let o: &java::Array<i32> = unsafe { self.0.as_pointer() }; fmt::Display::fmt(&java::default_text(\"[I\", java::identity_hash(o)), f) }",
+            "11 => { let o: &java::Array<i32> = &unsafe { self.0.to_pointer() }; fmt::Display::fmt(&java::default_text(\"[I\", java::identity_hash(o)), f) }",
         ],
     );
 }
@@ -6439,8 +6439,8 @@ fn bounded_type_variables_erase_to_the_bound() {
         &rust,
         &[
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
-            "enum ComparableView<'a> {\n    Point(&'a Arc<Point>) = 5,\n    String(&'a java::JString) = 7,\n}",
-            "5 => { let o: &Arc<Point> = unsafe { this.0.as_pointer() }; o.compare_to(other) }",
+            "enum ComparableView<'a> {\n    Point(Arc<Point>) = 5,\n    String(&'a java::JString) = 7,\n}",
+            "5 => { let o: &Arc<Point> = &unsafe { this.0.to_pointer() }; o.compare_to(other) }",
             "7 => { let o: &java::JString = unsafe { this.0.as_value() }; match (&other).view() { ComparableView::String(b) => java::compare_to(o, b), _ => { let b = &other; java::cast_failed_on(&b, &(\"java.lang.String\", java::BASE)) } } }",
         ],
     );
@@ -6496,12 +6496,12 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
     assert_contains(
         &rust,
         &[
-            "IntArray(&'a java::Array<i32>) = 11,",
+            "IntArray(java::Array<i32>) = 11,",
             "let held = Object::IntArray(cell.clone());",
             "java::cast(&held, |o| o.as_int_array(), &(\"[I\", java::BASE))",
             "fn eq(&self, other: &Object) -> bool {",
             "self.0 == other.0",
-            "11 => { let o: &java::Array<i32> = unsafe { this.0.as_pointer() }; java::identity_hash(o) }",
+            "11 => { let o: &java::Array<i32> = &unsafe { this.0.to_pointer() }; java::identity_hash(o) }",
         ],
     );
 }
@@ -6637,10 +6637,10 @@ fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
     assert_contains(
         &rust,
         &[
-            "StringBuilder(&'a java::StringBuilder) = 11,",
+            "StringBuilder(java::StringBuilder) = 11,",
             "let held = Object::StringBuilder(sb.clone());",
-            "11 => { let o: &java::StringBuilder = unsafe { this.0.as_pointer() }; matches!(other.view(), ObjectView::StringBuilder(b) if o.same(b)) }",
-            "11 => { let o: &java::StringBuilder = unsafe { self.0.as_pointer() }; fmt::Display::fmt(o, f) }",
+            "11 => { let o: &java::StringBuilder = &unsafe { this.0.to_pointer() }; matches!(other.view(), ObjectView::StringBuilder(ref b) if o.same(b)) }",
+            "11 => { let o: &java::StringBuilder = &unsafe { self.0.to_pointer() }; fmt::Display::fmt(o, f) }",
         ],
     );
 }
@@ -6666,14 +6666,14 @@ fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
         &rust,
         &[
             "let (src_pos, dest_pos, length_2) = (0, 0, length); match (&src, &dest) { (src, dest) => match (src.view(), dest.view()) {",
-            "(ObjectView::IntArray(src), ObjectView::IntArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
-            "(ObjectView::LongArray(src), ObjectView::LongArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
+            "(ObjectView::IntArray(ref src), ObjectView::IntArray(ref dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
+            "(ObjectView::LongArray(ref src), ObjectView::LongArray(ref dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
             "_ => java::try_arraycopy_across::<Object>(src, src_pos, dest, dest_pos, length_2).unwrap_or_else(|e| java::throw_exception(e)),",
             "11 => java::CopyKind::Primitive(\"int\"),",
         ],
     );
     // One arm takes every pair of two classes, so the arms grow with the array classes.
-    assert_lacks(&rust, &["(ObjectView::IntArray(src), ObjectView::LongArray(dest))"]);
+    assert_lacks(&rust, &["(ObjectView::IntArray(ref src), ObjectView::LongArray(ref dest))"]);
 }
 
 #[test]
@@ -6713,7 +6713,7 @@ fn an_arraycopy_between_objects_reads_and_stores_each_array_class_once() {
     );
     assert_lacks(
         &rust,
-        &["not supported yet", "(ObjectView::ColorArray(src), ObjectView::ObjectArray(dest))"],
+        &["not supported yet", "(ObjectView::ColorArray(ref src), ObjectView::ObjectArray(ref dest))"],
     );
 }
 
@@ -6964,7 +6964,7 @@ fn clone_in_a_class_tree_copies_each_runtime_class() {
         &rust,
         &[
             "AShapeView::Shape(_) => match java::try_clone_refused(\"A$Shape\") { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) },",
-            "AShapeView::Circle(o) => { AShape::Circle(Arc::new(ACircle { base: AShapeFields { x: java::Field::new(o.base.x.get()) }, r: java::Field::new(o.r.get()) })) }",
+            "AShapeView::Circle(ref o) => { AShape::Circle(Arc::new(ACircle { base: AShapeFields { x: java::Field::new(o.base.x.get()) }, r: java::Field::new(o.r.get()) })) }",
         ],
     );
 }
@@ -7318,7 +7318,7 @@ fn an_object_array_with_a_foreign_element_copied_into_a_box_array_stops_at_it() 
     assert_contains(
         &rust,
         &[
-            "ObjectView::Box(x) => Ok(Some(x.clone())), ",
+            "ObjectView::Box(ref x) => Ok(Some(x.clone())), ",
             "_ => Err(\"arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, Main$Box\"), ",
         ],
     );
@@ -7541,7 +7541,7 @@ fn a_small_default_body_is_copied_for_each_class_whose_arm_calls_it() {
         &rust,
         &[
             "HeightsReader__min_y_in_reader__on_heights_level(HeightsReader::Level(o.clone()))",
-            "fn HeightsReader__min_y_in_reader__on_heights_level(this: HeightsReader) -> i32 {\n    ({ let o: &Arc<HeightsLevel> = unsafe { this.0.as_pointer() }; o.dimension() }).min_y()",
+            "fn HeightsReader__min_y_in_reader__on_heights_level(this: HeightsReader) -> i32 {\n    ({ let o: &Arc<HeightsLevel> = &unsafe { this.0.to_pointer() }; o.dimension() }).min_y()",
             "fn HeightsReader__min_y_in_reader__on_heights_other(",
         ],
     );

@@ -40,7 +40,7 @@
 #                    step writes the trial again without a census, after a change to how a
 #                    translation is written or split; the trial step builds and runs it (default:
 #                    none)
-# TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 16G)
+# TRIAL_MEMORY_CAP   the most memory the trial step's build may take, as MEMORY_CAP (default 20G)
 # TRIAL_BODY_MB      how many megabytes of the body crates' Rust the trial step builds at once
 #                    (default 64), with CARGO_BUILD_JOBS threads among them (default: the cores)
 # TRIAL_LINK_JOBS    the threads of the last build, the binary's crate alone once the bodies are
@@ -629,7 +629,7 @@ trial-write() {
 trial() {
   [ -f "$cache/trial/Cargo.toml" ] || { echo "no trial translation (run the census with TRIAL_CRATES)" >&2; exit 1; }
   local -a cap
-  mapfile -t cap < <(memory_cap_command "${TRIAL_MEMORY_CAP:-16G}")
+  mapfile -t cap < <(memory_cap_command "${TRIAL_MEMORY_CAP:-20G}")
   local start
   start=$(date +%s)
   # The header crate, which every body crate needs, first and alone: rustc's memory for it grows

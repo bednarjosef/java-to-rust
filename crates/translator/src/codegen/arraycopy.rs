@@ -43,8 +43,9 @@ impl<'a> Gen<'a> {
         let mut arms = Vec::new();
         for &c in variants {
             if self.element_of(c).is_some() {
+                // An array's variant holds its handle (`view_binding`).
                 let v = self.view_pattern(t, c);
-                arms.push(format!("({v}(src), {v}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
+                arms.push(format!("({v}(ref src), {v}(ref dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
             }
         }
         self.need(Need::CopyAcross(t));

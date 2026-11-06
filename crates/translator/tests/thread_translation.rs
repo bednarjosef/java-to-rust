@@ -57,7 +57,7 @@ fn a_thread_and_what_it_reaches_are_arcs() {
         &[
             // Threads share a worker, but no monitor site locks one (`join` is the runtime's),
             // so it has `java::SharedField`s and no lock word.
-            "enum ThreadView<'a> {\n    Worker(&'a Arc<AWorker>) = 11,",
+            "enum ThreadView {\n    Worker(Arc<AWorker>) = 11,",
             "fn AWorker__run(this: &Arc<AWorker>) {",
             "let w = Arc::new(AWorker__new(10));",
             "sum: java::SharedField<i64>,",
@@ -327,8 +327,8 @@ fn a_string_builder_of_a_program_with_threads_is_shared() {
         &rust,
         &[
             "static A_LOG: LazyLock<java::Locked<java::SharedStringBuilder>>",
-            "StringBuilder(&'a java::SharedStringBuilder) = 22,",
-            "22 => { let o: &java::SharedStringBuilder = unsafe { self.0.as_pointer() }; java::HasMonitor::monitor(o) }",
+            "StringBuilder(java::SharedStringBuilder) = 22,",
+            "unsafe { self.0.monitor::<java::SharedStringBuilder>() }",
             "let _monitor = java::enter(&A_LOG",
         ],
     );

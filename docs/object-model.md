@@ -17,7 +17,7 @@ possible classes are known and dispatch can be a `match`.
 2. **A type that objects of several concrete classes can be is an eight-byte reference named
    after the Java type**, a `java::Thin` holding the class's number and the object's handle,
    with a constructor per class whose objects become values of the type (`Base::Circle(o)`)
-   and a *view*: an enum with one variant per such class that lends the class's object
+   and a *view*: an enum with one variant per such class that holds the class's object
    (`Arc<RefCell<C>>`, or `Arc<C>` when immutable). The code calls such a type and its view
    "the enum" of the type. A type with one such class is that class's object, with no enum.
    Enums are flat: every variant is a concrete class, never another enum, so a call through an
@@ -150,7 +150,7 @@ Naming:
   where that is shared too. The names are unique in the program, as every enum's conversions
   meet on `Object`: where two types still come to one name (`WinDef.LONG` and `Long`), all but
   the one with fewest dots take the first free number (`as_long`, `as_long_2`). `as_<type>()`
-  tests the class number and lends the object where it lies, as `view()` does, without the
+  tests the class number and takes the object out, as `view()` does, without the
   `match` over all of the type's classes that `view()` is. A Java method whose name would be `base`, `base_mut`, `view`, `clone` or one of
   the class methods above gets a suffix (`base_2`, `clone_2`).
 - A constructor, and an instance method that takes its object as a parameter (`this:
@@ -229,14 +229,14 @@ fn Circle__new(r: f64) -> Circle { Circle { base: BaseFields__new(java::wtf8("ci
 #[repr(transparent)]
 struct Base(java::Thin);
 #[repr(u16)]
-enum BaseView<'a> { Circle(&'a Arc<RefCell<Circle>>) = 2, Rect(&'a Arc<RefCell<Rect>>) = 3 }
+enum BaseView { Circle(Arc<RefCell<Circle>>) = 2, Rect(Arc<RefCell<Rect>>) = 3 }
 impl Base {
     fn Circle(o: Arc<RefCell<Circle>>) -> Base { Base(java::Thin::pointer(2, o)) }
     fn Rect(o: Arc<RefCell<Rect>>) -> Base { Base(java::Thin::pointer(3, o)) }
-    fn view(&self) -> BaseView<'_> {
+    fn view(&self) -> BaseView {
         match self.0.tag() {
-            2 => BaseView::Circle(unsafe { self.0.as_pointer() }),
-            3 => BaseView::Rect(unsafe { self.0.as_pointer() }),
+            2 => BaseView::Circle(unsafe { self.0.to_pointer() }),
+            3 => BaseView::Rect(unsafe { self.0.to_pointer() }),
             tag => java::bad_tag(tag),
         }
     }
@@ -244,16 +244,16 @@ impl Base {
 impl Base {
     fn base(&self) -> Ref<'_, BaseFields> {
         match self.0.tag() {
-            2 => { let o: &Arc<RefCell<Circle>> = unsafe { self.0.as_pointer() }; Ref::map(o.borrow(), |o| &o.base) }
-            3 => { let o: &Arc<RefCell<Rect>> = unsafe { self.0.as_pointer() }; Ref::map(o.borrow(), |o| &o.base) }
+            2 => { let o: &RefCell<Circle> = unsafe { self.0.as_prefix() }; Ref::map(o.borrow(), |o| &o.base) }
+            3 => { let o: &RefCell<Rect> = unsafe { self.0.as_prefix() }; Ref::map(o.borrow(), |o| &o.base) }
             tag => java::bad_tag(tag),
         }
     }
 }
 fn Base__area(this: Base) -> f64 {
     match this.0.tag() {
-        2 => { let o: &Arc<RefCell<Circle>> = unsafe { this.0.as_pointer() }; o.borrow().area() }
-        3 => { let o: &Arc<RefCell<Rect>> = unsafe { this.0.as_pointer() }; o.borrow().area() }
+        2 => { let o: &Arc<RefCell<Circle>> = &unsafe { this.0.to_pointer() }; o.borrow().area() }
+        3 => { let o: &Arc<RefCell<Rect>> = &unsafe { this.0.to_pointer() }; o.borrow().area() }
         tag => java::bad_tag(tag),
     }
 }
@@ -269,8 +269,8 @@ Rules:
 - A dispatcher exists on an enum for each method the program calls on a receiver of that type,
   a function named after the enum and the method that takes the value (`Base__area(b)`; a
   receiver that is a reference to the value is read as `Base(r.0)`).
-  It matches on the class number, and each arm lends the class's object where it lies, as
-  `view()` would, so a call is one jump to the class's code. An arm calls what the variant's
+  It matches on the class number, and each arm takes the class's object out, as `view()`
+  would, so a call is one jump to the class's code. An arm calls what the variant's
   class runs, in the form that class uses (`o.borrow().m()`,
   `o.borrow_mut().m()`, `C::m(o, ..)`, `o.m()` for an immutable class). When every variant runs
   the same body emitted on the enum, the call names that body and no dispatcher is written. A
@@ -283,8 +283,16 @@ Rules:
   function for rustc to check and to keep in the header crate's metadata.
 - An object is held by a `java::Arc`, a handle with no count (docs/collector.md). A value of an
   enum is that handle's address with the class's number in the top 16 bits (`java::Thin`,
-  `crates/runtime/src/thin.rs`); `Arc` ignores those bits when it reads its pointer, so `view()`
-  lends the handle where it lies, and the value is `Copy` and eight bytes, `Option` of it too.
+  `crates/runtime/src/thin.rs`), and the value is `Copy` and eight bytes, `Option` of it too.
+  `view()` and each arm of a dispatcher take the handle out with the number cleared
+  (`Thin::to_pointer`), so an `Arc` is always the plain address and a read through it is one
+  load: on the Minecraft server, clearing the bits at every read instead had been about
+  one instruction in thirteen. The arm keeps the handle in a temporary that `let o = &..` keeps
+  alive for the arm, and a pattern binds a view's handle by `ref`, so the arm's code sees
+  `o: &Arc<..>` either way; what must outlive the arm, as `base()`'s borrow or an object's
+  monitor, borrows the object itself (`Thin::as_prefix`, `Thin::monitor`), which lives as long
+  as the value. A view of values that are not handles (strings, boxes) lends them where they
+  lie, and has a lifetime for that.
   Each class has one number in the whole program (`class_tag`), so `to_x()` copies the bits, and
   `as_x()` and `instanceof` test the number. The numbers go through each class tree depth first,
   a class before its subclasses (`dispatch::class_numbers`; the runtime's strings, boxes, arrays

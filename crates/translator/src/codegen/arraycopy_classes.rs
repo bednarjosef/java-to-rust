@@ -105,7 +105,7 @@ impl<'a> Gen<'a> {
             hierarchy::Rep::Enum(t) => self
                 .enum_variants(t)
                 .into_iter()
-                .map(|c| (format!("{}(x)", self.view_pattern(t, c)), c))
+                .map(|c| (format!("{}({})", self.view_pattern(t, c), self.view_binding(c, "x")), c))
                 .collect(),
         };
         let missing = self.runtime("not_translated");
