@@ -124,6 +124,50 @@ fn mentions_word(text: &str, word: &str) -> bool {
     })
 }
 
+/// The fewest calls a call must have made in the profile for `profiled_sets` to test its classes.
+const PROFILED_CALLS: u64 = 1000;
+
+/// The classes that each call mostly saw in the counts of a profiled run (`java::count_dispatch`)
+/// in the file `JAVA_TO_RUST_DISPATCH_PROFILE` names, by the call's key (`Gen::profile_key`):
+/// the one class of 90% of its calls, else the two of 95%, for calls made at least
+/// `PROFILED_CALLS` times. The counts name classes by their numbers (`class_numbers`, `numbers`),
+/// which a translation of the same program gives them again.
+pub(super) fn profiled_sets(numbers: &[u16]) -> HashMap<String, std::sync::Arc<[usize]>> {
+    let Some(path) = std::env::var_os("JAVA_TO_RUST_DISPATCH_PROFILE") else { return HashMap::new() };
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the dispatch profile {}: {e}", std::path::Path::new(&path).display()));
+    let class_of: HashMap<u16, usize> = numbers.iter().enumerate().map(|(t, &n)| (n, t)).collect();
+    let mut sets = HashMap::new();
+    for line in text.lines() {
+        let Some((key, counts)) = line.split_once('\t') else { continue };
+        let mut by_class: BTreeMap<usize, u64> = BTreeMap::new();
+        let mut total = 0;
+        for item in counts.split_whitespace() {
+            let Some((class, n)) = item.split_once(':') else { continue };
+            let n: u64 = n.parse().unwrap_or(0);
+            total += n;
+            if let Some(&c) = class.parse().ok().and_then(|number: u16| class_of.get(&number)) {
+                *by_class.entry(c).or_default() += n;
+            }
+        }
+        if total < PROFILED_CALLS {
+            continue;
+        }
+        let mut most: Vec<(u64, usize)> = by_class.into_iter().map(|(c, n)| (n, c)).collect();
+        most.sort_unstable_by(|a, b| b.cmp(a));
+        let share = |k: usize| most.iter().take(k).map(|m| m.0).sum::<u64>() as f64 / total as f64;
+        let take = match () {
+            _ if share(1) >= 0.9 => 1,
+            _ if most.len() >= 2 && share(2) >= 0.95 => 2,
+            _ => continue,
+        };
+        let mut set: Vec<usize> = most[..take].iter().map(|m| m.1).collect();
+        set.sort_unstable();
+        sets.insert(key.to_string(), std::sync::Arc::from(set));
+    }
+    sets
+}
+
 /// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
 /// generation and every translation.
 pub(super) fn receiver_key(classes: &[usize]) -> u64 {
@@ -1773,9 +1817,10 @@ impl<'a> Gen<'a> {
         if let Some(call) = self.call_on_known_this(t, receiver, resolved, args) {
             return call;
         }
-        let name = match self.among(t, receiver) {
+        let group = self.class.hierarchy.group_id(resolved);
+        let among = self.among(t, receiver).or_else(|| self.profiled_among(t, receiver, group));
+        let name = match among {
             Some(key) if self.enum_body(t, resolved).is_none() => {
-                let group = self.class.hierarchy.group_id(resolved);
                 self.need(Need::Among(t, group, key));
                 format!("{}_among_{key:016x}", self.group_names[&group])
             }
@@ -1783,7 +1828,43 @@ impl<'a> Gen<'a> {
         };
         let obj = self.thin_receiver(t, receiver);
         let args = self.call_args(resolved, args).join(", ");
+        // Counts of the classes of the receivers of each call that dispatches among every class
+        // of its type, for profiling (`java::count_dispatch`), which `profiled_among` reads.
+        if std::env::var_os("JAVA_TO_RUST_COUNT_DISPATCH").is_some()
+            && among.is_none()
+            && self.enum_body(t, resolved).is_none()
+        {
+            let key = self.profile_key(receiver, group);
+            let call = self.enum_fn_call(t, &name, "j2r_receiver", &args);
+            return Code::atom(format!(
+                "{{ let j2r_receiver = {obj}; static COUNT: java::DispatchCount = java::DispatchCount::new({key:?}); \
+                 java::count_dispatch(&COUNT, j2r_receiver.0.tag()); {call} }}"
+            ));
+        }
         Code::atom(self.enum_fn_call(t, &name, &obj, &args))
+    }
+
+    /// The key of a call of a method of override group `group` on `receiver` in the counts of
+    /// `java::count_dispatch`: the method the call is in, the call's place in its source and the
+    /// group's name, which another translation of the same program gives the call again.
+    fn profile_key(&self, receiver: &Expr, group: usize) -> String {
+        let at = self.class.methods.get(self.method).map_or(String::new(), |m| {
+            format!("{}.{}/{}", self.class.types[m.class].name, m.name, m.params.len())
+        });
+        format!("{at}@{}:{}#{}", receiver.pos.line, receiver.pos.column, self.group_names[&group])
+    }
+
+    /// The key of the classes that a call on `receiver`, a value of the enum of `t`, mostly saw
+    /// in a profiled run of the program (`profiled_sets`), where those are a few of the enum's: the
+    /// call then tests for them before it runs the whole dispatcher, as `among` does for the
+    /// classes the points-to facts allow.
+    fn profiled_among(&self, t: usize, receiver: &Expr, group: usize) -> Option<u64> {
+        if self.profiled.is_empty() {
+            return None;
+        }
+        let set = self.profiled.get(&self.profile_key(receiver, group))?;
+        (set.iter().all(|&c| self.is_enum_variant(t, c)) && set.len() < self.shared_enum_variants(t).len())
+            .then(|| receiver_key(set))
     }
 
     /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
