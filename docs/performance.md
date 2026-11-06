@@ -368,9 +368,10 @@ instruction TLB's first level fall from 33.4 million to 0.26 million (8.7 millio
 alone, on 4 KB pages), misses of the instruction cache from 671 million to 640 million (634
 million), at the same 5.70 billion instructions. The cycles do not change beyond the noise (the
 fastest run of each: 1.76, 1.83 and 1.77 billion): on a binary that small, the TLB's second level
-holds every page the program runs, and a first-level miss costs a few cycles. The server's 121 MB
-of code in memory does not fit there; a server trial with `TRIAL_HOT_TEXT` is the test of the
-mechanism that matters.
+holds every page the program runs, and a first-level miss costs a few cycles. On the Minecraft
+server built with PGO, whose layout of each function already puts the paths taken together, it
+takes 8% of the instruction cache misses away but no measured time (`minecraft-server.md`, "The
+server's speed").
 
 ## Memory
 

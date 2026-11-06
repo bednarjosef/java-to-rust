@@ -105,6 +105,23 @@ impl<H: HasMonitor + ?Sized> HasMonitor for &H {
     }
 }
 
+impl crate::Thin {
+    /// The monitor of the object whose handle the value holds, for as long as the value is
+    /// borrowed: the handle that `to_pointer` gives back is a copy that ends with this call, but
+    /// the monitor lies in the object, or is made once for it (`LazyMonitor`), and the object
+    /// lives at least as long as the value that names it.
+    ///
+    /// # Safety
+    ///
+    /// The value was made by `Thin::pointer` with a handle of type `P`.
+    #[inline]
+    pub unsafe fn monitor<P: crate::Pointer + HasMonitor>(&self) -> MonitorOf<'_> {
+        let handle: P = unsafe { self.to_pointer() };
+        let monitor = handle.monitor();
+        unsafe { std::mem::transmute::<MonitorOf<'_>, MonitorOf<'_>>(monitor) }
+    }
+}
+
 /// The cell of an object of one thread: its monitor is kept by address.
 impl<T: ?Sized> HasMonitor for std::cell::RefCell<T> {
     #[inline]

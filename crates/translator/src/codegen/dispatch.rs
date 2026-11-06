@@ -392,6 +392,29 @@ impl<'a> Gen<'a> {
         format!("{}::{short}", self.view_name(t))
     }
 
+    /// The binding `name` of the object of class `c` in a pattern of its view's variant: by `ref`
+    /// where the variant holds the object's handle (`thin_impl`), so that `name` is a reference to
+    /// the object's payload either way.
+    pub(super) fn view_binding(&self, c: usize, name: &str) -> String {
+        if self.thin_pointer(c) { format!("ref {name}") } else { name.to_string() }
+    }
+
+    /// Whether a view over `variants` lends a value of one of them, so that it has a lifetime.
+    fn view_lends(&self, variants: &[usize]) -> bool {
+        variants.iter().any(|&c| !self.thin_pointer(c))
+    }
+
+    /// The object of class `c` that `thin`, a `java::Thin`, holds, as a reference to its payload:
+    /// a handle with the class number cleared (`Thin::to_pointer`), in the temporary that the
+    /// borrow makes, which lives as long as the `let` it is given to; or a value lent where it
+    /// lies.
+    pub(super) fn lent_object(&self, c: usize, thin: &str) -> String {
+        match self.thin_pointer(c) {
+            true => format!("&unsafe {{ {thin}.to_pointer() }}"),
+            false => format!("unsafe {{ {thin}.as_value() }}"),
+        }
+    }
+
     /// The name of the view of the enum of `t`: its name and `View`, or `Variants` where the
     /// program has a class of that name in the package.
     pub(super) fn view_name(&self, t: usize) -> String {
@@ -507,15 +530,16 @@ impl<'a> Gen<'a> {
             self.line("    java::bad_tag(self.0.tag())");
             self.line("}");
         } else {
-            self.line(&format!("{vis}fn view(&self) -> {view}<'_> {{"));
+            let lifetime = if self.view_lends(variants) { "<'_>" } else { "" };
+            self.line(&format!("{vis}fn view(&self) -> {view}{lifetime} {{"));
             self.indent += 1;
             self.line("match self.0.tag() {");
             self.indent += 1;
             for (&c, short) in variants.iter().zip(shorts) {
-                let (tag, lend) =
-                    (self.class_tag(c), if self.thin_pointer(c) { "as_pointer" } else { "as_value" });
+                let (tag, method) =
+                    (self.class_tag(c), if self.thin_pointer(c) { "to_pointer" } else { "as_value" });
                 // The class number is the one its constructor gives.
-                self.line(&format!("{tag} => {view}::{short}(unsafe {{ self.0.{lend}() }}),"));
+                self.line(&format!("{tag} => {view}::{short}(unsafe {{ self.0.{method}() }}),"));
             }
             self.line("tag => java::bad_tag(tag),");
             self.indent -= 1;
@@ -1218,7 +1242,7 @@ impl<'a> Gen<'a> {
         let mut arms: Vec<String> = self
             .object_arrays()
             .into_iter()
-            .map(|(_, pattern, _)| format!("{pattern}(a) => Ok({len}(a)),"))
+            .map(|(_, pattern, _)| format!("{pattern}(ref a) => Ok({len}(a)),"))
             .collect();
         arms.push(format!(
             "_ => Err({exception}::new(\"java.lang.IllegalArgumentException\", \"Argument is not an array\")),"
@@ -1270,7 +1294,7 @@ impl<'a> Gen<'a> {
                     } else {
                         format!("{read} as {}", rust_type(element))
                     };
-                    sources.push(format!("{source_variant}(b) => {read},"));
+                    sources.push(format!("{source_variant}({}) => {read},", self.view_binding(c, "b")));
                 }
                 sources.push(format!("_ => {},", fail("argument type mismatch")));
                 format!(
@@ -1318,7 +1342,7 @@ impl<'a> Gen<'a> {
             } else {
                 format!("{set}(a, {i}, element)")
             };
-            arms.push(format!("{pattern}(a) => {{ let element = {stored}; {store} }}"));
+            arms.push(format!("{pattern}(ref a) => {{ let element = {stored}; {store} }}"));
         }
         arms.push(format!("_ => {{ {}; }}", fail("Argument is not an array")));
         // The value's type is spelled out, as a `null` (`None`) may first be read where its type
@@ -1819,9 +1843,8 @@ impl<'a> Gen<'a> {
         if !uses {
             return Some(Code::atom(if args.is_empty() { text } else { format!("{{ {arguments}{text} }}") }));
         }
-        let payload = self.payload(c);
-        let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
-        Some(Code::atom(format!("{{ {arguments}let o: &{payload} = unsafe {{ this.0.{lend}() }}; {text} }}")))
+        let (payload, lent) = (self.payload(c), self.lent_object(c, "this.0"));
+        Some(Code::atom(format!("{{ {arguments}let o: &{payload} = {lent}; {text} }}")))
     }
 
     /// Whether a dispatcher's arm for class `c` calls a copy of body `i` written for `c`
@@ -2134,13 +2157,19 @@ impl<'a> Gen<'a> {
             } else {
                 // Each variant's discriminant is its class number, so that `view()` keeps the
                 // number it reads instead of mapping it to another, and its arms differ in nothing
-                // else.
+                // else. A variant holds the object's handle, with the class number cleared
+                // (`Thin::to_pointer`), which a pattern binds by `ref` (`view_binding`), or lends
+                // a value where it lies, for the lifetime that only a view with values has.
+                let lifetime = if self.view_lends(&variants) { "<'a>" } else { "" };
                 self.line("#[repr(u16)]");
-                self.line(&format!("{vis}enum {view}<'a> {{"));
+                self.line(&format!("{vis}enum {view}{lifetime} {{"));
                 self.indent += 1;
                 for (&c, short) in variants.iter().zip(&shorts) {
-                    let payload = self.payload(c);
-                    self.line(&format!("{short}(&'a {payload}) = {},", self.class_tag(c)));
+                    let (payload, tag) = (self.payload(c), self.class_tag(c));
+                    match self.thin_pointer(c) {
+                        true => self.line(&format!("{short}({payload}) = {tag},")),
+                        false => self.line(&format!("{short}(&'a {payload}) = {tag},")),
+                    }
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -2357,8 +2386,7 @@ impl<'a> Gen<'a> {
         for (c, text, uses) in arms {
             let tag = self.class_tag(c);
             if uses {
-                let payload = self.payload(c);
-                let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
+                let (payload, lent) = (self.payload(c), self.lent_object(c, &format!("{me}.0")));
                 // The class number is the one its constructor gives.
                 let call = match &frames {
                     Some((params, args, ret))
@@ -2370,9 +2398,7 @@ impl<'a> Gen<'a> {
                     }
                     _ => text,
                 };
-                lines.push(Ok(format!(
-                    "{tag} => {{ let o: &{payload} = unsafe {{ {me}.0.{lend}() }}; {call} }}"
-                )));
+                lines.push(Ok(format!("{tag} => {{ let o: &{payload} = {lent}; {call} }}")));
             } else if let Some(&i) = index.get(&text) {
                 alike[i].1.push(c);
             } else {
@@ -2466,18 +2492,22 @@ impl<'a> Gen<'a> {
             self.line("}");
             return;
         }
+        // Each arm borrows the object itself for as long as `self` is borrowed, where a borrow of
+        // the handle would end with the arm (`Thin::to_pointer`).
         self.match_arms(&variants, &|g: &mut Self, c| {
             let path = hierarchy::base_path(g.facts, g.class, c, root);
             let path = path.trim_end_matches('.');
+            let payload = g.payload(c);
+            let object = payload.strip_prefix("Arc<").and_then(|p| p.strip_suffix('>')).unwrap_or(&payload);
             let text = match (mutable, immutable, path.is_empty()) {
-                (false, true, true) => "&**o".to_string(),
+                (false, true, true) => "&*o".to_string(),
                 (false, true, false) => format!("&o.{path}"),
                 (false, false, true) => "o.borrow()".to_string(),
                 (false, false, false) => format!("{java}Ref::map(o.borrow(), |o| &o.{path})"),
                 (true, _, true) => "o.borrow_mut()".to_string(),
                 (true, _, false) => format!("{java}RefMut::map(o.borrow_mut(), |o| &mut o.{path})"),
             };
-            (text, true)
+            (format!("{{ let o: &{object} = unsafe {{ self.0.as_prefix() }}; {text} }}"), false)
         });
         self.indent -= 1;
         self.line("}");
@@ -2536,13 +2566,10 @@ impl<'a> Gen<'a> {
             self.line("match self.0.tag() {");
             self.indent += 1;
             for &c in passing.iter() {
-                let payload = self.payload(c);
-                let lend = if self.thin_pointer(c) { "as_pointer" } else { "as_value" };
+                let (payload, lent) = (self.payload(c), self.lent_object(c, "self.0"));
                 let (tag, held) = (self.class_tag(c), self.held(c));
                 // The class number is the one its constructor gives.
-                self.line(&format!(
-                    "{tag} => {{ let o: &{payload} = unsafe {{ self.0.{lend}() }}; Some({held}) }}"
-                ));
+                self.line(&format!("{tag} => {{ let o: &{payload} = {lent}; Some({held}) }}"));
             }
             self.line("_ => None,");
             self.indent -= 1;
@@ -3050,7 +3077,8 @@ impl<'a> Gen<'a> {
         } else {
             format!("{}.view()", operand(&place))
         };
-        let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
+        let b = self.view_binding(c, "b");
+        let pattern = if optional { format!("Some({variant}({b}))") } else { format!("{variant}({b})") };
         if !optional && self.shared_enum_variants(e).len() == 1 {
             return format!("{{ let {pattern} = {viewed}; {compare} }}");
         }
@@ -3168,11 +3196,14 @@ impl<'a> Gen<'a> {
         if !self.is_enum_variant(e, c) {
             return "false".to_string();
         }
-        let variant = self.view_pattern(e, c);
+        let (variant, b) = (self.view_pattern(e, c), self.view_binding(c, "b"));
         if optional {
-            format!("{}.as_ref().is_some_and(|b| matches!(b.view(), {variant}(b) if {same}))", operand(place))
+            format!(
+                "{}.as_ref().is_some_and(|b| matches!(b.view(), {variant}({b}) if {same}))",
+                operand(place)
+            )
         } else {
-            format!("matches!({}.view(), {variant}(b) if {same})", operand(place))
+            format!("matches!({}.view(), {variant}({b}) if {same})", operand(place))
         }
     }
 
@@ -3433,8 +3464,9 @@ impl<'a> Gen<'a> {
             ));
             self.indent += 1;
             for (c, same) in by_value {
-                let v = self.view_pattern(t, c);
-                self.line(&format!("({v}(a), {v}(b)) => {same},"));
+                let (v, a, b) =
+                    (self.view_pattern(t, c), self.view_binding(c, "a"), self.view_binding(c, "b"));
+                self.line(&format!("({v}({a}), {v}({b})) => {same},"));
             }
             self.line("_ => false,");
             self.indent -= 1;
@@ -3556,7 +3588,8 @@ impl<'a> Gen<'a> {
             self.line("match (self.view(), other.view()) {");
             self.indent += 1;
             for &c in &others {
-                let v = self.view_pattern(t, c);
+                let (v, a, b) =
+                    (self.view_pattern(t, c), self.view_binding(c, "a"), self.view_binding(c, "b"));
                 let mut same = self.same_variant(c);
                 // A `Boolean` or a `Byte` is one of `valueOf`'s cached objects, the same object
                 // exactly when the values are equal (see `analysis::boxing`). Shared strings are
@@ -3574,9 +3607,9 @@ impl<'a> Gen<'a> {
                 };
                 if unkept {
                     let end = self.runtime("unkept_identity");
-                    self.line(&format!("({v}(a), {v}(b)) => {same} && {end}(),"));
+                    self.line(&format!("({v}({a}), {v}({b})) => {same} && {end}(),"));
                 } else {
-                    self.line(&format!("({v}(a), {v}(b)) => {same},"));
+                    self.line(&format!("({v}({a}), {v}({b})) => {same},"));
                 }
             }
             if variants.len() > 1 {
@@ -3641,9 +3674,13 @@ impl<'a> Gen<'a> {
         let handles: std::collections::HashSet<usize> =
             variants.iter().zip(handles).filter(|(_, handle)| *handle).map(|(&c, _)| c).collect();
         let ret = format!(" -> {of}<'_>");
-        self.method_arms(("monitor", "", "", &ret), variants, &|_, c| match handles.contains(&c) {
-            true => (format!("{has}::monitor(o)"), true),
-            false => (unkept.clone(), false),
+        // The monitor is borrowed from `self` (`Thin::monitor`), not from the handle that an arm
+        // takes out of it, which ends with the arm.
+        let payloads: std::collections::HashMap<usize, String> =
+            handles.iter().map(|&c| (c, self.payload(c))).collect();
+        self.method_arms(("monitor", "", "", &ret), variants, &|_, c| match payloads.get(&c) {
+            Some(payload) => (format!("unsafe {{ self.0.monitor::<{payload}>() }}"), false),
+            None => (unkept.clone(), false),
         });
         self.indent -= 1;
         self.line("}");

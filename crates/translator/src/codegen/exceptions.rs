@@ -1507,9 +1507,9 @@ impl<'a> Gen<'a> {
             match self.rep(ty) {
                 // The parameter is the object of the one class it catches.
                 hierarchy::Rep::Object(c) if used => {
-                    let view = self.view_pattern(t, c);
+                    let (view, o) = (self.view_pattern(t, c), self.view_binding(c, "o"));
                     before.push(format!(
-                        "let {mutable}{name} = match {tested}.view() {{ {view}(o) => o.clone(), _ => unreachable!(\"the arm matches its class\") }};"
+                        "let {mutable}{name} = match {tested}.view() {{ {view}({o}) => o.clone(), _ => unreachable!(\"the arm matches its class\") }};"
                     ));
                 }
                 // The parameter is a value of the enum of a class of the program, which has the

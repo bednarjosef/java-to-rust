@@ -1363,7 +1363,7 @@ mod tests {
             let arms: String = (0..arms)
                 .map(|i| {
                     format!(
-                        "        {i} => {{\n            let o: &std::sync::Arc<java::Monitored<C{i}>> = unsafe {{ this.0.as_pointer() }};\n            C{i}__get(o, index)\n        }}\n"
+                        "        {i} => {{\n            let o: &std::sync::Arc<java::Monitored<C{i}>> = &unsafe {{ this.0.to_pointer() }};\n            C{i}__get(o, index)\n        }}\n"
                     )
                 })
                 .collect();

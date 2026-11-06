@@ -640,15 +640,16 @@ impl<'a> Gen<'a> {
         for a in &variants {
             for b in &variants {
                 arms.push(format!(
-                    "(Some({a}(src)), Some({b}(dest))) => {copy}(src, {p}, dest, {q}, {n}, {k}),"
+                    "(Some({a}(ref src)), Some({b}(ref dest))) => {copy}(src, {p}, dest, {q}, {n}, {k}),"
                 ));
             }
         }
         let (from, to, within) =
             (self.runtime("copy_from_native"), self.runtime("copy_to_native"), self.runtime("copy_native"));
         for v in &variants {
-            arms.push(format!("(None, Some({v}(dest))) => {from}({p}, dest, {q}, {n}, {k}),"));
-            arms.push(format!("(Some({v}(src)), None) => {to}(src, {p}, {q}, {n}, {k}),"));
+            // An array's variant holds its handle (`view_binding`).
+            arms.push(format!("(None, Some({v}(ref dest))) => {from}({p}, dest, {q}, {n}, {k}),"));
+            arms.push(format!("(Some({v}(ref src)), None) => {to}(src, {p}, {q}, {n}, {k}),"));
         }
         arms.push(format!("(None, None) => {within}({p}, {q}, {n}, {k}),"));
         arms.push(format!(
@@ -678,7 +679,7 @@ impl<'a> Gen<'a> {
         let mut arms: Vec<String> = self
             .primitive_array_variants()
             .iter()
-            .map(|variant| format!("Some({variant}(array)) => {set}(array, {o}, {n}, {v}),"))
+            .map(|variant| format!("Some({variant}(ref array)) => {set}(array, {o}, {n}, {v}),"))
             .collect();
         arms.push(format!("None => {}({o}, {n}, {v}),", self.runtime("set_native")));
         arms.push(format!(
@@ -738,7 +739,7 @@ impl<'a> Gen<'a> {
         let mut arms: Vec<String> = self
             .primitive_array_variants()
             .iter()
-            .map(|variant| format!("Some({variant}(array)) => {call},"))
+            .map(|variant| format!("Some({variant}(ref array)) => {call},"))
             .collect();
         // A null base: the offset is an address outside the heap.
         arms.push(if put {

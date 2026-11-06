@@ -97,11 +97,16 @@ impl<T> Arc<T> {
         std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
     }
 
-    /// The address of the value, which identifies the object while it lives: the pointer without
-    /// the class number that a handle lent by a `java::Thin` carries in its top bits.
+    /// The address of the value, which identifies the object while it lives. A handle taken out
+    /// of a `java::Thin` has its class number cleared (`Thin::to_pointer`), so this is the
+    /// pointer as it is.
     #[inline(always)]
     pub fn as_ptr(this: &Arc<T>) -> *const T {
-        (this.ptr.as_ptr() as usize & ADDRESS) as *const T
+        debug_assert!(
+            this.ptr.as_ptr() as usize & !ADDRESS == 0,
+            "a handle with a class number in its top bits"
+        );
+        this.ptr.as_ptr()
     }
 
     /// How many handles there may be of the object: handles are not counted, so always more than

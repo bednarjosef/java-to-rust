@@ -9,11 +9,13 @@
 //! that holds the value. A class number is never 0, so a `Thin` is never 0, and `Option` of it
 //! uses 0 for `None`.
 //!
-//! A `java::Arc` ignores the top 16 bits of its pointer (`ADDRESS`), so the `Thin` of a handle can
-//! be read as the handle where it lies: `as_pointer` lends the handle for as long as the `Thin`
-//! is borrowed, and the code of each class's arm uses it as it used the handle of an enum's
-//! variant. A value in the low bytes is lent the same way, as x86-64 keeps the low bytes of a word
-//! first. The collector ignores the top bits too when it scans memory for handles (`gc.rs`).
+//! `to_pointer` gives back the handle with the class number cleared from its top bits, so a
+//! `java::Arc` is always the plain address and reading through one is a plain load: the
+//! translation clears the bits once, where it takes the handle out of the `Thin` at a class's
+//! arm, rather than at each read of the object, which on the Minecraft server had been one
+//! instruction in fourteen. A value in the low bytes is lent where it lies, as x86-64 keeps the
+//! low bytes of a word first. The collector ignores the top bits when it scans memory for handles
+//! (`gc.rs`), as a field of an interface type holds a `Thin`.
 
 use crate::Arc;
 use std::num::NonZeroU64;
@@ -26,13 +28,13 @@ pub const ADDRESS: usize = (1 << 48) - 1;
 #[repr(transparent)]
 pub struct Thin(NonZeroU64);
 
-/// A type that is one pointer that ignores the top 16 bits: a handle, a `#[repr(transparent)]`
-/// struct around one (a builder), or a string with an identity (`java::JStr`).
+/// A type that is one pointer: a handle, a `#[repr(transparent)]` struct around one (a builder),
+/// or a string with an identity (`java::JStr`).
 ///
 /// # Safety
 ///
-/// The type is a `java::Arc<T>`, `#[repr(transparent)]` over a type that is, or one pointer that
-/// masks its top 16 bits with `ADDRESS` wherever it reads through it, and it has no `Drop`.
+/// The type is a `java::Arc<T>`, `#[repr(transparent)]` over a type that is, or one pointer whose
+/// bits are an address of at most 48 bits, and it has no `Drop`.
 pub unsafe trait Pointer: Sized {}
 
 unsafe impl<T> Pointer for Arc<T> {}
@@ -59,17 +61,15 @@ impl Thin {
         Thin::of(tag, address as u64)
     }
 
-    /// The handle that the value holds, lent while the value is borrowed.
+    /// The handle that the value holds, with the class number cleared.
     ///
     /// # Safety
     ///
     /// The value was made by `pointer` with a handle of type `P`.
     #[inline(always)]
-    pub unsafe fn as_pointer<P: Pointer>(&self) -> &P {
-        // The handle's pointer is these bits, whose tag it ignores. (A reference made of the
-        // reference rather than of a raw pointer has no checks of the pointer in a build without
-        // optimizations, which would be written out at each class's arm.)
-        unsafe { std::mem::transmute::<&Thin, &P>(self) }
+    pub unsafe fn to_pointer<P: Pointer>(self) -> P {
+        // A `Pointer` is one pointer, and these bits are the one `pointer` was given.
+        unsafe { std::mem::transmute_copy::<usize, P>(&(self.0.get() as usize & ADDRESS)) }
     }
 
     /// The start of the object whose handle the value holds, read as a `T` and lent while the
@@ -83,9 +83,8 @@ impl Thin {
     /// offset 0, or a `java::Monitored` of one).
     #[inline(always)]
     pub unsafe fn as_prefix<T>(&self) -> &T {
-        // The handle's pointer is these bits without the tag, as `Arc`'s `Deref` reads it, and
-        // the `T` lies where the `O` does, borrowed as `Deref` would lend the `O` for as long as
-        // the handle is.
+        // The handle's pointer is these bits without the tag, and the `T` lies where the `O`
+        // does, borrowed as `Deref` would lend the `O` for as long as the handle is.
         unsafe { &*((self.0.get() as usize & ADDRESS) as *const T) }
     }
 
@@ -113,7 +112,8 @@ impl Thin {
             // The value lies in the low bytes, which come first.
             unsafe { &*(self as *const Thin as *const T) }
         } else {
-            unsafe { self.as_pointer::<Arc<T>>() }
+            // The box's handle without the tag, read as `Arc<T>`'s `Deref` reads it.
+            unsafe { self.as_prefix::<T>() }
         }
     }
 
@@ -151,13 +151,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_handle_is_lent_where_it_lies() {
+    fn a_handle_comes_back_without_its_class_number() {
         let text = Arc::new("t".to_string());
         let thin = Thin::pointer(7, text.clone());
         assert_eq!(thin.tag(), 7);
-        let lent: &Arc<String> = unsafe { thin.as_pointer() };
-        assert!(Arc::ptr_eq(lent, &text));
-        assert_eq!(lent.as_str(), "t");
+        let back: Arc<String> = unsafe { thin.to_pointer() };
+        assert!(Arc::ptr_eq(&back, &text));
+        assert_eq!(back.as_str(), "t");
     }
 
     #[test]

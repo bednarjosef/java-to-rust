@@ -403,7 +403,9 @@ impl<'a> Gen<'a> {
                 let obj = self.object(&args[0]);
                 let mut arms: Vec<String> = enums
                     .iter()
-                    .map(|&c| format!("{}(e) => e.enum_name()", self.view_pattern(t, c)))
+                    .map(|&c| {
+                        format!("{}({}) => e.enum_name()", self.view_pattern(t, c), self.view_binding(c, "e"))
+                    })
                     .collect();
                 arms.push(self.not_enum_arm(t));
                 Code::atom(format!("{{ let value = {obj}; match value.view() {{ {} }} }}", arms.join(", ")))

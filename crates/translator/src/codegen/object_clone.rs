@@ -33,7 +33,8 @@ impl<'a> Gen<'a> {
                         };
                         format!("{read}.{path}{rust}{clone}")
                     });
-                    format!("{pattern}(o) => {{ {borrow}{variant}({}) }}", self.copy_handle(c, literal))
+                    let o = self.view_binding(c, "o");
+                    format!("{pattern}({o}) => {{ {borrow}{variant}({}) }}", self.copy_handle(c, literal))
                 } else {
                     format!("{pattern}(_) => {}", self.clone_refused(c, id).text)
                 };
