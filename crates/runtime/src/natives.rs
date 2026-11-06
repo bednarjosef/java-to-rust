@@ -61,7 +61,7 @@ fn checked_copy_from<T: Clone>(
     let (from, to, n) = copy_bounds::<T>(src_len, src_pos, dest.length(), dest_pos, length)
         .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
     let items: Vec<T> = read(from..from + n);
-    let fits = items.iter().take_while(|v| class.refuses(v).is_none()).count();
+    let fits = items.iter().take_while(|v| class.holds(v)).count();
     dest.store_from(to, &items[..fits]);
     if fits < n {
         // HotSpot tells whether `dest`'s element type is below `src`'s, which an array without a

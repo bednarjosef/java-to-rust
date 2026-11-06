@@ -297,11 +297,16 @@ pub struct ElementClass<T> {
     /// `ClassCastException` gives with the array's class (`java::BASE`, `java::APP`).
     module: &'static str,
     /// The binary names of the class of an element and of every class and interface above it,
-    /// its own first (`None` for null), which the store of the element tests.
+    /// its own first (`None` for null), which the store of the element tests where `fits` is
+    /// `None`, and which an `ArrayStoreException` names.
     names: fn(&T) -> Option<&'static [&'static str]>,
     /// The binary names of the array's class and of the classes and interfaces above it, its own
     /// first, which a store of the array into an array of arrays tests (`array_type_names`).
     own: &'static [&'static str],
+    /// Whether the array can hold an element, by the class number of the element's class
+    /// (`fitting`): the test that the store of an element makes, as HotSpot's compares a class
+    /// pointer, in place of a search of `names`.
+    fits: Option<fn(&T) -> bool>,
 }
 
 impl<T> ElementClass<T> {
@@ -312,7 +317,22 @@ impl<T> ElementClass<T> {
         names: fn(&T) -> Option<&'static [&'static str]>,
         own: &'static [&'static str],
     ) -> ElementClass<T> {
-        ElementClass { class, element, module, names, own }
+        ElementClass { class, element, module, names, own, fits: None }
+    }
+
+    /// The class, whose store of an element tests `fits` (null passes) rather than the names of
+    /// the element's classes: the translator writes it where the element type is a class.
+    pub fn fitting(self, fits: fn(&T) -> bool) -> ElementClass<T> {
+        ElementClass { fits: Some(fits), ..self }
+    }
+
+    /// Whether the array can hold `v`.
+    #[inline(always)]
+    pub(crate) fn holds(&self, v: &T) -> bool {
+        match self.fits {
+            Some(fits) => fits(v),
+            None => self.refuses(v).is_none(),
+        }
     }
 
     /// The binary name of the class of `v` where the array cannot hold it (`java.lang.Integer` in
@@ -332,6 +352,7 @@ impl<T> Clone for ElementClass<T> {
             module: self.module,
             names: self.names,
             own: self.own,
+            fits: self.fits,
         }
     }
 }
@@ -1311,16 +1332,17 @@ pub fn cast_array<T, A: Elements<T>>(a: A, class: &Class, to: crate::CastClass) 
     try_cast_array(a, class, to).unwrap_or_else(|e| crate::throw_exception(e))
 }
 
-/// Java's check of `a[i] = v` in an `Object[]` that may be a covariant array: the index is
-/// checked first, then whether the array can hold `v`.
+/// Java's check of `a[i] = v` in an `Object[]` that may be a covariant array, once the array
+/// was found not to hold `v` (`ElementClass::holds`): the index is checked first, then the
+/// exception names the class of `v`.
 #[cold]
 #[inline(never)]
-fn check_store<T>(class: &ElementClass<T>, len: usize, i: i32, v: &T) -> Result<(), Exception> {
-    try_position(len, i)?;
-    match class.refuses(v) {
-        Some(name) => Err(Exception::new("java.lang.ArrayStoreException", name)),
-        None => Ok(()),
+fn refused_store<T>(class: &ElementClass<T>, len: usize, i: i32, v: &T) -> Exception {
+    if let Err(e) = try_position(len, i) {
+        return e;
     }
+    let name = (class.names)(v).and_then(|names| names.first().copied()).unwrap_or("java.lang.Object");
+    Exception::new("java.lang.ArrayStoreException", name)
 }
 
 /// `a[i] = v` in an `Object[]` that may be a covariant array, which throws
@@ -1328,7 +1350,9 @@ fn check_store<T>(class: &ElementClass<T>, len: usize, i: i32, v: &T) -> Result<
 #[inline]
 pub fn checked_set<T>(a: &impl Elements<T>, i: i32, v: T) {
     if let Some(class) = a.element_class() {
-        check_store(class, a.length(), i, &v).unwrap_or_else(|e| crate::throw_exception(e));
+        if !class.holds(&v) {
+            crate::throw_exception(refused_store(class, a.length(), i, &v))
+        }
     }
     set(a, i, v)
 }
@@ -1336,7 +1360,9 @@ pub fn checked_set<T>(a: &impl Elements<T>, i: i32, v: T) {
 /// `checked_set` where the program observes the exception.
 pub fn try_checked_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
     if let Some(class) = a.element_class() {
-        check_store(class, a.length(), i, &v)?;
+        if !class.holds(&v) {
+            return Err(refused_store(class, a.length(), i, &v));
+        }
     }
     try_set(a, i, v)
 }
@@ -1781,7 +1807,9 @@ pub fn try_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exc
 /// `checked_set` as a volatile write.
 pub fn checked_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) {
     if let Some(class) = a.element_class() {
-        check_store(class, a.length(), i, &v).unwrap_or_else(|e| crate::throw_exception(e));
+        if !class.holds(&v) {
+            crate::throw_exception(refused_store(class, a.length(), i, &v))
+        }
     }
     set_volatile(a, i, v)
 }
@@ -1789,7 +1817,9 @@ pub fn checked_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) {
 /// `checked_set_volatile` where the program observes the exception.
 pub fn try_checked_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
     if let Some(class) = a.element_class() {
-        check_store(class, a.length(), i, &v)?;
+        if !class.holds(&v) {
+            return Err(refused_store(class, a.length(), i, &v));
+        }
     }
     try_set_volatile(a, i, v)
 }
