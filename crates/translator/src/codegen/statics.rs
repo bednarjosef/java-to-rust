@@ -238,12 +238,14 @@ impl<'a> Gen<'a> {
     /// initialization is waited for, and `init_done` ends the function. A rewritten `<clinit>`
     /// keeps its own state, which is its guard (`lower/clinit_errors.rs`): when its statics are
     /// the process's, another thread's initialization is waited for all the same, and the run
-    /// this thread starts is done at whichever return ends it, failed or not.
+    /// this thread starts is done at whichever return ends it, failed or not, and ready (the
+    /// `ClassInit`'s state that the fast path tests alone) when the kept state says it succeeded.
     pub(super) fn init_guard(&mut self, t: usize) {
         let class = &self.class.types[t].name;
         if crate::lower::rewritten_clinit(&self.class.types[t]) {
             if self.facts.process_statics(t) {
-                self.line(&format!("let _run = {}.run();", flag(class)));
+                let kept = self.cell_name(t, crate::lower::STATE);
+                self.line(&format!("let _run = {}.run(&{kept});", flag(class)));
             }
             return;
         }
@@ -262,13 +264,15 @@ impl<'a> Gen<'a> {
     /// The `init` function of class `t`, named `name`, returning `ret`: inlined where it is called,
     /// it returns at once when the class's initialization has started (for the process's statics,
     /// when it is done), and otherwise calls `{name}_slow`, which runs the `<clinit>` and is kept
-    /// out of line. A class is used far more often than it is initialized.
+    /// out of line. A class is used far more often than it is initialized, and the test is one
+    /// load of one flag: a loop that uses several classes tests each on every pass.
     pub(super) fn init_fast_path(&mut self, t: usize, name: &str, ret: &str) {
         let decl = &self.class.types[t];
         // A rewritten `<clinit>` records that it started before it runs; another thread waits
-        // until it is done.
+        // until it is done, and the `ClassInit` is ready once a run is done and succeeded, which
+        // stands for its kept state being 1 as well.
         let started = if crate::lower::rewritten_clinit(decl) && self.facts.process_statics(t) {
-            format!("{}.get() == 1 && {}.done()", self.cell_name(t, crate::lower::STATE), flag(&decl.name))
+            format!("{}.ready()", flag(&decl.name))
         } else if crate::lower::rewritten_clinit(decl) {
             format!("{}.get() == 1", self.cell_name(t, crate::lower::STATE))
         } else if self.facts.process_statics(t) {
