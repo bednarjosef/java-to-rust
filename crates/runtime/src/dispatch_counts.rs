@@ -1,5 +1,5 @@
 //! Counts of the classes that the receiver of each call through a dispatcher has, by call, for a
-//! translation that tests the classes a call mostly sees before it dispatches (docs/object-model.md,
+//! translation that tests the classes a call mostly sees before it dispatches (docs/native-speed.md,
 //! "Profiled calls"). The translator emits a count before each such call when it is asked to
 //! (`JAVA_TO_RUST_COUNT_DISPATCH=1` while translating); the program then writes, when it exits,
 //! a line per call to the file `JAVA_DISPATCH_COUNTS` names. A translation made without it has

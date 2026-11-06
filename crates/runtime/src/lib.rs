@@ -86,7 +86,6 @@ mod vm;
 mod weak;
 pub mod wtf8;
 pub use allocation_counts::{AllocationCount, count_allocation};
-pub use dispatch_counts::{DispatchCount, count_dispatch};
 pub use arguments::main_args;
 pub use boxed::*;
 pub use builder::{Builder, BuilderCell, SharedStringBuilder, StringBuilder, same_builder};
@@ -107,6 +106,7 @@ pub use deflate::{
     deflate_adler, deflate_buffer_buffer, deflate_buffer_bytes, deflate_bytes, deflate_bytes_buffer,
     deflate_end, deflate_init, deflate_reset, deflate_set_dictionary, deflate_set_dictionary_buffer,
 };
+pub use dispatch_counts::{DispatchCount, count_dispatch};
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
