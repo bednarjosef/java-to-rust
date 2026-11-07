@@ -25,6 +25,7 @@ use crate::analysis::closures;
 /// another method.
 struct Saved<'a> {
     method: usize,
+    known_init: Vec<(usize, usize)>,
     ret: Type,
     throwing: bool,
     this_struct: usize,
@@ -511,6 +512,7 @@ impl<'a> Gen<'a> {
     fn set_aside(&mut self) -> Saved<'a> {
         Saved {
             method: self.method,
+            known_init: std::mem::take(&mut self.known_init),
             ret: self.ret,
             throwing: self.throwing,
             this_struct: self.this_struct,
@@ -552,6 +554,7 @@ impl<'a> Gen<'a> {
 
     fn restore(&mut self, s: Saved<'a>) {
         self.method = s.method;
+        self.known_init = s.known_init;
         self.ret = s.ret;
         self.throwing = s.throwing;
         self.this_struct = s.this_struct;

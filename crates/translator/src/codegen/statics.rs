@@ -314,12 +314,97 @@ impl<'a> Gen<'a> {
         Some(format!("{};", self.init_run(init)))
     }
 
-    /// The class whose initialization a use of class `class` runs here (`init_call`), if any.
+    /// The class whose initialization a use of class `class` runs here (`init_call`), if any:
+    /// none in that class or a subclass of it, nor after a statement of the same method that
+    /// surely ran it (`known_init`).
     pub(super) fn uninitialized(&self, class: usize) -> Option<usize> {
         let current = self.class.methods[self.method].class;
         let init = self.facts.init_class(self.class, class)?;
-        let initialized = current == init || self.class.hierarchy.ancestors(current).contains(&init);
+        let initialized = current == init
+            || self.class.hierarchy.ancestors(current).contains(&init)
+            || self.known_init.contains(&(self.method, init));
         (!initialized).then_some(init)
+    }
+
+    /// The classes whose initialization statement `stmt` has run once it completes normally,
+    /// through a check written in this method (`init_call`): one for a read or write of a static
+    /// that is not a constant, an enum constant, or `Class.forName`, where the statement surely
+    /// evaluates it. Once the check passed, the class is initialized, or this thread is running
+    /// its initialization, and a second check would pass too. A call or `new` is left out (its
+    /// check is the callee's), and so is anything inside a lambda, past `&&`, `||` or `?`, or in a
+    /// switch's cases, which may not run.
+    pub(super) fn initialized_by(&self, stmt: &Stmt) -> Vec<usize> {
+        let mut found = Vec::new();
+        match stmt {
+            Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::If { cond: e, .. } => {
+                self.surely_initializes(e, &mut found)
+            }
+            _ => {}
+        }
+        found
+    }
+
+    fn surely_initializes(&self, e: &Expr, found: &mut Vec<usize>) {
+        let mut class_of = |class: usize| found.extend(self.facts.init_class(self.class, class));
+        match &e.kind {
+            ExprKind::Static { class, name } => {
+                let constant = self.class.types[*class].statics.iter().any(|f| f.name == *name && f.constant);
+                if !constant {
+                    class_of(*class);
+                }
+            }
+            ExprKind::EnumConstant { class, .. } => class_of(*class),
+            ExprKind::Builtin(Builtin::InitializeClass { class }, _) => class_of(*class),
+            ExprKind::Assign { target, value, .. } => {
+                if let Place::Static { class, .. } = target {
+                    class_of(*class);
+                }
+                self.place_surely_initializes(target, found);
+                self.surely_initializes(value, found);
+            }
+            ExprKind::IncDec { target, .. } => {
+                if let Place::Static { class, .. } = target {
+                    class_of(*class);
+                }
+                self.place_surely_initializes(target, found);
+            }
+            ExprKind::Binary(BinOp::And | BinOp::Or, left, _) => self.surely_initializes(left, found),
+            ExprKind::Binary(_, left, right) | ExprKind::Index(left, right) => {
+                self.surely_initializes(left, found);
+                self.surely_initializes(right, found);
+            }
+            ExprKind::Unary(_, value)
+            | ExprKind::Cast(_, value)
+            | ExprKind::InstanceOf { value, .. }
+            | ExprKind::Length(value)
+            | ExprKind::Conditional(value, ..)
+            | ExprKind::Field { object: value, .. }
+            | ExprKind::Switch { selector: value, .. } => self.surely_initializes(value, found),
+            ExprKind::NewArray(values)
+            | ExprKind::ArrayLit(values)
+            | ExprKind::Call { args: values, .. }
+            | ExprKind::New { args: values, .. }
+            | ExprKind::ThisCall { args: values, .. }
+            | ExprKind::SuperInit { args: values, .. } => {
+                values.iter().for_each(|v| self.surely_initializes(v, found))
+            }
+            ExprKind::MethodCall { receiver, args, .. } => {
+                self.surely_initializes(receiver, found);
+                args.iter().for_each(|v| self.surely_initializes(v, found));
+            }
+            _ => {}
+        }
+    }
+
+    fn place_surely_initializes(&self, place: &Place, found: &mut Vec<usize>) {
+        match place {
+            Place::Index(array, index) => {
+                self.surely_initializes(array, found);
+                self.surely_initializes(index, found);
+            }
+            Place::Field { object, .. } => self.surely_initializes(object, found),
+            Place::Var(_) | Place::Static { .. } => {}
+        }
     }
 
     /// The call that runs the initialization of the class `init` (its `init` function), without

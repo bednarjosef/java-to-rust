@@ -739,6 +739,7 @@ impl<'a> Gen<'a> {
             borrowed: HashSet::new(),
             borrowed_optional: HashSet::new(),
             after_body: &[],
+            known_init: Vec::new(),
             borrowed_optional_objects: HashSet::new(),
             int_receiver: false,
             double_receiver: false,
@@ -966,6 +967,11 @@ struct Gen<'a> {
     /// statements in their scope: a variable they assign is not narrowed there
     /// (`early_null_exit`).
     after_body: &'a [Expr],
+    /// The classes whose initialization the statements written before the current one in its
+    /// block, or in a block around it, surely ran (`initialized_by`), as `(method, class)`: a use
+    /// of one of them needs no check (`uninitialized`). Each block forgets what its statements
+    /// added as it ends, and a closure's body starts with none.
+    known_init: Vec<(usize, usize)>,
     /// The current method's possibly-null object parameters that are borrowed as
     /// `&Option<Rc<..>>`: a read of one as a value clones it.
     borrowed_optional_objects: HashSet<String>,
