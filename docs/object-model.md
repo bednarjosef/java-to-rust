@@ -662,7 +662,11 @@ to run.
   `RefCell` borrow or lock taken and none to end, so it needs no copy where a borrow of the
   object could not last (`{ c.borrow().name.clone() }`). In a program with threads, the fields of
   a class whose constructors, or whose subclasses' constructors, may start a thread are not
-  fixed, since that thread could read one while the constructor writes it. The runtime's
+  fixed, since that thread could read one while the constructor writes it, but for those that
+  only the class's own constructors write while `this` cannot have left: no constructor or field
+  initializer of the class or a superclass uses `this` as a value (passes, stores or captures
+  it, or calls a method on it), so no other thread holds the object before they are written. The
+  Minecraft server's `ChunkAccess.sections` is such a field. The runtime's
   `fixed.rs` gives the reasons that the borrow cannot alias a write. A fixed field of a celled
   object is read where it is too, `(*c.name.fixed())`, outside the constructors and field
   initializers, which write it (`Gen::fixed_cell`): a `java::SharedField` of a value that is not
