@@ -180,6 +180,12 @@ impl<T> Slot<T> {
     /// `H` is a handle of the slot's objects or of a supertype's: a `java::Arc<T>`, a struct
     /// around a `java::Thin`, or an `Option` of one, and no other handle of the object in the slot
     /// is used after the call.
+    ///
+    /// The handle's new word comes back from the out-of-line move (`move_out`), which never sees
+    /// where the handle is: had it been given the handle's address, the local holding the handle
+    /// would live in memory for the whole method, as a place that an unknown function may keep,
+    /// and each use of it after any atomic load (a field's acquire read) would load it again and
+    /// clear its class number again, where the local in a register is read once.
     #[inline(always)]
     pub unsafe fn to_heap<H>(&self, handle: &mut H) {
         const { assert!(std::mem::size_of::<H>() == std::mem::size_of::<usize>()) };
@@ -187,15 +193,18 @@ impl<T> Slot<T> {
         // 0 for `None`.
         let word = unsafe { std::ptr::read(handle as *const H as *const usize) };
         if word & ADDRESS == self.value.get() as usize {
-            unsafe { self.move_out(handle as *mut H as *mut usize, word) };
+            let moved = unsafe { self.move_out(word) };
+            unsafe { std::ptr::write(handle as *mut H as *mut usize, moved) };
         }
     }
 
+    /// The word of the handle `word` of the slot's object once the object is moved to the heap:
+    /// the moved object's address, with `word`'s class number.
     #[cold]
     #[inline(never)]
-    unsafe fn move_out(&self, handle: *mut usize, word: usize) {
+    unsafe fn move_out(&self, word: usize) -> usize {
         let moved = Arc::new(unsafe { std::ptr::read((*self.value.get()).as_ptr()) });
-        unsafe { handle.write((word & !ADDRESS) | Arc::as_ptr(&moved) as usize) };
+        (word & !ADDRESS) | Arc::as_ptr(&moved) as usize
     }
 }
 
@@ -272,6 +281,13 @@ mod tests {
         let held = held.expect("still a handle");
         assert!(!std::ptr::addr_eq(Arc::as_ptr(&held), Arc::as_ptr(&on_stack)));
         assert_eq!(held.get(), 5);
+        // A handle with its class number in the top bits keeps it, and names the moved copy.
+        let mut tagged = crate::Thin::pointer(7, slot.put(std::cell::Cell::new(6)));
+        unsafe { slot.to_heap(&mut tagged) };
+        assert_eq!(tagged.tag(), 7);
+        let tagged: Arc<std::cell::Cell<i32>> = unsafe { tagged.to_pointer() };
+        assert!(!std::ptr::addr_eq(Arc::as_ptr(&tagged), Arc::as_ptr(&on_stack)));
+        assert_eq!(tagged.get(), 6);
     }
 
     #[test]

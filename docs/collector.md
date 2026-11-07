@@ -296,7 +296,14 @@ The collector needs nothing for them:
   still start in a slot: the random `BlockPos` of each random tick of the Minecraft server, which
   only a block that ticks keeps. Before each statement where it may leave, `slot_1.to_heap(&mut
   pos)` copies it into the heap and points the variable there; once the variable names the heap
-  it does nothing. Such a statement is a call that is given the variable, or a store of it into
+  it does nothing. The copy is made out of line and gives back the new handle, which `to_heap`
+  writes into the variable: the out-of-line code never sees the variable's address, so the
+  variable stays a value in a register rather than a place in memory that an unknown function may
+  keep, which every acquire read of a field would make the code load again, and clear of its
+  class number again, at each use. In a register, it is known to name the slot until the move,
+  so the test in `to_heap` and the clearing of the class number before each field read fold
+  away: `benchmarks/RandomTickPositions.java`, the random tick's position read and kept on a
+  rare path, went from 893 to 866 million instructions. Such a statement is a call that is given the variable, or a store of it into
   a field, an array element or a static, that names the variable nowhere else and assigns it
   nowhere; and the object is held by that one variable, its identity hash is not read before (by
   the method, its callees, or the factory that made it), and with those statements taken for
