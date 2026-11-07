@@ -817,6 +817,7 @@ impl<'a> Gen<'a> {
             closures: Vec::new(),
             slots: HashMap::new(),
             slot_param: String::new(),
+            filled: HashSet::new(),
             moves: stack_objects::Moves::default(),
             unmoved: HashSet::new(),
             missed: Vec::new(),
@@ -1075,8 +1076,9 @@ struct Gen<'a> {
     /// Accesses of arrays at indexes proven in bounds that go through the view a counting loop
     /// took of the array before it (`bind_views`), by expression: the view's Rust name.
     views: HashMap<ExprId, String>,
-    /// Field reads that a loop takes once before it (`loop_fields.rs`), by expression: the
-    /// local that holds the value.
+    /// Field reads that are a local's value instead, by expression: those a loop takes once
+    /// before it (`loop_fields.rs`), and reads of fields of an object on the stack, also by a
+    /// getter, taken from its slot where it is made (`stack_objects::bind_slot_fields`).
     loop_fields: HashMap<ExprId, String>,
     /// The plain arrays that the loop being written reaches through slices (see
     /// `sliced_loops.rs`): Java name to the slice's Rust name and how many rows it skips.
@@ -1142,6 +1144,9 @@ struct Gen<'a> {
     slots: HashMap<ExprId, (String, usize)>,
     /// The name of the slot that a function's form on the stack is given.
     slot_param: String,
+    /// The `new`s and calls of factories just written that are sure to have put their object in
+    /// their slot, whose fields may then be read from it (`stack_objects::bind_slot_fields`).
+    filled: HashSet<ExprId>,
     /// The moves to the heap of the method being written (see `stack_objects::Moves`).
     moves: stack_objects::Moves,
     /// The objects that a move was not written for, which their methods, written again, make in

@@ -27,6 +27,11 @@
 //! `if !matches!(p.0.tag(), 3) { unsafe { slot_1.to_heap(&mut argument_0) }; }`, and is written
 //! unguarded when that test cannot be (`Gen::receiver_of_class`). A method in which a move cannot
 //! be written is written again with the object in the heap (`Gen::method_form`).
+//!
+//! A local declared with an object that is sure to be in its slot (`filled`) has the primitive
+//! fields that the rest of its block reads before the variable is used otherwise read from the
+//! slot right after its declaration, `let p_x = *unsafe { slot_1.object() }.x.fixed();`, and
+//! those reads, also by getters, read the locals (`Gen::bind_slot_fields`).
 
 use super::objects::changes_object;
 use super::*;
@@ -122,8 +127,46 @@ impl<'a> Gen<'a> {
     }
 
     /// The call `x` of a factory in its form on the stack, which makes its object in the slot of
-    /// `x`, or `None` when it is written as usual. It follows the forms of `expr`'s calls.
+    /// `x`, or `None` when it is written as usual. It follows the forms of `expr`'s calls. A call
+    /// of the factory itself, not of a dispatcher, whose factory always fills the slot
+    /// (`fills_slot`), is noted in `filled`.
     pub(super) fn call_on_stack(&mut self, x: &'a Expr) -> Option<Code> {
+        let mut among = false;
+        let code = self.factory_call_on_stack(x, &mut among)?;
+        if !among && self.call_of(x).is_some_and(|t| self.fills_slot(t)) {
+            self.filled.insert(x.id);
+        }
+        Some(code)
+    }
+
+    /// Whether the form on the stack of factory `t` always puts its object in the slot it is
+    /// given: every `return` of it returns the `new` that makes the object, of a class whose
+    /// constructors build a plain value, which its form on the stack writes as `put` in that
+    /// slot (`Gen::build_object`). (A factory that also returns other values, or the object of
+    /// another factory, which may be made in the heap, may leave the slot empty.)
+    fn fills_slot(&self, t: usize) -> bool {
+        let Some(p) = self.facts.stack_objects.factories.get(&t) else { return false };
+        let made = matches!(
+            self.find_expr(t, p.made).map(|x| &x.kind),
+            Some(ExprKind::New { class: c, ctor: Some(_), .. })
+                if *c == p.class
+                    && self.stack_class(*c)
+                    && self.facts.plain_constructors.contains(&self.class.types[*c].name)
+        );
+        let mut returns_made = true;
+        for s in &self.class.methods[t].body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                if let Stmt::Return(value, _) = s {
+                    returns_made &= value.as_ref().is_some_and(|e| e.id == p.made);
+                }
+            });
+        }
+        made && returns_made
+    }
+
+    /// `call_on_stack`, which sets `among` when the call is written as one of a dispatcher's
+    /// forms on the stack, which fills the slot only for some classes.
+    fn factory_call_on_stack(&mut self, x: &'a Expr, among: &mut bool) -> Option<Code> {
         let slot = self.slot_of(x.id)?;
         let t = self.call_of(x)?;
         if !self.stack_forms.contains(&t) {
@@ -158,7 +201,10 @@ impl<'a> Gen<'a> {
                 Some(_) => return None,
                 // A call that dispatches, which runs the factory for the classes it tests for
                 // first.
-                None => return self.among_on_stack(d, receiver, index, t, args, &slot),
+                None => {
+                    *among = true;
+                    return self.among_on_stack(d, receiver, index, t, args, &slot);
+                }
             }
             self.need(Need::Body(t));
             let obj = self.thin_receiver(d, receiver);
@@ -410,6 +456,239 @@ impl<'a> Gen<'a> {
             format!("matches!({}.0.tag(), {tags})", super::dispatch::operand(&self.object(receiver)))
         })
     }
+
+    /// The `new` or call of a factory that `stmt` declares a local with, `C v = <site>;`, when
+    /// its object goes in a slot: forgotten in `filled` until the statement is written, which
+    /// notes it again if it fills its slot.
+    pub(super) fn declared_site(&mut self, stmt: &'a Stmt) -> Option<&'a Expr> {
+        let Stmt::Local { init: Some(init), .. } = stmt else { return None };
+        let site = match &init.kind {
+            ExprKind::Cast(_, inner) => inner,
+            _ => init,
+        };
+        self.slots.contains_key(&site.id).then(|| {
+            self.filled.remove(&site.id);
+            site
+        })
+    }
+
+    /// After `stmt`, which declares `v` with the object that `site` made in its slot: reads the
+    /// primitive fields of the object that the statements after it in its block, `rest`, read
+    /// (`v.f`, or a call of a getter, `v.getF()`, whose body for the object's class is
+    /// `return this.f;`) from the slot into locals, `let v_f = *unsafe { slot_1.object() }.f.fixed();`,
+    /// and has those reads read the locals instead.
+    ///
+    /// A field read so is the value of the field at every read that takes it. Until the variable
+    /// is used for anything but such reads (`Use::Other`), nothing but the variable names the
+    /// object: the escape analysis proved that it is held by the method's variables and objects
+    /// alone, a constructor that builds a plain value does not hand out `this`, and a factory
+    /// that returns it keeps it nowhere. So no code can write its fields before that use, and a
+    /// read before the first one, in no loop that also has one, reads what the slot held when it
+    /// was made. (A move to the heap comes before a statement that uses the variable, after which
+    /// nothing is taken from the slot.) The local takes the field where the compiler still sees
+    /// the slot's stores, which it forwards to it: the field is not stored and read back through
+    /// a handle whose address, masked of its class number, it cannot follow.
+    pub(super) fn bind_slot_fields(&mut self, stmt: &'a Stmt, site: &'a Expr, rest: &'a [Stmt]) {
+        let Stmt::Local { name: var, .. } = stmt else { return };
+        let Some((slot, c)) = self.slots.get(&site.id).cloned() else { return };
+        if !self.filled.contains(&site.id) || !self.locals.contains_key(var.as_str()) {
+            return;
+        }
+        let name = &self.class.types[c].name;
+        let celled = self.celled(name);
+        if !celled && !self.facts.immutable.contains(name) {
+            return;
+        }
+        let mut scan = Scan { var, class: c, uses: Vec::new(), loops: Vec::new(), next_loop: 0 };
+        for s in rest {
+            self.scan_stmt(s, &mut scan);
+        }
+        let first_other = scan.uses.iter().position(|u| matches!(u.0, Use::Other)).unwrap_or(scan.uses.len());
+        let other_loops: HashSet<u32> = scan
+            .uses
+            .iter()
+            .filter(|u| matches!(u.0, Use::Other))
+            .flat_map(|u| u.1.iter().copied())
+            .collect();
+        let mut bound: Vec<(usize, &'a str, String)> = Vec::new();
+        for (u, loops) in &scan.uses[..first_other] {
+            let Use::Read(read, owner, field) = *u else { continue };
+            // The struct that declares the field holds cells as the object's does.
+            let same_cells = self.celled(&self.class.types[owner].name) == celled;
+            if !same_cells
+                || loops.iter().any(|l| other_loops.contains(l))
+                || self.loop_fields.contains_key(&read.id)
+            {
+                continue;
+            }
+            let local = match bound.iter().find(|(o, f, _)| *o == owner && *f == field) {
+                Some((_, _, local)) => local.clone(),
+                None => {
+                    let rust_field = field_name(&self.class.types[owner], field);
+                    let base = format!("{}_{rust_field}", self.local(var).trim_start_matches("r#"));
+                    let taken = |n: &str| {
+                        self.locals.values().any(|l| l == n)
+                            || self.fn_name_set.contains(n)
+                            || self.loop_fields.values().any(|l| l == n)
+                            || bound.iter().any(|(_, _, l)| l == n)
+                    };
+                    let local = (0..)
+                        .map(|k| if k == 0 { base.clone() } else { format!("{base}{k}") })
+                        .find(|n| !taken(n))
+                        .unwrap_or_default();
+                    let path = hierarchy::base_path(self.facts, self.class, c, owner) + &rust_field;
+                    let object = format!("unsafe {{ {slot}.object() }}");
+                    let value =
+                        if celled { format!("*{object}.{path}.fixed()") } else { format!("{object}.{path}") };
+                    self.line(&format!("let {local} = {value};"));
+                    bound.push((owner, field, local.clone()));
+                    local
+                }
+            };
+            self.loop_fields.insert(read.id, local);
+        }
+    }
+
+    /// The uses of the variable of `scan` in `stmt`, in the order of the code, with the loops
+    /// around each (see `bind_slot_fields`).
+    fn scan_stmt(&self, stmt: &'a Stmt, scan: &mut Scan<'a>) {
+        match stmt {
+            Stmt::Local { init: Some(e), .. }
+            | Stmt::Expr(e)
+            | Stmt::Return(Some(e), _)
+            | Stmt::Yield(e)
+            | Stmt::Throw(e) => self.scan_expr(e, scan),
+            Stmt::If { cond, then, otherwise } => {
+                self.scan_expr(cond, scan);
+                self.scan_stmt(then, scan);
+                if let Some(o) = otherwise {
+                    self.scan_stmt(o, scan);
+                }
+            }
+            Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
+                scan.enter_loop();
+                self.scan_expr(cond, scan);
+                self.scan_stmt(body, scan);
+                scan.loops.pop();
+            }
+            Stmt::For { init, cond, update, body } => {
+                init.iter().for_each(|s| self.scan_stmt(s, scan));
+                scan.enter_loop();
+                if let Some(cond) = cond {
+                    self.scan_expr(cond, scan);
+                }
+                self.scan_stmt(body, scan);
+                update.iter().for_each(|e| self.scan_expr(e, scan));
+                scan.loops.pop();
+            }
+            Stmt::ForEach { array, body, .. } => {
+                self.scan_expr(array, scan);
+                scan.enter_loop();
+                self.scan_stmt(body, scan);
+                scan.loops.pop();
+            }
+            Stmt::Block(stmts) => stmts.iter().for_each(|s| self.scan_stmt(s, scan)),
+            Stmt::Switch { selector, cases } => {
+                self.scan_expr(selector, scan);
+                for case in cases {
+                    for label in &case.labels {
+                        if let CaseLabel::Value(e) = label {
+                            self.scan_expr(e, scan);
+                        }
+                    }
+                    case.body.iter().for_each(|s| self.scan_stmt(s, scan));
+                }
+            }
+            Stmt::Labeled { body, .. } => self.scan_stmt(body, scan),
+            Stmt::Try { body, catches, finally } => {
+                body.iter().for_each(|s| self.scan_stmt(s, scan));
+                catches.iter().flat_map(|c| &c.body).for_each(|s| self.scan_stmt(s, scan));
+                finally.iter().flatten().for_each(|s| self.scan_stmt(s, scan));
+            }
+            Stmt::Local { init: None, .. }
+            | Stmt::Return(None, _)
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::BreakLabel(_)
+            | Stmt::ContinueLabel(_) => {}
+        }
+    }
+
+    /// `scan_stmt` for an expression. A switch expression, whose statements may hold loops, counts
+    /// as a loop around all of the expression.
+    fn scan_expr(&self, e: &'a Expr, scan: &mut Scan<'a>) {
+        let mut switch = false;
+        visit_expr(e, &mut |x| switch |= matches!(x.kind, ExprKind::Switch { .. }));
+        if switch {
+            scan.enter_loop();
+        }
+        // The mentions of the variable that are the objects of the reads found.
+        let mut read_on: Vec<*const Expr> = Vec::new();
+        visit_expr(e, &mut |x| {
+            if let Some((owner, field, on)) = self.slot_field_read(x, scan.var, scan.class) {
+                read_on.push(on);
+                let loops = scan.loops.clone();
+                scan.uses.push((Use::Read(x, owner, field), loops));
+                return;
+            }
+            let other = match &x.kind {
+                ExprKind::Var(v) => v == scan.var && !read_on.contains(&(x as *const Expr)),
+                ExprKind::Assign { target: Place::Var(v), .. }
+                | ExprKind::IncDec { target: Place::Var(v), .. } => v == scan.var,
+                _ => false,
+            };
+            if other {
+                let loops = scan.loops.clone();
+                scan.uses.push((Use::Other, loops));
+            }
+        });
+        if switch {
+            scan.loops.pop();
+        }
+    }
+
+    /// When `x` reads a primitive field of the object in variable `var`, of class `c`, which a
+    /// local may take (`bind_slot_fields`): the class that declares the field, its name, and the
+    /// mention of the variable. `v.f`, or `v.m()` where the method that class `c` runs for `m`
+    /// is `return this.f;`; `v` may be upcast.
+    fn slot_field_read(&self, x: &'a Expr, var: &str, c: usize) -> Option<(usize, &'a str, *const Expr)> {
+        let of_var = |o: &'a Expr| -> Option<&'a Expr> {
+            let o = match &o.kind {
+                ExprKind::Cast(_, inner) => inner,
+                _ => o,
+            };
+            matches!(&o.kind, ExprKind::Var(v) if v == var).then_some(o)
+        };
+        if !(x.ty.is_numeric() || x.ty == Type::Boolean) {
+            return None;
+        }
+        let (on, read) = match &x.kind {
+            ExprKind::Field { object, .. } => (of_var(object)?, x),
+            ExprKind::MethodCall { receiver, args, resolved: Some(r), is_super: false, .. }
+                if args.is_empty() =>
+            {
+                let on = of_var(receiver)?;
+                let class: &'a Class = self.class;
+                let m = &class.methods[class.hierarchy.implementation(*r, c)?];
+                if m.is_static || m.is_abstract || m.is_synchronized {
+                    return None;
+                }
+                let [Stmt::Return(Some(read), _)] = &m.body[..] else { return None };
+                match &read.kind {
+                    ExprKind::Field { object, .. }
+                        if matches!(object.kind, ExprKind::This) && read.ty == x.ty => {}
+                    _ => return None,
+                }
+                (on, read)
+            }
+            _ => return None,
+        };
+        let ExprKind::Field { object, name } = &read.kind else { return None };
+        let owner = self.class.field_owner(object.ty, name)?;
+        let of_class = owner == c || self.class.hierarchy.ancestors(c).contains(&owner);
+        let declared = self.class.types[owner].fields.iter().any(|f| f.name == *name);
+        (of_class && declared).then_some((owner, name.as_str(), on as *const Expr))
+    }
 }
 
 /// A move before a statement: the local that holds the object, the slot, the `new` or call that
@@ -444,5 +723,34 @@ impl Moves {
         missed.sort_unstable();
         missed.dedup();
         missed
+    }
+}
+
+/// What the statements after a local's declaration do with the object on the stack it holds
+/// (`Gen::bind_slot_fields`).
+enum Use<'a> {
+    /// A read of a primitive field of the object: the expression, the class that declares the
+    /// field, and its name.
+    Read(&'a Expr, usize, &'a str),
+    /// Any other mention of the variable, or an assignment of it: other code may hold the object
+    /// from then on, and write its fields.
+    Other,
+}
+
+/// The uses of the variable `var`, which holds an object of class `class` on the stack, found
+/// so far in the order of the code, each with the loops around it (numbered from 0 as they are
+/// met, `loops` those around the code being looked at).
+struct Scan<'a> {
+    var: &'a str,
+    class: usize,
+    uses: Vec<(Use<'a>, Vec<u32>)>,
+    loops: Vec<u32>,
+    next_loop: u32,
+}
+
+impl Scan<'_> {
+    fn enter_loop(&mut self) {
+        self.loops.push(self.next_loop);
+        self.next_loop += 1;
     }
 }

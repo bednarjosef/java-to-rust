@@ -57,7 +57,11 @@ impl<'a> Gen<'a> {
                 }
                 _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
                 _ => {
+                    let site = self.declared_site(stmt);
                     self.stmt(stmt, rest);
+                    if let Some(site) = site {
+                        self.bind_slot_fields(stmt, site, rest);
+                    }
                     // The statements after it run only once it completes normally.
                     let method = self.method;
                     let initialized = self.initialized_by(stmt);

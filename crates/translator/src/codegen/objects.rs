@@ -1772,6 +1772,7 @@ impl<'a> Gen<'a> {
             } else {
                 format!("{cell}::new({call})")
             };
+            self.filled.insert(id);
             format!("{slot}.put({value})")
         } else {
             self.held_object(c, call)

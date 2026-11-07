@@ -323,6 +323,27 @@ The collector needs nothing for them:
 - **What it owns.** A slot is never dropped, as a heap object is not: memory its fields own (a
   `Vec`'s buffer, in the heap) is found unreachable once no frame or object points to it.
 
+**Fields read where the object is made.** A handle into a slot hides the slot from the compiler:
+a handle of a class with subclasses carries its class number in its top bits, which a read
+masks off, and the compiler cannot tell the masked address from the slot's; a field of a class
+whose objects threads may share is read with an atomic load, to which it forwards no store
+either. So each field read through the handle is a load of what was just stored. So where a local is declared with an object made
+in its slot (`P p = new P(..)`, or the call of a factory whose every `return` is the `new` that
+makes its object), the primitive fields that the rest of the local's block reads, `p.x` or by a
+getter whose body for the object's class is `return this.x;`, are read from the slot into locals
+right there, `let p_x = *unsafe { slot_1.object() }.x.fixed();`, and those reads read the
+locals, with plain loads. The compiler forwards the slot's stores to them and keeps the values
+in registers, as Java's scalar replacement does, and may drop the stores when nothing else reads
+the slot. This needs
+the object made in a plain value (a constructor that hands out `this` is left out) and put in
+the slot for certain (a factory that may return another object, or a call of a dispatcher, is
+left out), and a read takes a local only if it comes before every other mention of the variable
+(a call given it, a store, an assignment of it or of its fields, which a move to the heap comes
+before) and is in no loop that has one. Until that mention nothing but the variable names the
+object, so no code can write its fields, and the local is their value. The random `BlockPos` of
+each random tick of the Minecraft server is read so, and moves to the heap later, when a block
+that ticks keeps it.
+
 A method declares at most 8 slots, and only for objects of up to 16 fields of a class that is
 not a Rust generic, an owned value or a closure. A call of a factory is written in its form on
 the stack only when it is one of the plain forms of a call (a static method, a method of the
