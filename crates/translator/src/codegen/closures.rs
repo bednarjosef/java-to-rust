@@ -30,6 +30,7 @@ struct Saved<'a> {
     throwing: bool,
     this_struct: usize,
     this_form: ThisForm,
+    confined_self: bool,
     borrowed: HashSet<String>,
     borrowed_optional: HashSet<String>,
     borrowed_optional_objects: HashSet<String>,
@@ -517,6 +518,8 @@ impl<'a> Gen<'a> {
             throwing: self.throwing,
             this_struct: self.this_struct,
             this_form: self.this_form,
+            // A closure's `this` is its lambda's, not the object of a confined form.
+            confined_self: std::mem::replace(&mut self.confined_self, false),
             borrowed: std::mem::take(&mut self.borrowed),
             borrowed_optional: std::mem::take(&mut self.borrowed_optional),
             borrowed_optional_objects: std::mem::take(&mut self.borrowed_optional_objects),
@@ -559,6 +562,7 @@ impl<'a> Gen<'a> {
         self.throwing = s.throwing;
         self.this_struct = s.this_struct;
         self.this_form = s.this_form;
+        self.confined_self = s.confined_self;
         self.borrowed = s.borrowed;
         self.borrowed_optional = s.borrowed_optional;
         self.borrowed_optional_objects = s.borrowed_optional_objects;

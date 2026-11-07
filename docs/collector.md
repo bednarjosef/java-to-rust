@@ -319,7 +319,9 @@ The collector needs nothing for them:
   `notify` on an object counts as an escape; a `synchronized` method called on one locks it by
   its address or by the lock inside it, as on the heap, and unlocks it before it returns.
 - **Threads.** Passing an object to another thread is an escape, so a stack object is only ever
-  used by the thread whose stack holds it.
+  used by the thread whose stack holds it. So is every object that stays in its method, in a slot
+  or not, and methods called on one of a thread-shared class read and write its fields without
+  atomic actions ([multi-threading.md](multi-threading.md) 2.1, "Objects that one thread uses").
 - **What it owns.** A slot is never dropped, as a heap object is not: memory its fields own (a
   `Vec`'s buffer, in the heap) is found unreachable once no frame or object points to it.
 

@@ -178,6 +178,27 @@ as for a `RefCell`. Identity is `Arc::ptr_eq`; `Option` for null is unchanged.
 `java::Atomic` (acquire/release); Java's volatile is sequentially consistent, so `SeqCst` statics
 are a known gap (section 7). In a single-threaded program `volatile` is nothing.
 
+**Objects that one thread uses.** An object of a thread-shared class that never leaves the method
+that makes it (`StackObjects::objects` of the escape analysis, [collector.md](collector.md),
+"Objects on the stack") and is never moved to the heap is used only by the thread that runs that
+method: handing an object to another thread is a way of leaving, since a thread reaches objects
+only through what the runtime is given when it starts and through fields and statics. Its fields
+then need none of the atomic actions above. A call on a receiver that always holds such an object
+(`analysis/escape/confined.rs`: a local whose every declaration and assignment is such a `new`,
+or in a lambda's method the field that captured one) calls the method's confined form,
+`<name>_confined`, which reads and writes the fields of `this` with `get_confined`,
+`set_confined` and the plain forms of the atomic updates (`compare_and_set_by_confined`,
+`get_and_update_confined`, ...), and calls the confined forms of what it calls on `this`: a
+counter `AtomicInteger` that a method keeps for a lambda it passes down sets it with a plain
+store, not an exchange, and its `incrementAndGet` is a plain increment, not a locked one. Only
+the methods that such calls may run and that do something atomic to `this` (an access of a
+`volatile` field, an update through `Unsafe`, or a call of such a method on `this`) get the
+form, since the other accesses are plain moves already, and only those that make no object (no
+lambda, whose `this` is another object). The decision is per object, but
+only for objects that stay in their method; an object that a field holds, such as a random
+generator that one thread's code reaches through a shared object, keeps the atomic accesses
+(section 7).
+
 ### 2.2 Arrays and builders
 
 In a threaded program an array that is not a plain `Vec` (see the array analysis) is a
@@ -667,7 +688,8 @@ name:
   as one atomic action of the field's `java::SharedField` (`compare_and_set_by`,
   `compare_exchange_by`, `replace`, `get_and_update`: a compare-and-swap of a word, or the
   striped lock for a wider value), so no other access comes between the read and the write; on
-  an object of one thread no other access can. Of an element, they are runtime functions
+  an object of one thread no other access can, and the method's confined form, called on an
+  object that never leaves its method (2.1), writes the plain read, comparison and write. Of an element, they are runtime functions
   (`java::compare_and_set_element` and its kin in `array.rs`): one borrow of an array of one
   thread, and one atomic action of the element's cell in a shared array (a compare-and-swap of a
   word, or the striped lock for a wider element). References compare by identity, and `float`
@@ -782,10 +804,17 @@ field that is not `volatile` asks for more (section 7).
 ## 7. Not done, and plans
 
 - **Per-site sharing.** Sharing is decided per class, arrays per element family and
-  builders by type. With the points-to analysis of thorough mode, sharing would be decided per
-  allocation site; a class with both shared and thread-local sites would get two structs, and an
-  array of a shared family that no other thread reaches would stay a `java::Array`. The escape analysis should then
-  be a client of a "heap edges" interface so that only the edge provider changes.
+  builders by type; only objects that never leave their method are told apart (2.1). With the
+  points-to analysis of thorough mode, sharing would be decided per allocation site: an object
+  held in a field of an object that one thread reaches would keep plain accesses. That needs the
+  points-to sets of each thread's code apart (what the main thread's methods reach, what each
+  started thread's `run` reaches), since a field of an object that both reach is shared whatever
+  the thread that made it; and code that is kept off a thread only by a run-time test of
+  `Thread.currentThread()` (a check that a packet is handled on the main thread) is reachable
+  from that thread to any static analysis. Then a class with both shared and thread-local sites
+  would get two structs, and an array of a shared family that no other thread reaches would stay
+  a `java::Array`. The escape analysis should then be a client of a "heap edges" interface so
+  that only the edge provider changes.
 - **`SeqCst` volatile statics and volatile-mode accesses of fields.** A `volatile` static
   should be sequentially consistent, and so should a volatile-mode access through `Unsafe` or a
   `VarHandle` (`getVolatile`, `setVolatile`) of a field that is not `volatile`, which lowering
@@ -831,7 +860,7 @@ own slot or object and `join` orders the output, or where the program checks its
 (every increment counted, every item consumed once) and prints the result. Programs that use the
 JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `AtomicArrayDekker`,
 `ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`,
-`ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ByteBufferViews`, `StaticVarHandles`, `RunTimeHandles`, `ScopedValues`). Shape tests of the generated Rust are in
+`ParkWithPermit`, `LockAmongValues`, `ConfinedAtomics`, `VarHandleViews`, `ByteBufferViews`, `StaticVarHandles`, `RunTimeHandles`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
 unchanged and that a class no thread reaches has no monitor.
 
@@ -840,7 +869,8 @@ unchanged and that a class no thread reaches has no monitor.
 - **Single-threaded programs pay nothing**: the output is what it was without this work.
 - **A thread-shared mutable object** costs nothing more than an object of one thread on a field
   access of a word: an acquire load or a release store is a plain move on x86-64. A `volatile`
-  store is an exchange. A wider value costs a striped spin lock once a second thread runs. Each
+  store is an exchange, and an atomic update a locked compare-and-swap, except on an object that
+  never leaves its method, whose confined forms use plain moves (2.1). A wider value costs a striped spin lock once a second thread runs. Each
   object carries a pointer to its monitor's lock, 8 bytes, and the 16 bytes of the lock once a
   thread first takes it. An immutable shared object costs nothing on reads,
   and copying a handle is copying a pointer, shared or not.

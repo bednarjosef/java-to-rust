@@ -25,8 +25,9 @@ enum Slot {
         on_enum: bool,
         /// Whether the field is a cell, read and written by value.
         cell: bool,
-        /// Whether the cell is a `volatile` field's, accessed in sequential consistency.
-        volatile: bool,
+        /// The accessors of the cell (`Gen::cell_accessors`).
+        get: &'static str,
+        set: &'static str,
     },
     /// A static field: a `Cell` when `plain`, else a `RefCell`; a `java::Global` when `global`
     /// (a program that starts no thread), else a thread-local cell or a `java::Locked`.
@@ -42,8 +43,7 @@ impl Slot {
     fn read(&self, clone: bool) -> String {
         let copy = !clone;
         match self {
-            Slot::Field { obj, field, on_enum, cell: true, volatile, .. } => {
-                let get = if *volatile { "get_volatile" } else { "get" };
+            Slot::Field { obj, field, on_enum, cell: true, get, .. } => {
                 format!("{obj}{}.{field}.{get}()", if *on_enum { ".base()" } else { "" })
             }
             Slot::Field { obj, field, plain: true, .. } => {
@@ -65,8 +65,7 @@ impl Slot {
 
     fn write(&self, value: &str) -> String {
         match self {
-            Slot::Field { obj, field, on_enum, cell: true, volatile, .. } => {
-                let set = if *volatile { "set_volatile" } else { "set" };
+            Slot::Field { obj, field, on_enum, cell: true, set, .. } => {
                 format!("{obj}{}.{field}.{set}({value});", if *on_enum { ".base()" } else { "" })
             }
             Slot::Field { obj, field, plain: true, .. } => format!("{obj}.{field} = {value};"),
@@ -650,9 +649,64 @@ impl<'a> Gen<'a> {
     }
 
     /// The accessors of the cell of field `name` of `object`: `get` and `set`, or for a
-    /// `volatile` field `get_volatile` and `set_volatile`.
+    /// `volatile` field `get_volatile` and `set_volatile`, or on `this` in a confined form
+    /// `get_confined` and `set_confined`.
     pub(super) fn cell_accessors(&self, object: &Expr, name: &str) -> (&'static str, &'static str) {
-        if self.volatile_cell(object, name) { ("get_volatile", "set_volatile") } else { ("get", "set") }
+        if self.confined_this(object, name) {
+            ("get_confined", "set_confined")
+        } else if self.volatile_cell(object, name) {
+            ("get_volatile", "set_volatile")
+        } else {
+            ("get", "set")
+        }
+    }
+
+    /// Whether `object` is `this` in a confined form (`confined_form`) and its field `name` a
+    /// `java::SharedField` (or `java::SharedRefField`), which the form reads and writes plainly.
+    pub(super) fn confined_this(&self, object: &Expr, name: &str) -> bool {
+        self.confined_self
+            && matches!(object.kind, ExprKind::This)
+            && self.shared_object(object)
+            && !(name == "referent"
+                && self.class.field_owner_name(object.ty, name) == Some("java.lang.ref.Reference"))
+    }
+
+    /// Whether method `index` gets a confined form, `<name>_confined`, for the calls on objects
+    /// that only one thread uses (`StackObjects::confined`): an instance method that some such
+    /// call may run (`StackObjects::confined_methods`), of a class whose fields are
+    /// `java::SharedField`s, that makes no object (so no lambda, whose `this` would be another
+    /// object). The form reads and writes the fields of `this` plainly, with none of the atomic
+    /// actions that another thread's accesses would need, and calls the confined forms of the
+    /// methods it calls on `this`.
+    pub(super) fn confined_form(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        let home = match self.homes[index] {
+            Home::Class(c) | Home::Fields(c) => c,
+            _ => return false,
+        };
+        self.facts.stack_objects.confined_methods.contains(&index)
+            && !m.is_static
+            && !m.is_ctor
+            && self.class.types[home].enum_constants.is_none()
+            && self.shared_cells(&self.class.types[home].name)
+            && !m.body.iter().any(|s| {
+                let mut new = false;
+                visit_stmt_exprs(s, &mut |x| new |= matches!(x.kind, ExprKind::New { .. }));
+                new
+            })
+    }
+
+    /// The name of method `index` called on `receiver`: its confined form's when it has one and
+    /// the receiver always holds an object that only one thread uses (`this` in a confined form
+    /// among them).
+    fn call_name(&self, receiver: &'a Expr, index: usize) -> String {
+        let confined = &self.facts.stack_objects.confined;
+        let peeled = self.peel(receiver);
+        let held = confined.contains(&receiver.id)
+            || confined.contains(&peeled.id)
+            || (self.confined_self && matches!(peeled.kind, ExprKind::This));
+        let name = &self.fn_names[index];
+        if held && self.confined_form(index) { format!("{name}_confined") } else { name.clone() }
     }
 
     /// The cell type of field `f` of class `t`, whose value is of type `ty`.
@@ -1858,9 +1912,15 @@ impl<'a> Gen<'a> {
             return code;
         }
         if !self.facts.self_methods.contains(&index) {
+            // The function's path ends with its name.
+            let path = self.qualified_fn(index);
+            let path = match self.call_name(receiver, index).strip_prefix(self.fn_names[index].as_str()) {
+                Some(suffix) => format!("{path}{suffix}"),
+                None => path,
+            };
             let mut all = vec![self.receiver_ref(receiver)];
             all.extend(self.call_args(index, args));
-            return Code::atom(format!("{}({})", self.qualified_fn(index), all.join(", ")));
+            return Code::atom(format!("{path}({})", all.join(", ")));
         }
         let mutating = self.facts.mutating.contains(&index);
         if self.is_plain(receiver) {
@@ -1873,7 +1933,7 @@ impl<'a> Gen<'a> {
             let args = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             let path = self.method_path(receiver, index);
-            return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
+            return Code::atom(format!("{obj}.{path}{}({args})", self.call_name(receiver, index)));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
         let Type::Class(class, _) = receiver.ty else {
@@ -1896,7 +1956,7 @@ impl<'a> Gen<'a> {
         let obj = self.object(receiver);
         let args = self.call_args(index, args).join(", ");
         let path = self.method_path(receiver, index);
-        let call = format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index]);
+        let call = format!("{obj}{borrow}.{path}{}({args})", self.call_name(receiver, index));
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
     }
 
@@ -1940,7 +2000,7 @@ impl<'a> Gen<'a> {
         }
         self.guarded = outer;
         let path = self.method_path(receiver, index);
-        lines.push(format!("{obj}{borrow}.{path}{}({})", self.fn_names[index], bound.join(", ")));
+        lines.push(format!("{obj}{borrow}.{path}{}({})", self.call_name(receiver, index), bound.join(", ")));
         Code::atom(format!("{{ {} }}", lines.join(" ")))
     }
 
@@ -2240,13 +2300,15 @@ impl<'a> Gen<'a> {
             {
                 // Only a constructor writes a field of an immutable class, through its own `this`;
                 // an owned object's fields are written by its methods.
+                let (get, set) = self.cell_accessors(object, name);
                 Slot::Field {
                     obj: self.object(object),
                     field: self.field_path(object, name),
                     plain: true,
                     on_enum: false,
                     cell: self.celled_object(object),
-                    volatile: self.volatile_cell(object, name),
+                    get,
+                    set,
                 }
             }
             Place::Field { object, name } => {
@@ -2261,9 +2323,10 @@ impl<'a> Gen<'a> {
                     }
                     None => false,
                 };
-                let (cell, volatile) = (self.celled_object(object), self.volatile_cell(object, name));
+                let cell = self.celled_object(object);
+                let (get, set) = self.cell_accessors(object, name);
                 let field = self.field_path(object, name);
-                Slot::Field { obj, field, plain: false, on_enum, cell, volatile }
+                Slot::Field { obj, field, plain: false, on_enum, cell, get, set }
             }
             Place::Static { class, name } => self.static_slot(*class, name, ty),
             Place::Var(_) => unreachable!("variables are assigned by `assignment`"),

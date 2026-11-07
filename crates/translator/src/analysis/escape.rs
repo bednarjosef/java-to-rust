@@ -136,6 +136,8 @@
 use super::{FastMap, FastSet};
 use crate::ast::*;
 
+mod confined;
+
 use std::rc::Rc;
 
 /// What the analysis found (see the module's comment).
@@ -152,6 +154,13 @@ pub struct StackObjects {
     /// The objects of `objects` that are moved to the heap where they may leave (see **Moves to
     /// the heap**), by the method that makes them.
     pub moves: FastMap<usize, Vec<Move>>,
+    /// The receivers of calls (by expression id) that always hold an object of `objects` that is
+    /// never moved, which only the thread that made it uses (see `confined`): a read of a local,
+    /// or in a lambda's method the field that captured one.
+    pub confined: FastSet<ExprId>,
+    /// The methods that the calls on `confined` receivers may run, and those that these call on
+    /// `this`, that do something atomic to `this` (see `confined`).
+    pub confined_methods: FastSet<usize>,
 }
 
 /// An object that starts in a slot and is moved to the heap before the statements where it may
@@ -374,6 +383,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
         analysis.explain_all(class, &wanted);
     }
     found.factories = analysis.factories.into_iter().collect();
+    (found.confined, found.confined_methods) = confined::receivers(class, &found);
     found
 }
 
