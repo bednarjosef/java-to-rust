@@ -127,7 +127,9 @@ impl<'a> Gen<'a> {
         for i in defaults {
             let mark = self.out.len();
             self.gap();
+            let outer = std::mem::replace(&mut self.plain_bodies_here, false);
             self.method(i);
+            self.plain_bodies_here = outer;
             let text = self.out.split_off(mark);
             // Trait methods have the trait's visibility.
             let text = text.replacen(&format!("{vis}fn "), "fn ", 1);

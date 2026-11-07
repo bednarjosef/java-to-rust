@@ -740,7 +740,21 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut throwing: FastSet<usize> = (0..class.methods.len())
         .filter(|&m| guarded[m] || (!initializer[m] && escapes.of(m).any(|k| observed(k, &seen[at[m]]))))
         .collect();
+    // A method of an override group returns what the group's dispatcher returns, a `Result` when
+    // one member throws something observed. A member whose own code lets nothing observed out
+    // keeps that signature only by a function that wraps its plain code's value in `Ok`
+    // (`plain_bodies`): a call of it there, or one that the dispatcher makes after inlining it,
+    // tests nothing.
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
+    let plain_bodies: FastSet<usize> = groups
+        .iter()
+        .copied()
+        .filter(|m| !throwing.contains(m))
+        .filter(|&m| {
+            let method = &class.methods[m];
+            !method.is_ctor && !method.is_static && !method.is_abstract && !initializer[m]
+        })
+        .collect();
     throwing.extend(groups);
     timed("texts and throwing methods");
 
@@ -1096,6 +1110,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     RECEIVER_TARGETS.with_borrow_mut(|cache| *cache = None);
     CALLEE_LISTS.with_borrow_mut(|lists| *lists = None);
     facts.throwing = throwing;
+    facts.plain_bodies = plain_bodies;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
     facts.raising_tries = raising_tries;

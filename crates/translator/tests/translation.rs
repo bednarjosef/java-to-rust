@@ -5888,6 +5888,69 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
     );
 }
 
+const SHAPES_ONE_OF_WHICH_THROWS: &str = "class Torn extends RuntimeException { Torn(int s) { super(\"torn \" + s); } }
+    abstract class Shape { abstract int area(int scale); }
+    final class Square extends Shape {
+        final int side; Square(int side) { this.side = side; }
+        int area(int scale) { return side * side * scale; }
+    }
+    final class Odd extends Shape {
+        int area(int scale) {
+            if (scale < 0) throw new IllegalStateException(\"negative\");
+            return scale;
+        }
+    }
+    final class Ripped extends Shape {
+        int area(int scale) { if (scale > 2) throw new Torn(scale); return scale; }
+    }
+    class A {
+        static long sum(Shape[] shapes, Square square, int rounds) {
+            long total = 0;
+            for (int r = 0; r < rounds; r++) {
+                for (Shape s : shapes) total += s.area(r);
+                total += square.area(r);
+            }
+            return total;
+        }
+        public static void main(String[] a) {
+            Shape[] shapes = { new Square(2), new Odd(), new Ripped() };
+            try { System.out.println(sum(shapes, new Square(3), 5)); } catch (Torn e) { System.out.println(e.getMessage()); }
+        }
+    }";
+
+#[test]
+fn an_override_that_cannot_throw_what_its_group_throws_returns_its_value_plainly() {
+    let rust = translate(SHAPES_ONE_OF_WHICH_THROWS);
+    assert_contains(
+        &rust,
+        &[
+            // The member that throws what the catch sees returns a `Result`.
+            "fn area(&self, scale: i32) -> Result<i32, Throwable> {\n        if scale > 2 {\n            return Err(",
+            // The others' code returns the value, behind the group's signature.
+            "fn area__plain(&self, scale: i32) -> i32 {\n        self.side.wrapping_mul(self.side).wrapping_mul(scale)\n    }",
+            "    #[inline(always)]\n    fn area(&self, scale: i32) -> Result<i32, Throwable> {\n        Ok(Self::area__plain(self, scale))\n    }",
+            // An exception that nothing catches ends the program where it is thrown, as in a
+            // method that does not throw.
+            "fn area__plain(&self, scale: i32) -> i32 {\n        if scale < 0 {\n            java::throw_uncaught(",
+        ],
+    );
+}
+
+#[test]
+fn a_direct_call_of_an_override_that_cannot_throw_tests_no_result() {
+    let rust = translate(SHAPES_ONE_OF_WHICH_THROWS);
+    // The call through the group passes the exception on; the call on the final class gets the
+    // value as it is.
+    assert_contains(
+        &rust,
+        &[
+            "match Shape__area(s, r) { Ok(v) => v, Err(e) => return Err(e) }",
+            "total = total.wrapping_add(square.area__plain(r) as i64);",
+        ],
+    );
+    assert_lacks(&rust, &["square.area(r)"]);
+}
+
 #[test]
 fn a_thrown_exception_whose_message_can_throw_is_made_out_of_line() {
     let rust = translate(

@@ -800,6 +800,8 @@ impl<'a> Gen<'a> {
             ret: Type::Void,
             uses_runtime: false,
             throwing: false,
+            plain_bodies_here: true,
+            plain_call: None,
             attempts: Vec::new(),
             finallies: Vec::new(),
             finally_ends: Vec::new(),
@@ -870,6 +872,10 @@ impl Gen<'_> {
 pub const OBJECTLESS_CLASSES: [&str; 2] = ["java.lang.Runtime", "java.lang.System"];
 
 const RECURSION_LIMIT: u32 = 1024;
+
+/// What the name of a method's function that returns its value plainly ends with, beside the
+/// function by the method's name that wraps it in `Ok` (`Facts::plain_bodies`).
+const PLAIN_BODY: &str = "__plain";
 
 /// The crate root's allocator: the runtime's collector (runtime `gc.rs`), or for a program with
 /// 4-byte references the form of it that looks for them (`java::CompactAllocator`).
@@ -1097,6 +1103,12 @@ struct Gen<'a> {
     uses_runtime: bool,
     /// Whether the current method returns `Result<_, Throwable>` (see `exceptions`).
     throwing: bool,
+    /// Whether the method being written may be a plain body and its wrapper
+    /// (`Facts::plain_bodies`): not inside a trait, which has room for its methods alone.
+    plain_bodies_here: bool,
+    /// The plain body (`Facts::plain_bodies`) that the direct call being written calls by its
+    /// own name, with no `Result` to pass on.
+    plain_call: Option<usize>,
     /// The `try` blocks around the code being written, innermost last.
     attempts: Vec<exceptions::Attempt>,
     /// The `try` statements with a `finally` whose body or `catch` clauses are being written,
@@ -1503,6 +1515,15 @@ impl<'a> Gen<'a> {
         if never_runs {
             self.line("#[allow(unused_variables)]");
         }
+        // A method that returns a `Result` only for its override group (`Facts::plain_bodies`):
+        // its code is a function that returns the value plainly, and the method's own function,
+        // inlined wherever it is called, wraps that in `Ok`. It is written so outside a trait,
+        // which can have no function of its own beside its methods.
+        let plain = self.facts.plain_bodies.contains(&index) && !never_runs && self.plain_bodies_here;
+        // The plain code's function is called through `Self::` inside an `impl`.
+        let in_impl = !self.module_fn(index)
+            && !thin
+            && matches!(self.homes[index], Home::Class(_) | Home::Fields(_) | Home::Enum(_));
         let fn_name = if m.name == "<clinit>" {
             let init = statics::init_name(name);
             self.init_fast_path(m.class, &init, &ret);
@@ -1530,6 +1551,33 @@ impl<'a> Gen<'a> {
             fn_name
         };
         let generics = self.type_params(&m.type_params).0;
+        let wrapper = plain.then(|| {
+            let args: Vec<&str> = params
+                .iter()
+                .map(|p| match p.trim_start_matches('&').trim_start_matches("mut ") {
+                    "self" => "self",
+                    p => p.split(':').next().unwrap_or(p).trim(),
+                })
+                .collect();
+            let callee = if in_impl {
+                format!("Self::{fn_name}{PLAIN_BODY}")
+            } else {
+                format!("{fn_name}{PLAIN_BODY}")
+            };
+            [
+                "#[inline(always)]".to_string(),
+                format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")),
+                format!("    Ok({callee}({}))", args.join(", ")),
+                "}".to_string(),
+            ]
+        });
+        let (fn_name, ret) = match plain {
+            true => {
+                self.throwing = false;
+                (format!("{fn_name}{PLAIN_BODY}"), self.plain_ret_text(index))
+            }
+            false => (fn_name, ret),
+        };
         self.line(&format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")));
         self.indent += 1;
         self.declare_slots(&sites);
@@ -1616,6 +1664,9 @@ impl<'a> Gen<'a> {
         self.resolve_annotations(start);
         if let Err(e) = exceptions::check_closures(&self.out[start..]) {
             self.closures.push(Error { pos: m.pos, ..e });
+        }
+        for line in wrapper.into_iter().flatten() {
+            self.line(&line);
         }
         let moves = std::mem::replace(&mut self.moves, outer_moves);
         self.missed.extend(moves.missed());
