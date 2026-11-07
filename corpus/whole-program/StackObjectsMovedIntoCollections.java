@@ -4,7 +4,9 @@ import java.util.List;
 import java.util.Map;
 
 // Objects made in a loop that only some iterations keep in a JDK collection: each starts on the
-// stack and moves to the heap just before the call that keeps it.
+// stack and moves to the heap just before the call that keeps it. Hashing one first reads its
+// own hashCode, not its identity hash, so it still moves; an object whose class keeps Object's
+// hashCode has its identity hash read by the same call, so it is made in the heap.
 public class StackObjectsMovedIntoCollections {
     static final class Pos {
         final int x, y, z;
@@ -16,6 +18,12 @@ public class StackObjectsMovedIntoCollections {
         @Override public String toString() { return "(" + x + ", " + y + ", " + z + ")"; }
     }
 
+    // An object with Object's hashCode: hashing it reads its identity hash.
+    static final class Plain {
+        final int v;
+        Plain(int v) { this.v = v; }
+    }
+
     static final class Grid {
         int seed = 42;
         Pos randomPos(int x, int y, int z) {
@@ -25,15 +33,26 @@ public class StackObjectsMovedIntoCollections {
         }
     }
 
+    static int bucket(Object o) {
+        return o.hashCode() & 15;
+    }
+
     public static void main(String[] args) {
         Grid grid = new Grid();
         List<Pos> ticked = new ArrayList<>();
         Map<Pos, Integer> counts = new HashMap<>();
+        List<Plain> plain = new ArrayList<>();
         long sum = 0;
         for (int section = 0; section < 40; section++) {
             for (int k = 0; k < 3; k++) {
                 Pos pos = grid.randomPos(section * 16, 64, 0);
                 sum += pos.x + pos.y + pos.z;
+                sum += bucket(pos);
+                Plain key = new Plain(section);
+                sum += bucket(key) >= 0 ? 1 : 0;
+                if (k == 1) {
+                    plain.add(key);
+                }
                 if ((pos.x + pos.z) % 7 == 0) {
                     ticked.add(pos);
                 }
@@ -42,7 +61,7 @@ public class StackObjectsMovedIntoCollections {
                 }
             }
         }
-        System.out.println(sum + " " + ticked.size() + " " + counts.size());
+        System.out.println(sum + " " + ticked.size() + " " + counts.size() + " " + plain.size());
         int same = 0;
         for (Pos p : ticked) {
             Integer n = counts.get(p);

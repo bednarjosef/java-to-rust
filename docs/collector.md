@@ -295,14 +295,23 @@ The collector needs nothing for them:
   is left in the slot unread. The variable is declared in the loop's body, so a move in one
   iteration never reaches the next one's object, which the slot is filled with again. An object
   that would be moved in the block it is made in, or a plain block inside it, is made in the
-  heap, as it would always be copied. A move that the generator cannot write before its statement makes it write the
-  method again with that object in the heap.
+  heap, as it would always be copied. A call whose receiver and arguments are computed into
+  temporaries first (`argument$0 = supplier;`) counts as one statement with them, so a variable
+  given to a temporary there moves before it.
+  A move before a call that dispatches can be guarded by the receiver's class: when a profiled
+  run saw nearly every receiver of one class, and what that class runs keeps the object nowhere
+  and reads its identity hash nowhere, the object is moved only for a receiver of another class
+  (`if !matches!(p.0.tag(), 3) { .. to_heap .. }`). Such a move is not counted as always
+  copying, so the supplier given to the server's profiler in every entity's tick, which the
+  usual profiler ignores, stays in its slot. A move that the generator cannot write before its
+  statement makes it write the method again with that object in the heap.
 - **Identity.** The identity hash is the address, unique while the object lives; two objects of
   one slot in a loop, never alive at once, may share it, which Java allows. An object moved to
-  the heap gets a new address, so it is moved only when its identity hash was not read before. A `synchronized`
-  block, `wait` or `notify` on an object counts as an escape; a `synchronized` method called on
-  one locks it by its address or by the lock inside it, as on the heap, and unlocks it before it
-  returns.
+  the heap gets a new address, so it is moved only when its identity hash was not read before.
+  A call that hashes it reads its identity hash only if what its class runs for `hashCode` does:
+  a `BlockPos`'s own `hashCode` does not, `Object`'s does. A `synchronized` block, `wait` or
+  `notify` on an object counts as an escape; a `synchronized` method called on one locks it by
+  its address or by the lock inside it, as on the heap, and unlocks it before it returns.
 - **Threads.** Passing an object to another thread is an escape, so a stack object is only ever
   used by the thread whose stack holds it.
 - **What it owns.** A slot is never dropped, as a heap object is not: memory its fields own (a

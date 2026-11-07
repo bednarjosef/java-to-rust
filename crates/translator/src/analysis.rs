@@ -59,7 +59,7 @@ pub(crate) use npe_messages::{
 pub use npe_messages::{KeptMessages, npe_messages, npe_messages_kept};
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
-pub use escape::StackObjects;
+pub use escape::{Guard, StackObjects};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
 pub use string_identity::string_identity;
 pub(crate) use string_identity::{Made, made, value_of_operand};

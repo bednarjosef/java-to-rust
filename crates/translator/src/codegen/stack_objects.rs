@@ -23,11 +23,14 @@
 //!
 //! An object that leaves only at some statements (`StackObjects::moves`) is moved to the heap
 //! before each of them, `unsafe { slot_1.to_heap(&mut pos) };`, and its local is `mut` (see
-//! `Moves`). A method in which such a move cannot be written is written again with the object in
-//! the heap (`Gen::method_form`).
+//! `Moves`). A guarded move (`analysis::Guard`) tests the receiver's class first,
+//! `if !matches!(p.0.tag(), 3) { unsafe { slot_1.to_heap(&mut argument_0) }; }`, and is written
+//! unguarded when that test cannot be (`Gen::receiver_of_class`). A method in which a move cannot
+//! be written is written again with the object in the heap (`Gen::method_form`).
 
 use super::objects::changes_object;
 use super::*;
+use crate::analysis::Guard;
 
 /// The most slots a method declares, so that a method that recursion runs deep keeps a small
 /// frame.
@@ -340,8 +343,8 @@ impl<'a> Gen<'a> {
         let mut moves = Moves::default();
         for mv in self.facts.stack_objects.moves.get(&index).into_iter().flatten() {
             let Some(slot) = self.slot_of(mv.made) else { continue };
-            for &before in &mv.before {
-                moves.before.entry(before).or_default().push((mv.var.clone(), slot.clone(), mv.made));
+            for &(before, guard) in &mv.before {
+                moves.before.entry(before).or_default().push((mv.var.clone(), slot.clone(), mv.made, guard));
             }
             moves.declared.push(mv.declared);
         }
@@ -355,24 +358,63 @@ impl<'a> Gen<'a> {
     }
 
     /// Writes the moves to the heap that come before `stmt` (`Slot::to_heap`): of each object in
-    /// a slot that may leave the method in it, held by a local.
-    pub(super) fn move_to_heap(&mut self, stmt: &Stmt) {
-        let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _)) = stmt else {
+    /// a slot that may leave the method in it, held by a local. A guarded move (`Guard`) is made
+    /// only when the receiver of its call is not of the guard's class.
+    pub(super) fn move_to_heap(&mut self, stmt: &'a Stmt) {
+        let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e)) =
+            stmt
+        else {
             return;
         };
         let Some(moves) = self.moves.before.get(&e.id).cloned() else { return };
-        for (var, slot, made) in moves {
+        for (var, slot, made, guard) in moves {
             // A variable that is not a plain local here is not moved: the method is then written
             // again with the object in the heap (`missed`).
             if !self.locals.contains_key(&var) || self.borrowed.contains(&var) || self.plain(&var).is_some() {
                 continue;
             }
             let rust = self.local(&var);
-            self.line(&format!("unsafe {{ {slot}.to_heap(&mut {rust}) }};"));
+            let line = format!("unsafe {{ {slot}.to_heap(&mut {rust}) }};");
+            // A guard that cannot be written here leaves the move unguarded, which is only slower.
+            match guard.and_then(|g| self.receiver_of_class(e, g)) {
+                Some(test) => self.line(&format!("if !{test} {{ {line} }}")),
+                None => self.line(&line),
+            }
             self.moves.written.insert((e.id, made));
         }
     }
+
+    /// The test that the receiver of the guard's call in `e`, a local, is of the guard's class
+    /// exactly: its class number in the receiver's enum. `None` when it is not an enum's.
+    fn receiver_of_class(&mut self, e: &'a Expr, guard: Guard) -> Option<String> {
+        let mut receiver = None;
+        visit_expr(e, &mut |x| {
+            if x.id == guard.call
+                && let ExprKind::MethodCall { receiver: r, .. } = &x.kind
+            {
+                receiver = Some(&**r);
+            }
+        });
+        let receiver: &'a Expr = receiver?;
+        if !matches!(receiver.kind, ExprKind::Var(_)) {
+            return None;
+        }
+        let t = self.enum_of(receiver)?;
+        if !self.is_enum_variant(t, guard.class) {
+            return None;
+        }
+        let tags = self.tags(&[guard.class], &self.enum_variants(t));
+        Some(if self.nullable(receiver) {
+            format!("{}.as_ref().is_some_and(|o| matches!(o.0.tag(), {tags}))", self.object_place(receiver))
+        } else {
+            format!("matches!({}.0.tag(), {tags})", super::dispatch::operand(&self.object(receiver)))
+        })
+    }
 }
+
+/// A move before a statement: the local that holds the object, the slot, the `new` or call that
+/// makes it, and the move's guard, if any.
+type MoveAt = (String, String, ExprId, Option<Guard>);
 
 /// The moves to the heap of the objects of the method being written that may leave it
 /// (`StackObjects::moves`): an object made in a slot is moved before each statement where it may
@@ -381,9 +423,8 @@ impl<'a> Gen<'a> {
 /// written is written again with those objects in the heap.
 #[derive(Default)]
 pub(super) struct Moves {
-    /// By statement (the id of its expression, `Move::before`): the local that holds the object,
-    /// the slot, and the `new` or call that makes it.
-    before: HashMap<ExprId, Vec<(String, String, ExprId)>>,
+    /// By statement (the id of its expression, `Move::before`): the moves before it.
+    before: HashMap<ExprId, Vec<MoveAt>>,
     /// The moves written, by statement and object.
     written: HashSet<(ExprId, ExprId)>,
     /// Where the locals that hold the objects are declared.
@@ -396,7 +437,7 @@ impl Moves {
         let mut missed: Vec<ExprId> = self
             .before
             .iter()
-            .flat_map(|(&at, moves)| moves.iter().map(move |&(_, _, made)| (at, made)))
+            .flat_map(|(&at, moves)| moves.iter().map(move |&(_, _, made, _)| (at, made)))
             .filter(|key| !self.written.contains(key))
             .map(|(_, made)| made)
             .collect();

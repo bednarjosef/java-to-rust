@@ -91,22 +91,35 @@
 //! and be moved to the heap just before the first of them: the random `BlockPos` that the
 //! Minecraft server picks in each section, which only a block that ticks keeps. The places
 //! (`points`) are the arguments of calls and the values stored in fields, arrays and statics that
-//! are a plain read of a local variable (or a cast of one), in a statement of its own (an expression, a local's
-//! declaration or a `return`) that names the variable nowhere else and assigns it nowhere, and is
-//! not in a switch expression nor a `for` loop's start. An object moves when one local declared by
-//! a `Stmt::Local` holds it and no other variable or object does (but the result of the call that
-//! makes it), nothing in the method or its callees reads its identity hash before
-//! (`Summary::identity`, and for a factory's object, the factory), it is not returned, with
-//! each of those places taken for none it stays (the loop rule included), and none of the places
-//! where it may leave is in the block of the variable's declaration or a plain block nested in
-//! it, which would always move it
-//! (`blocks`): then the heap is cheaper. Its translation then
-//! moves it before each statement with such a place where it may leave (`Slot::to_heap`), which
-//! does nothing once the variable names the heap. That is sound because before that point nothing
-//! else names the object, so nothing can tell the moved object from the one in the slot: its
-//! fields are copied as they are, and every later read of the variable reads the moved one. A
-//! variable declared in the loop's body is a new one at each iteration, so a moved object of one
-//! iteration is never taken for the next one's.
+//! are a plain read of a local variable (or a cast of one), in a statement of its own (an
+//! expression, a local's declaration, a `return` or a `yield`) that names the variable nowhere
+//! else and assigns it nowhere, and is not in a switch expression nor a `for` loop's start. The
+//! block in which an ordered call computes its receiver and arguments first (`lower::ordered_call`,
+//! a switch expression of one default case) counts as part of its statement, so its statements,
+//! such as `argument$0 = p;`, can be places too (`ordered_stmts`). An object
+//! moves when one local declared by a `Stmt::Local` holds it and no other variable or object does
+//! (but the result of the call that makes it), nothing in the method or its callees reads its
+//! identity hash before, it is not returned, with each of those places taken for none it stays
+//! (the loop rule included), and none of the places where it may leave is in the block of the
+//! variable's declaration or a plain block nested in it, which would always move it (`blocks`):
+//! then the heap is cheaper. Whether a callee reads the identity hash is in its summary
+//! (`Summary::identity`) as escapes are: always, or via the methods called on the parameter,
+//! which what the object's class runs for them decides (`this_identity`), so that hashing a
+//! `BlockPos` by its own `hashCode` does not count and hashing an object by `Object`'s does; for a
+//! factory's object, the factory must not read it either. Its translation then moves it before
+//! each statement with such a place where it may leave (`Slot::to_heap`), which does nothing once
+//! the variable names the heap. That is sound because before that point nothing else names the
+//! object, so nothing can tell the moved object from the one in the slot: its fields are copied
+//! as they are, and every later read of the variable reads the moved one. A variable declared in
+//! the loop's body is a new one at each iteration, so a moved object of one iteration is never
+//! taken for the next one's.
+//!
+//! A place that is an argument of a dispatched call, whose receiver is a local and was of one
+//! class in a profiled run, and where what that class runs keeps the object nowhere and reads its
+//! identity hash nowhere, gets a guarded move (`Guard`): the object is moved only when the
+//! receiver is of another class. Such a place leaves the object where it is on the common path,
+//! so it does not count for the rule on the declaring block: the profiler's `push(supplier)`,
+//! whose usual receiver ignores the supplier, keeps it in its slot.
 
 use super::{FastMap, FastSet};
 use crate::ast::*;
@@ -140,8 +153,21 @@ pub struct Move {
     /// Where that variable is declared.
     pub declared: Pos,
     /// The statements before which it is moved, by the id of their expression: an expression
-    /// statement's, a local's initializer or a returned value.
-    pub before: Vec<ExprId>,
+    /// statement's, a local's initializer, a returned or a yielded value; with each, the guard of
+    /// the move when it leaves there only for some classes of a call's receiver.
+    pub before: Vec<(ExprId, Option<Guard>)>,
+}
+
+/// The move before a statement where an object leaves only as an argument of a call whose
+/// receiver was of one class in a profiled run (see **Profiled calls**), and what that class runs
+/// for the call keeps it and reads its identity hash nowhere: the move is made only when the
+/// receiver, a local the statement reads, is of another class.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Guard {
+    /// The call, a `MethodCall`.
+    pub call: ExprId,
+    /// The class whose objects as the receiver leave the object where it is.
+    pub class: usize,
 }
 
 /// The object that a factory returns.
@@ -354,8 +380,10 @@ struct Summary {
     stored: Vec<Vec<FieldKey>>,
     /// What the method does with what `this` holds in each of those fields, by field.
     contents: Vec<(FieldKey, Escape)>,
-    /// Whether the identity hash of each parameter may be read, which tells where its object is.
-    identity: Vec<bool>,
+    /// Whether the identity hash of each parameter may be read, which tells where its object is:
+    /// always, or when what its class runs for one of the methods `via` (called on it as the
+    /// receiver) reads that of its `this`, as `Object.hashCode` does and a `BlockPos`'s does not.
+    identity: Vec<Escape>,
 }
 
 impl Summary {
@@ -365,7 +393,7 @@ impl Summary {
             returned: vec![false; arity],
             stored: vec![Vec::new(); arity],
             contents: Vec::new(),
-            identity: vec![false; arity],
+            identity: vec![Escape::default(); arity],
         }
     }
 
@@ -375,12 +403,12 @@ impl Summary {
             self.escapes.resize(other.escapes.len(), Escape::default());
             self.returned.resize(other.returned.len(), false);
             self.stored.resize(other.stored.len(), Vec::new());
-            self.identity.resize(other.identity.len(), false);
+            self.identity.resize(other.identity.len(), Escape::default());
         }
         for k in 0..other.escapes.len() {
             self.escapes[k].add(&other.escapes[k]);
             self.returned[k] |= other.returned[k];
-            self.identity[k] |= other.identity[k];
+            self.identity[k].add(&other.identity[k]);
             for f in &other.stored[k] {
                 if let Err(at) = self.stored[k].binary_search(f) {
                     self.stored[k].insert(at, *f);
@@ -398,7 +426,7 @@ impl Summary {
             && (0..other.escapes.len()).all(|k| {
                 self.escapes[k].covers(&other.escapes[k])
                     && (self.returned[k] || !other.returned[k])
-                    && (self.identity[k] || !other.identity[k])
+                    && self.identity[k].covers(&other.identity[k])
                     && covers_fields(&self.stored[k], &other.stored[k])
             })
             && other.contents.iter().all(|(f, e)| {
@@ -639,6 +667,11 @@ struct Call {
     /// Whether the receiver is exactly the object it names: a `new`'s own, or `this` for
     /// `this(..)` and `super(..)`, so that what the callee stores in its `this` is stored there.
     exact_receiver: bool,
+    /// The call's id.
+    id: ExprId,
+    /// For a dispatched call on a local whose receivers were of one class in a profiled run, that
+    /// class and what it runs for the call.
+    profiled: Option<(usize, usize)>,
 }
 
 /// A source of a method's own: a `new`, or a call of one method that may be a factory.
@@ -1260,9 +1293,10 @@ fn compile<'a>(
 
 /// The reads of local variables in method `m` that may be points (see **Moves to the heap**),
 /// with the statement each is in, by the id of its expression: a read in an expression
-/// statement, a local's initializer or a returned value that is the statement's only mention of
-/// its variable, in a statement that assigns or binds no variable of its name and has no switch
-/// expression, outside a `for` loop's start.
+/// statement, a local's initializer, a returned value or a yielded one that is the statement's
+/// only mention of its variable, in a statement that assigns or binds no variable of its name and
+/// has no switch expression, outside a `for` loop's start. The statements of the blocks that
+/// compute a call's arguments first (`ordered_stmts`) are statements too.
 fn points(
     method: &Method,
     blocks: &FastMap<*const Stmt, u32>,
@@ -1271,6 +1305,8 @@ fn points(
     for s in &method.body {
         visit_stmt_outside_switches(s, &mut |s| stmts.push(s));
     }
+    let ordered: Vec<&Stmt> = stmts.iter().flat_map(|s| own_exprs(s)).flat_map(ordered_stmts).collect();
+    stmts.extend(ordered);
     let mut starts: FastSet<*const Stmt> = FastSet::default();
     for s in &stmts {
         if let Stmt::For { init, .. } = s {
@@ -1280,10 +1316,12 @@ fn points(
     let mut points = FastMap::default();
     let mut point_blocks = FastMap::default();
     for s in stmts {
-        let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _)) = s else {
+        let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e)) =
+            s
+        else {
             continue;
         };
-        if starts.contains(&(s as *const Stmt)) {
+        if starts.contains(&(s as *const Stmt)) || !blocks.contains_key(&(s as *const Stmt)) {
             continue;
         }
         let mut reads: FastMap<&str, Option<ExprId>> = FastMap::default();
@@ -1314,9 +1352,56 @@ fn points(
     (points, point_blocks)
 }
 
+/// The expressions of statement `s` itself, not of the statements in it.
+fn own_exprs(s: &Stmt) -> Vec<&Expr> {
+    match s {
+        Stmt::Local { init: Some(e), .. }
+        | Stmt::Expr(e)
+        | Stmt::Return(Some(e), _)
+        | Stmt::Yield(e)
+        | Stmt::Throw(e)
+        | Stmt::If { cond: e, .. }
+        | Stmt::While { cond: e, .. }
+        | Stmt::DoWhile { cond: e, .. }
+        | Stmt::Switch { selector: e, .. } => vec![e],
+        _ => Vec::new(),
+    }
+}
+
+/// The statements of the blocks in `e` that compute a call's receiver and arguments before the
+/// call (`lower::ordered_call`), outside any other switch expression: they run one after the
+/// other where `e` runs, as statements of `e`'s own.
+fn ordered_stmts(e: &Expr) -> Vec<&Stmt> {
+    let mut ordered: Vec<&Expr> = Vec::new();
+    let mut inside_others: FastSet<ExprId> = FastSet::default();
+    visit_expr(e, &mut |x| {
+        if !matches!(x.kind, ExprKind::Switch { .. }) || inside_others.contains(&x.id) {
+            return;
+        }
+        if crate::lower::ordered_call(x).is_some() {
+            ordered.push(x);
+        } else {
+            visit_expr(x, &mut |y| {
+                if y.id != x.id {
+                    inside_others.insert(y.id);
+                }
+            });
+        }
+    });
+    ordered
+        .into_iter()
+        .filter(|x| !inside_others.contains(&x.id))
+        .flat_map(|x| match &x.kind {
+            ExprKind::Switch { cases, .. } => cases[0].body.iter().collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 /// A number for each statement of method `m` outside switch expressions: the same for the
-/// statements of one block, which run one after the other, and for those of a plain or labeled
-/// block nested in it, which run in the same run; a new one for each branch, loop body, case or
+/// statements of one block, which run one after the other, for those of a plain or labeled
+/// block nested in it, which run in the same run, and for those that compute the arguments of a
+/// call in one of them first (`ordered_stmts`); a new one for each branch, loop body, case or
 /// part of a `try` inside it.
 fn blocks(method: &Method) -> FastMap<*const Stmt, u32> {
     struct Numbering {
@@ -1326,6 +1411,9 @@ fn blocks(method: &Method) -> FastMap<*const Stmt, u32> {
     impl Numbering {
         fn stmt(&mut self, s: &Stmt, block: u32) {
             self.out.insert(s as *const Stmt, block);
+            for inner in own_exprs(s).into_iter().flat_map(ordered_stmts) {
+                self.out.insert(inner as *const Stmt, block);
+            }
             match s {
                 Stmt::Block(stmts) => stmts.iter().for_each(|s| self.stmt(s, block)),
                 Stmt::If { then, otherwise, .. } => {
@@ -1409,6 +1497,11 @@ impl<'a> Compiling<'a, '_> {
     /// in a profiled run runs for it (see **Profiled calls**). Only a place with one profiled
     /// call is read, as one of its calls cannot be told from another.
     fn profiled_target(&self, x: &Expr, l: u32) -> Option<usize> {
+        self.profiled_class(x, l).map(|(_, t)| t)
+    }
+
+    /// `profiled_target`, with the class.
+    fn profiled_class(&self, x: &Expr, l: u32) -> Option<(usize, usize)> {
         if self.profiled.is_empty() {
             return None;
         }
@@ -1427,7 +1520,7 @@ impl<'a> Compiling<'a, '_> {
         let [set] = &self.profiled.get(&place)?[..] else { return None };
         let [c] = set[..] else { return None };
         let t = self.class.hierarchy.implementation(*r, c)?;
-        self.lists.targets[l as usize].contains(&t).then_some(t)
+        self.lists.targets[l as usize].contains(&t).then_some((c, t))
     }
 
     /// The list of methods that the call `x` may run, or `None` when `x` is not a call of the
@@ -1634,6 +1727,16 @@ impl<'a> Compiling<'a, '_> {
             x.kind,
             ExprKind::New { ctor: Some(_), .. } | ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. }
         ) && start == 1;
+        let profiled = match (&x.kind, targets) {
+            (ExprKind::MethodCall { receiver, .. }, Some(l))
+                if dispatched
+                    && matches!(receiver.kind, ExprKind::Var(_))
+                    && self.lists.targets[l as usize].len() > 1 =>
+            {
+                self.profiled_class(x, l)
+            }
+            _ => None,
+        };
         self.code.calls.push(Call {
             targets,
             fits,
@@ -1647,6 +1750,8 @@ impl<'a> Compiling<'a, '_> {
             dispatched,
             has_receiver: start == 1,
             exact_receiver,
+            id: x.id,
+            profiled,
         });
         self.call_of.insert(x.id, c);
         c
@@ -1707,6 +1812,19 @@ impl Analysis<'_> {
     /// What what an object of class `c` runs for method `r` (called on it) does with what the
     /// object holds in each of its own fields (see `Contents`), by field, with the summaries
     /// known so far; `None` when it lets all of it escape.
+    /// Whether what an object of class `c` runs for method `r` (called on it) may read the
+    /// identity hash of its `this`, with the summaries known so far.
+    fn this_identity(&self, r: usize, c: usize, seen: &mut Vec<usize>, read: &mut Vec<usize>) -> bool {
+        let Some(t) = self.hierarchy.implementation(r, c) else { return true };
+        if seen.contains(&t) {
+            return false;
+        }
+        seen.push(t);
+        read.push(t);
+        let Some(e) = self.summaries[t].identity.first() else { return true };
+        e.always || e.via.iter().any(|&r| self.this_identity(r, c, seen, read))
+    }
+
     fn contents_escape(
         &self,
         r: usize,
@@ -1859,15 +1977,22 @@ impl Analysis<'_> {
         }
         // What has its identity hash read: by the method, or by the calls it is given to (but
         // for `mask` at the points, where it is read after its move or `moved` finds it).
+        // The receiver of a dispatched call has its read as what its class runs reads that of its
+        // `this` (`observed_via`, resolved below for the method's own objects).
         let mut observed = Sources::default();
+        let mut observed_via: Vec<Vec<usize>> = vec![Vec::new(); n];
         for value in &code.identity {
             observed.union(&eval(&vars, value));
         }
         for (call, combined) in code.calls.iter().zip(&combined) {
             let Some(combined) = combined else { continue };
             for (k, arg) in call.args.iter().enumerate() {
-                if combined.identity.get(k) == Some(&true) {
-                    observed.union(&at_point(eval(&vars, arg), call.points[k].is_some()));
+                let given = at_point(eval(&vars, arg), call.points[k].is_some());
+                if k == 0 && call.dispatched {
+                    let method = call.method.expect("a dispatched call names its method");
+                    add_via(&mut observed_via, &given, &[method]);
+                } else if let Some(e) = combined.identity.get(k) {
+                    apply(e, &given, &mut observed, &mut observed_via);
                 }
             }
         }
@@ -2043,9 +2168,30 @@ impl Analysis<'_> {
                 break;
             }
         }
+        for (i, site) in code.sites.iter().enumerate() {
+            let s = first + i;
+            if active[i] && !observed.contains(s) && !observed_via[s].is_empty() {
+                let c = self.site_class(site);
+                if observed_via[s].iter().any(|&r| self.this_identity(r, c, &mut Vec::new(), &mut read)) {
+                    observed.insert(s);
+                }
+            }
+        }
         read.sort_unstable();
         read.dedup();
-        Flows { vars, combined, active, escaping, returned, via, contents, by_field, read, observed }
+        Flows {
+            vars,
+            combined,
+            active,
+            escaping,
+            returned,
+            via,
+            contents,
+            by_field,
+            read,
+            observed,
+            observed_via,
+        }
     }
 
     /// Solves method `m` with the summaries and factories known so far: its summary, the
@@ -2059,8 +2205,19 @@ impl Analysis<'_> {
                 read: Vec::new(),
             };
         }
-        let Flows { vars, escaping, returned, via, contents, by_field, read, active, observed, .. } =
-            self.flows(m);
+        let Flows {
+            vars,
+            escaping,
+            returned,
+            via,
+            contents,
+            by_field,
+            read,
+            active,
+            observed,
+            observed_via,
+            ..
+        } = self.flows(m);
         let code = &self.code[m];
         let first = code.arity;
         let held = first + code.sites.len();
@@ -2068,7 +2225,7 @@ impl Analysis<'_> {
         for (i, at) in via.iter().enumerate().take(first) {
             summary.escapes[i] = Escape { always: escaping.contains(i), via: at.clone() };
             summary.returned[i] = returned.contains(i);
-            summary.identity[i] = observed.contains(i);
+            summary.identity[i] = Escape { always: observed.contains(i), via: observed_via[i].clone() };
             if code.has_this && i > 0 {
                 let mut fields: Vec<FieldKey> =
                     by_field[0].iter().filter(|(_, s)| s.contains(i)).map(|&(f, _)| f).collect();
@@ -2201,35 +2358,64 @@ impl Analysis<'_> {
             // A call at a point where it does not leave, which reads its identity hash, reads that
             // of the object in the slot.
             let mut read_in_slot = false;
-            let mut at: Vec<ExprId> =
-                code.escape_points.iter().filter(|&&(_, w, _)| w == v).map(|&(_, _, read)| read).collect();
+            let mut at: Vec<(ExprId, Option<Guard>)> = code
+                .escape_points
+                .iter()
+                .filter(|&&(_, w, _)| w == v)
+                .map(|&(_, _, read)| (read, None))
+                .collect();
             for (call, combined) in code.calls.iter().zip(&flows.combined) {
                 for (k, point) in call.points.iter().enumerate() {
                     let Some((w, read)) = *point else { continue };
                     if w != v {
                         continue;
                     }
+                    let escapes = |e: &Escape| {
+                        e.always
+                            || e.via
+                                .iter()
+                                .any(|&r| self.this_escapes(r, c, &mut Vec::new(), &mut Vec::new()))
+                    };
+                    let reads = |e: &Escape| {
+                        e.always
+                            || e.via
+                                .iter()
+                                .any(|&r| self.this_identity(r, c, &mut Vec::new(), &mut Vec::new()))
+                    };
+                    let keeps = |s: &Summary| {
+                        s.escapes.get(k).is_some_and(escapes)
+                            || (call.has_receiver
+                                && k >= 1
+                                && !call.exact_receiver
+                                && s.stored.get(k).is_some_and(|fields| !fields.is_empty()))
+                    };
                     let leaves = match combined {
                         None => true,
                         Some(_) if k == 0 && call.dispatched => {
                             let r = call.method.expect("a dispatched call names its method");
                             self.this_escapes(r, c, &mut Vec::new(), &mut Vec::new())
                         }
-                        Some(combined) => {
-                            combined.escapes.get(k).is_some_and(|e| {
-                                e.always
-                                    || e.via
-                                        .iter()
-                                        .any(|&r| self.this_escapes(r, c, &mut Vec::new(), &mut Vec::new()))
-                            }) || (call.has_receiver
-                                && k >= 1
-                                && !call.exact_receiver
-                                && combined.stored.get(k).is_some_and(|fields| !fields.is_empty()))
+                        Some(combined) => keeps(combined),
+                    };
+                    // Where what the profiled class runs keeps it nowhere and reads its identity
+                    // hash nowhere, it leaves only for the receivers of other classes.
+                    let guard = match call.profiled {
+                        Some((class, t)) if leaves && k >= 1 && combined.is_some() => {
+                            let own = &self.summaries[t];
+                            (!keeps(own) && !own.identity.get(k).is_some_and(reads))
+                                .then_some(Guard { call: call.id, class })
                         }
+                        _ => None,
                     };
                     if leaves {
-                        at.push(read);
-                    } else if combined.as_ref().is_some_and(|c| c.identity.get(k) == Some(&true)) {
+                        at.push((read, guard));
+                    } else if k == 0 && call.dispatched {
+                        let r = call.method.expect("a dispatched call names its method");
+                        read_in_slot |= self.this_identity(r, c, &mut Vec::new(), &mut Vec::new());
+                    } else if combined
+                        .as_ref()
+                        .is_some_and(|combined| combined.identity.get(k).is_some_and(reads))
+                    {
                         read_in_slot = true;
                     }
                 }
@@ -2238,14 +2424,25 @@ impl Analysis<'_> {
                 why(id, "is not moved: a call given it where it does not leave may read its identity hash");
                 continue;
             }
-            let mut before: Vec<ExprId> = at.iter().map(|read| code.points[read]).collect();
-            before.sort_unstable();
-            before.dedup();
+            // By statement: a guard only when every place where it may leave there has that one.
+            let mut before: Vec<(ExprId, Option<Guard>)> = Vec::new();
+            for &(read, guard) in &at {
+                let stmt = code.points[&read];
+                match before.iter_mut().find(|(s, _)| *s == stmt) {
+                    Some((_, g)) => {
+                        if *g != guard {
+                            *g = None;
+                        }
+                    }
+                    None => before.push((stmt, guard)),
+                }
+            }
+            before.sort_unstable_by_key(|&(s, _)| s);
             let (declared, block) = code.named[j].local.expect("a local");
             // A move in the block of the declaration runs whenever the object is made (but for an
             // exception or a jump before it), which would only add a copy: the object is made in
-            // the heap instead.
-            if before.iter().any(|at| code.point_blocks[at] == block) {
+            // the heap instead. A guarded one runs only for the receivers of other classes.
+            if before.iter().any(|(at, guard)| guard.is_none() && code.point_blocks[at] == block) {
                 why(id, "is made in the heap: it would be moved in the block it is made in");
                 continue;
             }
@@ -2482,8 +2679,10 @@ struct Flows {
     by_field: Vec<Vec<(FieldKey, Sources)>>,
     /// The methods outside the calls' targets whose summaries were read.
     read: Vec<usize>,
-    /// The sources whose identity hash the method or its calls may read.
+    /// The sources whose identity hash the method or its calls may read: always, and for the
+    /// parameters, via the methods called on them (as `via` is for escapes).
     observed: Sources,
+    observed_via: Vec<Vec<usize>>,
 }
 
 /// What `fields` holds in field `f`.

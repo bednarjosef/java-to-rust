@@ -59,6 +59,36 @@ const BAGS: &str = "public class Main {
     }
 }";
 
+const PROFILER: &str = "public class Main {
+    interface Name { String name(); }
+    static final class Fixed implements Name { public String name() { return \"fixed\"; } }
+    interface Filler { void push(Name name); void pop(); }
+    static final class Inactive implements Filler { public void push(Name name) {} public void pop() {} }
+    static final class Active implements Filler {
+        final Name[] kept = new Name[8]; int n;
+        public void push(Name name) { kept[n++ % 8] = name; }
+        public void pop() {} }
+    static final class Entity {
+        final String type; int ticks; Entity(String type) { this.type = type; }
+        String type() { return type; } }
+    static Filler profiler = new Inactive();
+    static void tick(Entity e) {
+        Filler p = profiler;
+        p.push(e::type);
+        e.ticks++;
+        p.pop();
+    }
+    public static void main(String[] args) {
+        Entity[] es = { new Entity(\"a\"), new Entity(\"b\") };
+        for (int i = 0; i < 30; i++) tick(es[i % 2]);
+        Active active = new Active();
+        profiler = active;
+        tick(es[0]);
+        active.push(new Fixed());
+        System.out.println(es[0].ticks + es[1].ticks + active.kept[0].name() + active.kept[1].name());
+    }
+}";
+
 /// The profile `JAVA_TO_RUST_DISPATCH_PROFILE` names while `translate` runs, as `text`.
 fn translate_profiled(java: &str, text: &str) -> String {
     let profile = std::env::temp_dir().join(format!("profiled-dispatch-{}.txt", std::process::id()));
@@ -180,4 +210,23 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     let end = among + profiled[among..].find("\n}").unwrap();
     assert_contains(&profiled[among..end], &["MainArr__cursor_on_stack(MainArr::Arr(o.clone()), j2r_slot)"]);
     assert_contains(&profiled, &["fn MainArr__cursor_on_stack("]);
+
+    // An object given to a call that mostly saw a class whose method keeps it nowhere starts in a
+    // slot, and is moved to the heap only for a receiver of another class.
+    let counted = counted_of(PROFILER);
+    let key = count_key(&counted, "#push");
+    let (inactive, active) = (class_number(&counted, "MainInactive"), class_number(&counted, "MainActive"));
+    let profiled = translate_profiled(PROFILER, &format!("{key}\t{inactive}:2900 {active}:100 *:0\n"));
+    let tick = profiled.find("fn tick(").expect("`tick`");
+    let tick = &profiled[tick..tick + profiled[tick..].find("\n}").unwrap()];
+    assert_contains(
+        tick,
+        &[
+            "let slot_1 = java::Slot::<",
+            "slot_1.put(",
+            &format!(
+                "if !matches!(p.0.tag(), {inactive}) {{ unsafe {{ slot_1.to_heap(&mut argument_0) }}; }}"
+            ),
+        ],
+    );
 }
