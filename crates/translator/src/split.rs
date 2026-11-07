@@ -419,10 +419,7 @@ const DISPATCHER_ARMS: usize = 8;
 /// header, `#[inline]`: a call through an interface is then the caller's `match` on the class
 /// number and one call of the method it picks, not a call of the dispatcher that calls it.
 fn small_dispatcher(attrs: &[syn::Attribute], code: &str) -> bool {
-    let marked = attrs.iter().any(|a| {
-        a.path().is_ident("cfg_attr")
-            && matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string().replace(' ', "") == "any(),dispatcher")
-    });
+    let marked = dispatcher(attrs);
     // The arms of the outermost `match`, less the one for a class number no class has.
     let arms = || {
         let block: syn::Block = syn::parse_str(code).ok()?;
@@ -434,6 +431,14 @@ fn small_dispatcher(attrs: &[syn::Attribute], code: &str) -> bool {
         })
     };
     marked && arms().is_some_and(|n| n <= DISPATCHER_ARMS)
+}
+
+/// Whether attributes `attrs` mark a dispatcher (`DISPATCHER_MARK`).
+fn dispatcher(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("cfg_attr")
+            && matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string().replace(' ', "") == "any(),dispatcher")
+    })
 }
 
 /// Whether `code`, a function's block, is small enough to stay in the header, `#[inline]`, where
@@ -718,7 +723,7 @@ fn split_module(
                             externs.push_str(&format!(
                                 "{decl_attrs}    #[link_name = \"{symbol}\"]\n    safe fn {name}__ret({params}) -> {ret_type};\n"
                             ));
-                            let code = widened(&ret, code);
+                            let code = widened_block(&ret, ret_type, &f.attrs, code);
                             body.push_str(&format!(
                                 "{attrs}#[unsafe(no_mangle)]\npub fn {symbol}({inputs}) -> {ret_type} {code}\n\n"
                             ));
@@ -835,8 +840,10 @@ fn split_module(
                         f.attrs.iter().map(|a| format!("    {}\n", at(text, a.span()))).collect();
                     let inputs =
                         if f.sig.inputs.is_empty() { "" } else { &text[f.sig.inputs.span().byte_range()] };
-                    let code = &text[block];
-                    let code = if small.is_some() { widened(&ret, code) } else { code.to_string() };
+                    let code = match &small {
+                        Some(ret_type) => widened_block(&ret, ret_type, &f.attrs, &text[block]),
+                        None => text[block].to_string(),
+                    };
                     // The method itself is the function that the header declares: a method's
                     // `self` is passed as a first parameter of its type is.
                     let code = format!(
@@ -1126,6 +1133,104 @@ fn widened(ret: &str, code: &str) -> String {
     format!("{{ java::Ret::from((move ||{ret} {code})()) }}")
 }
 
+/// The block `code` of a function with attributes `attrs` that returns `ret` (` -> Result<..>`),
+/// as the block of the same function that returns it widened, `ret_type`: for a dispatcher whose
+/// block is a `match` on the class number, each arm widens its own value (`widened_arm`), else
+/// the whole block does (`widened`).
+///
+/// A dispatcher's arm over many classes calls a function of its own (`codegen::dispatch`'s
+/// `tag_match`), which then returns the widened value too, in registers, and the dispatcher
+/// returns it as it is. Widened as a whole, the dispatcher passed the address of a slot in its
+/// frame for the `Result`, read it back and widened it: the Minecraft server's `Object.hashCode`
+/// ran 18 instructions around each call of an arm, and runs 10.
+fn widened_block(ret: &str, ret_type: &str, attrs: &[syn::Attribute], code: &str) -> String {
+    // The file was parsed without the functions' code (`hollow`).
+    match syn::parse_str::<syn::Block>(code) {
+        Ok(block) if dispatcher(attrs) => {
+            widened_match(ret, ret_type, &block, code).unwrap_or_else(|| widened(ret, code))
+        }
+        _ => widened(ret, code),
+    }
+}
+
+/// `widened_block` of a dispatcher whose block is a `match` on the class number (after macros, a
+/// `debug_assert!`), which binds nothing that borrows, that no `?` or `return` can leave but its
+/// arms, which have no guards. Each arm's closure moves what it uses, as the whole block's did.
+fn widened_match(ret: &str, ret_type: &str, block: &syn::Block, text: &str) -> Option<String> {
+    let (last, before) = block.stmts.split_last()?;
+    let syn::Stmt::Expr(syn::Expr::Match(m), None) = last else { return None };
+    let leaves = |code: &str| code.contains('?') || has_word(code, "return") || has_word(code, "break");
+    let scrutinee = at(text, m.expr.span());
+    if !before.iter().all(|s| matches!(s, syn::Stmt::Macro(_)) && !leaves(at(text, s.span())))
+        || !scrutinee.contains(".0.tag()")
+        || leaves(scrutinee)
+        || m.arms.iter().any(|a| a.guard.is_some())
+    {
+        return None;
+    }
+    let mut out = String::from("{\n");
+    for s in before {
+        out.push_str(&format!("    {}\n", at(text, s.span())));
+    }
+    out.push_str(&format!("    match {scrutinee} {{\n"));
+    for arm in &m.arms {
+        let body = widened_arm(ret, ret_type, &arm.body, text);
+        out.push_str(&format!("        {} => {body},\n", at(text, arm.pat.span())));
+    }
+    out.push_str("    }\n}");
+    Some(out)
+}
+
+/// The arm `body` of a dispatcher's `match` (`widened_match`), widened: one that calls a function
+/// of its own, `{ fn arm(..) -> Result<..> {..} arm(..) }`, as the same call of the function
+/// returning the value widened; any other in a closure, where each `return` and `?` returns as it
+/// did.
+fn widened_arm(ret: &str, ret_type: &str, body: &syn::Expr, text: &str) -> String {
+    let code = at(text, body.span());
+    let own = || {
+        let syn::Expr::Block(b) = body else { return None };
+        let (last, before) = b.block.stmts.split_last()?;
+        let syn::Stmt::Expr(syn::Expr::Call(call), None) = last else { return None };
+        let syn::Expr::Path(called) = &*call.func else { return None };
+        let [syn::Stmt::Item(syn::Item::Fn(f))] = before else { return None };
+        let args_leave = call.args.iter().any(|a| {
+            let a = at(text, a.span());
+            a.contains('?') || has_word(a, "return") || has_word(a, "break")
+        });
+        (b.label.is_none()
+            && b.attrs.is_empty()
+            && called.path.is_ident(&f.sig.ident)
+            && !args_leave
+            && at_or_empty(text, &f.sig.output) == ret)
+            .then_some(f)
+    };
+    let Some(f) = own() else {
+        return widened_value(ret, &format!("{{ {code} }}"));
+    };
+    let start = body.span().byte_range().start;
+    let (output, block) = (f.sig.output.span().byte_range(), f.block.span().byte_range());
+    format!(
+        "{}-> {ret_type}{}{}{}",
+        &text[start..output.start],
+        &text[output.end..block.start],
+        widened_value(ret, &text[block.clone()]),
+        &text[block.end..body.span().byte_range().end]
+    )
+}
+
+/// The block `code` of an arm or of its function, which makes the `Result` that `ret` (` ->
+/// Result<..>`) names, as a block that makes it widened: in a closure where it may `return` or
+/// pass an error on (`?`), else as it is, without a closure for rustc to compile.
+fn widened_value(ret: &str, code: &str) -> String {
+    let leaves = code.contains('?') || has_word(code, "return");
+    match ret.strip_prefix(" -> ") {
+        Some(result) if !leaves => {
+            format!("{{ let j2r_result: {result} = {code}; java::Ret::from(j2r_result) }}")
+        }
+        _ => widened(ret, code),
+    }
+}
+
 /// Renames the parameters of `sig` other than `self` to `p0`, `p1`, .. in the header (an edit of
 /// each pattern), and gives them as `p0: T0, ..` (each `Self` in a type replaced by `self_ty`) and
 /// as the arguments `p0, ..`.
@@ -1391,6 +1496,53 @@ mod tests {
         );
         let moved: String = part.split.pieces.iter().map(|p| p.text.as_str()).collect();
         assert!(moved.contains("fn j2r__p__many(") && !moved.contains("j2r__p__few"), "{moved}");
+    }
+
+    /// A moved dispatcher that returns a `Result` of a small value widens it in each arm of its
+    /// `match`, and an arm's function of its own returns it widened, in registers, which the
+    /// dispatcher returns as it is.
+    #[test]
+    fn a_dispatcher_widens_each_arm() {
+        let arms: String = (0..DISPATCHER_ARMS + 1)
+            .map(|i| {
+                format!(
+                    "        {i} => {{ #[inline(never)] fn arm(j2r_thin: java::Thin, index: i32) -> Result<i32, Throwable> {{ let o: &Arc<C{i}> = &unsafe {{ j2r_thin.to_pointer() }}; C{i}__get(o, index) }} arm(this.0, index) }}\n"
+                )
+            })
+            .collect();
+        let text = format!(
+            "#[{DISPATCHER_MARK}]\nfn get(this: E, index: i32) -> Result<i32, Throwable> {{\n    match this.0.tag() {{\n{arms}        20 => {{ if index < 0 {{ return Err(t()); }} Ok(index) }}\n        tag => java::bad_tag(tag),\n    }}\n}}\n"
+        );
+        let part = split_module(&text, &["p".to_string()], &mut Default::default(), &mut Default::default())
+            .unwrap();
+        let moved: String = part.split.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert!(
+            moved.contains(
+                "0 => { #[inline(never)] fn arm(j2r_thin: java::Thin, index: i32) -> java::Ret<i32, Throwable> { let j2r_result: Result<i32, Throwable> = { let o: &Arc<C0> = &unsafe { j2r_thin.to_pointer() }; C0__get(o, index) }; java::Ret::from(j2r_result) } arm(this.0, index) },"
+            ),
+            "{moved}"
+        );
+        assert!(
+            moved.contains(
+                "20 => { java::Ret::from((move || -> Result<i32, Throwable> { { if index < 0 { return Err(t()); } Ok(index) } })()) },"
+            ),
+            "{moved}"
+        );
+        assert!(
+            moved.contains(
+                "tag => { let j2r_result: Result<i32, Throwable> = { java::bad_tag(tag) }; java::Ret::from(j2r_result) },"
+            ),
+            "{moved}"
+        );
+        // A function that is no dispatcher is widened whole.
+        let plain = text.replacen(&format!("#[{DISPATCHER_MARK}]\n"), "", 1);
+        let part = split_module(&plain, &["p".to_string()], &mut Default::default(), &mut Default::default())
+            .unwrap();
+        let moved: String = part.split.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert!(
+            moved.contains("{ java::Ret::from((move || -> Result<i32, Throwable> {\n    match"),
+            "{moved}"
+        );
     }
 
     #[test]

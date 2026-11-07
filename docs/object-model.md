@@ -81,8 +81,11 @@ past 20 GB to compile; LLVM's time grows faster than a function's size, so the p
 they are items of their own, which the split into crates spreads over the body crates
 (docs/several-crates.md). A `match` over 2048 classes or fewer stays whole, so that its call is
 one jump, not two. A dispatcher's `match` over more than 64 classes runs each arm's call in a
-function of its own (`#[inline(never)] fn arm(o: &C0, ..) { o.area() }` in the arm), which the
-called method may still be inlined into but which is never inlined into the dispatcher: built
+function of its own (`#[inline(never)] fn arm(j2r_thin: java::Thin, ..) { let o: &C0 = ..;
+o.area() }` in the arm), which the called method may still be inlined into but which is never
+inlined into the dispatcher. The function takes the value's bits, in a register, and lends the
+object from them itself: lent by the dispatcher, the object lay in the dispatcher's frame, whose
+address the call passed, and the dispatcher kept a frame for it. Built
 with a profile (`-Cprofile-use`), LLVM inlined the hot arms of the Minecraft server's
 `Function.apply`, a `match` over 11 200 classes, into it, and their stack slots added up to a
 frame of 122 KB against 344 bytes without, which a deep recursion of the server's codecs
@@ -612,8 +615,16 @@ that declares `equals` or `hashCode` again (`Comparator`) dispatches a class wit
 An object's identity there is read from the value's bits rather than from its handle: the bits
 of two values are equal exactly when they are one object, and their address is the handle's
 (`java::Thin::address`), so `equals` is `b.0 == self.0` and `hashCode` is
-`java::address_hash(self.0.address())`, one text for every such class, and so is their arm of
-`object_identity_hash()`, which `System.identityHashCode` calls. A dispatcher writes an
+`java::address_hash(self.0.address())`, one text for every such class. `object_identity_hash()`,
+which `System.identityHashCode` calls (the JDK's `IdentityHashMap`, fastutil's maps by
+reference), tests the value's class number against the set of those classes (a
+`java::ClassSet`, an associated `const` `J2R_IDENTITY_BY_ADDRESS`, one load and a shift, or a
+`matches!` of a few runs of numbers) and hashes the bits' address for them; only the others (a
+string, a box, an enum's constant, an object in a cell, whose address is its value's) reach
+`object_identity_hash_by_class()`, a `match` over them. The method is small enough to stay in
+the header of a split program and run in place where it is called; as one `match` over the
+Minecraft server's 20 000 classes, cut into parts, it was a call of 45 instructions, which LLVM
+made vector code that hashed four addresses before it looked at the class. A dispatcher writes an
 arm whose text does not read the object once, for all the classes that run it
 (`match_arms_or`), so the arms of the classes that keep `Object`'s methods are one range of class
 numbers rather than one arm each; `java::SameObject` tests the bits for them the same way. In a
