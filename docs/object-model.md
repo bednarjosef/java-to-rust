@@ -376,12 +376,12 @@ locals first where the literal's field order would reorder them.
   way too (or delegate with `this(..)`), and when every other assignment stores a value that is
   not null (a variable that a null test around the assignment proves not null counts), nothing
   can read it empty (`analysis/assigned_fields.rs`, `Facts::assigned_fields`). Its reads then
-  take the value with no test, `java::assigned(c.data.get())` or, in place,
-  `java::assigned_ref(&c.data)`: a release build marks the empty case unreachable, so the
-  optimizer also knows the value is not null wherever it flows; a build with debug assertions
-  checks it all the same. A field read before it is set, or set to null anywhere, keeps Java's
-  null test and its `NullPointerException`, and so does a reference's `referent`, which the
-  collector clears outside the program's code.
+  take the value without Java's null check, `java::assigned(c.data.get())` or, in place,
+  `java::assigned_ref(&c.data)`: one test whose failure, out of line, ends the program, with no
+  `NullPointerException` to build and no `Result` to return, so that an analysis that is wrong
+  stops the program rather than letting it run on. A field read before it is set, or set to
+  null anywhere, keeps Java's null check and its `NullPointerException`, and so does a
+  reference's `referent`, which the collector clears outside the program's code.
 - A superclass's constructor can be a plain-value builder (`Facts::plain_constructors`) when it
   uses `this` only for the struct being built and calls on `this` only methods that borrow that
   struct, and so do its class's field initializers.

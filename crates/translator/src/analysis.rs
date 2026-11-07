@@ -150,7 +150,7 @@ pub struct Facts {
     /// String and object fields, as (class, field), that are null only while their object is
     /// being built: every constructor sets them, to a value that is not null, before anything can
     /// read them (`assigned_fields.rs`). Their cells are `Option`s, which start empty, and a read
-    /// takes the value with no test (`java::assigned`).
+    /// takes the value without a null check (`java::assigned`).
     pub assigned_fields: FastSet<(String, String)>,
     /// String and object static fields, as (class index, field), that can hold null.
     pub nullable_statics: FastSet<(usize, String)>,

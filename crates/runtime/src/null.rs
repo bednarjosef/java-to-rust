@@ -27,8 +27,10 @@ fn null_pointer_thrown(message: &str) -> ! {
 
 /// The value of a field that every constructor of its object sets, to a value that is not null,
 /// before anything can read it (`analysis/assigned_fields.rs`): its cell starts empty, as there is
-/// no object to start it with, and holds a value by the time any code reads it, so the read has no
-/// test. A build with debug assertions checks it all the same.
+/// no object to start it with, and holds a value by the time any code reads it. The read keeps
+/// one test, with its failure out of line (`unset_field`): it builds no `NullPointerException`
+/// and returns no `Result`, and an analysis that is wrong stops the program rather than letting
+/// it run on.
 #[inline(always)]
 pub fn assigned<T>(value: Option<T>) -> T {
     match value {
@@ -46,19 +48,11 @@ pub fn assigned_ref<T>(value: &Option<T>) -> &T {
     }
 }
 
-/// A read of a field of `assigned` that found it empty: the analysis was wrong.
-#[inline(always)]
-fn unset_field() -> ! {
-    if cfg!(debug_assertions) {
-        unset_field_found()
-    }
-    // The analysis proves that every constructor sets the field before anything can read it.
-    unsafe { std::hint::unreachable_unchecked() }
-}
-
+/// The end of the program where a read of a field of `assigned` found it empty: the analysis was
+/// wrong.
 #[cold]
 #[inline(never)]
-fn unset_field_found() -> ! {
+pub fn unset_field() -> ! {
     panic!("a field read before its constructor set it, which the analysis ruled out")
 }
 

@@ -5,7 +5,8 @@
 //! `if`, or on an object they allocate first because they pass `this` on afterwards. Such a field
 //! is null from the object's allocation to its assignment, so its cell is an `Option` that starts
 //! empty; but when nothing can read it in that window, every read finds a value, and the read
-//! needs no test (`java::assigned`).
+//! needs no null check (`java::assigned`, whose one test ends the program if the analysis is
+//! wrong).
 //!
 //! A field `f` of class `C` is assigned before it is read when:
 //!
