@@ -260,7 +260,7 @@ fn the_started_thread_runs_the_thread_object_it_was_given() {
         &rust,
         &[
             "{ let t = t.clone(); move || { java::set_current_thread(t.clone()); Thread__run(t); } }",
-            "java::join_thread(this.base().tid.get(), 0);",
+            "java::join_thread(*this.base().tid.fixed(), 0);",
         ],
     );
 }
@@ -706,4 +706,84 @@ fn a_constructor_that_starts_a_thread_without_letting_this_leave_keeps_its_field
         ],
     );
     assert_lacks(&rust, &["slots: java::SharedField"]);
+}
+
+#[test]
+fn a_fixed_number_boolean_or_enum_field_of_a_shared_object_is_read_with_a_plain_load() {
+    let rust = translate(
+        "class A {
+    enum Shape { SQUARE, CIRCLE }
+    static final class Spec {
+        final int width;
+        final long seed;
+        final double scale;
+        final boolean mirrored;
+        final char mark;
+        final Shape shape;
+        final int area;
+        int uses;
+        Spec(int width, long seed, double scale, boolean mirrored, Shape shape) {
+            this.width = width;
+            this.seed = seed;
+            this.scale = scale;
+            this.mirrored = mirrored;
+            this.mark = (char) ('a' + width);
+            this.shape = shape;
+            this.area = this.width * this.width;
+        }
+        long step(long x) {
+            long y = x * seed + width + mark + area;
+            if (mirrored) y = -y;
+            return shape == Shape.CIRCLE ? y + (long) scale : y;
+        }
+    }
+    static final class Leaky {
+        final Thread pinger;
+        final int value;
+        Leaky(int value) {
+            pinger = new Thread(this::ping);
+            pinger.start();
+            this.value = value;
+        }
+        void ping() { System.out.println(\"ping\"); }
+    }
+    static volatile Spec published;
+    public static void main(String[] args) throws InterruptedException {
+        Thread t = new Thread(() -> {
+            Spec s;
+            while ((s = published) == null) Thread.onSpinWait();
+            long total = 0;
+            for (int i = 0; i < 1000; i++) total += s.step(i);
+            s.uses++;
+            System.out.println(total);
+        });
+        t.start();
+        published = new Spec(3, 7L, 1.5, true, Shape.CIRCLE);
+        t.join();
+        Leaky l = new Leaky(4);
+        l.pinger.join();
+        System.out.println(l.value);
+    }
+}",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // The fields keep their atomic cells, which the constructor fills; elsewhere they are
+            // read where they are, a plain load.
+            "width: java::SharedField<i32>,",
+            "*self.seed.fixed()",
+            "*self.width.fixed()",
+            "*self.mirrored.fixed()",
+            "*self.mark.fixed()",
+            "*self.area.fixed()",
+            "*self.scale.fixed()",
+            "*self.shape.fixed()",
+            // A field that is not fixed is still an atomic load, and so is a fixed field of an
+            // object whose constructor hands `this` to a thread before writing it.
+            "uses.get()",
+            "value.get()",
+        ],
+    );
+    assert_lacks(&rust, &["self.seed.get()", "self.mirrored.get()", "self.shape.get()", "value.fixed()"]);
 }

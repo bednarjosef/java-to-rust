@@ -165,7 +165,8 @@ acquire and stored with release, which on x86-64 are plain moves; any other valu
 string without an identity) is copied and replaced under one of 64 striped spin locks, picked by
 the field's address and taken only once a second thread runs. A field that only constructors
 write (a fixed field, [object-model.md](object-model.md) 1.8) is read where it is, `fixed()`,
-with no lock and no copy, outside the constructors and field initializers. A
+with no lock and no copy, outside the constructors and field initializers; a fixed number,
+boolean, char or enum so read is a plain load, which the optimizer can merge and hoist. A
 `java::Monitored` object holds the fields first and then a pointer to the monitor's lock, made
 the first time a thread takes it (`LazyMonitor`), so the object's address is its fields', as
 `&self` of a method sees it. A class tree is celled, shared and monitored together, so an enum over it
