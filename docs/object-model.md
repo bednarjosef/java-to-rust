@@ -483,6 +483,26 @@ but stands for the code at its call sites, so calling it does not initialize tha
   A cast whose operand's class is known and not below the target
   always fails, and is written as that failure. A cast or test to a supertype is the implicit
   upcast.
+- A test or cast of a local whose class a dominating test already proved is not made again
+  (`analysis/proven_classes.rs`, `Facts::proven_types`). After `x instanceof T` passes, or after
+  a statement that always runs `(T) x`, the reads of `x` until it is assigned again hold a `T`
+  (null too, after the cast): in the branch or the `&&` operand the test guards, the body of a
+  loop whose condition it is, and the statements after an `if (!(x instanceof T)) <leave>;`. A
+  loop, `switch`, `try` or labeled statement forgets what comes before it of the locals it
+  assigns anywhere, and keeps nothing it proves inside. On such a read, `instanceof` of a type
+  that all or none of the proven classes are is `true` or `false`, and otherwise a test of the
+  fewer numbers among them; a cast that all of them pass is `java::cast(&x, |o|
+  Some(java::proven(o.as_t())), ..)`, where `java::proven` keeps the test only as a check of
+  the proof, with its failure out of line: a panic that stops the program where the proof is
+  wrong, never undefined behaviour. The optimizer folds the check into the earlier test where
+  both end up in one function. A call on the read dispatches among the proven classes alone (`_only_`, see docs/native-speed.md, "Direct calls"), which
+  for one class is a direct call of its method. The body of a lambda is a method of its own and
+  starts with nothing proven.
+- A cast that is the receiver of a call that tests first for a few classes (the points-to
+  facts' or a profile's, `_among_` and `_only_`) tests for those first too, `java::cast(o, |o|
+  if matches!(o.0.tag(), 12) { Some(java::proven(o.as_list())) } else { o.as_list() }, ..)`:
+  the call's compare of the same number then folds into the cast's, where the cast's general
+  test (a `java::ClassSet` for an interface) and the call's compare both ran.
 - A cast of a value that may be null to a Java enum is an `Option` of the enum, as any enum
   value that may be null is (`analysis/nullness.rs`).
 

@@ -469,6 +469,26 @@ pub fn cast<S: CastSource + ?Sized, T>(
     }
 }
 
+/// The value of a test of a class that the translation proved passes (`|o| o.as_t()` on an object
+/// whose class an earlier test on the same value already found). The test stays, with its failure
+/// out of line (`proven_wrong`): where the earlier test is in the same function after inlining,
+/// the optimizer folds the two, and a proof that is wrong stops the program rather than letting
+/// it run on with a value of the wrong class.
+#[inline(always)]
+pub fn proven<T>(value: Option<T>) -> T {
+    match value {
+        Some(value) => value,
+        None => proven_wrong(),
+    }
+}
+
+/// The end of the program where a class test that the translation proved passes failed.
+#[cold]
+#[inline(never)]
+pub fn proven_wrong() -> ! {
+    panic!("a class test that the translation proved passes failed")
+}
+
 /// `cast`, where a `catch` or a `finally` sees its `ClassCastException`: the failure is
 /// returned, to go on as a thrown exception does.
 #[inline]

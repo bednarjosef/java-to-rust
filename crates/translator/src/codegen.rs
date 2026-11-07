@@ -518,6 +518,9 @@ struct Setup {
     /// The classes each call mostly saw in a profiled run, by the call's key
     /// (`dispatch::profiled_sets`).
     profiled: HashMap<String, std::sync::Arc<[usize]>>,
+    /// The classes that each read of a local whose class a dominating test proved may be, by the
+    /// read's id (`dispatch::proven_sets`).
+    proven_sets: HashMap<ExprId, std::sync::Arc<[usize]>>,
     class_tags: Vec<u16>,
     runs: Vec<bool>,
     super_targets: HashSet<usize>,
@@ -546,6 +549,7 @@ impl Setup {
             ("fn_name_set", self.fn_name_set == other.fn_name_set),
             ("receiver_sets", self.receiver_sets == other.receiver_sets),
             ("profiled", self.profiled == other.profiled),
+            ("proven_sets", self.proven_sets == other.proven_sets),
             ("class_tags", self.class_tags == other.class_tags),
             ("runs", self.runs == other.runs),
             ("super_targets", self.super_targets == other.super_targets),
@@ -585,6 +589,7 @@ impl Setup {
         let fn_name_set = fn_names.iter().cloned().collect();
         let class_tags = dispatch::class_numbers(class);
         let profiled = dispatch::profiled_sets(&class_tags);
+        let proven_sets = dispatch::proven_sets(class, facts);
         let mut setup = Setup {
             live: phase("codegen: setup: live types", || live_types(class, facts)),
             homes,
@@ -597,9 +602,11 @@ impl Setup {
                 .receivers
                 .values()
                 .chain(profiled.values())
+                .chain(proven_sets.values())
                 .map(|s| (dispatch::receiver_key(s), s.clone()))
                 .collect(),
             profiled,
+            proven_sets,
             class_tags,
             runs: phase("codegen: setup: running types", || running_types(class, facts)),
             super_targets: phase("codegen: setup: super targets", || super_targets(class)),
@@ -747,6 +754,7 @@ impl<'a> Gen<'a> {
             group_names: &setup.group_names,
             receiver_sets: &setup.receiver_sets,
             profiled: &setup.profiled,
+            proven_sets: &setup.proven_sets,
             conversion_names: setup.conversion_names.clone(),
             live: &setup.live,
             class_tags: &setup.class_tags,
@@ -810,6 +818,8 @@ impl<'a> Gen<'a> {
             unset_locals: HashMap::new(),
             dereferenced: HashSet::new(),
             checked_cast: None,
+            cast_at: None,
+            cast_first: None,
             catching_now: HashSet::new(),
             discarded: None,
             written: HashSet::new(),
@@ -967,6 +977,9 @@ struct Gen<'a> {
     receiver_sets: &'a HashMap<u64, std::sync::Arc<[usize]>>,
     /// The classes each call mostly saw in a profiled run, by the call's key (`profile_key`).
     profiled: &'a HashMap<String, std::sync::Arc<[usize]>>,
+    /// The classes that each read of a local whose class a dominating test proved may be
+    /// (`dispatch::proven_sets`).
+    proven_sets: &'a HashMap<ExprId, std::sync::Arc<[usize]>>,
     /// The name of each type in the names of its conversions, unique in the program
     /// (`conversion_names`).
     conversion_names: std::sync::Arc<[String]>,
@@ -1125,6 +1138,11 @@ struct Gen<'a> {
     dereferenced: HashSet<ExprId>,
     /// The cast of `Facts::raising` that `class_cast` is writing, in the checked form.
     checked_cast: Option<ExprId>,
+    /// The cast that `class_cast` is writing.
+    cast_at: Option<ExprId>,
+    /// A cast that is the receiver of a call that tests first for the classes of the key: the
+    /// cast tests for those first too (`dispatch::downcast`).
+    cast_first: Option<(ExprId, u64)>,
     /// The operations of `Facts::catching` being written inside `java::catching`.
     catching_now: HashSet<ExprId>,
     /// The expression of the statement being written, whose value is not used: a string it

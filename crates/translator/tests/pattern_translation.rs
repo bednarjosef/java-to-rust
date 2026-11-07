@@ -205,3 +205,52 @@ fn comparing_classes_matches_the_variant_of_the_class() {
     );
     assert_lacks(&rust, &["\"A$Dog\" =="]);
 }
+
+#[test]
+fn a_class_test_proven_by_an_earlier_one_is_not_made_again() {
+    let rust = translate(
+        "public class A {
+            interface Shape { int area(); }
+            static final class Circle implements Shape {
+                final int r; Circle(int r) { this.r = r; } public int area() { return 3 * r * r; } }
+            static final class Square implements Shape {
+                final int s; Square(int s) { this.s = s; } public int area() { return s * s; } }
+            static int total(Object[] things) {
+                int sum = 0;
+                for (int i = 0; i < things.length; i++) {
+                    Object o = things[i];
+                    if (o instanceof Circle) {
+                        sum += ((Circle) o).r + ((Shape) o).area();
+                        if (o instanceof Square) sum += 1000;
+                    }
+                    if (!(o instanceof Shape)) continue;
+                    sum += ((Shape) o).area();
+                    o = things[0];
+                    sum += ((Shape) o).area();
+                }
+                return sum;
+            }
+            public static void main(String[] args) {
+                Object[] things = { new Circle(1), new Square(2), \"text\" };
+                System.out.println(total(things));
+            }
+        }",
+    );
+    // The test of `instanceof Circle`, then the casts after it with no test, and the call on
+    // the circle as a `Shape` runs `Circle.area` directly; `instanceof Square` is false.
+    assert_contains(
+        &rust,
+        &[
+            "if matches!(o.0.tag(), 2) {",
+            "java::cast(&o, |o| Some(java::proven(o.as_circle())), &(\"A$Circle\", java::APP)).r",
+            "AShape__area_only_",
+            "java::cast(&o, |o| Some(java::proven(o.as_shape())), &(\"A$Shape\", java::APP))",
+            "if false {",
+            "if !matches!(o.0.tag(), 2..=3) {\n            continue;\n        }",
+            "debug_assert!(matches!(this.0.tag(), 2));",
+        ],
+    );
+    // After `o` changes, its cast tests the class again.
+    assert_contains(&rust, &["java::cast(&o, |o| o.as_shape(), &(\"A$Shape\", java::APP))"]);
+    assert_lacks(&rust, &["java::cast(&o, |o| o.as_circle()"]);
+}

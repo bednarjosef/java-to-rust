@@ -922,10 +922,11 @@ impl<'a> Gen<'a> {
     /// `ClassCastException` (`Facts::raising`), in the checked form, whose failure goes on from
     /// here as a thrown exception does.
     pub(super) fn checked_class_cast(&mut self, id: ExprId, to: Type, value: &'a Expr) -> Code {
-        let outer = self.checked_cast;
+        let (outer, outer_at) = (self.checked_cast, self.cast_at);
         self.checked_cast = self.facts.raising.contains(&id).then_some(id);
+        self.cast_at = Some(id);
         let code = self.class_cast(to, value);
-        self.checked_cast = outer;
+        (self.checked_cast, self.cast_at) = (outer, outer_at);
         code
     }
 

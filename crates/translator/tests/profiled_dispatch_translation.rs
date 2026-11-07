@@ -117,6 +117,24 @@ const HEIGHTS: &str = "public class Main {
     }
 }";
 
+const CASTS: &str = "public class Main {
+    interface Shape { int area(); }
+    static final class Square implements Shape {
+        final int s; Square(int s) { this.s = s; } public int area() { return s * s; } }
+    static final class Rect implements Shape {
+        final int w; Rect(int w) { this.w = w; } public int area() { return w * 2; } }
+    static int total(Object[] things) {
+        int sum = 0;
+        for (int i = 0; i < things.length; i++) sum += ((Shape) things[i]).area();
+        return sum;
+    }
+    public static void main(String[] args) {
+        Object[] things = new Object[30];
+        for (int i = 0; i < 30; i++) things[i] = i % 10 == 0 ? new Rect(i) : new Square(i);
+        System.out.println(total(things) + \" \" + things[0].equals(\"x\"));
+    }
+}";
+
 /// The profile `JAVA_TO_RUST_DISPATCH_PROFILE` names while `translate` runs, as `text`.
 fn translate_profiled(java: &str, text: &str) -> String {
     let profile = std::env::temp_dir().join(format!("profiled-dispatch-{}.txt", std::process::id()));
@@ -274,4 +292,21 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     assert_contains(&profiled[among..end], &["section_y_in_height__on_main_a("]);
     assert_contains(&profiled, &["MainHeight__min_section__on_main_a(this)", "let o: &Arc<MainA>"]);
     assert!(!counted.contains("__on_main_a("), "{counted}");
+
+    // A cast that is the receiver of such a call tests for the class first too, where the call's
+    // compare of its number folds into the cast's.
+    let counted = counted_of(CASTS);
+    let key = count_key(&counted, "#area");
+    let (square, rect) = (class_number(&counted, "MainSquare"), class_number(&counted, "MainRect"));
+    let profiled = translate_profiled(CASTS, &format!("{key}\t{square}:2700 {rect}:300 *:0\n"));
+    assert_contains(
+        &profiled,
+        &[
+            &format!(
+                "java::cast(o, |o| if matches!(o.0.tag(), {square}) {{ Some(java::proven(o.as_shape())) }} \
+                 else {{ o.as_shape() }}, &(\"Main$Shape\", java::APP))"
+            ),
+            "MainShape__area_among_",
+        ],
+    );
 }
