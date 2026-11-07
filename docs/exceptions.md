@@ -317,7 +317,20 @@ can only be null, as no object of it can be made, so the statement is its body a
 
 ## Failures of the runtime
 
-The runtime raises a standard class with Java's message (`java::Exception { class, message }`).
+The runtime raises a standard class with Java's message: a `java::Exception`, one pointer to
+its class and message (`Raised`), made out of line (`Exception::new` and `bare` are `#[cold]`,
+`#[inline(never)]`). So a check that fails costs its caller a branch to one call, which returns
+the exception in a register: a `Result<T, java::Exception>` keeps its tag apart from the pointer,
+so the `match` after the call knows it got an `Err`, and the program's conversion
+(`Throwable::j2r_raised`, `#[cold]`, `#[inline(never)]`) takes the pointer. With the class and
+the message held in place (40 bytes), the message's niche was the `Result`'s tag: each inlined
+check wrote the exception to memory, read it back to tell `Ok` from `Err`, kept a path back into
+the hot code with its registers saved around the call, and copied the 40 bytes on to the
+conversion. Now LLVM merges the failing paths of a function's checks into one call of each
+kind: `ThreadLocalMap.expungeStaleEntry`, with seven checked indexes, went from 1,629 to 490
+bytes of machine code, and the whole programs `PathsAndDirectories` and
+`FileContentsThroughFiles` from 755 KB to 740 KB and from 999 KB to 978 KB of code (release
+builds).
 Where no `catch` or `finally` could see the failure, the operation keeps its exiting form. Where
 one could, `Gen::may_fail` picks the checked form, chosen by the same facts the analysis made:
 

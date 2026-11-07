@@ -87,7 +87,7 @@ mod tests {
     }
 
     fn message(s: &str) -> String {
-        try_translate_escapes(Wtf8::new(s)).unwrap_err().message.unwrap_or_default()
+        try_translate_escapes(Wtf8::new(s)).unwrap_err().into_message().unwrap_or_default()
     }
 
     #[test]

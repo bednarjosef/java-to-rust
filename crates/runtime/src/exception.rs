@@ -27,21 +27,64 @@ pub fn cold_or_raised<T>(make: impl FnOnce() -> Result<T, T>) -> T {
 }
 
 /// An exception that the runtime raises: the qualified name of its standard class, such as
-/// `java.lang.ArithmeticException`, and its message.
+/// `java.lang.ArithmeticException`, and its message, behind one pointer (`Raised`).
+///
+/// One pointer, which is never null, so that a failing path costs its call and nothing else: a
+/// `Result<T, Exception>` keeps its tag apart from the pointer, the function that makes the
+/// exception returns it in a register, and the `match` after the call knows that it got an
+/// `Err`. With the class and the message in place (40 bytes), each check that an inlined
+/// `java::try_` function made wrote them to memory, read them back to tell `Ok` from `Err` (the
+/// message's niche held the tag) and copied them on to the conversion into `Throwable`, and the
+/// path back into the hot code kept its registers saved around the call.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Exception(Box<Raised>);
+
+/// What an `Exception` holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Exception {
+pub struct Raised {
     pub class: &'static str,
     pub message: Option<String>,
 }
 
 impl Exception {
+    /// Out of line, as every exception is made where a check fails: the allocations and the
+    /// message stay out of the function that checks.
+    #[cold]
+    #[inline(never)]
     pub fn new(class: &'static str, message: impl Into<String>) -> Exception {
-        Exception { class, message: Some(message.into()) }
+        Exception(Box::new(Raised { class, message: Some(message.into()) }))
     }
 
     /// An exception without a message, whose `getMessage()` is null.
+    #[cold]
+    #[inline(never)]
     pub fn bare(class: &'static str) -> Exception {
-        Exception { class, message: None }
+        Exception(Box::new(Raised { class, message: None }))
+    }
+
+    /// The message, taken out of the exception.
+    pub fn into_message(self) -> Option<String> {
+        self.0.message
+    }
+}
+
+impl std::ops::Deref for Exception {
+    type Target = Raised;
+
+    fn deref(&self) -> &Raised {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Exception {
+    fn deref_mut(&mut self) -> &mut Raised {
+        &mut self.0
+    }
+}
+
+impl fmt::Debug for Exception {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -166,6 +209,23 @@ mod tests {
 
     fn parse(s: &str) -> Result<i32, Exception> {
         crate::try_parse_radix::<i32>(Some(crate::Wtf8::new(s)), 10)
+    }
+
+    #[test]
+    fn an_exception_is_one_pointer_and_a_result_keeps_its_tag_apart() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Exception>(), size_of::<usize>());
+        // `Ok(())` is the null pointer; any other `Ok` has a tag of its own, which the code
+        // that fails writes as a constant, never a word of what the exception's maker returned.
+        assert_eq!(size_of::<Result<(), Exception>>(), size_of::<usize>());
+        assert_eq!(size_of::<Result<i32, Exception>>(), 2 * size_of::<usize>());
+        assert_eq!(size_of::<Result<Option<std::sync::Arc<u8>>, Exception>>(), 2 * size_of::<usize>());
+        let e = Exception::new("java.lang.ArithmeticException", "/ by zero");
+        assert_eq!((e.class, e.message.as_deref()), ("java.lang.ArithmeticException", Some("/ by zero")));
+        assert_eq!(
+            format!("{e:?}"),
+            "Raised { class: \"java.lang.ArithmeticException\", message: Some(\"/ by zero\") }"
+        );
     }
 
     #[test]

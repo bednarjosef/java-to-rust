@@ -6166,6 +6166,41 @@ fn a_runtime_failure_that_a_catch_sees_is_a_checked_call_that_throws() {
     );
 }
 
+/// A failing check leaves the method through one call out of line: the program's conversion of
+/// the runtime's exception, and the `NullPointerException` with Java's message, are each one
+/// function that is never inlined, so a check's path is a branch to a call of it.
+#[test]
+fn a_failure_that_a_catch_sees_converts_out_of_line() {
+    let rust = translate(
+        "class A {
+            int v;
+            static int at(int[] a, int i) { return a[i]; }
+            static int get(A a) { return a.v; }
+            public static void main(String[] args) {
+                try {
+                    System.out.println(at(new int[1], args.length + 1));
+                } catch (ArrayIndexOutOfBoundsException e) {
+                    System.out.println(e.getMessage());
+                }
+                try {
+                    System.out.println(get(args.length == 0 ? null : new A()));
+                } catch (NullPointerException e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "#[cold]\n    #[inline(never)]\n    pub fn j2r_raised(e: java::Exception) -> Throwable {",
+            "#[cold]\n    #[inline(never)]\n    pub fn j2r_null_pointer(message: &'static str) -> Throwable {",
+            "Err(e) => return Err(Throwable::j2r_raised(e))",
+            "None => return Err(Throwable::j2r_null_pointer(",
+        ],
+    );
+}
+
 #[test]
 fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
     let rust = translate(
