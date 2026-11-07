@@ -37,6 +37,18 @@ the machine running out of memory.
 | `join` | not run by default. A client on the server, Java's (`JOIN=java`) or as the trial built it (`JOIN=trial`), in `join-java/` or `join-trial/`: once the server has started, a bot (`scripts/minecraft-join-bot.py`) joins in offline mode as a client does: login with compression, configuration (it gives back the known packs the server offers), then play, where it answers keep-alives, pings and the teleport to the spawn point (whose answer in 26.3 carries the position and rotation back), acknowledges each batch of chunks, runs `/me says hello` once it has 49 chunks, plays `JOIN_SECONDS` (15) and leaves; then `stop`. The packets' numbers come from the server's own report (`net.minecraft.data.Main --reports`, run with Java once into `reports/`). `result.txt` has what the bot received by kind and the server's lines about the bot. The translated server answers as Java's does: 49 chunks with their entities and light, the command in its log, a clean disconnect | |
 | `commands` | not run by default. An operator's two sessions, on Java's server (`COMMANDS=java`) or as the trial built it (`COMMANDS=trial`), in `commands-java/` or `commands-trial/`: a new world of seed `BENCH_SEED` with the join bot on it, about forty console commands (`list`, `op`, `gamemode`, `give`, `clear`, `tp`, `data get`, `time`, `weather`, `difficulty`, `gamerule`, `seed`, `setblock`, `fill`, `execute if block`, `summon`, `kill`, `effect`, `xp`, scoreboards, tags, `say`, `msg`, `banlist`, `locate biome` and `locate structure`, `spawnpoint`, `worldborder`, `save-all`, `kick`), a stop; then the server again on the saved world with the bot back, ten commands that read what the first session left (the blocks it set, the score, the border, the game rule, the player's position, experience and tags) and a stop. `log.txt` has the console of both sessions without times, to compare between the two | |
 
+A **profiled build** tests first, at each call through a dispatcher, for the class that a run of
+the server mostly saw there (docs/native-speed.md, "Profiled calls"). It takes two censuses:
+1. Count the classes. Run the `census` with `JAVA_TO_RUST_COUNT_DISPATCH=1`, then `trial` in
+   release (a debug build of the server overflows its stack). Then run `bench` with
+   `BENCH_TICKS=20000` and `JAVA_DISPATCH_COUNTS` naming a file, which the server writes the
+   counts to as it exits: about 11,000 calls.
+2. Use the counts. Run the `census` again with `JAVA_TO_RUST_DISPATCH_PROFILE` naming that file,
+   then `trial` or `trial-pgo`.
+
+The counts stay good while the server's code is the same. A change of the translator that
+renumbers classes or moves calls only costs the calls whose keys or classes no longer match.
+
 The census gives the translator only `Main.java` as a source file. The rest of the server is a
 `--library` root like the libraries and the JDK modules, and so are the resource roots, from
 which the translated server reads its resources as Java reads them from the jars, and whose
@@ -439,7 +451,9 @@ four runs of each, alternating, at a load under 3:
 |---|---:|---:|---:|
 | Java 25 (defaults) | 40,500–44,800 | 1.6–1.7 s | 2.7 GB |
 | translation, release | 19,100–20,000 | 0.82 s | 0.9 GB |
-| translation, `trial-pgo` | 26,400–27,500 | 0.62–0.64 s | 0.8–0.9 GB |
+| translation, release, profiled | 24,900–25,600 | 0.75–0.76 s | 0.85–0.9 GB |
+| translation, `trial-pgo` | 27,000–28,800 | 0.63 s | 0.8–0.9 GB |
+| translation, `trial-pgo`, profiled | 35,600–36,500 | 0.57–0.60 s | 0.8–0.85 GB |
 
 The server thread's counts per tick, over three seconds of a sprint of 300,000 ticks
 (`perf stat -t`, both threads at about 4.95 GHz):
