@@ -353,6 +353,23 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   each knows its exact types and Rust can inline it.
 - **Direct calls**: a call with one possible target is a direct call; one with two or three is
   a test and direct calls.
+- **Profiled calls** (built): a call that the points-to facts leave on every class of its type
+  can still meet one class almost always at run time, as `list.iterator()` on the Minecraft
+  server's lists does, where a JIT's inline cache tests for that class and inlines its method.
+  A translation made with `JAVA_TO_RUST_COUNT_DISPATCH=1` counts, at each such call, the class
+  of each receiver (`java::count_dispatch`), and writes the counts to the file
+  `JAVA_DISPATCH_COUNTS` names when the program exits: a line per call, keyed by the method it
+  is in, its place in the source and the method called (`codegen::dispatch::profile_key`), with
+  the counts by class number. A translation made with `JAVA_TO_RUST_DISPATCH_PROFILE` naming
+  that file gives each call that saw one class in 90% of at least 1000 calls, or two in 95%, the
+  inlined dispatcher among those classes that the points-to facts' small sets get (`_among_`):
+  a test of the class number and a direct call the compiler can inline, with the whole
+  dispatcher for any other class, so a profile that no longer fits the program costs speed,
+  never correctness. Class numbers are the same in any translation of the same program
+  (`dispatch::class_numbers`), so the counts name classes by them. Where the profiled class
+  runs a factory (`iterator()`), its object can go on the caller's stack (docs/collector.md,
+  "Objects on the stack"): the iterator of a loop over a list that is nearly always an
+  `ArrayList` is then never allocated, as a JIT's escape analysis would do after inlining.
 - **Checks removed**: null checks on never-null references, bounds checks inside proven ranges,
   write barriers on young objects, monitors on objects that never reach another thread.
 - **Smaller objects**: unused fields removed, integers proven small stored as `u8` or `u16`,

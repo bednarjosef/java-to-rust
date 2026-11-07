@@ -397,6 +397,16 @@ thread_local! {
     static SHARED_STRINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The classes that the receivers of each call through a dispatcher mostly were in a profiled
+/// run of the program (`JAVA_TO_RUST_DISPATCH_PROFILE`), by the call's key in the counts
+/// (docs/native-speed.md, "Profiled calls"); empty without a profile.
+pub(crate) fn profiled_sets(class: &Class) -> HashMap<String, std::sync::Arc<[usize]>> {
+    match std::env::var_os("JAVA_TO_RUST_DISPATCH_PROFILE") {
+        Some(_) => dispatch::profiled_sets(&dispatch::class_numbers(class)),
+        None => HashMap::new(),
+    }
+}
+
 /// Whether references in the fields of objects are 4 bytes (`java::RefField`, docs/native-speed.md
 /// 1.1): with `JAVA_TO_RUST_COMPACT_REFERENCES=1`, while the form is being built.
 pub(crate) fn compact_references() -> bool {
@@ -505,6 +515,9 @@ struct Setup {
     /// `fn_names` as a set, for the temporaries that must not take one.
     fn_name_set: HashSet<String>,
     receiver_sets: HashMap<u64, std::sync::Arc<[usize]>>,
+    /// The classes each call mostly saw in a profiled run, by the call's key
+    /// (`dispatch::profiled_sets`).
+    profiled: HashMap<String, std::sync::Arc<[usize]>>,
     class_tags: Vec<u16>,
     runs: Vec<bool>,
     super_targets: HashSet<usize>,
@@ -532,6 +545,7 @@ impl Setup {
             ("static_fn_names", self.static_fn_names == other.static_fn_names),
             ("fn_name_set", self.fn_name_set == other.fn_name_set),
             ("receiver_sets", self.receiver_sets == other.receiver_sets),
+            ("profiled", self.profiled == other.profiled),
             ("class_tags", self.class_tags == other.class_tags),
             ("runs", self.runs == other.runs),
             ("super_targets", self.super_targets == other.super_targets),
@@ -569,6 +583,8 @@ impl Setup {
             .map(|i| fn_names[i].clone())
             .collect();
         let fn_name_set = fn_names.iter().cloned().collect();
+        let class_tags = dispatch::class_numbers(class);
+        let profiled = dispatch::profiled_sets(&class_tags);
         let mut setup = Setup {
             live: phase("codegen: setup: live types", || live_types(class, facts)),
             homes,
@@ -577,8 +593,14 @@ impl Setup {
             group_names,
             struct_methods,
             static_fn_names,
-            receiver_sets: class.receivers.values().map(|s| (dispatch::receiver_key(s), s.clone())).collect(),
-            class_tags: dispatch::class_numbers(class),
+            receiver_sets: class
+                .receivers
+                .values()
+                .chain(profiled.values())
+                .map(|s| (dispatch::receiver_key(s), s.clone()))
+                .collect(),
+            profiled,
+            class_tags,
             runs: phase("codegen: setup: running types", || running_types(class, facts)),
             super_targets: phase("codegen: setup: super targets", || super_targets(class)),
             plans: phase("codegen: setup: plans", || modules::plans(class)),
@@ -723,6 +745,7 @@ impl<'a> Gen<'a> {
             checked_value_ofs: &setup.checked_value_ofs,
             group_names: &setup.group_names,
             receiver_sets: &setup.receiver_sets,
+            profiled: &setup.profiled,
             conversion_names: setup.conversion_names.clone(),
             live: &setup.live,
             class_tags: &setup.class_tags,
@@ -930,8 +953,11 @@ struct Gen<'a> {
     checked_value_ofs: &'a HashSet<&'static str>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: &'a HashMap<usize, String>,
-    /// The sets of classes in `Class::receivers`, by their key (`receiver_key`).
+    /// The sets of classes in `Class::receivers` and `Setup::profiled`, by their key
+    /// (`receiver_key`).
     receiver_sets: &'a HashMap<u64, std::sync::Arc<[usize]>>,
+    /// The classes each call mostly saw in a profiled run, by the call's key (`profile_key`).
+    profiled: &'a HashMap<String, std::sync::Arc<[usize]>>,
     /// The name of each type in the names of its conversions, unique in the program
     /// (`conversion_names`).
     conversion_names: std::sync::Arc<[String]>,

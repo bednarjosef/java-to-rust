@@ -28,6 +28,7 @@ mod code_point_chars;
 mod code_point_tables;
 mod copy_refs;
 mod deflate;
+mod dispatch_counts;
 mod exact;
 mod exception;
 mod fd;
@@ -105,6 +106,7 @@ pub use deflate::{
     deflate_adler, deflate_buffer_buffer, deflate_buffer_bytes, deflate_bytes, deflate_bytes_buffer,
     deflate_end, deflate_init, deflate_reset, deflate_set_dictionary, deflate_set_dictionary_buffer,
 };
+pub use dispatch_counts::{DispatchCount, count_dispatch};
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;

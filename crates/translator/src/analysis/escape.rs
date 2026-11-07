@@ -77,6 +77,15 @@
 //! other value too, which it treats as its own object. The set of factories grows with the
 //! summaries known, a few rounds per method, and is then cut down until every method in it is
 //! still a factory with the factories that remain.
+//!
+//! **Profiled calls.** A call that may run several methods, whose receivers were nearly all of
+//! one class in a profiled run of the program (docs/native-speed.md, "Profiled calls"), is a
+//! source too when what that class runs for it is a factory: its translation tests for the class
+//! and passes that factory a slot, and runs the whole dispatcher for any other class, whose
+//! object goes in the heap. The other methods' summaries still count for its arguments and what
+//! it returns, and the caller's rules hold for their objects too, as for a factory's other
+//! values. Which class a call saw is only a guess, so a wrong one costs the slot, never
+//! soundness.
 
 use super::{FastMap, FastSet};
 use crate::ast::*;
@@ -113,8 +122,9 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let mut lists = Lists::default();
     let field_inits = field_inits(class);
     let own_fields = own_fields(class);
+    let profiled = profiled(class);
     let code: Vec<Compiled> =
-        (0..n).map(|m| compile(class, m, &field_inits, &own_fields, &mut lists)).collect();
+        (0..n).map(|m| compile(class, m, &field_inits, &own_fields, &profiled, &mut lists)).collect();
     lists.combined = vec![None; lists.targets.len()];
     let mut analysis = Analysis {
         hierarchy: &class.hierarchy,
@@ -892,8 +902,25 @@ struct Compiling<'a, 'l> {
     site_of: FastMap<ExprId, u32>,
     call_of: FastMap<ExprId, u32>,
     own_fields: &'a FastSet<FieldKey>,
+    profiled: &'a Profiled,
     /// The method being compiled.
     method: usize,
+}
+
+/// The classes that the receivers of each call through a dispatcher mostly were in a profiled
+/// run of the program, by the place of the call (`codegen::profiled_sets`, whose keys end with
+/// the name of the dispatcher, which the analysis does not know): one set for each dispatcher
+/// called on a receiver at that place.
+type Profiled = FastMap<String, Vec<std::sync::Arc<[usize]>>>;
+
+fn profiled(class: &Class) -> Profiled {
+    let mut by_place = Profiled::default();
+    for (key, set) in crate::codegen::profiled_sets(class) {
+        if let Some((place, _)) = key.rsplit_once('#') {
+            by_place.entry(place.to_string()).or_default().push(set);
+        }
+    }
+    by_place
 }
 
 /// Reduces method `m` to its flows (`Compiled`).
@@ -902,6 +929,7 @@ fn compile<'a>(
     m: usize,
     field_inits: &[Vec<(usize, &'a Expr)>],
     own_fields: &'a FastSet<FieldKey>,
+    profiled: &'a Profiled,
     lists: &mut Lists,
 ) -> Compiled {
     let method = &class.methods[m];
@@ -920,6 +948,7 @@ fn compile<'a>(
         site_of: FastMap::default(),
         call_of: FastMap::default(),
         own_fields,
+        profiled,
         method: m,
     };
     for (i, p) in method.params.iter().enumerate() {
@@ -959,7 +988,7 @@ fn compile<'a>(
             _ => match cx.targets(x) {
                 Some(l) => match cx.lists.targets[l as usize][..] {
                     [t] => Some((0, Some(t))),
-                    _ => None,
+                    _ => cx.profiled_target(x, l).map(|t| (0, Some(t))),
                 },
                 None => None,
             },
@@ -1114,6 +1143,31 @@ impl<'a> Compiling<'a, '_> {
     fn new_var(&mut self) -> u32 {
         self.code.vars += 1;
         (self.code.vars - 1) as u32
+    }
+
+    /// The method of list `l`, which the call `x` may run, that the one class its receivers had
+    /// in a profiled run runs for it (see **Profiled calls**). Only a place with one profiled
+    /// call is read, as one of its calls cannot be told from another.
+    fn profiled_target(&self, x: &Expr, l: u32) -> Option<usize> {
+        if self.profiled.is_empty() {
+            return None;
+        }
+        let ExprKind::MethodCall { receiver, resolved: Some(r), is_super: false, .. } = &x.kind else {
+            return None;
+        };
+        let m = &self.class.methods[self.method];
+        let place = format!(
+            "{}.{}/{}@{}:{}",
+            self.class.types[m.class].name,
+            m.name,
+            m.params.len(),
+            receiver.pos.line,
+            receiver.pos.column
+        );
+        let [set] = &self.profiled.get(&place)?[..] else { return None };
+        let [c] = set[..] else { return None };
+        let t = self.class.hierarchy.implementation(*r, c)?;
+        self.lists.targets[l as usize].contains(&t).then_some(t)
     }
 
     /// The list of methods that the call `x` may run, or `None` when `x` is not a call of the
