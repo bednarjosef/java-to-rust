@@ -13,7 +13,7 @@
 //! threads, then writes out what is left of the output; a daemon thread still running then ends
 //! with the process.
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
@@ -148,9 +148,12 @@ thread_local! {
     /// The program's `Thread` object of the thread, once `currentThread()` or the start of the
     /// thread has made it.
     static CURRENT: RefCell<Option<Box<dyn Any>>> = const { RefCell::new(None) };
-    /// Where `CURRENT`'s object is, and its type, which `currentThread()` reads: two loads and a
-    /// compare, where `CURRENT` takes a borrow, a virtual call for the type and a release.
-    static CURRENT_AT: Cell<Option<(TypeId, *const ())>> = const { Cell::new(None) };
+    /// Where `CURRENT`'s object is, or null before it has one, which `currentThread()` reads: a
+    /// load and a test, where `CURRENT` takes a borrow, a virtual call for the type and a release.
+    static CURRENT_AT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
+    /// The type of `CURRENT`'s object, which `current_thread` checks in a debug build.
+    #[cfg(debug_assertions)]
+    static CURRENT_TYPE: Cell<Option<std::any::TypeId>> = const { Cell::new(None) };
     /// Whether the thread was started by the program, rather than being the main thread.
     static WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -203,7 +206,7 @@ pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + 
         WORKER.with(|w| w.set(true));
         RECORD.with_borrow_mut(|r| *r = Some(record.clone()));
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(body));
-        CURRENT_AT.set(None);
+        CURRENT_AT.set(std::ptr::null());
         CURRENT.with_borrow_mut(|c| *c = None);
         if let Err(payload) = outcome
             && !payload.is::<Uncaught>()
@@ -551,26 +554,41 @@ pub fn rename_thread(tid: i64, name: &str) {
 /// asks `Thread.currentThread()`.
 #[inline]
 pub fn has_current_thread() -> bool {
-    CURRENT_AT.get().is_some()
+    !CURRENT_AT.get().is_null()
 }
 
-/// Makes `thread` the `Thread` object of the calling thread.
+/// Makes `thread` the `Thread` object of the calling thread: once per thread, so cold, which
+/// keeps the making of the main thread's object out of the line of `currentThread()`.
+#[cold]
 pub fn set_current_thread<T: 'static>(thread: T) {
     let boxed = Box::new(thread);
     // The box does not move while `CURRENT` holds it, which is until the next `set` or the end
     // of the thread, where `CURRENT_AT` changes too.
-    CURRENT_AT.set(Some((TypeId::of::<T>(), &raw const *boxed as *const ())));
+    CURRENT_AT.set(&raw const *boxed as *const ());
+    #[cfg(debug_assertions)]
+    CURRENT_TYPE.set(Some(std::any::TypeId::of::<T>()));
     CURRENT.with_borrow_mut(|c| *c = Some(boxed));
 }
 
 /// `Thread.currentThread()`, once `set_current_thread` has given the thread its object.
+///
+/// # Safety
+///
+/// `T` is the type that `set_current_thread` was given on this thread. A translated program has
+/// one `Thread` type, which it gives to both, so the type is checked in a debug build only: in a
+/// release build the read is a load and a test, as the thread-locals read it on every `get`.
 #[inline]
-pub fn current_thread<T: Clone + 'static>() -> T {
-    match CURRENT_AT.get() {
-        // SAFETY: the pointer is to the `T` that `CURRENT` holds (see `set_current_thread`).
-        Some((ty, at)) if ty == TypeId::of::<T>() => unsafe { (*(at as *const T)).clone() },
-        _ => panic!("the thread has its `Thread` object"),
-    }
+pub unsafe fn current_thread<T: Clone + 'static>() -> T {
+    let at = CURRENT_AT.get();
+    assert!(!at.is_null(), "the thread has its `Thread` object");
+    #[cfg(debug_assertions)]
+    assert!(
+        CURRENT_TYPE.get() == Some(std::any::TypeId::of::<T>()),
+        "the thread's `Thread` object is of another type"
+    );
+    // SAFETY: the pointer is to the object that `CURRENT` holds (see `set_current_thread`), a `T`
+    // as the caller promises.
+    unsafe { (*(at as *const T)).clone() }
 }
 
 /// `LockSupport.park()`: waits until the calling thread's permit is given, and takes it, or until
@@ -772,7 +790,7 @@ mod tests {
             tx.send(has_current_thread()).unwrap();
         });
         assert!(!rx.recv().unwrap());
-        assert_eq!(current_thread::<i32>(), 7);
+        assert_eq!(unsafe { current_thread::<i32>() }, 7);
         join_thread(tid, 0);
     }
 }

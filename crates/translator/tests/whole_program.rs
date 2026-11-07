@@ -548,6 +548,48 @@ fn covariant_arrays_found_step_by_step_take_one_more_lowering() {
     assert_eq!(predicted, unpredicted);
 }
 
+const THREAD_LOCAL: &str = r#"
+public class Main {
+    static final ThreadLocal<StringBuilder> buffer = ThreadLocal.withInitial(StringBuilder::new);
+
+    public static void main(String[] args) throws InterruptedException {
+        Thread other = new Thread(() -> buffer.get().append("other"));
+        other.start();
+        other.join();
+        buffer.get().append("main");
+        buffer.set(new StringBuilder(buffer.get()).append('!'));
+        System.out.println(buffer.get());
+        buffer.remove();
+    }
+}
+"#;
+
+/// A thread-local's map finds its entry by the thread-local's slot number before any hashing (the
+/// patch of `ThreadLocal`, docs/multi-threading.md, "Thread-locals by slot number"), and
+/// `currentThread()`, which every `get` runs, is the runtime's read of one pointer.
+#[test]
+fn a_thread_local_is_found_by_its_slot_number() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-thread-local-slots");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), THREAD_LOCAL).unwrap();
+    let (_, rust) = translate_counted(&sources, &library, &work, None);
+    let start =
+        rust.find("fn ThreadLocalThreadLocalMap__get_entry(").expect("no getEntry in the translation");
+    let body = &rust[start..];
+    let body = &body
+        [..body[1..].find("\nfn ").or_else(|| body[1..].find("\npub fn ")).unwrap_or(body.len() - 1) + 1];
+    let (slot, hash) = (body.find("dense_slot"), body.find("thread_local_hash_code"));
+    assert!(slot.is_some() && body.contains(".dense."), "getEntry does not read the slots:\n{body}");
+    assert!(slot < hash, "getEntry hashes before it reads the slots:\n{body}");
+    assert!(rust.contains("unsafe { java::current_thread::<"), "no read of the current thread");
+}
+
 /// The translation of the program in `sources` with `--timings`, with
 /// `JAVA_TO_RUST_PREDICTION_CHECK` set to `check`: its timings and its Rust.
 fn translate_counted(sources: &Path, library: &Path, work: &Path, check: Option<&str>) -> (String, String) {
