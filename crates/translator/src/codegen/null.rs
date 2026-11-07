@@ -259,7 +259,13 @@ impl<'a> Gen<'a> {
                 }
                 ExprKind::Static { class, name } if self.init_call(*class).is_none() => {
                     let cell = self.cell_name(*class, name);
-                    format!("{cell}.with_borrow(Option::{test})")
+                    if self.facts.process_statics(*class) {
+                        // A static of the process is read by value, with no lock.
+                        let (get, _) = self.static_access(*class, name);
+                        format!("{cell}.{get}().{test}()")
+                    } else {
+                        format!("{cell}.with_borrow(Option::{test})")
+                    }
                 }
                 _ if matches!(other.ty, Type::Class(..) | Type::Array(_)) => {
                     format!("{}.{test}()", self.expr(other).at(ATOM))

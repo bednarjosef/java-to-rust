@@ -11,12 +11,14 @@
 //! whether initialization has started; `init_..._slow`, out of line, runs it.
 //!
 //! In a program that starts threads, the statics that the started threads' code may touch
-//! (`Facts::process_statics`, by class) have one copy for the process, read and written with the
-//! same text: a primitive is a `java::Atomic` (`X.get()`, `X.set(v)`, which acquire and release),
-//! anything else a `java::Locked` (`X.with_borrow(..)`, `X.with_borrow_mut(..)`), inside a
-//! `LazyLock` when its initializer is not a constant; such an eager class's flag is a
-//! `java::ClassInit`, which makes another thread wait while one runs the initialization. The other
-//! classes' statics are thread-local cells, which only the main thread uses.
+//! (`Facts::process_statics`, by class) have one copy for the process: a primitive is a
+//! `java::Atomic` (with the text of a thread-local `Cell`) and anything else a
+//! `java::SharedField`, inside a `LazyLock` when its initializer is not a constant, both read and
+//! written by value with no lock (`X.get()`, `X.set(v)`, which acquire and release;
+//! `get_volatile` and `set_volatile`, sequentially consistent, for a `volatile` static); such an
+//! eager class's flag is a `java::ClassInit`, which makes another thread wait while one runs the
+//! initialization. The other classes' statics are thread-local cells, which only the main thread
+//! uses.
 //!
 //! An object, array or string static of the process that only its class's static initialization
 //! assigns (`Facts::final_statics`) is a `java::Final` instead, with no `LazyLock` around it (it
@@ -217,7 +219,7 @@ impl<'a> Gen<'a> {
             } else if fixed {
                 self.runtime("Final")
             } else {
-                self.runtime("Locked")
+                self.runtime("SharedField")
             };
             let vis = self.vis();
             if fixed && !constant {

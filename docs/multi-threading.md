@@ -38,8 +38,9 @@ hand-written itself.
    region; field accesses take no lock. Monitors are kept only where the program can tell them
    from none, and only the objects that such a site may lock have one (section 3).
 5. **The statics that a started thread can touch are process-wide `static` items**:
-   `java::Atomic<T>` for primitives (acquire/release), `java::Locked<T>` for objects and strings,
-   and a `java::ClassInit` per class that runs its static initialization once for the process.
+   `java::Atomic<T>` for primitives, `java::SharedField<T>` for objects and strings, each access
+   one atomic action with no lock (sequentially consistent for a `volatile` static), and a
+   `java::ClassInit` per class that runs its static initialization once for the process.
    The statics of every other class stay thread-local cells, which only the main thread uses.
 6. **`Thread` and `ThreadGroup` are classes written in Java in the translator**
    (`crates/translator/java/Threads.java`), over natives in the runtime
@@ -73,7 +74,7 @@ The translation maps every Java memory action to one of:
 | `Unsafe`/`VarHandle` get, put, compare-and-set, get-and-add on an element | one atomic action of the element's cell, sequentially consistent in the volatile mode (5.3) |
 | monitor enter/exit, `wait`, `notify` | the object's reentrant lock and its wait set (section 3) |
 | `Thread.start`, `join`, `park`/`unpark` | `std::thread` spawn, the thread record's condition variables |
-| static field access | `java::Atomic` (acquire/release) or `java::Locked` statics; a `java::Final` static's one write is a release, and its reads acquire |
+| static field access | `java::Atomic` or `java::SharedField` statics: acquire/release, sequentially consistent for a `volatile` static; a `java::Final` static's one write is a release, and its reads acquire |
 | `Unsafe.fullFence` and the `VarHandle` fences | `fence(SeqCst)` |
 
 Each is at least as strong as the Java action: a lock makes the access part of a total order,
@@ -108,11 +109,11 @@ synchronization removes behaviours and never adds one, except for progress (1.3)
 ### 1.3 Progress and deadlock
 
 Java guarantees no fairness, so a thread that never gets a lock is legal; a deadlock, though, is
-observable, and the data locks are locks Java does not have: those of shared builders and
-statics (`java::Locked`), and the striped locks of wide fields and array elements. The rule that
-keeps them invisible
-is the one `RefCell` already imposes: **a data lock is held only while values are read or
-written, and never while the thread waits for anything else.**
+observable, and the data locks are locks Java does not have: those of shared builders and of
+the objects of a Java enum's class tree (`java::Locked`), and the striped locks of wide fields,
+statics and array elements. The rule that keeps them invisible is the one `RefCell` already
+imposes: **a data lock is held only while values are read or written, and never while the thread
+waits for anything else.**
 
 - An object's fields and a shared array's elements take no data lock: an access is one atomic
   action of the field's or element's cell, and a striped lock is held only to copy or replace one
@@ -174,10 +175,9 @@ lends every variant's fields struct as `&XFields`. A class tree with a Java enum
 `java::Locked`, whose `RefCell` API (`borrow`, `borrow_mut`, mapped guards) the generator writes
 as for a `RefCell`. Identity is `Arc::ptr_eq`; `Option` for null is unchanged.
 
-**Volatile fields** of a thread-shared object are read and written in sequential consistency
-(`get_volatile`, `set_volatile`), as Java's are. A `volatile` static is an ordinary
-`java::Atomic` (acquire/release); Java's volatile is sequentially consistent, so `SeqCst` statics
-are a known gap (section 7). In a single-threaded program `volatile` is nothing.
+**Volatile fields** of a thread-shared object and **volatile statics** of the process are read
+and written in sequential consistency (`get_volatile`, `set_volatile`), as Java's are. In a
+single-threaded program `volatile` is nothing.
 
 ### 2.2 Arrays and builders
 
@@ -227,11 +227,25 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | static | form | access |
 | --- | --- | --- |
 | compile-time constant | `const` | `X` |
-| primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release |
-| object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
+| primitive | `static X: java::Atomic<i32> = java::Atomic::new(0);` | `X.get()`, `X.set(v)`, acquire/release; `get_volatile`, `set_volatile` for a `volatile` one |
+| object or string | `java::SharedField<T>`, behind a `LazyLock` when its initializer is not a constant | `X.get()`, `X.set(v)`; `get_volatile`, `set_volatile` for a `volatile` one |
 | object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())` (`get_prepared` for an eager class's, which `main` prepares, `get_settled` for one that `main` initializes first); `X.set(v)` |
 | array that only its class's initialization makes, and that the program only indexes to read and measures | `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` when every array it is given has the constant length `N` | `java::get(&(*X.get()), i)`, `java::len(&(*X.get()))`; `X.set(java::freeze(a))`, `X.set(java::freeze_fixed(a))` |
 | a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();`; a use tests `C_INIT.done()` (`C_INIT.ready()` where the `<clinit>` keeps its own state) |
+
+A static field's read or write is one action in Java, never a region, so a static of the process
+is a cell of one value, as a field of a thread-shared object is (2.1): an object's handle, an
+array's, a builder's or a string with an identity is a word, loaded with acquire and stored with
+release, and any other value (a string without an identity, a closure) is copied or replaced
+under a striped spin lock. No access takes a lock that another could wait for, and none runs Java
+code, so a read cannot see half a write. A compound assignment (`log += s`, `n++`) reads and then
+writes, two actions, as Java's does; `volatile` makes each of them sequentially consistent, not
+the pair atomic. Such a static is never lent where it is: a read copies its value out, so a later
+write cannot change what an earlier read holds. Behind a lock, each read would take it with a
+compare-and-swap and give it back with an exchange, two full fences and two calls: the Minecraft
+server's main thread reads `Util.timeSource` and `BlockableEventLoop.delayedCrash` on every turn
+of the loop that waits for the next tick, and there the exchange alone was 0.8% of its
+instructions.
 
 A `static final` of object, array or string type that no code but its class's static
 initialization assigns (`Facts::final_statics`, from `analysis/statics.rs`) is a `java::Final`:
@@ -291,9 +305,10 @@ the place `(*X.get())` (`final_place` in `codegen/statics.rs`) instead of a clon
 starts empty is `(*java::non_null(X.get().as_ref()))`. The protocol of `ClassInit` around it is
 unchanged: a reader from another class calls the class's `init` first, which waits for a run in
 progress. The Minecraft server's noise functions index a `static final` array millions of times
-from every worker thread; behind a `java::Locked`, most of those threads stood in its lock. A
-small program of eight threads doing the same runs 25 times faster in a debug build, and over
-100 times faster in a release one, with a `java::Final`.
+from every worker thread; behind a lock, most of those threads stood in it. A small program of
+eight threads doing the same runs 25 times faster in a debug build, and over 100 times faster in
+a release one, with a `java::Final` than with a lock. Against a `java::SharedField`, a read of a
+`java::Final` copies nothing and lends the value in place.
 
 Such a `static final` that is a one-dimensional array, which every assignment gives a new array
 (`{..}`, `new T[] {..}`, `new T[n]`) and which every expression of the program only indexes to
@@ -787,11 +802,11 @@ field that is not `volatile` asks for more (section 7).
   allocation site; a class with both shared and thread-local sites would get two structs, and an
   array of a shared family that no other thread reaches would stay a `java::Array`. The escape analysis should then
   be a client of a "heap edges" interface so that only the edge provider changes.
-- **`SeqCst` volatile statics and volatile-mode accesses of fields.** A `volatile` static
-  should be sequentially consistent, and so should a volatile-mode access through `Unsafe` or a
-  `VarHandle` (`getVolatile`, `setVolatile`) of a field that is not `volatile`, which lowering
-  turns into an ordinary access, acquire or release (5.3). The atomic updates, and the
-  volatile-mode accesses of array elements, are sequentially consistent already.
+- **`SeqCst` volatile-mode accesses of fields.** A volatile-mode access through `Unsafe` or a
+  `VarHandle` (`getVolatile`, `setVolatile`) of a field that is not `volatile` should be
+  sequentially consistent, but lowering turns it into an ordinary access, acquire or release
+  (5.3). The atomic updates, and the volatile-mode accesses of array elements, are sequentially
+  consistent already.
 - **The rest of `java.util.concurrent`.** The pieces exercised by the whole-program corpus are
   the atomics (`AtomicInteger`, `AtomicLong`, atomic arrays), `LockSupport`, `ConcurrentHashMap`,
   `ConcurrentSkipListMap`/`Set`, `ThreadLocal`, `ThreadLocalRandom`, `ScopedValue`,
@@ -851,7 +866,8 @@ unchanged and that a class no thread reaches has no monitor.
   start late, or never (javac's), pays no atomic operation until then. The lock's word holds the
   holder's number and the count of its holds together, and the thread that ran alone is holder
   0, so the locks it holds when it starts a thread are its own without being recorded.
-- **Primitive statics** are plain loads and stores on x86-64 (acquire/release); object statics
-  cost a lock per access.
+- **Statics** of the process are plain loads and stores on x86-64 (acquire/release), a
+  `volatile` one's store an exchange, primitives and object handles alike; a string without an
+  identity or a closure is copied under a striped spin lock, as a wide field is.
 - The common case stays fast because classes no thread reaches have plain cells, immutable
   classes have no lock, and a `Vec` or plain value moved into a thread is not shared at all.

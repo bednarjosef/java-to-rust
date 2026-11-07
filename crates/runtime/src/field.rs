@@ -91,8 +91,9 @@ impl<T: Clone + fmt::Debug> fmt::Debug for Field<T> {
     }
 }
 
-/// `java::SharedField<T>`: a field of an object that threads share, or an element of an array that
-/// threads share (docs/multi-threading.md, 1.1).
+/// `java::SharedField<T>`: a field of an object that threads share, an element of an array that
+/// threads share, or a static field of the process that its class may assign again
+/// (docs/multi-threading.md, 1.1 and 2.3).
 ///
 /// A value of 1, 2, 4 or 8 bytes without drop glue (a primitive, a reference, a string with an
 /// identity) is its bits, which a clone copies: it is loaded with acquire and stored with release,

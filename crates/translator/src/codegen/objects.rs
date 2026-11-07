@@ -29,8 +29,12 @@ enum Slot {
         volatile: bool,
     },
     /// A static field: a `Cell` when `plain`, else a `RefCell`; a `java::Global` when `global`
-    /// (a program that starts no thread), else a thread-local cell or a `java::Locked`.
+    /// (a program that starts no thread), else a thread-local cell.
     Static { cell: String, plain: bool, global: bool },
+    /// A static field of the process (`Facts::process_statics`) that its class may assign again:
+    /// a `java::Atomic` or a `java::SharedField`, read and written by value with no lock, by
+    /// `get` and `set` (`get_volatile` and `set_volatile` for a `volatile` one).
+    Process { cell: String, get: &'static str, set: &'static str },
     /// A static field that is a `java::Final`, read with no lock (`get`, or `get_prepared` for
     /// one that `main` prepares, see `prepared_static`); `freeze` is the runtime's `freeze` where
     /// it holds a frozen array (`Facts::frozen_statics`), which a new array is made into as it is
@@ -58,6 +62,7 @@ impl Slot {
             Slot::Static { cell, plain: false, global: false } => {
                 format!("{cell}.with_borrow({})", if copy { "|v| *v" } else { "|v| v.clone()" })
             }
+            Slot::Process { cell, get, .. } => format!("{cell}.{get}()"),
             Slot::Final { cell, get, .. } if copy => format!("(*{cell}.{get}())"),
             Slot::Final { cell, get, .. } => format!("{cell}.{get}().clone()"),
         }
@@ -76,6 +81,7 @@ impl Slot {
             }
             Slot::Static { cell, plain: true, .. } => format!("{cell}.set({value});"),
             Slot::Static { cell, plain: false, .. } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
+            Slot::Process { cell, set, .. } => format!("{cell}.{set}({value});"),
             Slot::Final { cell, freeze: None, .. } => format!("{cell}.set({value});"),
             Slot::Final { cell, freeze: Some(freeze), .. } => format!("{cell}.set({freeze}({value}));"),
         }
@@ -1687,9 +1693,20 @@ impl<'a> Gen<'a> {
         if self.final_static(class, name) {
             let freeze = self.frozen_static(class, name).then(|| self.freezer(class, name));
             Slot::Final { cell, get: self.final_get(class, name), freeze }
+        } else if self.facts.process_statics(class) {
+            let (get, set) = self.static_access(class, name);
+            Slot::Process { cell, get, set }
         } else {
             Slot::Static { cell, plain: is_cell(ty), global: !self.facts.threaded }
         }
+    }
+
+    /// How a static of the process (`Facts::process_statics`) is read and written: in sequential
+    /// consistency when it is `volatile`, as Java's volatile accesses are, and with acquire and
+    /// release otherwise.
+    pub(super) fn static_access(&self, class: usize, name: &str) -> (&'static str, &'static str) {
+        let volatile = self.class.types[class].statics.iter().any(|f| f.name == name && f.volatile);
+        if volatile { ("get_volatile", "set_volatile") } else { ("get", "set") }
     }
 
     /// `new C(args)` of type `ty`, which calls the constructor that the checker chose. A
@@ -2152,6 +2169,11 @@ impl<'a> Gen<'a> {
         }
         let cell = self.cell_name(*class, name);
         let init = self.init_call(*class);
+        // A `volatile` static of the process is read and written in sequential consistency.
+        let (by_value, get, set) = match self.static_slot(*class, name, ty) {
+            Slot::Process { get, set, .. } => (true, get, set),
+            _ => (is_cell(ty), "get", "set"),
+        };
         let mut lines = Vec::new();
         match how {
             Update::Assign(value) => {
@@ -2167,16 +2189,15 @@ impl<'a> Gen<'a> {
                         let temp = self.temp("value");
                         lines.push(format!("let {temp} = {v};"));
                         lines.push(init);
-                        lines.push(format!("{cell}.set({temp});"));
+                        lines.push(format!("{cell}.{set}({temp});"));
                     }
-                    None => lines.push(format!("{cell}.set({v});")),
+                    None => lines.push(format!("{cell}.{set}({v});")),
                 }
             }
             // The old string and then the right operand are formatted, in Java's order.
             Update::Compound(_, value) if ty == Type::String => {
                 lines.extend(init);
-                let old = Slot::Static { cell: cell.clone(), plain: false, global: !self.facts.threaded }
-                    .read(true);
+                let old = self.static_slot(*class, name, ty).read(true);
                 // A static that may be null shows as `null` and is written as `Some`.
                 let nullable = self.place_nullable(target);
                 let old = match nullable {
@@ -2187,7 +2208,7 @@ impl<'a> Gen<'a> {
                 self.parts(value, &mut parts);
                 let text = self.concat(parts).text;
                 let text = if nullable { format!("Some({text})") } else { text };
-                lines.push(format!("{cell}.set({text});"));
+                lines.push(format!("{cell}.{set}({text});"));
             }
             Update::Compound(..) | Update::Step(_) => {
                 lines.extend(init);
@@ -2204,12 +2225,13 @@ impl<'a> Gen<'a> {
                 let step = step
                     .replace(&format!("{marked}."), &format!("{v}."))
                     .replace(&marked, &format!("(*{v})"));
-                if is_cell(ty) {
-                    // A `Cell` holds a copy: the step works on a local, which is then stored.
+                if by_value {
+                    // A `Cell` or a static of the process holds a copy: the step works on a local,
+                    // which is then stored.
                     let value = self.temp("value");
-                    lines.push(format!("let mut {value} = {cell}.get();"));
+                    lines.push(format!("let mut {value} = {cell}.{get}();"));
                     lines.push(format!("{{ let {v} = &mut {value}; {step}; }}"));
-                    lines.push(format!("{cell}.set({value});"));
+                    lines.push(format!("{cell}.{set}({value});"));
                 } else {
                     lines.push(format!("{cell}.with_borrow_mut(|{v}| {step});"));
                 }

@@ -62,9 +62,9 @@ pub(super) fn handles_uncaught(class: &Class) -> bool {
 
 impl Facts {
     /// Whether the statics of type `t` are one copy for the process (a `java::Atomic`, a
-    /// `java::Locked`, a `java::ClassInit` flag) rather than thread-local cells: in a program that
-    /// starts a thread, those that its threads' code may touch (`Class::thread_statics`), and all
-    /// of them when that is not known.
+    /// `java::SharedField`, a `java::Final`, a `java::ClassInit` flag) rather than thread-local
+    /// cells: in a program that starts a thread, those that its threads' code may touch
+    /// (`Class::thread_statics`), and all of them when that is not known.
     pub fn process_statics(&self, t: usize) -> bool {
         self.threaded && self.thread_statics.as_ref().is_none_or(|touched| touched.contains(&t))
     }
