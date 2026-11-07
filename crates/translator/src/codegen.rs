@@ -397,6 +397,16 @@ thread_local! {
     static SHARED_STRINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The classes that the receivers of each call through a dispatcher mostly were in a profiled
+/// run of the program (`JAVA_TO_RUST_DISPATCH_PROFILE`), by the call's key in the counts
+/// (docs/native-speed.md, "Profiled calls"); empty without a profile.
+pub(crate) fn profiled_sets(class: &Class) -> HashMap<String, std::sync::Arc<[usize]>> {
+    match std::env::var_os("JAVA_TO_RUST_DISPATCH_PROFILE") {
+        Some(_) => dispatch::profiled_sets(&dispatch::class_numbers(class)),
+        None => HashMap::new(),
+    }
+}
+
 /// Whether references in the fields of objects are 4 bytes (`java::RefField`, docs/native-speed.md
 /// 1.1): with `JAVA_TO_RUST_COMPACT_REFERENCES=1`, while the form is being built.
 pub(crate) fn compact_references() -> bool {

@@ -13,6 +13,11 @@
 //!   passes a slot of the caller's, in which the factory makes its object, or which it passes on
 //!   to the factory whose object it returns.
 //!
+//! A call that dispatches, among a few classes that the points-to facts allow or that a profiled
+//! run saw (`Gen::among_on_stack`), passes its slot to a form of its small dispatcher, whose arm
+//! for the classes that run the factory passes it on; the whole dispatcher, for any other class,
+//! makes its object in the heap.
+//!
 //! A call that the generator cannot write in its form on the stack is written as usual, and its
 //! object goes in the heap: the slot is then left empty, which is always correct.
 
@@ -138,8 +143,12 @@ impl<'a> Gen<'a> {
         }
         // `enum_call`, calling the body itself.
         if let Some(d) = self.enum_of(receiver) {
-            if self.enum_body(d, index) != Some(t) {
-                return None;
+            match self.enum_body(d, index) {
+                Some(b) if b == t => {}
+                Some(_) => return None,
+                // A call that dispatches, which runs the factory for the classes it tests for
+                // first.
+                None => return self.among_on_stack(d, receiver, index, t, args, &slot),
             }
             self.need(Need::Body(t));
             let obj = self.thin_receiver(d, receiver);

@@ -366,7 +366,10 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   a test of the class number and a direct call the compiler can inline, with the whole
   dispatcher for any other class, so a profile that no longer fits the program costs speed,
   never correctness. Class numbers are the same in any translation of the same program
-  (`dispatch::class_numbers`), so the counts name classes by them.
+  (`dispatch::class_numbers`), so the counts name classes by them. Where the profiled class
+  runs a factory (`iterator()`), its object can go on the caller's stack (docs/collector.md,
+  "Objects on the stack"): the iterator of a loop over a list that is nearly always an
+  `ArrayList` is then never allocated, as a JIT's escape analysis would do after inlining.
 - **Checks removed**: null checks on never-null references, bounds checks inside proven ranges,
   write barriers on young objects, monitors on objects that never reach another thread.
 - **Smaller objects**: unused fields removed, integers proven small stored as `u8` or `u16`,

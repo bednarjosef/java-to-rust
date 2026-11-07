@@ -190,8 +190,10 @@ pub(super) enum Need {
     Dispatch(usize, usize),
     /// The dispatcher on an enum for an override group whose objects are known to be of a few of
     /// its classes, the set of a call's receiver in `Class::receivers` (by its `receiver_key`):
-    /// arms for those, and the whole dispatcher for any other.
-    Among(usize, usize, u64),
+    /// arms for those, and the whole dispatcher for any other. With a factory, its form that
+    /// takes a slot, which it passes to the factory for the classes that run it
+    /// (`Gen::among_on_stack`).
+    Among(usize, usize, u64, Option<usize>),
     /// A method whose body is emitted on the enum of its type.
     Body(usize),
     /// A copy of such a body for one class of the enum, as `(method, class)`, which the
@@ -240,7 +242,7 @@ pub(super) fn impl_needs(wanted: &Needs, homes: &[Home]) -> HashMap<usize, Vec<N
             | Need::Convert(s, _)
             | Need::Narrow(s, _)
             | Need::Dispatch(s, _)
-            | Need::Among(s, _, _)
+            | Need::Among(s, ..)
             | Need::Variant(s, _) => s,
             Need::Body(i) | Need::BodyFor(i, _) => match homes[i] {
                 Home::Enum(t) => t,
@@ -270,7 +272,7 @@ pub(super) fn need_types(class: &Class, homes: &[Home], need: Need) -> Vec<usize
         | Need::Base(t)
         | Need::BaseMut(t)
         | Need::Dispatch(t, _)
-        | Need::Among(t, _, _)
+        | Need::Among(t, ..)
         | Need::Display(t)
         | Need::NullableText(t)
         | Need::JavaString(t)
@@ -336,7 +338,7 @@ impl<'a> Gen<'a> {
             Need::Narrow(s, _) => {
                 needs.insert(Need::Enum(s));
             }
-            Need::Among(t, group, _) => {
+            Need::Among(t, group, ..) => {
                 needs.insert(Need::Enum(t));
                 needs.insert(Need::Dispatch(t, group));
             }
@@ -1821,7 +1823,7 @@ impl<'a> Gen<'a> {
         let among = self.among(t, receiver).or_else(|| self.profiled_among(t, receiver, group));
         let name = match among {
             Some(key) if self.enum_body(t, resolved).is_none() => {
-                self.need(Need::Among(t, group, key));
+                self.need(Need::Among(t, group, key, None));
                 format!("{}_among_{key:016x}", self.group_names[&group])
             }
             _ => self.dispatch_name(t, resolved),
@@ -1865,6 +1867,34 @@ impl<'a> Gen<'a> {
         let set = self.profiled.get(&self.profile_key(receiver, group))?;
         (set.iter().all(|&c| self.is_enum_variant(t, c)) && set.len() < self.shared_enum_variants(t).len())
             .then(|| receiver_key(set))
+    }
+
+    /// The call `resolved(args)` on `receiver`, a value of the enum of `t`, that runs factory
+    /// `f` for the receivers of the classes it tests for first (`among`, `profiled_among`), in
+    /// the form that passes `slot` to the factory for those (`Need::Among`); `None` when the call
+    /// tests for no such class.
+    pub(super) fn among_on_stack(
+        &mut self,
+        t: usize,
+        receiver: &'a Expr,
+        resolved: usize,
+        f: usize,
+        args: &'a [Expr],
+        slot: &str,
+    ) -> Option<Code> {
+        let group = self.class.hierarchy.group_id(resolved);
+        let key = self.among(t, receiver).or_else(|| self.profiled_among(t, receiver, group))?;
+        let h = &self.class.hierarchy;
+        let runs = |c: usize| self.is_enum_variant(t, c) && h.implementation(resolved, c) == Some(f);
+        if !self.receiver_sets[&key].iter().any(|&c| runs(c) && self.arm_on_stack(c, f, "").is_some()) {
+            return None;
+        }
+        self.need(Need::Among(t, group, key, Some(f)));
+        let name = format!("{}_among_{key:016x}_on_stack_{f}", self.group_names[&group]);
+        let obj = self.thin_receiver(t, receiver);
+        let args: Vec<String> =
+            std::iter::once(format!("&{slot}")).chain(self.call_args(resolved, args)).collect();
+        Some(Code::atom(self.enum_fn_call(t, &name, &obj, &args.join(", "))))
     }
 
     /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
@@ -2272,8 +2302,8 @@ impl<'a> Gen<'a> {
             let at = self.out.len();
             self.indent -= 1;
             match *need {
-                Need::Dispatch(_, group) => self.dispatcher(t, group, None),
-                Need::Among(_, group, key) => self.dispatcher(t, group, Some(key)),
+                Need::Dispatch(_, group) => self.dispatcher(t, group, None, None),
+                Need::Among(_, group, key, factory) => self.dispatcher(t, group, Some(key), factory),
                 Need::Body(i) => {
                     self.gap();
                     self.method(i);
@@ -2662,7 +2692,7 @@ impl<'a> Gen<'a> {
 
     /// The dispatcher on the enum of `t` for an override group: each variant runs what its class
     /// runs for the method.
-    fn dispatcher(&mut self, t: usize, group: usize, among: Option<u64>) {
+    fn dispatcher(&mut self, t: usize, group: usize, among: Option<u64>, on_stack: Option<usize>) {
         let h = &self.class.hierarchy;
         let mut chain = vec![t];
         chain.extend(h.ancestors(t));
@@ -2697,7 +2727,10 @@ impl<'a> Gen<'a> {
             Some(key) => {
                 let set = &self.receiver_sets[&key];
                 variants.retain(|c| set.contains(c));
-                format!("{general}_among_{key:016x}")
+                match on_stack {
+                    Some(f) => format!("{general}_among_{key:016x}_on_stack_{f}"),
+                    None => format!("{general}_among_{key:016x}"),
+                }
             }
             None => general.clone(),
         };
@@ -2709,11 +2742,16 @@ impl<'a> Gen<'a> {
             self.line("#[inline]");
         }
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
+        let slot = on_stack.map_or(String::new(), |f| format!(", j2r_slot: {}", self.slot_param_type(f)));
         let ty = struct_name(&self.class.types[t].name);
         // A method that stays a Rust generic, as one whose overrides no live class has, keeps its
         // type parameters (`DatagramSocketImpl.setOption`).
         let generics = self.type_params(&m.type_params).0;
-        self.line(&format!("{}fn {}{generics}(this: {ty}{all}){ret} {{", self.vis(), self.enum_fn(t, &name)));
+        self.line(&format!(
+            "{}fn {}{generics}(this: {ty}{slot}{all}){ret} {{",
+            self.vis(),
+            self.enum_fn(t, &name)
+        ));
         self.indent += 1;
         let outer = std::mem::replace(&mut self.thin_this, true);
         // A nested function cannot name the dispatcher's type parameters.
@@ -2722,7 +2760,7 @@ impl<'a> Gen<'a> {
             (all.clone(), names, ret.clone())
         });
         let outer_frames = std::mem::replace(&mut self.arm_frames, frames);
-        self.dispatcher_body(t, r, among, &variants, &args, &general);
+        self.dispatcher_body(t, r, among, on_stack, &variants, &args, &general);
         self.arm_frames = outer_frames;
         self.thin_this = outer;
         self.indent -= 1;
@@ -2731,12 +2769,14 @@ impl<'a> Gen<'a> {
 
     /// The code of the dispatcher of `dispatcher`, for method `r` and among the `variants` it
     /// passes on to, whose parameters are `args`; one that dispatches `among` some classes runs
-    /// the whole one, `general`, for any other.
+    /// the whole one, `general`, for any other, and passes its slot to factory `on_stack`.
+    #[allow(clippy::too_many_arguments)]
     fn dispatcher_body(
         &mut self,
         t: usize,
         r: usize,
         among: Option<u64>,
+        on_stack: Option<usize>,
         variants: &[usize],
         args: &str,
         general: &str,
@@ -2759,6 +2799,12 @@ impl<'a> Gen<'a> {
             // `descriptorString()` itself (see `class_answer`).
             _ if g.runtime_of(c) == Some(Type::JavaClass) && g.class_answer(r).is_some() => {
                 (g.class_answer_arm(r), true)
+            }
+            Some(i)
+                if on_stack == Some(i)
+                    && let Some(text) = g.arm_on_stack(c, i, args) =>
+            {
+                (g.covariant_ret(i, r, text), true)
             }
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, args);
@@ -3441,17 +3487,41 @@ impl<'a> Gen<'a> {
         hash_code.and_then(|h| self.class.hierarchy.implementation(h, c))
     }
 
+    /// How an arm borrows the object of class `c`, bound to `o`, to run method `i` on it.
+    fn arm_borrow(&self, c: usize, i: usize) -> &'static str {
+        let class_name = &self.class.types[c].name;
+        let immutable = self.facts.immutable.contains(class_name) || self.celled(class_name);
+        match () {
+            _ if immutable || self.holds_value(c) => "",
+            _ if self.facts.mutating.contains(&i) => ".borrow_mut()",
+            _ => ".borrow()",
+        }
+    }
+
+    /// The call of factory `i`'s form on the stack that a dispatcher's arm for an object of class
+    /// `c`, bound to `o`, makes with the dispatcher's slot `j2r_slot`, where `arm_call` writes a
+    /// call of a class's method; `None` for any other.
+    pub(super) fn arm_on_stack(&self, c: usize, i: usize, args: &str) -> Option<String> {
+        if !matches!(self.homes[i], Home::Class(_))
+            || self.class.types[c].kind == TypeKind::Enum
+            || self.holds_value(c)
+            || !self.stack_forms.contains(&i)
+        {
+            return None;
+        }
+        let name = &self.fn_names[i];
+        let with = if args.is_empty() { "j2r_slot".to_string() } else { format!("j2r_slot, {args}") };
+        Some(match self.facts.self_methods.contains(&i) {
+            true => format!("o{}.{name}_on_stack({with})", self.arm_borrow(c, i)),
+            false => format!("{}_on_stack(o, {with})", self.qualified_fn(i)),
+        })
+    }
+
     /// The call that the dispatcher of the enum of `t` makes for an object of class `c` bound to
     /// `o`, running method `i`; and whether it uses `o`.
     fn arm_call(&mut self, t: usize, c: usize, i: usize, args: &str) -> (String, bool) {
         let name = self.fn_names[i].clone();
-        let class_name = &self.class.types[c].name;
-        let immutable = self.facts.immutable.contains(class_name) || self.celled(class_name);
-        let borrow = match () {
-            _ if immutable || self.holds_value(c) => "",
-            _ if self.facts.mutating.contains(&i) => ".borrow_mut()",
-            _ => ".borrow()",
-        };
+        let borrow = self.arm_borrow(c, i);
         match self.homes[i] {
             // A Java enum's constant is a `Copy` value whose methods take it by value: through
             // the reference, `to_string(locale, messages)` would be `ToString`'s.
