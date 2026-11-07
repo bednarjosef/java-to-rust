@@ -145,5 +145,6 @@ pub fn try_to_chars_into(cp: i32, dst: &impl Elements<u16>, index: i32) -> Resul
 
 /// The unchecked form of `try_to_chars_into`, for a call where the program cannot see the failure.
 pub fn to_chars_into(cp: i32, dst: &impl Elements<u16>, index: i32) -> i32 {
-    try_to_chars_into(cp, dst, index).unwrap_or_else(|e| throw(e.class, &e.message.unwrap_or_default()))
+    try_to_chars_into(cp, dst, index)
+        .unwrap_or_else(|e| throw(e.class, e.message.as_deref().unwrap_or_default()))
 }

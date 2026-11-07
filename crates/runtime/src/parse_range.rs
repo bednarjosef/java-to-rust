@@ -107,7 +107,7 @@ pub fn try_parse_unsigned_range(
 
 /// The string as UTF-16 units, once Java's `requireNonNull` and `checkFromToIndex` have passed.
 fn check_range(s: Option<&str>, begin: i32, end: i32) -> Result<Vec<u16>, Exception> {
-    let Some(s) = s else { return Err(Exception { class: "java.lang.NullPointerException", message: None }) };
+    let Some(s) = s else { return Err(Exception::bare("java.lang.NullPointerException")) };
     let units: Vec<u16> = s.encode_utf16().collect();
     if begin < 0 || begin > end || end as usize > units.len() {
         let message = format!("Range [{begin}, {end}) out of bounds for length {}", units.len());

@@ -1090,12 +1090,15 @@ impl<'a> Gen<'a> {
         self.gap();
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
+        // Out of line, each once: a failing check's path is a branch to one call.
         self.line("#[cold]");
+        self.line("#[inline(never)]");
         self.line(&format!("pub fn j2r_raised(e: java::Exception) -> {name} {{"));
         self.line(&format!("    <{name} as From<java::Exception>>::from(e)"));
         self.line("}");
         self.gap();
         self.line("#[cold]");
+        self.line("#[inline(never)]");
         self.line(&format!("pub fn j2r_null_pointer(message: &'static str) -> {name} {{"));
         self.line(&format!(
             "    {name}::j2r_raised(java::Exception::new(\"java.lang.NullPointerException\", message))"
