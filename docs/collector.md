@@ -244,7 +244,14 @@ its stack, so that neither is tested per word and each slot taken off the stack 
 inline rather than in a call. A word pointing into a small block, by far the most common, is
 tested for that kind first, and the bytes of each slot to scan are kept in the block's table.
 With one marker, BinaryTrees runs 34.6 G instructions instead of 43.8 G and SmallObjects 4.9 G
-instead of 6.5 G, 1.79 s instead of 2.09 s and 0.22 s instead of 0.24 s (fastest of 5).
+instead of 6.5 G, 1.79 s instead of 2.09 s and 0.22 s instead of 0.24 s (fastest of 5). The other
+kinds are marked as rare (`std::hint::cold_path`): without it the compiler tested the kind
+through a table of jumps, an indirect branch per word. And the slot's mark bit is read before
+its taken bit: a marked slot is always taken, and a word that points to a slot marked already,
+as many do, then reads one line of the block's bitmaps instead of two. With one marker, the two
+took the marking benchmark (`runtime/examples/marking.rs`: 300 MB alive in tables of chained
+entries, 6.7 million slots) from 1,272 M to 1,101 M instructions per collection, and its fewest
+cycles from 399 M to 331 M.
 
 ## Objects on the stack
 
@@ -350,10 +357,22 @@ on a futex.
   lock, whose waiters read it until it is free before they try to take it.
 - A range longer than 64 KB (a large array) is split into 64 KB pieces as it is taken, all of
   which go on the stack at once, so other markers can take them.
-- A slot taken off a marker's stack waits in a ring of 8 while its memory is prefetched, and is
-  scanned as it leaves the ring, so the cache misses of reading eight slots overlap instead of
-  coming one after another. On the Minecraft benchmark this took the translated javac's marking
-  from 3.9 s to 2.7 s in all (median of runs; 16 slots did no better).
+- A slot taken off a marker's stack waits in a ring of 16 while its memory is prefetched, its
+  first cache line and the line of its last word (within its first 256 bytes, `PREFETCH_LAST`),
+  and is scanned as it leaves the ring, so the cache misses of reading sixteen slots overlap
+  instead of coming one after another. On the Minecraft benchmark a ring of 8 that fetched first
+  lines took the translated javac's marking from 3.9 s to 2.7 s in all (median of runs; 16 such
+  slots did no better). On the marking benchmark with one marker, a slot's last line took 5% off
+  the fewest cycles of a collection, 16 slots 2%, and both together 12%. With the two changes to
+  the test of a word above, the benchmark marks in 479 M cycles instead of 612 M with one marker
+  (medians of 8 alternating runs on a busy machine), and its 16 markers take 146 ms of processor
+  time per collection instead of 176 ms, and 17.6 ms instead of 22.0 ms at the fastest.
+- Holding the words found in a slot that point into the heap in a ring of their own, to fetch
+  each one's block description before testing it, made marking slower: 95 to 110 ms instead of
+  79 ms with one marker on the marking benchmark, the bitmaps it then waits on being in other
+  lines than the description. Marking with plain stores instead of atomic ones, which is
+  wrong (two markers may each lose the other's bit), saved no more than 5% with 16 markers, so
+  a byte per slot, which would make plain stores safe, is not worth its memory.
 - An idle marker spins a little, yields a little, and then sleeps on a futex. A marker putting
   work in the pool wakes one sleeper for each 256 items, and the end of marking wakes them all.
   A heap that hands out no work (one long linked list) is marked by one thread while the others

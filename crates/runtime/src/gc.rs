@@ -2026,7 +2026,10 @@ static MARK_STACK: AtomicPtr<(usize, usize)> = AtomicPtr::new(ptr::null_mut());
 const SCAN_CHUNK: usize = 64 << 10;
 
 /// The slots a marker holds while their memory is fetched (see `Marker::drain`).
-const PREFETCH: usize = 8;
+const PREFETCH: usize = 16;
+
+/// The most bytes of a slot whose last cache line is fetched as the slot goes in the ring.
+const PREFETCH_LAST: usize = 256;
 
 /// The markers of a collection are the collecting thread and up to this many helper threads.
 const MAX_HELPERS: usize = 15;
@@ -2219,12 +2222,21 @@ impl Marker {
             if slot >= unsafe { (*m).slots } as usize || EXACT && start + slot * size != word {
                 return;
             }
-            // `slot` is below `slots`, so its word is within the bitmaps.
+            // `slot` is below `slots`, so its word is within the bitmaps. Its mark is read first:
+            // a marked slot is taken, and many words point to slots marked already, whose taken
+            // bit, in another cache line, is then not read.
             let (w, bit) = (slot / 64, 1u64 << (slot % 64));
-            if unsafe { *(&raw const (*m).taken).cast::<u64>().add(w) } & bit == 0
-                || !set_mark(unsafe { (&raw mut (*m).marks).cast::<u64>().add(w) }, bit, SHARES)
-            {
+            let marks = unsafe { AtomicU64::from_ptr((&raw mut (*m).marks).cast::<u64>().add(w)) };
+            let old = marks.load(Ordering::Relaxed);
+            if old & bit != 0 || unsafe { *(&raw const (*m).taken).cast::<u64>().add(w) } & bit == 0 {
                 return;
+            }
+            if SHARES {
+                if marks.fetch_or(bit, Ordering::Relaxed) & bit != 0 {
+                    return;
+                }
+            } else {
+                marks.store(old | bit, Ordering::Relaxed);
             }
             let scanned = unsafe { (*m).scanned } as usize;
             if scanned > 0 {
@@ -2232,6 +2244,9 @@ impl Marker {
             }
             return;
         }
+        // Without this, the compiler tests the kind with a table of jumps, an indirect branch per
+        // word, where a word that points into a small block, nearly every one, needs one test.
+        std::hint::cold_path();
         if let Some(head) = self.large_head(word, b, kind) {
             // A 4-byte reference is to a large allocation's start (`allocate_large`).
             if EXACT
@@ -2360,8 +2375,8 @@ impl Marker {
     /// Scans everything on this marker's stack, offering work to idle markers now and then.
     ///
     /// A slot taken off the stack waits in a ring of `PREFETCH` slots while its memory is fetched
-    /// (a prefetch as it goes in), and is scanned as it comes out: the misses of reading many
-    /// slots overlap instead of following one another.
+    /// (its first cache line and the line of its last word, as it goes in), and is scanned as it
+    /// comes out: the misses of reading many slots overlap instead of following one another.
     fn drain(&mut self) {
         match (self.shares, self.compact) {
             (false, false) => self.drain_as::<false, false>(),
@@ -2399,7 +2414,9 @@ impl Marker {
                 len = SCAN_CHUNK;
             }
             unsafe {
-                std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(start as *const i8)
+                use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+                _mm_prefetch::<_MM_HINT_T0>(start as *const i8);
+                _mm_prefetch::<_MM_HINT_T0>((start + len.min(PREFETCH_LAST) - 1) as *const i8);
             };
             if held == PREFETCH {
                 let (start, len) = ring[first];
