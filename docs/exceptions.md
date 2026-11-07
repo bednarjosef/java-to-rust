@@ -164,7 +164,9 @@ fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
   `<name>__plain` and tests nothing; the dispatcher's arm, and a call that a dispatcher among a
   few classes makes, inline the wrapper, so its constant `Ok` folds away, while a large body stays
   out of line and returns its value in registers. (The default methods of a closure's trait, which
-  can hold nothing but its methods, keep the `Result` in their code.)
+  can hold nothing but its methods, and methods of classes without objects, whose stub keeps
+  the method's signature, keep the `Result` in their code; `Gen::written_plain` decides it for
+  both the method and its direct calls.)
 
   ```java
   abstract class Shape { abstract int area(int scale); }

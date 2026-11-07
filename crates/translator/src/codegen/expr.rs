@@ -615,7 +615,7 @@ impl<'a> Gen<'a> {
             }
             // A plain body (`Facts::plain_bodies`) called directly gives its value as it
             // is: there is no `Result` to test.
-            if self.facts.plain_bodies.contains(&target) {
+            if self.written_plain(target) {
                 self.plain_call = Some(target);
                 let code = self.method_call(receiver, target, args);
                 self.plain_call = None;

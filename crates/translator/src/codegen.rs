@@ -800,7 +800,6 @@ impl<'a> Gen<'a> {
             ret: Type::Void,
             uses_runtime: false,
             throwing: false,
-            plain_bodies_here: true,
             plain_call: None,
             attempts: Vec::new(),
             finallies: Vec::new(),
@@ -876,6 +875,12 @@ const RECURSION_LIMIT: u32 = 1024;
 /// What the name of a method's function that returns its value plainly ends with, beside the
 /// function by the method's name that wraps it in `Ok` (`Facts::plain_bodies`).
 const PLAIN_BODY: &str = "__plain";
+
+/// Whether method `m` has the body that reach gives a method of a class without objects
+/// (`Builtin::NoObject`).
+fn stub(m: &Method) -> bool {
+    matches!(&m.body[..], [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })])
+}
 
 /// The crate root's allocator: the runtime's collector (runtime `gc.rs`), or for a program with
 /// 4-byte references the form of it that looks for them (`java::CompactAllocator`).
@@ -1103,9 +1108,6 @@ struct Gen<'a> {
     uses_runtime: bool,
     /// Whether the current method returns `Result<_, Throwable>` (see `exceptions`).
     throwing: bool,
-    /// Whether the method being written may be a plain body and its wrapper
-    /// (`Facts::plain_bodies`): not inside a trait, which has room for its methods alone.
-    plain_bodies_here: bool,
     /// The plain body (`Facts::plain_bodies`) that the direct call being written calls by its
     /// own name, with no `Result` to pass on.
     plain_call: Option<usize>,
@@ -1439,6 +1441,18 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether method `index` of `Facts::plain_bodies` is written as a plain body and its
+    /// wrapper, so that a direct call can call the plain body: not when it never runs (its body
+    /// is a stub that keeps the method's own signature) and not as the default method of a
+    /// closure type, whose trait can have no function beside its methods.
+    pub(super) fn written_plain(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        self.facts.plain_bodies.contains(&index)
+            && self.runs[m.class]
+            && !stub(m)
+            && !self.facts.closure_types.contains(&m.class)
+    }
+
     fn write_method(&mut self, index: usize) {
         let m = &self.class.methods[index];
         let outer = WRITING.with(|w| w.replace(Some(m.pos)));
@@ -1490,12 +1504,6 @@ impl<'a> Gen<'a> {
         // So does a factory whose `construct<Name>` call never runs, when nothing calls that
         // constructor of a class that has objects (`UnsupportedOperationException(String,
         // Throwable)` in javac).
-        let stub = |m: &Method| {
-            matches!(
-                &m.body[..],
-                [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
-            )
-        };
         // (A census's stub has a message, which its constructor ends the program with.)
         let pruned = |m: &Method| matches!(&m.body[..], [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, args), .. })] if args.is_empty());
         let factory_without_objects = m.is_static
@@ -1517,9 +1525,8 @@ impl<'a> Gen<'a> {
         }
         // A method that returns a `Result` only for its override group (`Facts::plain_bodies`):
         // its code is a function that returns the value plainly, and the method's own function,
-        // inlined wherever it is called, wraps that in `Ok`. It is written so outside a trait,
-        // which can have no function of its own beside its methods.
-        let plain = self.facts.plain_bodies.contains(&index) && !never_runs && self.plain_bodies_here;
+        // inlined wherever it is called, wraps that in `Ok`.
+        let plain = self.written_plain(index);
         // The plain code's function is called through `Self::` inside an `impl`.
         let in_impl = !self.module_fn(index)
             && !thin
