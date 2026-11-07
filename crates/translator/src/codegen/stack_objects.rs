@@ -1,7 +1,10 @@
 //! Objects on the stack: a `new` whose object never leaves its method (`Facts::stack_objects`)
 //! makes it in a `java::Slot` that the method declares at its start, `slot_1.put(..)`, rather
 //! than in the collected heap, `Arc::new(..)`. The handle is the same `java::Arc`, so nothing
-//! else in the code changes (docs/collector.md, "Objects on the stack").
+//! else in the code changes (docs/collector.md, "Objects on the stack"). A slot holds an object
+//! of at most `BYTES_PER_SLOT` bytes of fields, and a method's slots take at most
+//! `BYTES_PER_METHOD`. The body of a lambda written as a closure declares slots of its own at its
+//! start (`Gen::enter_inner_slots`), so that every call of the closure has its own.
 //!
 //! Two kinds of functions get a second form, `<name>_on_stack`, which takes a slot after its
 //! receiver and makes its object there:
@@ -32,12 +35,31 @@ use super::objects::changes_object;
 use super::*;
 use crate::analysis::Guard;
 
-/// The most slots a method declares, so that a method that recursion runs deep keeps a small
-/// frame.
-const SLOTS_PER_METHOD: usize = 8;
+/// The most bytes that a method's slots take, as `object_bytes` counts them, so that a method
+/// that recursion runs deep keeps a small frame: eight objects of the largest size.
+const BYTES_PER_METHOD: usize = 8 * (BYTES_PER_SLOT + SLOT_HEADER);
 
-/// The most fields (with those of its superclasses) of an object that goes in a slot.
-const FIELDS_PER_SLOT: usize = 16;
+/// The most bytes that the fields of an object that goes in a slot (with those of its
+/// superclasses) may take, as `field_bytes` counts them: 16 references, or an iterator's 30
+/// numbers and its cursor.
+const BYTES_PER_SLOT: usize = 128;
+
+/// What a slot takes beside its object's fields (its monitor and its state), about.
+const SLOT_HEADER: usize = 16;
+
+/// About the bytes a field of type `ty` takes in an object: a primitive its size, a reference
+/// or an enum a word, a string four (it may own its text, `java::JString`), and any other value
+/// (an array, a boxed number) two.
+fn field_bytes(ty: Type) -> usize {
+    match ty {
+        Type::Boolean | Type::Byte => 1,
+        Type::Short | Type::Char => 2,
+        Type::Int | Type::Float => 4,
+        Type::Long | Type::Double | Type::Class(..) | Type::Enum(_) => 8,
+        Type::String => 32,
+        _ => 16,
+    }
+}
 
 impl<'a> Gen<'a> {
     /// Whether objects of class `c` can be made in a slot: a class whose objects are handles
@@ -46,17 +68,22 @@ impl<'a> Gen<'a> {
     /// written and kept (`captures_nothing`), so it is never in a slot.
     pub(super) fn stack_class(&self, c: usize) -> bool {
         let decl = &self.class.types[c];
-        let fields: usize = std::iter::once(c)
-            .chain(self.class.hierarchy.ancestors(c))
-            .map(|t| self.class.types[t].fields.len())
-            .sum();
         decl.kind == TypeKind::Class
             && !decl.is_abstract
             && decl.type_params.is_empty()
             && !self.facts.owned.contains(&decl.name)
             && !decl.implements.iter().any(|i| self.facts.closure_types.contains(i))
-            && fields <= FIELDS_PER_SLOT
+            && self.object_bytes(c) <= BYTES_PER_SLOT
             && !(matches!(decl.origin, Origin::Lambda { .. }) && decl.fields.is_empty())
+    }
+
+    /// About the bytes the fields of an object of class `c` take (`field_bytes`).
+    fn object_bytes(&self, c: usize) -> usize {
+        std::iter::once(c)
+            .chain(self.class.hierarchy.ancestors(c))
+            .flat_map(|t| &self.class.types[t].fields)
+            .map(|f| field_bytes(f.ty))
+            .sum()
     }
 
     /// The `new`s and calls of factories of method `m` whose objects it makes in slots, with
@@ -74,15 +101,17 @@ impl<'a> Gen<'a> {
             return Vec::new();
         }
         let mut sites = Vec::new();
+        let mut bytes = 0;
         for s in &self.class.methods[m].body {
             visit_stmt(
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| {
-                        if sites.len() < SLOTS_PER_METHOD
-                            && self.facts.stack_objects.objects.contains(&x.id)
+                        if self.facts.stack_objects.objects.contains(&x.id)
                             && let Some(c) = self.slot_class(x)
+                            && bytes + self.object_bytes(c) + SLOT_HEADER <= BYTES_PER_METHOD
                         {
+                            bytes += self.object_bytes(c) + SLOT_HEADER;
                             sites.push((x.id, c));
                         }
                     })
@@ -286,7 +315,9 @@ impl<'a> Gen<'a> {
     /// locals and the free functions, and the slot parameter of its form on the stack. In a
     /// factory's form on the stack, the object it returns goes in the slot it is given.
     pub(super) fn name_slots(&mut self, index: usize, sites: &[(ExprId, usize)]) {
-        let taken: HashSet<String> = self.locals.values().cloned().collect();
+        // In a closure's body, its captures are locals too (`field_locals`).
+        let taken: HashSet<String> =
+            self.locals.values().chain(self.field_locals.values()).cloned().collect();
         let free = |name: &str| !taken.contains(name) && !self.static_fn_names.contains(name);
         let mut next = 1;
         let mut slots = HashMap::new();
@@ -330,6 +361,36 @@ impl<'a> Gen<'a> {
             let content = self.slot_content(c);
             self.line(&format!("let {name} = java::Slot::<{content}>::new();"));
         }
+    }
+
+    /// Names and declares the slots of method `index` whose body is written inside another
+    /// method's, as a closure's (`closures`): its objects that stay are made in slots that the
+    /// closure's body declares, so each call of the closure has its own, as each call of the
+    /// method would. Returns the enclosing method's slots and moves, which `leave_inner_slots`
+    /// puts back.
+    pub(super) fn enter_inner_slots(&mut self, index: usize) -> InnerSlots {
+        let outer = InnerSlots {
+            slots: std::mem::take(&mut self.slots),
+            slot_param: self.slot_param.clone(),
+            on_stack: std::mem::replace(&mut self.on_stack, false),
+            moves: std::mem::take(&mut self.moves),
+        };
+        let sites = self.stack_sites(index);
+        self.name_slots(index, &sites);
+        self.moves = self.find_moves(index);
+        self.declare_slots(&sites);
+        outer
+    }
+
+    /// Puts back the enclosing method's slots and moves after a body that `enter_inner_slots`
+    /// started. A move the body did not write makes the enclosing method be written again with
+    /// that object in the heap, as for its own (`Gen::method_form`).
+    pub(super) fn leave_inner_slots(&mut self, outer: InnerSlots) {
+        let moves = std::mem::replace(&mut self.moves, outer.moves);
+        self.missed.extend(moves.missed());
+        self.slots = outer.slots;
+        self.slot_param = outer.slot_param;
+        self.on_stack = outer.on_stack;
     }
 
     /// The slot that the `new` or call `id` makes its object in, if it is on the stack.
@@ -410,6 +471,15 @@ impl<'a> Gen<'a> {
             format!("matches!({}.0.tag(), {tags})", super::dispatch::operand(&self.object(receiver)))
         })
     }
+}
+
+/// The slots and moves of the method being written, set aside while the body of another method
+/// is written inside it (`Gen::enter_inner_slots`).
+pub(super) struct InnerSlots {
+    slots: HashMap<ExprId, (String, usize)>,
+    slot_param: String,
+    on_stack: bool,
+    moves: Moves,
 }
 
 /// A move before a statement: the local that holds the object, the slot, the `new` or call that

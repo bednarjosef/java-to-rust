@@ -1336,6 +1336,96 @@ fn a_call_on_an_object_of_one_class_returns_only_what_that_class_returns() {
 }
 
 #[test]
+fn a_factory_that_takes_its_parts_from_other_factories_is_one() {
+    // `span(Box)` calls four factories, all found after it; it is a factory once they are.
+    let rust = translate(
+        "class A {
+            static Span span(Box b) {
+                V lo = b.min();
+                V hi = b.max();
+                V mid = lo.mid(hi);
+                return Span.of((int) lo.x, (int) (hi.x + mid.x));
+            }
+            public static void main(String[] a) {
+                int sum = 0;
+                for (int i = 0; i < 10; i++) {
+                    Span s = span(new Box(i, i * 2, i + 3, i * 5));
+                    sum += s.size();
+                }
+                System.out.println(sum);
+            }
+        }
+        class V { final double x, y; V(double x, double y) { this.x = x; this.y = y; }
+            V mid(V o) { return new V((x + o.x) / 2, (y + o.y) / 2); } }
+        class Box { final double x0, y0, x1, y1;
+            Box(double x0, double y0, double x1, double y1) { this.x0 = x0; this.y0 = y0; this.x1 = x1; this.y1 = y1; }
+            V min() { return new V(x0, y0); }
+            V max() { return new V(x1, y1); } }
+        class Span { final int a, b; Span(int a, int b) { this.a = a; this.b = b; }
+            static Span of(int a, int b) { return new Span(Math.min(a, b), Math.max(a, b)); }
+            int size() { return b - a + 1; } }",
+    );
+    assert_contains(
+        &rust,
+        &["let s = span_on_stack(&slot_1, &", "fn span_on_stack(obj_slot: &java::Slot<Span>"],
+    );
+}
+
+#[test]
+fn a_slot_holds_an_object_of_many_numbers_and_a_method_many_small_objects() {
+    let rust = translate(
+        "class Cursor {
+            int a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t;
+            int sum() { return a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q + r + s + t; }
+        }
+        class P { final int x; P(int x) { this.x = x; } }
+        class A {
+            public static void main(String[] args) {
+                Cursor c = new Cursor();
+                Cursor d = args.length > 0 ? new Cursor() : c;
+                c.a = 1; d.t = 2;
+                P p1 = new P(1), p2 = new P(2), p3 = new P(3), p4 = new P(4), p5 = new P(5);
+                P p6 = new P(6), p7 = new P(7), p8 = new P(8), p9 = new P(9);
+                System.out.println(c.sum() + p1.x + p2.x + p3.x + p4.x + p5.x + p6.x + p7.x + p8.x + p9.x);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // Twenty numbers take about as much as ten references.
+            "let c = slot_1.put(Cursor__new());",
+            // Eleven objects of at most twenty numbers are still a small frame.
+            "let p9 = slot_11.put(P__new(9));",
+        ],
+    );
+}
+
+#[test]
+fn objects_made_in_a_closure_s_body_are_on_the_closure_s_stack() {
+    let rust = translate(
+        "class P { final int x, y; P(int x, int y) { this.x = x; this.y = y; } int dot(P o) { return x * o.x + y * o.y; } }
+        interface Visitor { boolean visit(int i); }
+        class A {
+            static int walk(int n, Visitor v) { int k = 0; for (int i = 0; i < n && v.visit(i); i++) k++; return k; }
+            public static void main(String[] args) {
+                int[] total = {0};
+                P axis = new P(1, 2);
+                int k = walk(10, i -> { P p = new P(i, i + 1); total[0] += p.dot(axis); return i < 8; });
+                System.out.println(k + \" \" + total[0]);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "Rc::new(move |i: i32| -> bool {\n        let slot_1 = java::Slot::<P>::new();",
+            "let p = slot_1.put(P__new(i, i + 1));",
+        ],
+    );
+}
+
+#[test]
 fn methods_borrow_their_shared_object() {
     let rust = translate(
         "class P { int x; P(int x) { this.x = x; } void set(int v) { x = v; } int get() { return x; } }

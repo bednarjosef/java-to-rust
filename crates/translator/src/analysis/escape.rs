@@ -84,7 +84,10 @@
 //! values (`emptyIterator()`): then the slot is left empty, and the caller's rules hold for the
 //! other value too, which it treats as its own object. The set of factories grows with the
 //! summaries known, a few rounds per method, and is then cut down until every method in it is
-//! still a factory with the factories that remain.
+//! still a factory with the factories that remain. The rounds take callees before their callers
+//! (by the call graph's components), so that a method that takes its object from one factory and
+//! its parts from several others (a box's `betweenCornersInDirection`) is checked once they are
+//! known rather than once per callee that becomes one, which would use its rounds up.
 //!
 //! **Profiled calls.** A call that may run several methods, whose receivers were nearly all of
 //! one class in a profiled run of the program (docs/native-speed.md, "Profiled calls"), is a
@@ -306,11 +309,16 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     // The factories, with the summaries known: a method is one when what it returns of its own
     // objects is one object, made by a `new` or a call of another factory. Adding a factory can
     // take one away (a method that returned one new object and one factory's), so the set is
-    // grown a few rounds and then cut down until every method in it is one.
+    // grown a few rounds and then cut down until every method in it is one. The methods are
+    // taken callees first, as for the summaries, so that a method is looked at once the
+    // factories it calls are known: one that calls several factories (`betweenCornersInDirection`
+    // of a box, which takes its corners from two and returns a third's object) is not looked at
+    // again for each of them, which would use up its rounds before the last.
     let mut queued = vec![true; n];
-    let mut work: Vec<usize> = (0..n).rev().collect();
+    let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
+        (0..n).map(|m| std::cmp::Reverse((rank[m], m))).collect();
     let mut visits = vec![0u8; n];
-    while let Some(m) = work.pop() {
+    while let Some(std::cmp::Reverse((_, m))) = work.pop() {
         queued[m] = false;
         visits[m] = visits[m].saturating_add(1);
         // A method visited too often is no factory from then on, so the rounds end.
@@ -322,7 +330,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
             }
             for &caller in &callers[m] {
                 if !std::mem::replace(&mut queued[caller], true) {
-                    work.push(caller);
+                    work.push(std::cmp::Reverse((rank[caller], caller)));
                 }
             }
         }
