@@ -757,7 +757,7 @@ fn a_constructor_that_starts_a_thread_without_letting_this_leave_keeps_its_field
 fn a_fixed_number_boolean_or_enum_field_of_a_shared_object_is_read_with_a_plain_load() {
     let rust = translate(
         "class A {
-    enum Shape { SQUARE, CIRCLE }
+    enum Shape { SQUARE, CIRCLE; boolean round() { return this == CIRCLE; } }
     static final class Spec {
         final int width;
         final long seed;
@@ -779,7 +779,7 @@ fn a_fixed_number_boolean_or_enum_field_of_a_shared_object_is_read_with_a_plain_
         long step(long x) {
             long y = x * seed + width + mark + area;
             if (mirrored) y = -y;
-            return shape == Shape.CIRCLE ? y + (long) scale : y;
+            return shape == Shape.CIRCLE && shape.round() ? y + (long) scale : y;
         }
     }
     static final class Leaky {
@@ -817,18 +817,22 @@ fn a_fixed_number_boolean_or_enum_field_of_a_shared_object_is_read_with_a_plain_
             // The fields keep their atomic cells, which the constructor fills; elsewhere they are
             // read where they are, a plain load.
             "width: java::SharedField<i32>,",
-            "*self.seed.fixed()",
-            "*self.width.fixed()",
-            "*self.mirrored.fixed()",
-            "*self.mark.fixed()",
-            "*self.area.fixed()",
-            "*self.scale.fixed()",
-            "*self.shape.fixed()",
+            "*this.seed.fixed()",
+            "*this.width.fixed()",
+            "*this.mirrored.fixed()",
+            "*this.mark.fixed()",
+            "*this.area.fixed()",
+            "*this.scale.fixed()",
+            "*this.shape.fixed()",
             // A field that is not fixed is still an atomic load, and so is a fixed field of an
             // object whose constructor hands `this` to a thread before writing it.
             "uses.get()",
             "value.get()",
         ],
     );
-    assert_lacks(&rust, &["self.seed.get()", "self.mirrored.get()", "self.shape.get()", "value.fixed()"]);
+    // An enum's read is parenthesized where a method is called on it.
+    assert_lacks(
+        &rust,
+        &["this.seed.get()", "this.mirrored.get()", "this.shape.get()", "value.fixed()", ".fixed().round()"],
+    );
 }

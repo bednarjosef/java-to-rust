@@ -1626,10 +1626,15 @@ impl<'a> Gen<'a> {
             };
             if self.fixed_cell(object, name, ty) {
                 let path = self.field_path(object, name);
-                if ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_)) {
+                if ty.is_numeric() || matches!(ty, Type::Boolean) {
                     // A word that the dereference copies, parenthesized only where an operator
                     // needs it: `*o.n.fixed() as i64`, `(*o.n.fixed()).wrapping_add(1)`.
                     return Code::new(format!("*{obj}{borrow}.{path}.fixed()"), UNARY);
+                }
+                if matches!(ty, Type::Enum(_)) {
+                    // An enum's methods are called on the read as written, so it is an atom:
+                    // `(*o.e.fixed()).ordinal()`.
+                    return Code::atom(format!("(*{obj}{borrow}.{path}.fixed())"));
                 }
                 return Code::atom(format!("(*{obj}{borrow}.{path}.fixed()){clone}"));
             }
