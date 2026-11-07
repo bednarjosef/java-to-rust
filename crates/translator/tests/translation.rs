@@ -1170,6 +1170,85 @@ fn an_object_that_leaves_on_some_paths_moves_to_the_heap_there() {
 }
 
 #[test]
+fn an_object_copied_into_a_call_s_argument_is_still_moved_where_it_leaves() {
+    let rust = translate(
+        "class P { int x; P(int x) { this.x = x; } P next() { return new P(x + 1); } }
+        class B { int at(P p, int sea) { return p.x < sea ? 0 : p.x & 3; } }
+        class A {
+            static B[] bs = { new B(), null };
+            static P[] kept = new P[64];
+            static int n, reads;
+            static int sea() { reads++; return 3; }
+            static B pick(int i) { return bs[i % 1]; }
+            public static void main(String[] a) {
+                int sum = 0;
+                for (int i = 0; i < 50; i++) {
+                    P p = new P(i);
+                    P q = p.next();
+                    B b = pick(i);
+                    int r = b.at(q, sea());
+                    sum += r;
+                    if (r == 3 && n < 64) kept[n++] = q;
+                }
+                System.out.println(sum + n + reads);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // `b` may be null and `sea()` has an effect, so `q` is first copied into the call's
+            // own `argument_0`, which is not read after the move.
+            "let argument_0 = q.clone();",
+            "let mut q = p.next_on_stack(&slot_2);",
+            "unsafe { slot_2.to_heap(&mut q) };",
+        ],
+    );
+}
+
+#[test]
+fn an_object_is_not_moved_where_another_local_that_holds_it_is_read_after() {
+    let rust = translate(
+        "class P { int x; P(int x) { this.x = x; } }
+        class A {
+            static P[] kept = new P[64];
+            static int n;
+            public static void main(String[] a) {
+                int sum = 0;
+                for (int i = 0; i < 50; i++) {
+                    P p = new P(i);
+                    {
+                        P copy = p;
+                        if (i % 7 == 0) kept[n++] = p;
+                        sum += copy.x;
+                    }
+                }
+                for (int i = 0; i < 50; i++) {
+                    P q = new P(i);
+                    {
+                        P copy = q;
+                        sum += copy.x;
+                    }
+                    if (i % 7 == 0) kept[n++] = q;
+                }
+                System.out.println(sum + n);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // `copy` is read after the place where `p` leaves, so `p` would leave it naming the
+            // slot: it is made in the heap.
+            "let p = Arc::new(P__new(i));",
+            // Here `copy` is not read again after it: `q` is moved where it leaves.
+            "let mut q = slot_1.put(P__new(i));",
+            "unsafe { slot_1.to_heap(&mut q) };",
+        ],
+    );
+}
+
+#[test]
 fn hashing_an_object_by_its_own_hash_code_does_not_keep_it_on_the_heap() {
     let rust = translate(
         "class P { int x; P(int x) { this.x = x; } public int hashCode() { return x * 31; } }
