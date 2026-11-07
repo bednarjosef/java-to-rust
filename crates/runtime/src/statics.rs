@@ -7,9 +7,11 @@
 //! thread uses:
 //!
 //! - a primitive is a `java::Atomic<T>`, read with `get()` (acquire) and written with `set(v)`
-//!   (release), the same text as a thread-local `Cell`'s; on x86-64 both are plain moves;
-//! - an object or a string is a `java::Locked<T>` (`with_borrow`, `with_borrow_mut`, as a
-//!   thread-local `RefCell`'s), behind a `LazyLock` when its initializer is not a constant;
+//!   (release), the same text as a thread-local `Cell`'s; on x86-64 both are plain moves; a
+//!   `volatile` one is read and written with `get_volatile` and `set_volatile`, sequentially
+//!   consistent;
+//! - an object or a string is a `java::SharedField<T>` (`field.rs`), read and written by value
+//!   with no lock in the same way, behind a `LazyLock` when its initializer is not a constant;
 //! - one that only its class's static initialization assigns, once (a `static final`), is a
 //!   `java::Final<T>`, which a thread reads with no lock: `get()` lends the value in place;
 //! - the flag that a class's static initialization has run is a `java::ClassInit`, which runs it
@@ -262,6 +264,18 @@ impl<T: Primitive> Atomic<T> {
     pub fn set(&self, value: T) {
         unsafe { T::store(self.0.get(), value, Ordering::Release) }
     }
+
+    /// A read of a `volatile` static, sequentially consistent as Java's is.
+    #[inline]
+    pub fn get_volatile(&self) -> T {
+        unsafe { T::load(self.0.get(), Ordering::SeqCst) }
+    }
+
+    /// A write of a `volatile` static, sequentially consistent as Java's is.
+    #[inline]
+    pub fn set_volatile(&self, value: T) {
+        unsafe { T::store(self.0.get(), value, Ordering::SeqCst) }
+    }
 }
 
 /// A `static final` object, array or string that threads share, which only its class's static
@@ -437,7 +451,7 @@ impl<T> Final<T> {
         }
     }
 
-    /// Runs `f` on the value, as a `java::Locked` static's read but with no lock.
+    /// Runs `f` on the value where it is, with no lock and no copy.
     #[inline(always)]
     pub fn with_borrow<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         f(self.get())

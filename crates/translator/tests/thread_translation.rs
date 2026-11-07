@@ -84,7 +84,7 @@ fn statics_that_a_started_thread_touches_are_process_wide() {
         &rust,
         &[
             "static A_BASE: java::Atomic<i32> = java::Atomic::new(3);",
-            "static A_LABEL: java::Locked<Option<java::JString>> = java::Locked::new(None);",
+            "static A_LABEL: java::SharedField<Option<java::JString>> = java::SharedField::new(None);",
             "let _main = java::main_thread();",
             "static CLASSLOADER_SYSTEM: RefCell<Option<Arc<ClassLoader>>> = const { RefCell::new(None) };",
         ],
@@ -92,10 +92,55 @@ fn statics_that_a_started_thread_touches_are_process_wide() {
 }
 
 #[test]
+fn a_static_of_the_process_is_read_and_written_without_a_lock() {
+    // `current` and `hits` are assigned again after initialization, so they are not
+    // `java::Final`s; each access is still one atomic action with no lock, sequentially
+    // consistent for the `volatile` ones, as Java's are.
+    let rust = translate(
+        "class A {
+            static String current;
+            static volatile Object stop;
+            static int hits;
+            static volatile int turns;
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> {
+                    while (stop == null) {
+                        current = \"seen \" + turns;
+                        hits++;
+                        turns += 2;
+                    }
+                });
+                t.start();
+                current += \"!\";
+                stop = new Object();
+                t.join();
+                System.out.println(current != null);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "static A_CURRENT: java::SharedField<Option<java::JString>> = java::SharedField::new(None);",
+            "static A_STOP: java::SharedField<Option<Arc<PlainObject>>> = java::SharedField::new(None);",
+            "static A_HITS: java::Atomic<i32> = java::Atomic::new(0);",
+            "A_STOP.get_volatile().is_none()",
+            "A_CURRENT.set(",
+            "A_CURRENT.get()",
+            "A_STOP.set_volatile(",
+            "A_TURNS.get_volatile()",
+            "A_TURNS.set_volatile(",
+            "A_CURRENT.get().is_some()",
+        ],
+    );
+    assert_lacks(&rust, &["java::Locked<Option", "A_CURRENT.with_borrow", "A_STOP.with_borrow"]);
+}
+
+#[test]
 fn a_static_final_that_threads_read_is_read_without_a_lock() {
     // `TABLE` and `NAME` are assigned once, by `A`'s static initialization: `java::Final`s, which a
     // thread lends in place, with no test, since `main` prepares them first. `log` is assigned
-    // again, so it keeps its lock.
+    // again, so it is a `java::SharedField`, read and written by value.
     let rust = translate(
         "class A {
             static final int[] TABLE;
@@ -119,7 +164,7 @@ fn a_static_final_that_threads_read_is_read_without_a_lock() {
             // `DESCRIBED`'s initializer reads it before it is set, so it may be null.
             "static A_TABLE: java::Final<Option<java::SharedArray<i32>>> = java::Final::new(None);",
             "static A_DESCRIBED: java::Final<java::JString> = java::Final::new(java::JString::new());",
-            "static A_LOG: java::Locked<Option<java::JString>>",
+            "static A_LOG: java::SharedField<Option<java::JString>>",
             "java::len(java::non_null((*{ init_a(); A_TABLE.get_prepared() }).as_ref()))",
             "{ init_a(); A_DESCRIBED.get_prepared().clone() }",
             "A_TABLE.prepare();",
@@ -326,7 +371,7 @@ fn a_string_builder_of_a_program_with_threads_is_shared() {
     assert_contains(
         &rust,
         &[
-            "static A_LOG: LazyLock<java::Locked<java::SharedStringBuilder>>",
+            "static A_LOG: LazyLock<java::SharedField<java::SharedStringBuilder>>",
             "StringBuilder(java::SharedStringBuilder) = 22,",
             "unsafe { self.0.monitor::<java::SharedStringBuilder>() }",
             "let _monitor = java::enter(&A_LOG",
