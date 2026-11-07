@@ -663,10 +663,16 @@ to run.
   object could not last (`{ c.borrow().name.clone() }`). In a program with threads, the fields of
   a class whose constructors, or whose subclasses' constructors, may start a thread are not
   fixed, since that thread could read one while the constructor writes it, but for those that
-  only the class's own constructors write while `this` cannot have left: no constructor or field
-  initializer of the class or a superclass uses `this` as a value (passes, stores or captures
-  it, or calls a method on it), so no other thread holds the object before they are written. The
-  Minecraft server's `ChunkAccess.sections` is such a field. The runtime's
+  only the class's own constructors and field initializers write, each write before `this` can
+  have left (`written_late`). A constructor runs the statements before its `super(..)` first
+  (javac's enclosing instance and captured locals), then the superclasses' constructors, its
+  field initializers in order and the rest of its body; `this` can have left from the first of
+  these that uses it as a value (passes, stores or captures it, or calls a method on it), from a
+  superclass constructor or initializer that does, and from a `this(..)`. Until then no other
+  thread holds the object. The Minecraft server's `ChunkAccess.sections`, whose class never lets
+  `this` leave, is such a field, and so are the enclosing instance of `ChunkMap.DistanceManager`
+  and the maps `ChunkMap`'s field initializers make, which come before its constructor hands
+  `this` to the light engine. The runtime's
   `fixed.rs` gives the reasons that the borrow cannot alias a write. A fixed field of a celled
   object is read where it is too, `(*c.name.fixed())`, outside the constructors and field
   initializers, which write it (`Gen::fixed_cell`): a `java::SharedField` of a value that is not
