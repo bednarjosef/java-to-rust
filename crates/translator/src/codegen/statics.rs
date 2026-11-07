@@ -238,12 +238,14 @@ impl<'a> Gen<'a> {
     /// initialization is waited for, and `init_done` ends the function. A rewritten `<clinit>`
     /// keeps its own state, which is its guard (`lower/clinit_errors.rs`): when its statics are
     /// the process's, another thread's initialization is waited for all the same, and the run
-    /// this thread starts is done at whichever return ends it, failed or not.
+    /// this thread starts is done at whichever return ends it, failed or not, and ready (the
+    /// `ClassInit`'s state that the fast path tests alone) when the kept state says it succeeded.
     pub(super) fn init_guard(&mut self, t: usize) {
         let class = &self.class.types[t].name;
         if crate::lower::rewritten_clinit(&self.class.types[t]) {
             if self.facts.process_statics(t) {
-                self.line(&format!("let _run = {}.run();", flag(class)));
+                let kept = self.cell_name(t, crate::lower::STATE);
+                self.line(&format!("let _run = {}.run(&{kept});", flag(class)));
             }
             return;
         }
@@ -262,13 +264,15 @@ impl<'a> Gen<'a> {
     /// The `init` function of class `t`, named `name`, returning `ret`: inlined where it is called,
     /// it returns at once when the class's initialization has started (for the process's statics,
     /// when it is done), and otherwise calls `{name}_slow`, which runs the `<clinit>` and is kept
-    /// out of line. A class is used far more often than it is initialized.
+    /// out of line. A class is used far more often than it is initialized, and the test is one
+    /// load of one flag: a loop that uses several classes tests each on every pass.
     pub(super) fn init_fast_path(&mut self, t: usize, name: &str, ret: &str) {
         let decl = &self.class.types[t];
         // A rewritten `<clinit>` records that it started before it runs; another thread waits
-        // until it is done.
+        // until it is done, and the `ClassInit` is ready once a run is done and succeeded, which
+        // stands for its kept state being 1 as well.
         let started = if crate::lower::rewritten_clinit(decl) && self.facts.process_statics(t) {
-            format!("{}.get() == 1 && {}.done()", self.cell_name(t, crate::lower::STATE), flag(&decl.name))
+            format!("{}.ready()", flag(&decl.name))
         } else if crate::lower::rewritten_clinit(decl) {
             format!("{}.get() == 1", self.cell_name(t, crate::lower::STATE))
         } else if self.facts.process_statics(t) {
@@ -310,12 +314,97 @@ impl<'a> Gen<'a> {
         Some(format!("{};", self.init_run(init)))
     }
 
-    /// The class whose initialization a use of class `class` runs here (`init_call`), if any.
+    /// The class whose initialization a use of class `class` runs here (`init_call`), if any:
+    /// none in that class or a subclass of it, nor after a statement of the same method that
+    /// surely ran it (`known_init`).
     pub(super) fn uninitialized(&self, class: usize) -> Option<usize> {
         let current = self.class.methods[self.method].class;
         let init = self.facts.init_class(self.class, class)?;
-        let initialized = current == init || self.class.hierarchy.ancestors(current).contains(&init);
+        let initialized = current == init
+            || self.class.hierarchy.ancestors(current).contains(&init)
+            || self.known_init.contains(&(self.method, init));
         (!initialized).then_some(init)
+    }
+
+    /// The classes whose initialization statement `stmt` has run once it completes normally,
+    /// through a check written in this method (`init_call`): one for a read or write of a static
+    /// that is not a constant, an enum constant, or `Class.forName`, where the statement surely
+    /// evaluates it. Once the check passed, the class is initialized, or this thread is running
+    /// its initialization, and a second check would pass too. A call or `new` is left out (its
+    /// check is the callee's), and so is anything inside a lambda, past `&&`, `||` or `?`, or in a
+    /// switch's cases, which may not run.
+    pub(super) fn initialized_by(&self, stmt: &Stmt) -> Vec<usize> {
+        let mut found = Vec::new();
+        match stmt {
+            Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::If { cond: e, .. } => {
+                self.surely_initializes(e, &mut found)
+            }
+            _ => {}
+        }
+        found
+    }
+
+    fn surely_initializes(&self, e: &Expr, found: &mut Vec<usize>) {
+        let mut class_of = |class: usize| found.extend(self.facts.init_class(self.class, class));
+        match &e.kind {
+            ExprKind::Static { class, name } => {
+                let constant = self.class.types[*class].statics.iter().any(|f| f.name == *name && f.constant);
+                if !constant {
+                    class_of(*class);
+                }
+            }
+            ExprKind::EnumConstant { class, .. } => class_of(*class),
+            ExprKind::Builtin(Builtin::InitializeClass { class }, _) => class_of(*class),
+            ExprKind::Assign { target, value, .. } => {
+                if let Place::Static { class, .. } = target {
+                    class_of(*class);
+                }
+                self.place_surely_initializes(target, found);
+                self.surely_initializes(value, found);
+            }
+            ExprKind::IncDec { target, .. } => {
+                if let Place::Static { class, .. } = target {
+                    class_of(*class);
+                }
+                self.place_surely_initializes(target, found);
+            }
+            ExprKind::Binary(BinOp::And | BinOp::Or, left, _) => self.surely_initializes(left, found),
+            ExprKind::Binary(_, left, right) | ExprKind::Index(left, right) => {
+                self.surely_initializes(left, found);
+                self.surely_initializes(right, found);
+            }
+            ExprKind::Unary(_, value)
+            | ExprKind::Cast(_, value)
+            | ExprKind::InstanceOf { value, .. }
+            | ExprKind::Length(value)
+            | ExprKind::Conditional(value, ..)
+            | ExprKind::Field { object: value, .. }
+            | ExprKind::Switch { selector: value, .. } => self.surely_initializes(value, found),
+            ExprKind::NewArray(values)
+            | ExprKind::ArrayLit(values)
+            | ExprKind::Call { args: values, .. }
+            | ExprKind::New { args: values, .. }
+            | ExprKind::ThisCall { args: values, .. }
+            | ExprKind::SuperInit { args: values, .. } => {
+                values.iter().for_each(|v| self.surely_initializes(v, found))
+            }
+            ExprKind::MethodCall { receiver, args, .. } => {
+                self.surely_initializes(receiver, found);
+                args.iter().for_each(|v| self.surely_initializes(v, found));
+            }
+            _ => {}
+        }
+    }
+
+    fn place_surely_initializes(&self, place: &Place, found: &mut Vec<usize>) {
+        match place {
+            Place::Index(array, index) => {
+                self.surely_initializes(array, found);
+                self.surely_initializes(index, found);
+            }
+            Place::Field { object, .. } => self.surely_initializes(object, found),
+            Place::Var(_) | Place::Static { .. } => {}
+        }
     }
 
     /// The call that runs the initialization of the class `init` (its `init` function), without

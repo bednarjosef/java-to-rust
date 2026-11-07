@@ -424,7 +424,14 @@ in the order of its `implements` clauses, each interface after its own superinte
 interface's initialization initializes none (`codegen::default_superinterfaces`, and
 reachability keeps those initializers, `Walk::default_interfaces`). Code in a class or its
 subclass does not initialize the class again (`codegen/statics.rs::init_call`), nor does a
-default method its interface, which the class's initialization has initialized. A method that
+default method its interface, which the class's initialization has initialized. Nor does a use
+after a statement of the same method that surely initialized the class through a check of its
+own (`initialized_by`): a read or write of one of its statics that is not a constant, or one of
+its enum constants, which the statement evaluates whatever path it takes (not past `&&`, `||` or
+`?`, nor in a lambda). That statement's block and the blocks inside it skip the check: once one
+check passed, the class is initialized or this thread is running its initialization, so a
+second one would pass too. A lambda's body checks again, as it may run on another thread. A
+call or a `new` does not count, as its check is in the callee. A method that
 lowering adds for an expression (`Method::added`, `lower/added_methods.rs`), such as the one
 every `Class.forName` with a computed name calls, is put in the class whose code it first meets
 but stands for the code at its call sites, so calling it does not initialize that class.

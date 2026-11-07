@@ -230,7 +230,7 @@ is process-wide (`crates/runtime/src/statics.rs`, `codegen/statics.rs`):
 | object or string | `java::Locked<T>`, behind a `LazyLock` when its initializer is not a constant | `with_borrow`, `with_borrow_mut` |
 | object or string that only its class's initialization assigns | `java::Final<T>`, made with `java::Final::lazy` when its initializer is not a constant | `X.get().clone()`, or the place `(*X.get())` (`get_prepared` for an eager class's, which `main` prepares, `get_settled` for one that `main` initializes first); `X.set(v)` |
 | array that only its class's initialization makes, and that the program only indexes to read and measures | `java::Final<java::Frozen<T>>`, or `java::Frozen<T, N>` when every array it is given has the constant length `N` | `java::get(&(*X.get()), i)`, `java::len(&(*X.get()))`; `X.set(java::freeze(a))`, `X.set(java::freeze_fixed(a))` |
-| a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();` |
+| a class's "initialized" flag | `static C_INIT: java::ClassInit` | `if !C_INIT.start() { return; }` .. `C_INIT.finish();`; a use tests `C_INIT.done()` (`C_INIT.ready()` where the `<clinit>` keeps its own state) |
 
 A `static final` of object, array or string type that no code but its class's static
 initialization assigns (`Facts::final_statics`, from `analysis/statics.rs`) is a `java::Final`:
@@ -324,7 +324,13 @@ copy of the `java::Frozen` handle that shares its elements.
 the initializer, another thread finding it in progress waits, and the same thread finding its
 own initialization in progress returns at once (a recursive initialization sees defaults, as in
 Java). `std::sync::Once` cannot do the last case. `start`/`finish` have the shape of the
-thread-local flag's guard, so the initializer body is generated once for both forms.
+thread-local flag's guard, so the initializer body is generated once for both forms. A use of
+the class tests one word before anything else, one acquire load (a plain move on x86-64) in the
+inlined `init` function: `done()`, or `ready()` for a class whose `<clinit>` keeps its own state
+of failure (`docs/exceptions.md`), whose run finishes as `READY` only when that state says it
+succeeded. A loop that uses several classes tests each on every pass, so the test is kept to the
+one load: a program whose loop calls a static method of each of two such classes ran 28
+instructions a pass when the test also read the kept state, and 22 with `ready()`.
 
 The statics that are process-wide are decided per class (`Facts::process_statics`): those of
 every class whose statics the code of a started thread may read or write, or whose static

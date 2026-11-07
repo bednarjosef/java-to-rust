@@ -1045,6 +1045,31 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The test that an `Object[]` of the class of elements `element` makes of an element it
+    /// stores (`java::ElementClass::fitting`), an element of `s`'s enum (an `Option` of one
+    /// where `nullable`): whether its class number is that of a class below `element`, and null
+    /// passes. `None` where `element` is no class of the program, an array type, or a type held
+    /// as the one class of its own that is stored as it (no enum of its own) while other classes
+    /// are below it too, whose narrowing (`narrow_fn`) could not give their objects that class's
+    /// handle.
+    pub(super) fn element_test(&mut self, s: usize, element: Type, nullable: bool) -> Option<String> {
+        let t = self.type_of(element).filter(|&t| self.class.array_of(t).is_none())?;
+        let passing = self.passing(s, t);
+        if passing.len() > 1 && self.class.types[t].kind != TypeKind::Enum && self.enum_for(t).is_none() {
+            return None;
+        }
+        let test = if passing.is_empty() {
+            "false".to_string()
+        } else {
+            self.need(Need::Narrow(s, t));
+            format!("o.{}().is_some()", self.as_name(t))
+        };
+        Some(match nullable {
+            true => format!("|v| v.as_ref().is_none_or(|o| {test})"),
+            false => format!("|o| {test}"),
+        })
+    }
+
     /// The pattern that binds `name`, of type `ty`, from `source` (`pattern_source`):
     /// `Some(name)`. Where no value of the program is a `T` (`None::<T>`), the code that would run
     /// with it may still assign fields of it, as of a value of a class that no object of the

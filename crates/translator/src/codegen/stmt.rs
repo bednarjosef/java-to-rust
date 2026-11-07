@@ -21,6 +21,7 @@ impl<'a> Gen<'a> {
         let mut narrowed = Vec::new();
         let mut synchronized = false;
         let outer_steady = self.steady.take();
+        let known = self.known_init.len();
         for (i, stmt) in stmts[..end].iter().enumerate() {
             let rest = &stmts[i + 1..];
             // The block of a `synchronized` that `synchronized_block` wrote with its lock.
@@ -55,9 +56,16 @@ impl<'a> Gen<'a> {
                     self.line(&format!("Err({text})"));
                 }
                 _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
-                _ => self.stmt(stmt, rest),
+                _ => {
+                    self.stmt(stmt, rest);
+                    // The statements after it run only once it completes normally.
+                    let method = self.method;
+                    let initialized = self.initialized_by(stmt);
+                    self.known_init.extend(initialized.into_iter().map(|c| (method, c)));
+                }
             }
         }
+        self.known_init.truncate(known);
         if folded {
             self.steady = Some(strings::SteadyOf::new(&stmts[end], Some(&stmts[end + 1])));
             self.tail_local(&stmts[end]);

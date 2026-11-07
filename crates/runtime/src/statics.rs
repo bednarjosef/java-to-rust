@@ -454,15 +454,23 @@ impl<T> Drop for Final<T> {
 }
 
 /// The state of a class's static initialization, for the whole process: not started, being run
-/// by the thread with a token, or done.
+/// by the thread with a token (the address of a thread-local, never 0, 1 or 2), done, or done and
+/// succeeded (`READY`, for an initialization that keeps its own state of success, see
+/// `ClassInit::run`).
 const NOT_STARTED: usize = 0;
 const DONE: usize = 1;
+const READY: usize = 2;
 
 /// Whether a class's static initialization has run, for a program with threads: the first thread
 /// that uses the class runs it, another thread that uses the class meanwhile waits until it is
 /// done, and the thread that runs it sees the class as initialized when its initializer uses the
 /// class again (it reads the statics not yet assigned at their defaults), as JLS 12.4.2 says.
 /// (`std::sync::Once` would deadlock on that last case.)
+///
+/// The test that a use of the class makes first is one acquire load of `state`: `done` for a
+/// class whose initialization cannot fail, `ready` for one that keeps its own state of success or
+/// failure, whose run records which it was as it finishes. Either sees, once true, everything the
+/// thread that ran the initialization wrote, as the finish stores with release.
 pub struct ClassInit {
     state: AtomicUsize,
     lock: Mutex<()>,
@@ -478,7 +486,7 @@ impl ClassInit {
     /// while this thread runs it; another thread's run is waited for first.
     #[inline]
     pub fn start(&self) -> bool {
-        if self.state.load(Ordering::Acquire) == DONE {
+        if matches!(self.state.load(Ordering::Acquire), DONE | READY) {
             return false;
         }
         self.start_slow()
@@ -488,7 +496,14 @@ impl ClassInit {
     /// class's `init` function.
     #[inline]
     pub fn done(&self) -> bool {
-        self.state.load(Ordering::Acquire) == DONE
+        matches!(self.state.load(Ordering::Acquire), DONE | READY)
+    }
+
+    /// Whether the initialization is done and succeeded (see `run`): the whole fast path of the
+    /// `init` function of a class whose `<clinit>` keeps its own state, one load.
+    #[inline]
+    pub fn ready(&self) -> bool {
+        self.state.load(Ordering::Acquire) == READY
     }
 
     #[cold]
@@ -501,7 +516,7 @@ impl ClassInit {
                     self.state.store(me, Ordering::Release);
                     return true;
                 }
-                DONE => return false,
+                DONE | READY => return false,
                 owner if owner == me => return false,
                 _ => guard = self.done.wait(guard).unwrap_or_else(|e| e.into_inner()),
             }
@@ -511,28 +526,38 @@ impl ClassInit {
     /// Records that the initialization the calling thread started is done, and wakes the threads
     /// that wait for it.
     pub fn finish(&self) {
+        self.finish_as(DONE);
+    }
+
+    fn finish_as(&self, state: usize) {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        self.state.store(DONE, Ordering::Release);
+        self.state.store(state, Ordering::Release);
         self.done.notify_all();
     }
 
-    /// `start`, for an initialization that keeps its own state of success or failure (a class
-    /// whose `<clinit>` the translator rewrites to rethrow): the run that the calling thread is to
-    /// do now, which finishes when it is dropped, at whichever return ends it, failed or not.
-    /// `None` once it is done, or while this thread runs it; another thread's run is waited for
-    /// first.
+    /// `start`, for an initialization that keeps its own state of success or failure in `kept`
+    /// (a class whose `<clinit>` the translator rewrites to rethrow: 0 not started, 1 started or
+    /// succeeded, 2 failed): the run that the calling thread is to do now, which finishes when it
+    /// is dropped, at whichever return ends it, failed or not; as `READY` when `kept` is then 1,
+    /// so that `ready` alone tells a later use that it may go on. `None` once it is done, or while
+    /// this thread runs it; another thread's run is waited for first.
     #[inline]
-    pub fn run(&self) -> Option<InitRun<'_>> {
-        self.start().then_some(InitRun(self))
+    pub fn run<'a>(&'a self, kept: &'a Atomic<i32>) -> Option<InitRun<'a>> {
+        self.start().then_some(InitRun { init: self, kept })
     }
 }
 
-/// An initialization that the calling thread runs (`ClassInit::run`): done when dropped.
-pub struct InitRun<'a>(&'a ClassInit);
+/// An initialization that the calling thread runs (`ClassInit::run`): done when dropped, and
+/// ready when its kept state says that it succeeded.
+pub struct InitRun<'a> {
+    init: &'a ClassInit,
+    kept: &'a Atomic<i32>,
+}
 
 impl Drop for InitRun<'_> {
     fn drop(&mut self) {
-        self.0.finish();
+        // Only the calling thread writes the kept state while the run is in progress.
+        self.init.finish_as(if self.kept.get() == 1 { READY } else { DONE });
     }
 }
 
@@ -611,7 +636,7 @@ mod tests {
         static INIT: ClassInit = ClassInit::new();
         static STATE: Atomic<i32> = Atomic::new(0);
         fn init() -> Result<(), &'static str> {
-            let _run = INIT.run();
+            let _run = INIT.run(&STATE);
             match STATE.get() {
                 2 => return Err("no class"),
                 1 => return Ok(()),
@@ -625,6 +650,33 @@ mod tests {
         let mut results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
         results.sort();
         assert_eq!(results, [Err("failed"), Err("no class"), Err("no class"), Err("no class")]);
-        assert!(INIT.done());
+        assert!(INIT.done() && !INIT.ready());
+    }
+
+    #[test]
+    fn a_run_that_succeeds_is_ready_for_the_threads_that_wait() {
+        crate::locked::begin_threads();
+        static INIT: ClassInit = ClassInit::new();
+        static STATE: Atomic<i32> = Atomic::new(0);
+        static VALUE: Atomic<i32> = Atomic::new(0);
+        fn init() -> Result<i32, &'static str> {
+            if INIT.ready() {
+                return Ok(VALUE.get());
+            }
+            let _run = INIT.run(&STATE);
+            match STATE.get() {
+                2 => return Err("no class"),
+                1 => return Ok(VALUE.get()),
+                _ => STATE.set(1),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            VALUE.set(7);
+            Ok(VALUE.get())
+        }
+        let threads: Vec<_> = (0..4).map(|_| std::thread::spawn(init)).collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), Ok(7));
+        }
+        assert!(INIT.ready() && INIT.done());
     }
 }
