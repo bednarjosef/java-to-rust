@@ -821,6 +821,7 @@ impl<'a> Gen<'a> {
             unmoved: HashSet::new(),
             missed: Vec::new(),
             on_stack: false,
+            few_arms: false,
             stack_forms: &setup.stack_forms,
             stack_sites: &setup.stack_sites,
             only_enums: round.only_enums.as_ref(),
@@ -1151,6 +1152,10 @@ struct Gen<'a> {
     /// Whether the constructor or factory being written is its form on the stack, which makes
     /// its object in the slot it is given.
     on_stack: bool,
+    /// Whether the arms being written are those of a dispatcher among a few classes, or of a copy
+    /// of a body for one class, which copy the small bodies they call for their classes
+    /// whatever the number of classes that run those (`Gen::body_for`).
+    few_arms: bool,
     /// The constructors and factories that get a form on the stack (see `stack_objects`).
     stack_forms: &'a HashSet<usize>,
     /// `Setup::stack_sites`.
