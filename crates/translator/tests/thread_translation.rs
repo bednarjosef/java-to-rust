@@ -616,3 +616,51 @@ fn a_static_initializer_that_nothing_observes_runs_first_in_main() {
     );
     assert_lacks(&rust, &["init_a_loud();\n    A_LOUD"]);
 }
+
+#[test]
+fn a_constructor_that_starts_a_thread_without_letting_this_leave_keeps_its_fields_fixed() {
+    let rust = translate(
+        "class A {
+    static final class Pool {
+        final int[] slots;
+        final Thread worker;
+        Pool(int n) {
+            slots = new int[n];
+            worker = new Thread(() -> System.out.println(\"worker\"));
+            worker.start();
+        }
+        int first() { return slots[0]; }
+    }
+    static final class Reporter {
+        final int[] counts;
+        final Thread thread;
+        Reporter(int n) {
+            thread = new Thread(this::report);
+            counts = new int[n];
+            thread.start();
+        }
+        void report() { System.out.println(counts.length); }
+        int first() { return counts[0]; }
+    }
+    public static void main(String[] args) throws InterruptedException {
+        Pool p = new Pool(2);
+        p.worker.join();
+        Reporter r = new Reporter(3);
+        r.thread.join();
+        System.out.println(p.first() + r.first());
+    }
+}",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // `Pool`'s constructor starts a thread, but no other code holds the pool until it
+            // returns: its array is frozen and read without an atomic load.
+            "slots: java::Frozen<i32>,",
+            // `Reporter`'s hands `this` to its thread before it writes `counts`.
+            "counts: java::SharedField<Option<java::SharedArray<i32>>>,",
+            "this.counts.get()",
+        ],
+    );
+    assert_lacks(&rust, &["slots: java::SharedField"]);
+}
