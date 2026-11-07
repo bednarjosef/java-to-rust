@@ -1911,7 +1911,7 @@ impl<'a> Gen<'a> {
         let key = self.among(t, receiver).or_else(|| self.profiled_among(t, receiver, group))?;
         let h = &self.class.hierarchy;
         let runs = |c: usize| self.is_enum_variant(t, c) && h.implementation(resolved, c) == Some(f);
-        if !self.receiver_sets[&key].iter().any(|&c| runs(c) && self.arm_on_stack(c, f, "").is_some()) {
+        if !self.receiver_sets[&key].iter().any(|&c| runs(c) && self.runs_on_stack(c, f)) {
             return None;
         }
         self.need(Need::Among(t, group, key, Some(f)));
@@ -2827,9 +2827,9 @@ impl<'a> Gen<'a> {
             }
             Some(i)
                 if on_stack == Some(i)
-                    && let Some(text) = g.arm_on_stack(c, i, args) =>
+                    && let Some((text, uses)) = g.arm_on_stack(t, c, i, args) =>
             {
-                (g.covariant_ret(i, r, text), true)
+                (g.covariant_ret(i, r, text), uses)
             }
             Some(i) => {
                 let (text, uses) = g.arm_call(t, c, i, args);
@@ -3523,22 +3523,50 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The call of factory `i`'s form on the stack that a dispatcher's arm for an object of class
-    /// `c`, bound to `o`, makes with the dispatcher's slot `j2r_slot`, where `arm_call` writes a
-    /// call of a class's method; `None` for any other.
-    pub(super) fn arm_on_stack(&self, c: usize, i: usize, args: &str) -> Option<String> {
-        if !matches!(self.homes[i], Home::Class(_))
-            || self.class.types[c].kind == TypeKind::Enum
-            || self.holds_value(c)
-            || !self.stack_forms.contains(&i)
-        {
+    /// Whether a dispatcher's arm for an object of class `c` can run factory `i` in its form on
+    /// the stack (`arm_on_stack`): a body on a class or on an enum, with a form on the stack.
+    fn runs_on_stack(&self, c: usize, i: usize) -> bool {
+        let class = match self.homes[i] {
+            Home::Class(_) => self.class.types[c].kind != TypeKind::Enum && !self.holds_value(c),
+            Home::Enum(_) => true,
+            _ => false,
+        };
+        class && self.stack_forms.contains(&i)
+    }
+
+    /// The call of factory `i`'s form on the stack that the dispatcher of the enum of `t` makes,
+    /// in its arm for an object of class `c` bound to `o`, with the dispatcher's slot `j2r_slot`,
+    /// where `arm_call` writes a call of the factory; and whether it uses `o`. `None` for a
+    /// factory that `runs_on_stack` leaves out.
+    pub(super) fn arm_on_stack(
+        &mut self,
+        t: usize,
+        c: usize,
+        i: usize,
+        args: &str,
+    ) -> Option<(String, bool)> {
+        if !self.runs_on_stack(c, i) {
             return None;
         }
-        let name = &self.fn_names[i];
+        let name = format!("{}_on_stack", self.fn_names[i]);
         let with = if args.is_empty() { "j2r_slot".to_string() } else { format!("j2r_slot, {args}") };
+        // As `arm_call` calls a body on an enum, without its copies for one class.
+        if let Home::Enum(d) = self.homes[i] {
+            self.need(Need::Body(i));
+            return Some(if d == t {
+                (self.enum_fn_call(d, &name, self.this_value(), &with), false)
+            } else if !self.class.hierarchy.is_subtype(t, d) {
+                let obj = format!("{}({})", self.variant(d, c), self.held(c));
+                (self.enum_fn_call(d, &name, &obj, &with), true)
+            } else {
+                self.need(Need::Convert(t, d));
+                let obj = format!("{}.{}()", self.me(), self.to_name(d));
+                (self.enum_fn_call(d, &name, &obj, &with), false)
+            });
+        }
         Some(match self.facts.self_methods.contains(&i) {
-            true => format!("o{}.{name}_on_stack({with})", self.arm_borrow(c, i)),
-            false => format!("{}_on_stack(o, {with})", self.qualified_fn(i)),
+            true => (format!("o{}.{name}({with})", self.arm_borrow(c, i)), true),
+            false => (format!("{}_on_stack(o, {with})", self.qualified_fn(i)), true),
         })
     }
 

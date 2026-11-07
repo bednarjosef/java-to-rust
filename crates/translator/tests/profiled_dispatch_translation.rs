@@ -71,6 +71,22 @@ fn translate_profiled(java: &str, text: &str) -> String {
     rust
 }
 
+/// `java` translated to count the classes of its calls' receivers.
+fn counted_of(java: &str) -> String {
+    // SAFETY (of `set_var`): this binary's only test, so no other thread reads the environment.
+    unsafe { std::env::set_var("JAVA_TO_RUST_COUNT_DISPATCH", "1") };
+    let counted = translate(java);
+    unsafe { std::env::remove_var("JAVA_TO_RUST_COUNT_DISPATCH") };
+    counted
+}
+
+/// The key of the count, in `counted`, of the call whose key ends in `end`.
+fn count_key<'a>(counted: &'a str, end: &str) -> &'a str {
+    let at = counted.find(&format!("{end}\")")).unwrap_or_else(|| panic!("a count of `{end}`"));
+    let start = counted[..at].rfind('"').unwrap() + 1;
+    &counted[start..at + end.len()]
+}
+
 /// The class number of the class whose struct is `name`, from its arm in a dispatcher of `rust`.
 fn class_number(rust: &str, name: &str) -> u16 {
     let arm =
@@ -128,13 +144,9 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
 
     // A call that mostly saw a class whose method is a factory makes its object on the stack, in
     // the test's arm for that class.
-    unsafe { std::env::set_var("JAVA_TO_RUST_COUNT_DISPATCH", "1") };
-    let counted = translate(BAGS);
-    unsafe { std::env::remove_var("JAVA_TO_RUST_COUNT_DISPATCH") };
+    let counted = counted_of(BAGS);
     assert!(!counted.contains("_on_stack"), "{counted}");
-    let at = counted.find("#cursor\")").expect("a count of the call of `cursor`");
-    let start = counted[..at].rfind('"').unwrap() + 1;
-    let key = &counted[start..at + "#cursor".len()];
+    let key = count_key(&counted, "#cursor");
     let (arr, one) = (class_number(&counted, "MainArr"), class_number(&counted, "MainOne"));
     let profiled = translate_profiled(BAGS, &format!("{key}\t{arr}:2700 {one}:300 *:0\n"));
     let total = profiled.find("fn total(").expect("`total`");
@@ -143,4 +155,29 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     let among = profiled.find("fn MainBag__cursor_among_").expect("a dispatcher that passes the slot on");
     let end = among + profiled[among..].find("\n}").unwrap();
     assert_contains(&profiled[among..end], &["j2r_slot: &java::Slot<", "cursor_on_stack(o, j2r_slot)"]);
+
+    // The same, where the factory is a body on the enum of a class and the one below it.
+    let java = BAGS
+        .replace("static final class Arr implements", "static class Arr implements")
+        .replace(
+            "    static final class One implements",
+            "    static final class Pair extends Arr { Pair() { super(new int[] { 3 }); } }\n    static final class One implements",
+        )
+        .replace("new One() };", "new One(), new Pair() };")
+        .replace("bags[i % 10 == 0 ? 1 : 0]", "bags[i % 10 == 0 ? 1 : i % 3 == 0 ? 2 : 0]");
+    let counted = counted_of(&java);
+    let key = count_key(&counted, "#cursor");
+    let (arr, pair, one) = (
+        class_number(&counted, "MainArrFields"),
+        class_number(&counted, "MainPair"),
+        class_number(&counted, "MainOne"),
+    );
+    let profiled = translate_profiled(&java, &format!("{key}\t{arr}:2850 {pair}:100 {one}:50 *:0\n"));
+    let total = profiled.find("fn total(").expect("`total`");
+    let total = &profiled[total..total + profiled[total..].find("\n}").unwrap()];
+    assert_contains(total, &["let slot_1 = java::Slot::<", "_on_stack_", ", &slot_1)"]);
+    let among = profiled.find("fn MainBag__cursor_among_").expect("a dispatcher that passes the slot on");
+    let end = among + profiled[among..].find("\n}").unwrap();
+    assert_contains(&profiled[among..end], &["MainArr__cursor_on_stack(MainArr::Arr(o.clone()), j2r_slot)"]);
+    assert_contains(&profiled, &["fn MainArr__cursor_on_stack("]);
 }
