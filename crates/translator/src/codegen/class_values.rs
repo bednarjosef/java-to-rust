@@ -154,8 +154,12 @@ impl<'a> Gen<'a> {
         let module = self.type_module(class);
         let element_class = self.runtime("ElementClass");
         let own: Vec<String> = self.type_names(class).iter().map(|n| rust_string(n)).collect();
+        let fitting = match self.element_test(t, element, self.nullable_element(object)) {
+            Some(test) => format!(".fitting({test})"),
+            None => String::new(),
+        };
         Code::atom(format!(
-            "{tagged}({}, Some({element_class}::<{item}>::new(|| {made}, {}, {module}, {names}, &[{}])))",
+            "{tagged}({}, Some({element_class}::<{item}>::new(|| {made}, {}, {module}, {names}, &[{}]){fitting}))",
             code.text,
             rust_string(&name),
             own.join(", ")
