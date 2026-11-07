@@ -1349,20 +1349,20 @@ fn refused_store<T>(class: &ElementClass<T>, len: usize, i: i32, v: &T) -> Excep
 /// `ArrayStoreException` for an element of another class.
 #[inline]
 pub fn checked_set<T>(a: &impl Elements<T>, i: i32, v: T) {
-    if let Some(class) = a.element_class() {
-        if !class.holds(&v) {
-            crate::throw_exception(refused_store(class, a.length(), i, &v))
-        }
+    if let Some(class) = a.element_class()
+        && !class.holds(&v)
+    {
+        crate::throw_exception(refused_store(class, a.length(), i, &v))
     }
     set(a, i, v)
 }
 
 /// `checked_set` where the program observes the exception.
 pub fn try_checked_set<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
-    if let Some(class) = a.element_class() {
-        if !class.holds(&v) {
-            return Err(refused_store(class, a.length(), i, &v));
-        }
+    if let Some(class) = a.element_class()
+        && !class.holds(&v)
+    {
+        return Err(refused_store(class, a.length(), i, &v));
     }
     try_set(a, i, v)
 }
@@ -1806,20 +1806,20 @@ pub fn try_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exc
 
 /// `checked_set` as a volatile write.
 pub fn checked_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) {
-    if let Some(class) = a.element_class() {
-        if !class.holds(&v) {
-            crate::throw_exception(refused_store(class, a.length(), i, &v))
-        }
+    if let Some(class) = a.element_class()
+        && !class.holds(&v)
+    {
+        crate::throw_exception(refused_store(class, a.length(), i, &v))
     }
     set_volatile(a, i, v)
 }
 
 /// `checked_set_volatile` where the program observes the exception.
 pub fn try_checked_set_volatile<T>(a: &impl Elements<T>, i: i32, v: T) -> Result<(), Exception> {
-    if let Some(class) = a.element_class() {
-        if !class.holds(&v) {
-            return Err(refused_store(class, a.length(), i, &v));
-        }
+    if let Some(class) = a.element_class()
+        && !class.holds(&v)
+    {
+        return Err(refused_store(class, a.length(), i, &v));
     }
     try_set_volatile(a, i, v)
 }
