@@ -427,9 +427,11 @@ A static block or static field initializer that throws is wrapped in
   In a program that starts a thread, the two fields are process-wide or thread-local with the
   class's other statics. Where they are process-wide, the state says only that some thread
   started, so the class's `java::ClassInit` still makes another thread wait while one runs the
-  initialization, as Java does (`init_guard`): the `init` function's fast path asks that the
-  state be 1 and the run done, and the run is done at whichever return ends it, so that the
-  threads that waited for a failed one see state 2 and throw `NoClassDefFoundError`.
+  initialization, as Java does (`init_guard`, `let _run = C_INIT.run(&C_INIT_STATE)`): the run
+  is done at whichever return ends it, so that the threads that waited for a failed one see
+  state 2 and throw `NoClassDefFoundError`, and it is done as ready when the state is then 1. The
+  `init` function's fast path is `C_INIT.ready()` alone, one load that stands for "the state is
+  1 and the run is done".
 - **The JDK's static initializers** run on the JDK's own constants and flags and none of the
   program's code, so they throw only for bugs: one lets out nothing, and the `catch` clauses
   around a use of its class are not looked for in its own code. A `catch` inside a rewritten JDK

@@ -2192,6 +2192,39 @@ fn static_blocks_run_once_in_an_init_function_guarded_by_a_flag() {
 }
 
 #[test]
+fn a_class_initialized_by_an_earlier_statement_is_not_checked_again() {
+    let rust = translate(
+        "class Helper {
+            static int made;
+            static { made = 10; System.out.println(\"ready\"); }
+        }
+        public class A {
+            public static void main(String[] args) {
+                if (args.length > 5 && Helper.made > 0) { System.out.println(1); }
+                int a = Helper.made;
+                int b = Helper.made + 1;
+                for (int i = 0; i < 3; i++) { b += Helper.made; }
+                Runnable r = () -> System.out.println(Helper.made);
+                r.run();
+                System.out.println(a + b);
+            }
+        }",
+    );
+    // The use past `&&` may not run, so the next one checks; after it, none does, but the
+    // lambda's body, which may run on another thread, checks for itself.
+    assert_contains(
+        &rust,
+        &[
+            "if args.len() as i32 > 5 && ({ init_helper(); HELPER_MADE.get() }) > 0 {",
+            "let a = { init_helper(); HELPER_MADE.get() };",
+            "let mut b = HELPER_MADE.get().wrapping_add(1);",
+            "b = b.wrapping_add(HELPER_MADE.get());",
+            "let r = || { java::println!(\"{}\", { init_helper(); HELPER_MADE.get() }); };",
+        ],
+    );
+}
+
+#[test]
 fn static_initializers_without_effects_stay_lazy() {
     let rust = translate(
         "class A {
