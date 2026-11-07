@@ -27,6 +27,14 @@
 //! object of the method's own, whose class is known, those conditions are checked; a method
 //! that is being checked already counts as not letting it escape (the others decide).
 //!
+//! **Results.** A call's result holds the arguments that its targets may return (a summary's
+//! `returned`). A virtual call on an object of the method's own returns what the target its
+//! object's class runs returns, not what any target may: `it.next()` on a list's iterator
+//! returns an element, though some other iterator's `next()` returns the iterator itself. Each
+//! object the receiver may hold is taken by itself, so the result only grows as the receiver
+//! does: a parameter, `this`, a field's object, or a receiver that holds none of the method's
+//! own objects takes what any target may return.
+//!
 //! **Contents.** A lambda or an anonymous class keeps what it captures in fields of its own, and
 //! a list's iterator keeps the list. A field that the program reads only on `this` (`this.f` or
 //! `f`, never `x.f`: `own_fields`) is read only by its object's own methods, so what is stored
@@ -1915,16 +1923,35 @@ impl Analysis<'_> {
                 readers[v as usize].push(i as u32);
             }
         }
+        // A dispatched call whose targets may return some of their parameters returns those
+        // that what the classes of its receiver run return (`refined`), so it is taken again when
+        // its receiver grows.
+        let refined: Vec<bool> = code
+            .calls
+            .iter()
+            .zip(&combined)
+            .map(|(call, combined)| {
+                call.dispatched
+                    && call.has_receiver
+                    && call.method.is_some()
+                    && combined.as_ref().is_some_and(|c| c.returned.contains(&true))
+            })
+            .collect();
         for (j, (call, combined)) in code.calls.iter().zip(&combined).enumerate() {
             let Some(combined) = combined else { continue };
             for (k, arg) in call.args.iter().enumerate() {
-                if combined.returned.get(k) == Some(&true) {
+                if combined.returned.get(k) == Some(&true) || (k == 0 && refined[j]) {
                     for &v in &arg.vars {
                         readers[v as usize].push((assigns + j) as u32);
                     }
                 }
             }
         }
+        // The methods whose summaries the flows read beyond the combined ones of the calls.
+        let mut read = Vec::new();
+        // What each refined call runs for the class of each of the method's own objects, when
+        // that is one of its targets.
+        let mut runs: FastMap<(usize, usize), Option<usize>> = FastMap::default();
         let steps = assigns + code.calls.len();
         let mut queued = vec![true; steps];
         let mut queue: std::collections::VecDeque<u32> = (0..steps as u32).collect();
@@ -1943,9 +1970,53 @@ impl Analysis<'_> {
                     s.insert(first + site as usize);
                 }
                 if let Some(combined) = combined {
-                    for (k, arg) in call.args.iter().enumerate() {
-                        if combined.returned.get(k) == Some(&true) {
-                            s.union(&eval(&vars, arg));
+                    if refined[i - assigns] {
+                        // Each object the receiver may be returns what its class runs returns:
+                        // for an object of the method's own, of a known class, what that one
+                        // target does, and for any other (a parameter, `this`, a field's
+                        // object) or none known, what any target may.
+                        let method = call.method.expect("a refined call names its method");
+                        let targets = &self.lists.targets[call.targets.expect("a followed call") as usize];
+                        let receivers = eval(&vars, &call.args[0]);
+                        let mut returns = vec![false; call.args.len()];
+                        let mut unknown = receivers.is_empty();
+                        for x in receivers.iter() {
+                            let own = (sites.contains(&x) && active[x - first]).then(|| x - first);
+                            let ran = own.and_then(|site| {
+                                *runs.entry((i - assigns, site)).or_insert_with(|| {
+                                    let c = self.site_class(&code.sites[site]);
+                                    self.hierarchy
+                                        .implementation(method, c)
+                                        .filter(|t| targets.binary_search(t).is_ok())
+                                })
+                            });
+                            let by = match ran {
+                                Some(t) => {
+                                    read.push(t);
+                                    &self.summaries[t].returned
+                                }
+                                None => {
+                                    unknown = true;
+                                    &combined.returned
+                                }
+                            };
+                            if by.first() == Some(&true) {
+                                s.insert(x);
+                            }
+                            for (k, r) in returns.iter_mut().enumerate().skip(1) {
+                                *r |= by.get(k) == Some(&true);
+                            }
+                        }
+                        for (k, arg) in call.args.iter().enumerate().skip(1) {
+                            if returns[k] || (unknown && combined.returned.get(k) == Some(&true)) {
+                                s.union(&eval(&vars, arg));
+                            }
+                        }
+                    } else {
+                        for (k, arg) in call.args.iter().enumerate() {
+                            if combined.returned.get(k) == Some(&true) {
+                                s.union(&eval(&vars, arg));
+                            }
                         }
                     }
                 }
@@ -2121,7 +2192,6 @@ impl Analysis<'_> {
         // An object of the method's own is of a known class, so what its methods do with their
         // `this` and its fields decides whether it and what it holds escape when methods are
         // called on it. What an object that escapes holds escapes with it.
-        let mut read = Vec::new();
         let mut resolved = vec![0; n];
         // What each source holds is the same throughout, so each that escapes lets it escape
         // once.

@@ -266,8 +266,11 @@ The collector needs nothing for them:
   scanned as a heap slot, or freed.
 - **Nothing reaches them once the frame is gone.** The analysis proves that no handle to the
   object is stored in a field, an array element, a static or a closure, returned, thrown, or
-  passed to a call that may keep it; anything it does not model counts as kept. The one field
-  it may be stored in is one of another object of the same frame that only that object's own
+  passed to a call that may keep it; anything it does not model counts as kept. A call's
+  result may be the arguments its targets return; for a call on an object of the frame, only
+  what that object's class runs counts: the element that a list's iterator's `next()` gives
+  back is not taken for the iterator, though another iterator class's `next()` returns itself.
+  The one field it may be stored in is one of another object of the same frame that only that object's own
   methods read (a lambda's capture, an iterator's list), when that object is kept no longer;
   in a program with 4-byte references not even that, since a field's 4 bytes reach only the
   heap.

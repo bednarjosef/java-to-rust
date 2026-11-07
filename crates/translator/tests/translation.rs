@@ -1209,6 +1209,54 @@ fn hashing_an_object_by_its_own_hash_code_does_not_keep_it_on_the_heap() {
 }
 
 #[test]
+fn a_call_on_an_object_of_one_class_returns_only_what_that_class_returns() {
+    let rust = translate(
+        "interface Cursor { boolean more(); Object next(); }
+        class Bag {
+            Object[] items = new Object[4]; int n;
+            Cursor cursor() { return new BagCursor(this); }
+        }
+        class BagCursor implements Cursor {
+            Bag bag; int i;
+            BagCursor(Bag bag) { this.bag = bag; }
+            public boolean more() { return i < bag.n; }
+            public Object next() { return bag.items[i++]; }
+        }
+        class Countdown implements Cursor {
+            int left = 2;
+            public boolean more() { return left > 0; }
+            public Object next() { left--; return this; }
+        }
+        class A {
+            static Object[] kept = new Object[8];
+            static int n;
+            static Cursor same(Cursor c) { return c; }
+            public static void main(String[] a) {
+                Bag bag = new Bag();
+                bag.items[bag.n++] = \"x\";
+                for (int r = 0; r < 2; r++) {
+                    Cursor c = same(bag.cursor());
+                    while (c.more()) kept[n++] = c.next();
+                }
+                Cursor d = same(new Countdown());
+                while (d.more()) kept[n++] = d.next();
+                System.out.println(n);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // `Countdown.next` returns its receiver, but a `BagCursor`'s does not, so what the bag's
+            // cursor's `next()` returns is kept and the cursor stays.
+            "let c = same(Bag__cursor_on_stack(&bag, &slot_2));",
+            // What a `Countdown`'s `next()` returns is the `Countdown`, which is kept.
+            "let d = same(Cursor::Countdown(Arc::new(Countdown__new())));",
+        ],
+    );
+}
+
+#[test]
 fn methods_borrow_their_shared_object() {
     let rust = translate(
         "class P { int x; P(int x) { this.x = x; } void set(int v) { x = v; } int get() { return x; } }
