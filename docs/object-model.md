@@ -672,7 +672,15 @@ to run.
   initializers, which write it (`Gen::fixed_cell`): a `java::SharedField` of a value that is not
   one word (a `Class`, a lambda) is otherwise copied out under a striped spin lock, and a
   lambda's handle counted, at each read. The Minecraft server's reflection table read each
-  member's class so.
+  member's class so. A fixed number, boolean, char or enum of a `java::SharedField` is read
+  so too, `*c.width.fixed()`: `get` would be an atomic load, which the optimizer never merges
+  with another read of the field, forwards a store to or moves out of a loop, while this is a
+  plain load that it can (the Minecraft server's `SimpleBitStorage.bits` and `mask`). That is
+  sound for the same reason as a reference's read: another thread reaches the object only
+  through a handle written with release and read with acquire (a field, an element, a static)
+  or through `Thread.start` or a monitor, each after the constructor's writes, so the plain
+  read sees them, as Java's final-field rule promises. A `java::Field` of such a word is read
+  with `get`, which is already a plain load.
 - A fields struct has no representation of its own: it is always inside a concrete object.
 
 ### 1.9 Comparable, Number, CharSequence, Enum, Record and other JDK interfaces

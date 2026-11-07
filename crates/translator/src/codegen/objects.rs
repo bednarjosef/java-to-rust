@@ -816,9 +816,11 @@ impl<'a> Gen<'a> {
     /// object is celled, the field is not `volatile`, and the code is not a constructor's or a
     /// field initializer's, which write the fixed fields. Once its object is built nothing writes
     /// the field, so a reference into the cell aliases no write (the runtime's `Field::fixed`).
-    /// A primitive or a Java enum's value is a word that `get` copies as cheaply.
+    /// A primitive or a Java enum's value is read so only from a `java::SharedField`, whose `get`
+    /// is an atomic load that the optimizer neither merges with another read of the field nor
+    /// moves out of a loop; a `java::Field`'s `get` of such a word is already a plain load.
     pub(super) fn fixed_cell(&self, object: &Expr, name: &str, ty: Type) -> bool {
-        !(ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_)))
+        (!(ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_))) || self.shared_object(object))
             && self.celled_object(object)
             && !self.compact_cell(object, name)
             && !(name == "referent"
@@ -1618,6 +1620,11 @@ impl<'a> Gen<'a> {
             };
             if self.fixed_cell(object, name, ty) {
                 let path = self.field_path(object, name);
+                if ty.is_numeric() || matches!(ty, Type::Boolean | Type::Enum(_)) {
+                    // A word that the dereference copies, parenthesized only where an operator
+                    // needs it: `*o.n.fixed() as i64`, `(*o.n.fixed()).wrapping_add(1)`.
+                    return Code::new(format!("*{obj}{borrow}.{path}.fixed()"), UNARY);
+                }
                 return Code::atom(format!("(*{obj}{borrow}.{path}.fixed()){clone}"));
             }
             let (get, _) = self.cell_accessors(object, name);
