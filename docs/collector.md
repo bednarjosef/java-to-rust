@@ -291,11 +291,14 @@ The collector needs nothing for them:
   pos)` copies it into the heap and points the variable there; once the variable names the heap
   it does nothing. Such a statement is a call that is given the variable, or a store of it into
   a field, an array element or a static, that names the variable nowhere else and assigns it
-  nowhere; and the object is held by that one variable alone, its identity hash is not read
-  before (by the method, its callees, or the factory that made it), and with those statements
-  taken for none it would stay. Until the move nothing else names the object, so no code can tell
-  the copy from the original: every later read of the variable reads the copy, and the original
-  is left in the slot unread. The variable is declared in the loop's body, so a move in one
+  nowhere; and the object is held by that one variable, its identity hash is not read before (by
+  the method, its callees, or the factory that made it), and with those statements taken for
+  none it would stay. Other locals may hold it too when each is declared in a block inside the
+  variable's that no move is in, such as the temporary `argument$0` of a call that computes its
+  arguments first (below): at a move such a local is not declared yet, and is given the copy, or
+  is gone. Until the move nothing that is read after it names the object but the variable, so no
+  code can tell the copy from the original: every later read of the variable reads the copy, and
+  the original is left in the slot unread. The variable is declared in the loop's body, so a move in one
   iteration never reaches the next one's object, which the slot is filled with again. An object
   that would be moved in the block it is made in, or a plain block inside it, is made in the
   heap, as it would always be copied. A call whose receiver and arguments are computed into

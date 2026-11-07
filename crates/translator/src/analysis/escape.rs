@@ -104,23 +104,27 @@
 //! else and assigns it nowhere, and is not in a switch expression nor a `for` loop's start. The
 //! block in which an ordered call computes its receiver and arguments first (`lower::ordered_call`,
 //! a switch expression of one default case) counts as part of its statement, so its statements,
-//! such as `argument$0 = p;`, can be places too (`ordered_stmts`). An object
-//! moves when one local declared by a `Stmt::Local` holds it and no other variable or object does
-//! (but the result of the call that makes it), nothing in the method or its callees reads its
-//! identity hash before, it is not returned, with each of those places taken for none it stays
-//! (the loop rule included), and none of the places where it may leave is in the block of the
-//! variable's declaration or a plain block nested in it, which would always move it (`blocks`):
-//! then the heap is cheaper. Whether a callee reads the identity hash is in its summary
-//! (`Summary::identity`) as escapes are: always, or via the methods called on the parameter,
-//! which what the object's class runs for them decides (`this_identity`), so that hashing a
-//! `BlockPos` by its own `hashCode` does not count and hashing an object by `Object`'s does; for a
-//! factory's object, the factory must not read it either. Its translation then moves it before
-//! each statement with such a place where it may leave (`Slot::to_heap`), which does nothing once
-//! the variable names the heap. That is sound because before that point nothing else names the
-//! object, so nothing can tell the moved object from the one in the slot: its fields are copied
-//! as they are, and every later read of the variable reads the moved one. A variable declared in
-//! the loop's body is a new one at each iteration, so a moved object of one iteration is never
-//! taken for the next one's.
+//! such as `argument$0 = p;`, can be places too (`ordered_stmts`). An object moves when one
+//! local declared by a `Stmt::Local` holds it and no other variable or object does (but the
+//! result of the call that makes it, and other locals declared in lists of statements inside
+//! that local's, `scopes`, such as the `argument$0` that copies it), nothing in the method or its
+//! callees reads its identity hash before, it is not returned, with each of the places of its
+//! local taken for none it stays (the loop rule included), and none of the places where it may
+//! leave is in the block of the variable's declaration or a plain block nested in it, which would
+//! always move it (`blocks`): then the heap is cheaper. No place where it is moved may be in the
+//! list of statements of another local that holds it, so at each move that local is not declared
+//! yet, and is given the moved object, or is gone; its own places are not taken for none, so an
+//! object that leaves by it is not moved. Whether a callee reads the identity hash is in its
+//! summary (`Summary::identity`) as escapes are: always, or via the methods called on the
+//! parameter, which what the object's class runs for them decides (`this_identity`), so that
+//! hashing a `BlockPos` by its own `hashCode` does not count and hashing an object by `Object`'s
+//! does; for a factory's object, the factory must not read it either. Its translation then moves
+//! it before each statement with such a place where it may leave (`Slot::to_heap`), which does
+//! nothing once the variable names the heap. That is sound because before that point nothing
+//! that is read after it names the object but the variable, so nothing can tell the moved object
+//! from the one in the slot: its fields are copied as they are, and every later read of the
+//! variable reads the moved one. A variable declared in the loop's body is a new one at each
+//! iteration, so a moved object of one iteration is never taken for the next one's.
 //!
 //! A place that is an argument of a dispatched call, whose receiver is a local and was of one
 //! class in a profiled run, and where what that class runs keeps the object nowhere and reads its
@@ -706,6 +710,9 @@ struct Named {
     /// Where it is declared, when it is a local that one `Stmt::Local` declares (none of a `for`
     /// loop's start), and the block of statements that declaration is in (`blocks`).
     local: Option<(Pos, u32)>,
+    /// The list of statements that declaration is in (`scopes`), outside which the local cannot
+    /// be read.
+    scope: Option<u32>,
 }
 
 /// A method's code, reduced once to the flows the analysis follows: the variables (named ones
@@ -733,6 +740,11 @@ struct Compiled {
     /// The block of statements (`blocks`) that each statement with a point is in, by the id of its
     /// expression.
     point_blocks: FastMap<ExprId, u32>,
+    /// The innermost list of statements (`scopes`) that each statement with a point is in, by the
+    /// id of its expression.
+    point_scopes: FastMap<ExprId, u32>,
+    /// The list of statements that each list (`scopes`) is in; the body's is its own.
+    scope_parents: Vec<u32>,
     /// What the method reads the identity hash of.
     identity: Vec<Value>,
     returns: Vec<Value>,
@@ -1141,7 +1153,9 @@ fn compile<'a>(
         }
     }
     let blocks = blocks(method);
-    (cx.code.points, cx.code.point_blocks) = points(method, &blocks);
+    let scopes;
+    (scopes, cx.code.scope_parents) = self::scopes(method);
+    (cx.code.points, cx.code.point_blocks, cx.code.point_scopes) = points(method, &blocks, &scopes);
     // The expressions the method runs: its body's, and for a constructor that does not delegate,
     // its class's field initializers.
     let mut exprs: Vec<&Expr> = Vec::new();
@@ -1242,6 +1256,7 @@ fn compile<'a>(
     // The locals that only `Stmt::Local`s outside a `for` loop's start declare.
     let mut starts: FastSet<*const Stmt> = FastSet::default();
     let mut declared: FastMap<VarKey<'a>, Option<(Pos, u32)>> = FastMap::default();
+    let mut declared_in: FastMap<VarKey<'a>, u32> = FastMap::default();
     for s in &stmts {
         if let Stmt::For { init, .. } = s {
             starts.extend(init.iter().map(|i| i as *const Stmt));
@@ -1255,6 +1270,11 @@ fn compile<'a>(
                 // A variable declared twice is no local of one declaration.
                 let block = blocks.get(&(*s as *const Stmt)).copied();
                 let at = if plain && !declared.contains_key(&key) { block.map(|b| (*pos, b)) } else { None };
+                if at.is_some()
+                    && let Some(&scope) = scopes.get(&(*s as *const Stmt))
+                {
+                    declared_in.insert(key, scope);
+                }
                 declared.insert(key, at);
             }
             Stmt::ForEach { name, .. } => _ = declared.insert(cx.resolved.declaration(name, s), None),
@@ -1288,6 +1308,7 @@ fn compile<'a>(
     }
     for (named, key) in cx.code.named.iter_mut().zip(&cx.order) {
         named.local = declared.get(key).copied().flatten().filter(|_| named.param.is_none());
+        named.scope = named.local.and_then(|_| declared_in.get(key).copied());
         named.loops = scopes.declarations.get(key).map(|ds| {
             let mut all = ds.first().cloned().unwrap_or_default();
             for d in &ds[1..] {
@@ -1308,7 +1329,8 @@ fn compile<'a>(
 fn points(
     method: &Method,
     blocks: &FastMap<*const Stmt, u32>,
-) -> (FastMap<ExprId, ExprId>, FastMap<ExprId, u32>) {
+    scopes: &FastMap<*const Stmt, u32>,
+) -> (FastMap<ExprId, ExprId>, FastMap<ExprId, u32>, FastMap<ExprId, u32>) {
     let mut stmts: Vec<&Stmt> = Vec::new();
     for s in &method.body {
         visit_stmt_outside_switches(s, &mut |s| stmts.push(s));
@@ -1323,13 +1345,17 @@ fn points(
     }
     let mut points = FastMap::default();
     let mut point_blocks = FastMap::default();
+    let mut point_scopes = FastMap::default();
     for s in stmts {
         let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e)) =
             s
         else {
             continue;
         };
-        if starts.contains(&(s as *const Stmt)) || !blocks.contains_key(&(s as *const Stmt)) {
+        if starts.contains(&(s as *const Stmt))
+            || !blocks.contains_key(&(s as *const Stmt))
+            || !scopes.contains_key(&(s as *const Stmt))
+        {
             continue;
         }
         let mut reads: FastMap<&str, Option<ExprId>> = FastMap::default();
@@ -1354,10 +1380,11 @@ fn points(
             {
                 points.insert(id, e.id);
                 point_blocks.insert(e.id, blocks[&(s as *const Stmt)]);
+                point_scopes.insert(e.id, scopes[&(s as *const Stmt)]);
             }
         }
     }
-    (points, point_blocks)
+    (points, point_blocks, point_scopes)
 }
 
 /// The expressions of statement `s` itself, not of the statements in it.
@@ -1462,6 +1489,102 @@ fn blocks(method: &Method) -> FastMap<*const Stmt, u32> {
     numbering.out
 }
 
+/// A number for each list of statements of method `m` outside switch expressions, but the blocks
+/// that compute a call's arguments first (`ordered_stmts`): the innermost list that each
+/// statement is in, and the list that each list is in (the body's is its own, 0). A local
+/// declared in a list cannot be read outside it, and is a new variable each time the list runs.
+fn scopes(method: &Method) -> (FastMap<*const Stmt, u32>, Vec<u32>) {
+    struct Numbering {
+        parents: Vec<u32>,
+        out: FastMap<*const Stmt, u32>,
+    }
+    impl Numbering {
+        fn list<'s>(&mut self, stmts: impl IntoIterator<Item = &'s Stmt>, parent: u32) {
+            let scope = self.parents.len() as u32;
+            self.parents.push(parent);
+            stmts.into_iter().for_each(|s| self.stmt(s, scope));
+        }
+
+        fn stmt(&mut self, s: &Stmt, scope: u32) {
+            self.out.insert(s as *const Stmt, scope);
+            // Each block that computes a call's arguments first is a list in the statement's,
+            // and one in it is a list in that one.
+            for e in own_exprs(s) {
+                let mut inside: FastSet<ExprId> = FastSet::default();
+                let mut top: Vec<&Expr> = Vec::new();
+                visit_expr(e, &mut |x| {
+                    if !matches!(x.kind, ExprKind::Switch { .. }) || inside.contains(&x.id) {
+                        return;
+                    }
+                    if crate::lower::ordered_call(x).is_some() {
+                        top.push(x);
+                    }
+                    visit_expr(x, &mut |y| {
+                        if y.id != x.id {
+                            inside.insert(y.id);
+                        }
+                    });
+                });
+                for x in top {
+                    if let ExprKind::Switch { cases, .. } = &x.kind {
+                        self.list(&cases[0].body, scope);
+                    }
+                }
+            }
+            match s {
+                Stmt::Block(stmts) => self.list(stmts, scope),
+                Stmt::If { then, otherwise, .. } => {
+                    self.list([&**then], scope);
+                    if let Some(o) = otherwise {
+                        self.list([&**o], scope);
+                    }
+                }
+                Stmt::Labeled { body, .. } => self.stmt(body, scope),
+                Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::ForEach { body, .. } => {
+                    self.list([&**body], scope)
+                }
+                Stmt::For { init, body, .. } => {
+                    // Its start is a list of its own, around the body.
+                    let start = self.parents.len() as u32;
+                    self.parents.push(scope);
+                    init.iter().for_each(|s| self.stmt(s, start));
+                    self.list([&**body], start);
+                }
+                Stmt::Switch { cases, .. } => {
+                    // A local declared in one case is in scope in the cases after it.
+                    let all = self.parents.len() as u32;
+                    self.parents.push(scope);
+                    cases.iter().for_each(|case| case.body.iter().for_each(|s| self.stmt(s, all)));
+                }
+                Stmt::Try { body, catches, finally } => {
+                    self.list(body, scope);
+                    catches.iter().for_each(|catch| self.list(&catch.body, scope));
+                    if let Some(f) = finally {
+                        self.list(f, scope);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut numbering = Numbering { parents: vec![0], out: FastMap::default() };
+    method.body.iter().for_each(|s| numbering.stmt(s, 0));
+    (numbering.out, numbering.parents)
+}
+
+/// Whether list `inner` (`scopes`) is list `outer` or in it.
+fn within(parents: &[u32], mut inner: u32, outer: u32) -> bool {
+    loop {
+        if inner == outer {
+            return true;
+        }
+        if inner == 0 {
+            return false;
+        }
+        inner = parents[inner as usize];
+    }
+}
+
 impl<'a> Compiling<'a, '_> {
     /// The variable read by `e` and the read's id, when `e` is a point (see **Moves to the
     /// heap**).
@@ -1491,6 +1614,7 @@ impl<'a> Compiling<'a, '_> {
             loops: None,
             name: key.0.to_string(),
             local: None,
+            scope: None,
         });
         self.order.push(key);
         v
@@ -1887,9 +2011,9 @@ impl Analysis<'_> {
         self.flows_masked(m, None)
     }
 
-    /// `flows`, with the sources `mask` taken for leaving nowhere at the points (see **Moves to
-    /// the heap**).
-    fn flows_masked(&mut self, m: usize, mask: Option<&Sources>) -> Flows {
+    /// `flows`, with the sources `mask` holds for each variable taken for leaving nowhere at the
+    /// points that read that variable (see **Moves to the heap**).
+    fn flows_masked(&mut self, m: usize, mask: Option<&FastMap<u32, Sources>>) -> Flows {
         let code = &self.code[m];
         let combined: Vec<Option<Rc<Summary>>> = code
             .calls
@@ -2030,20 +2154,24 @@ impl Analysis<'_> {
                 }
             }
         }
-        // What a point gives, with `mask` taken away.
-        let at_point = |s: Sources, point: bool| match mask {
-            Some(mask) if point => {
-                let mut s = s;
-                s.minus(mask);
-                s
-            }
+        // What a point that reads variable `point` gives, with what `mask` holds for it taken
+        // away.
+        let at_point = |s: Sources, point: Option<u32>| match (mask, point) {
+            (Some(mask), Some(v)) => match mask.get(&v) {
+                Some(masked) => {
+                    let mut s = s;
+                    s.minus(masked);
+                    s
+                }
+                None => s,
+            },
             _ => s,
         };
         // What escapes, and what is returned.
         let mut escaping = Sources::default();
         let mut returned = Sources::default();
         for (i, value) in code.escapes.iter().enumerate() {
-            let point = code.escape_points.iter().any(|&(j, ..)| j == i);
+            let point = code.escape_points.iter().find(|&&(j, ..)| j == i).map(|&(_, w, _)| w);
             escaping.union(&at_point(eval(&vars, value), point));
         }
         // What has its identity hash read: by the method, or by the calls it is given to (but
@@ -2058,7 +2186,7 @@ impl Analysis<'_> {
         for (call, combined) in code.calls.iter().zip(&combined) {
             let Some(combined) = combined else { continue };
             for (k, arg) in call.args.iter().enumerate() {
-                let given = at_point(eval(&vars, arg), call.points[k].is_some());
+                let given = at_point(eval(&vars, arg), call.points[k].map(|(w, _)| w));
                 if k == 0 && call.dispatched {
                     let method = call.method.expect("a dispatched call names its method");
                     add_via(&mut observed_via, &given, &[method]);
@@ -2096,7 +2224,7 @@ impl Analysis<'_> {
                         }
                     }
                 } else {
-                    escaping.union(&at_point(stored, call.points[k].is_some()));
+                    escaping.union(&at_point(stored, call.points[k].map(|(w, _)| w)));
                 }
             }
         }
@@ -2160,7 +2288,7 @@ impl Analysis<'_> {
             match combined {
                 Some(combined) => {
                     for (k, arg) in call.args.iter().enumerate() {
-                        let given = at_point(eval(&vars, arg), call.points[k].is_some());
+                        let given = at_point(eval(&vars, arg), call.points[k].map(|(w, _)| w));
                         // The receiver of a dispatched call escapes as what its class runs lets
                         // its `this` and what it holds escape.
                         if k == 0 && call.dispatched {
@@ -2182,7 +2310,7 @@ impl Analysis<'_> {
                     (Some(rest), Some(_)) => {
                         escaping.union(&eval(&vars, rest));
                         for &(v, _) in call.points.iter().flatten() {
-                            escaping.union(&at_point(vars[v as usize].clone(), true));
+                            escaping.union(&at_point(vars[v as usize].clone(), Some(v)));
                         }
                     }
                     _ => _ = escaping.union(&eval(&vars, &call.unknown)),
@@ -2363,8 +2491,8 @@ impl Analysis<'_> {
         let code = &self.code[m];
         let first = code.arity;
         let held = |s: usize| flows.by_field.iter().any(|fields| fields.iter().any(|(_, h)| h.contains(s)));
-        let mut candidates: Vec<(usize, usize)> = Vec::new();
-        let mut mask = Sources::default();
+        let mut candidates: Vec<(usize, usize, Vec<usize>)> = Vec::new();
+        let mut mask: FastMap<u32, Sources> = FastMap::default();
         for i in 0..code.sites.len() {
             let s = first + i;
             let id = code.sites[i].id;
@@ -2375,15 +2503,35 @@ impl Analysis<'_> {
                 why(id, "is not moved: it is returned or held by an object");
                 continue;
             }
-            // One local holds it, and no call's result but that of the call that makes it.
+            // One local holds it, and no call's result but that of the call that makes it. Other
+            // locals may too, each declared in a list of statements inside that local's (such
+            // as the `argument$1` of a call that computes its arguments first): the move is
+            // made only where none of them can be read (checked below, with the moves).
             let holders: Vec<usize> = (0..code.named.len())
                 .filter(|&j| flows.vars[code.named[j].var as usize].contains(s))
                 .collect();
-            let [j] = holders[..] else {
-                let names: Vec<&str> = holders.iter().map(|&j| code.named[j].name.as_str()).collect();
-                why(id, &format!("is not moved: not one variable holds it, but {names:?}"));
-                continue;
+            let scope = |j: usize| code.named[j].scope.filter(|_| code.named[j].local.is_some());
+            let outer: Vec<usize> = holders
+                .iter()
+                .copied()
+                .filter(|&j| {
+                    scope(j).is_some_and(|sj| {
+                        holders.iter().all(|&h| {
+                            h == j
+                                || scope(h).is_some_and(|sh| sh != sj && within(&code.scope_parents, sh, sj))
+                        })
+                    })
+                })
+                .collect();
+            let j = match (&holders[..], &outer[..]) {
+                ([j], _) | (_, [j]) => *j,
+                _ => {
+                    let names: Vec<&str> = holders.iter().map(|&j| code.named[j].name.as_str()).collect();
+                    why(id, &format!("is not moved: not one variable holds it, but {names:?}"));
+                    continue;
+                }
             };
+            let others: Vec<usize> = holders.iter().copied().filter(|&h| h != j).collect();
             if code.named[j].local.is_none()
                 || code
                     .calls
@@ -2393,15 +2541,15 @@ impl Analysis<'_> {
                 why(id, "is not moved: its variable is no plain local, or a call returns it");
                 continue;
             }
-            candidates.push((i, j));
-            mask.insert(s);
+            candidates.push((i, j, others));
+            mask.entry(code.named[j].var).or_default().insert(s);
         }
         if candidates.is_empty() {
             return Vec::new();
         }
         let masked = self.flows_masked(m, Some(&mask));
         let mut moves = Vec::new();
-        for (i, j) in candidates {
+        for (i, j, others) in candidates {
             let s = first + i;
             let code = &self.code[m];
             let site = &code.sites[i];
@@ -2508,6 +2656,22 @@ impl Analysis<'_> {
                 }
             }
             before.sort_unstable_by_key(|&(s, _)| s);
+            // Another local that holds it is read only in its own list of statements, which the
+            // move must be outside of: it then reads the copy, given it after the move, or is not
+            // read again.
+            if let Some(&h) = others.iter().find(|&&h| {
+                let sh = code.named[h].scope.expect("a local in a list");
+                before.iter().any(|(at, _)| within(&code.scope_parents, code.point_scopes[at], sh))
+            }) {
+                why(
+                    id,
+                    &format!(
+                        "is not moved: {:?}, which holds it too, may be read after a move",
+                        code.named[h].name
+                    ),
+                );
+                continue;
+            }
             let (declared, block) = code.named[j].local.expect("a local");
             // A move in the block of the declaration runs whenever the object is made (but for an
             // exception or a jump before it), which would only add a copy: the object is made in
