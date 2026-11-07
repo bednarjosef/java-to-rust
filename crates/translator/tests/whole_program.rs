@@ -587,7 +587,7 @@ fn a_thread_local_is_found_by_its_slot_number() {
     let (slot, hash) = (body.find("dense_slot"), body.find("thread_local_hash_code"));
     assert!(slot.is_some() && body.contains(".dense."), "getEntry does not read the slots:\n{body}");
     assert!(slot < hash, "getEntry hashes before it reads the slots:\n{body}");
-    assert!(rust.contains("unsafe { java::current_thread::<"), "no read of the current thread");
+    assert!(rust.contains("java::current_thread::<"), "no read of the current thread");
 }
 
 /// The translation of the program in `sources` with `--timings`, with

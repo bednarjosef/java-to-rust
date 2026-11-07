@@ -182,9 +182,8 @@ impl<'a> Gen<'a> {
                 call(self, "set_current_thread", vec![thread])
             }
             Native::CurrentThread => {
-                // The program's one `Thread` type is the one `set_current_thread` is given.
                 let ty = self.ty_name(ty);
-                Code::atom(format!("unsafe {{ {}::<{ty}>() }}", self.runtime("current_thread")))
+                call(self, &format!("current_thread::<{ty}>"), vec![])
             }
             Native::ThreadStart => self.thread_start(args),
             Native::MonitorWait | Native::MonitorNotify { .. } | Native::HoldsLock => {

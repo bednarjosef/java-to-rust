@@ -551,9 +551,9 @@ and the members a program uses are added to it. It holds `Thread`, `Thread.Uncau
   (`java/patches/java/lang/ThreadLocal.java`) so that `get` and `set` find a value without
   hashing. Each of the first 4,096 thread-locals made gets a slot number of its own, never given
   again, and each thread's map keeps an array from those numbers to the entries of its hash table,
-  next to the table. A `get` is then the current thread (one thread-local pointer), its map, and an
-  indexed load from the array: no hash, no probe and no test of the entry's weak referent, which a
-  live thread-local's entry cannot have lost. The table still decides what the map holds: an entry
+  next to the table. A `get` is then the current thread (a thread-local type compared and a
+  pointer read), its map, and an indexed load from the array: no hash, no probe and no test of the
+  entry's weak referent, which a live thread-local's entry cannot have lost. The table still decides what the map holds: an entry
   goes into the array where it goes into the table and leaves it wherever it leaves the table
   (`remove`, a stale entry expunged or replaced, a stale entry dropped as the table grows), so
   `initialValue` runs once per thread, `remove` brings it back, values stay in their thread's map,
@@ -589,7 +589,7 @@ group enumeration.
 | native | Rust (`crates/runtime/src/thread.rs` unless noted) |
 | --- | --- |
 | `start0(t, tid, name, daemon)` | `java::start_thread`: a `std::thread` with that name, which sets the current thread and calls `t.run()`; a daemon is not counted among the live threads |
-| `currentThread` | a thread-local current `Thread`, found through one thread-local pointer (no borrow, no virtual call and, in a release build, no check of its type, as a program has one `Thread` type: for code that checks its owner thread, or reads a thread-local, on every call); the main thread's is made on first use |
+| `currentThread` | a thread-local current `Thread`, found through one thread-local pointer and its type, compared with the program's `Thread` type (no borrow and no virtual call, for code that checks its owner thread, or reads a thread-local, on every call); the main thread's is made on first use |
 | `alive0`, `state0` | the record's alive flag and state byte |
 | `join0(tid, millis)` | wait on the record's condition variable until it is not alive or the timeout passes, interruptible |
 | `interrupt0`, `isInterrupted0`, `clearInterrupt0` | the interrupt status (3.3) |
