@@ -371,9 +371,10 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   `JAVA_DISPATCH_COUNTS` names when the program exits: a line per call, keyed by the method it
   is in, its place in the source and the method called (`codegen::dispatch::profile_key`), with
   the counts by class number. A translation made with `JAVA_TO_RUST_DISPATCH_PROFILE` naming
-  that file gives each call that saw one class in 90% of at least 1000 calls, or two in 95%, the
+  that file gives each call that saw one class in 75% of at least 1000 calls, or two in 85%, the
   inlined dispatcher among those classes (`_among_`): a test of the class number and a direct
-  call the compiler can inline, with the whole dispatcher for any other class, so a profile that no longer fits the program costs speed,
+  call the compiler can inline, with the whole dispatcher for any other class, so a profile
+  that no longer fits the program costs speed,
   never correctness. Class numbers are the same in any translation of the same program
   (`dispatch::class_numbers`), so the counts name classes by them. Where the profiled class
   runs a factory (`iterator()`), its object can go on the caller's stack (docs/collector.md,

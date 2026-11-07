@@ -127,9 +127,17 @@ fn mentions_word(text: &str, word: &str) -> bool {
 /// The fewest calls a call must have made in the profile for `profiled_sets` to test its classes.
 const PROFILED_CALLS: u64 = 1000;
 
+/// The shares of a call's calls that its one class, else its two, must have had in the profile
+/// for `profiled_sets` to test for them. A test that fails costs a compare before the whole
+/// dispatcher; one that passes saves the dispatcher's jump and lets the call be inlined, so the
+/// test pays already where it mostly passes: on the Minecraft server's counts, these bars cover
+/// 94% of the calls through dispatchers, with 90% passing (at 90% and 95%, 88% with 87%).
+const ONE_SHARE: f64 = 0.75;
+const TWO_SHARE: f64 = 0.85;
+
 /// The classes that each call mostly saw in the counts of a profiled run (`java::count_dispatch`)
 /// in the file `JAVA_TO_RUST_DISPATCH_PROFILE` names, by the call's key (`Gen::profile_key`):
-/// the one class of 90% of its calls, else the two of 95%, for calls made at least
+/// the one class of `ONE_SHARE` of its calls, else the two of `TWO_SHARE`, for calls made at least
 /// `PROFILED_CALLS` times. The counts name classes by their numbers (`class_numbers`, `numbers`),
 /// which a translation of the same program gives them again.
 pub(super) fn profiled_sets(numbers: &[u16]) -> HashMap<String, std::sync::Arc<[usize]>> {
@@ -157,8 +165,8 @@ pub(super) fn profiled_sets(numbers: &[u16]) -> HashMap<String, std::sync::Arc<[
         most.sort_unstable_by(|a, b| b.cmp(a));
         let share = |k: usize| most.iter().take(k).map(|m| m.0).sum::<u64>() as f64 / total as f64;
         let take = match () {
-            _ if share(1) >= 0.9 => 1,
-            _ if most.len() >= 2 && share(2) >= 0.95 => 2,
+            _ if share(1) >= ONE_SHARE => 1,
+            _ if most.len() >= 2 && share(2) >= TWO_SHARE => 2,
             _ => continue,
         };
         let mut set: Vec<usize> = most[..take].iter().map(|m| m.1).collect();
