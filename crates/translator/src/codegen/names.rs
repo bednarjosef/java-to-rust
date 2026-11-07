@@ -124,6 +124,7 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
         "runtime_class_name",
         "runtime_type_names",
         "object_identity_hash",
+        "object_identity_hash_by_class",
         "same_object_slow",
         "eq_by_value",
     ]

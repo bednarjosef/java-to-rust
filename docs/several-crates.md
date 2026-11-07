@@ -154,7 +154,14 @@ along classes. It splits declarations from code, as C splits headers from source
   a method's body narrows the value of its declaration's call. The moved code runs in a closure
   that returns the `Result` (`java::Ret::from((move || -> Result<i32, Throwable> {..})())`), so
   each `return` returns as it did. HeightChain, a dispatcher's call of a default body in a loop
-  split into three crates, runs 2.84 billion instructions where it ran 3.52.
+  split into three crates, runs 2.84 billion instructions where it ran 3.52. A dispatcher whose
+  code is a `match` on the class number is widened arm by arm instead (`widened_match`): an arm
+  that calls a function of its own (`fn arm`, docs/object-model.md) has the function return the
+  value widened, in registers, which the dispatcher returns as it is; any other arm widens its
+  value in place, in a closure of its own only where it may `return` or pass an error on. Widened
+  whole, the dispatcher had a slot in its frame for the `Result` that the arm's function wrote,
+  and read it back to widen it: the Minecraft server's `Object.hashCode`, which every `HashMap`
+  of objects calls, ran 18 instructions around each call of an arm, and runs 10.
 - **Each body crate** depends on the header alone and defines those functions for the items
   given to it: a function with `#[unsafe(no_mangle)]`, a method as below. A module of a body crate starts with
   `pub use header::<its path>::*` and has the module's own `use` lines, so moved code names

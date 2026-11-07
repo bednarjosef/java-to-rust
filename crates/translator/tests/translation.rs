@@ -1052,7 +1052,12 @@ fn a_dispatcher_over_many_classes_runs_each_call_in_a_function_of_its_own() {
             made.join(", ")
         ))
     };
-    assert_contains(&shapes(70), &["#[inline(never)] fn arm(o: &", "arm(o)"]);
+    // The function takes the value's bits and lends the object itself, so that the dispatcher
+    // keeps nothing in its frame.
+    assert_contains(
+        &shapes(70),
+        &["#[inline(never)] fn arm(j2r_thin: java::Thin)", "let o: &", "arm(this.0)"],
+    );
     assert_lacks(&shapes(60), &["fn arm("]);
 }
 
@@ -2407,6 +2412,36 @@ fn bit_conversions_are_plain_where_java_keeps_the_bits() {
             "f64::from_bits(bits as u64)",
         ],
     );
+}
+
+/// `System.identityHashCode` of an `Object`: the address in the value's bits for a class whose
+/// identity it is, after a test of the class number, and a `match` only over the others.
+#[test]
+fn identity_hashes_of_objects_read_the_address_after_a_test_of_the_class() {
+    let rust = translate(
+        "class A {
+            static class B {}
+            static class C { int v; }
+            public static void main(String[] a) {
+                Object[] objects = { new A(), new B(), new C(), \"text\", 7 };
+                for (Object o : objects) {
+                    System.out.println(System.identityHashCode(o) == System.identityHashCode(o));
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "pub(crate) fn object_identity_hash(&self) -> i32 {",
+            "{ java::address_hash(self.0.address()) } else { self.object_identity_hash_by_class() }",
+            "pub(crate) fn object_identity_hash_by_class(&self) -> i32 {",
+        ],
+    );
+    // Only the string and the box are in the `match`.
+    let by_class = rust.split("fn object_identity_hash_by_class(").nth(1).unwrap();
+    let by_class = &by_class[..by_class.find("\n    }").unwrap()];
+    assert_eq!(by_class.matches(" => ").count(), 3, "{by_class}");
 }
 
 #[test]

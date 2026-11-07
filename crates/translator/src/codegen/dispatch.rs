@@ -2776,23 +2776,32 @@ impl<'a> Gen<'a> {
         // stack slots added up to a frame of 122 KB, against 344 bytes without, which overflowed
         // the stack of a deep recursion. The method may still be inlined into that function, so
         // the arm costs a jump at most. An arm that reads the dispatcher's receiver is not moved.
+        // The function takes the value's bits (`java::Thin`), in a register, and lends the object
+        // itself: lent by the dispatcher, the object lay in the dispatcher's frame, whose address
+        // the call passed. As it is, the dispatcher keeps nothing in its frame, and returns what
+        // the function returns (in a split program, widened in registers: `split::widened_match`).
         let frames = self.arm_frames.clone().filter(|_| variants.len() > OWN_FRAME_ABOVE);
+        let thin = self.runtime("Thin");
         for (c, text, uses) in arms {
             let tag = self.class_tag(c);
             if uses {
-                let (payload, lent) = (self.payload(c), self.lent_object(c, &format!("{me}.0")));
+                let payload = self.payload(c);
                 // The class number is the one its constructor gives.
-                let call = match &frames {
+                let body = match &frames {
                     Some((params, args, ret))
-                        if ![me, "self", "Self"].iter().any(|w| mentions_word(&text, w)) =>
+                        if ![me, "self", "Self", "j2r_thin"].iter().any(|w| mentions_word(&text, w)) =>
                     {
+                        let lent = self.lent_object(c, "j2r_thin");
                         format!(
-                            "#[inline(never)] fn arm(o: &{payload}{params}){ret} {{ {text} }} arm(o{args})"
+                            "{{ #[inline(never)] fn arm(j2r_thin: {thin}{params}){ret} {{ let o: &{payload} = {lent}; {text} }} arm({me}.0{args}) }}"
                         )
                     }
-                    _ => text,
+                    _ => format!(
+                        "{{ let o: &{payload} = {}; {text} }}",
+                        self.lent_object(c, &format!("{me}.0"))
+                    ),
                 };
-                lines.push(Ok((tag.to_string(), format!("{{ let o: &{payload} = {lent}; {call} }}"))));
+                lines.push(Ok((tag.to_string(), body)));
             } else if let Some(&i) = index.get(&text) {
                 alike[i].1.push(c);
             } else {
@@ -4442,6 +4451,10 @@ impl<'a> Gen<'a> {
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
         for (need, method, ret) in methods {
+            if let Need::IdentityHash(_) = need {
+                self.identity_hash_fns(variants);
+                continue;
+            }
             self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
             self.indent += 1;
             if let Need::RuntimeTypeNames(_) = need {
@@ -4484,18 +4497,66 @@ impl<'a> Gen<'a> {
             self.method_arms((method, "", "", &ret), variants, &|g: &mut Self, c| match need {
                 Need::RuntimeClassName(_) if g.has_bodies(c) => (g.constant_class_name(c, "*o", false), true),
                 Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
-                Need::CopyKind(_) => (g.copy_kind(c), false),
-                // Read from the value's bits, the same text for every such class, whose arms
-                // are one (`match_arms_or`): the Minecraft server's were 6 MB of the same code.
-                Need::IdentityHash(_) if g.identity_by_address(c) => {
-                    (format!("{}(self.0.address())", g.runtime("address_hash")), false)
-                }
-                _ => (g.value_hash(c, "o"), true),
+                _ => (g.copy_kind(c), false),
             });
             self.indent -= 1;
             self.line("}");
         }
         self.flush_arm_parts(&name, false);
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// `object_identity_hash()` on the enum of `variants`.
+    ///
+    /// The hash of an object whose identity is the address of its handle (`identity_by_address`)
+    /// is read from the value's bits, the same code for every such class: the method tests the
+    /// class number against the set of those classes, a `java::ClassSet` (one load and a shift)
+    /// where they are more than a few runs of numbers, and calls `object_identity_hash_by_class()`,
+    /// a `match` over the others (a string, a box, an enum's constant, an object in a cell, whose
+    /// address is its value's), only for them. The method is that small, so the split into
+    /// crates keeps it in the header, and every call of `System.identityHashCode` (the JDK's
+    /// `IdentityHashMap`, fastutil's maps by reference) runs it in place: as a `match` over every
+    /// class, cut into parts of 256 numbers, it was a call of 45 instructions, which LLVM turned
+    /// into vector code that hashed four addresses at once before it looked at the class.
+    fn identity_hash_fns(&mut self, variants: &[usize]) {
+        let (by_address, others): (Vec<usize>, Vec<usize>) =
+            variants.iter().partition(|&&c| self.identity_by_address(c));
+        let address = format!("{}(self.0.address())", self.runtime("address_hash"));
+        let value_arms = &|g: &mut Self, c| (g.value_hash(c, "o"), true);
+        if by_address.is_empty() || others.is_empty() {
+            self.line("pub(crate) fn object_identity_hash(&self) -> i32 {");
+            self.indent += 1;
+            match others.is_empty() {
+                true => self.line(&address),
+                false => self.method_arms(("object_identity_hash", "", "", " -> i32"), variants, value_arms),
+            }
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        let runs = self.tag_runs(&[&by_address], variants).pop().unwrap_or_default();
+        let test = if runs.len() > SET_RUNS {
+            // An associated `const`, whose borrow is a static.
+            let (first, last) = (runs[0].0 >> 6, runs[runs.len() - 1].1 >> 6);
+            let list: Vec<String> = runs.iter().map(|(a, b)| format!("({a}, {b})")).collect();
+            let set = self.runtime("ClassSet");
+            self.line(&format!(
+                "const J2R_IDENTITY_BY_ADDRESS: {set}<{}> = {set}::of(&[{}]);",
+                last - first + 1,
+                list.join(", ")
+            ));
+            "Self::J2R_IDENTITY_BY_ADDRESS.contains(self.0.tag())".to_string()
+        } else {
+            format!("matches!(self.0.tag(), {})", self.tags(&by_address, variants))
+        };
+        self.line("pub(crate) fn object_identity_hash(&self) -> i32 {");
+        self.line(&format!("    if {test} {{ {address} }} else {{ self.object_identity_hash_by_class() }}"));
+        self.line("}");
+        self.line("pub(crate) fn object_identity_hash_by_class(&self) -> i32 {");
+        self.indent += 1;
+        // Only the others reach it.
+        self.method_arms(("object_identity_hash_by_class", "", "", " -> i32"), &others, value_arms);
         self.indent -= 1;
         self.line("}");
     }

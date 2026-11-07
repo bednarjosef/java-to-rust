@@ -424,6 +424,50 @@ fn small_results_split_into_crates_match_java() {
     assert!(header.contains("-> java::Ret<i32, "), "no widened result in the header");
 }
 
+/// Objects of many classes hashed through `Object.hashCode` and `System.identityHashCode`, split
+/// into crates: `Object`'s dispatcher widens the value in each arm, whose function of its own
+/// returns it widened (`split::widened_match`), and `object_identity_hash()` reads the address of
+/// an object of most classes from its bits after a test of its class number, in the header.
+#[test]
+fn hash_codes_of_many_classes_split_into_crates() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/whole-program");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-split-hash-codes");
+    std::fs::create_dir_all(&work).unwrap();
+    let programs = programs(&root, &work);
+    let p = programs
+        .iter()
+        .find(|p| p.name == "hashcodesofmanyclasses")
+        .expect("corpus/whole-program/HashCodesOfManyClasses.java");
+    let cache = check_cache::test_root().join("whole-program-java");
+    let java = run_java(p, &work.join(&p.name).join("classes"), &cache);
+    let (rust, _) = run_rust(p, &library, &work, &work.join("unused"), None, Some(3));
+    assert_eq!(rust, Ok(java));
+    let dir = work.join(&p.name).join("crate");
+    let mut moved = String::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path().join("src/lib.rs");
+        if path.parent().and_then(|s| s.parent()).is_some_and(|d| d.ends_with("header")) {
+            continue;
+        }
+        moved.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+    }
+    let dispatcher = moved
+        .split("\npub fn ")
+        .find(|f| f.contains("__Object__hash_code(this: Object) -> java::Ret<i32, Throwable>"))
+        .expect("Object's hashCode dispatcher in a body crate");
+    assert!(dispatcher.contains("fn arm(j2r_thin: java::Thin) -> java::Ret<i32, Throwable>"), "{dispatcher}");
+    assert!(!dispatcher.contains("fn arm(j2r_thin: java::Thin) -> Result<"), "{dispatcher}");
+    let header = std::fs::read_to_string(dir.join("header/src/lib.rs")).unwrap();
+    assert!(
+        header.contains("else { self.object_identity_hash_by_class() }"),
+        "no test of the class number in object_identity_hash()"
+    );
+}
+
 /// A generic method that stays a Rust generic in a class that no object is of: split into crates,
 /// the class's dispatcher keeps the method's type parameters.
 #[test]
