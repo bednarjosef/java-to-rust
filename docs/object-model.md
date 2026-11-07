@@ -445,7 +445,13 @@ but stands for the code at its call sites, so calling it does not initialize tha
 - `x instanceof Circle` is a test of the class's number, `matches!(x.0.tag(), 2)` (the range of
   numbers of the classes at or below `Circle`, 1.2); against a type that shares no variant
   with the operand, it is `false`, and when the operand's static type is already the tested type
-  or below it, it passes (an operand with effects is still evaluated).
+  or below it, it passes (an operand with effects is still evaluated). An operand that may be
+  null is tested as `matches!(java::Thin::tag_or_null(x.as_ref().map(|o| o.0)), 2)`: null's
+  number is 0, which no class has, so the one compare is the test for null too. `tag()` is one
+  shift that the optimizer cannot see into, so each test compares the class number with 32-bit
+  immediates (`shr $48; cmp $2`) rather than the masked word with 64-bit constants, and a test
+  that an earlier one on the same value decides is still dropped (the module comment of
+  `runtime/src/thin.rs`).
 - A pattern variable is an owned value: the tested type's enum gets `as_circle(&self) ->
   Option<Arc<..>>` (`Need::Narrow`), and `x instanceof Circle c` binds `c` from it (a handle copy
   per successful test). One form covers a binding to a class and to a type with an enum of its
