@@ -177,6 +177,33 @@ pub(super) fn profiled_sets(numbers: &[u16]) -> HashMap<String, std::sync::Arc<[
     sets
 }
 
+/// The classes that each read of a local whose class a dominating test proved
+/// (`Facts::proven_types`) may be: those at or below the proven type, and of those only the ones
+/// the points-to facts allow where they list the read (`Class::receivers`). A call on the read
+/// dispatches among these (`Gen::proven_among`), so a call on a local of one class proven runs
+/// that class's method with no test of its number.
+pub(super) fn proven_sets(
+    class: &Class,
+    facts: &crate::analysis::Facts,
+) -> HashMap<ExprId, std::sync::Arc<[usize]>> {
+    let h = &class.hierarchy;
+    let mut kept: HashMap<Vec<usize>, std::sync::Arc<[usize]>> = HashMap::new();
+    let mut sets = HashMap::new();
+    for (&id, &p) in &facts.proven_types {
+        let below = h.concretes_of(p);
+        let set = match class.receivers.get(&id) {
+            Some(allowed) => {
+                let list: Vec<usize> =
+                    allowed.iter().copied().filter(|c| below.binary_search(c).is_ok()).collect();
+                kept.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone()
+            }
+            None => below,
+        };
+        sets.insert(id, set);
+    }
+    sets
+}
+
 /// The name of the dispatcher of group `general` among the classes of key `key`
 /// (`Need::Among`): `_only_` where they are closed, as it then has no whole dispatcher to fall
 /// back on, which a profiled set of the same classes needs.
@@ -939,6 +966,7 @@ impl<'a> Gen<'a> {
         if self.passing(s, t).is_empty() {
             return self.failing_cast(to, value, checked);
         }
+        let at = self.cast_at.take();
         self.need(Need::Narrow(s, t));
         self.need(Need::CastSource(s));
         let name = self.as_name(t);
@@ -949,6 +977,20 @@ impl<'a> Gen<'a> {
         let array = self.tested_array(value);
         if let Some((_, exact)) = &array {
             target = exact.clone();
+        }
+        let test = match array {
+            None => self.cast_test(s, t, value, at),
+            Some(_) => None,
+        };
+        if let Some(test) = test {
+            let text = if self.nullable(value) {
+                format!("{}.as_ref().map(|o| {cast}(o, {test}, &{target}))", self.object_place(value))
+            } else {
+                let obj = self.object(value);
+                let obj = super::class_values::borrow_of(&obj);
+                format!("{cast}({obj}, {test}, &{target})")
+            };
+            return self.cast_result(text, checked, self.nullable(value));
         }
         let check = |g: &mut Self, call: String| match &array {
             Some((class, exact)) if checked.is_some() => {
@@ -968,6 +1010,60 @@ impl<'a> Gen<'a> {
             check(self, format!("{cast}({obj}, |o| o.{name}(), &{target})"))
         };
         self.cast_result(text, checked, self.nullable(value))
+    }
+
+    /// The test of a cast of `value`, an object of the enum of `s`, to type `t`, as the closure
+    /// that `java::cast` takes, where a test made before it on the same value narrows it; `None`
+    /// where none does. `at` is the cast.
+    ///
+    /// - Where a dominating test proved the value's class (`Facts::proven_types`), the cast
+    ///   passes for every class it may be, and the test only checks the proof (`java::proven`),
+    ///   or it is a test of the fewer numbers that pass among those classes.
+    /// - Where the cast is the receiver of a call that tests first for a few classes (`among`,
+    ///   `profiled_among`), the cast tests for those first: the call's test of the same number
+    ///   then folds into it, where the general test (a `java::ClassSet` for an interface) and the
+    ///   call's compare would both run.
+    fn cast_test(&mut self, s: usize, t: usize, value: &'a Expr, at: Option<ExprId>) -> Option<String> {
+        let passing = self.passing(s, t);
+        let name = self.as_name(t);
+        let proven = self.runtime("proven");
+        if let Some(classes) = self.proven_variants(s, value) {
+            let passes: Vec<usize> =
+                classes.iter().copied().filter(|c| passing.binary_search(c).is_ok()).collect();
+            if passes.is_empty() {
+                return None;
+            }
+            if passes.len() == classes.len() {
+                return Some(format!("|o| Some({proven}(o.{name}()))"));
+            }
+            let tags = self.tags(&passes, &classes);
+            return Some(format!(
+                "|o| if matches!(o.0.tag(), {tags}) {{ Some({proven}(o.{name}())) }} else {{ None }}"
+            ));
+        }
+        let key = self.cast_first.filter(|&(id, _)| Some(id) == at)?.1;
+        let first: Vec<usize> =
+            self.receiver_sets[&key].iter().copied().filter(|c| passing.binary_search(c).is_ok()).collect();
+        if first.is_empty() || first.len() == passing.len() {
+            return None;
+        }
+        let tags = self.tags(&first, &first);
+        Some(format!(
+            "|o| if matches!(o.0.tag(), {tags}) {{ Some({proven}(o.{name}())) }} else {{ o.{name}() }}"
+        ))
+    }
+
+    /// The classes of the enum of `s` that `value` may be, where a dominating test proved its
+    /// class (`Facts::proven_types`), in index order.
+    fn proven_variants(&self, s: usize, value: &Expr) -> Option<std::rc::Rc<[usize]>> {
+        let p = self.proven_type(value)?;
+        Some(self.passing(s, p))
+    }
+
+    /// The type that a dominating test proved `value` is of (`Facts::proven_types`).
+    fn proven_type(&self, value: &Expr) -> Option<usize> {
+        let facts = &self.facts.proven_types;
+        facts.get(&value.id).or_else(|| facts.get(&self.peel(value).id)).copied()
     }
 
     /// A cast of a value whose class is known to a type that it is not of, which always fails
@@ -1029,7 +1125,27 @@ impl<'a> Gen<'a> {
                 if passing.is_empty() {
                     return known(self, false);
                 }
-                if let Some((class, _)) = self.tested_array(value) {
+                let array = self.tested_array(value);
+                // The classes that a dominating test left: the test passes or fails for all of
+                // them, or is a test of the fewer numbers among them.
+                if array.is_none()
+                    && let Some(proven) = self.proven_variants(s, value)
+                {
+                    let passes: Vec<usize> =
+                        proven.iter().copied().filter(|c| passing.binary_search(c).is_ok()).collect();
+                    if passes.len() == proven.len() || passes.is_empty() {
+                        return known(self, !passes.is_empty());
+                    }
+                    let tags = self.tags(&passes, &proven);
+                    return Code::atom(match nullable {
+                        true => format!(
+                            "{}.as_ref().is_some_and(|o| matches!(o.0.tag(), {tags}))",
+                            self.object_place(value)
+                        ),
+                        false => format!("matches!({}.0.tag(), {tags})", operand(&self.object(value))),
+                    });
+                }
+                if let Some((class, _)) = array {
                     self.need(Need::Narrow(s, t));
                     let name = self.as_name(t);
                     let is = format!("is_some_and(|a| {}(&a, {class}))", self.runtime("array_is"));
@@ -1110,11 +1226,30 @@ impl<'a> Gen<'a> {
             Narrowing::Known(false) => format!("None::<{}>", self.ty_name(to)),
             Narrowing::Down(s) => {
                 let t = self.type_of(to).expect("a test of a type of the program");
-                if self.passing(s, t).is_empty() {
+                let passing = self.passing(s, t);
+                if passing.is_empty() {
                     return format!("None::<{}>", self.ty_name(to));
                 }
                 self.need(Need::Narrow(s, t));
                 let name = self.as_name(t);
+                // A dominating test proved that every class the value may be passes, or none.
+                if self.tested_array(value).is_none()
+                    && let Some(proven) = self.proven_variants(s, value)
+                {
+                    let passes = proven.iter().filter(|c| passing.binary_search(c).is_ok()).count();
+                    if passes == 0 {
+                        return format!("None::<{}>", self.ty_name(to));
+                    }
+                    if passes == proven.len() {
+                        let proven = self.runtime("proven");
+                        let text = if nullable {
+                            format!("{}.as_ref().map(|o| {proven}(o.{name}()))", self.object_place(value))
+                        } else {
+                            format!("Some({proven}({}.{name}()))", self.object(value))
+                        };
+                        return self.tested(value, text);
+                    }
+                }
                 let mut text = if nullable {
                     let enum_name = struct_name(&self.class.types[s].name);
                     format!("{}.as_ref().and_then({enum_name}::{name})", self.object_place(value))
@@ -1876,7 +2011,8 @@ impl<'a> Gen<'a> {
             }
             _ => self.dispatch_name(t, resolved),
         };
-        let obj = self.thin_receiver(t, receiver);
+        let first = among.filter(|_| self.enum_body(t, resolved).is_none()).map(|(key, _)| key);
+        let obj = self.receiver_testing_first(t, receiver, first);
         let args = self.call_args(resolved, args).join(", ");
         // Counts of the classes of the receivers of each call that dispatches among every class
         // of its type, for profiling (`java::count_dispatch`), which `profiled_among` reads.
@@ -1939,10 +2075,43 @@ impl<'a> Gen<'a> {
         }
         self.need(Need::Among(t, group, key, Some(f), closed));
         let name = among_name(&self.group_names[&group], key, closed, Some(f));
-        let obj = self.thin_receiver(t, receiver);
+        let obj = self.receiver_testing_first(t, receiver, Some(key));
         let args: Vec<String> =
             std::iter::once(format!("&{slot}")).chain(self.call_args(resolved, args)).collect();
         Some(Code::atom(self.enum_fn_call(t, &name, &obj, &args.join(", "))))
+    }
+
+    /// `thin_receiver` of `receiver`, a value of the enum of `t`, for a call that tests first for
+    /// the classes of key `first`: a cast that is the receiver tests for them first too
+    /// (`cast_test`).
+    fn receiver_testing_first(&mut self, t: usize, receiver: &'a Expr, first: Option<u64>) -> String {
+        let outer = self.cast_first;
+        if let Some(key) = first
+            && matches!(receiver.kind, ExprKind::Cast(..))
+        {
+            self.cast_first = Some((receiver.id, key));
+        }
+        let obj = self.thin_receiver(t, receiver);
+        self.cast_first = outer;
+        obj
+    }
+
+    /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where a
+    /// dominating test proved its class (`Setup::proven_sets`): a call on it dispatches among
+    /// those, closed where the proven classes are all those it may be (the points-to facts did
+    /// not narrow them, or list every class of the enum that reaches the call). `None` where they
+    /// are more than `AMONG_MOST` of the enum's classes, or all of them.
+    fn proven_among(&self, t: usize, receiver: &Expr, resolved: usize) -> Option<(u64, bool)> {
+        let sets = self.proven_sets;
+        let set = sets.get(&receiver.id).or_else(|| sets.get(&self.peel(receiver).id))?;
+        let among = set.iter().filter(|&&c| self.is_enum_variant(t, c)).count();
+        if among == 0 || among > AMONG_MOST || among >= self.shared_enum_variants(t).len() {
+            return None;
+        }
+        let group = self.class.hierarchy.group_id(resolved);
+        let closed =
+            !self.class.receivers.contains_key(&receiver.id) || self.receivers_listed(t, resolved, group);
+        Some((receiver_key(set), closed))
     }
 
     /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
@@ -1965,6 +2134,9 @@ impl<'a> Gen<'a> {
     /// receiver is of one class runs that class's method with no test of its number, and one of
     /// a few classes tests for all but the last of them.
     fn closed_among(&self, t: usize, receiver: &Expr, resolved: usize) -> Option<(u64, bool)> {
+        if let Some(found) = self.proven_among(t, receiver, resolved) {
+            return Some(found);
+        }
         let group = self.class.hierarchy.group_id(resolved);
         if let Some(key) = self.among(t, receiver) {
             let closed = self.receiver_sets[&key].iter().all(|&c| self.is_enum_variant(t, c))

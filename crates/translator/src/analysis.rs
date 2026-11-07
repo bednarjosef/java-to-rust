@@ -41,6 +41,7 @@ mod objects;
 pub(crate) use objects::instantiated;
 mod owned;
 mod patterns;
+mod proven_classes;
 mod ranges;
 mod reflection_table;
 mod statics;
@@ -110,6 +111,9 @@ pub struct Facts {
     /// range analysis: (lowest, highest), empty when `lowest > highest`. Each size of a
     /// `new T[n]` has its values here too, keyed by the size expression.
     pub index_ranges: FastMap<ExprId, (i64, i64)>,
+    /// The class type, by index, that a dominating test proved each read of a local holds, by
+    /// the read's id, where it is narrower than the local's type (see `proven_classes`).
+    pub proven_types: FastMap<ExprId, usize>,
     /// Reads of string, array and object variables that are last uses: the value is moved, not
     /// cloned (see `moves`).
     pub moves: FastSet<ExprId>,
@@ -417,6 +421,7 @@ struct FromCode<'scope> {
     frozen_statics: FastSet<(usize, String)>,
     entry_init: FastSet<usize>,
     early_static_reads: FastSet<ExprId>,
+    proven_types: FastMap<ExprId, usize>,
     /// `Facts::ascii_length`, from the ranges' `ascii_chars`, on a thread of its own.
     ascii_length: alongside::Alongside<'scope, FastSet<ExprId>>,
 }
@@ -544,6 +549,7 @@ fn analyze_with(
                 frozen_statics,
                 entry_init,
                 early_static_reads,
+                proven_types: phase("analysis: proven classes", || proven_classes::proven_types(class)),
                 ascii_length,
             }
         });
@@ -567,6 +573,7 @@ fn analyze_with(
                 frozen_statics,
                 entry_init,
                 early_static_reads,
+                proven_types,
                 ascii_length,
             } = from_code.join();
             facts.no_overflow = ranges.no_overflow.clone();
@@ -584,6 +591,7 @@ fn analyze_with(
                 _ => None,
             };
             facts.early_static_reads = early_static_reads;
+            facts.proven_types = proven_types;
             phase("analysis: nullness", || nullness::analyze(class, &mut facts));
             let borrowing = alongside::Done::of(|| {
                 phase("analysis: borrowing", || {

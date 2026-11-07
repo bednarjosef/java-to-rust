@@ -365,6 +365,10 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   still checks the class number (`debug_assert!`), which the whole-program tests run. The
   Minecraft server's `ChunkAccess.getMinY()` calls its level's `getMinY()` so, which only a
   `ServerLevel` reaches.
+  A call on a local whose class a dominating `instanceof` or cast proved
+  (`analysis/proven_classes.rs`) calls the dispatcher among the proven classes the same way,
+  closed where the points-to facts do not narrow them further or list every class
+  (docs/object-model.md, 1.5).
 - **Profiled calls** (built): a call that the points-to facts leave on every class of its type
   can still meet one class almost always at run time, as `list.iterator()` on the Minecraft
   server's lists does, where a JIT's inline cache tests for that class and inlines its method.
@@ -382,6 +386,8 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   runs a factory (`iterator()`), its object can go on the caller's stack (docs/collector.md,
   "Objects on the stack"): the iterator of a loop over a list that is nearly always an
   `ArrayList` is then never allocated, as a JIT's escape analysis would do after inlining.
+  A cast that is the receiver of such a call (`((List) entry.getValue()).iterator()`) tests for
+  the call's classes first (docs/object-model.md, 1.5).
 - **Checks removed**: null checks on never-null references, bounds checks inside proven ranges,
   write barriers on young objects, monitors on objects that never reach another thread.
 - **Smaller objects**: unused fields removed, integers proven small stored as `u8` or `u16`,
