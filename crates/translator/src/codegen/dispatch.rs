@@ -357,6 +357,11 @@ pub(super) enum Narrowing {
 impl<'a> Gen<'a> {
     /// Records that the code uses an item of an enum (and so the enum).
     pub(super) fn need(&self, need: Need) {
+        // The one body that an open `Among` falls back to, found before `needs` is borrowed.
+        let among_body = match need {
+            Need::Among(t, group, _, _, false) => self.group_body(t, group),
+            _ => None,
+        };
         let mut needs = self.needs.borrow_mut();
         match need {
             Need::Base(t)
@@ -389,7 +394,10 @@ impl<'a> Gen<'a> {
             Need::Among(t, group, _, _, closed) => {
                 needs.insert(Need::Enum(t));
                 if !closed {
-                    needs.insert(Need::Dispatch(t, group));
+                    match among_body {
+                        Some(only) => needs.insert(Need::Body(only)),
+                        None => needs.insert(Need::Dispatch(t, group)),
+                    };
                 }
             }
             Need::Body(i) | Need::BodyFor(i, _) => {
@@ -2005,7 +2013,9 @@ impl<'a> Gen<'a> {
         let group = self.class.hierarchy.group_id(resolved);
         let among = self.closed_among(t, receiver, resolved);
         let name = match among {
-            Some((key, closed)) if self.enum_body(t, resolved).is_none() => {
+            Some((key, closed))
+                if self.enum_body(t, resolved).is_none() || self.copies_among(t, key, resolved) =>
+            {
                 self.need(Need::Among(t, group, key, None, closed));
                 among_name(&self.group_names[&group], key, closed, None)
             }
@@ -2112,6 +2122,17 @@ impl<'a> Gen<'a> {
         let closed =
             !self.class.receivers.contains_key(&receiver.id) || self.receivers_listed(t, resolved, group);
         Some((receiver_key(set), closed))
+    }
+
+    /// Whether a call of `resolved`, whose one body every object of the enum of `t` runs
+    /// (`enum_body`), on receivers of the classes of `key`, runs copies of the body for some of
+    /// them (`copyable`): a dispatcher among those classes then runs each its copy, whose calls
+    /// on `this` are direct, where the body would dispatch them among every class that runs it.
+    fn copies_among(&self, t: usize, key: u64, resolved: usize) -> bool {
+        let Some(only) = self.enum_body(t, resolved) else { return false };
+        let set = &self.receiver_sets[&key];
+        let among = set.iter().filter(|&&c| self.is_enum_variant(t, c)).count();
+        among <= BODY_FOR_CLASSES && set.iter().any(|&c| self.is_enum_variant(t, c) && self.copyable(only, c))
     }
 
     /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
@@ -2225,8 +2246,23 @@ impl<'a> Gen<'a> {
     /// among a few classes (`Need::Among`) or of a copy copies the body whatever the number of
     /// classes that run it, as only those few get copies: the server's `LevelChunk`, one of the
     /// many classes that run `LevelHeightAccessor`'s `getSectionYFromSectionIndex`, then runs its
-    /// copies down to `getMinY()`, where the body dispatched again among all of them.
+    /// copies down to `getMinY()`, where the body dispatched again among all of them. A call
+    /// on an object whose class is known (`receiver_class`) runs the copy too.
     pub(super) fn body_for(&self, i: usize, c: usize) -> bool {
+        if !self.copyable(i, c) {
+            return false;
+        }
+        let h = &self.class.hierarchy;
+        let Home::Enum(d) = self.homes[i] else { return false };
+        let runners =
+            self.enum_variants(d).into_iter().filter(|&v| h.implementation(i, v) == Some(i)).count();
+        runners <= BODY_FOR_CLASSES || self.few_arms
+    }
+
+    /// Whether body `i` may be copied for class `c` (`body_for`), whatever the number of classes
+    /// that run it: a small body of one expression, of values, operators, fields, calls of static
+    /// methods and calls on `this`, with one call on `this` at least.
+    pub(super) fn copyable(&self, i: usize, c: usize) -> bool {
         let m = &self.class.methods[i];
         let Home::Enum(d) = self.homes[i] else { return false };
         if m.is_static
@@ -2249,6 +2285,9 @@ impl<'a> Gen<'a> {
                 ExprKind::MethodCall { receiver, is_super: false, .. } => {
                     on_this |= matches!(receiver.kind, ExprKind::This);
                 }
+                // A static helper of the body (`SectionPos.blockToSectionCoord(y)`) runs the same
+                // in the copy.
+                ExprKind::Call { resolved: Some(r), .. } if self.class.methods[*r].is_static => {}
                 ExprKind::Int(_)
                 | ExprKind::Long(_)
                 | ExprKind::Double(_)
@@ -2267,13 +2306,44 @@ impl<'a> Gen<'a> {
                 _ => plain = false,
             }
         });
-        if !plain || !on_this || nodes > BODY_FOR_NODES {
-            return false;
+        plain && on_this && nodes <= BODY_FOR_NODES
+    }
+
+    /// The one class that the objects of `receiver` have, where the code knows it: `this` in a
+    /// copy of a body written for one class (`body_for`), an object of a class whose struct holds
+    /// only its own objects, or a receiver that the points-to facts give one class
+    /// (`Class::receivers`).
+    fn receiver_class(&self, receiver: &Expr) -> Option<usize> {
+        let receiver = self.peel(receiver);
+        if matches!(receiver.kind, ExprKind::This)
+            && let Some(c) = self.this_class
+        {
+            return Some(c);
         }
+        if let Some(set) = self.class.receivers.get(&receiver.id)
+            && let [c] = set[..]
+        {
+            return Some(c);
+        }
+        if self.enum_of(receiver).is_none() {
+            // An enum's constant with a body is of the body's class.
+            return self.struct_class(receiver).filter(|&c| !self.has_bodies(c));
+        }
+        None
+    }
+
+    /// The body that every object of the enum of `t` runs for a call of override group `group`
+    /// (`enum_body`), of the group's method declared nearest above the type.
+    fn group_body(&self, t: usize, group: usize) -> Option<usize> {
         let h = &self.class.hierarchy;
-        let runners =
-            self.enum_variants(d).into_iter().filter(|&v| h.implementation(i, v) == Some(i)).count();
-        runners <= BODY_FOR_CLASSES || self.few_arms
+        let mut chain = vec![t];
+        chain.extend(h.ancestors(t));
+        let members = h.group(group);
+        let r = chain
+            .iter()
+            .find_map(|&a| members.iter().copied().find(|&m| self.class.methods[m].class == a))
+            .or_else(|| members.iter().copied().find(|m| h.is_subtype(t, self.class.methods[*m].class)))?;
+        self.enum_body(t, r)
     }
 
     /// The name of the copy of body `i` for class `c` (`body_for`): the body's, then `on_` and
@@ -2414,10 +2484,23 @@ impl<'a> Gen<'a> {
     ) -> Option<Code> {
         match self.homes[index] {
             Home::Enum(d) => {
-                self.need(Need::Body(index));
+                // On an object whose class is known, a small body runs as its copy for the class,
+                // whose calls on `this` run that class's methods directly (`body_for`).
+                // A plain call (`called_name`) calls the copy's plain body.
+                let name = match self.receiver_class(receiver).filter(|&c| self.is_enum_variant(d, c)) {
+                    Some(c) if self.copyable(index, c) => {
+                        self.need(Need::BodyFor(index, c));
+                        let plain = if self.plain_call == Some(index) { super::PLAIN_BODY } else { "" };
+                        format!("{}{plain}", self.body_for_name(index, c))
+                    }
+                    _ => {
+                        self.need(Need::Body(index));
+                        self.called_name(index)
+                    }
+                };
                 let obj = self.thin_as_enum(d, receiver);
                 let args = self.call_args(index, args).join(", ");
-                Some(Code::atom(self.enum_fn_call(d, &self.called_name(index), &obj, &args)))
+                Some(Code::atom(self.enum_fn_call(d, &name, &obj, &args)))
             }
             Home::Fields(d) => {
                 let t = self.enum_of(receiver)?;
@@ -3104,7 +3187,12 @@ impl<'a> Gen<'a> {
             return;
         }
         let closed = among.is_some_and(|(_, closed)| closed);
-        let otherwise = among.filter(|_| !closed).map(|_| self.enum_fn_call(t, general, "this", args));
+        // Any other class runs the whole dispatcher, or the one body that every class runs.
+        let general = match self.enum_body(t, r) {
+            Some(only) if among.is_some() => self.fn_names[only].clone(),
+            _ => general.to_string(),
+        };
+        let otherwise = among.filter(|_| !closed).map(|_| self.enum_fn_call(t, &general, "this", args));
         let numbers = match among.is_some() && !closed {
             true => self.enum_variants(t),
             false => variants.to_vec(),

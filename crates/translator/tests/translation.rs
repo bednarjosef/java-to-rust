@@ -8108,6 +8108,77 @@ fn a_small_default_body_is_copied_for_each_class_whose_arm_calls_it() {
 }
 
 #[test]
+fn a_default_body_on_receivers_of_known_classes_runs_their_copies() {
+    // Five classes run `maxY()`, too many for copies in its dispatcher. A call on an object of a
+    // known class still runs a copy of the body, whose `minY()` and `height()` are the class's own
+    // methods. (A call on a field that holds objects of two of the classes runs their copies too,
+    // where the points-to facts of a whole program bound the field: whole-program
+    // DefaultMethodReceivers.)
+    let rust = translate(
+        r#"
+        public class Known {
+            interface Heights {
+                int minY();
+                int height();
+                default int maxY() { return minY() + height() - 1; }
+            }
+
+            static final class Level implements Heights {
+                public int minY() { return -64; }
+                public int height() { return 384; }
+            }
+
+            static final class Region implements Heights {
+                public int minY() { return -16; }
+                public int height() { return 32; }
+            }
+
+            static final class Chunk implements Heights {
+                public int minY() { return 0; }
+                public int height() { return 16; }
+            }
+
+            static final class Fixed implements Heights {
+                final int m;
+                Fixed(int m) { this.m = m; }
+                public int minY() { return m; }
+                public int height() { return 8; }
+            }
+
+            static final class Imposter implements Heights {
+                public int minY() { return 1; }
+                public int height() { return 2; }
+            }
+
+            static final class Game {
+                final Heights world;
+                Game(Heights world) { this.world = world; }
+                int top() { return world.maxY(); }
+            }
+
+            public static void main(String[] args) {
+                Level level = new Level();
+                System.out.println(level.maxY());
+                System.out.println(new Game(level).top() + new Game(new Region()).top());
+                Heights[] all = { new Chunk(), new Fixed(3), new Imposter() };
+                for (Heights h : all) {
+                    System.out.println(h.maxY());
+                }
+            }
+        }
+    "#,
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn KnownHeights__max_y__on_known_level(this: KnownHeights) -> i32 {\n    ({ let o: &Arc<KnownLevel> = &unsafe { this.0.to_pointer() }; o.min_y() })",
+            "java::println!(\"{}\", KnownHeights__max_y__on_known_level(KnownHeights::Level(level.clone())));",
+        ],
+    );
+    assert_lacks(&rust, &["__on_known_chunk", "__on_known_fixed", "__on_known_imposter"]);
+}
+
+#[test]
 fn a_field_that_a_loop_only_reads_is_read_once_before_it() {
     let rust = translate(
         "class A {
