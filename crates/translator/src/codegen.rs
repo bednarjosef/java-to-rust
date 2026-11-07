@@ -816,6 +816,9 @@ impl<'a> Gen<'a> {
             closures: Vec::new(),
             slots: HashMap::new(),
             slot_param: String::new(),
+            moves: stack_objects::Moves::default(),
+            unmoved: HashSet::new(),
+            missed: Vec::new(),
             on_stack: false,
             stack_forms: &setup.stack_forms,
             stack_sites: &setup.stack_sites,
@@ -1134,6 +1137,13 @@ struct Gen<'a> {
     slots: HashMap<ExprId, (String, usize)>,
     /// The name of the slot that a function's form on the stack is given.
     slot_param: String,
+    /// The moves to the heap of the method being written (see `stack_objects::Moves`).
+    moves: stack_objects::Moves,
+    /// The objects that a move was not written for, which their methods, written again, make in
+    /// the heap.
+    unmoved: HashSet<ExprId>,
+    /// The objects of the method just written whose moves were not all written.
+    missed: Vec<ExprId>,
     /// Whether the constructor or factory being written is its form on the stack, which makes
     /// its object in the slot it is given.
     on_stack: bool,
@@ -1369,8 +1379,27 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Writes method `index`, or its form on the stack when `on_stack` is set.
+    /// Writes method `index`, or its form on the stack when `on_stack` is set. A method in which
+    /// a move to the heap was not written (`stack_objects::Moves`) is written again with those
+    /// objects in the heap.
     fn method_form(&mut self, index: usize) {
+        let (start, indent, closures, rejected) =
+            (self.out.len(), self.indent, self.closures.len(), self.rejected.len());
+        loop {
+            self.method_form_once(index);
+            let missed = std::mem::take(&mut self.missed);
+            if missed.is_empty() {
+                return;
+            }
+            self.out.truncate(start);
+            self.indent = indent;
+            self.closures.truncate(closures);
+            self.rejected.truncate(rejected);
+            self.unmoved.extend(missed);
+        }
+    }
+
+    fn method_form_once(&mut self, index: usize) {
         if !CATCHING.with(|c| c.get()) {
             return self.write_method(index);
         }
@@ -1481,6 +1510,8 @@ impl<'a> Gen<'a> {
         // The `new`s and calls whose objects the method makes in slots on its stack.
         let sites = if never_runs { Vec::new() } else { self.stack_sites(index) };
         self.name_slots(index, &sites);
+        let moves = self.find_moves(index);
+        let outer_moves = std::mem::replace(&mut self.moves, moves);
         let fn_name = if self.on_stack {
             // The slot comes after the receiver.
             let param = format!("{}: {}", self.slot_param, self.slot_param_type(index));
@@ -1577,6 +1608,8 @@ impl<'a> Gen<'a> {
         if let Err(e) = exceptions::check_closures(&self.out[start..]) {
             self.closures.push(Error { pos: m.pos, ..e });
         }
+        let moves = std::mem::replace(&mut self.moves, outer_moves);
+        self.missed.extend(moves.missed());
         self.slots = outer_slots;
         self.thin_this = outer_thin;
         WRITING.with(|w| w.set(outer));

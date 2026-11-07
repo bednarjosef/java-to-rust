@@ -86,6 +86,27 @@
 //! it returns, and the caller's rules hold for their objects too, as for a factory's other
 //! values. Which class a call saw is only a guess, so a wrong one costs the slot, never
 //! soundness.
+//!
+//! **Moves to the heap.** An object that escapes only at a few places may still start in a slot
+//! and be moved to the heap just before the first of them: the random `BlockPos` that the
+//! Minecraft server picks in each section, which only a block that ticks keeps. The places
+//! (`points`) are the arguments of calls and the values stored in fields, arrays and statics that
+//! are a plain read of a local variable (or a cast of one), in a statement of its own (an expression, a local's
+//! declaration or a `return`) that names the variable nowhere else and assigns it nowhere, and is
+//! not in a switch expression nor a `for` loop's start. An object moves when one local declared by
+//! a `Stmt::Local` holds it and no other variable or object does (but the result of the call that
+//! makes it), nothing in the method or its callees reads its identity hash before
+//! (`Summary::identity`, and for a factory's object, the factory), it is not returned, with
+//! each of those places taken for none it stays (the loop rule included), and none of the places
+//! where it may leave is in the block of the variable's declaration or a plain block nested in
+//! it, which would always move it
+//! (`blocks`): then the heap is cheaper. Its translation then
+//! moves it before each statement with such a place where it may leave (`Slot::to_heap`), which
+//! does nothing once the variable names the heap. That is sound because before that point nothing
+//! else names the object, so nothing can tell the moved object from the one in the slot: its
+//! fields are copied as they are, and every later read of the variable reads the moved one. A
+//! variable declared in the loop's body is a new one at each iteration, so a moved object of one
+//! iteration is never taken for the next one's.
 
 use super::{FastMap, FastSet};
 use crate::ast::*;
@@ -103,6 +124,24 @@ pub struct StackObjects {
     pub calls: FastMap<ExprId, usize>,
     /// The factories: the methods that return a new object that does not otherwise leave them.
     pub factories: FastMap<usize, Product>,
+    /// The objects of `objects` that are moved to the heap where they may leave (see **Moves to
+    /// the heap**), by the method that makes them.
+    pub moves: FastMap<usize, Vec<Move>>,
+}
+
+/// An object that starts in a slot and is moved to the heap before the statements where it may
+/// leave (see **Moves to the heap**).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Move {
+    /// The `new` or call of a factory that makes it.
+    pub made: ExprId,
+    /// The local variable that holds it.
+    pub var: String,
+    /// Where that variable is declared.
+    pub declared: Pos,
+    /// The statements before which it is moved, by the id of their expression: an expression
+    /// statement's, a local's initializer or a returned value.
+    pub before: Vec<ExprId>,
 }
 
 /// The object that a factory returns.
@@ -274,6 +313,25 @@ pub fn stack_objects(class: &Class) -> StackObjects {
             }
         }
     }
+    // The objects moved to the heap where they leave, found once the summaries and the
+    // factories are final.
+    let mut product_read = FastMap::default();
+    let wanted = std::env::var("JAVA_TO_RUST_ESCAPE_WHY").unwrap_or_default();
+    let wanted: Vec<&str> = wanted.split(',').filter(|w| !w.is_empty()).collect();
+    for m in 0..n {
+        let name = method_name(class, m);
+        let report = wanted.iter().any(|w| name.contains(w)).then_some(name.as_str());
+        let moves = analysis.moved(m, &mut product_read, report);
+        for (made, call, _) in &moves {
+            found.objects.insert(*made);
+            if let Some(t) = call {
+                found.calls.insert(*made, *t);
+            }
+        }
+        if !moves.is_empty() {
+            found.moves.insert(m, moves.into_iter().map(|(_, _, mv)| mv).collect());
+        }
+    }
     if let Ok(wanted) = std::env::var("JAVA_TO_RUST_ESCAPE_WHY") {
         analysis.explain_all(class, &wanted);
     }
@@ -296,6 +354,8 @@ struct Summary {
     stored: Vec<Vec<FieldKey>>,
     /// What the method does with what `this` holds in each of those fields, by field.
     contents: Vec<(FieldKey, Escape)>,
+    /// Whether the identity hash of each parameter may be read, which tells where its object is.
+    identity: Vec<bool>,
 }
 
 impl Summary {
@@ -305,6 +365,7 @@ impl Summary {
             returned: vec![false; arity],
             stored: vec![Vec::new(); arity],
             contents: Vec::new(),
+            identity: vec![false; arity],
         }
     }
 
@@ -314,10 +375,12 @@ impl Summary {
             self.escapes.resize(other.escapes.len(), Escape::default());
             self.returned.resize(other.returned.len(), false);
             self.stored.resize(other.stored.len(), Vec::new());
+            self.identity.resize(other.identity.len(), false);
         }
         for k in 0..other.escapes.len() {
             self.escapes[k].add(&other.escapes[k]);
             self.returned[k] |= other.returned[k];
+            self.identity[k] |= other.identity[k];
             for f in &other.stored[k] {
                 if let Err(at) = self.stored[k].binary_search(f) {
                     self.stored[k].insert(at, *f);
@@ -335,6 +398,7 @@ impl Summary {
             && (0..other.escapes.len()).all(|k| {
                 self.escapes[k].covers(&other.escapes[k])
                     && (self.returned[k] || !other.returned[k])
+                    && (self.identity[k] || !other.identity[k])
                     && covers_fields(&self.stored[k], &other.stored[k])
             })
             && other.contents.iter().all(|(f, e)| {
@@ -438,6 +502,13 @@ impl Sources {
                 })
             })
         })
+    }
+
+    /// Takes `other` away.
+    fn minus(&mut self, other: &Sources) {
+        for (w, &o) in self.0.iter_mut().zip(&other.0) {
+            *w &= !o;
+        }
     }
 
     /// Adds `other`; whether that added anything.
@@ -549,6 +620,11 @@ struct Call {
     /// What escapes when it is not followed: the receiver, `this` for a call on it, the call's
     /// own source and every argument.
     unknown: Value,
+    /// Which of `args` (or, when it is not followed, of what it is given) are points (see
+    /// **Moves to the heap**): the variable read and the id of the read.
+    points: Vec<Option<(u32, ExprId)>>,
+    /// When it is not followed and some of what it is given are points, what escapes but those.
+    unknown_rest: Option<Value>,
     /// The variable that holds its result.
     result: u32,
     /// Its own source: a `new`'s, or that of a call of one method, which is one when that method
@@ -584,6 +660,11 @@ struct Named {
     param: Option<usize>,
     /// The loops around every declaration of it; `None` when it has none.
     loops: Option<Vec<usize>>,
+    /// Its name.
+    name: String,
+    /// Where it is declared, when it is a local that one `Stmt::Local` declares (none of a `for`
+    /// loop's start), and the block of statements that declaration is in (`blocks`).
+    local: Option<(Pos, u32)>,
 }
 
 /// A method's code, reduced once to the flows the analysis follows: the variables (named ones
@@ -602,6 +683,17 @@ struct Compiled {
     escapes: Vec<Value>,
     /// What each of `escapes` is, for the explanations.
     labels: Vec<&'static str>,
+    /// The `escapes` that are a point (see **Moves to the heap**), by their place in `escapes`,
+    /// with the variable read and the id of the read.
+    escape_points: Vec<(usize, u32, ExprId)>,
+    /// The reads of local variables that are points, with the statement each is in, by the id of
+    /// its expression.
+    points: FastMap<ExprId, ExprId>,
+    /// The block of statements (`blocks`) that each statement with a point is in, by the id of its
+    /// expression.
+    point_blocks: FastMap<ExprId, u32>,
+    /// What the method reads the identity hash of.
+    identity: Vec<Value>,
     returns: Vec<Value>,
     sites: Vec<Site>,
     /// What is stored in each field of `this` that only its own methods read (`own_fields`).
@@ -1007,6 +1099,8 @@ fn compile<'a>(
             }
         }
     }
+    let blocks = blocks(method);
+    (cx.code.points, cx.code.point_blocks) = points(method, &blocks);
     // The expressions the method runs: its body's, and for a constructor that does not delegate,
     // its class's field initializers.
     let mut exprs: Vec<&Expr> = Vec::new();
@@ -1036,7 +1130,15 @@ fn compile<'a>(
             }
             _ => {}
         }
+        if let ExprKind::Builtin(Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash), args) =
+            &x.kind
+        {
+            let mut read = Value::default();
+            args.iter().for_each(|a| cx.add(a, &mut read));
+            cx.code.identity.push(read);
+        }
         let mut escaping = Value::default();
+        let mut point = None;
         let label = match &x.kind {
             ExprKind::Assign { op: None, target: Place::Field { object, name }, value }
                 if has_this
@@ -1054,6 +1156,9 @@ fn compile<'a>(
                 ..
             }
             | ExprKind::Assign { op: Some(_), value, .. } => {
+                if matches!(x.kind, ExprKind::Assign { op: None, .. }) {
+                    point = cx.point(value);
+                }
                 cx.add(value, &mut escaping);
                 "stored in a field, a static or an array"
             }
@@ -1082,6 +1187,9 @@ fn compile<'a>(
             _ => "",
         };
         if !escaping.is_empty() {
+            if let Some((v, id)) = point {
+                cx.code.escape_points.push((cx.code.escapes.len(), v, id));
+            }
             cx.code.escapes.push(escaping);
             cx.code.labels.push(label);
         }
@@ -1089,6 +1197,28 @@ fn compile<'a>(
     let mut stmts: Vec<&Stmt> = Vec::new();
     for s in &method.body {
         visit_stmt(s, &mut |_| {}, &mut |s| stmts.push(s));
+    }
+    // The locals that only `Stmt::Local`s outside a `for` loop's start declare.
+    let mut starts: FastSet<*const Stmt> = FastSet::default();
+    let mut declared: FastMap<VarKey<'a>, Option<(Pos, u32)>> = FastMap::default();
+    for s in &stmts {
+        if let Stmt::For { init, .. } = s {
+            starts.extend(init.iter().map(|i| i as *const Stmt));
+        }
+    }
+    for s in &stmts {
+        match s {
+            Stmt::Local { name, pos, .. } => {
+                let key = cx.resolved.declaration(name, s);
+                let plain = key.1 != MERGED && !starts.contains(&(*s as *const Stmt));
+                // A variable declared twice is no local of one declaration.
+                let block = blocks.get(&(*s as *const Stmt)).copied();
+                let at = if plain && !declared.contains_key(&key) { block.map(|b| (*pos, b)) } else { None };
+                declared.insert(key, at);
+            }
+            Stmt::ForEach { name, .. } => _ = declared.insert(cx.resolved.declaration(name, s), None),
+            _ => {}
+        }
     }
     for s in stmts {
         match s {
@@ -1116,6 +1246,7 @@ fn compile<'a>(
         site.loops = scopes.sites.get(&site.id).cloned();
     }
     for (named, key) in cx.code.named.iter_mut().zip(&cx.order) {
+        named.local = declared.get(key).copied().flatten().filter(|_| named.param.is_none());
         named.loops = scopes.declarations.get(key).map(|ds| {
             let mut all = ds.first().cloned().unwrap_or_default();
             for d in &ds[1..] {
@@ -1127,7 +1258,130 @@ fn compile<'a>(
     cx.code
 }
 
+/// The reads of local variables in method `m` that may be points (see **Moves to the heap**),
+/// with the statement each is in, by the id of its expression: a read in an expression
+/// statement, a local's initializer or a returned value that is the statement's only mention of
+/// its variable, in a statement that assigns or binds no variable of its name and has no switch
+/// expression, outside a `for` loop's start.
+fn points(
+    method: &Method,
+    blocks: &FastMap<*const Stmt, u32>,
+) -> (FastMap<ExprId, ExprId>, FastMap<ExprId, u32>) {
+    let mut stmts: Vec<&Stmt> = Vec::new();
+    for s in &method.body {
+        visit_stmt_outside_switches(s, &mut |s| stmts.push(s));
+    }
+    let mut starts: FastSet<*const Stmt> = FastSet::default();
+    for s in &stmts {
+        if let Stmt::For { init, .. } = s {
+            starts.extend(init.iter().map(|i| i as *const Stmt));
+        }
+    }
+    let mut points = FastMap::default();
+    let mut point_blocks = FastMap::default();
+    for s in stmts {
+        let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _)) = s else {
+            continue;
+        };
+        if starts.contains(&(s as *const Stmt)) {
+            continue;
+        }
+        let mut reads: FastMap<&str, Option<ExprId>> = FastMap::default();
+        let mut assigned: FastSet<&str> = FastSet::default();
+        let mut switches = false;
+        visit_expr(e, &mut |x| match &x.kind {
+            ExprKind::Var(name) => {
+                reads.entry(name).and_modify(|r| *r = None).or_insert(Some(x.id));
+            }
+            ExprKind::Assign { target: Place::Var(name), .. }
+            | ExprKind::IncDec { target: Place::Var(name), .. }
+            | ExprKind::InstanceOf { binding: Some(name), .. } => _ = assigned.insert(name),
+            ExprKind::Switch { .. } => switches = true,
+            _ => {}
+        });
+        if switches {
+            continue;
+        }
+        for (name, read) in reads {
+            if let Some(id) = read
+                && !assigned.contains(name)
+            {
+                points.insert(id, e.id);
+                point_blocks.insert(e.id, blocks[&(s as *const Stmt)]);
+            }
+        }
+    }
+    (points, point_blocks)
+}
+
+/// A number for each statement of method `m` outside switch expressions: the same for the
+/// statements of one block, which run one after the other, and for those of a plain or labeled
+/// block nested in it, which run in the same run; a new one for each branch, loop body, case or
+/// part of a `try` inside it.
+fn blocks(method: &Method) -> FastMap<*const Stmt, u32> {
+    struct Numbering {
+        next: u32,
+        out: FastMap<*const Stmt, u32>,
+    }
+    impl Numbering {
+        fn stmt(&mut self, s: &Stmt, block: u32) {
+            self.out.insert(s as *const Stmt, block);
+            match s {
+                Stmt::Block(stmts) => stmts.iter().for_each(|s| self.stmt(s, block)),
+                Stmt::If { then, otherwise, .. } => {
+                    self.inner(std::slice::from_ref(&**then));
+                    if let Some(o) = otherwise {
+                        self.inner(std::slice::from_ref(&**o));
+                    }
+                }
+                Stmt::Labeled { body, .. } => self.stmt(body, block),
+                Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::ForEach { body, .. } => {
+                    self.inner(std::slice::from_ref(&**body))
+                }
+                Stmt::For { init, body, .. } => {
+                    // Its start runs where the loop is.
+                    init.iter().for_each(|s| self.stmt(s, block));
+                    self.inner(std::slice::from_ref(&**body));
+                }
+                Stmt::Switch { cases, .. } => cases.iter().for_each(|case| self.inner(&case.body)),
+                Stmt::Try { body, catches, finally } => {
+                    self.inner(body);
+                    catches.iter().for_each(|catch| self.inner(&catch.body));
+                    if let Some(f) = finally {
+                        self.inner(f);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn inner(&mut self, stmts: &[Stmt]) {
+            self.next += 1;
+            let block = self.next;
+            stmts.iter().for_each(|s| self.stmt(s, block));
+        }
+    }
+    let mut numbering = Numbering { next: 0, out: FastMap::default() };
+    method.body.iter().for_each(|s| numbering.stmt(s, 0));
+    numbering.out
+}
+
 impl<'a> Compiling<'a, '_> {
+    /// The variable read by `e` and the read's id, when `e` is a point (see **Moves to the
+    /// heap**).
+    fn point(&mut self, e: &'a Expr) -> Option<(u32, ExprId)> {
+        let mut e = e;
+        while let ExprKind::Cast(_, inner) = &e.kind {
+            e = inner;
+        }
+        let ExprKind::Var(name) = &e.kind else { return None };
+        if !self.code.points.contains_key(&e.id) {
+            return None;
+        }
+        let key = self.resolved.mention(name, e.id);
+        Some((self.var(key), e.id))
+    }
+
     /// The variable `key`.
     fn var(&mut self, key: VarKey<'a>) -> u32 {
         if let Some(&v) = self.names.get(&key) {
@@ -1135,7 +1389,13 @@ impl<'a> Compiling<'a, '_> {
         }
         let v = self.new_var();
         self.names.insert(key, v);
-        self.code.named.push(Named { var: v, param: None, loops: None });
+        self.code.named.push(Named {
+            var: v,
+            param: None,
+            loops: None,
+            name: key.0.to_string(),
+            local: None,
+        });
         self.order.push(key);
         v
     }
@@ -1306,10 +1566,20 @@ impl<'a> Compiling<'a, '_> {
             _ => false,
         };
         let start = usize::from(receiver.is_some());
+        let mut points: Vec<Option<(u32, ExprId)>> = Vec::new();
+        if let ExprKind::MethodCall { receiver: r, .. } = &x.kind
+            && receiver.is_some()
+        {
+            points.push(self.point(r));
+        } else if receiver.is_some() {
+            points.push(None);
+        }
         let mut all: Vec<Value> = receiver.into_iter().collect();
         for a in args {
             let value = self.value(a);
             all.push(value);
+            let point = self.point(a);
+            points.push(point);
         }
         let fits = followed
             && targets.is_some_and(|l| match self.lists.shapes[l as usize] {
@@ -1318,11 +1588,14 @@ impl<'a> Compiling<'a, '_> {
                 None => false,
             });
         let mut unknown = Value::default();
+        let mut unknown_rest = None;
         if !fits {
             // A call the analysis does not follow lets everything it is given escape.
+            let mut given: Vec<&'a Expr> = Vec::new();
             if let ExprKind::MethodCall { receiver, .. } = &x.kind {
-                self.add(receiver, &mut unknown);
+                given.push(receiver);
             }
+            given.extend(args);
             if matches!(
                 x.kind,
                 ExprKind::Call { .. } | ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. }
@@ -1330,8 +1603,18 @@ impl<'a> Compiling<'a, '_> {
                 unknown.sources.extend(&this);
             }
             unknown.sources.extend(own(site, self.code.arity).sources);
-            for a in args {
+            let mut rest = Value { vars: Vec::new(), sources: unknown.sources.clone() };
+            points.clear();
+            for a in given {
                 self.add(a, &mut unknown);
+                let point = self.point(a);
+                if point.is_none() {
+                    self.add(a, &mut rest);
+                }
+                points.push(point);
+            }
+            if points.iter().any(Option::is_some) {
+                unknown_rest = Some(rest);
             }
             all.clear();
         }
@@ -1356,6 +1639,8 @@ impl<'a> Compiling<'a, '_> {
             fits,
             args: all,
             unknown,
+            points,
+            unknown_rest,
             result,
             site,
             method,
@@ -1473,6 +1758,12 @@ impl Analysis<'_> {
     /// hold in their own fields, what escapes and what is returned, with the summaries and
     /// factories known so far.
     fn flows(&mut self, m: usize) -> Flows {
+        self.flows_masked(m, None)
+    }
+
+    /// `flows`, with the sources `mask` taken for leaving nowhere at the points (see **Moves to
+    /// the heap**).
+    fn flows_masked(&mut self, m: usize, mask: Option<&Sources>) -> Flows {
         let code = &self.code[m];
         let combined: Vec<Option<Rc<Summary>>> = code
             .calls
@@ -1550,11 +1841,35 @@ impl Analysis<'_> {
                 }
             }
         }
+        // What a point gives, with `mask` taken away.
+        let at_point = |s: Sources, point: bool| match mask {
+            Some(mask) if point => {
+                let mut s = s;
+                s.minus(mask);
+                s
+            }
+            _ => s,
+        };
         // What escapes, and what is returned.
         let mut escaping = Sources::default();
         let mut returned = Sources::default();
-        for value in &code.escapes {
-            escaping.union(&eval(&vars, value));
+        for (i, value) in code.escapes.iter().enumerate() {
+            let point = code.escape_points.iter().any(|&(j, ..)| j == i);
+            escaping.union(&at_point(eval(&vars, value), point));
+        }
+        // What has its identity hash read: by the method, or by the calls it is given to (but
+        // for `mask` at the points, where it is read after its move or `moved` finds it).
+        let mut observed = Sources::default();
+        for value in &code.identity {
+            observed.union(&eval(&vars, value));
+        }
+        for (call, combined) in code.calls.iter().zip(&combined) {
+            let Some(combined) = combined else { continue };
+            for (k, arg) in call.args.iter().enumerate() {
+                if combined.identity.get(k) == Some(&true) {
+                    observed.union(&at_point(eval(&vars, arg), call.points[k].is_some()));
+                }
+            }
         }
         for value in &code.returns {
             returned.union(&eval(&vars, value));
@@ -1585,7 +1900,7 @@ impl Analysis<'_> {
                         }
                     }
                 } else {
-                    escaping.union(&stored);
+                    escaping.union(&at_point(stored, call.points[k].is_some()));
                 }
             }
         }
@@ -1649,15 +1964,16 @@ impl Analysis<'_> {
             match combined {
                 Some(combined) => {
                     for (k, arg) in call.args.iter().enumerate() {
+                        let given = at_point(eval(&vars, arg), call.points[k].is_some());
                         // The receiver of a dispatched call escapes as what its class runs lets
                         // its `this` and what it holds escape.
                         if k == 0 && call.dispatched {
                             let method = call.method.expect("a dispatched call names its method");
-                            add_via(&mut via, &eval(&vars, arg), &[method]);
+                            add_via(&mut via, &given, &[method]);
                             continue;
                         }
                         let Some(e) = combined.escapes.get(k) else { continue };
-                        apply(e, &eval(&vars, arg), &mut escaping, &mut via);
+                        apply(e, &given, &mut escaping, &mut via);
                     }
                     if call.has_receiver && !call.dispatched {
                         let receivers = eval(&vars, &call.args[0]);
@@ -1666,7 +1982,15 @@ impl Analysis<'_> {
                         }
                     }
                 }
-                None => _ = escaping.union(&eval(&vars, &call.unknown)),
+                None => match (&call.unknown_rest, mask) {
+                    (Some(rest), Some(_)) => {
+                        escaping.union(&eval(&vars, rest));
+                        for &(v, _) in call.points.iter().flatten() {
+                            escaping.union(&at_point(vars[v as usize].clone(), true));
+                        }
+                    }
+                    _ => _ = escaping.union(&eval(&vars, &call.unknown)),
+                },
             }
         }
         // An object of the method's own is of a known class, so what its methods do with their
@@ -1721,7 +2045,7 @@ impl Analysis<'_> {
         }
         read.sort_unstable();
         read.dedup();
-        Flows { vars, combined, active, escaping, returned, via, contents, by_field, read }
+        Flows { vars, combined, active, escaping, returned, via, contents, by_field, read, observed }
     }
 
     /// Solves method `m` with the summaries and factories known so far: its summary, the
@@ -1735,7 +2059,8 @@ impl Analysis<'_> {
                 read: Vec::new(),
             };
         }
-        let Flows { vars, escaping, returned, via, contents, by_field, read, active, .. } = self.flows(m);
+        let Flows { vars, escaping, returned, via, contents, by_field, read, active, observed, .. } =
+            self.flows(m);
         let code = &self.code[m];
         let first = code.arity;
         let held = first + code.sites.len();
@@ -1743,6 +2068,7 @@ impl Analysis<'_> {
         for (i, at) in via.iter().enumerate().take(first) {
             summary.escapes[i] = Escape { always: escaping.contains(i), via: at.clone() };
             summary.returned[i] = returned.contains(i);
+            summary.identity[i] = observed.contains(i);
             if code.has_this && i > 0 {
                 let mut fields: Vec<FieldKey> =
                     by_field[0].iter().filter(|(_, s)| s.contains(i)).map(|&(f, _)| f).collect();
@@ -1785,6 +2111,167 @@ impl Analysis<'_> {
             product = Some(Product { made: site.id, class: self.site_class(site), call: site.call });
         }
         MethodFacts { summary, staying, product, read }
+    }
+
+    /// The objects of method `m` that escape only at points and are moved to the heap there (see
+    /// **Moves to the heap**), with the factory that each call of them runs. `product_read` keeps
+    /// whether the identity hash of each factory's object may be read before it returns it.
+    /// With `report`, the method's name, it writes on standard error why each object that
+    /// escapes is moved or not (`JAVA_TO_RUST_ESCAPE_WHY`).
+    fn moved(
+        &mut self,
+        m: usize,
+        product_read: &mut FastMap<usize, bool>,
+        report: Option<&str>,
+    ) -> Vec<(ExprId, Option<usize>, Move)> {
+        if self.code[m].is_abstract || self.code[m].points.is_empty() {
+            return Vec::new();
+        }
+        let why = |id: ExprId, reason: &str| {
+            if let Some(name) = report {
+                eprintln!("[escape] {name}: object {id} {reason}");
+            }
+        };
+        let flows = self.flows(m);
+        let code = &self.code[m];
+        let first = code.arity;
+        let held = |s: usize| flows.by_field.iter().any(|fields| fields.iter().any(|(_, h)| h.contains(s)));
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        let mut mask = Sources::default();
+        for i in 0..code.sites.len() {
+            let s = first + i;
+            let id = code.sites[i].id;
+            if !flows.active[i] || !flows.escaping.contains(s) {
+                continue;
+            }
+            if flows.returned.contains(s) || held(s) {
+                why(id, "is not moved: it is returned or held by an object");
+                continue;
+            }
+            // One local holds it, and no call's result but that of the call that makes it.
+            let holders: Vec<usize> = (0..code.named.len())
+                .filter(|&j| flows.vars[code.named[j].var as usize].contains(s))
+                .collect();
+            let [j] = holders[..] else {
+                let names: Vec<&str> = holders.iter().map(|&j| code.named[j].name.as_str()).collect();
+                why(id, &format!("is not moved: not one variable holds it, but {names:?}"));
+                continue;
+            };
+            if code.named[j].local.is_none()
+                || code
+                    .calls
+                    .iter()
+                    .any(|c| c.site != Some(i as u32) && flows.vars[c.result as usize].contains(s))
+            {
+                why(id, "is not moved: its variable is no plain local, or a call returns it");
+                continue;
+            }
+            candidates.push((i, j));
+            mask.insert(s);
+        }
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let masked = self.flows_masked(m, Some(&mask));
+        let mut moves = Vec::new();
+        for (i, j) in candidates {
+            let s = first + i;
+            let code = &self.code[m];
+            let site = &code.sites[i];
+            let (id, call, c) = (site.id, site.call, self.site_class(site));
+            if masked.escaping.contains(s) {
+                why(id, "is not moved: it escapes elsewhere than at the points of its variable");
+                continue;
+            }
+            if masked.observed.contains(s) {
+                why(id, "is not moved: its identity hash may be read");
+                continue;
+            }
+            if !dead_by_next_iteration(code, &masked.vars, &masked.contents, s, &mut Vec::new()) {
+                why(id, "is not moved: it is held past its loop's iteration");
+                continue;
+            }
+            if call.is_some_and(|t| self.product_read(t, product_read)) {
+                why(id, "is not moved: its factory may read its identity hash");
+                continue;
+            }
+            let code = &self.code[m];
+            let v = code.named[j].var;
+            // The points of its variable where it may leave, with the summaries known.
+            // A call at a point where it does not leave, which reads its identity hash, reads that
+            // of the object in the slot.
+            let mut read_in_slot = false;
+            let mut at: Vec<ExprId> =
+                code.escape_points.iter().filter(|&&(_, w, _)| w == v).map(|&(_, _, read)| read).collect();
+            for (call, combined) in code.calls.iter().zip(&flows.combined) {
+                for (k, point) in call.points.iter().enumerate() {
+                    let Some((w, read)) = *point else { continue };
+                    if w != v {
+                        continue;
+                    }
+                    let leaves = match combined {
+                        None => true,
+                        Some(_) if k == 0 && call.dispatched => {
+                            let r = call.method.expect("a dispatched call names its method");
+                            self.this_escapes(r, c, &mut Vec::new(), &mut Vec::new())
+                        }
+                        Some(combined) => {
+                            combined.escapes.get(k).is_some_and(|e| {
+                                e.always
+                                    || e.via
+                                        .iter()
+                                        .any(|&r| self.this_escapes(r, c, &mut Vec::new(), &mut Vec::new()))
+                            }) || (call.has_receiver
+                                && k >= 1
+                                && !call.exact_receiver
+                                && combined.stored.get(k).is_some_and(|fields| !fields.is_empty()))
+                        }
+                    };
+                    if leaves {
+                        at.push(read);
+                    } else if combined.as_ref().is_some_and(|c| c.identity.get(k) == Some(&true)) {
+                        read_in_slot = true;
+                    }
+                }
+            }
+            if read_in_slot {
+                why(id, "is not moved: a call given it where it does not leave may read its identity hash");
+                continue;
+            }
+            let mut before: Vec<ExprId> = at.iter().map(|read| code.points[read]).collect();
+            before.sort_unstable();
+            before.dedup();
+            let (declared, block) = code.named[j].local.expect("a local");
+            // A move in the block of the declaration runs whenever the object is made (but for an
+            // exception or a jump before it), which would only add a copy: the object is made in
+            // the heap instead.
+            if before.iter().any(|at| code.point_blocks[at] == block) {
+                why(id, "is made in the heap: it would be moved in the block it is made in");
+                continue;
+            }
+            why(id, &format!("is moved to the heap before {} statements", before.len()));
+            moves.push((id, call, Move { made: id, var: code.named[j].name.clone(), declared, before }));
+        }
+        moves
+    }
+
+    /// Whether the identity hash of the object that factory `t` returns may be read before it
+    /// returns it, by it or by the factory that makes it.
+    fn product_read(&mut self, t: usize, known: &mut FastMap<usize, bool>) -> bool {
+        if let Some(&read) = known.get(&t) {
+            return read;
+        }
+        // A factory that the question reaches again is taken to read it.
+        known.insert(t, true);
+        let Some(p) = self.factories.get(&t).copied() else { return true };
+        let flows = self.flows(t);
+        let code = &self.code[t];
+        let read = match code.sites.iter().position(|site| site.id == p.made) {
+            Some(i) => flows.observed.contains(code.arity + i),
+            None => true,
+        } || p.call.is_some_and(|u| self.product_read(u, known));
+        known.insert(t, read);
+        read
     }
 
     /// Writes on standard error why each object made in the methods whose names contain one of
@@ -1995,6 +2482,8 @@ struct Flows {
     by_field: Vec<Vec<(FieldKey, Sources)>>,
     /// The methods outside the calls' targets whose summaries were read.
     read: Vec<usize>,
+    /// The sources whose identity hash the method or its calls may read.
+    observed: Sources,
 }
 
 /// What `fields` holds in field `f`.

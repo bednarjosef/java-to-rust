@@ -20,6 +20,11 @@
 //!
 //! A call that the generator cannot write in its form on the stack is written as usual, and its
 //! object goes in the heap: the slot is then left empty, which is always correct.
+//!
+//! An object that leaves only at some statements (`StackObjects::moves`) is moved to the heap
+//! before each of them, `unsafe { slot_1.to_heap(&mut pos) };`, and its local is `mut` (see
+//! `Moves`). A method in which such a move cannot be written is written again with the object in
+//! the heap (`Gen::method_form`).
 
 use super::objects::changes_object;
 use super::*;
@@ -55,7 +60,9 @@ impl<'a> Gen<'a> {
     /// their classes, in the order of the code: found once for the program, with the setup
     /// (`find_stack_sites`).
     pub(super) fn stack_sites(&self, m: usize) -> Vec<(ExprId, usize)> {
-        self.stack_sites.get(&m).cloned().unwrap_or_default()
+        let mut sites = self.stack_sites.get(&m).cloned().unwrap_or_default();
+        sites.retain(|(id, _)| !self.unmoved.contains(id));
+        sites
     }
 
     /// `stack_sites`, found in the code of `m`.
@@ -325,5 +332,76 @@ impl<'a> Gen<'a> {
     /// The slot that the `new` or call `id` makes its object in, if it is on the stack.
     pub(super) fn slot_of(&self, id: ExprId) -> Option<String> {
         self.slots.get(&id).map(|(name, _)| name.clone())
+    }
+
+    /// The moves to the heap of method `index` (`StackObjects::moves`) of the objects that it
+    /// makes in its slots, once `name_slots` named them.
+    pub(super) fn find_moves(&self, index: usize) -> Moves {
+        let mut moves = Moves::default();
+        for mv in self.facts.stack_objects.moves.get(&index).into_iter().flatten() {
+            let Some(slot) = self.slot_of(mv.made) else { continue };
+            for &before in &mv.before {
+                moves.before.entry(before).or_default().push((mv.var.clone(), slot.clone(), mv.made));
+            }
+            moves.declared.push(mv.declared);
+        }
+        moves
+    }
+
+    /// Whether the local declared at `pos` holds an object that the method moves to the heap,
+    /// which makes it `mut`.
+    pub(super) fn moved_local(&self, pos: Pos) -> bool {
+        self.moves.declared.contains(&pos)
+    }
+
+    /// Writes the moves to the heap that come before `stmt` (`Slot::to_heap`): of each object in
+    /// a slot that may leave the method in it, held by a local.
+    pub(super) fn move_to_heap(&mut self, stmt: &Stmt) {
+        let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _)) = stmt else {
+            return;
+        };
+        let Some(moves) = self.moves.before.get(&e.id).cloned() else { return };
+        for (var, slot, made) in moves {
+            // A variable that is not a plain local here is not moved: the method is then written
+            // again with the object in the heap (`missed`).
+            if !self.locals.contains_key(&var) || self.borrowed.contains(&var) || self.plain(&var).is_some() {
+                continue;
+            }
+            let rust = self.local(&var);
+            self.line(&format!("unsafe {{ {slot}.to_heap(&mut {rust}) }};"));
+            self.moves.written.insert((e.id, made));
+        }
+    }
+}
+
+/// The moves to the heap of the objects of the method being written that may leave it
+/// (`StackObjects::moves`): an object made in a slot is moved before each statement where it may
+/// leave, by `java::Slot::to_heap`, which does nothing once its local names the heap. A move that
+/// is not written would let the object leave from the stack, so a method whose moves are not all
+/// written is written again with those objects in the heap.
+#[derive(Default)]
+pub(super) struct Moves {
+    /// By statement (the id of its expression, `Move::before`): the local that holds the object,
+    /// the slot, and the `new` or call that makes it.
+    before: HashMap<ExprId, Vec<(String, String, ExprId)>>,
+    /// The moves written, by statement and object.
+    written: HashSet<(ExprId, ExprId)>,
+    /// Where the locals that hold the objects are declared.
+    declared: Vec<Pos>,
+}
+
+impl Moves {
+    /// The objects with a move that was not written.
+    pub(super) fn missed(&self) -> Vec<ExprId> {
+        let mut missed: Vec<ExprId> = self
+            .before
+            .iter()
+            .flat_map(|(&at, moves)| moves.iter().map(move |&(_, _, made)| (at, made)))
+            .filter(|key| !self.written.contains(key))
+            .map(|(_, made)| made)
+            .collect();
+        missed.sort_unstable();
+        missed.dedup();
+        missed
     }
 }

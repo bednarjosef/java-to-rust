@@ -93,12 +93,15 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn statement(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
+        self.move_to_heap(stmt);
         match stmt {
-            Stmt::Local { ty, name, init: None, .. } => {
-                self.local_decl(*ty, name, None, self.declared_local_is_mut(*ty, name, rest));
+            Stmt::Local { ty, name, init: None, pos } => {
+                let mutable = self.moved_local(*pos) || self.declared_local_is_mut(*ty, name, rest);
+                self.local_decl(*ty, name, None, mutable);
             }
-            Stmt::Local { ty, name, init, .. } => {
-                self.local_decl(*ty, name, init.as_ref(), self.local_is_mut(*ty, name, rest));
+            Stmt::Local { ty, name, init, pos } => {
+                let mutable = self.moved_local(*pos) || self.local_is_mut(*ty, name, rest);
+                self.local_decl(*ty, name, init.as_ref(), mutable);
             }
             Stmt::Expr(e) => self.effect(e),
             Stmt::ForEach { name, array, body, .. } => self.for_each(name, array, body),

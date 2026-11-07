@@ -1127,6 +1127,49 @@ fn immutable_objects_are_shared_without_a_refcell() {
 }
 
 #[test]
+fn an_object_that_leaves_on_some_paths_moves_to_the_heap_there() {
+    let rust = translate(
+        "class P { int x; P(int x) { this.x = x; } }
+        class A {
+            static P[] kept = new P[10];
+            static int n;
+            static void keep(P p) { kept[n++] = p; }
+            public static void main(String[] a) {
+                int sum = 0;
+                for (int i = 0; i < 20; i++) {
+                    P p = new P(i);
+                    sum += p.x;
+                    if (i % 4 == 0) keep(p);
+                    p.x++;
+                }
+                for (int i = 0; i < 4; i++) {
+                    P q = new P(i);
+                    keep(q);
+                }
+                for (int i = 0; i < 4; i++) {
+                    P r = new P(i);
+                    int h = System.identityHashCode(r);
+                    if (h == 0) keep(r);
+                }
+                System.out.println(sum + kept[0].x);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // Made on the stack, and moved to the heap only where it leaves.
+            "let mut p = slot_1.put(P__new(i));",
+            "unsafe { slot_1.to_heap(&mut p) };\n            keep(p.clone());",
+            // An object that leaves whenever it is made, or whose identity hash is read before it
+            // leaves, is made in the heap.
+            "let q = Arc::new(P__new(i));",
+            "let r = Arc::new(P__new(i));",
+        ],
+    );
+}
+
+#[test]
 fn methods_borrow_their_shared_object() {
     let rust = translate(
         "class P { int x; P(int x) { this.x = x; } void set(int v) { x = v; } int get() { return x; } }
