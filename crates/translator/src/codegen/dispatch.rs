@@ -79,7 +79,8 @@ const OPTIONAL: &str = "java.util.Optional";
 /// The most expressions in a body that is copied for each class (`Gen::body_for`).
 const BODY_FOR_NODES: usize = 12;
 
-/// The most classes that run a body that is copied for each of them (`Gen::body_for`).
+/// The most classes that run a body that is copied for each of them, or that a dispatcher among
+/// a few classes tests for (`Gen::body_for`).
 const BODY_FOR_CLASSES: usize = 4;
 
 /// The most classes a call's receiver may be of for the call to dispatch among them alone
@@ -2026,7 +2027,9 @@ impl<'a> Gen<'a> {
             }
         }
         let passed = passed.join(", ");
+        let few = std::mem::replace(&mut self.few_arms, true);
         let (text, uses) = self.arm_call(t, c, i, &passed);
+        self.few_arms = few;
         let text = self.covariant_ret(i, resolved, text);
         let arguments = match args.is_empty() {
             true => String::new(),
@@ -2046,7 +2049,11 @@ impl<'a> Gen<'a> {
     /// body dispatches on the class again: with its arms the body was too large for the
     /// compiler to inline into the dispatcher, which knows the class. Only small bodies that a
     /// few classes run are copied, each once for each class whose arm calls it: javac's
-    /// `TreeScanner` has some 40 subclasses that each run its small visits.
+    /// `TreeScanner` has some 40 subclasses that each run its small visits. An arm of a dispatcher
+    /// among a few classes (`Need::Among`) or of a copy copies the body whatever the number of
+    /// classes that run it, as only those few get copies: the server's `LevelChunk`, one of the
+    /// many classes that run `LevelHeightAccessor`'s `getSectionYFromSectionIndex`, then runs its
+    /// copies down to `getMinY()`, where the body dispatched again among all of them.
     pub(super) fn body_for(&self, i: usize, c: usize) -> bool {
         let m = &self.class.methods[i];
         let Home::Enum(d) = self.homes[i] else { return false };
@@ -2094,7 +2101,7 @@ impl<'a> Gen<'a> {
         let h = &self.class.hierarchy;
         let runners =
             self.enum_variants(d).into_iter().filter(|&v| h.implementation(i, v) == Some(i)).count();
-        runners <= BODY_FOR_CLASSES
+        runners <= BODY_FOR_CLASSES || self.few_arms
     }
 
     /// The name of the copy of body `i` for class `c` (`body_for`): the body's, then `on_` and
@@ -2921,6 +2928,8 @@ impl<'a> Gen<'a> {
             true => self.enum_variants(t),
             false => variants.to_vec(),
         };
+        let few = self.few_arms;
+        self.few_arms |= among.is_some() && variants.len() <= BODY_FOR_CLASSES;
         self.closed_arms_or(variants, &numbers, closed, otherwise, &|g: &mut Self, c| match g
             .class
             .hierarchy
@@ -2951,6 +2960,7 @@ impl<'a> Gen<'a> {
             None if g.facts.throwing.contains(&r) => (format!("Ok({})", g.builtin_arm(r, c)), true),
             None => (g.builtin_arm(r, c), true),
         });
+        self.few_arms = few;
     }
 
     /// The call of method `r` on the enum of `t` when every variant runs one body emitted on a

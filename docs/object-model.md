@@ -173,7 +173,11 @@ Naming:
   share a name), which the arm calls instead (`Need::BodyFor`, `Gen::body_for`). In the copy a
   call on `this` is what the dispatcher's arm for the class runs, not a dispatch. With the
   dispatch inside, the server's body was 96 instructions with 7 calls, past what LLVM inlines
-  into the dispatcher, which knew the class all along.
+  into the dispatcher, which knew the class all along. The arms of a dispatcher among at most
+  four classes (`Need::Among`) and of a copy get copies whatever the number of classes that run
+  the body, as only their few classes do: the server's random-tick loop asks its `LevelChunk`
+  for `getSectionYFromSectionIndex`, a default body of `LevelHeightAccessor` that many classes
+  run, and through the copies of it and of `getMinSectionY()` reaches `getMinY()` directly.
 - Instance methods are named once per override group within the class trees the group reaches,
   so every implementation has the name its callers use; overload suffixes count the groups of a
   name (`codegen/names.rs`). A type also has its interfaces' methods, whose trees are their

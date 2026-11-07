@@ -59,6 +59,34 @@ const BAGS: &str = "public class Main {
     }
 }";
 
+const HEIGHTS: &str = "public class Main {
+    interface Height {
+        int minY();
+        default int minSection() { return minY() >> 4; }
+        default int sectionY(int i) { return i + minSection(); }
+    }
+    static final class A implements Height { public int minY() { return -64; } }
+    static final class B implements Height { public int minY() { return 0; } }
+    static final class C implements Height { public int minY() { return 16; } }
+    static final class D implements Height { public int minY() { return 32; } }
+    static final class F implements Height { public int minY() { return 64; } }
+    static final class E implements Height {
+        public int minY() { return 48; }
+        public int sectionY(int i) { return i; }
+    }
+    static int total(Height h) {
+        int sum = 0;
+        for (int i = 0; i < 24; i++) sum += h.sectionY(i);
+        return sum;
+    }
+    public static void main(String[] args) {
+        Height[] heights = { new A(), new B(), new C(), new D(), new E(), new F() };
+        int sum = 0;
+        for (int i = 0; i < 50; i++) sum += total(heights[i % 10 == 0 ? 1 + i % 5 : 0]);
+        System.out.println(sum);
+    }
+}";
+
 /// The profile `JAVA_TO_RUST_DISPATCH_PROFILE` names while `translate` runs, as `text`.
 fn translate_profiled(java: &str, text: &str) -> String {
     let profile = std::env::temp_dir().join(format!("profiled-dispatch-{}.txt", std::process::id()));
@@ -180,4 +208,21 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     let end = among + profiled[among..].find("\n}").unwrap();
     assert_contains(&profiled[among..end], &["MainArr__cursor_on_stack(MainArr::Arr(o.clone()), j2r_slot)"]);
     assert_contains(&profiled, &["fn MainArr__cursor_on_stack("]);
+
+    // A call that mostly saw one class of the many that run a small default body runs that
+    // body's copy for the class, and the copy those of the bodies it calls.
+    let counted = counted_of(HEIGHTS);
+    let key = count_key(&counted, "#section_y");
+    let view = |name: &str| -> u16 {
+        let arm = counted.find(&format!(" => MainHeightView::{name}(")).expect("a view's arm");
+        counted[..arm].rsplit(' ').next().unwrap().parse().expect("a class number")
+    };
+    let (a, b) = (view("A"), view("B"));
+    let profiled = translate_profiled(HEIGHTS, &format!("{key}\t{a}:2900 {b}:100 *:0\n"));
+    let among =
+        profiled.find("fn MainHeight__section_y_among_").expect("a dispatcher among the profiled classes");
+    let end = among + profiled[among..].find("\n}").unwrap();
+    assert_contains(&profiled[among..end], &["section_y_in_height__on_main_a("]);
+    assert_contains(&profiled, &["MainHeight__min_section__on_main_a(this)", "let o: &Arc<MainA>"]);
+    assert!(!counted.contains("__on_main_a("), "{counted}");
 }
