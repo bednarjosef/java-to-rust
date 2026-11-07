@@ -1170,6 +1170,45 @@ fn an_object_that_leaves_on_some_paths_moves_to_the_heap_there() {
 }
 
 #[test]
+fn hashing_an_object_by_its_own_hash_code_does_not_keep_it_on_the_heap() {
+    let rust = translate(
+        "class P { int x; P(int x) { this.x = x; } public int hashCode() { return x * 31; } }
+        class Q extends P { Q(int x) { super(x); } public int hashCode() { return System.identityHashCode(this); } }
+        class A {
+            static P[] kept = new P[10];
+            static int n;
+            static void keep(P p) { kept[n++] = p; }
+            static int bucket(Object o) { return o.hashCode() & 15; }
+            public static void main(String[] a) {
+                int sum = 0;
+                for (int i = 0; i < 20; i++) {
+                    P p = new P(i);
+                    sum += bucket(p);
+                    if (i % 4 == 0) keep(p);
+                }
+                for (int i = 0; i < 4; i++) {
+                    P q = new Q(i);
+                    sum += bucket(q) >= 0 ? 1 : 0;
+                    if (i == 1) keep(q);
+                }
+                System.out.println(sum + kept[0].x);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // `bucket` reads what the object's class runs for `hashCode`: a `P`'s reads no
+            // identity hash, so it is moved where it leaves.
+            "let mut p = P::P(slot_1.put(PFields__new(i)));",
+            "unsafe { slot_1.to_heap(&mut p) };",
+            // A `Q`'s reads its identity hash, so it is made in the heap.
+            "let q = P::Q(Arc::new(Q__new(i)));",
+        ],
+    );
+}
+
+#[test]
 fn methods_borrow_their_shared_object() {
     let rust = translate(
         "class P { int x; P(int x) { this.x = x; } void set(int v) { x = v; } int get() { return x; } }
