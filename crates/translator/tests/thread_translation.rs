@@ -167,7 +167,8 @@ fn a_static_final_array_that_is_only_read_is_frozen() {
 fn an_array_field_only_its_constructor_makes_and_writes_is_frozen() {
     // `table` and `sized` are made and filled by the constructor only, then only indexed and
     // measured: frozen, of length 16 and of no constant length. `counts` has its elements written
-    // by a method, and `given` leaves its object: shared arrays.
+    // by a method, and `given` leaves its object: shared arrays. `table` and `counts` always have
+    // one length, which their indexes stay within: in bounds.
     let rust = translate(
         "class A {
             final int[] table = new int[16];
@@ -201,11 +202,53 @@ fn an_array_field_only_its_constructor_makes_and_writes_is_frozen() {
             "sized: java::Frozen<i64>,",
             "table: java::freeze_fixed(java::shared_filled(16, 0))",
             "sized: java::freeze(java::shared_filled(n, 0i64))",
-            "java::set(&this.table, i, i * i);",
-            "java::get(&self.table, h & 15)",
+            "java::set_in_bounds(&this.table, i, i * i);",
+            "java::get_in_bounds(&self.table, h & 15)",
+            "java::get_in_bounds(&self.counts, 0)",
+            "java::get(&self.sized, java::rem(h, java::len(&self.sized)))",
         ],
     );
     assert_lacks(&rust, &["counts: java::Frozen", "given: java::Frozen"]);
+}
+
+#[test]
+fn final_array_fields_that_threads_share_bound_their_indexes() {
+    // The constructor starts a thread, so `sections` is read from its cell at each use; it is
+    // final, so the array a read finds is the same at every later read, and the guard on its
+    // length proves the index.
+    let rust = translate(
+        "class A {
+            private final int[] sections;
+            private final Thread worker;
+            A(int height) {
+                this.sections = new int[height];
+                this.worker = new Thread(() -> System.out.println(this.sections.length));
+                this.worker.start();
+            }
+            synchronized int at(int y) {
+                if (y >= 0 && y < this.sections.length) {
+                    return this.sections[y];
+                }
+                return -1;
+            }
+            synchronized int below(int y) { return this.sections[y - 1]; }
+            synchronized void put(int y) { this.sections[y] = y; }
+            public static void main(String[] args) throws InterruptedException {
+                A a = new A(6);
+                a.worker.join();
+                a.put(2);
+                System.out.println(a.at(2) + a.below(6));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::get_in_bounds(java::non_null(this.sections.get().as_ref()), y)",
+            "(java::non_null(this.sections.get().as_ref()), y - 1)",
+        ],
+    );
+    assert_lacks(&rust, &["java::get_in_bounds(java::non_null(this.sections.get().as_ref()), y - 1)"]);
 }
 
 #[test]

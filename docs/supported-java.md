@@ -284,9 +284,14 @@ Design: [closures-and-nested-classes.md](closures-and-nested-classes.md).
   `&mut [T]` where every call can lend one.
 - Indexing is `a[i as usize]` where the bounds analysis proves the index in range
   (`analysis/arrays/bounds.rs`), and `java::at`/`java::put` otherwise. A `java::Array` held in a
-  local variable or a parameter, or, outside the constructors, in an array field of `this` that
-  only constructors assign (`Facts::fixed_fields`), whose length the analysis knows in the same
-  way, is read and written with `java::get_in_bounds`/`java::set_in_bounds`: no
+  local variable or a parameter, or in an array field of `this` declared `final` (which Java
+  assigns once, and reflection never writes here, even where threads keep it in a cell) or,
+  outside the constructors, one that only constructors assign (`Facts::fixed_fields`), whose
+  length the analysis knows in the same way, or in a `final` array field of any object, or
+  static, that every assignment of the program gives an array of the same constant length
+  (`final long[] cache = new long[4]`), at an index within it (a constant, a loop's counter
+  between constants, `h & 3`, or what the range analysis finds), is read and written with
+  `java::get_in_bounds`/`java::set_in_bounds`: no
   `ArrayIndexOutOfBoundsException` can come of them, so none is passed on, but they still compare
   the index with the length, and a wrong proof stops the program (a translator bug, never memory
   corruption), as a plain array's does. A counting loop takes the view (`java::view`) of each

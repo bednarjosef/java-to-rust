@@ -503,8 +503,8 @@ impl<'a> Gen<'a> {
             ("store_some", self.value(rhs, ty).text)
         } else if !used && self.views.contains_key(&id) {
             ("view_set", self.element_value(rhs, ty))
-        } else if !used && self.facts.in_bounds.contains(&id) && !self.class.checks_store(array.ty, rhs) {
-            ("set_in_bounds", self.element_value(rhs, ty))
+        } else if self.facts.in_bounds.contains(&id) && !self.class.checks_store(array.ty, rhs) {
+            (if used { "store_in_bounds" } else { "set_in_bounds" }, self.element_value(rhs, ty))
         } else {
             (if used { "store" } else { "set" }, self.element_value(rhs, ty))
         };

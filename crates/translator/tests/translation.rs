@@ -429,6 +429,54 @@ fn guarded_indexes_of_shared_arrays_in_variables_are_not_checked() {
 }
 
 #[test]
+fn indexes_within_array_fields_of_one_length_are_in_bounds() {
+    let rust = translate(
+        "class A {
+            static final int[] STEPS = {1, 2, 4, 8};
+            static class Cache {
+                private final long[] keys = new long[4];
+                final int[] uneven;
+                Cache(boolean big) { uneven = new int[big ? 8 : 2]; }
+                void shift(long k) {
+                    for (int i = 3; i > 0; i--) { this.keys[i] = this.keys[i - 1]; }
+                    this.keys[0] = k;
+                }
+                long sum(Cache other) {
+                    long s = 0;
+                    for (int i = 0; i < 4; i++) { s += other.keys[i] * STEPS[i]; }
+                    return s;
+                }
+                long past() {
+                    long s = 0;
+                    for (int i = 0; i <= 4; i++) { s += keys[i]; }
+                    return s;
+                }
+                int uneven(int i) { return uneven[i]; }
+            }
+            public static void main(String[] args) {
+                Cache c = new Cache(args.length > 0);
+                c.shift(5);
+                System.out.println(c.sum(c) + c.uneven(1) + c.past());
+            } }",
+    );
+    // Constant indexes and counters between constants within the length are in bounds, through
+    // any object, and also for the store that holds its array and index first; an index past
+    // the end and a field made with two lengths keep Java's check.
+    assert_contains(
+        &rust,
+        &[
+            "java::get_in_bounds(&self.keys, i - 1)",
+            "java::store_in_bounds(&receiver_0, argument_1, argument_2)",
+            "java::set_in_bounds(&self.keys, 0, k);",
+            "java::get_in_bounds(&other.keys, i)",
+            "java::get_in_bounds(&A_STEPS.cloned(), i)",
+            "java::get(&self.keys, i)",
+            "java::get(&self.uneven, i)",
+        ],
+    );
+}
+
+#[test]
 fn arrays_seen_through_two_names_are_shared() {
     let rust = translate(
         "class A { public static void main(String[] args) {
@@ -5593,13 +5641,14 @@ fn an_access_at_an_element_offset_is_the_element() {
     )
     .unwrap_or_else(|e| panic!("translation failed: {e}"));
     // The update reads, compares and writes the element in one runtime call, which holds the
-    // array for all of it; reads and writes are of the element.
+    // array for all of it; reads and writes are of the element (whose indexes, which the calls
+    // keep within the array's constant length, are proven in bounds).
     assert_contains(
         &rust,
         &[
             "java::compare_and_set_element(&self.slots, i, None, Some(o), ",
-            "java::set(&self.slots, i, Some(o));",
-            "java::get(&self.slots, i)",
+            "java::set_in_bounds(&self.slots, i, Some(o));",
+            "java::get_in_bounds(&self.slots, i)",
         ],
     );
     assert_lacks(&rust, &["fn compare_and_set_reference", "fn get_reference_acquire"]);
@@ -5616,8 +5665,9 @@ fn offsets_computed_elsewhere_and_static_fields_are_handles_too() {
     assert_contains(
         &rust,
         &[
-            // A call of a method that returns an element offset is the element of its argument.
-            "java::get(&self.slots, 0)",
+            // A call of a method that returns an element offset is the element of its argument,
+            // here within the array's constant length.
+            "java::get_in_bounds(&self.slots, 0)",
             // A local that holds an element offset is Java's value: the index is computed back.
             "java::compare_and_set_element(&array, java::div(k.wrapping_sub(java::array_base_offset()), \
              java::array_index_scale(\"java.lang.Object\") as i64) as i32, ",
