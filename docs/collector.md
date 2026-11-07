@@ -295,9 +295,9 @@ The collector needs nothing for them:
 A method declares at most 8 slots, and only for objects of up to 16 fields of a class that is
 not a Rust generic, an owned value or a closure. A call of a factory is written in its form on
 the stack only when it is one of the plain forms of a call (a static method, a method of the
-receiver's class, or a body on an enum without a dispatcher), or a call that tests for a few
-classes before its dispatcher (the points-to facts' small sets, or a profiled call's classes,
-docs/native-speed.md): the test's arm for the class that runs the factory passes the slot on.
+receiver's class, or a body on an enum without a dispatcher), or a call that dispatches among a
+few classes (the points-to facts' small sets, or a profiled call's classes before its whole
+dispatcher, docs/native-speed.md): the arm for the class that runs the factory passes the slot on.
 Any other is written as usual, its object goes in the heap, and the slot stays empty. A
 profiled call may run several methods, and is a source in its caller when what its profiled
 class runs is a factory: the other methods count for its arguments and what it returns, and
