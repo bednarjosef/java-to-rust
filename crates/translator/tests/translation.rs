@@ -1636,6 +1636,50 @@ fn translate_project(project: &str, main: &str) -> String {
     java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"))
 }
 
+/// The translation of the program of one file `Main.java`, `java`, as a whole program.
+fn translate_whole(name: &str, java: &str) -> String {
+    let src = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name).join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("Main.java"), java).unwrap();
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![src], ..Default::default() };
+    java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"))
+}
+
+#[test]
+fn a_call_whose_receiver_is_of_one_class_runs_its_method_with_no_test() {
+    let rust = translate_whole(
+        "one-class-receivers",
+        "public class Main {
+            interface Shape { int area(); }
+            static final class Square implements Shape {
+                final int s; Square(int s) { this.s = s; } public int area() { return s * s; } }
+            static final class Rect implements Shape {
+                final int w; Rect(int w) { this.w = w; } public int area() { return w * 2; } }
+            static final class Circle implements Shape { public int area() { return 3; } }
+            static final class Holder {
+                final Shape shape; Holder(Shape shape) { this.shape = shape; }
+                int area() { return shape.area(); } }
+            public static void main(String[] args) {
+                Shape[] two = { new Square(2), new Rect(3) };
+                Shape circle = new Circle();
+                int sum = new Holder(new Square(4)).area() + circle.area();
+                for (Shape s : two) sum += s.area();
+                System.out.println(sum);
+            }
+        }",
+    );
+    // The points-to facts give each call the classes its receiver can be: one runs that class's
+    // method, with no test of the class number but in a debug build, and two test for the first.
+    let only = rust.find("fn MainShape__area_only_").expect("a dispatcher among the receiver's classes");
+    let only = &rust[only..rust[only..].find("\n}").unwrap() + only];
+    assert_contains(&rust, &["debug_assert!(matches!(this.0.tag(), "]);
+    assert!(rust.matches("fn MainShape__area_only_").count() == 3, "{rust}");
+    assert!(rust.contains("    _ => { let o: &Arc<"), "{rust}");
+    assert!(!only.contains("match this"), "{only}");
+    // No call falls back on the whole dispatcher, which is not written.
+    assert_lacks(&rust, &["fn MainShape__area(", "_among_"]);
+}
+
 #[test]
 fn packages_become_nested_modules() {
     let rust = translate_project("imports", "com.example.app.Main");

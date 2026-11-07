@@ -351,8 +351,18 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   iteration order never reaches the output become faster tables. Others keep Java's order.
 - **Specialized methods**: copies of a method for different receivers or argument classes, so
   each knows its exact types and Rust can inline it.
-- **Direct calls**: a call with one possible target is a direct call; one with two or three is
-  a test and direct calls.
+- **Direct calls** (built for the points-to facts' sets): a call whose receiver the points-to
+  facts (`Class::receivers`) narrow to at most four classes of its type's enum calls a
+  dispatcher among those alone (`_only_`): with one class, that class's method with no test of
+  the class number; with several, a test for each but the last, whose arm is `_`. The whole
+  dispatcher is not called (nor written, where nothing else needs it). The facts list the
+  classes of the program's methods that a call runs, on the objects the program makes, so this
+  holds only where every class of the enum runs a method of the program for the call and none
+  is a string, a box or a `Class`, whose values the runtime makes; elsewhere the call tests for
+  the set's classes and runs the whole dispatcher for any other (`_among_`). A debug build
+  still checks the class number (`debug_assert!`), which the whole-program tests run. The
+  Minecraft server's `ChunkAccess.getMinY()` calls its level's `getMinY()` so, which only a
+  `ServerLevel` reaches.
 - **Profiled calls** (built): a call that the points-to facts leave on every class of its type
   can still meet one class almost always at run time, as `list.iterator()` on the Minecraft
   server's lists does, where a JIT's inline cache tests for that class and inlines its method.
@@ -362,9 +372,8 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   is in, its place in the source and the method called (`codegen::dispatch::profile_key`), with
   the counts by class number. A translation made with `JAVA_TO_RUST_DISPATCH_PROFILE` naming
   that file gives each call that saw one class in 90% of at least 1000 calls, or two in 95%, the
-  inlined dispatcher among those classes that the points-to facts' small sets get (`_among_`):
-  a test of the class number and a direct call the compiler can inline, with the whole
-  dispatcher for any other class, so a profile that no longer fits the program costs speed,
+  inlined dispatcher among those classes (`_among_`): a test of the class number and a direct
+  call the compiler can inline, with the whole dispatcher for any other class, so a profile that no longer fits the program costs speed,
   never correctness. Class numbers are the same in any translation of the same program
   (`dispatch::class_numbers`), so the counts name classes by them. Where the profiled class
   runs a factory (`iterator()`), its object can go on the caller's stack (docs/collector.md,

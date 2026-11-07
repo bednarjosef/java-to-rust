@@ -741,6 +741,7 @@ impl<'a> Gen<'a> {
             passing_lists: Default::default(),
             cast_classes: Default::default(),
             enum_variant_sets: Default::default(),
+            receivers_listed: Default::default(),
             variant_types: Default::default(),
             checked_value_ofs: &setup.checked_value_ofs,
             group_names: &setup.group_names,
@@ -945,6 +946,9 @@ struct Gen<'a> {
     cast_classes: HashMap<usize, String>,
     /// `enum_variant_lists` as sets, for `dispatch::is_enum_variant`.
     enum_variant_sets: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashSet<usize>>>>,
+    /// Whether the points-to facts list every class of the enum of a type that reaches a call of
+    /// an override group, by `(type, group)` (`Gen::receivers_listed`).
+    receivers_listed: std::cell::RefCell<HashMap<(usize, usize), bool>>,
     /// The types whose `enum_variants` the code written asked for, which depend on which classes
     /// are live: a census that stubs code writes the modules that asked again where a stub
     /// changes that (`generate_all_stubbing`).

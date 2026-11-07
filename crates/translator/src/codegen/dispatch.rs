@@ -168,6 +168,17 @@ pub(super) fn profiled_sets(numbers: &[u16]) -> HashMap<String, std::sync::Arc<[
     sets
 }
 
+/// The name of the dispatcher of group `general` among the classes of key `key`
+/// (`Need::Among`): `_only_` where they are closed, as it then has no whole dispatcher to fall
+/// back on, which a profiled set of the same classes needs.
+fn among_name(general: &str, key: u64, closed: bool, on_stack: Option<usize>) -> String {
+    let among = if closed { "only" } else { "among" };
+    match on_stack {
+        Some(f) => format!("{general}_{among}_{key:016x}_on_stack_{f}"),
+        None => format!("{general}_{among}_{key:016x}"),
+    }
+}
+
 /// The key of a set of classes in `Class::receivers`: a hash of it, the same in every pass of the
 /// generation and every translation.
 pub(super) fn receiver_key(classes: &[usize]) -> u64 {
@@ -189,11 +200,12 @@ pub(super) enum Need {
     /// The dispatcher on an enum for an override group (by group id).
     Dispatch(usize, usize),
     /// The dispatcher on an enum for an override group whose objects are known to be of a few of
-    /// its classes, the set of a call's receiver in `Class::receivers` (by its `receiver_key`):
-    /// arms for those, and the whole dispatcher for any other. With a factory, its form that
-    /// takes a slot, which it passes to the factory for the classes that run it
-    /// (`Gen::among_on_stack`).
-    Among(usize, usize, u64, Option<usize>),
+    /// its classes, the set of a call's receiver in `Class::receivers` or in a profiled run (by
+    /// its `receiver_key`): arms for those, and the whole dispatcher for any other, unless the
+    /// set is closed, the points-to facts' set of classes that are all of the enum's, which no
+    /// other object can be (`Gen::closed_among`). With a factory, its form that takes a slot,
+    /// which it passes to the factory for the classes that run it (`Gen::among_on_stack`).
+    Among(usize, usize, u64, Option<usize>, bool),
     /// A method whose body is emitted on the enum of its type.
     Body(usize),
     /// A copy of such a body for one class of the enum, as `(method, class)`, which the
@@ -338,9 +350,11 @@ impl<'a> Gen<'a> {
             Need::Narrow(s, _) => {
                 needs.insert(Need::Enum(s));
             }
-            Need::Among(t, group, ..) => {
+            Need::Among(t, group, _, _, closed) => {
                 needs.insert(Need::Enum(t));
-                needs.insert(Need::Dispatch(t, group));
+                if !closed {
+                    needs.insert(Need::Dispatch(t, group));
+                }
             }
             Need::Body(i) | Need::BodyFor(i, _) => {
                 if let Home::Enum(t) = self.homes[i] {
@@ -1820,11 +1834,11 @@ impl<'a> Gen<'a> {
             return call;
         }
         let group = self.class.hierarchy.group_id(resolved);
-        let among = self.among(t, receiver).or_else(|| self.profiled_among(t, receiver, group));
+        let among = self.closed_among(t, receiver, resolved);
         let name = match among {
-            Some(key) if self.enum_body(t, resolved).is_none() => {
-                self.need(Need::Among(t, group, key, None));
-                format!("{}_among_{key:016x}", self.group_names[&group])
+            Some((key, closed)) if self.enum_body(t, resolved).is_none() => {
+                self.need(Need::Among(t, group, key, None, closed));
+                among_name(&self.group_names[&group], key, closed, None)
             }
             _ => self.dispatch_name(t, resolved),
         };
@@ -1883,14 +1897,14 @@ impl<'a> Gen<'a> {
         slot: &str,
     ) -> Option<Code> {
         let group = self.class.hierarchy.group_id(resolved);
-        let key = self.among(t, receiver).or_else(|| self.profiled_among(t, receiver, group))?;
+        let (key, closed) = self.closed_among(t, receiver, resolved)?;
         let h = &self.class.hierarchy;
         let runs = |c: usize| self.is_enum_variant(t, c) && h.implementation(resolved, c) == Some(f);
         if !self.receiver_sets[&key].iter().any(|&c| runs(c) && self.arm_on_stack(c, f, "").is_some()) {
             return None;
         }
-        self.need(Need::Among(t, group, key, Some(f)));
-        let name = format!("{}_among_{key:016x}_on_stack_{f}", self.group_names[&group]);
+        self.need(Need::Among(t, group, key, Some(f), closed));
+        let name = among_name(&self.group_names[&group], key, closed, Some(f));
         let obj = self.thin_receiver(t, receiver);
         let args: Vec<String> =
             std::iter::once(format!("&{slot}")).chain(self.call_args(resolved, args)).collect();
@@ -1907,6 +1921,40 @@ impl<'a> Gen<'a> {
         let among = set.iter().filter(|&&c| self.is_enum_variant(t, c)).count();
         (among > 0 && among <= AMONG_MOST && among < self.shared_enum_variants(t).len())
             .then(|| receiver_key(set))
+    }
+
+    /// The key of the classes that a call of `resolved` on `receiver`, a value of the enum of
+    /// `t`, tests for first (`among`, else `profiled_among`), and whether they are closed: the
+    /// points-to facts' set, all of whose classes are the enum's, where the facts would list
+    /// every class of the enum that reaches the call (`receivers_listed`). No object of a class
+    /// outside the set then does, and the call needs no whole dispatcher for one: a call whose
+    /// receiver is of one class runs that class's method with no test of its number, and one of
+    /// a few classes tests for all but the last of them.
+    fn closed_among(&self, t: usize, receiver: &Expr, resolved: usize) -> Option<(u64, bool)> {
+        let group = self.class.hierarchy.group_id(resolved);
+        if let Some(key) = self.among(t, receiver) {
+            let closed = self.receiver_sets[&key].iter().all(|&c| self.is_enum_variant(t, c))
+                && self.receivers_listed(t, resolved, group);
+            return Some((key, closed));
+        }
+        Some((self.profiled_among(t, receiver, group)?, false))
+    }
+
+    /// Whether the points-to facts list every class of the enum of `t` whose objects reach a
+    /// call of `resolved`, of override group `group` (remembered by type and group). They list
+    /// the classes of the methods of the program that a call runs, on the objects that the
+    /// program makes: not a class whose arm runs none (`Object`'s `hashCode` of a class that
+    /// keeps its identity's), nor one whose values the runtime makes (a string, a box, a
+    /// `Class`), which the facts follow apart.
+    fn receivers_listed(&self, t: usize, resolved: usize, group: usize) -> bool {
+        if let Some(&found) = self.receivers_listed.borrow().get(&(t, group)) {
+            return found;
+        }
+        let h = &self.class.hierarchy;
+        let found = (self.shared_enum_variants(t).iter())
+            .all(|&c| h.implementation(resolved, c).is_some() && self.runtime_of(c).is_none());
+        self.receivers_listed.borrow_mut().insert((t, group), found);
+        found
     }
 
     /// A call of `resolved` on `this` in a copy of a body written for one class (`body_for`):
@@ -2303,7 +2351,9 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             match *need {
                 Need::Dispatch(_, group) => self.dispatcher(t, group, None, None),
-                Need::Among(_, group, key, factory) => self.dispatcher(t, group, Some(key), factory),
+                Need::Among(_, group, key, factory, closed) => {
+                    self.dispatcher(t, group, Some((key, closed)), factory)
+                }
                 Need::Body(i) => {
                     self.gap();
                     self.method(i);
@@ -2414,6 +2464,21 @@ impl<'a> Gen<'a> {
         otherwise: Option<String>,
         arm: &dyn Fn(&mut Self, usize) -> (String, bool),
     ) {
+        self.closed_arms_or(variants, variants, false, otherwise, arm);
+    }
+
+    /// `match_arms_or`, where `numbers` are the classes whose numbers the value may have, those of
+    /// `variants` and the others, which run `otherwise`. With `closed`, the value is surely of a
+    /// class of `variants` (and `otherwise` is `None`): the last arm is `_`, and with one class
+    /// there is no `match`, only a test of the class's number in a debug build.
+    pub(super) fn closed_arms_or(
+        &mut self,
+        variants: &[usize],
+        numbers: &[usize],
+        closed: bool,
+        otherwise: Option<String>,
+        arm: &dyn Fn(&mut Self, usize) -> (String, bool),
+    ) {
         if variants.is_empty() {
             self.line(&format!("match {}.view() {{}}", self.me()));
             return;
@@ -2463,7 +2528,7 @@ impl<'a> Gen<'a> {
                 ));
                 self.indent += 1;
                 let classes: Vec<usize> = arms.iter().map(|arm| arm.0).collect();
-                self.tag_match(&classes, arms, otherwise.clone());
+                self.tag_match(&classes, &classes, arms, otherwise.clone(), false);
                 self.indent -= 1;
                 self.line("}");
             }
@@ -2472,19 +2537,25 @@ impl<'a> Gen<'a> {
             self.arm_parts.push_str(&parts);
             return;
         }
-        self.tag_match(variants, arms, otherwise);
+        self.tag_match(variants, numbers, arms, otherwise, closed);
     }
 
-    /// The `match` on the class number that `match_arms_or` writes, of the arms of `variants`.
-    fn tag_match(&mut self, variants: &[usize], arms: Vec<(usize, String, bool)>, otherwise: Option<String>) {
+    /// The `match` on the class number that `closed_arms_or` writes, of the arms of `variants`,
+    /// among the classes `numbers`.
+    fn tag_match(
+        &mut self,
+        variants: &[usize],
+        numbers: &[usize],
+        arms: Vec<(usize, String, bool)>,
+        otherwise: Option<String>,
+        closed: bool,
+    ) {
         // A match on the class number, whose arm lends the object where it lies, as `view()`
         // does: one jump to the class's code rather than one to the view and one to the code.
         let me = self.me();
-        self.line(&format!("match {me}.0.tag() {{"));
-        self.indent += 1;
         // An arm that does not read the object is written once for every class that runs its
         // text, where the first of them is.
-        let mut lines: Vec<Result<String, usize>> = Vec::new();
+        let mut lines: Vec<Result<(String, String), usize>> = Vec::new();
         let mut alike: Vec<(String, Vec<usize>)> = Vec::new();
         let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         // In a dispatcher over many classes, each arm runs its call in a function of its own that
@@ -2509,7 +2580,7 @@ impl<'a> Gen<'a> {
                     }
                     _ => text,
                 };
-                lines.push(Ok(format!("{tag} => {{ let o: &{payload} = {lent}; {call} }}")));
+                lines.push(Ok((tag.to_string(), format!("{{ let o: &{payload} = {lent}; {call} }}"))));
             } else if let Some(&i) = index.get(&text) {
                 alike[i].1.push(c);
             } else {
@@ -2519,7 +2590,32 @@ impl<'a> Gen<'a> {
             }
         }
         let groups: Vec<&[usize]> = alike.iter().map(|(_, classes)| classes.as_slice()).collect();
-        let patterns = self.tag_patterns(&groups, variants);
+        // A run of numbers in a pattern spans only the classes of its arm among those the value
+        // may be of, which, where others run `otherwise`, are not only `variants`.
+        let patterns = self.tag_patterns(&groups, numbers);
+        if closed {
+            let arms: Vec<(String, String)> = lines
+                .into_iter()
+                .map(|line| match line {
+                    Ok((tag, body)) => (tag, body),
+                    Err(i) => (patterns[i].clone(), alike[i].0.clone()),
+                })
+                .collect();
+            self.line(&format!("debug_assert!(matches!({me}.0.tag(), {}));", self.tags(variants, variants)));
+            if let [(_, body)] = &arms[..] {
+                self.line(body);
+                return;
+            }
+            self.line(&format!("match {me}.0.tag() {{"));
+            for (k, (pattern, body)) in arms.iter().enumerate() {
+                let pattern = if k + 1 == arms.len() { "_" } else { pattern };
+                self.line(&format!("    {pattern} => {body},"));
+            }
+            self.line("}");
+            return;
+        }
+        self.line(&format!("match {me}.0.tag() {{"));
+        self.indent += 1;
         // The arm of the most runs of class numbers, where the match has no other: rustc tests a
         // pattern's runs one by one before the `match` on the numbers of the other arms, and the
         // Minecraft server's `Object::hash_code` spent its time in the 3 750 runs of the classes
@@ -2532,7 +2628,7 @@ impl<'a> Gen<'a> {
             .filter(|&i| runs(&patterns[i]) > LAST_ARM_RUNS);
         for line in lines {
             match line {
-                Ok(line) => self.line(&line),
+                Ok((tag, body)) => self.line(&format!("{tag} => {body}")),
                 Err(i) if Some(i) == last => {}
                 Err(i) => self.line(&format!("{} => {},", patterns[i], alike[i].0)),
             }
@@ -2692,7 +2788,7 @@ impl<'a> Gen<'a> {
 
     /// The dispatcher on the enum of `t` for an override group: each variant runs what its class
     /// runs for the method.
-    fn dispatcher(&mut self, t: usize, group: usize, among: Option<u64>, on_stack: Option<usize>) {
+    fn dispatcher(&mut self, t: usize, group: usize, among: Option<(u64, bool)>, on_stack: Option<usize>) {
         let h = &self.class.hierarchy;
         let mut chain = vec![t];
         chain.extend(h.ancestors(t));
@@ -2724,13 +2820,10 @@ impl<'a> Gen<'a> {
         let general = self.group_names[&group].clone();
         let mut variants = self.enum_variants(t);
         let name = match among {
-            Some(key) => {
+            Some((key, closed)) => {
                 let set = &self.receiver_sets[&key];
                 variants.retain(|c| set.contains(c));
-                match on_stack {
-                    Some(f) => format!("{general}_among_{key:016x}_on_stack_{f}"),
-                    None => format!("{general}_among_{key:016x}"),
-                }
+                among_name(&general, key, closed, on_stack)
             }
             None => general.clone(),
         };
@@ -2775,7 +2868,7 @@ impl<'a> Gen<'a> {
         &mut self,
         t: usize,
         r: usize,
-        among: Option<u64>,
+        among: Option<(u64, bool)>,
         on_stack: Option<usize>,
         variants: &[usize],
         args: &str,
@@ -2789,8 +2882,13 @@ impl<'a> Gen<'a> {
             self.line(&call);
             return;
         }
-        let otherwise = among.map(|_| self.enum_fn_call(t, general, "this", args));
-        self.match_arms_or(variants, otherwise, &|g: &mut Self, c| match g
+        let closed = among.is_some_and(|(_, closed)| closed);
+        let otherwise = among.filter(|_| !closed).map(|_| self.enum_fn_call(t, general, "this", args));
+        let numbers = match among.is_some() && !closed {
+            true => self.enum_variants(t),
+            false => variants.to_vec(),
+        };
+        self.closed_arms_or(variants, &numbers, closed, otherwise, &|g: &mut Self, c| match g
             .class
             .hierarchy
             .implementation(r, c)
