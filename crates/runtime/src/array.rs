@@ -2154,6 +2154,13 @@ pub fn store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> T {
     v
 }
 
+/// `store` for an `i` that the translator proved in bounds: a wrong proof stops the program.
+#[inline(always)]
+pub fn store_in_bounds<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> T {
+    a.put_in_bounds(i, v.clone());
+    v
+}
+
 /// `a[i] = v` as an expression, where the program observes the exception.
 #[inline]
 pub fn try_store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> Result<T, Exception> {

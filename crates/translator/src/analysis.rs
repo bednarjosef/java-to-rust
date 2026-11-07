@@ -168,8 +168,8 @@ pub struct Facts {
     /// see: plain `Vec`s (of `Vec`s, for arrays of arrays). The flag says whether an element of
     /// the array, at any depth, is ever assigned.
     pub plain_arrays: FastMap<(usize, String), bool>,
-    /// Accesses of plain arrays (`a[i]` reads, element assignments and rows `m[i]` of `m[i][j]`)
-    /// whose index is always in bounds.
+    /// Array accesses (`a[i]` reads, element assignments and rows `m[i]` of `m[i][j]`) whose
+    /// index is always in bounds (`arrays::bounds`).
     pub in_bounds: FastSet<ExprId>,
     /// Array parameters, as (method, parameter) indexes, that are plain at every call: `&[T]`, or
     /// `&mut [T]` when the flag says the elements are written.

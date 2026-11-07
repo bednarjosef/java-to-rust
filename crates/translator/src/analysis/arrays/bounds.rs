@@ -10,27 +10,110 @@
 //!   was made with
 //!   (`new boolean[limit + 1]`, `new int[n][n]` with `int n = a.length`), given that neither the
 //!   array nor the variables of the size are ever assigned again;
-//! - outside the constructors, an array field of `this` that only constructors assign
-//!   (`Facts::fixed_fields`, Java's `final` fields) is such an array too, as the JIT takes one;
+//! - an array field of `this` declared `final` is such an array too, as the JIT takes one: Java
+//!   assigns it once, and reflection never writes it here, so once a read finds an array every
+//!   later read finds the same one; and so, outside the constructors, is one that only
+//!   constructors assign (`Facts::fixed_fields`);
 //! - `i * i <= n` bounds `i` by `n` where `i` is at least 1 and the product cannot overflow.
 //!
 //! A row's length is known only while no row of the array is replaced and the array is not
 //! passed to a method, which could replace one. Constant sizes are also compared with the range
 //! analysis's bounds: `a[2]` of `new int[3]`.
+//!
+//! A `final` array field (of any object, or static) that every assignment in the program gives
+//! an array of the same constant length (`final long[] cache = new long[4]`,
+//! `static final int[] STEPS = {1, 2, 4}`) has that length whenever it holds an array, whichever
+//! object or thread reads it and however often (`field_lengths`). Its accesses are in bounds
+//! where the range analysis keeps the index within that length, or where the index is a
+//! constant, the counter of an enclosing loop between constants plus or minus a constant, or a
+//! value masked by a constant, within it (`within_length`): `this.cache[0]`, `this.cache[h & 3]`,
+//! `for (int i = 0; i < 4; i++) this.cache[i]`, `for (int i = 3; i > 0; i--) this.cache[i - 1]`.
+//! Its length also bounds guards (`i < this.cache.length`) and the variables that copy it
+//! (`long[] c = this.cache`), as a constant does.
 
 use super::super::Facts;
 use super::super::{FastMap, FastSet};
 use super::declarations;
 use crate::ast::*;
 
+/// The `final` array fields, by the type that declares them and their name, that every
+/// assignment of the program gives an array of the same constant length (or `null`), with that
+/// length. A field that no assignment gives an array is not among them: it is always null.
+pub(super) fn field_lengths(class: &Class) -> FastMap<(usize, String), i64> {
+    // The length each candidate gets so far: `None` once two disagree or one is not constant.
+    let mut lengths: FastMap<(usize, String), Option<i64>> = FastMap::default();
+    // Fields assigned through an object of no class the program declares, or through a class
+    // that does not declare the static: any field of the name may be the one.
+    let mut unknown: FastSet<String> = FastSet::default();
+    let mut note = |owner: Option<usize>, name: &str, value: &Expr| {
+        let Some(owner) = owner else {
+            unknown.insert(name.to_string());
+            return;
+        };
+        let length = match &value.kind {
+            ExprKind::Null => return,
+            ExprKind::NewArray(dims) => match dims.first().map(|d| &d.kind) {
+                Some(ExprKind::Int(c)) if *c >= 0 => Some(*c as i64),
+                _ => None,
+            },
+            ExprKind::ArrayLit(items) => Some(items.len() as i64),
+            _ => None,
+        };
+        let seen = lengths.entry((owner, name.to_string())).or_insert(length);
+        if *seen != length {
+            *seen = None;
+        }
+    };
+    let static_owner =
+        |c: usize, name: &str| class.types[c].statics.iter().any(|f| f.name == name).then_some(c);
+    let mut assignment = |x: &Expr| {
+        let ExprKind::Assign { target, value, .. } = &x.kind else { return };
+        match target {
+            Place::Field { object, name } => note(class.field_owner(object.ty, name), name, value),
+            Place::Static { class: c, name } => note(static_owner(*c, name), name, value),
+            Place::Var(_) | Place::Index(..) => {}
+        }
+    };
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut assignment), &mut |_| {});
+        }
+    }
+    for t in &class.types {
+        for init in t.fields.iter().chain(&t.statics).filter_map(|f| f.init.as_ref()) {
+            visit_expr(init, &mut assignment);
+        }
+    }
+    for (t, decl) in class.types.iter().enumerate() {
+        for f in decl.fields.iter().chain(&decl.statics).filter(|f| f.init.is_some()) {
+            note(Some(t), &f.name, f.init.as_ref().expect("filtered"));
+        }
+    }
+    let finals: FastSet<(usize, &str)> = class
+        .types
+        .iter()
+        .enumerate()
+        .flat_map(|(t, decl)| decl.fields.iter().chain(&decl.statics).map(move |f| (t, f)))
+        .filter(|(_, f)| f.is_final && matches!(f.ty, Type::Array(_)))
+        .map(|(t, f)| (t, f.name.as_str()))
+        .collect();
+    lengths
+        .into_iter()
+        .filter(|((t, name), _)| finals.contains(&(*t, name.as_str())) && !unknown.contains(name))
+        .filter_map(|(key, length)| Some((key, length?)))
+        .collect()
+}
+
 /// The accesses of arrays in `method` whose index is always in bounds: element reads and
-/// writes and row reads, by expression id.
+/// writes and row reads, by expression id. `lengths` are the fields whose every array has one
+/// length (`field_lengths`).
 pub(super) fn in_bounds(
     class: &Class,
     method: &Method,
     plain: &FastSet<String>,
     reshaped: &FastSet<String>,
     facts: &Facts,
+    lengths: &FastMap<(usize, String), i64>,
 ) -> Vec<ExprId> {
     let mut declared: FastMap<&str, usize> = FastMap::default();
     let mut inits: FastMap<&str, &Expr> = FastMap::default();
@@ -92,12 +175,15 @@ pub(super) fn in_bounds(
         class,
         ctor: method.is_ctor,
         facts,
+        field_lengths: lengths,
         plain,
         stable,
         inits,
         fixed_rows: plain.iter().filter(|r| !reshaped.contains(*r) && !lent.contains(*r)).cloned().collect(),
         guards: Vec::new(),
         proven: Vec::new(),
+        counters: Vec::new(),
+        held: FastMap::default(),
     };
     walk.block(&method.body);
     walk.proven
@@ -166,6 +252,8 @@ struct Walk<'a> {
     /// Whether the method is a constructor, which may assign its fixed fields.
     ctor: bool,
     facts: &'a Facts,
+    /// The fields whose every array has one length (`field_lengths`).
+    field_lengths: &'a FastMap<(usize, String), i64>,
     plain: &'a FastSet<String>,
     /// Variables declared once and never assigned after their declaration.
     stable: FastSet<&'a str>,
@@ -174,6 +262,13 @@ struct Walk<'a> {
     fixed_rows: FastSet<String>,
     guards: Vec<Guard>,
     proven: Vec<ExprId>,
+    /// The counters of the enclosing loops that count between constants, with the values they
+    /// take (`counter_range`).
+    counters: Vec<(String, i64, i64)>,
+    /// Variables declared once, inside such a loop, and never assigned again, whose value is
+    /// its counter's plus or minus a constant (`argument$1 = i` of a held store), with the
+    /// values they take: the body never assigns the counter.
+    held: FastMap<String, (i64, i64)>,
 }
 
 impl Walk<'_> {
@@ -181,16 +276,30 @@ impl Walk<'_> {
         self.stable.contains(name)
     }
 
-    /// The name standing for `this.f`, `"this.f"`, where `f` is an array field that only
-    /// constructors assign and the method is not one: its array is the same all through the
-    /// method, as a variable never assigned again is. No variable has a name with a dot.
+    /// The name standing for `this.f`, `"this.f"`, where `f` is an array field declared
+    /// `final`, or one that only constructors assign and the method is not one: once a read
+    /// finds its array, it is the same all through the method, as a variable never assigned
+    /// again is. No variable has a name with a dot.
     fn fixed_field(&self, e: &Expr) -> Option<String> {
         let ExprKind::Field { object, name } = &e.kind else { return None };
-        if self.ctor || !matches!(object.kind, ExprKind::This) || !matches!(e.ty, Type::Array(_)) {
+        if !matches!(object.kind, ExprKind::This) || !matches!(e.ty, Type::Array(_)) {
             return None;
         }
         let owner = self.class.field_owner(object.ty, name)?;
-        self.facts.fixed_fields.contains(&(owner, name.clone())).then(|| format!("this.{name}"))
+        let declared_final = self.class.types[owner].fields.iter().any(|f| f.name == *name && f.is_final);
+        let fixed = !self.ctor && self.facts.fixed_fields.contains(&(owner, name.clone()));
+        (declared_final || fixed).then(|| format!("this.{name}"))
+    }
+
+    /// The length of the array that `e`, a read of a field or a static, holds whenever it holds
+    /// one (`field_lengths`).
+    fn field_length(&self, e: &Expr) -> Option<i64> {
+        let owner = match &e.kind {
+            ExprKind::Field { object, name } => (self.class.field_owner(object.ty, name)?, name),
+            ExprKind::Static { class, name } => (*class, name),
+            _ => return None,
+        };
+        self.field_lengths.get(&(owner.0, owner.1.clone())).copied()
     }
 
     /// The bound that `e` evaluates to where a guard is tested, if it has a symbolic form.
@@ -203,7 +312,10 @@ impl Walk<'_> {
                 vars.extend(bound.vars());
                 Some((bound, vars))
             }
-            ExprKind::Length(_) => self.length_of(e),
+            ExprKind::Length(array) => match self.field_length(array) {
+                Some(c) => Some((Bound::constant(c), FastSet::default())),
+                None => self.length_of(e),
+            },
             ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), l, r)
                 if self.facts.no_overflow.contains(&e.id) =>
             {
@@ -251,7 +363,7 @@ impl Walk<'_> {
                 ExprKind::Var(a) if self.is_stable(a) => {
                     Some(Bound { base: Some(Base::Len(a.clone(), Vec::new())), offset: 0 })
                 }
-                _ => None,
+                _ => self.field_length(array).map(Bound::constant),
             },
             _ => None,
         }
@@ -287,6 +399,9 @@ impl Walk<'_> {
             return Vec::new();
         }
         let Some(init) = self.inits.get(root) else { return Vec::new() };
+        if let Some(c) = self.field_length(init) {
+            return vec![Some(Bound::constant(c))];
+        }
         let mut sizes = Vec::new();
         let mut level = Some(*init);
         while let Some(e) = level {
@@ -323,6 +438,15 @@ impl Walk<'_> {
         while let ExprKind::Index(inner, _) = &root.kind {
             rows += 1;
             root = inner;
+        }
+        if rows == 0
+            && let Some(c) = self.field_length(root)
+        {
+            let mut lengths = vec![Bound::constant(c)];
+            lengths.extend(
+                self.fixed_field(root).map(|f| Bound { base: Some(Base::Len(f, Vec::new())), offset: 0 }),
+            );
+            return lengths;
         }
         if let Some(field) = self.fixed_field(root) {
             return if rows == 0 {
@@ -416,9 +540,15 @@ impl Walk<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Local { init, .. } => {
+            Stmt::Local { name, init, .. } => {
                 if let Some(e) = init {
                     self.expr(e);
+                    if !self.counters.is_empty()
+                        && self.is_stable(name)
+                        && let Some(range) = self.counted(e)
+                    {
+                        self.held.insert(name.clone(), range);
+                    }
                 }
             }
             Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e) => self.expr(e),
@@ -452,7 +582,13 @@ impl Walk<'_> {
                 for g in &mut guards {
                     g.counts_up = counts_up_from_zero(init, cond, update, body, &g.var);
                 }
+                let counter = counter_range(init, cond, update, body);
+                let counted = counter.is_some();
+                self.counters.extend(counter);
                 self.guarded(guards, body);
+                if counted {
+                    self.counters.pop();
+                }
             }
             Stmt::ForEach { array, body, .. } => {
                 self.expr(array);
@@ -523,7 +659,7 @@ impl Walk<'_> {
                     ExprKind::Index(array, index)
                     | ExprKind::Assign { target: Place::Index(array, index), .. }
                     | ExprKind::IncDec { target: Place::Index(array, index), .. }
-                        if self.proven(e.id, array, index) =>
+                        if self.within_length(array, index) || self.proven(e.id, array, index) =>
                     {
                         self.proven.push(e.id);
                     }
@@ -541,7 +677,11 @@ impl Walk<'_> {
         // An array that is not plain is reached through its variable alone, whose array is never
         // replaced where a guard of its length holds (`ends`), and whose length never changes.
         let plain = root_of(array).is_some_and(|r| self.plain.contains(r));
-        if !plain && !matches!(array.kind, ExprKind::Var(_)) && self.fixed_field(array).is_none() {
+        if !plain
+            && !matches!(array.kind, ExprKind::Var(_))
+            && self.fixed_field(array).is_none()
+            && self.field_length(array).is_none()
+        {
             return false;
         }
         let range = self.facts.index_ranges.get(&id).copied();
@@ -574,6 +714,92 @@ impl Walk<'_> {
             low && positive && lengths.iter().any(|l| l.base == g.bound.base && g.bound.offset + c < l.offset)
         })
     }
+}
+
+impl Walk<'_> {
+    /// Whether the access `array[index]` is in bounds because `array` is a field whose every
+    /// array has one length, and the index is a constant, or the counter of an enclosing loop
+    /// between two constants (`counter_range`), plus or minus a constant, whose values all lie
+    /// within that length: a proof from the code where it is, which needs neither the guards nor
+    /// the ranges that calls carry into a method.
+    fn within_length(&self, array: &Expr, index: &Expr) -> bool {
+        // A variable that copies the field, as the store `a[i] = v` holds its array before it
+        // computes `v` (`lower/argument_order.rs`).
+        let copied = match &array.kind {
+            ExprKind::Var(v) if self.is_stable(v) => self.inits.get(v.as_str()).copied(),
+            _ => None,
+        };
+        let Some(length) = self.field_length(copied.unwrap_or(array)) else { return false };
+        self.counted(index).is_some_and(|(lo, hi)| 0 <= lo && lo <= hi && hi < length)
+    }
+
+    /// The values that `index` takes, where it is a constant, the counter of an enclosing loop
+    /// between constants (`counters`) or a variable that holds one (`held`), plus or minus a
+    /// constant, or a value masked by a constant that is not negative (`h & 15`).
+    fn counted(&self, index: &Expr) -> Option<(i64, i64)> {
+        let counter = |v: &str| {
+            let counted =
+                self.counters.iter().rev().find(|(name, _, _)| name == v).map(|&(_, lo, hi)| (lo, hi));
+            counted.or_else(|| self.held.get(v).copied())
+        };
+        let range = match &index.kind {
+            ExprKind::Int(k) => Some((*k as i64, *k as i64)),
+            ExprKind::Var(v) => counter(v),
+            // `h & 15` is from 0 to 15 whatever `h` is.
+            ExprKind::Binary(BinOp::BitAnd, l, r) if index.ty == Type::Int => match (&l.kind, &r.kind) {
+                (ExprKind::Int(k), _) | (_, ExprKind::Int(k)) if *k >= 0 => Some((0, *k as i64)),
+                _ => None,
+            },
+            ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), l, r) => match (&l.kind, &r.kind) {
+                (ExprKind::Var(v), ExprKind::Int(k)) => {
+                    let k = if *op == BinOp::Add { *k as i64 } else { -(*k as i64) };
+                    counter(v).map(|(lo, hi)| (lo + k, hi + k))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        // Within the values of `int`, its arithmetic cannot have wrapped around.
+        range.filter(|&(lo, hi)| i32::MIN as i64 <= lo && hi <= i32::MAX as i64)
+    }
+}
+
+/// The values that the counter of `for (int i = a; i < b; i++)` takes in the body, where `a` and
+/// `b` are constants and the body never assigns `i`: also with `<=`, with `i += k` for a constant
+/// `k >= 1`, and counting down with `i--` or `i -= 1` and `>` or `>=`. A loop that never turns
+/// gives nothing.
+fn counter_range(init: &[Stmt], cond: &Expr, update: &[Expr], body: &Stmt) -> Option<(String, i64, i64)> {
+    let [Stmt::Local { ty: Type::Int, name, init: Some(start), .. }] = init else { return None };
+    let ExprKind::Int(start) = start.kind else { return None };
+    let ExprKind::Binary(op, var, bound) = &cond.kind else { return None };
+    let (ExprKind::Var(v), ExprKind::Int(bound)) = (&var.kind, &bound.kind) else { return None };
+    if v != name || assigns_stmt(body, name) {
+        return None;
+    }
+    let [step] = update else { return None };
+    let up = match &step.kind {
+        ExprKind::IncDec { target: Place::Var(t), increment, .. } if t == name => *increment,
+        ExprKind::Assign { op: Some(BinOp::Add), target: Place::Var(t), value } if t == name => {
+            matches!(value.kind, ExprKind::Int(k) if k >= 1)
+        }
+        ExprKind::Assign { op: Some(BinOp::Sub), target: Place::Var(t), value } if t == name => {
+            if !matches!(value.kind, ExprKind::Int(1)) {
+                return None;
+            }
+            false
+        }
+        _ => return None,
+    };
+    let (start, bound) = (start as i64, *bound as i64);
+    // The counter never passes the end of `int`, where it would wrap around and keep going.
+    let (lo, hi) = match (up, op) {
+        (true, BinOp::Lt) => (start, bound - 1),
+        (true, BinOp::Le) if bound < i32::MAX as i64 => (start, bound),
+        (false, BinOp::Gt) => (bound + 1, start),
+        (false, BinOp::Ge) if bound > i32::MIN as i64 => (bound, start),
+        _ => return None,
+    };
+    (lo <= hi).then(|| (name.clone(), lo, hi))
 }
 
 /// Whether the `for` loop is a counting loop (`ast::counting`) that counts `var` up from a

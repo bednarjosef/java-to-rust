@@ -78,6 +78,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
         .all(|f| !matches!(f.ty, Type::Array(_)));
     let solution = solve(class, &scans, lend_shared, facts);
     let written = written_names(class, &scans, &solution.borrowed);
+    let field_lengths = bounds::field_lengths(class);
     for (m, method) in class.methods.iter().enumerate() {
         let names: FastMap<String, bool> =
             solution.plain[m].iter().map(|name| (name.clone(), written[m].contains(name))).collect();
@@ -90,7 +91,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
                 }
             });
         }
-        let proven = bounds::in_bounds(class, method, &solution.plain[m], &scans[m].reshaped, facts);
+        let proven =
+            bounds::in_bounds(class, method, &solution.plain[m], &scans[m].reshaped, facts, &field_lengths);
         facts.in_bounds.extend(proven);
         facts.sliced_loops.extend(slices::sliced_loops(method, &solution.plain[m], facts));
         facts.moves.extend(scans[m].moves.iter().copied());
