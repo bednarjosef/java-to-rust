@@ -7,8 +7,11 @@
 //! without writing it. A class whose static
 //! initialization must run eagerly (see `analysis::statics`) has an `init` function that runs its
 //! `<clinit>` once, and every static method, constructor and access from another class calls it
-//! first, as Java initializes a class on first use. The `init` function is inlined and only tests
-//! whether initialization has started; `init_..._slow`, out of line, runs it.
+//! first, as Java initializes a class on first use, unless the class is known to be initialized
+//! there (`uninitialized`). The `init` function is inlined and only tests whether initialization
+//! has started; `init_..._slow`, out of line, runs it. A static method or constructor that starts
+//! with the call is two functions (`split_entry`), so that a caller that knows the class is
+//! initialized calls the one without it.
 //!
 //! In a program that starts threads, the statics that the started threads' code may touch
 //! (`Facts::process_statics`, by class) have one copy for the process: a primitive is a
@@ -42,6 +45,11 @@ pub(super) fn init_name(class: &str) -> String {
     let (path, local) = modules::split(class);
     path + &format!("init_{}", snake_case(&modules::flat_name(class, local)))
 }
+
+/// What the name of a static method's or constructor's function that has no initialization
+/// check ends with, after the name of the one that has (`Gen::split_entry`). A Java name in snake
+/// case has no `__` but where it had `$$`.
+pub(super) const INITIALIZED: &str = "__initialized";
 
 /// The flag that records that a class's static initialization has started.
 fn flag(class: &str) -> String {
@@ -319,25 +327,70 @@ impl<'a> Gen<'a> {
 
     /// The class whose initialization a use of class `class` runs here (`init_call`), if any:
     /// none in that class or a subclass of it, nor after a statement of the same method that
-    /// surely ran it (`known_init`), nor for a class that `main` initializes first
-    /// (`Facts::initialized_first`).
+    /// surely ran it or the initialization of a subclass of it (`known_init`, `implies`), nor
+    /// for a class that `main` initializes first (`Facts::initialized_first`).
     pub(super) fn uninitialized(&self, class: usize) -> Option<usize> {
         let current = self.class.methods[self.method].class;
         let init = self.facts.init_class(self.class, class)?;
         let initialized = current == init
             || self.class.hierarchy.ancestors(current).contains(&init)
-            || self.known_init.contains(&(self.method, init))
+            || self.facts.init_class(self.class, current).is_some_and(|c| self.implies(c, init))
+            || self.known_init.iter().any(|&(m, known)| m == self.method && self.implies(known, init))
             || self.facts.initialized_first(init);
         (!initialized).then_some(init)
+    }
+
+    /// Whether a passed check of eager class `known` means that eager class `init` is
+    /// initialized too: it is that class, or one that the `<clinit>` of `known` initializes
+    /// before its own code (its superclass's, and the superinterfaces with code that are eager,
+    /// see `write_method`), or one that those imply in turn. Once `known` has started, those
+    /// initializations have run or are running on this thread, where a check of theirs would
+    /// pass as well.
+    fn implies(&self, known: usize, init: usize) -> bool {
+        if known == init {
+            return true;
+        }
+        let superclass =
+            self.class.hierarchy.superclass(known).and_then(|s| self.facts.init_class(self.class, s));
+        superclass.is_some_and(|s| self.implies(s, init))
+            || (self.facts.eager_init.contains(&init)
+                && super::default_superinterfaces(self.class, known).contains(&init))
+    }
+
+    /// Whether static method or constructor `index` is written as two functions (`write_method`):
+    /// the one of its name, which runs its class's initialization check and calls the other,
+    /// named with `INITIALIZED` after it, which holds the code. A call where the class is known
+    /// to be initialized (`uninitialized`) calls the second (`entry_suffix`): a `super(..)` from a
+    /// subclass's constructor, a call from the class's own code, or one after a statement that
+    /// surely initialized it. Those are the methods that start with that check (`entry_init`),
+    /// but `main`, an enum's builder of constants and a generic method, whose type arguments a
+    /// call of the second would have to name.
+    pub(super) fn split_entry(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        self.facts.entry_init.contains(&index)
+            && (m.is_static || m.is_ctor)
+            && !m.is_main
+            && m.type_params.is_empty()
+            && !self.class.is_initializer(index)
+            && self.facts.init_class(self.class, m.class).is_some()
+    }
+
+    /// What a call of static method or constructor `index` written here adds to its function's
+    /// name: `INITIALIZED`, calling the code without the check, where the method is split
+    /// (`split_entry`) and its class is known to be initialized here; else nothing.
+    pub(super) fn entry_suffix(&self, index: usize) -> &'static str {
+        let class = self.class.methods[index].class;
+        if self.split_entry(index) && self.uninitialized(class).is_none() { INITIALIZED } else { "" }
     }
 
     /// The classes whose initialization statement `stmt` has run once it completes normally,
     /// through a check written in this method (`init_call`): one for a read or write of a static
     /// that is not a constant, an enum constant, or `Class.forName`, where the statement surely
-    /// evaluates it. Once the check passed, the class is initialized, or this thread is running
-    /// its initialization, and a second check would pass too. A call or `new` is left out (its
-    /// check is the callee's), and so is anything inside a lambda, past `&&`, `||` or `?`, or in a
-    /// switch's cases, which may not run.
+    /// evaluates it; or through the check a called function starts with: a call or `new` of a
+    /// static method or constructor that has one (`entry_call`). Once the check passed, the class
+    /// is initialized, or this thread is running its initialization, and a second check would
+    /// pass too. Anything inside a lambda, past `&&`, `||` or `?`, or in a switch's cases, which
+    /// may not run, is left out.
     pub(super) fn initialized_by(&self, stmt: &Stmt) -> Vec<usize> {
         let mut found = Vec::new();
         match stmt {
@@ -398,6 +451,26 @@ impl<'a> Gen<'a> {
                 args.iter().for_each(|v| self.surely_initializes(v, found));
             }
             _ => {}
+        }
+        // A call of a static method or constructor that starts with its class's check, written as
+        // a call of its function (`entry_calls`), has run the check once it returns.
+        if let ExprKind::Call { resolved: Some(m), .. }
+        | ExprKind::MethodCall { resolved: Some(m), .. }
+        | ExprKind::New { ctor: Some(m), .. } = &e.kind
+            && self.entry_calls.contains(&e.id)
+        {
+            found.extend(self.facts.init_class(self.class, self.class.methods[*m].class));
+        }
+    }
+
+    /// Records that call or `new` `e` of method `index` is written as a call of its function, so
+    /// that a statement that surely runs it initializes the class of a method that starts with
+    /// its class's check (`surely_initializes`); a `new` of a lambda that becomes a Rust closure,
+    /// say, calls no constructor.
+    pub(super) fn entry_call(&mut self, e: ExprId, index: usize) {
+        let m = &self.class.methods[index];
+        if self.facts.entry_init.contains(&index) && (m.is_static || m.is_ctor) {
+            self.entry_calls.insert(e);
         }
     }
 

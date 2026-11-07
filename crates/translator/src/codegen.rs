@@ -772,6 +772,7 @@ impl<'a> Gen<'a> {
             borrowed_optional: HashSet::new(),
             after_body: &[],
             known_init: Vec::new(),
+            entry_calls: HashSet::new(),
             borrowed_optional_objects: HashSet::new(),
             int_receiver: false,
             double_receiver: false,
@@ -1032,6 +1033,9 @@ struct Gen<'a> {
     /// of one of them needs no check (`uninitialized`). Each block forgets what its statements
     /// added as it ends, and a closure's body starts with none.
     known_init: Vec<(usize, usize)>,
+    /// The calls and `new`s of static methods and constructors that start with their class's
+    /// initialization check, written as calls of their functions (`entry_call`).
+    entry_calls: HashSet<ExprId>,
     /// The current method's possibly-null object parameters that are borrowed as
     /// `&Option<Rc<..>>`: a read of one as a value clones it.
     borrowed_optional_objects: HashSet<String>,
@@ -1564,7 +1568,8 @@ impl<'a> Gen<'a> {
             };
         let never_runs =
             !m.is_static && m.name != "<clinit>" && !self.runs[m.class] || factory_without_objects || stub(m);
-        if never_runs {
+        let split = self.split_entry(index);
+        if never_runs && !split {
             self.line("#[allow(unused_variables)]");
         }
         // A method that returns a `Result` only for its override group (`Facts::plain_bodies`):
@@ -1593,17 +1598,27 @@ impl<'a> Gen<'a> {
         self.name_slots(index, &sites);
         let moves = self.find_moves(index);
         let outer_moves = std::mem::replace(&mut self.moves, moves);
-        let fn_name = if self.on_stack {
+        let stack = if self.on_stack {
             // The slot comes after the receiver.
             let param = format!("{}: {}", self.slot_param, self.slot_param_type(index));
             params.insert(receivers, param);
-            format!("{fn_name}_on_stack")
+            "_on_stack"
         } else if self.confined_self {
-            format!("{fn_name}_confined")
+            "_confined"
         } else {
-            fn_name
+            ""
         };
         let generics = self.type_params(&m.type_params).0;
+        let fn_name = if split {
+            let inner = format!("{fn_name}{}{stack}", statics::INITIALIZED);
+            self.entry_check_fn(index, &format!("{fn_name}{stack}"), &inner, &params, &ret);
+            if never_runs {
+                self.line("#[allow(unused_variables)]");
+            }
+            inner
+        } else {
+            format!("{fn_name}{stack}")
+        };
         let wrapper = plain.then(|| {
             let args: Vec<&str> = params
                 .iter()
@@ -1665,6 +1680,7 @@ impl<'a> Gen<'a> {
                 }
             }
         } else if self.facts.entry_init.contains(&index)
+            && !split
             && let Some(t) = self.facts.init_class(self.class, m.class)
         {
             let call = self.init_run(t);
@@ -1726,6 +1742,30 @@ impl<'a> Gen<'a> {
         self.slots = outer_slots;
         self.thin_this = outer_thin;
         WRITING.with(|w| w.set(outer));
+    }
+
+    /// The function `name` of static method or constructor `index`, which is split
+    /// (`split_entry`): with the parameters `params` and the return type `ret` of the function
+    /// `inner` that holds its code, it runs its class's initialization check, as Java does when
+    /// the method is called, and calls `inner`. It is inlined: a call costs the check alone.
+    fn entry_check_fn(&mut self, index: usize, name: &str, inner: &str, params: &[String], ret: &str) {
+        let m = &self.class.methods[index];
+        let init = self.facts.init_class(self.class, m.class).expect("a split method's class is eager");
+        let params: Vec<&str> = params.iter().map(|p| p.strip_prefix("mut ").unwrap_or(p)).collect();
+        let args: Vec<&str> = params.iter().map(|p| p.split(':').next().unwrap_or(p).trim()).collect();
+        // A constructor of a generic class is a function of its `impl`.
+        let in_impl = !matches!(self.homes[index], Home::Free) && !self.module_fn(index);
+        let path = if in_impl { format!("Self::{inner}") } else { inner.to_string() };
+        // Every call may be one where the class is known to be initialized.
+        self.line("#[inline]");
+        self.line("#[allow(dead_code)]");
+        self.line(&format!("{}fn {name}({}){ret} {{", self.vis(), params.join(", ")));
+        self.indent += 1;
+        let call = self.init_run(init);
+        self.line(&format!("{call};"));
+        self.line(&format!("{path}({})", args.join(", ")));
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// Picks Rust names for the method's parameters and locals: snake case, distinct from each

@@ -1082,9 +1082,10 @@ fn superclass_static_initialization_runs_first() {
         }
         class A { public static void main(String[] a) { System.out.println(new Sub().both()); } }",
     );
+    // `make` is Base's, which `init_sub` has initialized: it is called without the check.
     assert_contains(
         &rust,
-        &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make(java::wtf8(\"sub\")));"],
+        &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make__initialized(java::wtf8(\"sub\")));"],
     );
 }
 
@@ -2824,6 +2825,58 @@ fn a_class_initialized_by_an_earlier_statement_is_not_checked_again() {
             "let r = || { java::println!(\"{}\", { init_helper(); HELPER_MADE.get() }); };",
         ],
     );
+}
+
+#[test]
+fn a_known_initialized_class_is_called_without_its_check() {
+    let rust = translate(
+        "class Vec {
+            static int made;
+            static { System.out.println(\"vec\"); }
+            final int x, y;
+            Vec(int x, int y) { this.x = x; this.y = y; made++; }
+        }
+        class Pos extends Vec {
+            static final Pos ORIGIN;
+            static { ORIGIN = new Pos(0, 0); System.out.println(\"pos\"); }
+            Pos(int x, int y) { super(x, y); }
+            Pos above() { return new Pos(x, y + 1); }
+            static int pack(int x, int y) { return x * 31 + y; }
+        }
+        class World {
+            static int walk(int n) {
+                int sum = 0;
+                for (int i = 0; i < n; i++) {
+                    Pos p = new Pos(i, i);
+                    sum += Pos.pack(p.x, p.y);
+                    sum += Pos.pack(p.above().x, 0) + Vec.made;
+                }
+                return sum;
+            }
+        }
+        public class A {
+            public static void main(String[] args) { System.out.println(World.walk(3)); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // A static method or constructor that another class calls checks its class in a
+            // function of its own name, which calls the one with its code.
+            "fn Pos__new(x: i32, y: i32) -> Pos {\n    init_pos();\n    Pos__new__initialized(x, y)\n}",
+            "fn pack(x: i32, y: i32) -> i32 {\n    init_pos();\n    pack__initialized(x, y)\n}",
+            // `super(..)` initializes nothing, and Vec is initialized before Pos.
+            "Pos { base: Vec_Fields__new__initialized(x, y) }",
+            // Pos's own code knows Pos is initialized.
+            "Arc::new(Pos__new__initialized(self.base.x, self.base.y.wrapping_add(1)))",
+            "POS_ORIGIN.set(Some(Arc::new(Pos__new__initialized(0, 0))));",
+            // After the statement that made a Pos, neither Pos nor its superclass is checked.
+            "let p = slot_1.put(Pos__new(i, i));",
+            "sum = sum.wrapping_add(pack__initialized(p_x, p_y));",
+            "pack__initialized(p.above_on_stack(&slot_2).base.x, 0).wrapping_add(VEC_MADE.get())",
+        ],
+    );
+    assert_lacks(&rust, &["init_vec(); VEC_MADE"]);
 }
 
 #[test]
@@ -5921,7 +5974,7 @@ fn natives_of_jdk_classes_become_runtime_calls() {
     // the native declarations nor the methods replaced at their calls are translated.
     assert_lacks(
         &rust,
-        &["register_natives", "initialize", "from_archive", "fn array_base_offset", "fn array_index_scale"],
+        &["register_natives", "initialize(", "from_archive", "fn array_base_offset", "fn array_index_scale"],
     );
 }
 

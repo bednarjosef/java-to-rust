@@ -455,19 +455,35 @@ body; a class with field initializers is rejected there, as they would run first
 superinterfaces that declare a method with code that is not static (a default or private one),
 in the order of its `implements` clauses, each interface after its own superinterfaces; an
 interface's initialization initializes none (`codegen::default_superinterfaces`, and
-reachability keeps those initializers, `Walk::default_interfaces`). Code in a class or its
-subclass does not initialize the class again (`codegen/statics.rs::init_call`), nor does a
-default method its interface, which the class's initialization has initialized. Nor does a use
-after a statement of the same method that surely initialized the class through a check of its
-own (`initialized_by`): a read or write of one of its statics that is not a constant, or one of
-its enum constants, which the statement evaluates whatever path it takes (not past `&&`, `||` or
+reachability keeps those initializers, `Walk::default_interfaces`). A static method or
+constructor that code of another class calls starts with its class's check
+(`analysis::statics::entry_inits`), as Java initializes a class when one is called. Code in a
+class or its subclass does not initialize the class again (`codegen/statics.rs::init_call`),
+nor does a default method its interface, which the class's initialization has initialized. Nor
+does a use after a statement of the same method that surely initialized the class through a
+check (`initialized_by`): a read or write of one of its statics that is not a constant, one of
+its enum constants, or a call or `new` of one of its static methods or constructors that starts
+with the check, which the statement evaluates whatever path it takes (not past `&&`, `||` or
 `?`, nor in a lambda). That statement's block and the blocks inside it skip the check: once one
 check passed, the class is initialized or this thread is running its initialization, so a
-second one would pass too. A lambda's body checks again, as it may run on another thread. A
-call or a `new` does not count, as its check is in the callee. A method that
-lowering adds for an expression (`Method::added`, `lower/added_methods.rs`), such as the one
-every `Class.forName` with a computed name calls, is put in the class whose code it first meets
-but stands for the code at its call sites, so calling it does not initialize that class.
+second one would pass too. A check of a class stands for those of the classes its
+initialization initializes first, its superclasses and those superinterfaces (`implies`): once
+it has started, theirs have run or are running on this thread. A lambda's body checks again, as
+it may run on another thread.
+
+Where the class is known to be initialized, the check that starts a static method or
+constructor is left out too. Such a method is two functions (`split_entry`): the one of its name,
+inlined, which runs the check and calls the other, `name__initialized`, which holds the code; a
+call where the class is known to be initialized calls the second (`entry_suffix`). So `new
+BlockPos(..)` from another class checks `BlockPos` once and its `super(..)` calls `Vec3i`'s
+constructor without a check (Java's `super(..)` initializes nothing, and `Vec3i` was initialized
+before `BlockPos`), and `new BlockPos(..)` in `BlockPos`'s own methods checks nothing. A loop of
+the Minecraft server that made a `BlockPos` in another class's method tested both flags on every
+pass. A generic static method, whose type arguments the call of the second function would have
+to name, keeps the check in its one function. A method that lowering adds for an expression
+(`Method::added`, `lower/added_methods.rs`), such as the one every `Class.forName` with a
+computed name calls, is put in the class whose code it first meets but stands for the code at
+its call sites, so calling it does not initialize that class.
 
 ### 1.5 `instanceof`, patterns and casts
 
