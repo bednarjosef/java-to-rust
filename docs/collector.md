@@ -282,8 +282,24 @@ The collector needs nothing for them:
   another variable, which neither holds the object nor counts against it. A
   factory's object is made outside every loop of the factory, once per call, and the caller's
   slot then follows the caller's loops by the same rule.
+- **Moved to the heap where it leaves.** An object that leaves only at some calls or stores may
+  still start in a slot: the random `BlockPos` of each random tick of the Minecraft server, which
+  only a block that ticks keeps. Before each statement where it may leave, `slot_1.to_heap(&mut
+  pos)` copies it into the heap and points the variable there; once the variable names the heap
+  it does nothing. Such a statement is a call that is given the variable, or a store of it into
+  a field, an array element or a static, that names the variable nowhere else and assigns it
+  nowhere; and the object is held by that one variable alone, its identity hash is not read
+  before (by the method, its callees, or the factory that made it), and with those statements
+  taken for none it would stay. Until the move nothing else names the object, so no code can tell
+  the copy from the original: every later read of the variable reads the copy, and the original
+  is left in the slot unread. The variable is declared in the loop's body, so a move in one
+  iteration never reaches the next one's object, which the slot is filled with again. An object
+  that would be moved in the block it is made in, or a plain block inside it, is made in the
+  heap, as it would always be copied. A move that the generator cannot write before its statement makes it write the
+  method again with that object in the heap.
 - **Identity.** The identity hash is the address, unique while the object lives; two objects of
-  one slot in a loop, never alive at once, may share it, which Java allows. A `synchronized`
+  one slot in a loop, never alive at once, may share it, which Java allows. An object moved to
+  the heap gets a new address, so it is moved only when its identity hash was not read before. A `synchronized`
   block, `wait` or `notify` on an object counts as an escape; a `synchronized` method called on
   one locks it by its address or by the lock inside it, as on the heap, and unlocks it before it
   returns.

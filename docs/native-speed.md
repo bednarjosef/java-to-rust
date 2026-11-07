@@ -342,7 +342,9 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   too many to become locals, go in a region freed when the method returns. Built for single
   objects: an object that never leaves its method, or that a factory returns to a caller that
   keeps it, is made in a slot in the caller's frame (docs/collector.md, "Objects on the
-  stack"). Regions for objects made in a loop and kept across its iterations are planned.
+  stack"). An object that leaves only on some paths, at a call or a store, starts in a slot too
+  and is copied to the heap just before the statement where it leaves, as a JIT's partial escape
+  analysis would. Regions for objects made in a loop and kept across its iterations are planned.
 - **Inline objects**: a child that is created with its parent, never re-pointed and never
   compared by identity is stored inside the parent. A list that owns objects of one class becomes
   a `Vec` of structs side by side.
@@ -393,7 +395,8 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   receiver is of one class.
 - **Representation switches**: a list starts as `Vec<i32>`, and converts itself to the general
   form if anything else is ever stored. An object starts inline and moves to the heap if it
-  escapes.
+  escapes; for an object of a method's own frame this is built (see **Stack and method
+  regions**).
 - **Start-up snapshot**: static initializers that depend on nothing outside the program run at
   build time, and their objects are part of the binary.
 

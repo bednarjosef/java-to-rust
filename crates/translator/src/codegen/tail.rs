@@ -27,6 +27,7 @@ impl<'a> Gen<'a> {
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         match stmt {
             Stmt::Return(Some(value), _) => {
+                self.move_to_heap(stmt);
                 let text = match self.returned_closure(value) {
                     // The captures of a returned closure are bound on lines of their own.
                     Some((prelude, closure)) => {
@@ -68,6 +69,7 @@ impl<'a> Gen<'a> {
         };
         let conflicts = self.stmt_conflicts(stmt);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
+        self.move_to_heap(stmt);
         let code = self.returned(value);
         let text = self.ok_last(value, code.text);
         self.line(&text);

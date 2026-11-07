@@ -167,6 +167,36 @@ impl<T> Slot<T> {
         let ptr = unsafe { NonNull::new_unchecked(place as *mut T) };
         Arc { ptr, owns: PhantomData }
     }
+
+    /// Moves the object in the slot to the collected heap when `handle` names it, and makes
+    /// `handle` name the moved object, keeping the class number in its top bits; does nothing
+    /// when `handle` names anything else, or nothing. The translation calls it before a statement
+    /// where an object that it made in the slot may leave its method (docs/collector.md,
+    /// "Objects on the stack"): nothing else names the object then, so the moved object is the
+    /// object from then on. The old one is left in the slot as it was, not dropped.
+    ///
+    /// # Safety
+    ///
+    /// `H` is a handle of the slot's objects or of a supertype's: a `java::Arc<T>`, a struct
+    /// around a `java::Thin`, or an `Option` of one, and no other handle of the object in the slot
+    /// is used after the call.
+    #[inline(always)]
+    pub unsafe fn to_heap<H>(&self, handle: &mut H) {
+        const { assert!(std::mem::size_of::<H>() == std::mem::size_of::<usize>()) };
+        // A handle is one word: the address, with a class number in the top bits in a `Thin`, or
+        // 0 for `None`.
+        let word = unsafe { std::ptr::read(handle as *const H as *const usize) };
+        if word & ADDRESS == self.value.get() as usize {
+            unsafe { self.move_out(handle as *mut H as *mut usize, word) };
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    unsafe fn move_out(&self, handle: *mut usize, word: usize) {
+        let moved = Arc::new(unsafe { std::ptr::read((*self.value.get()).as_ptr()) });
+        unsafe { handle.write((word & !ADDRESS) | Arc::as_ptr(&moved) as usize) };
+    }
 }
 
 impl<T> Default for Slot<T> {
@@ -220,6 +250,28 @@ mod tests {
         assert_eq!(b.get(), 5);
         let (x, y) = (Slot::new(), Slot::new());
         assert!(!Arc::ptr_eq(&x.put(()), &y.put(())));
+    }
+
+    #[test]
+    fn objects_move_from_their_slots_once() {
+        let slot = Slot::new();
+        let mut a = slot.put(std::cell::Cell::new(3));
+        a.set(4);
+        let on_stack = a.clone();
+        unsafe { slot.to_heap(&mut a) };
+        assert!(!Arc::ptr_eq(&a, &on_stack));
+        assert_eq!(a.get(), 4);
+        let moved = a.clone();
+        unsafe { slot.to_heap(&mut a) };
+        assert!(Arc::ptr_eq(&a, &moved));
+        let mut none: Option<Arc<std::cell::Cell<i32>>> = None;
+        unsafe { slot.to_heap(&mut none) };
+        assert!(none.is_none());
+        let mut held = Some(slot.put(std::cell::Cell::new(5)));
+        unsafe { slot.to_heap(&mut held) };
+        let held = held.expect("still a handle");
+        assert!(!std::ptr::addr_eq(Arc::as_ptr(&held), Arc::as_ptr(&on_stack)));
+        assert_eq!(held.get(), 5);
     }
 
     #[test]
