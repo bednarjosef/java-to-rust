@@ -357,6 +357,68 @@ impl<T> SharedField<T> {
         self.set(value)
     }
 
+    /// A copy of the value of a field of an object that one thread alone uses: a plain read. The
+    /// translator calls this and the other `_confined` accessors only on an object that never
+    /// leaves the method that made it, which no other thread can then reach
+    /// (docs/multi-threading.md, "Objects that one thread uses").
+    #[inline(always)]
+    pub fn get_confined(&self) -> T
+    where
+        T: Clone,
+    {
+        // Only this thread reads or writes the field (above).
+        unsafe { (*self.0.get()).clone() }
+    }
+
+    /// Replaces the value of a field of an object that one thread alone uses (`get_confined`).
+    #[inline(always)]
+    pub fn set_confined(&self, value: T) {
+        drop(self.replace_confined(value));
+    }
+
+    /// Replaces the value of a field of an object that one thread alone uses, returning the old
+    /// one (`get_confined`).
+    #[inline(always)]
+    pub fn replace_confined(&self, value: T) -> T {
+        // As in `get_confined`.
+        unsafe { std::ptr::replace(self.0.get(), value) }
+    }
+
+    /// `compare_exchange_by` on a field of an object that one thread alone uses
+    /// (`get_confined`): a read, a comparison and a write.
+    #[inline(always)]
+    pub fn compare_exchange_by_confined(&self, expected: T, value: T, same: impl Fn(&T, &T) -> bool) -> T
+    where
+        T: Clone,
+    {
+        let old = self.get_confined();
+        if same(&old, &expected) {
+            drop(self.replace_confined(value));
+        }
+        old
+    }
+
+    /// `compare_and_set_by` on a field of an object that one thread alone uses (`get_confined`).
+    #[inline(always)]
+    pub fn compare_and_set_by_confined(&self, expected: T, value: T, same: impl Fn(&T, &T) -> bool) -> bool
+    where
+        T: Clone,
+    {
+        let old = self.compare_exchange_by_confined(expected.clone(), value, &same);
+        same(&old, &expected)
+    }
+
+    /// `get_and_update` on a field of an object that one thread alone uses (`get_confined`).
+    #[inline(always)]
+    pub fn get_and_update_confined(&self, f: impl Fn(&T) -> T) -> T
+    where
+        T: Clone,
+    {
+        let old = self.get_confined();
+        drop(self.replace_confined(f(&old)));
+        old
+    }
+
     /// The value of a cell that nothing else reaches.
     #[inline(always)]
     pub fn get_mut(&mut self) -> &mut T {

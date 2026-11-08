@@ -227,6 +227,55 @@ impl<T: Compress> SharedRefField<T> {
         self.0.set_volatile(value.pack())
     }
 
+    /// A copy of the value of a field of an object that one thread alone uses: a plain read
+    /// (`SharedField::get_confined`).
+    #[inline(always)]
+    pub fn get_confined(&self) -> T {
+        unsafe { T::unpack(self.0.get_confined()) }
+    }
+
+    /// Replaces the value of a field of an object that one thread alone uses.
+    #[inline(always)]
+    pub fn set_confined(&self, value: T) {
+        self.0.set_confined(value.pack())
+    }
+
+    /// Replaces the value of a field of an object that one thread alone uses, returning the old
+    /// one.
+    #[inline(always)]
+    pub fn replace_confined(&self, value: T) -> T {
+        unsafe { T::unpack(self.0.replace_confined(value.pack())) }
+    }
+
+    /// `compare_exchange_by` on a field of an object that one thread alone uses.
+    #[inline(always)]
+    pub fn compare_exchange_by_confined(&self, expected: T, value: T, same: impl Fn(&T, &T) -> bool) -> T {
+        let old = self.get_confined();
+        if same(&old, &expected) {
+            self.set_confined(value);
+        }
+        old
+    }
+
+    /// `compare_and_set_by` on a field of an object that one thread alone uses.
+    #[inline(always)]
+    pub fn compare_and_set_by_confined(&self, expected: T, value: T, same: impl Fn(&T, &T) -> bool) -> bool {
+        let old = self.get_confined();
+        let swapped = same(&old, &expected);
+        if swapped {
+            self.set_confined(value);
+        }
+        swapped
+    }
+
+    /// `get_and_update` on a field of an object that one thread alone uses.
+    #[inline(always)]
+    pub fn get_and_update_confined(&self, f: impl Fn(&T) -> T) -> T {
+        let old = self.get_confined();
+        self.set_confined(f(&old));
+        old
+    }
+
     pub fn into_inner(self) -> T {
         unsafe { T::unpack(self.0.into_inner()) }
     }

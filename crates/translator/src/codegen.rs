@@ -832,6 +832,7 @@ impl<'a> Gen<'a> {
             unmoved: HashSet::new(),
             missed: Vec::new(),
             on_stack: false,
+            confined_self: false,
             few_arms: false,
             stack_forms: &setup.stack_forms,
             stack_sites: &setup.stack_sites,
@@ -1184,6 +1185,9 @@ struct Gen<'a> {
     /// Whether the constructor or factory being written is its form on the stack, which makes
     /// its object in the slot it is given.
     on_stack: bool,
+    /// Whether the method being written is its confined form, called on an object that only one
+    /// thread uses, which reads and writes the fields of `this` plainly (`Gen::confined_form`).
+    confined_self: bool,
     /// Whether the arms being written are those of a dispatcher among a few classes, or of a copy
     /// of a body for one class, which copy the small bodies they call for their classes
     /// whatever the number of classes that run those (`Gen::body_for`).
@@ -1418,6 +1422,11 @@ impl<'a> Gen<'a> {
             self.method_form(index);
             self.on_stack = false;
         }
+        if self.confined_form(index) {
+            self.confined_self = true;
+            self.method_form(index);
+            self.confined_self = false;
+        }
     }
 
     /// Writes method `index`, or its form on the stack when `on_stack` is set. A method in which
@@ -1572,6 +1581,8 @@ impl<'a> Gen<'a> {
             let param = format!("{}: {}", self.slot_param, self.slot_param_type(index));
             params.insert(receivers, param);
             format!("{fn_name}_on_stack")
+        } else if self.confined_self {
+            format!("{fn_name}_confined")
         } else {
             fn_name
         };

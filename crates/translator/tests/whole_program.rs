@@ -1730,6 +1730,83 @@ public class Main {
     );
 }
 
+/// Atomics that never leave the methods that make them, a counter that a lambda passed down
+/// captures and one that a started thread makes for itself, are used by one thread alone: their
+/// calls run the confined forms of the atomics' methods, plain reads and writes (and through
+/// `incrementAndGet`, the plain form of its update). The atomic that the threads share through a
+/// static keeps the atomic forms (docs/multi-threading.md, 2.1, "Objects that one thread uses").
+const CONFINED_ATOMICS: &str = r#"
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
+
+public class Main {
+    static final AtomicInteger shared = new AtomicInteger();
+
+    static void each(int n, IntConsumer action) {
+        for (int i = 0; i < n; i++) action.accept(i);
+    }
+
+    static int lastOdd(int n) {
+        AtomicInteger last = new AtomicInteger(-1);
+        each(n, i -> { if (i % 2 == 1) last.set(i); });
+        return last.get();
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        Thread t = new Thread(() -> {
+            AtomicInteger mine = new AtomicInteger();
+            for (int i = 0; i < 100; i++) {
+                mine.incrementAndGet();
+                shared.incrementAndGet();
+            }
+            System.out.println(mine.get());
+        });
+        t.start();
+        t.join();
+        System.out.println(lastOdd(10) + " " + shared.get());
+    }
+}
+"#;
+
+#[test]
+fn atomics_that_one_thread_uses_run_confined_forms() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-confined-atomics");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), CONFINED_ATOMICS).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    // The forms, with plain accesses of the field.
+    assert!(rust.contains("fn set_confined(&self, new_value: i32) {"), "no confined `set`");
+    assert!(rust.contains(".value.set_confined(new_value)"), "no plain write in the confined `set`");
+    assert!(rust.contains(".value.get_and_update_confined("), "no plain update");
+    // The captured counter and the started thread's own.
+    assert!(rust.contains("last.set_confined(i)"), "the captured counter is set atomically");
+    assert!(rust.contains("last.get_confined()"), "the captured counter is read atomically");
+    assert!(
+        rust.contains("AtomicInteger__increment_and_get_confined(&mine)"),
+        "the thread's own counter is atomic"
+    );
+    // The shared counter.
+    let shared: Vec<&str> =
+        rust.lines().filter(|l| l.contains("SHARED") && l.contains("increment_and_get")).collect();
+    assert!(!shared.is_empty() && shared.iter().all(|l| !l.contains("_confined")), "{shared:?}");
+}
+
 /// Handles held as values that lowering does not follow are rejected: an access through a handle
 /// that may be null whose arguments do something before Java's null check, and a handle kept as
 /// an `Object`. (A lookup of a method other than the handle factories throws when it runs, which

@@ -35,6 +35,8 @@ impl<'a> Gen<'a> {
             None => "",
         };
         let place = format!("{obj}{borrow}.{}", self.field_path(object, field));
+        // In a confined form, the cell of `this` is updated by plain reads and writes.
+        let confined = if self.confined_this(object, field) { "_confined" } else { "" };
         Some(match update {
             FieldUpdate::CompareAndSet | FieldUpdate::CompareAndExchange => {
                 let expected = self.field_value(var("expected")?, ty, nullable);
@@ -45,21 +47,23 @@ impl<'a> Gen<'a> {
                 } else {
                     "compare_exchange_by"
                 };
-                format!("{place}.{name}({expected}, {value}, {same})")
+                format!("{place}.{name}{confined}({expected}, {value}, {same})")
             }
             FieldUpdate::GetAndSet => {
-                format!("{place}.replace({})", self.field_value(var("value")?, ty, nullable))
+                format!("{place}.replace{confined}({})", self.field_value(var("value")?, ty, nullable))
             }
             FieldUpdate::GetAndAdd => {
                 let delta = self.value(var("delta")?, ty).text;
                 match ty {
-                    Type::Float | Type::Double => format!("{place}.get_and_update(|a| *a + {delta})"),
-                    _ => format!("{place}.get_and_update(|a| a.wrapping_add({delta}))"),
+                    Type::Float | Type::Double => {
+                        format!("{place}.get_and_update{confined}(|a| *a + {delta})")
+                    }
+                    _ => format!("{place}.get_and_update{confined}(|a| a.wrapping_add({delta}))"),
                 }
             }
             FieldUpdate::GetAndBitwise(op) => {
                 let mask = self.value(var("delta")?, ty).text;
-                format!("{place}.get_and_update(|a| *a {} {mask})", op.java())
+                format!("{place}.get_and_update{confined}(|a| *a {} {mask})", op.java())
             }
         })
     }
