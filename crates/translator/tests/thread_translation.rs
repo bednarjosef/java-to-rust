@@ -836,3 +836,74 @@ fn a_fixed_number_boolean_or_enum_field_of_a_shared_object_is_read_with_a_plain_
         &["this.seed.get()", "this.mirrored.get()", "this.shape.get()", "value.fixed()", ".fixed().round()"],
     );
 }
+
+#[test]
+fn fields_written_before_this_leaves_the_constructor_stay_fixed() {
+    let rust = translate(
+        "class A {
+    static Object keep;
+    static void aside(Runnable r) {
+        Thread t = new Thread(r);
+        t.start();
+        try { t.join(); } catch (InterruptedException e) { }
+    }
+    static final class Grid {
+        final int[] cells = new int[4];
+        final StringBuilder log;
+        final StringBuilder after;
+        final Inner inner;
+        Grid() {
+            log = new StringBuilder(\"g\");
+            aside(this::fill);
+            after = new StringBuilder(\"a\");
+            inner = new Inner();
+        }
+        void fill() { cells[0] = log.length(); }
+        final class Inner {
+            int reads;
+            Inner() { aside(this::count); }
+            void count() { reads++; }
+            int read() { count(); return cells[0] + after.length() + reads; }
+        }
+    }
+    static class Base {
+        Base() { keep = this; }
+    }
+    static final class Sub extends Base {
+        final StringBuilder name;
+        Sub() { super(); name = new StringBuilder(\"s\"); aside(this::len); }
+        void len() { System.out.println(name.length()); }
+    }
+    static final class Pair {
+        final StringBuilder a;
+        StringBuilder c;
+        Pair() { this(new StringBuilder(\"p\")); c = new StringBuilder(\"c\"); }
+        Pair(StringBuilder a) { this.a = a; aside(this::len); }
+        void len() { System.out.println(a.length() + (c == null ? 0 : c.length())); }
+    }
+    public static void main(String[] args) {
+        Grid g = new Grid();
+        System.out.println(g.inner.read());
+        new Sub();
+        new Pair();
+    }
+}",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // Written by an initializer and before the statement that hands `this` to a thread,
+            // and the enclosing instance, which the inner class's constructor writes first.
+            ".cells.fixed()",
+            ".log.fixed()",
+            "(*this.outer.fixed())",
+            "self.a.fixed()",
+            // Written after `this` left: in a later statement, after a superclass's constructor
+            // that stores it, and after `this(..)`.
+            ".after.get()",
+            "self.name.get()",
+            "self.c.get()",
+        ],
+    );
+    assert_lacks(&rust, &[".cells.get()", ".log.get()", ".outer.get()", "self.a.get()"]);
+}

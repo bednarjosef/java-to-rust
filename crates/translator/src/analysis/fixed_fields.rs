@@ -7,11 +7,12 @@
 //! before it writes the field, and the thread's read, which takes no lock, would race with the
 //! write. So the fields of a class one of whose constructors, or one of whose subclasses'
 //! constructors, may start a thread are not fixed, but for those that only the class's own
-//! constructors write while `this` cannot have left: no constructor or field initializer of the
-//! class or of a superclass uses `this` as a value (passes, stores, returns or captures it, or
-//! calls a method on it), so until they are done no other code, on any thread, holds the object.
-//! A subclass's constructor runs only once they are. (Java promises nothing for a `final` field
-//! that another thread reads while the constructor runs either; here the read must not race.)
+//! constructors and field initializers write while `this` cannot have left: before anything uses
+//! `this` as a value (passes, stores, returns or captures it, or calls a method on it), so until
+//! then no other code, on any thread, holds the object (`written_late`). When no constructor or
+//! field initializer of the class or of a superclass does, that is every write; a subclass's
+//! constructor runs only once they are done. (Java promises nothing for a `final` field that
+//! another thread reads while the constructor runs either; here the read must not race.)
 
 use super::{FastMap, FastSet};
 use crate::ast::*;
@@ -61,6 +62,7 @@ pub fn fixed_fields(class: &Class, threaded: bool) -> FastSet<(usize, String)> {
     }
     let unsafe_classes = if threaded { constructors_starting_threads(class) } else { FastSet::default() };
     let leaking = if unsafe_classes.is_empty() { FastSet::default() } else { leaking_this(class) };
+    let late = if unsafe_classes.is_empty() { FastSet::default() } else { written_late(class, &leaking) };
     let mut fixed = FastSet::default();
     for (t, decl) in class.types.iter().enumerate() {
         // Whether the constructors that run before any other code can hold the object never let
@@ -73,7 +75,7 @@ pub fn fixed_fields(class: &Class, threaded: bool) -> FastSet<(usize, String)> {
                 continue;
             }
             let own = writers.get(&key).is_none_or(|w| w.iter().all(|&c| c == t));
-            if !unsafe_classes.contains(&t) || (own && kept()) {
+            if !unsafe_classes.contains(&t) || (own && (kept() || !late.contains(&key))) {
                 fixed.insert(key);
             }
         }
@@ -85,34 +87,101 @@ pub fn fixed_fields(class: &Class, threaded: bool) -> FastSet<(usize, String)> {
 /// but the object of a field's read or write, such as an argument, a stored value, the receiver
 /// of a call or the enclosing instance of a nested class's object.
 fn leaking_this(class: &Class) -> FastSet<usize> {
-    let leaks = |e: &Expr| {
-        let mut this: Vec<ExprId> = Vec::new();
-        let mut fields: FastSet<ExprId> = FastSet::default();
-        visit_expr(e, &mut |x| match &x.kind {
-            ExprKind::This => this.push(x.id),
-            ExprKind::Field { object, .. }
-            | ExprKind::Assign { target: Place::Field { object, .. }, .. }
-            | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => _ = fields.insert(object.id),
-            _ => {}
-        });
-        this.iter().any(|id| !fields.contains(id))
-    };
     let mut out = FastSet::default();
     for m in class.methods.iter().filter(|m| m.is_ctor) {
         let mut leaked = false;
         for s in &m.body {
-            visit_stmt(s, &mut |e| leaked |= leaks(e), &mut |_| {});
+            visit_stmt(s, &mut |e| leaked |= leaks_this(e), &mut |_| {});
         }
         if leaked {
             out.insert(m.class);
         }
     }
     for (t, decl) in class.types.iter().enumerate() {
-        if decl.fields.iter().filter_map(|f| f.init.as_ref()).any(leaks) {
+        if decl.fields.iter().filter_map(|f| f.init.as_ref()).any(leaks_this) {
             out.insert(t);
         }
     }
     out
+}
+
+/// Whether `e` uses `this` as a value (see `leaking_this`).
+fn leaks_this(e: &Expr) -> bool {
+    let mut this: Vec<ExprId> = Vec::new();
+    let mut fields: FastSet<ExprId> = FastSet::default();
+    visit_expr(e, &mut |x| match &x.kind {
+        ExprKind::This => this.push(x.id),
+        ExprKind::Field { object, .. }
+        | ExprKind::Assign { target: Place::Field { object, .. }, .. }
+        | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => _ = fields.insert(object.id),
+        _ => {}
+    });
+    this.iter().any(|id| !fields.contains(id))
+}
+
+/// The fields, as (declaring type, name), that a constructor or field initializer writes through
+/// `this` after `this` may have left it, or in the statement that lets it leave. A constructor
+/// runs its statements before `this(..)` or `super(..)` (javac's enclosing instance and captured
+/// locals), then the superclasses' constructors, then the field initializers in order, then the
+/// rest of its body; `this` may have left from the first of them that `leaking_this` would count,
+/// or from a superclass that leaks it anywhere. A `this(..)` counts as leaking, as the constructor
+/// it calls may. A field none of whose writes is here was written before any other code, on any
+/// thread, could hold the object.
+fn written_late(class: &Class, leaking: &FastSet<usize>) -> FastSet<(usize, String)> {
+    let mut late = FastSet::default();
+    // Notes the fields that statement or initializer `e` writes through `this` as late when
+    // `this` may have left (`left`), after noting whether `e` lets it leave.
+    let note = |e: &Expr, left: &mut bool, late: &mut FastSet<(usize, String)>| {
+        *left |= leaks_this(e);
+        if !*left {
+            return;
+        }
+        visit_expr(e, &mut |x| {
+            if let ExprKind::Assign { target: Place::Field { object, name }, .. }
+            | ExprKind::IncDec { target: Place::Field { object, name }, .. } = &x.kind
+                && matches!(object.kind, ExprKind::This)
+                && let Some(owner) = class.field_owner(object.ty, name)
+            {
+                late.insert((owner, name.clone()));
+            }
+        });
+    };
+    // Whether `this` may have left once the superclasses' constructors and the field initializers
+    // of each type have run.
+    let mut after_inits = vec![false; class.types.len()];
+    for (t, decl) in class.types.iter().enumerate() {
+        let mut left = class.hierarchy.ancestors(t).iter().any(|a| leaking.contains(a));
+        for f in &decl.fields {
+            let Some(init) = &f.init else { continue };
+            note(init, &mut left, &mut late);
+            if left {
+                late.insert((t, f.name.clone()));
+            }
+        }
+        after_inits[t] = left;
+    }
+    for m in class.methods.iter().filter(|m| m.is_ctor) {
+        let (before, call, after) = split_explicit_call(&m.body);
+        let mut left = false;
+        let stmts = |stmts: &[Stmt], left: &mut bool, late: &mut FastSet<(usize, String)>| {
+            for s in stmts {
+                let mut leaked = *left;
+                visit_stmt(s, &mut |e| leaked |= leaks_this(e), &mut |_| {});
+                *left = leaked;
+                visit_stmt(s, &mut |e| note(e, left, late), &mut |_| {});
+            }
+        };
+        stmts(before, &mut left, &mut late);
+        match call.map(|c| &c.kind) {
+            Some(ExprKind::ThisCall { .. }) => left = true,
+            Some(ExprKind::SuperInit { args, .. }) => {
+                left |= args.iter().any(leaks_this) || after_inits[m.class];
+            }
+            _ => left |= after_inits[m.class],
+        }
+        stmts(after, &mut left, &mut late);
+    }
+    late
 }
 
 /// The classes that a constructor which may start a thread builds objects of: the class of the
