@@ -1988,9 +1988,10 @@ impl<'a> Gen<'a> {
             return code;
         }
         if !self.facts.self_methods.contains(&index) {
-            // The function's path ends with its name.
+            // The function's path ends with its name (`called_name`), to which a confined form
+            // adds its suffix.
             let path = self.qualified_fn(index);
-            let path = match self.call_name(receiver, index).strip_prefix(self.fn_names[index].as_str()) {
+            let path = match self.call_name(receiver, index).strip_prefix(self.called_name(index).as_str()) {
                 Some(suffix) => format!("{path}{suffix}"),
                 None => path,
             };

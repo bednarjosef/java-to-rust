@@ -908,3 +908,43 @@ fn fields_written_before_this_leaves_the_constructor_stay_fixed() {
     );
     assert_lacks(&rust, &[".cells.get()", ".log.get()", ".outer.get()", "self.a.get()"]);
 }
+
+#[test]
+fn a_direct_call_of_a_shared_override_that_cannot_throw_names_its_plain_body_once() {
+    // A class with `synchronized` methods has its methods as functions of its module that take the
+    // object (`Square__area(this, ..)`); the calls on the final class call the plain body.
+    let rust = translate(
+        "class Torn extends RuntimeException { Torn(int s) { super(\"torn \" + s); } }
+    abstract class Shape { abstract int area(int scale); }
+    final class Square extends Shape {
+        final int side; Square(int side) { this.side = side; }
+        synchronized int area(int scale) { return side * side * scale; }
+        synchronized boolean flat() { return area(1) == 0; }
+    }
+    final class Ripped extends Shape {
+        int area(int scale) { if (scale > 2) throw new Torn(scale); return scale; }
+    }
+    class A {
+        static long sum(Shape[] shapes, Square square, int rounds) {
+            long total = 0;
+            for (int r = 0; r < rounds; r++) {
+                for (Shape s : shapes) total += s.area(r);
+                total += square.area(r);
+                if (square.flat()) total = -total;
+            }
+            return total;
+        }
+        public static void main(String[] a) throws InterruptedException {
+            Shape[] shapes = { new Square(2), new Ripped() };
+            Square square = new Square(3);
+            Thread t = new Thread(() -> {
+                try { System.out.println(sum(shapes, square, 5)); } catch (Torn e) { System.out.println(e.getMessage()); }
+            });
+            t.start();
+            t.join();
+        }
+    }",
+    );
+    assert_contains(&rust, &["area__plain("]);
+    assert_lacks(&rust, &["__plain__plain"]);
+}
